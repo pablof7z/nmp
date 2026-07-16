@@ -349,6 +349,1585 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiBlossomAuthError",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "InvalidAuthorPubkey",
+            discr: None,
+            fields: [
+                Field {
+                    name: "got",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "`author_pubkey_hex` is not a valid 32-byte hex public key\n(boundary-re-introduced fallibility; the direct-Rust builders take\na proven `PublicKey`).",
+            ),
+        },
+        Variant {
+            name: "InvalidBlobSha256",
+            discr: None,
+            fields: [
+                Field {
+                    name: "error",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomSha256HexError",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "A supplied blob sha256 hex string failed the strict lowercase-hex\nparse (boundary-re-introduced fallibility).",
+            ),
+        },
+        Variant {
+            name: "InvalidEventJson",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The signed authorization event did not parse as a nostr event --\ncovers malformed JSON and malformed id/pubkey/sig hex, from either\nvalidation door (boundary-re-introduced fallibility).",
+            ),
+        },
+        Variant {
+            name: "ExpirationNotAfterCreatedAt",
+            discr: None,
+            fields: [
+                Field {
+                    name: "created_at_secs",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "expiration_secs",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "`nmp_blossom::AuthDraftError::ExpirationNotAfterCreatedAt` mirror:\nsuch a window is expired at birth.",
+            ),
+        },
+        Variant {
+            name: "WrongKind",
+            discr: None,
+            fields: [
+                Field {
+                    name: "found",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Not kind 24242.",
+            ),
+        },
+        Variant {
+            name: "BadSignature",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The Schnorr signature (or event id) does not verify.",
+            ),
+        },
+        Variant {
+            name: "MissingVerb",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "No `t` tag with a value at all.",
+            ),
+        },
+        Variant {
+            name: "MultipleVerbs",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "More than one `t` tag: a bearer token must grant exactly one verb.",
+            ),
+        },
+        Variant {
+            name: "VerbMismatch",
+            discr: None,
+            fields: [
+                Field {
+                    name: "expected",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomVerb",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "found",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The sole `t` tag names a different verb than expected (or a string\nthat is not a BUD-11 verb).",
+            ),
+        },
+        Variant {
+            name: "BlobNotBound",
+            discr: None,
+            fields: [
+                Field {
+                    name: "expected_sha256_hex",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The expectation binds a blob but no `x` tag carries exactly that\nlowercase-hex sha256.",
+            ),
+        },
+        Variant {
+            name: "MissingExpiration",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "No `expiration` tag.",
+            ),
+        },
+        Variant {
+            name: "Expired",
+            discr: None,
+            fields: [
+                Field {
+                    name: "expiration_secs",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "now_secs",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The `expiration` tag is not in the future.",
+            ),
+        },
+        Variant {
+            name: "CreatedAtInFuture",
+            discr: None,
+            fields: [
+                Field {
+                    name: "created_at_secs",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "now_secs",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "BUD-11 requires `created_at` in the past.",
+            ),
+        },
+    ],
+    shape: Error {
+        flat: false,
+    },
+    non_exhaustive: false,
+    docstring: Some(
+        "The draft-construction + validation failure taxonomy\n(`nmp_blossom::AuthDraftError` + `nmp_blossom::AuthValidationError`\nmirrors, plus the boundary-re-introduced input parses). One enum for\nboth stages because both answer the same caller question -- \"why is\nthere no usable authorization?\" -- while every underlying check keeps\nits own variant (a refused authorization still names the exact BUD-11\nclause it failed).",
+    ),
+}
+
+enum Enum {
+    name: "FfiBlossomDeleteError",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "InvalidServerUrl",
+            discr: None,
+            fields: [
+                Field {
+                    name: "error",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomServerUrlError",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "`server_url` failed the admission rules (boundary parse).",
+            ),
+        },
+        Variant {
+            name: "InvalidBlobSha256",
+            discr: None,
+            fields: [
+                Field {
+                    name: "error",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomSha256HexError",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "`blob_sha256_hex` failed the strict lowercase-hex parse (boundary\nparse).",
+            ),
+        },
+        Variant {
+            name: "RuntimeUnavailable",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The per-call current-thread tokio runtime could not be built.",
+            ),
+        },
+        Variant {
+            name: "ClientBuild",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "`nmp_blossom::ClientBuildError` mirror.",
+            ),
+        },
+        Variant {
+            name: "AuthorizationBlobMismatch",
+            discr: None,
+            fields: [
+                Field {
+                    name: "expected_sha256_hex",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "authorized_verb",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomVerb",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "authorized_blob_sha256_hex",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Not a `delete` grant for EXACTLY the blob named in the request path\n-- refused before any admission or I/O.",
+            ),
+        },
+        Variant {
+            name: "LocalHostNotAdmitted",
+            discr: None,
+            fields: [
+                Field {
+                    name: "host",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Unadmitted literal-local host -- refused before ANY socket I/O.",
+            ),
+        },
+        Variant {
+            name: "Network",
+            discr: None,
+            fields: [
+                Field {
+                    name: "detail",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Transport failure.",
+            ),
+        },
+        Variant {
+            name: "RedirectRefused",
+            discr: None,
+            fields: [
+                Field {
+                    name: "status",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Redirects are never followed.",
+            ),
+        },
+        Variant {
+            name: "AuthRejected",
+            discr: None,
+            fields: [
+                Field {
+                    name: "status",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "401/402/403: the server refused the authorization (BUD-12 names all\nthree as authorization-indicting for DELETE).",
+            ),
+        },
+        Variant {
+            name: "NotFound",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "404: no blob with this sha256 exists on the server -- \"already\ngone\" is actionable where a generic rejection is not.",
+            ),
+        },
+        Variant {
+            name: "ServerRejected",
+            discr: None,
+            fields: [
+                Field {
+                    name: "status",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Any other non-success, non-5xx status.",
+            ),
+        },
+        Variant {
+            name: "ServerError",
+            discr: None,
+            fields: [
+                Field {
+                    name: "status",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "5xx: the server failed.",
+            ),
+        },
+    ],
+    shape: Error {
+        flat: false,
+    },
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp_blossom::DeleteError` mirror plus the boundary-re-introduced\nparse/machinery variants. Exhaustive.",
+    ),
+}
+
+enum Enum {
+    name: "FfiBlossomDescriptorError",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "TooLarge",
+            discr: None,
+            fields: [
+                Field {
+                    name: "limit_bytes",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Input exceeds the descriptor byte bound -- refused before any parse.",
+            ),
+        },
+        Variant {
+            name: "Json",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Not a JSON object of the expected field shapes.",
+            ),
+        },
+        Variant {
+            name: "MissingUrl",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "The mandatory `url` field is absent (or JSON `null`).",
+            ),
+        },
+        Variant {
+            name: "MissingSha256",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "The mandatory `sha256` field is absent (or JSON `null`).",
+            ),
+        },
+        Variant {
+            name: "MissingSize",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "The mandatory `size` field is absent (or JSON `null`).",
+            ),
+        },
+        Variant {
+            name: "BadSha256",
+            discr: None,
+            fields: [
+                Field {
+                    name: "error",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomSha256HexError",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "`sha256` is present but not 64 lowercase hex characters.",
+            ),
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp_blossom::DescriptorError` mirror -- the strict BUD-02 descriptor\nparse refusals, variant-for-variant.",
+    ),
+}
+
+enum Enum {
+    name: "FfiBlossomListError",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "InvalidServerUrl",
+            discr: None,
+            fields: [
+                Field {
+                    name: "error",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomServerUrlError",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "`server_url` failed the admission rules (boundary parse).",
+            ),
+        },
+        Variant {
+            name: "InvalidOwnerPubkey",
+            discr: None,
+            fields: [
+                Field {
+                    name: "got",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "`owner_pubkey_hex` is not a valid 32-byte hex public key (boundary\nparse).",
+            ),
+        },
+        Variant {
+            name: "InvalidCursor",
+            discr: None,
+            fields: [
+                Field {
+                    name: "error",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomSha256HexError",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "`cursor_sha256_hex` failed the strict lowercase-hex parse (boundary\nparse).",
+            ),
+        },
+        Variant {
+            name: "RuntimeUnavailable",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The per-call current-thread tokio runtime could not be built.",
+            ),
+        },
+        Variant {
+            name: "ClientBuild",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "`nmp_blossom::ClientBuildError` mirror.",
+            ),
+        },
+        Variant {
+            name: "WrongVerb",
+            discr: None,
+            fields: [
+                Field {
+                    name: "authorized_verb",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomVerb",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "An authorization was supplied but is not a `list` grant -- refused\nbefore any admission or I/O (no cross-verb replay).",
+            ),
+        },
+        Variant {
+            name: "LocalHostNotAdmitted",
+            discr: None,
+            fields: [
+                Field {
+                    name: "host",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Unadmitted literal-local host -- refused before ANY socket I/O.",
+            ),
+        },
+        Variant {
+            name: "Network",
+            discr: None,
+            fields: [
+                Field {
+                    name: "detail",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Transport failure.",
+            ),
+        },
+        Variant {
+            name: "RedirectRefused",
+            discr: None,
+            fields: [
+                Field {
+                    name: "status",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Redirects are never followed.",
+            ),
+        },
+        Variant {
+            name: "AuthRejected",
+            discr: None,
+            fields: [
+                Field {
+                    name: "status",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "401/402/403: the server refused the request as unauthorized --\nincluding a 401 on an auth-less call to a server that requires a\n`list` authorization.",
+            ),
+        },
+        Variant {
+            name: "ServerRejected",
+            discr: None,
+            fields: [
+                Field {
+                    name: "status",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Any other non-success, non-5xx status.",
+            ),
+        },
+        Variant {
+            name: "ServerError",
+            discr: None,
+            fields: [
+                Field {
+                    name: "status",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "5xx: the server failed.",
+            ),
+        },
+        Variant {
+            name: "ResponseTooLarge",
+            discr: None,
+            fields: [
+                Field {
+                    name: "limit_bytes",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The success body exceeded the configured list response cap.",
+            ),
+        },
+        Variant {
+            name: "BodyNotAnArray",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The success body is not a top-level JSON array -- refused outright,\nnever coerced.",
+            ),
+        },
+        Variant {
+            name: "InvalidDescriptor",
+            discr: None,
+            fields: [
+                Field {
+                    name: "index",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "error",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomDescriptorError",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Array element `index` failed the strict BUD-02 descriptor rules --\nthe WHOLE list fails typed; a malformed row is never silently\nskipped.",
+            ),
+        },
+    ],
+    shape: Error {
+        flat: false,
+    },
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp_blossom::ListError` mirror plus the boundary-re-introduced\nparse/machinery variants. Exhaustive.",
+    ),
+}
+
+enum Enum {
+    name: "FfiBlossomMirrorError",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "InvalidServerUrl",
+            discr: None,
+            fields: [
+                Field {
+                    name: "error",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomServerUrlError",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "`server_url` failed the admission rules (boundary parse).",
+            ),
+        },
+        Variant {
+            name: "InvalidExpectedSha256",
+            discr: None,
+            fields: [
+                Field {
+                    name: "error",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomSha256HexError",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "`expected_sha256_hex` failed the strict lowercase-hex parse\n(boundary parse).",
+            ),
+        },
+        Variant {
+            name: "RuntimeUnavailable",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The per-call current-thread tokio runtime could not be built.",
+            ),
+        },
+        Variant {
+            name: "ClientBuild",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "`nmp_blossom::ClientBuildError` mirror.",
+            ),
+        },
+        Variant {
+            name: "AuthorizationBlobMismatch",
+            discr: None,
+            fields: [
+                Field {
+                    name: "expected_sha256_hex",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "authorized_verb",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomVerb",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "authorized_blob_sha256_hex",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Not an `upload` grant (BUD-04 mirrors under the `upload` verb)\nbound to EXACTLY the expected blob -- refused before any I/O.",
+            ),
+        },
+        Variant {
+            name: "LocalHostNotAdmitted",
+            discr: None,
+            fields: [
+                Field {
+                    name: "host",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Unadmitted literal-local host -- refused before ANY socket I/O.",
+            ),
+        },
+        Variant {
+            name: "Network",
+            discr: None,
+            fields: [
+                Field {
+                    name: "detail",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Transport failure.",
+            ),
+        },
+        Variant {
+            name: "RedirectRefused",
+            discr: None,
+            fields: [
+                Field {
+                    name: "status",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Redirects are never followed.",
+            ),
+        },
+        Variant {
+            name: "AuthRejected",
+            discr: None,
+            fields: [
+                Field {
+                    name: "status",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "401/403: the server refused the authorization itself.",
+            ),
+        },
+        Variant {
+            name: "HashMismatchRefused",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "409: the SERVER found the mirrored blob's hash does not match the\nauthorized `x` tag -- distinct from `Sha256Mismatch`, which is THIS\nCLIENT refusing a 2xx descriptor.",
+            ),
+        },
+        Variant {
+            name: "OriginFetchFailed",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "502: the destination server could not fetch the source URL -- the\norigin failed, not the destination.",
+            ),
+        },
+        Variant {
+            name: "ServerRejected",
+            discr: None,
+            fields: [
+                Field {
+                    name: "status",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Any other non-success, non-5xx status.",
+            ),
+        },
+        Variant {
+            name: "ServerError",
+            discr: None,
+            fields: [
+                Field {
+                    name: "status",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Any 5xx other than 502: the destination server itself failed.",
+            ),
+        },
+        Variant {
+            name: "ResponseTooLarge",
+            discr: None,
+            fields: [
+                Field {
+                    name: "limit_bytes",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The success body exceeded the configured response cap.",
+            ),
+        },
+        Variant {
+            name: "DescriptorInvalid",
+            discr: None,
+            fields: [
+                Field {
+                    name: "error",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomDescriptorError",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The success body is not a valid BUD-02 blob descriptor.",
+            ),
+        },
+        Variant {
+            name: "Sha256Mismatch",
+            discr: None,
+            fields: [
+                Field {
+                    name: "expected_sha256_hex",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "returned_sha256_hex",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "INTEGRITY GATE: the 2xx descriptor names a different sha256 than\nthe hash this client authorized -- fail closed.",
+            ),
+        },
+    ],
+    shape: Error {
+        flat: false,
+    },
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp_blossom::MirrorError` mirror plus the boundary-re-introduced\nparse/machinery variants. Deliberately its own enum: mirror has failure\nmodes with no upload analogue (the 409 hash refusal, the 502\norigin-fetch failure) and operation failures are never collapsed.",
+    ),
+}
+
+enum Enum {
+    name: "FfiBlossomServerUrlError",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Parse",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Not a parseable URL at all.",
+            ),
+        },
+        Variant {
+            name: "MissingHost",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "The URL names no host.",
+            ),
+        },
+        Variant {
+            name: "UnsupportedScheme",
+            discr: None,
+            fields: [
+                Field {
+                    name: "scheme",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "A scheme other than `http`/`https`.",
+            ),
+        },
+        Variant {
+            name: "Credentialed",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "URL userinfo would become an ambient credential; refused outright.",
+            ),
+        },
+        Variant {
+            name: "NonRootPath",
+            discr: None,
+            fields: [
+                Field {
+                    name: "path",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "BUD endpoints live at the domain root; a base URL with a path is\nrefused rather than rewritten.",
+            ),
+        },
+        Variant {
+            name: "QueryOrFragment",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "A query or fragment would survive into derived endpoint URLs;\nrefused rather than stripped.",
+            ),
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp_blossom::ServerUrlError` mirror -- every base-URL admission\nrefusal, variant-for-variant.",
+    ),
+}
+
+enum Enum {
+    name: "FfiBlossomSha256HexError",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "BadLength",
+            discr: None,
+            fields: [
+                Field {
+                    name: "length",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Not exactly 64 characters.",
+            ),
+        },
+        Variant {
+            name: "NotLowercaseHex",
+            discr: None,
+            fields: [
+                Field {
+                    name: "character",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "A character outside `[0-9a-f]` -- BUD-11 mandates LOWERCASE hex, so\nuppercase digits are refused, never case-folded.",
+            ),
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp_blossom::Sha256HexError` mirror -- the strict lowercase-hex parse\nrefusals, carried as a typed field by the variants that wrap it (never\nflattened into a message string).",
+    ),
+}
+
+enum Enum {
+    name: "FfiBlossomUploadError",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "InvalidServerUrl",
+            discr: None,
+            fields: [
+                Field {
+                    name: "error",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomServerUrlError",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "`server_url` failed [`FfiBlossomServerUrlError`]'s admission rules\n(boundary-re-introduced fallibility).",
+            ),
+        },
+        Variant {
+            name: "RuntimeUnavailable",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The per-call current-thread tokio runtime could not be built.",
+            ),
+        },
+        Variant {
+            name: "ClientBuild",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "`nmp_blossom::ClientBuildError` mirror: the HTTP stack could not be\nconstructed (system DNS configuration unreadable, or reqwest client\nconstruction failed).",
+            ),
+        },
+        Variant {
+            name: "AuthorizationBlobMismatch",
+            discr: None,
+            fields: [
+                Field {
+                    name: "expected_sha256_hex",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "authorized_verb",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomVerb",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "authorized_blob_sha256_hex",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The supplied authorization is not an `upload` grant for EXACTLY the\nblob bytes being uploaded -- refused before any admission or I/O.",
+            ),
+        },
+        Variant {
+            name: "LocalHostNotAdmitted",
+            discr: None,
+            fields: [
+                Field {
+                    name: "host",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Literal loopback/private/link-local/unspecified/onion host without\noperator opt-in -- refused before ANY socket I/O.",
+            ),
+        },
+        Variant {
+            name: "Network",
+            discr: None,
+            fields: [
+                Field {
+                    name: "detail",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Transport failure: connect/DNS/TLS/timeout, or the body stream died.",
+            ),
+        },
+        Variant {
+            name: "RedirectRefused",
+            discr: None,
+            fields: [
+                Field {
+                    name: "status",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The server answered with a redirect; redirects are never followed.",
+            ),
+        },
+        Variant {
+            name: "AuthRejected",
+            discr: None,
+            fields: [
+                Field {
+                    name: "status",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "401/403: the server refused the authorization itself.",
+            ),
+        },
+        Variant {
+            name: "ServerRejected",
+            discr: None,
+            fields: [
+                Field {
+                    name: "status",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Any other non-success, non-5xx status.",
+            ),
+        },
+        Variant {
+            name: "ServerError",
+            discr: None,
+            fields: [
+                Field {
+                    name: "status",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "5xx: the server failed.",
+            ),
+        },
+        Variant {
+            name: "ResponseTooLarge",
+            discr: None,
+            fields: [
+                Field {
+                    name: "limit_bytes",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The success body exceeded the configured response cap.",
+            ),
+        },
+        Variant {
+            name: "DescriptorInvalid",
+            discr: None,
+            fields: [
+                Field {
+                    name: "error",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomDescriptorError",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The success body is not a valid BUD-02 blob descriptor.",
+            ),
+        },
+        Variant {
+            name: "Sha256Mismatch",
+            discr: None,
+            fields: [
+                Field {
+                    name: "expected_sha256_hex",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "returned_sha256_hex",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "INTEGRITY GATE: the server's descriptor names a different sha256\nthan the bytes this client just hashed and sent -- fail closed.",
+            ),
+        },
+    ],
+    shape: Error {
+        flat: false,
+    },
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp_blossom::UploadError` mirror plus the boundary-re-introduced\nparse/machinery variants. Exhaustive; never collapsed with the other\noperations' taxonomies.",
+    ),
+}
+
+enum Enum {
+    name: "FfiBlossomVerb",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Upload",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Delete",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Get",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "List",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "The BUD-11 authorization verbs (`nmp_blossom::BlossomVerb` mirror).\n`get` is modeled totally (the Rust enum is total) but has no draft\nbuilder yet -- the `get`/`media` endpoints are epic-#216 follow-ups.",
+    ),
+}
+
+enum Enum {
     name: "FfiBunkerParseError",
     module_path: "nmp_ffi",
     remote: false,
@@ -3431,6 +5010,174 @@ record Record {
 }
 
 record Record {
+    name: "FfiBlobDescriptor",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "url",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "sha256",
+            type_: String,
+            default: None,
+            docstring: Some(
+                "64 lowercase hex characters -- the strict BUD-01 blob identity.",
+            ),
+        },
+        Field {
+            name: "size",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "mime_type",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "uploaded",
+            type_: Optional {
+                inner_type: UInt64,
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "A BUD-02 blob descriptor (`nmp_blossom::BlobDescriptor` mirror). When\nreturned by [`FfiBlossomClient::upload`]/[`FfiBlossomClient::mirror`]\nits `sha256` was PROVEN equal to the locally computed/authorized hash\n(the `VerifiedUpload` integrity gate); rows from\n[`FfiBlossomClient::list`] are strictly parsed but remain unverified\nserver claims, exactly as in the Rust crate.",
+    ),
+}
+
+record Record {
+    name: "FfiBlossomAuthDraft",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "unsigned_event_json",
+            type_: String,
+            default: None,
+            docstring: Some(
+                "The draft as canonical unsigned-event JSON (`nostr::UnsignedEvent`),\nfor external signers that consume event JSON.",
+            ),
+        },
+        Field {
+            name: "blob_sha256_hex",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: Some(
+                "The blob this draft binds via its `x` tag (`None` for `list`).",
+            ),
+        },
+        Field {
+            name: "verb",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiBlossomVerb",
+            },
+            default: None,
+            docstring: Some(
+                "The verb this draft grants.",
+            ),
+        },
+        Field {
+            name: "created_at_secs",
+            type_: UInt64,
+            default: None,
+            docstring: Some(
+                "Raw tokens of the same draft, shaped for `FfiSignEventRequest` so\nthe engine sign-only path needs no native JSON parsing. Always\nkind 24242.",
+            ),
+        },
+        Field {
+            name: "kind",
+            type_: UInt16,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "tags",
+            type_: Sequence {
+                inner_type: Sequence {
+                    inner_type: String,
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "content",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "An UNSIGNED kind:24242 authorization draft. This module never signs --\nthe app does, through whichever signer path it has:\n\n- engine sign-only path: feed `created_at_secs`/`kind`/`tags`/`content`\ninto `FfiSignEventRequest` and call `NmpEngine::sign_event` (the\nauthor is frozen from the ACTIVE ACCOUNT, so `author_pubkey_hex`\npassed to the draft builder must be that account's pubkey); the\nresulting `FfiSignedEvent` enters\n[`FfiBlossomAuthorization::validate_signed_event`];\n- external/native signer path: hand `unsigned_event_json` to the\nsigner, then pass the signed event's canonical JSON to\n[`FfiBlossomAuthorization::validate`].",
+    ),
+}
+
+record Record {
+    name: "FfiBlossomClientConfig",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "allowed_local_hosts",
+            type_: Sequence {
+                inner_type: String,
+            },
+            default: None,
+            docstring: Some(
+                "Operator opt-in local-host allowlist, in `nmp-transport`'s\nnormalized bare-host form (lowercase, no brackets) -- the same\nvocabulary the engine's `allowed_local_relay_hosts` uses. Empty\nmeans NO loopback/private/link-local/onion host may be dialed.",
+            ),
+        },
+        Field {
+            name: "max_response_bytes",
+            type_: Optional {
+                inner_type: UInt64,
+            },
+            default: None,
+            docstring: Some(
+                "Cap on a single-descriptor response body (upload/mirror).",
+            ),
+        },
+        Field {
+            name: "max_list_response_bytes",
+            type_: Optional {
+                inner_type: UInt64,
+            },
+            default: None,
+            docstring: Some(
+                "Cap on a `GET /list` response body.",
+            ),
+        },
+        Field {
+            name: "request_deadline_secs",
+            type_: Optional {
+                inner_type: UInt64,
+            },
+            default: None,
+            docstring: Some(
+                "Overall request deadline (connect, headers, and body), seconds.",
+            ),
+        },
+    ],
+    docstring: Some(
+        "[`FfiBlossomClient`] construction knobs\n(`nmp_blossom::BlossomClientConfig` mirror). `None` means the crate\ndefault.",
+    ),
+}
+
+record Record {
     name: "FfiContentBlock",
     module_path: "nmp_ffi",
     remote: false,
@@ -5231,6 +6978,311 @@ function Function {
 }
 
 function Function {
+    name: "blossom_delete_authorization_draft",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "author_pubkey_hex",
+            type_: String,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "blob_sha256_hex",
+            type_: String,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "created_at_secs",
+            type_: UInt64,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "expiration_secs",
+            type_: UInt64,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "description",
+            type_: String,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiBlossomAuthDraft",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_blossom_delete_authorization_draft",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "author_pubkey_hex",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+            FfiArgument {
+                name: "blob_sha256_hex",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+            FfiArgument {
+                name: "created_at_secs",
+                type_: UInt64,
+            },
+            FfiArgument {
+                name: "expiration_secs",
+                type_: UInt64,
+            },
+            FfiArgument {
+                name: "description",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiBlossomAuthDraft",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Compose an UNSIGNED BUD-12 `delete` authorization draft --\n`nmp_blossom::delete_authorization_draft` mirror. Exactly ONE blob is\nbound (BUD-12 forbids multi-blob deletes via extra `x` tags).",
+    ),
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiBlossomAuthError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_blossom_delete_authorization_draft",
+    checksum: Some(
+        19630,
+    ),
+}
+
+function Function {
+    name: "blossom_list_authorization_draft",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "author_pubkey_hex",
+            type_: String,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "created_at_secs",
+            type_: UInt64,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "expiration_secs",
+            type_: UInt64,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "description",
+            type_: String,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiBlossomAuthDraft",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_blossom_list_authorization_draft",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "author_pubkey_hex",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+            FfiArgument {
+                name: "created_at_secs",
+                type_: UInt64,
+            },
+            FfiArgument {
+                name: "expiration_secs",
+                type_: UInt64,
+            },
+            FfiArgument {
+                name: "description",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiBlossomAuthDraft",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Compose an UNSIGNED BUD-12 `list` authorization draft --\n`nmp_blossom::list_authorization_draft` mirror. No `x` tag: listing is\nscoped to a pubkey by the request path, not to any blob.",
+    ),
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiBlossomAuthError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_blossom_list_authorization_draft",
+    checksum: Some(
+        5585,
+    ),
+}
+
+function Function {
+    name: "blossom_upload_authorization_draft",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "author_pubkey_hex",
+            type_: String,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "blob_sha256_hex",
+            type_: String,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "created_at_secs",
+            type_: UInt64,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "expiration_secs",
+            type_: UInt64,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "description",
+            type_: String,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiBlossomAuthDraft",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_blossom_upload_authorization_draft",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "author_pubkey_hex",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+            FfiArgument {
+                name: "blob_sha256_hex",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+            FfiArgument {
+                name: "created_at_secs",
+                type_: UInt64,
+            },
+            FfiArgument {
+                name: "expiration_secs",
+                type_: UInt64,
+            },
+            FfiArgument {
+                name: "description",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiBlossomAuthDraft",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Compose an UNSIGNED BUD-11 `upload` authorization draft (kind 24242) --\n`nmp_blossom::upload_authorization_draft` mirror. BUD-04 NOTE: a mirror\nis authorized with THIS builder (the spec assigns mirroring the\n`upload` verb); there is deliberately no separate mirror builder.\nEngine-less free function ([`crate::entity`]'s precedent).",
+    ),
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiBlossomAuthError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_blossom_upload_authorization_draft",
+    checksum: Some(
+        22765,
+    ),
+}
+
+function Function {
     name: "content_reference_demand_plan",
     module_path: "nmp_ffi",
     is_async: false,
@@ -6273,6 +8325,882 @@ object Object {
     ffi_init_callback: None,
     docstring: Some(
         "Opaque proof for one exact AUTH-policy installation. It exposes only the\nexpected account identity, never the capability instance.",
+    ),
+}
+
+object Object {
+    name: "FfiBlossomAuthorization",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [
+        Constructor {
+            name: "validate",
+            object_name: "FfiBlossomAuthorization",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            arguments: [
+                Argument {
+                    name: "signed_event_json",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "verb",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomVerb",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "blob_sha256_hex",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "now_secs",
+                    type_: UInt64,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_constructor_ffiblossomauthorization_validate",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "signed_event_json",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "verb",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiBlossomVerb",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                    FfiArgument {
+                        name: "blob_sha256_hex",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "now_secs",
+                        type_: UInt64,
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiBlossomAuthorization",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Fail-closed BUD-11 validation of a signed kind:24242 event supplied\nas canonical event JSON (the external/native-signer path). `verb` is\nwhat the caller is ABOUT to use the authorization for; `blob_sha256_hex`\nbinds the exact blob for verbs that grant one (upload/delete/mirror\n-- mirror validates under `Upload`); `now_secs` is the caller's\nclock (unix seconds).",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiBlossomAuthError",
+                },
+            ),
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_constructor_ffiblossomauthorization_validate",
+            checksum: Some(
+                25900,
+            ),
+            self_type: Object {
+                module_path: "nmp_ffi",
+                name: "FfiBlossomAuthorization",
+                imp: Struct,
+            },
+        },
+        Constructor {
+            name: "validate_signed_event",
+            object_name: "FfiBlossomAuthorization",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            arguments: [
+                Argument {
+                    name: "event",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiSignedEvent",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "verb",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomVerb",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "blob_sha256_hex",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "now_secs",
+                    type_: UInt64,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_constructor_ffiblossomauthorization_validate_signed_event",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "event",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiSignedEvent",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                    FfiArgument {
+                        name: "verb",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiBlossomVerb",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                    FfiArgument {
+                        name: "blob_sha256_hex",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "now_secs",
+                        type_: UInt64,
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiBlossomAuthorization",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Fail-closed BUD-11 validation of the exact value\n`NmpEngine::sign_event` returns (the engine sign-only path) -- the\nsame checks as [`Self::validate`], with the event reassembled from\nits raw tokens through the same strict `nostr::Event` parser (a\nmalformed id/sig/pubkey is a typed\n[`FfiBlossomAuthError::InvalidEventJson`], never a panic).",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiBlossomAuthError",
+                },
+            ),
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_constructor_ffiblossomauthorization_validate_signed_event",
+            checksum: Some(
+                20895,
+            ),
+            self_type: Object {
+                module_path: "nmp_ffi",
+                name: "FfiBlossomAuthorization",
+                imp: Struct,
+            },
+        },
+    ],
+    methods: [
+        Method {
+            name: "blob_sha256_hex",
+            object_name: "FfiBlossomAuthorization",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Optional {
+                    inner_type: String,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffiblossomauthorization_blob_sha256_hex",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiBlossomAuthorization",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        None,
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "The blob hash this authorization was proven to bind (`None` for\nverbs validated without a blob binding).",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffiblossomauthorization_blob_sha256_hex",
+            checksum: Some(
+                47123,
+            ),
+        },
+        Method {
+            name: "verb",
+            object_name: "FfiBlossomAuthorization",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiBlossomVerb",
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffiblossomauthorization_verb",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiBlossomAuthorization",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        Some(
+                            ExternalFfiMetadata {
+                                name: "FfiBlossomVerb",
+                                module_path: "nmp_ffi",
+                            },
+                        ),
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "The verb this authorization was validated FOR.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffiblossomauthorization_verb",
+            checksum: Some(
+                23081,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_ffiblossomauthorization",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiBlossomAuthorization",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiBlossomAuthorization",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_ffiblossomauthorization",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiBlossomAuthorization",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "A signed kind:24242 event PROVEN (at construction) to satisfy every\nBUD-11 check -- `nmp_blossom::SignedAuthorization`'s\ntype-over-convention witness, carried across the boundary as an opaque\nobject so an unvalidated event can never enter a client operation.",
+    ),
+}
+
+object Object {
+    name: "FfiBlossomClient",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [
+        Constructor {
+            name: "new",
+            object_name: "FfiBlossomClient",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            arguments: [
+                Argument {
+                    name: "config",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomClientConfig",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_constructor_ffiblossomclient_new",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "config",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiBlossomClientConfig",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiBlossomClient",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_constructor_ffiblossomclient_new",
+            checksum: Some(
+                6375,
+            ),
+            self_type: Object {
+                module_path: "nmp_ffi",
+                name: "FfiBlossomClient",
+                imp: Struct,
+            },
+        },
+    ],
+    methods: [
+        Method {
+            name: "delete",
+            object_name: "FfiBlossomClient",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "server_url",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "blob_sha256_hex",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "auth",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomAuthorization",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffiblossomclient_delete",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiBlossomClient",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "server_url",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "blob_sha256_hex",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "auth",
+                        type_: RustArcPtr(
+                            "FfiBlossomAuthorization",
+                        ),
+                    },
+                ],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "BLOCKING `DELETE /<sha256>` (BUD-12)\n(`nmp_blossom::BlossomClient::delete`). The authorization is a\n`delete` grant bound to EXACTLY `blob_sha256_hex`. Call off the main\nthread.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiBlossomDeleteError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffiblossomclient_delete",
+            checksum: Some(
+                45793,
+            ),
+        },
+        Method {
+            name: "list",
+            object_name: "FfiBlossomClient",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "server_url",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "owner_pubkey_hex",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "cursor_sha256_hex",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "limit",
+                    type_: Optional {
+                        inner_type: UInt32,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "auth",
+                    type_: Optional {
+                        inner_type: Object {
+                            module_path: "nmp_ffi",
+                            name: "FfiBlossomAuthorization",
+                            imp: Struct,
+                        },
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Sequence {
+                    inner_type: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlobDescriptor",
+                    },
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffiblossomclient_list",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiBlossomClient",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "server_url",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "owner_pubkey_hex",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "cursor_sha256_hex",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "limit",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "auth",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        None,
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "BLOCKING `GET /list/<pubkey>` (BUD-12)\n(`nmp_blossom::BlossomClient::list`): the blobs `server_url` stores\nfor `owner_pubkey_hex`, newest first. `auth` is optional -- a server\nthat requires a `list` authorization answers 401 on an auth-less\ncall, surfaced as `AuthRejected`. `cursor_sha256_hex`/`limit` are\nthe BUD-12 pagination parameters, sent only when set. Call off the\nmain thread.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiBlossomListError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffiblossomclient_list",
+            checksum: Some(
+                40863,
+            ),
+        },
+        Method {
+            name: "mirror",
+            object_name: "FfiBlossomClient",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "server_url",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "source_url",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "expected_sha256_hex",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "auth",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomAuthorization",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiBlobDescriptor",
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffiblossomclient_mirror",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiBlossomClient",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "server_url",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "source_url",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "expected_sha256_hex",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "auth",
+                        type_: RustArcPtr(
+                            "FfiBlossomAuthorization",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        Some(
+                            ExternalFfiMetadata {
+                                name: "FfiBlobDescriptor",
+                                module_path: "nmp_ffi",
+                            },
+                        ),
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "BLOCKING `PUT /mirror` (BUD-04): ask `server_url` to download the\nblob at `source_url` itself, integrity-gated against\n`expected_sha256_hex` (`nmp_blossom::BlossomClient::mirror`). The\nauthorization is an `upload` grant bound to that hash. Call off the\nmain thread.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiBlossomMirrorError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffiblossomclient_mirror",
+            checksum: Some(
+                55512,
+            ),
+        },
+        Method {
+            name: "upload",
+            object_name: "FfiBlossomClient",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "server_url",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "blob",
+                    type_: Bytes,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "content_type",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "auth",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomAuthorization",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiBlobDescriptor",
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffiblossomclient_upload",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiBlossomClient",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "server_url",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "blob",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "content_type",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "auth",
+                        type_: RustArcPtr(
+                            "FfiBlossomAuthorization",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        Some(
+                            ExternalFfiMetadata {
+                                name: "FfiBlobDescriptor",
+                                module_path: "nmp_ffi",
+                            },
+                        ),
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "BLOCKING `PUT /upload` of `blob`'s exact bytes -- self-verifying end\nto end (`nmp_blossom::BlossomClient::upload`): the returned\ndescriptor's sha256 was PROVEN equal to the hash of the uploaded\nbytes. Call off the main thread.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiBlossomUploadError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffiblossomclient_upload",
+            checksum: Some(
+                21684,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_ffiblossomclient",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiBlossomClient",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiBlossomClient",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_ffiblossomclient",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiBlossomClient",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "The BUD-02/04/12 blob client (`nmp_blossom::BlossomClient` mirror).\nEvery method BLOCKS the calling thread for up to the configured request\ndeadline -- call OFF the main thread (the hand-written Swift/Kotlin\nwrappers dispatch for you). Construction is infallible: the config is\nheld as data and the HTTP stack is built per call (see module doc), so\nconstruction failures surface as each operation's own typed\n`ClientBuild` variant.",
     ),
 }
 
