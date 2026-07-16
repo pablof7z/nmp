@@ -28,3 +28,4 @@ nmp-executor.workspace = true
 [dev-dependencies]
 nmp-engine = { workspace = true, features = ["test-instrumentation"] }
 tempfile = "3"
+tungstenite = "0.29"
