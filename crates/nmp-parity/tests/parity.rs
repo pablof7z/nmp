@@ -2232,7 +2232,12 @@ struct ReattachProof {
 /// further), then reattach with a second, independent observer and prove it
 /// replays the identical fact sequence the original saw.
 async fn run_direct_reattach_live() -> ReattachProof {
-    let keys = Keys::generate();
+    // Must match `run_ffi_reattach_live`'s identity: since #47 Unit B the
+    // replayed `AwaitingCapability` carries the frozen author pubkey, so the
+    // direct-vs-FFI `ReattachProof` equality now compares that hex payload.
+    // A per-run `Keys::generate()` would make the two halves disagree by
+    // construction; a shared fixed key makes the payload-parity real.
+    let keys = fixed_keys();
     let engine = Engine::new(EngineConfig::default()).expect("direct engine must construct");
     engine
         .set_active_account(Some(keys.public_key()))
@@ -2306,7 +2311,10 @@ async fn run_direct_reattach_live() -> ReattachProof {
 }
 
 async fn run_ffi_reattach_live() -> ReattachProof {
-    let keys = Keys::generate();
+    // Shared fixed identity with `run_direct_reattach_live` -- see the note
+    // there: the reattach `AwaitingCapability` payload is now the frozen
+    // author pubkey, and the direct-vs-FFI proof compares it.
+    let keys = fixed_keys();
     let engine = NmpEngine::new(NmpEngineConfig::default()).expect("FFI engine must construct");
     engine
         .set_active_account(Some(keys.public_key().to_hex()))
