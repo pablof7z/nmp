@@ -1313,6 +1313,7 @@ fn relay_diagnostics_to_ffi(r: RelayDiagnosticsSnapshot) -> FfiRelayDiagnostics 
         nip11_last_error: r.nip11_last_error,
         nip77_advertisement: r.nip77_advertisement.to_string(),
         nip77_behavior: r.nip77_behavior.to_string(),
+        nip77_handoff: r.nip77_handoff.to_string(),
     }
 }
 
@@ -1838,6 +1839,7 @@ mod tests {
                 nip11_last_error: None,
                 nip77_advertisement: "advertised_supported",
                 nip77_behavior: "behaviorally_proven",
+                nip77_handoff: "reconciling",
             }],
             uncovered_author_count: 7,
             dropped_merge_rules: vec!["limit"],
@@ -1856,6 +1858,7 @@ mod tests {
             })
         );
         assert_eq!(ffi.relays[0].coverage[1].coverage, None);
+        assert_eq!(ffi.relays[0].nip77_handoff, "reconciling");
         assert_eq!(
             ffi.auth_sessions
                 .iter()

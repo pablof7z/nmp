@@ -32,6 +32,7 @@ use nostr::{EventId, Keys, RelayUrl};
 use nostr_relay_builder::local::LocalRelay;
 use nostr_relay_builder::prelude::{
     Event as RelayEvent, EventBuilder as RelayEventBuilder, FinalizeEvent, Keys as RelayKeys,
+    Timestamp as RelayTimestamp,
 };
 
 fn free_port() -> u16 {
@@ -110,7 +111,7 @@ fn literal_kind1(author_hex: &str) -> LiveQuery {
 /// bootstraps with author `a`'s own (empty) feed first, waits for the
 /// probe round-trip to resolve `Supported` (near-instant over loopback),
 /// THEN widens onto `b` -- at which point the relay is already known to
-/// support NIP-77 and the widened atom routes negentropy-first.
+/// support NIP-77 and the widened atom routes through the live-first handoff.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn subscribe_widens_via_negentropy_and_surfaces_the_backfilled_post() {
     let _ = tracing_subscriber::fmt()
@@ -175,7 +176,7 @@ async fn subscribe_widens_via_negentropy_and_surfaces_the_backfilled_post() {
 
     // Widen onto b's kind:1 feed -- SAME skeleton as `a`'s, so this
     // coalesces onto the SAME relay sub-id, which by now is Supported: the
-    // reducer routes it negentropy-first instead of a plain REQ.
+    // reducer routes it through live-first EOSE and then Negentropy.
     let (_b_handle, b_rows_rx) = handle
         .subscribe(literal_kind1(&b.public_key().to_hex()))
         .expect("test subscription construction");
@@ -191,6 +192,27 @@ async fn subscribe_widens_via_negentropy_and_surfaces_the_backfilled_post() {
         "negentropy must discover b's pre-seeded, never-REQ'd post, backfill it via the \
          ordinary REQ/EOSE/ingest pipeline, and the query's own relay source must carry a \
          proven reconciled_through once (and only once) the backfilled event actually landed"
+    );
+
+    // The reconciliation is finished now, but its live-first REQ must still
+    // be open. Publish a NEW event with an intentionally ancient timestamp:
+    // the removed `since: now` reopening strategy would filter this out,
+    // while an uninterrupted live subscription delivers it immediately.
+    let backdated_live_post: RelayEvent =
+        RelayEventBuilder::text_note("published after reconciliation with an old created_at")
+            .custom_created_at(RelayTimestamp::from(1u64))
+            .finalize(&b_relay_keys)
+            .expect("sign backdated live post");
+    relay
+        .add_event(backdated_live_post.clone())
+        .await
+        .expect("publish backdated post through the real relay");
+    assert!(
+        wait_for_rows(&b_rows_rx, Duration::from_secs(10), |rows, _| rows
+            .iter()
+            .any(|row| row.id.to_hex() == backdated_live_post.id.to_hex())),
+        "the live REQ must remain open after NEG completion and deliver a newly-published, \
+         backdated event that any `since: now` reopen would lose"
     );
 
     handle.shutdown();

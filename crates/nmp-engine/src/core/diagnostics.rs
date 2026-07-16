@@ -77,6 +77,9 @@ pub struct RelayDiagnosticsSnapshot {
     /// `unknown`, `probing`, `behaviorally_proven`, or
     /// `behaviorally_rejected`. Kept separate from advertisement evidence.
     pub nip77_behavior: &'static str,
+    /// Current gap-free handoff phase: `none`, `awaiting_live_eose`,
+    /// `reconciling`, `backfilling`, `fallback_backlog`, or `live`.
+    pub nip77_handoff: &'static str,
 }
 
 /// Bounded, session-scoped AUTH reducer facts (#8 U4 — the engine-level
@@ -221,6 +224,7 @@ pub(crate) fn build(
             nip11_last_error: None,
             nip77_advertisement: "unknown",
             nip77_behavior: "unknown",
+            nip77_handoff: "none",
         });
     }
 

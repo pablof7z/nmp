@@ -194,6 +194,18 @@ impl AttributionState {
         self.sub_id_by_wire.retain(|(key, _), _| key != session);
     }
 
+    /// Discard every outstanding snapshot and wire lookup for one exact
+    /// internal subscription id. NIP-77 uses this when a reconciliation or
+    /// temporary backlog request is superseded/abandoned before it can earn
+    /// coverage. These ids are role-derived and never shared with the live
+    /// REQ, so removing the whole FIFO is exact rather than a best-effort
+    /// "pop the newest" convention.
+    pub(crate) fn discard_sub(&mut self, sub_id: &SubId) {
+        self.inflight.remove(sub_id);
+        self.sub_id_by_wire
+            .retain(|_, mapped_sub_id| mapped_sub_id != sub_id);
+    }
+
     /// Attribute an EOSE arriving on `session` for wire subscription id
     /// `wire_sub_id` at engine clock `eose_time`. Returns one
     /// `(CoverageKey, CoverageInterval)` pair per attributed atom — empty
