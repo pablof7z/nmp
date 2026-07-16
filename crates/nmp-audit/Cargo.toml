@@ -26,4 +26,5 @@ nmp-nip51.workspace = true
 # the crate breaks this audit at build time, before the runtime
 # cargo-metadata test would notice.
 nmp-nip29.workspace = true
+nmp-blossom.workspace = true
 serde_json.workspace = true

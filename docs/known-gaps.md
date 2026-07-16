@@ -321,6 +321,10 @@ about current code:
 
 - **Secret zeroization and platform signer-provider boundary are not complete.** NIP-46 URI/session secrets use redacted debug output and zeroizing memory, and the durable event/outbox store persists only the expected pubkey plus an opaque identity reference. `LocalKeySigner` still holds `nostr::Keys` without the old repo's raw-bytes/zeroize hardening, and Swift/Kotlin do not yet ship standard secure-storage-backed providers that restore sessions automatically. Owner: security/signing workstream (#47).
 
+## Protocol modules
+
+- **`nmp-blossom` covers BUD-02 upload only (#545, epic #216).** The opt-in crate ships the BUD-11 kind:24242 upload-authorization vocabulary (draft + validate + header encoding), the BUD-02 blob-descriptor parser, and a sha256-self-verifying `PUT /upload` client with the engine's HTTP admission discipline — nothing else. Deliberately NOT in this unit, tracked as #216 follow-ups: mirror/delete/list verbs (the `BlossomVerb` enum models them totally, but only `upload` has a draft builder), FFI/Swift/Kotlin projection (no facade or surface-snapshot change in this unit), NIP-68 `imeta` picture events (T15-B), and the upload-then-publish composition seam (T15-C).
+
 ## Process / tooling
 
 - **Required-status branch protection is not configured (#81).** Ordinary CI
