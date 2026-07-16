@@ -7320,6 +7320,36 @@ function Function {
 }
 
 function Function {
+    name: "generate_account_secret_key",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [],
+    return_type: Some(
+        String,
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_generate_account_secret_key",
+        is_async: false,
+        arguments: [],
+        return_type: Some(
+            RustBuffer(
+                None,
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Generate a fresh local-account secret key via OS RNG (hex-encoded,\n`NmpEngine::add_account`-compatible) -- the one keygen-only FFI door #588\nasks for. This function touches no engine state, installs no signer, and\npersists nothing: a native wrapper composes it with the existing\n`add_account` to give a clean-start client its first identity, inheriting\nthat method's save-with-rollback choreography and checkpoint tracking\nwholesale instead of a second, parallel registration pipeline.",
+    ),
+    throws: None,
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_generate_account_secret_key",
+    checksum: Some(
+        6489,
+    ),
+}
+
+function Function {
     name: "group_content_demand",
     module_path: "nmp_ffi",
     is_async: false,
