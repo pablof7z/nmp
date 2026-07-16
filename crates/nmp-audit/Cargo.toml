@@ -28,4 +28,8 @@ nmp-nip51.workspace = true
 nmp-nip29.workspace = true
 nmp-blossom.workspace = true
 nmp-nip68.workspace = true
+# nmp-media exports no claims() (DeclaresNoClaims in the registry -- it is a
+# composition crate, not a kind owner, #559); the dev-dep is kept purely for
+# compile-time coupling, exactly like nmp-nip29 above.
+nmp-media.workspace = true
 serde_json.workspace = true
