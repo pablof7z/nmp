@@ -5802,7 +5802,7 @@ record Record {
         },
     ],
     docstring: Some(
-        "One delivered observation frame (`nmp::Frame` mirror) -- the ONE\nvocabulary both observation modes share. Delivery is DERIVED from\nboundedness, never a knob, and never carried twice on the wire:\n\n- Unbounded (`window` is `None`): `deltas` is the exact lossless\ntransition from the previously delivered frame; the full row set is\nnever redelivered (full-set redelivery is the O(rows squared) P0 #485\nexists to kill).\n- Windowed (`window` is `Some`): `window.rows` is the complete current\nbounded set and `deltas` is ALWAYS empty -- bridges replace state from\nthe snapshot, so shipping deltas too would cross every row the FFI\nboundary twice just to be folded and discarded.",
+        "One delivered observation frame (`nmp::Frame` mirror) -- the ONE\nvocabulary both observation modes share. Delivery is DERIVED from\nboundedness, never a knob, and never carried twice on the wire:\n\n- Unbounded (`window` is `None`): `deltas` is the exact transition rebased\nonto the previously delivered frame. Intermediate reducer emits may be\nconflated for a slow observer; the full row set is never redelivered\n(full-set redelivery is the O(rows squared) P0 #485 exists to kill).\n- Windowed (`window` is `Some`): `window.rows` is the complete current\nbounded set and `deltas` is ALWAYS empty -- bridges replace state from\nthe snapshot, so shipping deltas too would cross every row the FFI\nboundary twice just to be folded and discarded.",
     ),
 }
 
@@ -11062,7 +11062,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Open a live subscription. `observer` is driven from a dedicated drain\nthread (M4 plan §4b) -- never the engine thread itself. The returned\n[`NmpQueryHandle`]'s `Drop` withdraws the subscription (deinit-tied\ndemand drop, plan §4c); call [`NmpQueryHandle::cancel`] for an\nexplicit early teardown instead of waiting on Swift's own `deinit`\ntiming.\n\n`window` selects the observation's delivery policy (#485). `None` is\ntoday's unbounded observation: a lossless delta stream, full set\nnever redelivered. `Some(FfiWindow::Expandable { initial, max })` is\na bounded newest-first window: each frame carries the complete\ncurrent row set + growth fact in `FfiFrame::window` (deltas stay\nempty on the wire) and grows only via\n[`NmpQueryHandle::request_rows`], never above `max`. Zero bounds and\n`initial > max` fail closed here with a typed [`FfiError`]; a\nwindowed selection that already declares a NIP-01 `limit` fails with\n[`FfiError::WindowSelectionHasLimit`].",
+                "Open a live subscription. `observer` is driven from a dedicated drain\nthread (M4 plan §4b) -- never the engine thread itself. The returned\n[`NmpQueryHandle`]'s `Drop` withdraws the subscription (deinit-tied\ndemand drop, plan §4c); call [`NmpQueryHandle::cancel`] for an\nexplicit early teardown instead of waiting on Swift's own `deinit`\ntiming.\n\n`window` selects the observation's delivery policy (#485). `None` is\ntoday's unbounded observation: exact deltas are rebased when a slow\nobserver skips intermediate reducer emits, and the full set is never\nredelivered. `Some(FfiWindow::Expandable { initial, max })` is a\nbounded newest-first window: each frame carries the complete\ncurrent row set + growth fact in `FfiFrame::window` (deltas stay\nempty on the wire) and grows only via\n[`NmpQueryHandle::request_rows`], never above `max`. Zero bounds and\n`initial > max` fail closed here with a typed [`FfiError`]; a\nwindowed selection that already declares a NIP-01 `limit` fails with\n[`FfiError::WindowSelectionHasLimit`].",
             ),
             throws: Some(
                 Enum {
@@ -11073,7 +11073,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_observe",
             checksum: Some(
-                2370,
+                58546,
             ),
         },
         Method {
@@ -13000,7 +13000,7 @@ callback CallbackInterface {
         is_object_free_function: false,
     },
     docstring: Some(
-        "Drains a live subscription's frames (M4 §4b) -- the ONE observer both\nobservation modes share (#485): unbounded frames carry the exact delta\ntransition, windowed frames carry the complete bounded row set plus its\ngrowth fact (see [`FfiFrame`]'s doc for why delivery derives from\nboundedness and rows never cross the wire twice). `on_frame` is called\nonce per delivered frame, in order, on a dedicated drain thread — never\non the engine thread itself, so a slow native consumer cannot stall\n`EngineCore`'s own recv loop (windowed frames additionally conflate to\nlatest-state under backpressure, so a slow consumer sees fewer, never\nstale-ordered, frames). `on_closed` fires exactly once, when the engine\nhas torn the subscription down (cancel, or the frame channel's `Sender`\nwas dropped for any other reason) — after which no further `on_frame`\ncall will ever occur. `frame.evidence` is the query's scoped per-source\nacquisition evidence (`docs/design/scoped-evidence-49-12-plan.md` §4) --\nnever a collapsed completeness verdict.",
+        "Drains a live subscription's frames (M4 §4b) -- the ONE observer both\nobservation modes share (#485): unbounded frames carry the exact delta\ntransition, windowed frames carry the complete bounded row set plus its\ngrowth fact (see [`FfiFrame`]'s doc for why delivery derives from\nboundedness and rows never cross the wire twice). `on_frame` is called\nonce per delivered frame, in order, on a dedicated drain thread — never\non the engine thread itself, so a slow native consumer cannot stall\n`EngineCore`'s own recv loop. Both delivery modes conflate under\nbackpressure: windowed frames keep the latest complete snapshot and\nunbounded frames compose one exact transition rebased onto the last\ndelivered state, so a slow consumer sees fewer intermediate frames but\nits next frame still reaches newest state. `on_closed` fires exactly once, when the engine\nhas torn the subscription down (cancel, or the frame channel's `Sender`\nwas dropped for any other reason) — after which no further `on_frame`\ncall will ever occur. `frame.evidence` is the query's scoped per-source\nacquisition evidence (`docs/design/scoped-evidence-49-12-plan.md` §4) --\nnever a collapsed completeness verdict.",
     ),
 }
 
