@@ -89,7 +89,10 @@ sealed class WritePayload {
  * [WriteStatus.Accepted] before it. An override naming a pubkey with no
  * registered signer parks as [WriteStatus.AwaitingCapability] until that
  * capability attaches; acceptance pins the override, so a later
- * [NMPEngine.setActiveAccount] cannot retarget the write. */
+ * [NMPEngine.setActiveAccount] cannot retarget the write. [WriteStatus.
+ * AwaitingCapability.pubkey] (#47 Unit B) is the exact frozen identity
+ * parked -- the override when one was given, else the active account at
+ * publish time -- never the (possibly different) currently active account. */
 data class WriteIntent(
     val payload: WritePayload,
     val durability: Durability,
@@ -111,7 +114,11 @@ data class WriteIntent(
 sealed class WriteStatus {
     object Accepted : WriteStatus()
 
-    object AwaitingCapability : WriteStatus()
+    /** #47 Unit B: [pubkey] is the exact frozen identity (64-char hex) no
+     * registered signer currently answers for. Retained, not terminal --
+     * re-arrives verbatim on restart replay and resumes only when a signer
+     * for THIS pubkey attaches, never a different one. */
+    data class AwaitingCapability(val pubkey: String) : WriteStatus()
 
     data class Signed(val eventId: String) : WriteStatus()
 
@@ -147,7 +154,7 @@ sealed class WriteStatus {
         fun from(ffi: FfiWriteStatus): WriteStatus =
             when (ffi) {
                 is FfiWriteStatus.Accepted -> Accepted
-                is FfiWriteStatus.AwaitingCapability -> AwaitingCapability
+                is FfiWriteStatus.AwaitingCapability -> AwaitingCapability(ffi.pubkey)
                 is FfiWriteStatus.Signed -> Signed(ffi.eventId)
                 is FfiWriteStatus.Routed -> Routed(ffi.relays)
                 is FfiWriteStatus.AwaitingRelay -> AwaitingRelay(ffi.relay)

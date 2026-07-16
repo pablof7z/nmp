@@ -486,7 +486,12 @@ fn attaching_matching_signer_rearms_awaiting_intent() {
     assert!(wait_for_status(
         &receipt,
         Duration::from_secs(5),
-        |status| { matches!(status, WriteStatus::AwaitingCapability) }
+        |status| {
+            matches!(
+                status,
+                WriteStatus::AwaitingCapability { pubkey } if *pubkey == a.public_key()
+            )
+        }
     ));
 
     handle
@@ -537,7 +542,12 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
     assert!(wait_for_status(
         &receipt,
         Duration::from_secs(5),
-        |status| { matches!(status, WriteStatus::AwaitingCapability) }
+        |status| {
+            matches!(
+                status,
+                WriteStatus::AwaitingCapability { pubkey } if *pubkey == b.public_key()
+            )
+        }
     ));
 
     handle.set_active_account(Some(a.public_key()));
@@ -793,9 +803,13 @@ fn unregistered_override_parks_durably_and_never_retargets_on_account_switch() {
         .expect("receipt id allocation");
     assert!(
         wait_for_status(&receipt, Duration::from_secs(5), |status| {
-            matches!(status, WriteStatus::AwaitingCapability)
+            matches!(
+                status,
+                WriteStatus::AwaitingCapability { pubkey } if *pubkey == b.public_key()
+            )
         }),
-        "an override with no registered capability must park, not fail"
+        "an override with no registered capability must park, not fail, and the parked pubkey \
+         must be the frozen override B -- never the active account A"
     );
 
     // Re-rooting the ACTIVE account onto A (whose signer is attached and

@@ -2456,7 +2456,9 @@ impl<S: EventStore> EngineCore<S> {
                 .get(&id)
                 .is_some_and(|pending| !pending.already_signed)
         {
-            replay.push(WriteStatus::AwaitingCapability);
+            replay.push(WriteStatus::AwaitingCapability {
+                pubkey: receipt.expected_pubkey,
+            });
         }
         if receipt.intent_id.is_some() {
             let mut details_by_attempt = details
@@ -3900,8 +3902,11 @@ impl<S: EventStore> EngineCore<S> {
                     self.fail_and_compensate(id, err.to_string(), &mut effects);
                 } else if let Some(pending) = self.pending.get_mut(&id) {
                     let signing_pubkey = pending.signing_pubkey;
-                    Self::notify(pending, WriteStatus::AwaitingCapability);
-                    effects.push(Effect::EmitReceipt(id, WriteStatus::AwaitingCapability));
+                    let status = WriteStatus::AwaitingCapability {
+                        pubkey: signing_pubkey,
+                    };
+                    Self::notify(pending, status.clone());
+                    effects.push(Effect::EmitReceipt(id, status));
                     effects.push(Effect::RearmSignerIfAvailable(signing_pubkey));
                 }
             }
@@ -3916,8 +3921,11 @@ impl<S: EventStore> EngineCore<S> {
                 return effects;
             }
             pending.sign_request_in_flight = false;
-            Self::notify(pending, WriteStatus::AwaitingCapability);
-            effects.push(Effect::EmitReceipt(id, WriteStatus::AwaitingCapability));
+            let status = WriteStatus::AwaitingCapability {
+                pubkey: pending.signing_pubkey,
+            };
+            Self::notify(pending, status.clone());
+            effects.push(Effect::EmitReceipt(id, status));
         }
         effects
     }

@@ -23,7 +23,7 @@
 
 use std::collections::BTreeSet;
 
-use nostr::{EventId, RelayUrl, Timestamp};
+use nostr::{EventId, PublicKey, RelayUrl, Timestamp};
 
 use crate::core::ReceiptId;
 
@@ -32,7 +32,17 @@ use crate::core::ReceiptId;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteStatus {
     Accepted,
-    AwaitingCapability,
+    /// No registered signer answers for `pubkey` -- the exact identity
+    /// FROZEN at acceptance (`AcceptWrite::expected_pubkey` / an
+    /// `identity_override`, #47 Unit A). Retained, not terminal: re-armed
+    /// only by a `SignerAttached` for this exact key (never a different
+    /// one, even across `set_active_account`) and re-emitted verbatim on
+    /// restart replay. #47 Unit B carries the pubkey so an observer can act
+    /// on (or merely display) WHICH capability the durable park is waiting
+    /// for, instead of an anonymous "still waiting."
+    AwaitingCapability {
+        pubkey: PublicKey,
+    },
     Signed(EventId),
     Routed(BTreeSet<RelayUrl>),
     /// This relay lane has no in-flight EVENT attempt because its connection

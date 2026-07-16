@@ -3956,7 +3956,8 @@ fn signer_unavailable_keeps_accepted_row_visible() {
     let effects = core.handle(EngineMsg::SignerUnavailable(id, generation));
     assert!(effects.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(rid, WriteStatus::AwaitingCapability) if *rid == id
+        Effect::EmitReceipt(rid, WriteStatus::AwaitingCapability { pubkey })
+            if *rid == id && *pubkey == a.public_key()
     )));
     let fresh = core.handle(EngineMsg::Subscribe(
         literal_query(&[1], &a.public_key().to_hex()),
@@ -4694,7 +4695,8 @@ fn retryable_signer_errors_retain_and_rearm_the_exact_write() {
         let waiting = core.handle(EngineMsg::SignerCompleted(id, generation, Err(error)));
         assert!(waiting.iter().any(|effect| matches!(
             effect,
-            Effect::EmitReceipt(rid, WriteStatus::AwaitingCapability) if *rid == id
+            Effect::EmitReceipt(rid, WriteStatus::AwaitingCapability { pubkey })
+                if *rid == id && *pubkey == a.public_key()
         )));
         assert!(waiting.iter().any(|effect| matches!(
             effect,
@@ -4702,7 +4704,9 @@ fn retryable_signer_errors_retain_and_rearm_the_exact_write() {
         )));
         assert_eq!(
             sink.0.lock().unwrap().last(),
-            Some(&WriteStatus::AwaitingCapability)
+            Some(&WriteStatus::AwaitingCapability {
+                pubkey: a.public_key()
+            })
         );
 
         let rearmed = core.handle(EngineMsg::SignerAttached(a.public_key()));
