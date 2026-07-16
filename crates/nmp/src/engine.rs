@@ -772,6 +772,7 @@ mod tests {
         use std::collections::BTreeSet;
         use std::time::{Duration, Instant};
 
+        use nostr::filter::MatchEventOptions;
         use nostr::{ClientMessage, EventBuilder, JsonUtil, RelayMessage};
         use tungstenite::Message;
 
@@ -799,11 +800,19 @@ mod tests {
                         continue;
                     };
                     let Ok(ClientMessage::Req {
-                        subscription_id, ..
+                        subscription_id,
+                        filters,
                     }) = ClientMessage::from_json(text.as_str())
                     else {
                         continue;
                     };
+                    if !filters.into_iter().any(|filter| {
+                        filter
+                            .into_owned()
+                            .match_event(&event, MatchEventOptions::new())
+                    }) {
+                        continue;
+                    }
                     socket
                         .send(Message::text(
                             RelayMessage::event(subscription_id.clone().into_owned(), event)
