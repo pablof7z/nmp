@@ -1,6 +1,6 @@
-//! BUD-11 kind:24242 authorization events (#545): draft construction,
-//! fail-closed validation, and the HTTP header encoding. This crate NEVER
-//! signs -- [`upload_authorization_draft`] returns an
+//! BUD-11 kind:24242 authorization events (#545, #551): draft
+//! construction, fail-closed validation, and the HTTP header encoding.
+//! This crate NEVER signs -- the draft builders return an
 //! [`nostr::UnsignedEvent`] and the caller signs it with the existing
 //! `nmp-signer` machinery (signing and publishing are orthogonal stages,
 //! #47/#32). [`SignedAuthorization`] is the ONLY way to obtain an
@@ -17,9 +17,12 @@ use nostr::{
 use crate::sha256::Sha256Hash;
 
 /// The BUD-11 authorization verbs, modeled TOTALLY so the verb-string
-/// mapping can never drift per call site. Only [`BlossomVerb::Upload`] has
-/// a draft builder in this unit; delete/get/list builders land with the
-/// follow-up units under epic #216.
+/// mapping can never drift per call site. Upload, delete, and list have
+/// draft builders in this crate ([`upload_authorization_draft`],
+/// [`delete_authorization_draft`], [`list_authorization_draft`]); `get`
+/// has no builder yet -- it lands with the follow-up units under epic
+/// #216. BUD-04 mirror deliberately has NO builder of its own: the spec
+/// authorizes a mirror with the `upload` verb.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlossomVerb {
     Upload,
@@ -59,7 +62,9 @@ impl std::fmt::Display for BlossomVerb {
     }
 }
 
-/// [`upload_authorization_draft`]'s failure modes. Exhaustive.
+/// The draft builders' shared failure modes ([`upload_authorization_draft`],
+/// [`delete_authorization_draft`], [`list_authorization_draft`]).
+/// Exhaustive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthDraftError {
     /// BUD-11 requires `created_at` in the past and `expiration` in the
@@ -89,20 +94,21 @@ impl std::fmt::Display for AuthDraftError {
 
 impl std::error::Error for AuthDraftError {}
 
-/// Compose an UNSIGNED BUD-11 `upload` authorization (kind 24242): content
-/// = human-readable `description`, `["t","upload"]`, `["x", <lowercase hex
-/// sha256 of the exact blob bytes>]`, `["expiration", <unix ts>]`. The
-/// caller signs the returned draft with its own signer -- this crate never
-/// holds keys.
+/// The shared BUD-11 draft assembly all verb builders delegate to: content
+/// = human-readable `description`, `["t", <verb>]`, an `["x", <lowercase
+/// hex sha256>]` tag when the verb binds a blob, and `["expiration",
+/// <unix ts>]`, in exactly that tag order (the `upload` builder's
+/// observable output predates this factoring and must not change).
 ///
 /// Refuses `expiration <= created_at` (typed): such a window is expired at
 /// birth. Whether `created_at` is actually in the past and `expiration`
 /// actually in the future is checked against a real clock at validation
 /// time ([`SignedAuthorization::validate`]) -- draft construction has no
 /// clock on purpose (deterministic composition, caller-supplied time).
-pub fn upload_authorization_draft(
+fn authorization_draft(
     author: PublicKey,
-    blob: Sha256Hash,
+    verb: BlossomVerb,
+    blob: Option<Sha256Hash>,
     created_at: Timestamp,
     expiration: Timestamp,
     description: &str,
@@ -113,15 +119,93 @@ pub fn upload_authorization_draft(
             expiration,
         });
     }
-    Ok(EventBuilder::new(Kind::BlossomAuth, description)
-        .tag(Tag::hashtag(BlossomVerb::Upload.as_tag_value()))
-        .tag(Tag::custom(
+    let mut builder =
+        EventBuilder::new(Kind::BlossomAuth, description).tag(Tag::hashtag(verb.as_tag_value()));
+    if let Some(blob) = blob {
+        builder = builder.tag(Tag::custom(
             TagKind::single_letter(Alphabet::X, false),
             [blob.to_hex()],
-        ))
+        ));
+    }
+    Ok(builder
         .tag(Tag::expiration(expiration))
         .custom_created_at(created_at)
         .build(author))
+}
+
+/// Compose an UNSIGNED BUD-11 `upload` authorization (kind 24242): content
+/// = human-readable `description`, `["t","upload"]`, `["x", <lowercase hex
+/// sha256 of the exact blob bytes>]`, `["expiration", <unix ts>]`. The
+/// caller signs the returned draft with its own signer -- this crate never
+/// holds keys. Refuses `expiration <= created_at` (typed); see
+/// [`authorization_draft`] for the clock discipline.
+///
+/// BUD-04 NOTE (#551): a `PUT /mirror` request is authorized with THIS
+/// builder -- the spec assigns mirroring the `upload` verb, with the `x`
+/// tag bound to the mirrored blob's sha256. There is deliberately no
+/// separate mirror builder.
+pub fn upload_authorization_draft(
+    author: PublicKey,
+    blob: Sha256Hash,
+    created_at: Timestamp,
+    expiration: Timestamp,
+    description: &str,
+) -> Result<UnsignedEvent, AuthDraftError> {
+    authorization_draft(
+        author,
+        BlossomVerb::Upload,
+        Some(blob),
+        created_at,
+        expiration,
+        description,
+    )
+}
+
+/// Compose an UNSIGNED BUD-12 `delete` authorization (kind 24242):
+/// `["t","delete"]`, `["x", <lowercase hex sha256 of the blob to
+/// delete>]`, `["expiration", <unix ts>]`. Exactly ONE blob is bound:
+/// BUD-12 mandates that multiple `x` tags MUST NOT be read as a request to
+/// delete multiple blobs, so this builder never emits more than one.
+/// Refuses `expiration <= created_at` (typed); see [`authorization_draft`]
+/// for the clock discipline. The caller signs the returned draft -- this
+/// crate never holds keys.
+pub fn delete_authorization_draft(
+    author: PublicKey,
+    blob: Sha256Hash,
+    created_at: Timestamp,
+    expiration: Timestamp,
+    description: &str,
+) -> Result<UnsignedEvent, AuthDraftError> {
+    authorization_draft(
+        author,
+        BlossomVerb::Delete,
+        Some(blob),
+        created_at,
+        expiration,
+        description,
+    )
+}
+
+/// Compose an UNSIGNED BUD-12 `list` authorization (kind 24242):
+/// `["t","list"]` and `["expiration", <unix ts>]`, NO `x` tag -- listing
+/// is scoped to a pubkey by the request path, not to any blob (BUD-12).
+/// Refuses `expiration <= created_at` (typed); see [`authorization_draft`]
+/// for the clock discipline. The caller signs the returned draft -- this
+/// crate never holds keys.
+pub fn list_authorization_draft(
+    author: PublicKey,
+    created_at: Timestamp,
+    expiration: Timestamp,
+    description: &str,
+) -> Result<UnsignedEvent, AuthDraftError> {
+    authorization_draft(
+        author,
+        BlossomVerb::List,
+        None,
+        created_at,
+        expiration,
+        description,
+    )
 }
 
 /// What a caller is about to use an authorization FOR. `blob` is `Some`
@@ -426,6 +510,90 @@ mod tests {
         let auth = SignedAuthorization::validate(event, &expected, now)
             .expect("the exact hash binds despite adjacent garbage");
         assert_eq!(auth.blob(), Some(blob));
+    }
+
+    /// Invariant (#551): the delete builder emits kind 24242 with
+    /// `["t","delete"]`, EXACTLY ONE `x` tag (BUD-12 forbids reading
+    /// multiple `x` tags as a multi-blob delete, so the builder can never
+    /// emit more), and the expiration; the list builder emits
+    /// `["t","list"]` with NO `x` tag at all; and both route through the
+    /// same expired-at-birth refusal as the upload builder.
+    #[test]
+    fn delete_and_list_drafts_carry_the_spec_tag_shapes() {
+        let keys = nostr::Keys::generate();
+        let blob = Sha256Hash::of(b"blob");
+        let created_at = Timestamp::from(1_700_000_000u64);
+        let expiration = Timestamp::from(created_at.as_secs() + 600);
+
+        let delete_draft = delete_authorization_draft(
+            keys.public_key(),
+            blob,
+            created_at,
+            expiration,
+            "delete a blob",
+        )
+        .expect("a future expiration");
+        assert_eq!(delete_draft.kind, Kind::BlossomAuth);
+        assert_eq!(delete_draft.created_at, created_at);
+        assert_eq!(
+            delete_draft
+                .tags
+                .find(TagKind::t())
+                .and_then(|tag| tag.content()),
+            Some("delete")
+        );
+        let x_values: Vec<String> = delete_draft
+            .tags
+            .filter(TagKind::single_letter(Alphabet::X, false))
+            .filter_map(|tag| tag.content())
+            .map(str::to_string)
+            .collect();
+        assert_eq!(x_values, vec![blob.to_hex()]);
+        assert_eq!(delete_draft.tags.expiration(), Some(&expiration));
+
+        let list_draft =
+            list_authorization_draft(keys.public_key(), created_at, expiration, "list my blobs")
+                .expect("a future expiration");
+        assert_eq!(list_draft.kind, Kind::BlossomAuth);
+        assert_eq!(
+            list_draft
+                .tags
+                .find(TagKind::t())
+                .and_then(|tag| tag.content()),
+            Some("list")
+        );
+        assert_eq!(
+            list_draft
+                .tags
+                .filter(TagKind::single_letter(Alphabet::X, false))
+                .count(),
+            0,
+            "a list authorization binds no blob"
+        );
+        assert_eq!(list_draft.tags.expiration(), Some(&expiration));
+
+        // Both new builders refuse an expiration at/before created_at,
+        // through the same shared gate as the upload builder.
+        assert_eq!(
+            delete_authorization_draft(
+                keys.public_key(),
+                blob,
+                created_at,
+                created_at,
+                "delete a blob",
+            ),
+            Err(AuthDraftError::ExpirationNotAfterCreatedAt {
+                created_at,
+                expiration: created_at,
+            })
+        );
+        assert_eq!(
+            list_authorization_draft(keys.public_key(), created_at, created_at, "list my blobs"),
+            Err(AuthDraftError::ExpirationNotAfterCreatedAt {
+                created_at,
+                expiration: created_at,
+            })
+        );
     }
 
     /// Invariant (#545): a wrong-kind event is refused before any other

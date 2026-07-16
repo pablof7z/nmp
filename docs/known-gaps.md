@@ -323,7 +323,7 @@ about current code:
 
 ## Protocol modules
 
-- **`nmp-blossom` covers BUD-02 upload only (#545, epic #216).** The opt-in crate ships the BUD-11 kind:24242 upload-authorization vocabulary (draft + validate + header encoding), the BUD-02 blob-descriptor parser, and a sha256-self-verifying `PUT /upload` client with the engine's HTTP admission discipline — nothing else. Deliberately NOT in this unit, tracked as #216 follow-ups: mirror/delete/list verbs (the `BlossomVerb` enum models them totally, but only `upload` has a draft builder), FFI/Swift/Kotlin projection (no facade or surface-snapshot change in this unit), NIP-68 `imeta` picture events (T15-B), and the upload-then-publish composition seam (T15-C).
+- **`nmp-blossom` covers the BUD verbs but not the platform/composition layers (#545 upload, #551 mirror/delete/list, epic #216).** The opt-in crate ships the BUD-11 kind:24242 authorization vocabulary (draft builders for upload/delete/list — BUD-04 mirror deliberately reuses the `upload` builder — plus validate + header encoding), the BUD-02 blob-descriptor parser, and an HTTP client with the engine's admission discipline covering sha256-self-verifying `PUT /upload`, `PUT /mirror` (409/502 kept distinct, same integrity gate), single-blob-bound `DELETE /<sha256>`, and strictly parsed, bounded `GET /list/<pubkey>` (cursor/limit pagination; the deprecated `since`/`until` are not modeled). Deliberately NOT in this unit, tracked as #216 follow-ups: the `get`/`media` endpoints (the `BlossomVerb` enum models `get` totally, but it has no draft builder), FFI/Swift/Kotlin projection (no facade or surface-snapshot change in this unit), NIP-68 `imeta` picture events (T15-B), and the upload-then-publish composition seam (T15-C).
 
 ## Process / tooling
 
