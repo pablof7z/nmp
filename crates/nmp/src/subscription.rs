@@ -13,10 +13,12 @@
 //! There is ONE [`Subscription`] type for both modes; delivery is DERIVED from
 //! boundedness, never a free knob:
 //!
-//! - `window: None` ⇒ the unbounded delta stream. Each [`Frame`] carries the
-//!   engine-computed lossless [`RowDelta`] transition and `window: None`. The
-//!   full row set is never redelivered — doing so would be the O(rows²)
-//!   redelivery class this design exists to avoid.
+//! - `window: None` ⇒ the unbounded query result, delivered as an exact
+//!   rebased [`RowDelta`] transition and `window: None`. Intermediate reducer
+//!   emits may be conflated for a slow observer, but applying the next frame
+//!   to its last delivered state yields the newest state. The full row set is
+//!   never redelivered — doing so would be the O(rows²) redelivery class this
+//!   design exists to avoid.
 //! - `Some(`[`Window::Expandable`]`)` ⇒ a bounded newest-first window
 //!   delivered as conflated latest-state snapshot frames. Each [`Frame`]
 //!   carries `window: Some(`[`WindowContents`]`)` (the complete current row
@@ -31,7 +33,8 @@ use std::time::Duration;
 
 use nmp_engine::core::{AcquisitionEvidence, HistoryAdvanceError, Row, RowDelta, WindowLoad};
 use nmp_engine::runtime::{
-    DiagnosticsHandle, Handle, HistoryHandle, HistoryReceiver, LatestReceiver, QueryHandle, RowsMsg,
+    DiagnosticsHandle, Handle, HistoryHandle, HistoryReceiver, LatestReceiver, QueryHandle,
+    RowsReceiver,
 };
 
 use crate::diagnostics::DiagnosticsSnapshot;
@@ -114,10 +117,10 @@ impl ObservationCancel {
 #[derive(Debug, Clone)]
 pub struct Frame {
     /// The exact transition from this subscription's previously received
-    /// frame. Unbounded observations: the engine-computed lossless delta
-    /// stream. Windowed observations: derived receiver-side against the last
-    /// delivered frame (windowed frames conflate, so the delta is rebased
-    /// onto whatever was last actually seen).
+    /// frame. Unbounded observations: the producer-composed exact transition
+    /// rebased onto the last batch actually delivered. Windowed observations:
+    /// derived receiver-side against the last delivered frame. Both modes may
+    /// conflate intermediate reducer emits for a slow observer.
     pub deltas: Vec<RowDelta>,
     /// The complete current bounded row set plus its growth fact. `Some` iff
     /// the subscription was opened with a [`Window`]. Unbounded observations
@@ -202,7 +205,7 @@ pub struct Subscription {
 }
 
 enum Delivery {
-    Unbounded(std::sync::mpsc::Receiver<RowsMsg>),
+    Unbounded(RowsReceiver),
     Windowed(HistoryReceiver),
 }
 
@@ -242,11 +245,7 @@ impl WindowHandle {
 }
 
 impl Subscription {
-    pub(crate) fn new(
-        handle: Handle,
-        query_handle: QueryHandle,
-        rows: std::sync::mpsc::Receiver<RowsMsg>,
-    ) -> Self {
+    pub(crate) fn new(handle: Handle, query_handle: QueryHandle, rows: RowsReceiver) -> Self {
         Self {
             cancel: ObservationCancel::new(move || handle.unsubscribe(query_handle)),
             delivery: Delivery::Unbounded(rows),
@@ -273,12 +272,12 @@ impl Subscription {
         }
     }
 
-    /// Block for the next observation [`Frame`]. Unbounded: the next lossless
-    /// delta batch. Windowed: the newest self-contained bounded state
-    /// (intermediate states may be conflated, while `window.rows` and the
-    /// re-derived `deltas` always describe an exact transition from this
-    /// receiver's last return). `Err` once the engine thread has shut down and
-    /// the channel disconnects.
+    /// Block for the next observation [`Frame`]. Unbounded: the exact rebased
+    /// transition to the newest state. Windowed: the newest self-contained
+    /// bounded state. Intermediate reducer emits may be conflated in either
+    /// mode, while the returned `deltas` always describe an exact transition
+    /// from this receiver's last return. `Err` once the engine thread has shut
+    /// down and the channel disconnects.
     pub fn recv(&self) -> Result<Frame, RecvError> {
         match &self.delivery {
             Delivery::Unbounded(rows) => {

@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use nmp_engine::core::RelayAdmissionPolicy;
 use nmp_engine::core::{AcquisitionEvidence, RowDelta, SourceStatus};
 use nmp_engine::outbox::WriteStatus;
-use nmp_engine::runtime::{EngineThread, RowsMsg};
+use nmp_engine::runtime::{EngineThread, RowsReceiver};
 use nmp_engine::{AuthPolicy, AuthPolicyOp, AuthPolicyRequest};
 use nmp_grammar::{
     AccessContext, Binding, Demand, Derived, Filter, IdentityField, Selector, SetAlgebra, SetOp,
@@ -79,7 +79,7 @@ fn literal_kind1(author_hex: &str) -> LiveQuery {
 /// over_a_real_relay` below, whose predicate needs the settled CURRENT
 /// membership, not a monotonic history.
 fn wait_for_rows(
-    rx: &Receiver<RowsMsg>,
+    rx: &RowsReceiver,
     timeout: Duration,
     pred: impl Fn(&[nostr::Event], &AcquisitionEvidence) -> bool,
 ) -> bool {
