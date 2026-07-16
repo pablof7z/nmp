@@ -12,7 +12,7 @@
 //! is refused ([`PictureBuildError::NoImages`]): a kind:20 picture with no
 //! image artifact is unrepresentable (#421).
 
-use nostr::{EventBuilder, Kind, PublicKey, Tag, UnsignedEvent};
+use nostr::{EventBuilder, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
 use crate::image::PictureImage;
 
@@ -77,6 +77,7 @@ impl std::error::Error for PictureBuildError {}
 /// [`UnsignedEvent`] for the caller's signer.
 pub fn build_picture(
     author: PublicKey,
+    created_at: Timestamp,
     spec: &PictureSpec,
 ) -> Result<UnsignedEvent, PictureBuildError> {
     if spec.images.is_empty() {
@@ -114,9 +115,15 @@ pub fn build_picture(
         tags.push(Tag::parse(["t", hashtag.as_str()]).expect("a two-cell `t` row is never empty"));
     }
 
+    // Explicit `created_at` (not `now()`): a kind:20 draft is a composable
+    // value whose final unsigned body must be deterministic and
+    // byte-identical across the direct and FFI surfaces (the T15-C
+    // composition/parity contract, #559), exactly as
+    // `nmp_blossom::upload_authorization_draft` takes its own `created_at`.
     Ok(
         EventBuilder::new(Kind::from(PICTURE_KIND), spec.description.as_str())
             .tags(tags)
+            .custom_created_at(created_at)
             .build(author),
     )
 }
@@ -129,6 +136,10 @@ mod tests {
 
     fn author() -> PublicKey {
         nostr::Keys::generate().public_key()
+    }
+
+    fn fixed_time() -> Timestamp {
+        Timestamp::from(1_700_000_000u64)
     }
 
     fn image(seed: &[u8]) -> PictureImage {
@@ -158,7 +169,7 @@ mod tests {
             hashtags: vec![],
         };
         assert_eq!(
-            build_picture(author(), &spec),
+            build_picture(author(), fixed_time(), &spec),
             Err(PictureBuildError::NoImages)
         );
     }
@@ -175,7 +186,7 @@ mod tests {
             hashtags: vec!["ok".to_string(), String::new()],
         };
         assert_eq!(
-            build_picture(author(), &spec),
+            build_picture(author(), fixed_time(), &spec),
             Err(PictureBuildError::EmptyHashtag)
         );
     }
@@ -200,7 +211,7 @@ mod tests {
             }),
             hashtags: vec!["cats".to_string()],
         };
-        let event = build_picture(author(), &spec).expect("valid spec builds");
+        let event = build_picture(author(), fixed_time(), &spec).expect("valid spec builds");
         assert_eq!(event.kind, Kind::from(PICTURE_KIND));
         assert_eq!(event.content, "two pics");
 
@@ -236,7 +247,7 @@ mod tests {
             content_warning: Some(ContentWarning { reason: None }),
             hashtags: vec![],
         };
-        let event = build_picture(author(), &spec).expect("valid");
+        let event = build_picture(author(), fixed_time(), &spec).expect("valid");
         let cw = event
             .tags
             .iter()
