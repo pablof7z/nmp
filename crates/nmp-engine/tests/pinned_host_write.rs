@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use nmp_engine::core::RelayAdmissionPolicy;
 use nmp_engine::core::RowDelta;
 use nmp_engine::outbox::WriteStatus;
-use nmp_engine::runtime::{EngineThread, RowsMsg};
+use nmp_engine::runtime::{EngineThread, RowsReceiver};
 use nmp_nip29::GroupTimelineEvidence;
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
@@ -60,7 +60,7 @@ fn wait_for_status(
 }
 
 fn wait_for_rows(
-    rx: &Receiver<RowsMsg>,
+    rx: &RowsReceiver,
     timeout: Duration,
     pred: impl Fn(&[nostr::Event]) -> bool,
 ) -> Option<Vec<nostr::Event>> {

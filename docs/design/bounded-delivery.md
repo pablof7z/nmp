@@ -1,7 +1,8 @@
 # Bounded delivery, overload, and shortfall
 
-- **Status:** TARGET CONTRACT - Swift snapshot coalescing and some router caps
-  exist, but boundedness is not yet enforced as one end-to-end contract.
+- **Status:** PARTIAL - ordinary query, window, diagnostics, Swift, and Kotlin
+  observation delivery are bounded; ingestion pressure and several graph,
+  wire, cache, and result limits are not yet enforced end to end.
 - **Owns:** observer buffering, durable fact delivery, graph/wire/result limits,
   ingestion backpressure, and explicit shortfall.
 
@@ -22,14 +23,26 @@ categories and their observable consequences are architectural contract.
 
 ## 2. Latest-state observations
 
-Query snapshots and diagnostics are latest-state streams. Intermediate
-deliveries are not durable facts; a slow observer may skip them as long as the
-next delivery represents the newest complete **local** state and includes the
-current evidence/shortfall revision.
+Windowed query snapshots and diagnostics are latest-state streams. Unwindowed
+queries retain their incremental contract: unchanged rows are not redelivered,
+but the producer may compose skipped reducer deltas into one exact transition
+rebased onto the observer's last delivered state. Folding that transition must
+produce the newest complete **local** state and it must carry the current
+evidence/shortfall revision. Intermediate reducer deliveries are not durable
+facts in either mode.
 
-Each platform bridge therefore uses a bounded newest-value buffer and may frame
-coalesce bursts. Cancellation/drop withdraws observation according to the query
-refcount contract; it does not leave an unbounded producer queue.
+The Rust ordinary-row producer therefore holds one pending transition per event
+id in a single mailbox slot, while windowed queries and diagnostics hold one
+complete latest snapshot. Each platform bridge also uses a bounded newest-value
+buffer and may frame-coalesce bursts. Cancellation/drop withdraws observation
+according to the query refcount contract; it does not leave an unbounded
+producer queue.
+
+This bounds delivery backlog, not the semantic cardinality of an unwindowed
+query result: the pending transition can still be proportional to the change
+between the last delivered state and current state, and the app's accumulated
+full result can still grow with the query. Apps requiring a bounded result set
+use an explicit window.
 
 "Complete local state" means all mutations incorporated through that revision.
 It does not mean globally complete Nostr state.

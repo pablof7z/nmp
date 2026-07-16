@@ -652,6 +652,11 @@ pub struct Row {
 /// O(rows²) total over a session (confirmed live: ~3.35M raw row deliveries
 /// for ~2,587 distinct notes in 20s against real relays --
 /// `docs/known-gaps.md`'s P0).
+///
+/// Runtime delivery may compose several of these reducer deltas into one
+/// exact transition rebased onto the observer's last delivered batch (#46);
+/// that preserves this incremental contract while bounding a slow observer's
+/// pending backlog.
 #[derive(Debug, Clone)]
 pub enum RowDelta {
     /// A row that newly matches the query, carrying the full row (event +

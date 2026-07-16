@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use nmp_engine::core::RelayAdmissionPolicy;
 use nmp_engine::core::RowDelta;
 use nmp_engine::outbox::WriteStatus;
-use nmp_engine::runtime::{EngineThread, RowsMsg};
+use nmp_engine::runtime::{EngineThread, RowsReceiver};
 use nmp_grammar::{Binding, Filter, IdentityField};
 use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 use nmp_resolver::LiveQuery;
@@ -64,7 +64,7 @@ impl SigningCapability for PubkeylessSigner {
 /// Same accumulate-deltas-into-a-snapshot idiom as the other runtime tests
 /// (`nmp_engine::core::RowDelta`'s doc: the wire is deltas, never snapshots).
 fn wait_for_rows(
-    rx: &Receiver<RowsMsg>,
+    rx: &RowsReceiver,
     timeout: Duration,
     pred: impl Fn(&BTreeSet<EventId>) -> bool,
 ) -> bool {

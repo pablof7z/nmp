@@ -15,9 +15,11 @@ use crate::types::{
 /// boundedness and rows never cross the wire twice). `on_frame` is called
 /// once per delivered frame, in order, on a dedicated drain thread — never
 /// on the engine thread itself, so a slow native consumer cannot stall
-/// `EngineCore`'s own recv loop (windowed frames additionally conflate to
-/// latest-state under backpressure, so a slow consumer sees fewer, never
-/// stale-ordered, frames). `on_closed` fires exactly once, when the engine
+/// `EngineCore`'s own recv loop. Both delivery modes conflate under
+/// backpressure: windowed frames keep the latest complete snapshot and
+/// unbounded frames compose one exact transition rebased onto the last
+/// delivered state, so a slow consumer sees fewer intermediate frames but
+/// its next frame still reaches newest state. `on_closed` fires exactly once, when the engine
 /// has torn the subscription down (cancel, or the frame channel's `Sender`
 /// was dropped for any other reason) — after which no further `on_frame`
 /// call will ever occur. `frame.evidence` is the query's scoped per-source

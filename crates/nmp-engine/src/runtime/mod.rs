@@ -43,7 +43,7 @@
 //! batch (`docs/design/scoped-evidence-49-12-plan.md`). This runtime
 //! therefore picks ONE channel per plan's guidance: rows+evidence are
 //! delivered from `Effect::EmitRows` alone (via
-//! a `HandleId -> Sender` registry owned by the engine thread); the
+//! a `HandleId -> RowsSender` registry owned by the engine thread); the
 //! `RowSink` registered at `Subscribe` time is a deliberate no-op so nothing
 //! is delivered twice. Receipts have no such asymmetry — `ReceiptSink::
 //! on_status` and `Effect::EmitReceipt` carry the exact same `WriteStatus`,
@@ -65,6 +65,7 @@
 
 mod auth;
 mod diagnostics_channel;
+mod row_channel;
 
 pub use auth::{
     AddAuthPolicyError, AuthPolicy, AuthPolicyDecision, AuthPolicyError, AuthPolicyOp,
@@ -113,6 +114,8 @@ use nmp_grammar::WriteIntent;
 
 pub use diagnostics_channel::LatestReceiver;
 use diagnostics_channel::{latest_channel, LatestSender};
+pub use row_channel::RowsReceiver;
+use row_channel::{rows_channel, RowsSender};
 
 /// NIP-11 may refine a capability decision, but a slow/unavailable HTTP
 /// endpoint must not hold the WebSocket protocol path hostage. This is a
@@ -144,9 +147,10 @@ impl nmp_transport::PoolEventSink for EnginePoolSink {
     }
 }
 
-/// One delivered batch for a live subscription: raw rows + the query's
-/// per-source acquisition evidence (see the module doc's "two delivery
-/// channels" note).
+/// One delivered batch for a live subscription: an exact row transition
+/// rebased onto the receiver's previous batch + the query's latest per-source
+/// acquisition evidence (see [`RowsReceiver`] and the module doc's "two
+/// delivery channels" note).
 pub type RowsMsg = (Vec<RowDelta>, AcquisitionEvidence);
 pub type HistoryMsg = HistoryBatch;
 
@@ -652,7 +656,7 @@ enum Cmd {
     RelayWorkerRetired,
     Subscribe {
         query: LiveQuery,
-        reply: Sender<Result<(HandleId, Receiver<RowsMsg>), EngineThreadError>>,
+        reply: Sender<Result<(HandleId, RowsReceiver), EngineThreadError>>,
     },
     SubscribeHistory {
         query: HistoryQuery,
@@ -2212,7 +2216,7 @@ mod relay_worker_reconciliation_tests {
                 _ => None,
             })
             .expect("initial protected target exists until preflight resolves");
-        let (rows_tx, _rows_rx) = mpsc::channel();
+        let (rows_tx, _rows_rx) = rows_channel();
         rows.insert(id, rows_tx);
 
         let mut opened = None;
@@ -3213,7 +3217,7 @@ fn engine_loop<S, D>(
     } = pool_runtime;
     let native_tasks = &native_tasks;
     let mut core = EngineCore::new(store, Box::new(directory), cap).with_relay_admission(admission);
-    let mut row_channels: HashMap<HandleId, Sender<RowsMsg>> = HashMap::new();
+    let mut row_channels: HashMap<HandleId, RowsSender> = HashMap::new();
     let mut history_channels: HashMap<HistorySessionId, LatestSender<HistoryMsg>> = HashMap::new();
     let mut diag_channels: HashMap<u64, LatestSender<DiagnosticsSnapshot>> = HashMap::new();
     let mut next_diag_id: u64 = 0;
@@ -3848,7 +3852,7 @@ fn engine_loop<S, D>(
                         _ => None,
                     })
                     .expect("Subscribe must yield a fresh EmitRows for its own handle");
-                let (rows_tx, rows_rx) = mpsc::channel();
+                let (rows_tx, rows_rx) = rows_channel();
                 row_channels.insert(id, rows_tx);
                 if let Err(error) = preflight_query_relay_workers(&effects, &pool) {
                     row_channels.remove(&id);
@@ -4263,7 +4267,7 @@ fn dispatch_core_effects<S: EventStore>(
     core: &mut EngineCore<S>,
     effects: Vec<Effect>,
     pool: &Pool,
-    row_channels: &mut HashMap<HandleId, Sender<RowsMsg>>,
+    row_channels: &mut HashMap<HandleId, RowsSender>,
     history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
     preambles: &mut Preambles,
@@ -4374,7 +4378,7 @@ fn dispatch_relay_open_failure(
     session: RelaySessionKey,
     error: nmp_transport::RelayOpenError,
     pool: &Pool,
-    row_channels: &mut HashMap<HandleId, Sender<RowsMsg>>,
+    row_channels: &mut HashMap<HandleId, RowsSender>,
     history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
     preambles: &mut Preambles,
@@ -4572,7 +4576,7 @@ fn dispatch_effects(
     core: &mut EngineCore<impl EventStore>,
     effects: Vec<Effect>,
     pool: &Pool,
-    row_channels: &mut HashMap<HandleId, Sender<RowsMsg>>,
+    row_channels: &mut HashMap<HandleId, RowsSender>,
     history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
     preambles: &mut Preambles,
@@ -4601,7 +4605,7 @@ fn dispatch_effect(
     core: &mut EngineCore<impl EventStore>,
     effect: Effect,
     pool: &Pool,
-    row_channels: &mut HashMap<HandleId, Sender<RowsMsg>>,
+    row_channels: &mut HashMap<HandleId, RowsSender>,
     history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
     preambles: &mut Preambles,
@@ -4781,7 +4785,7 @@ fn dispatch_effect(
         }
         Effect::EmitRows(id, rows, evidence) => {
             if let Some(tx) = row_channels.get(&id) {
-                let _ = tx.send((rows, evidence));
+                tx.send((rows, evidence));
             }
         }
         Effect::EmitHistory(id, batch) => {
@@ -5055,7 +5059,7 @@ impl DiagnosticsHandle {
 /// diagnostics; #464 adds governed sign-only without creating a third
 /// workload noun or bypassing the active-signer boundary:
 ///
-/// - `subscribe(LiveQuery) -> (QueryHandle, Receiver<RowsMsg>)`
+/// - `subscribe(LiveQuery) -> (QueryHandle, RowsReceiver)`
 /// - `unsubscribe(QueryHandle)`
 /// - `add_signer(impl SigningCapability) -> Result<SignerRegistration, AddSignerError>`
 /// - `remove_signer(SignerRegistration) -> bool`
@@ -5251,7 +5255,7 @@ impl Handle {
     pub fn subscribe(
         &self,
         query: LiveQuery,
-    ) -> Result<(QueryHandle, Receiver<RowsMsg>), EngineThreadError> {
+    ) -> Result<(QueryHandle, RowsReceiver), EngineThreadError> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox
             .send(Cmd::Subscribe {
@@ -5266,8 +5270,8 @@ impl Handle {
     }
 
     /// Withdraw a live subscription. Fire-and-forget: once the engine thread
-    /// processes it, the row channel's `Sender` is dropped and the app's
-    /// `Receiver` observes a clean disconnect.
+    /// processes it, the row channel's sender is dropped and the app's
+    /// [`RowsReceiver`] observes a clean disconnect.
     pub fn unsubscribe(&self, handle: QueryHandle) {
         let _ = self
             .inbox
