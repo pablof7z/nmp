@@ -256,6 +256,7 @@ fn offline_accept_restart_real_bunker_reattach_publish_and_ack() {
                 payload: WritePayload::Unsigned(unsigned.clone()),
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
+                identity_override: None,
             })
             .unwrap();
         assert_eq!(receipt.statuses.recv().unwrap(), WriteStatus::Accepted);
@@ -400,6 +401,7 @@ fn mutated_real_bunker_response_retracts_pending_and_restores_replaceable_predec
             payload: WritePayload::Unsigned(replacement),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         })
         .unwrap();
     assert_eq!(receipt.statuses.recv().unwrap(), WriteStatus::Accepted);

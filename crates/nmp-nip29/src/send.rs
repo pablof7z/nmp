@@ -202,6 +202,9 @@ pub(crate) fn compose_group_send_with_tags(
         payload: WritePayload::Unsigned(unsigned),
         durability: Durability::Durable,
         routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(host)),
+        // Composed group sends keep the default identity contract (#47):
+        // `author` must be the active account at publish time.
+        identity_override: None,
     }
 }
 

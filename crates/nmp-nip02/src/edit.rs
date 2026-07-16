@@ -103,6 +103,7 @@ pub fn compose_follow_change(
         },
         durability: Durability::Durable,
         routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
     })))
 }
 
