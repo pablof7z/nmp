@@ -131,7 +131,7 @@ pub fn admits_network_relay_hint(relay: &nostr::RelayUrl) -> bool {
 // protocol module (e.g. `nmp-nip29::compose_group_send`), not the default
 // facade surface.
 pub use nmp_engine::core::ReceiptId;
-pub use nmp_engine::outbox::WriteStatus;
+pub use nmp_engine::outbox::{CancelWriteError, CancelWriteOutcome, WriteStatus};
 pub use nmp_engine::runtime::{
     ReceiptReattachment, ReceiptStream, SignEventCancel, SignEventError, SignEventOperation,
     SignerRegistration,

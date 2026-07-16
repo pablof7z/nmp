@@ -688,6 +688,26 @@ fn increment_pending_ephemeral_in_txn(
     Ok(())
 }
 
+fn decrement_pending_ephemeral_in_txn(
+    outbox_meta: &mut redb::Table<'_, &str, &str>,
+) -> Result<(), PersistenceError> {
+    let current = outbox_meta
+        .get(PENDING_EPHEMERAL_RECEIPTS_KEY)
+        .map_err(persist_err)?
+        .map(|guard| guard.value().parse::<u64>())
+        .transpose()
+        .map_err(|err| PersistenceError(format!("parse pending ephemeral count: {err}")))?
+        .unwrap_or(0);
+    let next = current
+        .checked_sub(1)
+        .ok_or_else(|| PersistenceError("pending ephemeral receipt count underflow".into()))?;
+    let encoded = next.to_string();
+    outbox_meta
+        .insert(PENDING_EPHEMERAL_RECEIPTS_KEY, encoded.as_str())
+        .map_err(persist_err)?;
+    Ok(())
+}
+
 /// [`OUTBOX_RECEIPTS`]'s key for `id` — same zero-padding convention as
 /// [`intent_key`].
 fn receipt_key(id: u64) -> String {
@@ -708,10 +728,9 @@ struct OutboxReceiptRecord {
     state: ReceiptState,
 }
 
-/// Update `OUTBOX_RECEIPTS[receipt_id]`'s `state` in place, if a row exists
-/// (it always should, by construction — every journaled `accept_write`
-/// writes one in the same transaction). Shared by `promote_signed` and
-/// `compensate_write` (architecture review correction).
+/// Update `OUTBOX_RECEIPTS[receipt_id]`'s `state` in place. Absence or corrupt
+/// bytes are persistence failures: returning success would let promotion or
+/// cancellation fabricate a terminal fact that was never retained.
 fn update_outbox_receipt(
     outbox_receipts: &mut redb::Table<'_, &str, &str>,
     receipt_id: u64,
@@ -721,15 +740,19 @@ fn update_outbox_receipt(
     // Two statements, not one chained expression — see `remove_row_in_txn`'s
     // comment on the same `?`-temporary-lifetime-extension quirk.
     let existing = outbox_receipts.get(key.as_str()).map_err(persist_err)?;
-    if let Some(json) = existing.map(|guard| guard.value().to_string()) {
-        let mut record: OutboxReceiptRecord =
-            serde_json::from_str(&json).expect("redb: decode outbox receipt");
-        record.state = state;
-        let encoded = serde_json::to_string(&record).expect("redb: encode outbox receipt");
-        outbox_receipts
-            .insert(key.as_str(), encoded.as_str())
-            .map_err(persist_err)?;
-    }
+    let json = existing
+        .map(|guard| guard.value().to_string())
+        .ok_or_else(|| PersistenceError(format!("missing outbox receipt {receipt_id}")))?;
+    let mut record: OutboxReceiptRecord = serde_json::from_str(&json).map_err(|error| {
+        PersistenceError(format!("decode outbox receipt {receipt_id}: {error}"))
+    })?;
+    record.state = state;
+    let encoded = serde_json::to_string(&record).map_err(|error| {
+        PersistenceError(format!("encode outbox receipt {receipt_id}: {error}"))
+    })?;
+    outbox_receipts
+        .insert(key.as_str(), encoded.as_str())
+        .map_err(persist_err)?;
     Ok(())
 }
 
@@ -832,7 +855,8 @@ fn remove_claimant_in_txn(
     else {
         return Ok(());
     };
-    let mut claimants: Vec<u64> = serde_json::from_str(&json).expect("redb: decode claimant set");
+    let mut claimants: Vec<u64> = serde_json::from_str(&json)
+        .map_err(|error| PersistenceError(format!("decode claimant set: {error}")))?;
     claimants.retain(|id| *id != intent_id.0);
     if claimants.is_empty() {
         table.remove(key).map_err(persist_err)?;
@@ -903,8 +927,8 @@ fn remove_addr_claimant_in_txn(
     else {
         return Ok(());
     };
-    let mut claimants: Vec<AddrClaimant> =
-        serde_json::from_str(&json).expect("redb: decode addr claimant set");
+    let mut claimants: Vec<AddrClaimant> = serde_json::from_str(&json)
+        .map_err(|error| PersistenceError(format!("decode address claimant set: {error}")))?;
     claimants.retain(|c| c.intent_id != intent_id.0);
     if claimants.is_empty() {
         table.remove(key).map_err(persist_err)?;
@@ -931,8 +955,8 @@ fn addr_has_covering_claimant_in_txn(
     else {
         return Ok(false);
     };
-    let claimants: Vec<AddrClaimant> =
-        serde_json::from_str(&json).expect("redb: decode addr claimant set");
+    let claimants: Vec<AddrClaimant> = serde_json::from_str(&json)
+        .map_err(|error| PersistenceError(format!("decode address claimant set: {error}")))?;
     Ok(claimants
         .iter()
         .any(|c| candidate_created_at.as_secs() <= c.ceiling))
@@ -997,6 +1021,11 @@ fn encode_stored_event(se: &StoredEvent) -> Vec<u8> {
 /// read-side counterpart of [`encode_stored_event`].
 fn decode_stored_event(bytes: &[u8]) -> StoredEvent {
     binary_event::decode(bytes).expect("redb: decode portable stored event")
+}
+
+fn try_decode_stored_event(bytes: &[u8]) -> Result<StoredEvent, PersistenceError> {
+    binary_event::decode(bytes)
+        .map_err(|error| PersistenceError(format!("decode portable stored event: {error:?}")))
 }
 
 fn decode_stored_event_record(bytes: &[u8]) -> StoredEventRecord {
@@ -1122,12 +1151,16 @@ impl<'txn> CanonicalWriteTables<'txn> {
         };
         let local_bytes = self.local.get(key).map_err(persist_err)?;
         let event = StoredEventView::from_trusted(event_bytes.value())
-            .expect("redb: decode canonical event view")
+            .map_err(|error| PersistenceError(format!("decode canonical event view: {error:?}")))?
             .materialize_event()
-            .expect("redb: materialize canonical event");
-        let local = local_bytes.map(|bytes| {
-            binary_event::decode_local(bytes.value()).expect("redb: decode canonical local state")
-        });
+            .map_err(|error| PersistenceError(format!("materialize canonical event: {error:?}")))?;
+        let local = local_bytes
+            .map(|bytes| {
+                binary_event::decode_local(bytes.value()).map_err(|error| {
+                    PersistenceError(format!("decode canonical local state: {error:?}"))
+                })
+            })
+            .transpose()?;
         let provenance = Provenance {
             seen: self.load_seen(key)?,
             local,
@@ -1136,9 +1169,15 @@ impl<'txn> CanonicalWriteTables<'txn> {
     }
 
     fn load_local(&self, key: EventKey) -> Result<Option<LocalOrigin>, PersistenceError> {
-        Ok(self.local.get(key).map_err(persist_err)?.map(|bytes| {
-            binary_event::decode_local(bytes.value()).expect("redb: decode canonical local state")
-        }))
+        self.local
+            .get(key)
+            .map_err(persist_err)?
+            .map(|bytes| {
+                binary_event::decode_local(bytes.value()).map_err(|error| {
+                    PersistenceError(format!("decode canonical local state: {error:?}"))
+                })
+            })
+            .transpose()
     }
 
     fn load_seen(
@@ -2945,7 +2984,7 @@ fn find_displaced_key_by_event_id_in_txn(
 ) -> Result<Option<String>, PersistenceError> {
     for entry in outbox_displaced.iter().map_err(persist_err)? {
         let (key, value) = entry.map_err(persist_err)?;
-        let record = decode_stored_event_record(value.value());
+        let record = stored_event_to_record(&try_decode_stored_event(value.value())?);
         let owned_by_this_intent = record
             .local
             .as_ref()
@@ -2978,7 +3017,7 @@ fn find_any_displaced_key_by_event_id_in_txn(
 ) -> Result<Option<String>, PersistenceError> {
     for entry in outbox_displaced.iter().map_err(persist_err)? {
         let (key, value) = entry.map_err(persist_err)?;
-        let record = decode_stored_event_record(value.value());
+        let record = stored_event_to_record(&try_decode_stored_event(value.value())?);
         if record.event.id == frozen_id {
             return Ok(Some(key.value().to_string()));
         }
@@ -5291,8 +5330,13 @@ impl EventStore for RedbStore {
             let outcome = match intent_json {
                 None => PromoteOutcome::NotFound,
                 Some(intent_json) => {
-                    let intent_record: OutboxIntentRecord =
-                        serde_json::from_str(&intent_json).expect("redb: decode outbox intent");
+                    let intent_record: OutboxIntentRecord = serde_json::from_str(&intent_json)
+                        .map_err(|error| {
+                            PersistenceError(format!(
+                                "decode outbox intent {}: {error}",
+                                intent_id.0
+                            ))
+                        })?;
                     // No-second-transition guard (codex-nova finding): a
                     // repeat promotion (e.g. a duplicate signer completion)
                     // must not overwrite an already-Signed row and re-emit
@@ -5509,10 +5553,15 @@ impl EventStore for RedbStore {
         Ok(outcome)
     }
 
-    fn compensate_write(
+    fn compensate_write_with_state(
         &mut self,
         intent_id: IntentId,
+        reason: crate::CompensationReason,
     ) -> Result<CompensateOutcome, PersistenceError> {
+        let terminal_state = match reason {
+            crate::CompensationReason::Failure => ReceiptState::Compensated,
+            crate::CompensationReason::ExplicitCancellation => ReceiptState::Cancelled,
+        };
         let write_txn = self.db.begin_write().map_err(persist_err)?;
         let outcome = {
             let mut canonical = CanonicalWriteTables::open(&write_txn)?;
@@ -5547,15 +5596,25 @@ impl EventStore for RedbStore {
             let outcome = match intent_json {
                 None => CompensateOutcome::NotFound,
                 Some(intent_json) => {
-                    let intent_record: OutboxIntentRecord =
-                        serde_json::from_str(&intent_json).expect("redb: decode outbox intent");
+                    let intent_record: OutboxIntentRecord = serde_json::from_str(&intent_json)
+                        .map_err(|error| {
+                            PersistenceError(format!(
+                                "decode outbox intent {}: {error}",
+                                intent_id.0
+                            ))
+                        })?;
                     if intent_record.sig_state == IntentSigState::Signed {
                         // Pre-signature only (retraction doc §4.2's
                         // "Promotion correction").
-                        CompensateOutcome::NotFound
+                        CompensateOutcome::AlreadySigned
                     } else {
-                        let frozen_event = Event::from_json(&intent_record.frozen_json)
-                            .expect("redb: decode frozen event json");
+                        let frozen_event =
+                            Event::from_json(&intent_record.frozen_json).map_err(|error| {
+                                PersistenceError(format!(
+                                    "decode frozen event for intent {}: {error}",
+                                    intent_id.0
+                                ))
+                            })?;
                         let frozen_id = frozen_event.id;
                         let live = canonical.load_by_id(&frozen_id)?;
                         let is_live = live.as_ref().is_some_and(|(_event_key, stored)| {
@@ -5620,10 +5679,14 @@ impl EventStore for RedbStore {
                                 .expect("just found this key")
                                 .value()
                                 .to_vec();
-                            let mut other_record = decode_stored_event_record(&other_bytes);
-                            let mut local = other_record.local.clone().expect(
-                                "find_displaced_key_by_event_id_in_txn only matches owned entries",
-                            );
+                            let mut other_record =
+                                stored_event_to_record(&try_decode_stored_event(&other_bytes)?);
+                            let Some(mut local) = other_record.local.clone() else {
+                                return Err(PersistenceError(format!(
+                                    "displaced event for intent {} lost local ownership",
+                                    intent_id.0
+                                )));
+                            };
                             local.owners.remove(&intent_id);
                             let should_drop = local.owners.is_empty()
                                 && local.sig_state == SigState::Pending
@@ -5667,7 +5730,7 @@ impl EventStore for RedbStore {
                                 &mut outbox_kind5_claims,
                                 &mut outbox_suppress_by_id,
                                 &mut outbox_suppress_by_addr,
-                                decode_stored_event(&bytes),
+                                try_decode_stored_event(&bytes)?,
                             )?
                             .map(Box::new),
                             None => None,
@@ -5696,7 +5759,12 @@ impl EventStore for RedbStore {
                             .map(|guard| guard.value().to_string());
                         if let Some(claims_json) = claims_json {
                             let claims: Vec<SuppressClaimRecord> =
-                                serde_json::from_str(&claims_json).expect("redb: decode claims");
+                                serde_json::from_str(&claims_json).map_err(|error| {
+                                    PersistenceError(format!(
+                                        "decode suppression claims for intent {}: {error}",
+                                        intent_id.0
+                                    ))
+                                })?;
 
                             let mut candidate_ids: Vec<EventId> = Vec::new();
                             let mut seen_candidates: HashSet<EventId> = HashSet::new();
@@ -5707,14 +5775,18 @@ impl EventStore for RedbStore {
                                         // `"{id_hex}:{author_hex}"` — the
                                         // target's own id is everything
                                         // before the first `:`.
-                                        let hex = id_key
-                                            .split(':')
-                                            .next()
-                                            .expect("id_tombstone_key always has a ':'");
-                                        Some(
-                                            EventId::from_hex(hex)
-                                                .expect("redb: decode id claim target"),
-                                        )
+                                        let hex = id_key.split(':').next().ok_or_else(|| {
+                                            PersistenceError(format!(
+                                                "decode id suppression claim for intent {}",
+                                                intent_id.0
+                                            ))
+                                        })?;
+                                        Some(EventId::from_hex(hex).map_err(|error| {
+                                            PersistenceError(format!(
+                                                "decode id suppression claim for intent {}: {error}",
+                                                intent_id.0
+                                            ))
+                                        })?)
                                     }
                                     SuppressClaimRecord::Addr { key: addr_key, .. } => {
                                         let event_key = addr_index
@@ -5787,7 +5859,7 @@ impl EventStore for RedbStore {
                         update_outbox_receipt(
                             &mut outbox_receipts,
                             intent_record.receipt_id,
-                            ReceiptState::Compensated,
+                            terminal_state,
                         )?;
 
                         CompensateOutcome::Compensated { restored, revealed }
@@ -5801,6 +5873,80 @@ impl EventStore for RedbStore {
         self.crash_if(RedbCrashPoint::CompensateBeforeCommit);
         write_txn.commit().map_err(persist_err)?;
         Ok(outcome)
+    }
+
+    fn cancel_ephemeral_receipt(
+        &mut self,
+        receipt_id: u64,
+    ) -> Result<crate::CancelEphemeralOutcome, PersistenceError> {
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
+        let outcome = {
+            let mut receipts = write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
+            let key = receipt_key(receipt_id);
+            let existing = receipts.get(key.as_str()).map_err(persist_err)?;
+            let Some(json) = existing.map(|guard| guard.value().to_string()) else {
+                return Ok(crate::CancelEphemeralOutcome::NotFound);
+            };
+            let mut record: OutboxReceiptRecord = serde_json::from_str(&json)
+                .map_err(|err| PersistenceError(format!("decode outbox receipt: {err}")))?;
+            if record.intent_id.is_some() {
+                crate::CancelEphemeralOutcome::NotEphemeral
+            } else {
+                match record.state {
+                    ReceiptState::Accepted => {
+                        record.state = ReceiptState::Cancelled;
+                        let encoded = serde_json::to_string(&record).map_err(|err| {
+                            PersistenceError(format!("encode outbox receipt: {err}"))
+                        })?;
+                        receipts
+                            .insert(key.as_str(), encoded.as_str())
+                            .map_err(persist_err)?;
+                        let mut meta = write_txn.open_table(OUTBOX_META).map_err(persist_err)?;
+                        decrement_pending_ephemeral_in_txn(&mut meta)?;
+                        crate::CancelEphemeralOutcome::Cancelled
+                    }
+                    ReceiptState::Signed => crate::CancelEphemeralOutcome::AlreadySigned,
+                    ReceiptState::Cancelled => crate::CancelEphemeralOutcome::AlreadyCancelled,
+                    ReceiptState::Abandoned => crate::CancelEphemeralOutcome::AlreadyAbandoned,
+                    ReceiptState::Compensated => crate::CancelEphemeralOutcome::AlreadyCompensated,
+                }
+            }
+        };
+        if outcome == crate::CancelEphemeralOutcome::Cancelled {
+            write_txn.commit().map_err(persist_err)?;
+        }
+        Ok(outcome)
+    }
+
+    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
+        let write_txn = self.db.begin_write().map_err(persist_err)?;
+        let changed = {
+            let mut receipts = write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
+            let key = receipt_key(receipt_id);
+            let existing = receipts.get(key.as_str()).map_err(persist_err)?;
+            let Some(json) = existing.map(|guard| guard.value().to_string()) else {
+                return Ok(false);
+            };
+            let mut record: OutboxReceiptRecord = serde_json::from_str(&json)
+                .map_err(|err| PersistenceError(format!("decode outbox receipt: {err}")))?;
+            if record.intent_id.is_some() || record.state != ReceiptState::Accepted {
+                false
+            } else {
+                record.state = ReceiptState::Signed;
+                let encoded = serde_json::to_string(&record)
+                    .map_err(|err| PersistenceError(format!("encode outbox receipt: {err}")))?;
+                receipts
+                    .insert(key.as_str(), encoded.as_str())
+                    .map_err(persist_err)?;
+                let mut meta = write_txn.open_table(OUTBOX_META).map_err(persist_err)?;
+                decrement_pending_ephemeral_in_txn(&mut meta)?;
+                true
+            }
+        };
+        if changed {
+            write_txn.commit().map_err(persist_err)?;
+        }
+        Ok(changed)
     }
 
     fn recover_outbox(&self) -> Vec<RecoveredIntent> {

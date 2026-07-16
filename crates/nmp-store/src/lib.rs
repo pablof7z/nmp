@@ -691,11 +691,24 @@ pub enum CompensateOutcome {
         restored: Option<Box<StoredEvent>>,
         revealed: Vec<StoredEvent>,
     },
-    /// This `IntentId` names no still-open intent: already promoted
-    /// (compensation is pre-signature only, retraction doc §4.2's
-    /// "Promotion correction"), already compensated, or never accepted
-    /// through `accept_write`.
+    /// The intent crossed signature promotion; the destructive pre-signature
+    /// door refuses without changing its row, receipt, or lanes.
+    AlreadySigned,
+    /// This `IntentId` names no still-open intent: already compensated or
+    /// never accepted through `accept_write`.
     NotFound,
+}
+
+/// Typed result from the receipt-keyed ephemeral cancellation door.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelEphemeralOutcome {
+    Cancelled,
+    NotFound,
+    NotEphemeral,
+    AlreadySigned,
+    AlreadyCancelled,
+    AlreadyAbandoned,
+    AlreadyCompensated,
 }
 
 /// One still-open intent replayed by [`EventStore::recover_outbox`] on
@@ -744,6 +757,10 @@ pub enum ReceiptState {
     /// (retraction doc §4.2). Terminal — a compensated intent never
     /// promotes.
     Compensated,
+    /// The app explicitly cancelled this still-unsigned obligation. The
+    /// compensation transaction committed, so this is a durable terminal
+    /// fact rather than a generic failure string.
+    Cancelled,
     /// An `Ephemeral` receipt (see [`EventStore::accept_ephemeral`]) that
     /// was still `Accepted` when the store reopened after a restart.
     /// `Ephemeral` writes are NEVER retried after process loss (R4), and
@@ -755,6 +772,19 @@ pub enum ReceiptState {
     /// same boot pass, mirroring how NIP-40 catches up expired-while-dead
     /// events at boot (retraction-and-negative-deltas.md §3.3). Terminal.
     Abandoned,
+}
+
+/// Backend-extension vocabulary for why the one atomic compensation
+/// transaction is running. This is not a third app-facing workload noun:
+/// [`EventStore`] remains implementable outside this crate, so its shared
+/// implementation door must be nameable by adapter stores. The exhaustive
+/// enum admits only the two legal terminal outcomes instead of exposing a
+/// `ReceiptState` parameter that could persist an impossible transition.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompensationReason {
+    Failure,
+    ExplicitCancellation,
 }
 
 /// A durably-retained receipt record, independent of whether the intent's
@@ -1438,6 +1468,39 @@ pub trait EventStore {
     fn compensate_write(
         &mut self,
         intent_id: IntentId,
+    ) -> Result<CompensateOutcome, PersistenceError> {
+        self.compensate_write_with_state(intent_id, CompensationReason::Failure)
+    }
+
+    /// The explicit-cancellation form of [`Self::compensate_write`]. It has
+    /// identical atomic row/predecessor/lane semantics, but persists
+    /// [`ReceiptState::Cancelled`] so reattachment can distinguish deliberate
+    /// cancellation from a terminal signer/protocol failure.
+    fn cancel_write(&mut self, intent_id: IntentId) -> Result<CompensateOutcome, PersistenceError> {
+        self.compensate_write_with_state(intent_id, CompensationReason::ExplicitCancellation)
+    }
+
+    /// Persist cancellation of an accepted unsigned ephemeral receipt. Such
+    /// a receipt has no outbox intent row or pending canonical row to
+    /// compensate, but its terminal fact is still retained and reattachable.
+    fn cancel_ephemeral_receipt(
+        &mut self,
+        receipt_id: u64,
+    ) -> Result<CancelEphemeralOutcome, PersistenceError>;
+
+    /// Persist that an accepted ephemeral receipt crossed the irreversible
+    /// signature boundary. Returns `false` when it is absent, durable, or no
+    /// longer accepted.
+    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError>;
+
+    /// Backend implementation for the two typed pre-signature compensation
+    /// outcomes. Callers use [`Self::compensate_write`] or
+    /// [`Self::cancel_write`], never this shared atomic door directly.
+    #[doc(hidden)]
+    fn compensate_write_with_state(
+        &mut self,
+        intent_id: IntentId,
+        reason: CompensationReason,
     ) -> Result<CompensateOutcome, PersistenceError>;
 
     /// Read every still-open intent back out of the durable journal on

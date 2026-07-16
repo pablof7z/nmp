@@ -26,7 +26,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
 use nmp_engine::core::ReceiptId;
-use nmp_engine::outbox::WriteStatus;
+use nmp_engine::outbox::{CancelWriteError, CancelWriteOutcome, WriteStatus};
 use nmp_engine::runtime::{
     EngineThread, Handle, ReceiptReattachment, ReceiptStream, RuntimeConfig, SignEventError,
     SignEventOperation, SignerRegistration,
@@ -436,6 +436,15 @@ impl Engine {
     /// retained obligations with unreadable evidence are distinct outcomes.
     pub fn reattach_receipt(&self, id: ReceiptId) -> Result<ReceiptReattachment, EngineError> {
         self.with_handle(|handle| handle.reattach_receipt(id))
+    }
+
+    /// Explicitly cancel one accepted unsigned write by its stable receipt
+    /// id. [`CancelWriteOutcome::Cancelled`] means the durable
+    /// [`WriteStatus::Cancelled`] fact committed; signed or otherwise terminal
+    /// receipts return a precise typed refusal.
+    pub fn cancel(&self, id: ReceiptId) -> Result<CancelWriteOutcome, CancelWriteError> {
+        self.with_handle(|handle| handle.cancel_write(id))
+            .map_err(|_| CancelWriteError::EngineClosed)?
     }
 
     /// Register an account from its secret key (hex or bech32 `nsec`). Does
@@ -946,6 +955,100 @@ mod tests {
         assert!(!path.exists(), "reset must remove the failed-open store");
     }
 
+    #[test]
+    fn facade_cancellation_is_typed_idempotent_and_reattachable() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+        let keys = Keys::generate();
+        engine
+            .set_active_account(Some(keys.public_key()))
+            .expect("engine open");
+        let receipt = engine
+            .publish_tracked(WriteIntent {
+                payload: nmp_grammar::WritePayload::Unsigned(UnsignedEvent::new(
+                    keys.public_key(),
+                    Timestamp::from(10),
+                    Kind::TextNote,
+                    Vec::new(),
+                    "cancel through facade",
+                )),
+                durability: nmp_grammar::Durability::Durable,
+                routing: nmp_grammar::WriteRouting::AuthorOutbox,
+                identity_override: None,
+            })
+            .expect("accept write");
+        assert_eq!(
+            receipt
+                .statuses
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap(),
+            WriteStatus::Accepted
+        );
+
+        assert_eq!(engine.cancel(receipt.id), Ok(CancelWriteOutcome::Cancelled));
+        let mut saw_cancelled = false;
+        while let Ok(status) = receipt
+            .statuses
+            .recv_timeout(std::time::Duration::from_secs(1))
+        {
+            if status == WriteStatus::Cancelled {
+                saw_cancelled = true;
+                break;
+            }
+        }
+        assert!(saw_cancelled);
+        assert_eq!(engine.cancel(receipt.id), Ok(CancelWriteOutcome::Cancelled));
+
+        let ReceiptReattachment::Attached(replay) = engine.reattach_receipt(receipt.id).unwrap()
+        else {
+            panic!("cancelled receipt must remain reattachable")
+        };
+        assert_eq!(replay.recv().unwrap(), WriteStatus::Cancelled);
+        assert!(matches!(
+            engine.cancel(ReceiptId(u64::MAX)),
+            Err(CancelWriteError::UnknownReceipt { .. })
+        ));
+
+        engine.shutdown();
+        assert_eq!(
+            engine.cancel(receipt.id),
+            Err(CancelWriteError::EngineClosed)
+        );
+    }
+
+    #[test]
+    fn dropping_a_receipt_observer_does_not_cancel_the_write() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+        let keys = Keys::generate();
+        engine
+            .set_active_account(Some(keys.public_key()))
+            .expect("engine open");
+        let receipt = engine
+            .publish_tracked(WriteIntent {
+                payload: nmp_grammar::WritePayload::Unsigned(UnsignedEvent::new(
+                    keys.public_key(),
+                    Timestamp::from(11),
+                    Kind::TextNote,
+                    Vec::new(),
+                    "observer lifetime is not write ownership",
+                )),
+                durability: nmp_grammar::Durability::Durable,
+                routing: nmp_grammar::WriteRouting::AuthorOutbox,
+                identity_override: None,
+            })
+            .expect("accept write");
+        let receipt_id = receipt.id;
+        assert_eq!(receipt.statuses.recv().unwrap(), WriteStatus::Accepted);
+        drop(receipt.statuses);
+
+        let ReceiptReattachment::Attached(replay) = engine.reattach_receipt(receipt_id).unwrap()
+        else {
+            panic!("dropping the observer must not remove the receipt")
+        };
+        assert_eq!(replay.recv().unwrap(), WriteStatus::Accepted);
+        assert_eq!(engine.cancel(receipt_id), Ok(CancelWriteOutcome::Cancelled));
+        engine.shutdown();
+    }
+
     #[cfg(feature = "unstable-mechanism")]
     #[test]
     fn from_parts_cannot_bypass_guard_and_spawn_failure_releases_store() {
@@ -1247,6 +1350,70 @@ mod tests {
             *producer.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(sender);
             operation
         }
+    }
+
+    #[test]
+    fn cancelling_a_write_releases_its_pending_signer_task() {
+        let engine = Engine::new(EngineConfig {
+            max_native_tasks: 1,
+            ..EngineConfig::default()
+        })
+        .expect("engine must build");
+        let keys = Keys::generate();
+        let cancellations = Arc::new(AtomicUsize::new(0));
+        engine
+            .add_signer(PendingSigner {
+                public_key: keys.public_key(),
+                cancellations: Arc::clone(&cancellations),
+            })
+            .unwrap();
+        engine.set_active_account(Some(keys.public_key())).unwrap();
+
+        let publish = |content: &str| {
+            engine
+                .publish_tracked(WriteIntent {
+                    payload: nmp_grammar::WritePayload::Unsigned(UnsignedEvent::new(
+                        keys.public_key(),
+                        Timestamp::from(10),
+                        Kind::TextNote,
+                        Vec::new(),
+                        content,
+                    )),
+                    durability: nmp_grammar::Durability::Durable,
+                    routing: nmp_grammar::WriteRouting::AuthorOutbox,
+                    identity_override: None,
+                })
+                .expect("write must be accepted")
+        };
+
+        let first = publish("cancel releases slot");
+        assert_eq!(first.statuses.recv().unwrap(), WriteStatus::Accepted);
+        for _ in 0..100 {
+            if engine.native_task_census().admitted == 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(engine.native_task_census().admitted, 1);
+
+        assert_eq!(engine.cancel(first.id), Ok(CancelWriteOutcome::Cancelled));
+        engine.wait_for_native_tasks_idle();
+        assert_eq!(cancellations.load(Ordering::SeqCst), 1);
+        assert_eq!(engine.native_task_census().admitted, 0);
+
+        let second = publish("released slot is reusable");
+        assert_eq!(second.statuses.recv().unwrap(), WriteStatus::Accepted);
+        for _ in 0..100 {
+            if engine.native_task_census().admitted == 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(engine.native_task_census().admitted, 1);
+        assert_eq!(engine.cancel(second.id), Ok(CancelWriteOutcome::Cancelled));
+        engine.wait_for_native_tasks_idle();
+        assert_eq!(cancellations.load(Ordering::SeqCst), 2);
+        engine.shutdown();
     }
 
     #[test]

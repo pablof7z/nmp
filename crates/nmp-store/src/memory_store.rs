@@ -1916,17 +1916,28 @@ impl EventStore for MemoryStore {
         })
     }
 
-    fn compensate_write(
+    fn compensate_write_with_state(
         &mut self,
         intent_id: IntentId,
+        reason: crate::CompensationReason,
     ) -> Result<CompensateOutcome, PersistenceError> {
+        let terminal_state = match reason {
+            crate::CompensationReason::Failure => ReceiptState::Compensated,
+            crate::CompensationReason::ExplicitCancellation => ReceiptState::Cancelled,
+        };
         let Some(intent_record) = self.outbox_intents.get(&intent_id) else {
             return Ok(CompensateOutcome::NotFound);
         };
         // Pre-signature only (retraction doc §4.2's "Promotion
         // correction"): once `promote_signed` has run, this door refuses.
         if intent_record.sig_state == IntentSigState::Signed {
-            return Ok(CompensateOutcome::NotFound);
+            return Ok(CompensateOutcome::AlreadySigned);
+        }
+        let receipt_id = intent_record.receipt_id;
+        if !self.outbox_receipts.contains_key(&receipt_id) {
+            return Err(PersistenceError(format!(
+                "missing outbox receipt {receipt_id}"
+            )));
         }
         let frozen_id = intent_record.frozen.id;
 
@@ -2068,15 +2079,45 @@ impl EventStore for MemoryStore {
             }
         }
 
-        if let Some(receipt) = self
-            .outbox_receipts
-            .values_mut()
-            .find(|r| r.intent_id == Some(intent_id))
-        {
-            receipt.state = ReceiptState::Compensated;
-        }
+        self.outbox_receipts
+            .get_mut(&receipt_id)
+            .expect("receipt existence checked before compensation")
+            .state = terminal_state;
 
         Ok(CompensateOutcome::Compensated { restored, revealed })
+    }
+
+    fn cancel_ephemeral_receipt(
+        &mut self,
+        receipt_id: u64,
+    ) -> Result<crate::CancelEphemeralOutcome, PersistenceError> {
+        let Some(receipt) = self.outbox_receipts.get_mut(&receipt_id) else {
+            return Ok(crate::CancelEphemeralOutcome::NotFound);
+        };
+        if receipt.intent_id.is_some() {
+            return Ok(crate::CancelEphemeralOutcome::NotEphemeral);
+        }
+        match receipt.state {
+            ReceiptState::Accepted => {
+                receipt.state = ReceiptState::Cancelled;
+                Ok(crate::CancelEphemeralOutcome::Cancelled)
+            }
+            ReceiptState::Signed => Ok(crate::CancelEphemeralOutcome::AlreadySigned),
+            ReceiptState::Cancelled => Ok(crate::CancelEphemeralOutcome::AlreadyCancelled),
+            ReceiptState::Abandoned => Ok(crate::CancelEphemeralOutcome::AlreadyAbandoned),
+            ReceiptState::Compensated => Ok(crate::CancelEphemeralOutcome::AlreadyCompensated),
+        }
+    }
+
+    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
+        let Some(receipt) = self.outbox_receipts.get_mut(&receipt_id) else {
+            return Ok(false);
+        };
+        if receipt.intent_id.is_some() || receipt.state != ReceiptState::Accepted {
+            return Ok(false);
+        }
+        receipt.state = ReceiptState::Signed;
+        Ok(true)
     }
 
     fn recover_outbox(&self) -> Vec<RecoveredIntent> {
