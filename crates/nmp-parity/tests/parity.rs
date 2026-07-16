@@ -323,6 +323,9 @@ fn ffi_status_name(status: FfiSourceStatus) -> String {
             FfiAuthPhase::AwaitingChallenge => "awaiting_auth:challenge".to_string(),
             FfiAuthPhase::AwaitingSignature => "awaiting_auth:signature".to_string(),
             FfiAuthPhase::AwaitingRelayAck => "awaiting_auth:relay_ack".to_string(),
+            FfiAuthPhase::Ready => "awaiting_auth:invalid_ready".to_string(),
+            FfiAuthPhase::Denied => "awaiting_auth:invalid_denied".to_string(),
+            FfiAuthPhase::Error => "awaiting_auth:invalid_error".to_string(),
         },
         FfiSourceStatus::AuthDenied => "auth_denied".to_string(),
         FfiSourceStatus::Error => "error".to_string(),
@@ -1402,7 +1405,7 @@ async fn run_ffi_follow_scenario(
         .add_account(author.secret_key().to_secret_hex())
         .expect("FFI follow account must register");
     engine
-        .set_active_account(Some(active))
+        .set_active_account(Some(active.public_key()))
         .expect("FFI follow account must activate");
 
     let (snapshot_tx, snapshot_rx) = mpsc::channel();
@@ -1535,7 +1538,7 @@ async fn run_ffi_missing_contact_list(
         .add_account(author.secret_key().to_secret_hex())
         .expect("FFI missing-list account must register");
     engine
-        .set_active_account(Some(active))
+        .set_active_account(Some(active.public_key()))
         .expect("FFI missing-list account must activate");
 
     let (snapshot_tx, snapshot_rx) = mpsc::channel();
@@ -1726,9 +1729,10 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
         ..NmpEngineConfig::default()
     })
     .expect("FFI engine must construct");
-    let pubkey = engine
+    let registration = engine
         .add_account(keys.secret_key().to_secret_hex())
         .expect("FFI account must register");
+    let pubkey = registration.public_key();
     engine
         .set_active_account(Some(pubkey.clone()))
         .expect("FFI account must activate");
@@ -1906,9 +1910,10 @@ async fn run_ffi_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<Nor
         ..NmpEngineConfig::default()
     })
     .expect("FFI auth-parked engine must construct");
-    let pubkey = engine
+    let registration = engine
         .add_account(keys.secret_key().to_secret_hex())
         .expect("FFI auth-parked account must register");
+    let pubkey = registration.public_key();
     engine
         .set_active_account(Some(pubkey.clone()))
         .expect("FFI auth-parked account must activate");

@@ -103,6 +103,12 @@ final class EvidenceMappingTests: XCTestCase {
                 .init(relay: "wss://connecting.example", access: .public, reconciledThrough: nil, status: .connecting),
                 .init(relay: "wss://disconnected.example", access: .public, reconciledThrough: 20, status: .disconnected),
                 .init(
+                    relay: "wss://challenge.example",
+                    access: .nip42(publicKey: String(repeating: "a", count: 64)),
+                    reconciledThrough: nil,
+                    status: .awaitingAuth(phase: .awaitingChallenge)
+                ),
+                .init(
                     relay: "wss://policy.example",
                     access: .public,
                     reconciledThrough: nil,
@@ -113,6 +119,12 @@ final class EvidenceMappingTests: XCTestCase {
                     access: .public,
                     reconciledThrough: nil,
                     status: .awaitingAuth(phase: .awaitingSignature)
+                ),
+                .init(
+                    relay: "wss://ack.example",
+                    access: .public,
+                    reconciledThrough: nil,
+                    status: .awaitingAuth(phase: .awaitingRelayAck)
                 ),
                 .init(relay: "wss://denied.example", access: .public, reconciledThrough: nil, status: .authDenied),
                 .init(relay: "wss://error.example", access: .public, reconciledThrough: nil, status: .error),
@@ -131,10 +143,16 @@ final class EvidenceMappingTests: XCTestCase {
         XCTAssertEqual(evidence.sources[1].status, .connecting)
         XCTAssertNil(evidence.sources[1].reconciledThrough)
         XCTAssertEqual(evidence.sources[2].status, .disconnected)
-        XCTAssertEqual(evidence.sources[3].status, .awaitingAuth(phase: .awaitingPolicy))
-        XCTAssertEqual(evidence.sources[4].status, .awaitingAuth(phase: .awaitingSignature))
-        XCTAssertEqual(evidence.sources[5].status, .authDenied)
-        XCTAssertEqual(evidence.sources[6].status, .error)
+        XCTAssertEqual(evidence.sources[3].status, .awaitingAuth(phase: .awaitingChallenge))
+        XCTAssertEqual(
+            evidence.sources[3].access,
+            .nip42(publicKey: String(repeating: "a", count: 64))
+        )
+        XCTAssertEqual(evidence.sources[4].status, .awaitingAuth(phase: .awaitingPolicy))
+        XCTAssertEqual(evidence.sources[5].status, .awaitingAuth(phase: .awaitingSignature))
+        XCTAssertEqual(evidence.sources[6].status, .awaitingAuth(phase: .awaitingRelayAck))
+        XCTAssertEqual(evidence.sources[7].status, .authDenied)
+        XCTAssertEqual(evidence.sources[8].status, .error)
         XCTAssertEqual(
             evidence.shortfall,
             [

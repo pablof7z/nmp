@@ -59,13 +59,16 @@ public struct Row: Sendable, Identifiable, Hashable {
     }
 }
 
-/// The AUTH negotiation phases worth surfacing while awaiting proof
+/// Closed AUTH negotiation and terminal diagnostics phases
 /// (populated by the #8 AUTH reducer).
 public enum AuthPhase: Sendable, Hashable {
     case awaitingChallenge
     case awaitingPolicy
     case awaitingSignature
     case awaitingRelayAck
+    case ready
+    case denied
+    case error
 
     init(_ ffi: FfiAuthPhase) {
         switch ffi {
@@ -73,6 +76,9 @@ public enum AuthPhase: Sendable, Hashable {
         case .awaitingPolicy: self = .awaitingPolicy
         case .awaitingSignature: self = .awaitingSignature
         case .awaitingRelayAck: self = .awaitingRelayAck
+        case .ready: self = .ready
+        case .denied: self = .denied
+        case .error: self = .error
         }
     }
 }

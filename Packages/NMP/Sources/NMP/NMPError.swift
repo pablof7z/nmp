@@ -27,6 +27,8 @@ public enum NMPError: Error, Sendable, Equatable {
     case invalidTag([String])
     case invalidSecretKey
     case invalidSigner(String)
+    case authCapabilityRegistryFull(limit: UInt64)
+    case authCapabilityInstanceExhausted
     case noActiveSigner
     case invalidSignRequest(String)
     case signerUnavailable(String)
@@ -85,6 +87,10 @@ public enum NMPError: Error, Sendable, Equatable {
         case .InvalidTag(let got): self = .invalidTag(got)
         case .InvalidSecretKey: self = .invalidSecretKey
         case .InvalidSigner(let reason): self = .invalidSigner(reason)
+        case .AuthCapabilityRegistryFull(let limit):
+            self = .authCapabilityRegistryFull(limit: limit)
+        case .AuthCapabilityInstanceExhausted:
+            self = .authCapabilityInstanceExhausted
         case .NoActiveSigner: self = .noActiveSigner
         case .InvalidSignRequest(let reason): self = .invalidSignRequest(reason)
         case .ReceiptCorrelationIdExhausted: self = .receiptCorrelationIdExhausted

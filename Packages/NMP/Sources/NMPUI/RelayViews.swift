@@ -178,6 +178,9 @@ public enum NMPRelayRuntimePresentation: Sendable, Hashable {
             case .awaitingPolicy: "Awaiting authentication policy"
             case .awaitingSignature: "Awaiting authentication signature"
             case .awaitingRelayAck: "Awaiting relay authentication acknowledgment"
+            case .ready: "Authenticated"
+            case .denied: "Authentication denied"
+            case .error: "Authentication error"
             }
         case .authDenied: "Authentication denied"
         case .error: "Connection error"

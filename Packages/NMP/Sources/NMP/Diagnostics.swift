@@ -110,17 +110,49 @@ public struct RelayDiagnostics: Sendable, Identifiable, Hashable {
     }
 }
 
+/// One bounded exact-session AUTH diagnostics record. The raw challenge and
+/// opaque capability-instance identities remain engine-private.
+public struct AuthDiagnostics: Sendable, Hashable {
+    public let relay: String
+    public let access: NMPAccessContext
+    public let transportGeneration: UInt64
+    public let epochSequence: UInt64?
+    public let challengeDescriptor: String?
+    public let phase: AuthPhase
+    public let policyBound: Bool
+    public let signerBound: Bool
+    public let authEventID: String?
+    public let sendHandoffAccepted: Bool
+    public let relayOKAccepted: Bool
+
+    init(_ ffi: FfiAuthDiagnostics) {
+        relay = ffi.relay
+        access = NMPAccessContext(ffi.access)
+        transportGeneration = ffi.transportGeneration
+        epochSequence = ffi.epochSequence
+        challengeDescriptor = ffi.challengeDescriptor
+        phase = AuthPhase(ffi.phase)
+        policyBound = ffi.policyBound
+        signerBound = ffi.signerBound
+        authEventID = ffi.authEventId
+        sendHandoffAccepted = ffi.sendHandoffAccepted
+        relayOKAccepted = ffi.relayOkAccepted
+    }
+}
+
 /// The engine-global diagnostics snapshot (M5 plan §1.1) -- one snapshot
 /// covers every currently-planned relay. Delivered by `NMPDiagnostics`
 /// (`observeDiagnostics()`), pushed reactively, never polled.
 public struct DiagnosticsSnapshot: Sendable {
     public let relays: [RelayDiagnostics]
+    public let authSessions: [AuthDiagnostics]
     public let uncoveredAuthorCount: UInt32
     public let droppedMergeRules: [String]
     public let transportDegraded: String?
 
     init(_ ffi: FfiDiagnosticsSnapshot) {
         relays = ffi.relays.map(RelayDiagnostics.init)
+        authSessions = ffi.authSessions.map(AuthDiagnostics.init)
         uncoveredAuthorCount = ffi.uncoveredAuthorCount
         droppedMergeRules = ffi.droppedMergeRules
         transportDegraded = ffi.transportDegraded
@@ -131,11 +163,13 @@ public struct DiagnosticsSnapshot: Sendable {
     /// snapshot arrives.
     public init(
         relays: [RelayDiagnostics] = [],
+        authSessions: [AuthDiagnostics] = [],
         uncoveredAuthorCount: UInt32 = 0,
         droppedMergeRules: [String] = [],
         transportDegraded: String? = nil
     ) {
         self.relays = relays
+        self.authSessions = authSessions
         self.uncoveredAuthorCount = uncoveredAuthorCount
         self.droppedMergeRules = droppedMergeRules
         self.transportDegraded = transportDegraded

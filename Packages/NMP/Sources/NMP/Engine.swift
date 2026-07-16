@@ -2,7 +2,53 @@
 // (plan §7): everything past `init` is a method call on this object, never
 // a second container/provider the app must adopt.
 
+import Foundation
 import NMPFFI
+
+/// A checkpoint write failed and the required exact live-account rollback
+/// could not be proven. `persistenceError` remains the primary failure;
+/// `rollbackFailure` records why a live signer may still be installed.
+public struct NMPAccountCheckpointRollbackError: Error {
+    public enum RollbackFailure {
+        case registrationWasNotActive
+        case removalFailed(any Error)
+    }
+
+    public let persistenceError: any Error
+    public let rollbackFailure: RollbackFailure
+}
+
+/// The engine-side account removal succeeded but the configured plaintext
+/// checkpoint could not be cleared, so the removed account could still
+/// resurrect on the next launch. The removal stands -- the registration is
+/// spent and `removeAccount` would now return `false` -- and the caller
+/// retries the file cleanup with `clearPersistedAccount()`.
+public struct NMPAccountCheckpointClearError: Error {
+    /// Why the checkpoint file could not be removed.
+    public let underlying: any Error
+}
+
+func rethrowCheckpointFailureAfterRollback(
+    _ persistenceError: any Error,
+    rollback: () throws -> Bool
+) throws -> Never {
+    do {
+        guard try rollback() else {
+            throw NMPAccountCheckpointRollbackError(
+                persistenceError: persistenceError,
+                rollbackFailure: .registrationWasNotActive
+            )
+        }
+    } catch let composite as NMPAccountCheckpointRollbackError {
+        throw composite
+    } catch {
+        throw NMPAccountCheckpointRollbackError(
+            persistenceError: persistenceError,
+            rollbackFailure: .removalFailed(error)
+        )
+    }
+    throw persistenceError
+}
 
 /// Construction config for `NMPEngine`. The only relay facts this app ever
 /// supplies are the three operator-configured lanes -- `indexerRelays`,
@@ -38,6 +84,9 @@ public struct NMPConfig: Sendable {
     public var maxRelays: UInt32
     /// Finite zero-queue native observer/action/waiter ceiling.
     public var maxNativeTasks: UInt32
+    /// Shared ceiling for live local-account signer and AUTH-policy
+    /// registrations. Zero deliberately admits none.
+    public var maxAuthCapabilities: UInt32
 
     public init(
         storePath: String? = nil,
@@ -46,7 +95,8 @@ public struct NMPConfig: Sendable {
         fallbackRelays: [String] = [],
         allowedLocalRelayHosts: [String] = [],
         maxRelays: UInt32 = 10,
-        maxNativeTasks: UInt32 = 12
+        maxNativeTasks: UInt32 = 12,
+        maxAuthCapabilities: UInt32 = 64
     ) {
         self.storePath = storePath
         self.indexerRelays = indexerRelays
@@ -55,6 +105,7 @@ public struct NMPConfig: Sendable {
         self.allowedLocalRelayHosts = allowedLocalRelayHosts
         self.maxRelays = maxRelays
         self.maxNativeTasks = maxNativeTasks
+        self.maxAuthCapabilities = maxAuthCapabilities
     }
 
     func toFfi() -> NmpEngineConfig {
@@ -65,7 +116,8 @@ public struct NMPConfig: Sendable {
             fallbackRelays: fallbackRelays,
             allowedLocalRelayHosts: allowedLocalRelayHosts,
             maxRelays: maxRelays,
-            maxNativeTasks: maxNativeTasks
+            maxNativeTasks: maxNativeTasks,
+            maxAuthCapabilities: maxAuthCapabilities
         )
     }
 }
@@ -75,8 +127,27 @@ public struct NMPConfig: Sendable {
 /// wrapper. `import NMP; let nmp = try NMPEngine(config: .init(...))` is the
 /// entire adoption cost.
 public final class NMPEngine: Sendable {
+    /// Lock-guarded record of which pubkey the configured checkpoint file
+    /// currently holds (#529). Set on the init restore path and on every
+    /// successful `addAccount` checkpoint save; consulted by
+    /// `removeAccount` so removing that exact account also clears the
+    /// on-disk checkpoint instead of letting it resurrect on restart.
+    private final class CheckpointTracker: @unchecked Sendable {
+        private let lock = NSLock()
+        private var pubkey: String?
+
+        func set(_ value: String?) {
+            lock.withLock { pubkey = value }
+        }
+
+        func holds(_ candidate: String) -> Bool {
+            lock.withLock { pubkey == candidate }
+        }
+    }
+
     let ffi: NmpEngineProtocol
-    private let localAccountStore: NMPInsecureFileAccountStore?
+    private let localAccountStore: (any NMPLocalAccountCheckpoint)?
+    private let checkpointedPubkey = CheckpointTracker()
 
     /// Destructively remove one closed persistent NMP store. A live engine in
     /// this process using the same canonical path throws
@@ -92,19 +163,29 @@ public final class NMPEngine: Sendable {
 
     /// Construct an engine and, when explicitly configured, restore the local
     /// account held by NMP's plaintext app-sandbox file provider.
-    public init(
+    public convenience init(
         config: NMPConfig,
         localAccountStore: NMPInsecureFileAccountStore? = nil
     ) throws {
+        try self.init(config: config, localAccountCheckpoint: localAccountStore)
+    }
+
+    /// Internal injection seam for deterministic checkpoint-failure tests.
+    init(
+        config: NMPConfig,
+        localAccountCheckpoint: (any NMPLocalAccountCheckpoint)?
+    ) throws {
         let ffi = try nmpRethrowing { try NmpEngine(config: config.toFfi()) }
         self.ffi = ffi
-        self.localAccountStore = localAccountStore
+        self.localAccountStore = localAccountCheckpoint
         do {
-            if let secretKey = try localAccountStore?.loadSecretKey() {
-                let pubkey = try nmpRethrowing {
+            if let secretKey = try localAccountCheckpoint?.loadSecretKey() {
+                let registration = try nmpRethrowing {
                     try ffi.addAccount(secretKey: secretKey)
                 }
+                let pubkey = registration.publicKey()
                 try nmpRethrowing { try ffi.setActiveAccount(pubkey: pubkey) }
+                checkpointedPubkey.set(pubkey)
             }
         } catch {
             ffi.shutdown()
@@ -124,14 +205,59 @@ public final class NMPEngine: Sendable {
     /// key crosses this boundary exactly once and lives engine-side from
     /// this point on. When an `NMPInsecureFileAccountStore` was explicitly
     /// configured, NMP also checkpoints it for restart restoration. Returns
-    /// the account's hex public key. Does NOT make the account active -- call
+    /// the opaque exact registration required for stale-safe removal. Does
+    /// NOT make the account active -- use `registration.publicKey` with
     /// `setActiveAccount` for that.
-    public func addAccount(secretKey: String) async throws -> String {
-        let pubkey = try nmpRethrowing {
+    ///
+    /// If checkpoint persistence fails after the live signer is installed,
+    /// this method removes that exact installation before rethrowing the
+    /// original persistence error.
+    public func addAccount(secretKey: String) async throws -> NMPAccountRegistration {
+        let ffiRegistration = try nmpRethrowing {
             try ffi.addAccount(secretKey: secretKey)
         }
-        try localAccountStore?.saveSecretKey(secretKey)
-        return pubkey
+        let registration = NMPAccountRegistration(ffi: ffiRegistration)
+        if let localAccountStore {
+            do {
+                try localAccountStore.saveSecretKey(secretKey)
+            } catch let persistenceError {
+                try rethrowCheckpointFailureAfterRollback(persistenceError) {
+                    try nmpRethrowing {
+                        try ffi.removeAccount(registration: ffiRegistration)
+                    }
+                }
+            }
+            checkpointedPubkey.set(registration.publicKey)
+        }
+        return registration
+    }
+
+    /// Remove only the live signer installation proven by `registration`.
+    /// Repeated removal and removal through a stale registration return
+    /// `false`; there is deliberately no public-key removal overload.
+    ///
+    /// When the removal succeeds AND the configured checkpoint currently
+    /// holds this exact account, the on-disk plaintext checkpoint is cleared
+    /// too, so a removed account cannot resurrect on the next launch (#529).
+    /// A stale removal (`false`) or a removal of an account the checkpoint
+    /// does not hold never touches the checkpoint. If the engine-side
+    /// removal succeeds but the checkpoint clear fails, the removal stands
+    /// (the registration is spent) and this method throws
+    /// `NMPAccountCheckpointClearError` -- retry the file cleanup with
+    /// `clearPersistedAccount()`.
+    public func removeAccount(_ registration: NMPAccountRegistration) throws -> Bool {
+        let removed = try nmpRethrowing {
+            try ffi.removeAccount(registration: registration.ffi)
+        }
+        if removed, checkpointedPubkey.holds(registration.publicKey) {
+            do {
+                try localAccountStore?.clear()
+            } catch {
+                throw NMPAccountCheckpointClearError(underlying: error)
+            }
+            checkpointedPubkey.set(nil)
+        }
+        return removed
     }
 
     /// Re-root every reactive query AND the active signing capability
@@ -155,9 +281,13 @@ public final class NMPEngine: Sendable {
     }
 
     /// Remove the configured plaintext checkpoint. The live signer remains in
-    /// this engine until the caller shuts the engine down.
+    /// this engine until the caller shuts the engine down or removes the
+    /// account through its registration (which also clears the checkpoint
+    /// when it holds that exact account -- see `removeAccount`). Also the
+    /// documented retry path after an `NMPAccountCheckpointClearError`.
     public func clearPersistedAccount() throws {
         try localAccountStore?.clear()
+        checkpointedPubkey.set(nil)
     }
 
     // MARK: - Read noun

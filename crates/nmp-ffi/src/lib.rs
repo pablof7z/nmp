@@ -14,6 +14,8 @@
 //! blocking `recv()` verbs to UniFFI's callback-interface observers.
 //!
 //! Module layout mirrors the plan's §2 sketch:
+//! - [`auth`] -- opaque account/policy registrations and the completion-only
+//!   foreign AUTH-policy callback bridge.
 //! - [`types`] -- the FFI mirror records/enums (`FfiFilter`/`FfiBinding`/…).
 //! - [`convert`] -- `FfiFilter <-> nmp_grammar::Filter` and the
 //!   `nostr::Event`/`nmp` value mirrors, plus the shared [`FfiError`](convert::FfiError).
@@ -31,6 +33,7 @@
 //! through `nmp`'s own re-exports (#52 Unit B). `nmp-nip51`/`nmp-nip29`
 //! are the one deliberate exception (see [`nip29`]'s own doc for why).
 
+pub mod auth;
 pub mod content;
 pub mod convert;
 pub mod entity;

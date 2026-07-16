@@ -69,12 +69,112 @@ enum Enum {
             fields: [],
             docstring: None,
         },
+        Variant {
+            name: "Ready",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Denied",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Error",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
     ],
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "`nmp::AuthPhase` mirror -- the AUTH negotiation phases worth surfacing\nwhile awaiting proof (populated by the #8 AUTH reducer; see\n`nmp_engine::core::evidence`'s own doc).",
+        "Closed AUTH phase vocabulary shared by scoped acquisition evidence and\nengine-global AUTH diagnostics. Scoped evidence uses only the awaiting\nvariants; completed/denied/error truth remains top-level in\n[`FfiSourceStatus`] and appears here only for a diagnostics session.",
     ),
+}
+
+enum Enum {
+    name: "FfiAuthPolicyCompletionError",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "AlreadyCompleted",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Cancelled",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "ReceiverGone",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Error {
+        flat: false,
+    },
+    non_exhaustive: false,
+    docstring: None,
+}
+
+enum Enum {
+    name: "FfiAuthPolicyOutcome",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Allow",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Deny",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Unavailable",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Technical",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: None,
 }
 
 enum Enum {
@@ -666,6 +766,29 @@ enum Enum {
                 },
             ],
             docstring: None,
+        },
+        Variant {
+            name: "AuthCapabilityRegistryFull",
+            discr: None,
+            fields: [
+                Field {
+                    name: "limit",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The shared signer/AUTH-policy registry reached its configured bound.",
+            ),
+        },
+        Variant {
+            name: "AuthCapabilityInstanceExhausted",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "The exact capability-instance namespace was exhausted.",
+            ),
         },
         Variant {
             name: "NoActiveSigner",
@@ -3171,6 +3294,134 @@ record Record {
 }
 
 record Record {
+    name: "FfiAuthDiagnostics",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "relay",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "access",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiAccessContext",
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "transport_generation",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "epoch_sequence",
+            type_: Optional {
+                inner_type: UInt64,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "challenge_descriptor",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "phase",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiAuthPhase",
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "policy_bound",
+            type_: Boolean,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "signer_bound",
+            type_: Boolean,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "auth_event_id",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "send_handoff_accepted",
+            type_: Boolean,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "relay_ok_accepted",
+            type_: Boolean,
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "One bounded exact-session AUTH diagnostics record. `relay + access`\nidentifies the session. Capability-instance ids and the raw challenge do\nnot cross FFI: only binding booleans and the engine's BLAKE3 challenge\ndescriptor are exposed. `AwaitingRelayAck` covers the post-signature\nsend/ack span; `send_handoff_accepted` distinguishes whether transport\naccepted the AUTH event yet.",
+    ),
+}
+
+record Record {
+    name: "FfiAuthPolicyRequest",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "expected_public_key",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "relay",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "challenge",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "transport_generation",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "epoch_sequence",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: None,
+}
+
+record Record {
     name: "FfiContentBlock",
     module_path: "nmp_ffi",
     remote: false,
@@ -3366,6 +3617,19 @@ record Record {
             },
             default: None,
             docstring: None,
+        },
+        Field {
+            name: "auth_sessions",
+            type_: Sequence {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiAuthDiagnostics",
+                },
+            },
+            default: None,
+            docstring: Some(
+                "At most one record per currently connected protected session.",
+            ),
         },
         Field {
             name: "uncovered_author_count",
@@ -4887,6 +5151,20 @@ record Record {
                 "Maximum immediately-running native observer/action/waiter tasks.\nZero selects the finite default; saturation never queues an accepted\nstream behind a long-lived drain.",
             ),
         },
+        Field {
+            name: "max_auth_capabilities",
+            type_: UInt32,
+            default: Some(
+                UInt(
+                    64,
+                    Decimal,
+                    UInt32,
+                ),
+            ),
+            docstring: Some(
+                "Maximum live signer and AUTH-policy registrations. Zero deliberately\nadmits none rather than selecting the default.",
+            ),
+        },
     ],
     docstring: Some(
         "Construction config for [`NmpEngine::new`]. See the module doc: the only\nrelay facts a caller ever supplies are the three operator-configured\nlanes -- `indexer_relays`, `app_relays`, `fallback_relays`\n(`routing-and-ownership.md` §2.1) -- everything else is discovered live.",
@@ -5692,6 +5970,288 @@ function Function {
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_reset_persistent_store",
     checksum: Some(
         56595,
+    ),
+}
+
+object Object {
+    name: "FfiAccountRegistration",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [],
+    methods: [
+        Method {
+            name: "public_key",
+            object_name: "FfiAccountRegistration",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                String,
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffiaccountregistration_public_key",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiAccountRegistration",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        None,
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffiaccountregistration_public_key",
+            checksum: Some(
+                16512,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_ffiaccountregistration",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiAccountRegistration",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiAccountRegistration",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_ffiaccountregistration",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiAccountRegistration",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "Opaque proof for one exact local-account installation. Dropping this\nobject does not remove the account; removal is explicit and repeatable.",
+    ),
+}
+
+object Object {
+    name: "FfiAuthPolicyCompletion",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [],
+    methods: [
+        Method {
+            name: "resolve",
+            object_name: "FfiAuthPolicyCompletion",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "outcome",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiAuthPolicyOutcome",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffiauthpolicycompletion_resolve",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiAuthPolicyCompletion",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "outcome",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiAuthPolicyOutcome",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                ],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Resolve this exact request once. A cancellation that linearized first\nis distinct from a repeated completion and a dropped runtime receiver.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiAuthPolicyCompletionError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffiauthpolicycompletion_resolve",
+            checksum: Some(
+                7474,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_ffiauthpolicycompletion",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiAuthPolicyCompletion",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiAuthPolicyCompletion",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_ffiauthpolicycompletion",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiAuthPolicyCompletion",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: None,
+}
+
+object Object {
+    name: "FfiAuthPolicyRegistration",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [],
+    methods: [
+        Method {
+            name: "expected_public_key",
+            object_name: "FfiAuthPolicyRegistration",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                String,
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffiauthpolicyregistration_expected_public_key",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiAuthPolicyRegistration",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        None,
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffiauthpolicyregistration_expected_public_key",
+            checksum: Some(
+                735,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_ffiauthpolicyregistration",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiAuthPolicyRegistration",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiAuthPolicyRegistration",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_ffiauthpolicyregistration",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiAuthPolicyRegistration",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "Opaque proof for one exact AUTH-policy installation. It exposes only the\nexpected account identity, never the capability instance.",
     ),
 }
 
@@ -6570,7 +7130,11 @@ object Object {
                 },
             ],
             return_type: Some(
-                String,
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "FfiAccountRegistration",
+                    imp: Struct,
+                },
             ),
             ffi_func: FfiFunction {
                 name: "uniffi_nmp_ffi_fn_method_nmpengine_add_account",
@@ -6590,15 +7154,15 @@ object Object {
                     },
                 ],
                 return_type: Some(
-                    RustBuffer(
-                        None,
+                    RustArcPtr(
+                        "FfiAccountRegistration",
                     ),
                 ),
                 has_rust_call_status_arg: true,
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Register an account from its secret key (hex or bech32 `nsec`). The\nkey crosses this boundary exactly once, as a value, and lives in the\nengine from this point on (VISION ledger #12; M4 plan §5) -- this\nmethod does NOT make the account active, call\n[`Self::set_active_account`] for that. Returns the account's hex\npublic key.",
+                "Register an account from its secret key (hex or bech32 `nsec`). The\nkey crosses this boundary exactly once, as a value, and lives in the\nengine from this point on (VISION ledger #12; M4 plan §5) -- this\nmethod does NOT make the account active, call\n[`Self::set_active_account`] for that. Returns the opaque exact\nregistration required for stale-safe explicit removal.",
             ),
             throws: Some(
                 Enum {
@@ -6609,7 +7173,83 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_add_account",
             checksum: Some(
-                13924,
+                2164,
+            ),
+        },
+        Method {
+            name: "add_auth_policy",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "expected_public_key",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "callback",
+                    type_: CallbackInterface {
+                        module_path: "nmp_ffi",
+                        name: "FfiAuthPolicyCallback",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "FfiAuthPolicyRegistration",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_add_auth_policy",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "expected_public_key",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "callback",
+                        type_: UInt64,
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiAuthPolicyRegistration",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Install a native-owned authorization policy for one exact account.\nThe callback may resolve inline or retain the supplied completion.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_add_auth_policy",
+            checksum: Some(
+                57420,
             ),
         },
         Method {
@@ -7798,6 +8438,126 @@ object Object {
             ),
         },
         Method {
+            name: "remove_account",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "registration",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "FfiAccountRegistration",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Boolean,
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_remove_account",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "registration",
+                        type_: RustArcPtr(
+                            "FfiAccountRegistration",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    Int8,
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Remove only the account installation proven by `registration`.\nRepeated or stale cleanup returns `false`.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_remove_account",
+            checksum: Some(
+                30488,
+            ),
+        },
+        Method {
+            name: "remove_auth_policy",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "registration",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "FfiAuthPolicyRegistration",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Boolean,
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_remove_auth_policy",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "registration",
+                        type_: RustArcPtr(
+                            "FfiAuthPolicyRegistration",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    Int8,
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Remove only the policy installation proven by `registration`.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_remove_auth_policy",
+            checksum: Some(
+                53111,
+            ),
+        },
+        Method {
             name: "set_active_account",
             object_name: "NmpEngine",
             object_module_path: "nmp_ffi",
@@ -8451,6 +9211,114 @@ callback CallbackInterface {
     docstring: Some(
         "Drains a live diagnostics stream (`nmp::Engine::observe_diagnostics`'s\n`DiagnosticsSubscription`, M5 plan §1.2 step 5). `on_snapshot` fires once\nper delivered snapshot, in order, on a dedicated drain thread — never on\nthe engine thread itself. Because the underlying mailbox is latest-wins\n(see `nmp::DiagnosticsSubscription::recv`'s doc), a slow Swift-side\nconsumer may observe fewer snapshots than were actually produced, but\nnever a stale one out of order. `on_closed` fires exactly once, when the\nobserver is cancelled or the engine shuts down.",
     ),
+}
+
+callback CallbackInterface {
+    name: "FfiAuthPolicyCallback",
+    module_path: "nmp_ffi",
+    methods: [
+        Method {
+            name: "evaluate",
+            object_name: "FfiAuthPolicyCallback",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "request",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiAuthPolicyRequest",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "completion",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "FfiAuthPolicyCompletion",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffiauthpolicycallback_evaluate",
+                is_async: false,
+                arguments: [],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffiauthpolicycallback_evaluate",
+            checksum: Some(
+                21986,
+            ),
+        },
+        Method {
+            name: "on_cancelled",
+            object_name: "FfiAuthPolicyCallback",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "request",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiAuthPolicyRequest",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffiauthpolicycallback_on_cancelled",
+                is_async: false,
+                arguments: [],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Called from the runtime worker after cancellation has won the pending\ncompletion linearization. Implementations may safely reenter NMP.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffiauthpolicycallback_on_cancelled",
+            checksum: Some(
+                34547,
+            ),
+        },
+    ],
+    ffi_init_callback: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_init_callback_vtable_ffiauthpolicycallback",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "vtable",
+                type_: Reference(
+                    Struct(
+                        "VTableCallbackInterfaceFfiAuthPolicyCallback",
+                    ),
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: false,
+        is_object_free_function: false,
+    },
+    docstring: None,
 }
 
 callback CallbackInterface {

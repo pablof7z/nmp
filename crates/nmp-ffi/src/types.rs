@@ -430,15 +430,19 @@ pub enum FfiSourceStatus {
     Error,
 }
 
-/// `nmp::AuthPhase` mirror -- the AUTH negotiation phases worth surfacing
-/// while awaiting proof (populated by the #8 AUTH reducer; see
-/// `nmp_engine::core::evidence`'s own doc).
+/// Closed AUTH phase vocabulary shared by scoped acquisition evidence and
+/// engine-global AUTH diagnostics. Scoped evidence uses only the awaiting
+/// variants; completed/denied/error truth remains top-level in
+/// [`FfiSourceStatus`] and appears here only for a diagnostics session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub enum FfiAuthPhase {
     AwaitingChallenge,
     AwaitingPolicy,
     AwaitingSignature,
     AwaitingRelayAck,
+    Ready,
+    Denied,
+    Error,
 }
 
 /// `nmp::SourceEvidence` mirror -- one relay's acquisition state for a
@@ -625,6 +629,27 @@ pub struct FfiRelayDiagnostics {
     pub nip77_behavior: String,
 }
 
+/// One bounded exact-session AUTH diagnostics record. `relay + access`
+/// identifies the session. Capability-instance ids and the raw challenge do
+/// not cross FFI: only binding booleans and the engine's BLAKE3 challenge
+/// descriptor are exposed. `AwaitingRelayAck` covers the post-signature
+/// send/ack span; `send_handoff_accepted` distinguishes whether transport
+/// accepted the AUTH event yet.
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiAuthDiagnostics {
+    pub relay: String,
+    pub access: FfiAccessContext,
+    pub transport_generation: u64,
+    pub epoch_sequence: Option<u64>,
+    pub challenge_descriptor: Option<String>,
+    pub phase: FfiAuthPhase,
+    pub policy_bound: bool,
+    pub signer_bound: bool,
+    pub auth_event_id: Option<String>,
+    pub send_handoff_accepted: bool,
+    pub relay_ok_accepted: bool,
+}
+
 /// The engine-global diagnostics snapshot (M5 plan §1.1) -- "the acceptance
 /// test rendered on screen, permanently." Pushed reactively via
 /// `NmpEngine::observe_diagnostics`, never polled; read-only and off the
@@ -632,6 +657,8 @@ pub struct FfiRelayDiagnostics {
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiDiagnosticsSnapshot {
     pub relays: Vec<FfiRelayDiagnostics>,
+    /// At most one record per currently connected protected session.
+    pub auth_sessions: Vec<FfiAuthDiagnostics>,
     pub uncovered_author_count: u32,
     pub dropped_merge_rules: Vec<String>,
     /// DISCOVERED relays rejected by the SSRF admission policy before they
