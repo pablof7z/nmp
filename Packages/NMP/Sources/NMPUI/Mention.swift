@@ -15,14 +15,14 @@ public struct NMPProfileMention: View {
     @State private var showsPreview = false
 
     public let pubkey: String
-    public let profile: NostrProfileMetadata?
+    public let profile: NMPProfilePresentation?
     public let variant: NMPMentionVariant
     public let showsLongPressPreview: Bool
     public let action: (() -> Void)?
 
     public init(
         pubkey: String,
-        profile: NostrProfileMetadata? = nil,
+        profile: NMPProfilePresentation? = nil,
         variant: NMPMentionVariant = .avatar,
         showsLongPressPreview: Bool = false,
         action: (() -> Void)? = nil
@@ -112,9 +112,9 @@ public struct NMPMentionPreview: View {
     @Environment(\.nmpUITheme) private var theme
 
     public let pubkey: String
-    public let profile: NostrProfileMetadata?
+    public let profile: NMPProfilePresentation?
 
-    public init(pubkey: String, profile: NostrProfileMetadata? = nil) {
+    public init(pubkey: String, profile: NMPProfilePresentation? = nil) {
         self.pubkey = pubkey
         self.profile = profile
     }

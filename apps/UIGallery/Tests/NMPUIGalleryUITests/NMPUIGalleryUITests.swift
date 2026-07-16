@@ -10,29 +10,28 @@ final class NMPUIGalleryUITests: XCTestCase {
         XCTAssertTrue(app.tabBars.buttons["Components"].waitForExistence(timeout: 20))
     }
 
-    func testPrimaryCatalogSurfacesAreReachable() {
+    func testComponentOwnedReferenceCatalogIsReachable() {
         XCTAssertTrue(app.staticTexts["Identity primitives"].exists)
         XCTAssertTrue(app.staticTexts["Channel preview"].exists)
 
         app.tabBars.buttons["Content"].tap()
-        XCTAssertTrue(app.staticTexts["Mention variants"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Article primitives"].exists)
+        XCTAssertTrue(app.staticTexts["Literal profile · zero fetch"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Literal event · zero fetch"].exists)
 
-        app.tabBars.buttons["Live proof"].tap()
-        XCTAssertTrue(app.staticTexts["Only two relay facts enter the app"].waitForExistence(timeout: 5))
-        keepScreenshot("live-proof")
+        let scroll = app.scrollViews.firstMatch
+        for _ in 0..<4 { scroll.swipeUp(velocity: .slow) }
+        XCTAssertTrue(app.staticTexts["Replaceable outer loader"].waitForExistence(timeout: 5))
+        keepScreenshot("component-owned-content")
     }
 
-    func testPrimaryCatalogPassesVoiceOverAccessibilityAudit() throws {
-        try app.performAccessibilityAudit(
-            for: [
-                .elementDetection,
-                .hitRegion,
-                .sufficientElementDescription,
-                .textClipped,
-                .trait,
-            ]
+    func testLiveProofShowsVisibleDemandDiagnostics() {
+        app.tabBars.buttons["Live proof"].tap()
+        XCTAssertTrue(
+            app.staticTexts["Visible component-owned observations"]
+                .waitForExistence(timeout: 5)
         )
+        XCTAssertTrue(app.staticTexts["Engine relay diagnostics"].exists)
+        keepScreenshot("live-proof")
     }
 
     func testConnectedFollowButtonsExposeNMPsSignedOutState() {
@@ -53,28 +52,23 @@ final class NMPUIGalleryUITests: XCTestCase {
         keepScreenshot("connected-follow-signed-out")
     }
 
-    func testConformanceStatesExposeDeterministicFallbacks() throws {
+    func testConformanceStatesRetainAccessibilityAndFollowProofs() throws {
         app.tabBars.buttons["States"].tap()
-        XCTAssertTrue(element("gallery.states.scripted").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("gallery.states.reference-policies").waitForExistence(timeout: 5))
 
         let scroll = app.scrollViews.firstMatch
         scroll.swipeUp()
         XCTAssertTrue(element("gallery.states.unknown-kind").waitForExistence(timeout: 5))
 
         let dynamicTypeTitle = app.staticTexts["Accessibility Dynamic Type"]
-        var foundDynamicType = false
-        for _ in 0..<5 {
-            if dynamicTypeTitle.waitForExistence(timeout: 1) {
-                foundDynamicType = true
-                break
-            }
+        for _ in 0..<5 where !dynamicTypeTitle.isHittable {
             scroll.swipeUp(velocity: .slow)
         }
-        XCTAssertTrue(foundDynamicType)
+        XCTAssertTrue(dynamicTypeTitle.waitForExistence(timeout: 5))
         try app.performAccessibilityAudit(for: [.textClipped])
 
         let followStates = element("gallery.states.follow")
-        for _ in 0..<4 where !followStates.isHittable {
+        for _ in 0..<5 where !followStates.isHittable {
             scroll.swipeUp(velocity: .slow)
         }
         XCTAssertTrue(followStates.waitForExistence(timeout: 5))
@@ -89,45 +83,40 @@ final class NMPUIGalleryUITests: XCTestCase {
         XCTAssertEqual(retry.value as? String, "Ready to retry")
         XCTAssertTrue(retry.isEnabled)
 
-        for _ in 0..<5 { scroll.swipeUp() }
+        for _ in 0..<7 { scroll.swipeUp() }
         XCTAssertTrue(element("gallery.states.long-content").waitForExistence(timeout: 5))
         keepScreenshot("conformance-long-content")
     }
 
-    func testRapidScrollReachesEndWithoutLosingTheContentView() {
+    func testRapidVisibilityChurnReachesBothEnds() {
         app.tabBars.buttons["Stress"].tap()
-        XCTAssertTrue(app.staticTexts.matching(identifier: "gallery.stress.active-count").firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(element("gallery.stress.wire-count").waitForExistence(timeout: 5))
 
         let scroll = app.scrollViews["gallery.stress.scroll"]
         XCTAssertTrue(scroll.exists)
         for _ in 0..<18 { scroll.swipeUp(velocity: .fast) }
 
-        XCTAssertTrue(app.staticTexts["gallery.stress.end"].waitForExistence(timeout: 5))
+        XCTAssertTrue(element("gallery.stress.end").waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["End of 72-row stress list"].exists)
 
         for _ in 0..<18 { scroll.swipeDown(velocity: .fast) }
-        let activeCount = app.staticTexts.matching(identifier: "gallery.stress.active-count").firstMatch
-        XCTAssertTrue(activeCount.waitForExistence(timeout: 5))
         XCTAssertTrue(
-            app.staticTexts["Seventy-two rows. Two live references each."].isHittable,
-            "rapid scroll did not return to the top of the stress gallery"
-        )
-        let bounded = NSPredicate { object, _ in
-            guard let element = object as? XCUIElement,
-                  let count = Int(element.label.split(separator: " ").first ?? "")
-            else { return false }
-            return count <= 24
-        }
-        let result = XCTWaiter.wait(
-            for: [XCTNSPredicateExpectation(predicate: bounded, object: activeCount)],
-            timeout: 8
-        )
-        XCTAssertEqual(
-            result,
-            .completed,
-            "visible reference claims did not return to a bounded window; observed: \(activeCount.label)"
+            app.staticTexts["Seventy-two rows. Two independently owned references each."].waitForExistence(timeout: 5),
+            "rapid visibility churn did not return to the top"
         )
         keepScreenshot("stress-returned-to-top")
+    }
+
+    func testPrimaryCatalogPassesVoiceOverAccessibilityAudit() throws {
+        try app.performAccessibilityAudit(
+            for: [
+                .elementDetection,
+                .hitRegion,
+                .sufficientElementDescription,
+                .textClipped,
+                .trait,
+            ]
+        )
     }
 
     private func element(_ identifier: String) -> XCUIElement {

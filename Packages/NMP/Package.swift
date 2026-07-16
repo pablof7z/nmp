@@ -11,8 +11,8 @@
 //                   ONLY target a consuming app imports. Holds zero engine
 //                   concepts of its own -- AsyncSequence conformances,
 //                   deinit-tied teardown, and @Observable sugar over NMPFFI.
-//   NMPContent   -- optional semantic parsing + bounded live references over
-//                   an existing NMP engine.
+//   NMPContent   -- optional pure semantic document parsing. It depends on
+//                   generated parser values, not the NMP engine layer.
 //   NMPUI        -- optional native SwiftUI primitives, controlled relay
 //                   identity views, content renderer, and ready-made
 //                   compositions over NMPContent.
@@ -52,7 +52,7 @@ let package = Package(
         ),
         .target(
             name: "NMPContent",
-            dependencies: ["NMP", "NMPFFI"]
+            dependencies: ["NMPFFI"]
         ),
         .target(
             name: "NMPUI",
@@ -68,7 +68,7 @@ let package = Package(
         ),
         .testTarget(
             name: "NMPUITests",
-            dependencies: ["NMPUI"]
+            dependencies: ["NMP", "NMPUI"]
         ),
     ]
 )

@@ -1,4 +1,3 @@
-import NMP
 import NMPContent
 import XCTest
 
@@ -31,14 +30,4 @@ final class ContentDocumentTests: XCTestCase {
         XCTAssertEqual(document.blocks.last?.context, .paragraph)
     }
 
-    func testReferenceDemandIsAnOrdinaryNMPDemand() {
-        let target = NostrReferenceTarget.profile(
-            pubkey: "aa4fcb665f5696e33db7e1a572e3b0f5b3d615837b0f362dcb1c8068b098c7b4"
-        )
-        let plan = referenceDemandPlan(for: target)
-        XCTAssertEqual(plan.targetKey, "profile:aa4fcb665f5696e33db7e1a572e3b0f5b3d615837b0f362dcb1c8068b098c7b4")
-        XCTAssertEqual(plan.canonical.source, .authorOutboxes)
-        XCTAssertEqual(plan.canonical.selection.kinds, [0])
-        XCTAssertTrue(plan.helpers.isEmpty)
-    }
 }

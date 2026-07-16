@@ -15,13 +15,15 @@ public enum NMPContentNodeLayout: Sendable, Hashable {
     case block
 }
 
-/// A renderer returns both an arbitrary SwiftUI view and how it participates
-/// in document flow. The view can be an app-only kind, not an NMP enum case.
+/// A component returns an arbitrary SwiftUI view plus its document-flow role.
 public struct NMPRenderedNode {
     let view: AnyView
     let layout: NMPContentNodeLayout
 
-    public init<Content: View>(_ layout: NMPContentNodeLayout = .inline, @ViewBuilder content: () -> Content) {
+    public init<Content: View>(
+        _ layout: NMPContentNodeLayout = .inline,
+        @ViewBuilder content: () -> Content
+    ) {
         self.layout = layout
         self.view = AnyView(content())
     }
@@ -46,30 +48,43 @@ public struct NostrContentActions {
     }
 }
 
-public struct NMPProfileMentionInput {
+/// Input to the app-selected profile-reference component. Receiving a factory
+/// does not open anything; only the selected component can call it.
+public struct NMPProfileReferenceInput {
     public let occurrence: NostrReferenceOccurrence
-    public let state: NostrReferenceState
     public let pubkey: String
-    public let profile: NostrProfileMetadata?
     public let purpose: NostrContentPurpose
+    public let observationFactory: NMPReferenceObservationFactory?
     public let actions: NostrContentActions
 }
 
+/// Input to the app-selected outer event-reference loader. The loader may
+/// observe, render literally, ask for consent, or apply another app policy.
+public struct NMPEventReferenceInput {
+    public let occurrence: NostrReferenceOccurrence
+    public let purpose: NostrContentPurpose
+    public let context: NostrContentRenderContext
+    public let observationFactory: NMPReferenceObservationFactory?
+    public let renderers: NostrContentRenderers
+    public let actions: NostrContentActions
+}
+
+/// Input delivered only after an outer loader has acquired a row. Renderer
+/// selection uses `event.kind`, never the occurrence's optional kind hint.
 public struct NMPEventRenderInput {
     public let occurrence: NostrReferenceOccurrence
-    public let state: NostrReferenceState
     public let event: Row
     public let purpose: NostrContentPurpose
     public let context: NostrContentRenderContext
-    public let session: NostrContentSession
+    public let observationFactory: NMPReferenceObservationFactory?
     public let renderers: NostrContentRenderers
     public let actions: NostrContentActions
 }
 
 public struct NMPReferenceFallbackInput {
     public let occurrence: NostrReferenceOccurrence
-    public let state: NostrReferenceState
     public let purpose: NostrContentPurpose
+    public let failure: String?
 }
 
 public struct NMPHashtagRenderInput {
@@ -86,15 +101,16 @@ public struct NMPLinkRenderInput {
     public let actions: NostrContentActions
 }
 
-/// Immutable, locally scoped dispatch. Including/replacing returns a new value;
-/// there is no global registry, component host, or callback into Rust.
+/// Immutable, locally scoped component table. The outer event loader and the
+/// actual-kind renderer table are independent extension points.
 public struct NostrContentRenderers {
     private struct EventKey: Hashable {
         let kind: UInt16
         let purpose: NostrContentPurpose?
     }
 
-    private var profileRenderer: (NMPProfileMentionInput) -> NMPRenderedNode
+    private var profileReferenceComponent: (NMPProfileReferenceInput) -> NMPRenderedNode
+    private var eventReferenceLoader: (NMPEventReferenceInput) -> NMPRenderedNode
     private var eventRenderers: [EventKey: (NMPEventRenderInput) -> NMPRenderedNode]
     private var eventFallback: (NMPEventRenderInput) -> NMPRenderedNode
     private var referenceFallback: (NMPReferenceFallbackInput) -> NMPRenderedNode
@@ -103,33 +119,51 @@ public struct NostrContentRenderers {
 
     public static var standard: NostrContentRenderers {
         NostrContentRenderers()
-            .event(kind: 30_023, purpose: .card, layout: .block) { input in
-                NMPResolvedArticleCard(input: input, variant: .portrait)
-            }
-            .event(kind: 30_023, purpose: .detail, layout: .block) { input in
-                NMPResolvedArticleCard(input: input, variant: .portrait)
+            .event(kind: 1, layout: .block) { input in
+                NMPGenericEventCard(input: input, label: "Note")
             }
             .event(kind: 30_023, layout: .block) { input in
-                NMPResolvedArticleCard(input: input, variant: .medium)
+                // NIP-23 schema projection intentionally waits for its exact
+                // Rust owner. The standard component renders the validated
+                // raw row honestly in the meantime.
+                NMPGenericEventCard(input: input, label: "Long-form event")
+            }
+    }
+
+    /// A complete no-observation component choice useful for literal/link UI.
+    public static var literalReferences: NostrContentRenderers {
+        NostrContentRenderers()
+            .profileReferenceNode { input in
+                NMPRenderedNode(
+                    input.occurrence.placement == .standalone ? .block : .inline
+                ) {
+                    NMPReferenceLiteral(original: input.occurrence.original)
+                }
+            }
+            .eventLoaderNode { input in
+                NMPRenderedNode(
+                    input.occurrence.placement == .standalone ? .block : .inline
+                ) {
+                    NMPReferenceLiteral(original: input.occurrence.original)
+                }
             }
     }
 
     public init() {
-        profileRenderer = { input in
+        profileReferenceComponent = { input in
             NMPRenderedNode(.inline) {
-                NMPProfileMention(
-                    pubkey: input.pubkey,
-                    profile: input.profile,
-                    variant: .avatar,
-                    showsLongPressPreview: true,
-                    action: { input.actions.openProfile(input.pubkey) }
-                )
+                NMPStandardProfileMention(input: input)
+            }
+        }
+        eventReferenceLoader = { input in
+            NMPRenderedNode(input.occurrence.placement == .standalone ? .block : .inline) {
+                NMPDefaultEventLoader(input: input)
             }
         }
         eventRenderers = [:]
         eventFallback = { input in
             NMPRenderedNode(.block) {
-                NMPResolvedEventCard(input: input, variant: .standard)
+                NMPGenericEventCard(input: input, label: "Event kind \(input.event.kind)")
             }
         }
         referenceFallback = { input in
@@ -156,15 +190,54 @@ public struct NostrContentRenderers {
         }
     }
 
-    public func profileMention<Content: View>(
+    /// Replace the profile-reference component, including its decision to
+    /// observe or render only the authored occurrence.
+    public func profileReference<Content: View>(
         layout: NMPContentNodeLayout = .inline,
-        @ViewBuilder _ renderer: @escaping (NMPProfileMentionInput) -> Content
+        @ViewBuilder _ component: @escaping (NMPProfileReferenceInput) -> Content
     ) -> NostrContentRenderers {
         var copy = self
-        copy.profileRenderer = { input in NMPRenderedNode(layout) { renderer(input) } }
+        copy.profileReferenceComponent = { input in
+            NMPRenderedNode(layout) { component(input) }
+        }
         return copy
     }
 
+    /// Node-level form for components whose flow role depends on occurrence
+    /// placement rather than one fixed registration-time layout.
+    public func profileReferenceNode(
+        _ component: @escaping (NMPProfileReferenceInput) -> NMPRenderedNode
+    ) -> NostrContentRenderers {
+        var copy = self
+        copy.profileReferenceComponent = component
+        return copy
+    }
+
+    /// Replace the outer event loader without changing any actual-kind
+    /// renderer. The loader owns whether and how acquisition occurs.
+    public func eventLoader<Content: View>(
+        layout: NMPContentNodeLayout = .block,
+        @ViewBuilder _ component: @escaping (NMPEventReferenceInput) -> Content
+    ) -> NostrContentRenderers {
+        var copy = self
+        copy.eventReferenceLoader = { input in
+            NMPRenderedNode(layout) { component(input) }
+        }
+        return copy
+    }
+
+    /// Node-level form for outer loaders whose flow role depends on the
+    /// authored occurrence. It changes no actual-kind renderer entry.
+    public func eventLoaderNode(
+        _ component: @escaping (NMPEventReferenceInput) -> NMPRenderedNode
+    ) -> NostrContentRenderers {
+        var copy = self
+        copy.eventReferenceLoader = component
+        return copy
+    }
+
+    /// Register presentation for a validated acquired row's actual kind and
+    /// optional purpose. This renderer never decides acquisition.
     public func event<Content: View>(
         kind: UInt16,
         purpose: NostrContentPurpose? = nil,
@@ -216,8 +289,12 @@ public struct NostrContentRenderers {
         eventRenderers[EventKey(kind: kind, purpose: purpose)] != nil
     }
 
-    func renderProfile(_ input: NMPProfileMentionInput) -> NMPRenderedNode {
-        profileRenderer(input)
+    func renderProfileReference(_ input: NMPProfileReferenceInput) -> NMPRenderedNode {
+        profileReferenceComponent(input)
+    }
+
+    func renderEventReference(_ input: NMPEventReferenceInput) -> NMPRenderedNode {
+        eventReferenceLoader(input)
     }
 
     func renderEvent(_ input: NMPEventRenderInput) -> NMPRenderedNode {

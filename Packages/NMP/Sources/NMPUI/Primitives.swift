@@ -40,11 +40,11 @@ struct NMPCardInteraction: ViewModifier {
 
 public struct NMPAvatarItem: Identifiable, Hashable, Sendable {
     public let pubkey: String
-    public let profile: NostrProfileMetadata?
+    public let profile: NMPProfilePresentation?
 
     public var id: String { pubkey }
 
-    public init(pubkey: String, profile: NostrProfileMetadata? = nil) {
+    public init(pubkey: String, profile: NMPProfilePresentation? = nil) {
         self.pubkey = pubkey
         self.profile = profile
     }
@@ -113,21 +113,21 @@ public struct NMPNIP05: View {
 }
 
 public enum NMPArticleText {
-    public static func title(_ article: NostrArticle) -> String {
+    public static func title(_ article: NMPArticlePresentation) -> String {
         article.title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
             ?? "Untitled article"
     }
 
-    public static func summary(_ article: NostrArticle) -> String? {
+    public static func summary(_ article: NMPArticlePresentation) -> String? {
         article.summary?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
     }
 }
 
 public struct NMPArticleTitle: View {
     @Environment(\.nmpUITheme) private var theme
-    public let article: NostrArticle
+    public let article: NMPArticlePresentation
 
-    public init(article: NostrArticle) {
+    public init(article: NMPArticlePresentation) {
         self.article = article
     }
 
@@ -140,9 +140,9 @@ public struct NMPArticleTitle: View {
 
 public struct NMPArticleSummary: View {
     @Environment(\.nmpUITheme) private var theme
-    public let article: NostrArticle
+    public let article: NMPArticlePresentation
 
-    public init(article: NostrArticle) {
+    public init(article: NMPArticlePresentation) {
         self.article = article
     }
 
@@ -158,11 +158,11 @@ public struct NMPArticleSummary: View {
 
 public struct NMPArticleImage: View {
     @Environment(\.nmpUITheme) private var theme
-    public let article: NostrArticle
+    public let article: NMPArticlePresentation
     public let placeholderSystemImage: String
 
     public init(
-        article: NostrArticle,
+        article: NMPArticlePresentation,
         placeholderSystemImage: String = "doc.text.image"
     ) {
         self.article = article
@@ -188,10 +188,10 @@ public struct NMPArticleImage: View {
 
 public struct NMPArticleReadingTime: View {
     @Environment(\.nmpUITheme) private var theme
-    public let article: NostrArticle
+    public let article: NMPArticlePresentation
     public let wordsPerMinute: Int
 
-    public init(article: NostrArticle, wordsPerMinute: Int = 220) {
+    public init(article: NMPArticlePresentation, wordsPerMinute: Int = 220) {
         self.article = article
         self.wordsPerMinute = wordsPerMinute
     }
@@ -204,13 +204,13 @@ public struct NMPArticleReadingTime: View {
 
 public struct NMPArticleByline: View {
     @Environment(\.nmpUITheme) private var theme
-    public let article: NostrArticle
-    public let authorProfile: NostrProfileMetadata?
+    public let article: NMPArticlePresentation
+    public let authorProfile: NMPProfilePresentation?
     public let includesDate: Bool
 
     public init(
-        article: NostrArticle,
-        authorProfile: NostrProfileMetadata? = nil,
+        article: NMPArticlePresentation,
+        authorProfile: NMPProfilePresentation? = nil,
         includesDate: Bool = true
     ) {
         self.article = article

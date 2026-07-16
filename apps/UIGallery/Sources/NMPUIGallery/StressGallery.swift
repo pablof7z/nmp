@@ -1,25 +1,31 @@
+import NMP
 import NMPContent
 import NMPUI
 import SwiftUI
 
 struct StressGallery: View {
-    @ObservedObject var model: GalleryModel
+    let model: GalleryModel
+    @State private var diagnostics = DiagnosticsSnapshot()
 
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 GalleryIntro(
                     eyebrow: "RAPID-SCROLL FALSIFIER",
-                    title: "Seventy-two rows. Two live references each.",
-                    description: "Every row uses the production content view. Claims follow visibility, sessions cap their own work, and ordinary NMP demand coalesces repeated profile/event targets."
+                    title: "Seventy-two rows. Two independently owned references each.",
+                    description: "Every row uses the production content view. Each selected component owns and releases its ordinary NMP handle as visibility changes; equal core demand may still coalesce."
                 )
                 .padding(.bottom, 18)
 
                 metrics
                     .padding(.bottom, 14)
 
-                ForEach(Array(model.stressSessions.enumerated()), id: \.offset) { index, session in
-                    StressContentRow(index: index, session: session)
+                ForEach(Array(model.stressDocuments.enumerated()), id: \.offset) { index, document in
+                    StressContentRow(
+                        index: index,
+                        document: document,
+                        observationFactory: model.observationFactory
+                    )
                     Divider()
                 }
 
@@ -35,6 +41,7 @@ struct StressGallery: View {
         .navigationTitle("Stress")
         .navigationBarTitleDisplayMode(.inline)
         .accessibilityIdentifier("gallery.stress.scroll")
+        .task { await observeDiagnostics() }
     }
 
     private var metrics: some View {
@@ -42,10 +49,10 @@ struct StressGallery: View {
             Image(systemName: "waveform.path.ecg")
                 .foregroundStyle(.purple)
             VStack(alignment: .leading, spacing: 2) {
-                Text("\(model.stressActiveReferences) visible reference claims")
+                Text("\(wireSubscriptionCount) engine wire subscriptions")
                     .font(.headline)
-                    .accessibilityIdentifier("gallery.stress.active-count")
-                Text("The number should rise and fall with visible rows—not grow toward 144.")
+                    .accessibilityIdentifier("gallery.stress.wire-count")
+                Text("This is observed engine evidence, not a UI-owned claim counter or budget.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -54,11 +61,23 @@ struct StressGallery: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.purple.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
     }
+
+    private var wireSubscriptionCount: UInt32 {
+        diagnostics.relays.reduce(0) { $0 + $1.wireSubCount }
+    }
+
+    private func observeDiagnostics() async {
+        guard let stream = try? model.engine.observeDiagnostics() else { return }
+        for await snapshot in stream {
+            diagnostics = snapshot
+        }
+    }
 }
 
 private struct StressContentRow: View {
     let index: Int
-    @ObservedObject var session: NostrContentSession
+    let document: NostrContentDocument
+    let observationFactory: NMPReferenceObservationFactory
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -67,7 +86,8 @@ private struct StressContentRow: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 24, alignment: .trailing)
             NostrContent(
-                session: session,
+                document: document,
+                observationFactory: observationFactory,
                 purpose: .preview,
                 renderers: stressRenderers,
                 maximumBlocks: 1,
@@ -82,13 +102,6 @@ private struct StressContentRow: View {
 
     private var stressRenderers: NostrContentRenderers {
         NostrContentRenderers.standard
-            .profileMention { input in
-                NMPProfileMention(
-                    pubkey: input.pubkey,
-                    profile: input.profile,
-                    variant: .avatar
-                )
-            }
             .fallbackEvent(layout: .inline) { input in
                 Text(input.event.content)
                     .lineLimit(1)

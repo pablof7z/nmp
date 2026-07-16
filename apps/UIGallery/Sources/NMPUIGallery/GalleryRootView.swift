@@ -10,16 +10,12 @@ struct GalleryRootView: View {
         TabView {
             NavigationStack { ComponentsGallery(model: model) }
                 .tabItem { Label("Components", systemImage: "square.grid.2x2") }
-
             NavigationStack { ContentGallery(model: model) }
                 .tabItem { Label("Content", systemImage: "text.quote") }
-
             NavigationStack { LiveProofGallery(model: model) }
                 .tabItem { Label("Live proof", systemImage: "dot.radiowaves.left.and.right") }
-
             NavigationStack { ConformanceGallery(model: model) }
                 .tabItem { Label("States", systemImage: "checklist") }
-
             NavigationStack { StressGallery(model: model) }
                 .tabItem { Label("Stress", systemImage: "gauge.with.dots.needle.67percent") }
         }
@@ -40,33 +36,34 @@ private struct ComponentsGallery: View {
                 GalleryIntro(
                     eyebrow: "NMP UI · SWIFTUI",
                     title: "Useful before customization.",
-                    description: "Real public components, backed by one live NMP engine. Each section is the same API an app imports."
+                    description: "Display leaves accept app/protocol-owner values. Reference components independently choose whether to observe."
                 )
 
-                GallerySection("Identity primitives", note: "Kind:0 resolves live; every size has a deterministic fallback before it arrives.") {
-                    NMPResolvedProfile(session: model.profileSession, pubkey: GalleryModel.profilePubkey) { profile in
-                        VStack(alignment: .leading, spacing: 16) {
-                            HStack(spacing: 14) {
-                                ForEach([24.0, 36.0, 52.0, 72.0], id: \.self) { size in
-                                    NMPAvatar(
-                                        pubkey: GalleryModel.profilePubkey,
-                                        profile: profile,
-                                        size: size
-                                    )
-                                }
+                GallerySection("Identity primitives", note: "App-supplied presentation fields keep the leaf catalog inspectable without putting a kind:0 codec in NMPContent or NMPUI.") {
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack(spacing: 14) {
+                            ForEach([24.0, 36.0, 52.0, 72.0], id: \.self) { size in
+                                NMPAvatar(
+                                    pubkey: GalleryModel.profilePubkey,
+                                    profile: GalleryFixtures.profile,
+                                    size: size
+                                )
                             }
-                            NMPName(pubkey: GalleryModel.profilePubkey, profile: profile)
-                                .font(.title2.weight(.bold))
-                            NMPProfileIdentity(
-                                pubkey: GalleryModel.profilePubkey,
-                                profile: profile,
-                                avatarSize: 44
-                            )
                         }
+                        NMPName(
+                            pubkey: GalleryModel.profilePubkey,
+                            profile: GalleryFixtures.profile
+                        )
+                        .font(.title2.weight(.bold))
+                        NMPProfileIdentity(
+                            pubkey: GalleryModel.profilePubkey,
+                            profile: GalleryFixtures.profile,
+                            avatarSize: 44
+                        )
                     }
                 }
 
-                GallerySection("Channel preview", note: "The preview receives ordinary Nostr content; the bech32 is replaced in place as profile metadata arrives.") {
+                GallerySection("Channel preview", note: "This ordinary content component owns a visibility-scoped profile observation; the parser and parent document own none.") {
                     HStack(spacing: 12) {
                         Circle()
                             .fill(Color(red: 0.80, green: 0.82, blue: 0.25))
@@ -75,9 +72,9 @@ private struct ComponentsGallery: View {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("29er-next").font(.headline)
                             NostrContent(
-                                session: model.previewSession,
+                                document: model.previewDocument,
+                                observationFactory: model.observationFactory,
                                 purpose: .preview,
-                                renderers: nameOnlyRenderers,
                                 maximumBlocks: 1,
                                 maximumLinesPerBlock: 1
                             )
@@ -93,32 +90,30 @@ private struct ComponentsGallery: View {
                     .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 16))
                 }
 
-                GallerySection("Featured users", note: "Three layouts, one Avatar/Name fallback contract, and one live NMP-owned NIP-02 relationship. Signed-out, acquisition, conflict, and receipt state are never guessed by the card.") {
-                    NMPResolvedProfile(session: model.profileSession, pubkey: GalleryModel.profilePubkey) { profile in
-                        VStack(spacing: 14) {
-                            NMPUserCard(
-                                pubkey: GalleryModel.profilePubkey,
-                                profile: profile,
-                                variant: .featured,
-                                following: model.following
-                            )
-                            NMPUserCard(
-                                pubkey: GalleryModel.profilePubkey,
-                                profile: profile,
-                                variant: .landscape,
-                                following: model.following
-                            )
-                            NMPUserCard(
-                                pubkey: GalleryModel.profilePubkey,
-                                profile: profile,
-                                variant: .compact,
-                                following: model.following
-                            )
-                        }
+                GallerySection("Featured users", note: "Three layouts, one Avatar/Name fallback contract, and one live NMP-owned NIP-02 relationship.") {
+                    VStack(spacing: 14) {
+                        NMPUserCard(
+                            pubkey: GalleryModel.profilePubkey,
+                            profile: GalleryFixtures.profile,
+                            variant: .featured,
+                            following: model.following
+                        )
+                        NMPUserCard(
+                            pubkey: GalleryModel.profilePubkey,
+                            profile: GalleryFixtures.profile,
+                            variant: .landscape,
+                            following: model.following
+                        )
+                        NMPUserCard(
+                            pubkey: GalleryModel.profilePubkey,
+                            profile: GalleryFixtures.profile,
+                            variant: .compact,
+                            following: model.following
+                        )
                     }
                 }
 
-                GallerySection("Reaction controls", note: "Different interaction models—not one button with three padding values. State and writes remain controlled by the host app.") {
+                GallerySection("Reaction controls", note: "Different interaction models retain controlled app-owned write state.") {
                     VStack(alignment: .leading, spacing: 18) {
                         HStack(spacing: 18) {
                             NMPReactionButton(
@@ -137,20 +132,16 @@ private struct ComponentsGallery: View {
                                 variant: .minimal
                             ) { liked.toggle() }
                         }
-
-                        NMPResolvedProfile(session: model.profileSession, pubkey: GalleryModel.profilePubkey) { profile in
-                            NMPAvatarReactionButton(
-                                people: [
-                                    NMPReactionPerson(
-                                        pubkey: GalleryModel.profilePubkey,
-                                        profile: profile
-                                    )
-                                ],
-                                totalCount: liked ? 2 : 1,
-                                isReacted: liked
-                            ) { liked.toggle() }
-                        }
-
+                        NMPAvatarReactionButton(
+                            people: [
+                                NMPReactionPerson(
+                                    pubkey: GalleryModel.profilePubkey,
+                                    profile: GalleryFixtures.profile
+                                )
+                            ],
+                            totalCount: liked ? 2 : 1,
+                            isReacted: liked
+                        ) { liked.toggle() }
                         NMPEmojiReactionBar(
                             reactions: ["🔥", "🤙", "😂", "💜"].map {
                                 NMPEmojiReaction(
@@ -171,14 +162,14 @@ private struct ComponentsGallery: View {
                     }
                 }
 
-                GallerySection("State lab · missing metadata", note: "Deterministic non-network states are kept separate from the live examples above.") {
+                GallerySection("State lab · missing metadata", note: "Deterministic non-network states stay separate from the live reference example.") {
                     VStack(alignment: .leading, spacing: 16) {
                         NMPProfileIdentity(
                             pubkey: String(repeating: "7a", count: 32),
                             profile: nil,
                             avatarSize: 48
                         )
-                        NMPArticleMediumCard(article: missingImageArticle)
+                        NMPArticleMediumCard(article: GalleryFixtures.article)
                     }
                 }
             }
@@ -188,30 +179,8 @@ private struct ComponentsGallery: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 
-    private var nameOnlyRenderers: NostrContentRenderers {
-        NostrContentRenderers.standard.profileMention { input in
-            NMPProfileMention(
-                pubkey: input.pubkey,
-                profile: input.profile,
-                variant: .text
-            )
-        }
-    }
-
     private func baseCount(_ emoji: String) -> Int {
         ["🔥": 18, "🤙": 6, "😂": 11, "💜": 4][emoji] ?? 0
-    }
-
-    private var missingImageArticle: NostrArticle {
-        NostrArticle(
-            eventID: String(repeating: "01", count: 32),
-            author: String(repeating: "7a", count: 32),
-            createdAt: UInt64(Date().timeIntervalSince1970),
-            identifier: "state-lab-missing-image",
-            title: "An article still has a useful shape before its image arrives",
-            summary: "The same real component preserves hierarchy and interaction continuity.",
-            content: Array(repeating: "word", count: 360).joined(separator: " ")
-        )
     }
 }
 
@@ -222,69 +191,103 @@ private struct ContentGallery: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 28) {
                 GalleryIntro(
-                    eyebrow: "LIVE CONTENT",
-                    title: "One document. Native views inside the words.",
-                    description: "NMP parses and resolves. This renderer set decides how each occurrence looks—locally, immutably, and without leaf-owned queries."
+                    eyebrow: "REFERENCE POLICY",
+                    title: "Detection is not acquisition.",
+                    description: "The same parsed documents use literal, standard, or custom loader components without changing NMPContent."
                 )
-
-                GallerySection("Mention variants", note: "All three resolve the same real profile. Long-press the avatar or pill variants.") {
+                GallerySection("Mention variants", note: "These app-selected components render the same detected profile in three visual styles and intentionally open no query.") {
                     VStack(alignment: .leading, spacing: 14) {
                         NostrContent(
-                            session: model.profileSession,
+                            document: model.profileDocument,
                             renderers: mentionRenderers(.text, preview: false)
                         )
                         NostrContent(
-                            session: model.profileSession,
+                            document: model.profileDocument,
                             renderers: mentionRenderers(.avatar, preview: true)
                         )
                         NostrContent(
-                            session: model.profileSession,
+                            document: model.profileDocument,
                             renderers: mentionRenderers(.pill, preview: true)
                         )
                     }
                 }
-
-                GallerySection("Article primitives", note: "The cards below are compositions of the same public image, title, summary, byline, and reading-time leaves.") {
-                    GalleryResolvedArticlePrimitives(session: model.articleSession)
+                GallerySection("Article primitives", note: "Image, title, summary, byline, and reading time consume an explicit presentation value supplied by an app or exact protocol owner.") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        NMPArticleImage(article: GalleryFixtures.article)
+                            .frame(height: 128)
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                        NMPArticleTitle(article: GalleryFixtures.article)
+                            .font(.headline)
+                        NMPArticleSummary(article: GalleryFixtures.article)
+                            .font(.subheadline)
+                        NMPArticleByline(
+                            article: GalleryFixtures.article,
+                            authorProfile: GalleryFixtures.profile
+                        )
+                        NMPArticleReadingTime(article: GalleryFixtures.article)
+                            .font(.caption)
+                    }
                 }
-
-                GallerySection("Article · portrait", note: "Featured editorial layout with lead image, title, summary, reading time, and live author identity.") {
-                    NostrContent(
-                        session: model.articleSession,
-                        purpose: .card,
-                        renderers: .standard
+                GallerySection("Article · portrait", note: "The production composition remains available without making NMPUI a NIP-23 schema owner.") {
+                    NMPArticlePortraitCard(
+                        article: GalleryFixtures.article,
+                        authorProfile: GalleryFixtures.profile
                     )
                 }
-
-                GallerySection("Article · Medium-like", note: "A separate horizontal composition intended for lists and inline article mentions.") {
-                    NostrContent(
-                        session: model.articleSession,
-                        purpose: .embedded,
-                        renderers: .standard
+                GallerySection("Article · Medium-like", note: "A separate horizontal composition for lists and inline article mentions.") {
+                    NMPArticleMediumCard(
+                        article: GalleryFixtures.article,
+                        authorProfile: GalleryFixtures.profile
                     )
                 }
-
-                GallerySection("Generic event chrome", note: "Author profile and nested event content resolve through the parent content session.") {
+                GallerySection("Literal profile · zero fetch", note: "Even with a live factory available, this component ignores it.") {
                     NostrContent(
-                        session: model.noteSession,
-                        purpose: .embedded,
-                        renderers: .standard
+                        document: model.profileDocument,
+                        observationFactory: model.observationFactory,
+                        renderers: .literalReferences
                     )
                 }
-
-                GallerySection("Local renderer override", note: "This call site replaces kind:1 only. No global registration and no Rust/FFI enum change.") {
+                GallerySection("Literal event · zero fetch", note: "The nevent remains authored text and creates no event query.") {
                     NostrContent(
-                        session: model.noteSession,
+                        document: model.noteDocument,
+                        observationFactory: model.observationFactory,
+                        renderers: .literalReferences
+                    )
+                }
+                GallerySection("Default event loader", note: "The outer component observes; the inner table dispatches the acquired row's actual kind.") {
+                    NostrContent(
+                        document: model.noteDocument,
+                        observationFactory: model.observationFactory,
                         purpose: .embedded,
                         renderers: editorialNoteRenderers
                     )
                 }
-
-                GallerySection("Mixed document", note: "Inline mention, standalone article, and quoted event share one parsed document and deduplicated live demands.") {
+                GallerySection("Raw kind:30023 fallback", note: "No Swift NIP-23 schema decoder is recreated while the Rust owner is missing.") {
                     NostrContent(
-                        session: model.mixedSession,
-                        purpose: .body,
-                        renderers: .standard
+                        document: model.articleDocument,
+                        observationFactory: model.observationFactory,
+                        purpose: .card
+                    )
+                }
+                GallerySection("Replaceable outer loader", note: "This loader chooses literal rendering while preserving the same actual-kind renderer table.") {
+                    NostrContent(
+                        document: model.noteDocument,
+                        observationFactory: model.observationFactory,
+                        renderers: NostrContentRenderers.standard.eventLoader { input in
+                            NMPReferenceLiteral(original: "Fetch disabled: \(input.occurrence.original)")
+                        }
+                    )
+                }
+                GallerySection("Mixed document", note: "Each selected component owns an independent handle; equal core demands still coalesce.") {
+                    NostrContent(
+                        document: model.mixedDocument,
+                        observationFactory: model.observationFactory
+                    )
+                }
+                GallerySection("Immutable recursion context", note: "Long Markdown renders without a session-shaped coordinator.") {
+                    NostrContent(
+                        document: model.longContentDocument,
+                        observationFactory: model.observationFactory
                     )
                 }
             }
@@ -298,10 +301,10 @@ private struct ContentGallery: View {
         _ variant: NMPMentionVariant,
         preview: Bool
     ) -> NostrContentRenderers {
-        NostrContentRenderers.standard.profileMention { input in
+        NostrContentRenderers.standard.profileReference { input in
             NMPProfileMention(
                 pubkey: input.pubkey,
-                profile: input.profile,
+                profile: GalleryFixtures.profile,
                 variant: variant,
                 showsLongPressPreview: preview
             )
@@ -310,131 +313,76 @@ private struct ContentGallery: View {
 
     private var editorialNoteRenderers: NostrContentRenderers {
         NostrContentRenderers.standard.event(kind: 1, layout: .block) { input in
-            NMPResolvedProfile(session: input.session, pubkey: input.event.pubkey) { profile in
-                NMPEventChrome(
-                    pubkey: input.event.pubkey,
-                    profile: profile,
-                    createdAt: input.event.createdAt,
-                    variant: .editorial
-                ) {
-                    Text(input.event.content)
-                }
+            NMPEventChrome(
+                pubkey: input.event.pubkey,
+                createdAt: input.event.createdAt,
+                variant: .editorial
+            ) {
+                Text(input.event.content)
             }
         }
     }
 }
 
+private enum GalleryFixtures {
+    static let profile = NMPProfilePresentation(
+        name: "alice",
+        displayName: "Alice",
+        about: "Presentation fields are supplied by an app or exact protocol owner.",
+        nip05: "alice@example.com"
+    )
+
+    static let article = NMPArticlePresentation(
+        author: GalleryModel.profilePubkey,
+        createdAt: UInt64(Date().timeIntervalSince1970),
+        title: "Article cards consume presentation values, not a Swift NIP-23 codec",
+        summary: "The standard event loader stays on raw rows until the exact Rust owner exists.",
+        content: Array(repeating: "word", count: 360).joined(separator: " ")
+    )
+}
+
 private struct LiveProofGallery: View {
     let model: GalleryModel
     @State private var diagnostics = DiagnosticsSnapshot()
-    @State private var proofClaims: [NostrContentClaim] = []
 
     var body: some View {
         List {
-            Section {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Only two relay facts enter the app")
-                        .font(.headline)
-                    Text("Everything else below—including author outboxes for the hint-free article and note—is NMP’s ordinary routing work.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.vertical, 4)
-                ForEach(GalleryModel.indexers, id: \.self) { relay in
-                    Label(relay, systemImage: "server.rack")
-                        .font(.callout.monospaced())
-                }
-            } header: {
-                Text("Configured indexers")
+            Section("Visible component-owned observations") {
+                NostrContent(
+                    document: model.previewDocument,
+                    observationFactory: model.observationFactory,
+                    purpose: .preview,
+                    maximumBlocks: 1,
+                    maximumLinesPerBlock: 1
+                )
+                NostrContent(
+                    document: model.noteDocument,
+                    observationFactory: model.observationFactory,
+                    purpose: .embedded
+                )
             }
-
-            Section("Live content state") {
-                stateRow("Profile", state: model.profileSession.snapshot.resources.values.first)
-                stateRow("No-hint article", state: model.articleSession.snapshot.resources.values.first)
-                stateRow("No-hint note", state: model.noteSession.snapshot.resources.values.first)
-            }
-
             Section("Engine relay diagnostics") {
                 if diagnostics.relays.isEmpty {
-                    HStack { ProgressView(); Text("Waiting for live relay plans…") }
+                    HStack { ProgressView(); Text("Waiting for visible demand…") }
                 }
                 ForEach(diagnostics.relays) { relay in
-                    VStack(alignment: .leading, spacing: 5) {
+                    VStack(alignment: .leading, spacing: 4) {
                         Text(relay.relay).font(.caption.monospaced()).lineLimit(1)
-                        HStack {
-                            Text("\(relay.wireSubCount) wire subs")
-                            Text("·")
-                            Text("\(relay.eventsByKind.reduce(0) { $0 + $1.count }) events")
-                        }
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        if !GalleryModel.indexers.contains(relay.relay) {
-                            Text("discovered by NMP")
-                                .font(.caption2.weight(.semibold))
-                                .foregroundStyle(.purple)
-                        }
+                        Text("\(relay.wireSubCount) wire subs")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
                 }
-            }
-
-            Section("Hardcoded seed entities") {
-                seed("profile · relay hint", GalleryModel.profile)
-                seed("article · no relay hint", GalleryModel.article)
-                seed("note · author hint only", GalleryModel.note)
             }
         }
         .navigationTitle("Live proof")
         .task { await observeDiagnostics() }
-        .onAppear { startProofClaims() }
-        .onDisappear {
-            proofClaims.forEach { $0.cancel() }
-            proofClaims.removeAll()
-        }
-    }
-
-    private func stateRow(_ label: String, state: NostrReferenceState?) -> some View {
-        HStack {
-            Text(label)
-            Spacer()
-            Text(stateLabel(state))
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(state?.resource == nil ? Color.secondary : Color.green)
-        }
-    }
-
-    private func stateLabel(_ state: NostrReferenceState?) -> String {
-        guard let state else { return "idle" }
-        switch state {
-        case .idle: return "idle"
-        case .loading: return "loading"
-        case .refreshing: return "refreshing cache"
-        case .resolved: return "resolved"
-        case .withdrawn: return "withdrawn"
-        case .shortfall: return "shortfall"
-        case .stopped: return "stopped"
-        case .collapsed: return "bounded"
-        }
-    }
-
-    private func seed(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(label).font(.caption.weight(.semibold))
-            Text(value).font(.caption2.monospaced()).lineLimit(2)
-        }
     }
 
     private func observeDiagnostics() async {
         guard let stream = try? model.engine.observeDiagnostics() else { return }
         for await snapshot in stream {
             diagnostics = snapshot
-        }
-    }
-
-    private func startProofClaims() {
-        guard proofClaims.isEmpty else { return }
-        proofClaims = [model.profileSession, model.articleSession, model.noteSession].compactMap { session in
-            guard let id = session.snapshot.document.references.first?.id else { return nil }
-            return session.claim(referenceID: id)
         }
     }
 }
@@ -480,60 +428,4 @@ struct GallerySection<Content: View>: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
-}
-
-private struct GalleryResolvedArticlePrimitives: View {
-    @ObservedObject var session: NostrContentSession
-    @State private var claim: NostrContentClaim?
-
-    var body: some View {
-        Group {
-            if let article {
-                VStack(alignment: .leading, spacing: 10) {
-                    NMPArticleImage(article: article)
-                        .frame(height: 128)
-                        .clipShape(RoundedRectangle(cornerRadius: 14))
-                    NMPArticleTitle(article: article)
-                        .font(.headline)
-                        .lineLimit(2)
-                    NMPArticleSummary(article: article)
-                        .font(.subheadline)
-                        .lineLimit(2)
-                    NMPResolvedProfile(session: session, pubkey: article.author) { profile in
-                        NMPArticleByline(article: article, authorProfile: profile)
-                    }
-                    NMPArticleReadingTime(article: article)
-                        .font(.caption)
-                }
-            } else {
-                HStack(spacing: 10) {
-                    ProgressView()
-                    Text("Resolving the real NIP-23 article…")
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-        .onAppear {
-            guard claim == nil, let referenceID else { return }
-            claim = session.claim(referenceID: referenceID)
-        }
-        .onDisappear {
-            claim?.cancel()
-            claim = nil
-        }
-    }
-
-    private var occurrence: NostrReferenceOccurrence? {
-        session.snapshot.document.references.first
-    }
-
-    private var referenceID: UInt64? { occurrence?.id }
-
-    private var resource: NostrContentResource? {
-        guard let occurrence else { return nil }
-        return session.snapshot.state(for: occurrence).resource
-    }
-
-    private var article: NostrArticle? { resource?.article }
-
 }

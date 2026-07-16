@@ -155,6 +155,11 @@ public struct AcquisitionEvidence: Sendable, Hashable {
     public let sources: [SourceEvidence]
     public let shortfall: [ShortfallFact]
 
+    public init(sources: [SourceEvidence] = [], shortfall: [ShortfallFact] = []) {
+        self.sources = sources
+        self.shortfall = shortfall
+    }
+
     init(_ ffi: FfiAcquisitionEvidence) {
         sources = ffi.sources.map(SourceEvidence.init)
         shortfall = ffi.shortfall.map(ShortfallFact.init)
@@ -173,4 +178,14 @@ public struct RowBatch: Sendable {
     /// window whose growth could be reported, exactly as
     /// `NMPQuery.requestRows(atLeast:)` refuses with `.unwindowed` there.
     public let load: WindowLoad?
+
+    public init(
+        rows: [Row],
+        evidence: AcquisitionEvidence = AcquisitionEvidence(),
+        load: WindowLoad? = nil
+    ) {
+        self.rows = rows
+        self.evidence = evidence
+        self.load = load
+    }
 }

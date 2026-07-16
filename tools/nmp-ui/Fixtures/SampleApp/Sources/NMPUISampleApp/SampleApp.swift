@@ -4,11 +4,9 @@ import SwiftUI
 
 @main
 struct NMPUISampleApp: App {
-    private let article = NostrArticle(
-        eventID: String(repeating: "a", count: 64),
+    private let article = NMPArticlePresentation(
         author: String(repeating: "b", count: 64),
         createdAt: 1_723_456_789,
-        identifier: "source-owned-ui",
         title: "Source-owned composition, linked semantics",
         summary: "The card is editable app source; protocol and media behavior stay linked.",
         image: "https://example.invalid/article.jpg",

@@ -6,11 +6,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-nmp.workspace = true
-nostr.workspace = true
+nmp-grammar.workspace = true
 pulldown-cmark = { version = "0.13", default-features = false }
 regex = "1.11"
-serde_json = "1"
 
 [dev-dependencies]
 proptest.workspace = true

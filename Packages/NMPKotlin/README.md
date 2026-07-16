@@ -77,18 +77,23 @@ the next engine construction restores and activates it. Sign-out calls
 `clearPersistedAccount()` before closing the credential-owning engine. This is
 not encrypted, Keystore-backed, or a secure production-vault claim.
 
-The same package also exposes the optional content substrate:
+The same package also exposes pure content parsing and engine-free reference
+planning:
 
 ```kotlin
-val content = NMPContentClient(nmp).session(rawContent, viewModelScope)
-val occurrence = content.snapshot.value.document.references.first()
-val claim = content.claim(occurrence.id)
+val document = parseNostrContent(rawContent)
+val occurrence = document.references.first()
+
+// Only a purpose-owning component/application scope that needs acquisition
+// asks for the ordinary NMP demands and retains the handles it opens.
+val plan = referenceDemandPlan(occurrence.target)
+val canonical = nmp.observe(plan.canonical)
 ```
 
-It parses through the shared Rust semantic document and collects only ordinary
-NMP demand. `ContentSession.close()` and each `ContentClaim.close()` map
-deterministically onto coroutine cancellation; no JVM `Cleaner` owns reference
-withdrawal. See `docs/builder/34-content.md`.
+Parsing opens no query and requires no engine. A literal renderer can use the
+authored occurrence and never call `referenceDemandPlan`; a component that does
+observe owns each canonical/helper `Flow` collection and its coroutine
+lifecycle. See `docs/builder/34-content.md`.
 
 ## Building from a clean clone
 

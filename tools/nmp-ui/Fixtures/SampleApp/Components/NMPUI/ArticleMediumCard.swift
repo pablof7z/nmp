@@ -4,13 +4,13 @@ import SwiftUI
 
 /// App-owned article row installed by nmp-ui. Edit it to match the host app.
 public struct NMPSourceArticleMediumCard: View {
-    public let article: NostrArticle
-    public let authorProfile: NostrProfileMetadata?
+    public let article: NMPArticlePresentation
+    public let authorProfile: NMPProfilePresentation?
     public let action: (() -> Void)?
 
     public init(
-        article: NostrArticle,
-        authorProfile: NostrProfileMetadata? = nil,
+        article: NMPArticlePresentation,
+        authorProfile: NMPProfilePresentation? = nil,
         action: (() -> Void)? = nil
     ) {
         self.article = article

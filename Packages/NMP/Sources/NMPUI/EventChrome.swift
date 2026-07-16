@@ -8,14 +8,12 @@ public enum NMPEventChromeVariant: Sendable, Hashable {
     case editorial
 }
 
-/// Reusable event shell. It deliberately accepts arbitrary content and footer
-/// views, so the same chrome can host NostrContent, an app-only kind, media, or
-/// an entirely custom interaction surface.
+/// Reusable event shell over app/protocol-owner supplied identity display data.
 public struct NMPEventChrome<Content: View, Footer: View>: View {
     @Environment(\.nmpUITheme) private var theme
 
     public let pubkey: String
-    public let profile: NostrProfileMetadata?
+    public let profile: NMPProfilePresentation?
     public let createdAt: UInt64
     public let variant: NMPEventChromeVariant
     private let content: Content
@@ -23,7 +21,7 @@ public struct NMPEventChrome<Content: View, Footer: View>: View {
 
     public init(
         pubkey: String,
-        profile: NostrProfileMetadata? = nil,
+        profile: NMPProfilePresentation? = nil,
         createdAt: UInt64,
         variant: NMPEventChromeVariant = .standard,
         @ViewBuilder content: () -> Content,
@@ -75,7 +73,10 @@ public struct NMPEventChrome<Content: View, Footer: View>: View {
         }
         .padding(15)
         .background(theme.surface, in: RoundedRectangle(cornerRadius: theme.cornerRadius))
-        .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius).strokeBorder(theme.border, lineWidth: 0.5))
+        .overlay(
+            RoundedRectangle(cornerRadius: theme.cornerRadius)
+                .strokeBorder(theme.border, lineWidth: 0.5)
+        )
     }
 
     private var editorial: some View {
@@ -84,8 +85,7 @@ public struct NMPEventChrome<Content: View, Footer: View>: View {
                 NMPAvatar(pubkey: pubkey, profile: profile, size: 52)
                 header(font: .title3)
             }
-            content
-                .font(.system(.body, design: .serif))
+            content.font(.system(.body, design: .serif))
             Divider().overlay(theme.border)
             footer
         }
@@ -109,7 +109,7 @@ public struct NMPEventChrome<Content: View, Footer: View>: View {
 public extension NMPEventChrome where Footer == EmptyView {
     init(
         pubkey: String,
-        profile: NostrProfileMetadata? = nil,
+        profile: NMPProfilePresentation? = nil,
         createdAt: UInt64,
         variant: NMPEventChromeVariant = .standard,
         @ViewBuilder content: () -> Content
@@ -125,130 +125,238 @@ public extension NMPEventChrome where Footer == EmptyView {
     }
 }
 
-/// Connected convenience that claims kind:0 through an existing content
-/// session. It never opens an independent query or owns a cache.
-public struct NMPResolvedProfile<Content: View>: View {
-    @ObservedObject private var session: NostrContentSession
-    @State private var claim: NostrContentClaim?
+/// Standard profile-reference component. It owns its own visibility-scoped
+/// kind:0 observation when a factory is supplied. Until #208 supplies the
+/// exact profile codec, the visual remains the pubkey fallback and the raw
+/// row is retained only as live replacement evidence.
+public struct NMPStandardProfileMention: View {
+    let input: NMPProfileReferenceInput
 
-    public let pubkey: String
-    private let content: (NostrProfileMetadata?) -> Content
-
-    public init(
-        session: NostrContentSession,
-        pubkey: String,
-        @ViewBuilder content: @escaping (NostrProfileMetadata?) -> Content
-    ) {
-        self.session = session
-        self.pubkey = pubkey
-        self.content = content
+    public init(input: NMPProfileReferenceInput) {
+        self.input = input
     }
 
+    @ViewBuilder
     public var body: some View {
-        content(profile)
-            .onAppear {
-                if claim == nil { claim = session.claimProfile(pubkey: pubkey) }
-            }
-            .onDisappear {
-                claim?.cancel()
-                claim = nil
-            }
-    }
-
-    private var profile: NostrProfileMetadata? {
-        session.snapshot.state(for: .profile(pubkey: pubkey)).resource?.profile
-    }
-}
-
-struct NMPResolvedEventCard: View {
-    let input: NMPEventRenderInput
-    let variant: NMPEventChromeVariant
-
-    var body: some View {
-        NMPResolvedProfile(session: input.session, pubkey: input.event.pubkey) { profile in
-            NMPEventChrome(
-                pubkey: input.event.pubkey,
-                profile: profile,
-                createdAt: input.event.createdAt,
-                variant: variant
-            ) {
-                NMPNestedEventContent(input: input)
-            } footer: {
-                HStack(spacing: 18) {
-                    Label("Reply", systemImage: "bubble.left")
-                    Label("React", systemImage: "heart")
-                    Spacer()
-                    Text("kind \(input.event.kind)")
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-            .modifier(
-                NMPCardInteraction(
-                    accessibilityName: "Open event",
-                    action: { input.actions.openEvent(input.event) }
-                )
-            )
+        if let factory = input.observationFactory {
+            NMPObservedProfileMention(input: input, factory: factory)
+        } else {
+            mention
         }
     }
+
+    private var mention: some View {
+        NMPProfileMention(
+            pubkey: input.pubkey,
+            variant: .avatar,
+            showsLongPressPreview: true,
+            action: { input.actions.openProfile(input.pubkey) }
+        )
+    }
 }
 
-struct NMPNestedEventContent: View {
-    @StateObject private var nestedSession: NostrContentSession
-    let input: NMPEventRenderInput
+private struct NMPObservedProfileMention: View {
+    let input: NMPProfileReferenceInput
+    @StateObject private var observation: NMPVisibleReferenceObservation
 
-    init(input: NMPEventRenderInput) {
+    init(input: NMPProfileReferenceInput, factory: NMPReferenceObservationFactory) {
         self.input = input
-        _nestedSession = StateObject(
-            wrappedValue: input.session.nestedSession(
-                content: input.event.content,
-                syntax: input.event.kind == 30_023 ? .markdown : .plainText,
-                context: input.context
+        _observation = StateObject(
+            wrappedValue: NMPVisibleReferenceObservation(
+                target: input.occurrence.target,
+                factory: factory
             )
         )
     }
 
     var body: some View {
+        NMPProfileMention(
+            pubkey: input.pubkey,
+            variant: .avatar,
+            showsLongPressPreview: true,
+            action: { input.actions.openProfile(input.pubkey) }
+        )
+        // A replacement row changes identity even while the temporary raw-row
+        // fallback has no schema fields to display.
+        .id(profileEvent?.id ?? input.pubkey)
+        .observeWhileVisible(observation)
+    }
+
+    private var profileEvent: Row? {
+        observation.canonical?.rows.first {
+            $0.kind == 0 && $0.pubkey == input.pubkey
+        }
+    }
+}
+
+/// Standard outer event-reference component. It is replaceable independently
+/// from the actual-kind renderer table.
+public struct NMPDefaultEventLoader: View {
+    let input: NMPEventReferenceInput
+
+    public init(input: NMPEventReferenceInput) {
+        self.input = input
+    }
+
+    @ViewBuilder
+    public var body: some View {
+        if let nextContext = input.context.descending(into: input.occurrence.target.key) {
+            if let factory = input.observationFactory {
+                NMPObservedEventLoader(
+                    input: input,
+                    context: nextContext,
+                    factory: factory
+                )
+            } else {
+                fallback(failure: "no observation factory")
+            }
+        } else {
+            fallback(failure: "recursive embed stopped")
+        }
+    }
+
+    private func fallback(failure: String?) -> some View {
+        input.renderers.renderReferenceFallback(
+            NMPReferenceFallbackInput(
+                occurrence: input.occurrence,
+                purpose: input.purpose,
+                failure: failure
+            )
+        ).view
+    }
+}
+
+private struct NMPObservedEventLoader: View {
+    let input: NMPEventReferenceInput
+    let context: NostrContentRenderContext
+    @StateObject private var observation: NMPVisibleReferenceObservation
+
+    init(
+        input: NMPEventReferenceInput,
+        context: NostrContentRenderContext,
+        factory: NMPReferenceObservationFactory
+    ) {
+        self.input = input
+        self.context = context
+        _observation = StateObject(
+            wrappedValue: NMPVisibleReferenceObservation(
+                target: input.occurrence.target,
+                factory: factory
+            )
+        )
+    }
+
+    var body: some View {
+        Group {
+            if let event = observation.canonical?.rows.first {
+                NMPResolvedEventDispatcher(
+                    reference: input,
+                    event: event,
+                    context: context
+                )
+            } else {
+                input.renderers.renderReferenceFallback(
+                    NMPReferenceFallbackInput(
+                        occurrence: input.occurrence,
+                        purpose: input.purpose,
+                        failure: observation.failure
+                    )
+                ).view
+            }
+        }
+        .observeWhileVisible(observation)
+    }
+}
+
+/// Reusable second stage for custom outer loaders. Dispatch is always keyed by
+/// the validated acquired row's actual kind and the requested purpose.
+public struct NMPResolvedEventDispatcher: View {
+    public let reference: NMPEventReferenceInput
+    public let event: Row
+    public let context: NostrContentRenderContext
+
+    public init(
+        reference: NMPEventReferenceInput,
+        event: Row,
+        context: NostrContentRenderContext
+    ) {
+        self.reference = reference
+        self.event = event
+        self.context = context
+    }
+
+    public var body: some View {
+        reference.renderers.renderEvent(
+            NMPEventRenderInput(
+                occurrence: reference.occurrence,
+                event: event,
+                purpose: reference.purpose,
+                context: context,
+                observationFactory: reference.observationFactory,
+                renderers: reference.renderers,
+                actions: reference.actions
+            )
+        ).view
+    }
+}
+
+struct NMPGenericEventCard: View {
+    let input: NMPEventRenderInput
+    let label: String
+
+    var body: some View {
+        NMPEventChrome(
+            pubkey: input.event.pubkey,
+            createdAt: input.event.createdAt,
+            variant: .standard
+        ) {
+            NMPNestedEventContent(input: input)
+        } footer: {
+            HStack(spacing: 18) {
+                Label("Reply", systemImage: "bubble.left")
+                Label("React", systemImage: "heart")
+                Spacer()
+                Text(label)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .modifier(
+            NMPCardInteraction(
+                accessibilityName: "Open event",
+                action: { input.actions.openEvent(input.event) }
+            )
+        )
+    }
+}
+
+private struct NMPNestedEventContent: View {
+    let input: NMPEventRenderInput
+
+    var body: some View {
         NostrContent(
-            session: nestedSession,
+            content: input.event.content,
+            // Syntax selection for kind:30023 remains presentation-only here;
+            // no NIP-23 tags or schema fields are decoded in Swift.
+            syntax: input.event.kind == 30_023 ? .markdown : .plainText,
+            observationFactory: input.observationFactory,
+            context: input.context,
             purpose: .embedded,
             renderers: input.renderers,
             actions: input.actions
         )
-        .onDisappear { nestedSession.stop() }
     }
 }
 
-enum NMPResolvedArticleVariant {
-    case portrait
-    case medium
-}
+public struct NMPReferenceLiteral: View {
+    public let original: String
 
-struct NMPResolvedArticleCard: View {
-    let input: NMPEventRenderInput
-    let variant: NMPResolvedArticleVariant
+    public init(original: String) {
+        self.original = original
+    }
 
-    var body: some View {
-        if let article = decodeNIP23Article(from: input.event) {
-            NMPResolvedProfile(session: input.session, pubkey: article.author) { profile in
-                switch variant {
-                case .portrait:
-                    NMPArticlePortraitCard(
-                        article: article,
-                        authorProfile: profile,
-                        action: { input.actions.openEvent(input.event) }
-                    )
-                case .medium:
-                    NMPArticleMediumCard(
-                        article: article,
-                        authorProfile: profile,
-                        action: { input.actions.openEvent(input.event) }
-                    )
-                }
-            }
-        } else {
-            NMPResolvedEventCard(input: input, variant: .standard)
-        }
+    public var body: some View {
+        Text(original).font(.body.monospaced())
     }
 }
 
@@ -258,8 +366,8 @@ struct NMPReferencePlaceholder: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            if isLoading { ProgressView().controlSize(.mini) }
-            Image(systemName: icon)
+            if input.failure == nil { ProgressView().controlSize(.mini) }
+            Image(systemName: input.failure == nil ? "link" : "exclamationmark.circle")
                 .font(.caption)
             Text(compactOriginal)
                 .font(.caption.monospaced())
@@ -269,21 +377,6 @@ struct NMPReferencePlaceholder: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
         .background(theme.surface, in: Capsule())
-    }
-
-    private var isLoading: Bool {
-        switch input.state {
-        case .idle, .loading, .refreshing: return true
-        case .resolved, .withdrawn, .shortfall, .stopped, .collapsed: return false
-        }
-    }
-
-    private var icon: String {
-        switch input.state {
-        case .shortfall, .stopped, .withdrawn: return "exclamationmark.circle"
-        case .collapsed: return "arrow.triangle.branch"
-        case .idle, .loading, .refreshing, .resolved: return "link"
-        }
     }
 
     private var compactOriginal: String {

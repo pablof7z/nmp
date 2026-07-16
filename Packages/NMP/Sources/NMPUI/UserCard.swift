@@ -16,14 +16,14 @@ public struct NMPUserCard: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     public let pubkey: String
-    public let profile: NostrProfileMetadata?
+    public let profile: NMPProfilePresentation?
     public let variant: NMPUserCardVariant
     public let following: NMPFollowing?
     public let action: (() -> Void)?
 
     public init(
         pubkey: String,
-        profile: NostrProfileMetadata? = nil,
+        profile: NMPProfilePresentation? = nil,
         variant: NMPUserCardVariant = .featured,
         following: NMPFollowing? = nil,
         action: (() -> Void)? = nil
