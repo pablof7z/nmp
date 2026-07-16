@@ -15,7 +15,40 @@
 </itunes:owner>
 <itunes:category text="Technology"/>
 <itunes:type>episodic</itunes:type>
-<lastBuildDate>Thu, 16 Jul 2026 02:52:00 GMT</lastBuildDate>
+<lastBuildDate>Thu, 16 Jul 2026 03:58:00 GMT</lastBuildDate>
+<item>
+<title>NMP Pulse — 2026-07-16 03:58 UTC</title>
+<link>https://pablof7z.github.io/nmp/status/reports/pulse-0012.mp3</link>
+<guid isPermaLink="false">nmp-pulse-0012</guid>
+<pubDate>Thu, 16 Jul 2026 03:58:00 GMT</pubDate>
+<description><![CDATA[
+Hey, this is the NMP pulse.
+
+Quick refresher: NMP is an embeddable Nostr client engine, a Rust core with Swift and Kotlin SDKs, that owns relay handling, event storage, and durable publishing so your app doesn't have to rebuild all of that from scratch.
+
+Big news this hour: pull request 542, wave three of content-relay authentication, merged. Last pulse said it was one green check away, and it landed.
+
+Here's why this one actually matters. This is the milestone the whole authentication arc has been building toward: an authenticated content-relay read now works end to end, at the engine level. Not a mock, not a simulation against a fake socket -- a real WebSocket relay, a real challenge, a real proof.
+
+The engine now has runtime capability binding: an authentication-policy trait, a bounded registry, and handle calls to add or remove an auth policy at the engine layer. And the capstone test proves the whole authenticated path in one shot: challenge comes in, the policy is consulted, the response gets signed, the authentication frame goes out, the relay says okay, the subscription request goes out, end-of-stored-events comes back, and real rows land. Challenge to rows, for real.
+
+It doesn't stop at the happy path. The same capstone proves a denial gets parked correctly instead of dropped or blindly retried. It proves a reconnect gets a genuinely fresh challenge instead of reusing a stale one. And there's a dedicated wrong-challenge oracle -- a test that deliberately signs against the wrong challenge, just to prove the test fixture would actually catch a broken implementation rather than passing by accident.
+
+All eight lifecycle and leak invariants this wave checks passed adversarial review clean.
+
+Now, the honest framing, because it matters more than the celebration. What's proven is the engine boundary. There is still no app-facing call an application developer can make -- no "log in to this relay" method on Swift or Kotlin yet. Wave five, which puts that authentication-policy API and the account-registration shape into the Rust facade, is in the build gate right now. Wave six then projects it out to Swift and Kotlin. So: NIP-42's hardest half is done and proven. What's left is wiring it out through the app software development kit.
+
+One related cleanup: the long-held remove-account pull request, number 529, was closed. Its pubkey-only shape didn't match the account-registration model this epic ratified, so wave five replaces it properly -- add an account, get back a full registration handle, remove an account by that same handle. That closes out issue 495 for good.
+
+One smaller note, unchanged from before: there's still a flaky macOS-only test in the ingest-smoke suite, tracked separately -- a testing-infrastructure quirk, not a product bug.
+
+That's the pulse. The biggest authentication milestone in this arc is merged and proven at the engine level -- next hour's story is what happens when it starts reaching the app.
+]]></description>
+<enclosure url="https://pablof7z.github.io/nmp/status/reports/pulse-0012.mp3" type="audio/mpeg" length="3325484"/>
+<itunes:title>NMP Pulse — 2026-07-16 03:58 UTC</itunes:title>
+<itunes:duration>208</itunes:duration>
+<itunes:explicit>false</itunes:explicit>
+</item>
 <item>
 <title>NMP Pulse — 2026-07-16 02:52 UTC</title>
 <link>https://pablof7z.github.io/nmp/status/reports/pulse-0011.mp3</link>
