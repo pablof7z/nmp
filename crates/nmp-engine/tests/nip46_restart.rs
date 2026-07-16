@@ -262,7 +262,9 @@ fn offline_accept_restart_real_bunker_reattach_publish_and_ack() {
         assert_eq!(receipt.statuses.recv().unwrap(), WriteStatus::Accepted);
         assert_eq!(
             receipt.statuses.recv().unwrap(),
-            WriteStatus::AwaitingCapability
+            WriteStatus::AwaitingCapability {
+                pubkey: user.public_key()
+            }
         );
         handle.shutdown();
         engine.join();
@@ -291,7 +293,12 @@ fn offline_accept_restart_real_bunker_reattach_publish_and_ack() {
         _ => panic!("durable receipt must reattach after restart"),
     };
     assert_eq!(statuses.recv().unwrap(), WriteStatus::Accepted);
-    assert_eq!(statuses.recv().unwrap(), WriteStatus::AwaitingCapability);
+    assert_eq!(
+        statuses.recv().unwrap(),
+        WriteStatus::AwaitingCapability {
+            pubkey: user.public_key()
+        }
+    );
 
     let bunker_uri = format!(
         "bunker://{}?relay={}&secret=restart-proof",

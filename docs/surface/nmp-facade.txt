@@ -24382,7 +24382,32 @@ reexport nmp::ReceiptReattachment => nmp_engine::runtime::ReceiptReattachment
                                                   "inner": {
                                                     "variant": {
                                                       "discriminant": null,
-                                                      "kind": "plain"
+                                                      "kind": {
+                                                        "struct": {
+                                                          "fields": [
+                                                            {
+                                                              "attrs": [],
+                                                              "inner": {
+                                                                "struct_field": {
+                                                                  "resolved_path": {
+                                                                    "args": null,
+                                                                    "path": "nostr::PublicKey",
+                                                                    "resolved_item": {
+                                                                      "definition": {
+                                                                        "previously_defined": "nostr::key::public_key::PublicKey"
+                                                                      },
+                                                                      "path": "nostr::key::public_key::PublicKey"
+                                                                    }
+                                                                  }
+                                                                }
+                                                              },
+                                                              "name": "pubkey",
+                                                              "visibility": "default"
+                                                            }
+                                                          ],
+                                                          "has_stripped_fields": false
+                                                        }
+                                                      }
                                                     }
                                                   },
                                                   "name": "AwaitingCapability",

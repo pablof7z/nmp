@@ -2052,7 +2052,10 @@ mod tests {
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(10))
                 .expect("must observe AwaitingCapability"),
-            FfiWriteStatus::AwaitingCapability
+            FfiWriteStatus::AwaitingCapability {
+                pubkey: overridden.public_key().to_hex()
+            },
+            "the parked pubkey must be the frozen override, never the active account"
         );
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(1)),
@@ -2260,7 +2263,9 @@ mod tests {
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(10))
                 .expect("must observe AwaitingCapability"),
-            FfiWriteStatus::AwaitingCapability
+            FfiWriteStatus::AwaitingCapability {
+                pubkey: keys.public_key().to_hex()
+            }
         );
 
         // Reattach through a FRESH observer/channel -- exercises the real
@@ -2283,7 +2288,9 @@ mod tests {
         assert_eq!(
             rx2.recv_timeout(Duration::from_secs(10))
                 .expect("replay must deliver AwaitingCapability"),
-            FfiWriteStatus::AwaitingCapability
+            FfiWriteStatus::AwaitingCapability {
+                pubkey: keys.public_key().to_hex()
+            }
         );
 
         engine.shutdown();

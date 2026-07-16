@@ -75,7 +75,10 @@ public enum WritePayload: Sendable, Hashable {
 /// `.accepted` before it. An override naming a pubkey with no registered
 /// signer parks as `.awaitingCapability` until that capability attaches;
 /// acceptance pins the override, so a later `setActiveAccount` cannot
-/// retarget the write.
+/// retarget the write. `WriteStatus.awaitingCapability`'s associated
+/// `pubkey` (#47 Unit B) is the exact frozen identity parked -- the
+/// override when one was given, else the active account at publish time --
+/// never a different, later-active account.
 public struct WriteIntent: Sendable, Hashable {
     public var payload: WritePayload
     public var durability: Durability
@@ -109,7 +112,11 @@ public struct WriteIntent: Sendable, Hashable {
 /// the terminal states).
 public enum WriteStatus: Sendable, Hashable {
     case accepted
-    case awaitingCapability
+    /// #47 Unit B: `pubkey` is the exact frozen identity (64-char hex) no
+    /// registered signer currently answers for. Retained, not terminal --
+    /// re-arrives verbatim on restart replay and resumes only when a
+    /// signer for THIS pubkey attaches, never a different one.
+    case awaitingCapability(pubkey: String)
     case signed(eventId: String)
     case routed(relays: [String])
     case awaitingRelay(relay: String)
@@ -129,7 +136,7 @@ public enum WriteStatus: Sendable, Hashable {
     init(_ ffi: FfiWriteStatus) {
         switch ffi {
         case .accepted: self = .accepted
-        case .awaitingCapability: self = .awaitingCapability
+        case .awaitingCapability(let pubkey): self = .awaitingCapability(pubkey: pubkey)
         case .signed(let eventId): self = .signed(eventId: eventId)
         case .routed(let relays): self = .routed(relays: relays)
         case .awaitingRelay(let relay): self = .awaitingRelay(relay: relay)

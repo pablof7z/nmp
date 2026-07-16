@@ -141,7 +141,9 @@ struct NormEvidence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NormStatus {
     Accepted,
-    AwaitingCapability,
+    /// #47 Unit B: carries the parked pubkey (hex) so the direct/FFI
+    /// parity proof covers the payload, not just the variant tag.
+    AwaitingCapability(String),
     Signed(String),
     Routed(Vec<String>),
     AwaitingRelay(String),
@@ -389,7 +391,9 @@ fn normalize_ffi_evidence(evidence: FfiAcquisitionEvidence, relay: &str) -> Norm
 fn normalize_direct_status(status: WriteStatus, relay: &str) -> NormStatus {
     match status {
         WriteStatus::Accepted => NormStatus::Accepted,
-        WriteStatus::AwaitingCapability => NormStatus::AwaitingCapability,
+        WriteStatus::AwaitingCapability { pubkey } => {
+            NormStatus::AwaitingCapability(pubkey.to_hex())
+        }
         WriteStatus::Signed(id) => NormStatus::Signed(id.to_hex()),
         WriteStatus::Routed(relays) => NormStatus::Routed(
             relays
@@ -449,7 +453,7 @@ fn normalize_direct_status(status: WriteStatus, relay: &str) -> NormStatus {
 fn normalize_ffi_status(status: FfiWriteStatus, relay: &str) -> NormStatus {
     match status {
         FfiWriteStatus::Accepted => NormStatus::Accepted,
-        FfiWriteStatus::AwaitingCapability => NormStatus::AwaitingCapability,
+        FfiWriteStatus::AwaitingCapability { pubkey } => NormStatus::AwaitingCapability(pubkey),
         FfiWriteStatus::Signed { event_id } => NormStatus::Signed(event_id),
         FfiWriteStatus::Routed { mut relays } => {
             for url in &mut relays {
@@ -1135,7 +1139,7 @@ fn normalize_ffi_follow_snapshot(snapshot: FfiFollowSnapshot) -> NormFollowSnaps
 fn direct_follow_receipt_name(status: &WriteStatus) -> &'static str {
     match status {
         WriteStatus::Accepted => "accepted",
-        WriteStatus::AwaitingCapability => "awaiting_capability",
+        WriteStatus::AwaitingCapability { .. } => "awaiting_capability",
         WriteStatus::Signed(_) => "signed",
         WriteStatus::Routed(_) => "routed",
         WriteStatus::AwaitingRelay { .. } => "awaiting_relay",
@@ -1157,7 +1161,7 @@ fn direct_follow_receipt_name(status: &WriteStatus) -> &'static str {
 fn ffi_follow_receipt_name(status: &FfiWriteStatus) -> &'static str {
     match status {
         FfiWriteStatus::Accepted => "accepted",
-        FfiWriteStatus::AwaitingCapability => "awaiting_capability",
+        FfiWriteStatus::AwaitingCapability { .. } => "awaiting_capability",
         FfiWriteStatus::Signed { .. } => "signed",
         FfiWriteStatus::Routed { .. } => "routed",
         FfiWriteStatus::AwaitingRelay { .. } => "awaiting_relay",
@@ -2228,7 +2232,12 @@ struct ReattachProof {
 /// further), then reattach with a second, independent observer and prove it
 /// replays the identical fact sequence the original saw.
 async fn run_direct_reattach_live() -> ReattachProof {
-    let keys = Keys::generate();
+    // Must match `run_ffi_reattach_live`'s identity: since #47 Unit B the
+    // replayed `AwaitingCapability` carries the frozen author pubkey, so the
+    // direct-vs-FFI `ReattachProof` equality now compares that hex payload.
+    // A per-run `Keys::generate()` would make the two halves disagree by
+    // construction; a shared fixed key makes the payload-parity real.
+    let keys = fixed_keys();
     let engine = Engine::new(EngineConfig::default()).expect("direct engine must construct");
     engine
         .set_active_account(Some(keys.public_key()))
@@ -2261,7 +2270,9 @@ async fn run_direct_reattach_live() -> ReattachProof {
             deadline,
             "direct original AwaitingCapability"
         ),
-        WriteStatus::AwaitingCapability
+        WriteStatus::AwaitingCapability {
+            pubkey: keys.public_key()
+        }
     );
 
     let outcome = engine
@@ -2300,7 +2311,10 @@ async fn run_direct_reattach_live() -> ReattachProof {
 }
 
 async fn run_ffi_reattach_live() -> ReattachProof {
-    let keys = Keys::generate();
+    // Shared fixed identity with `run_direct_reattach_live` -- see the note
+    // there: the reattach `AwaitingCapability` payload is now the frozen
+    // author pubkey, and the direct-vs-FFI proof compares it.
+    let keys = fixed_keys();
     let engine = NmpEngine::new(NmpEngineConfig::default()).expect("FFI engine must construct");
     engine
         .set_active_account(Some(keys.public_key().to_hex()))
@@ -2336,7 +2350,7 @@ async fn run_ffi_reattach_live() -> ReattachProof {
             recv_before(&rx, deadline, "FFI original AwaitingCapability"),
             "n/a"
         ),
-        NormStatus::AwaitingCapability
+        NormStatus::AwaitingCapability(keys.public_key().to_hex())
     );
 
     let (replay_tx, replay_rx) = mpsc::channel();
