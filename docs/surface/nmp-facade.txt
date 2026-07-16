@@ -16,6 +16,7 @@ pub use nmp::Durability
 pub use nmp::Event
 pub use nmp::EventId
 pub use nmp::Filter
+pub use nmp::Freshness
 pub use nmp::IdentityField
 pub use nmp::IndexedTagName
 pub use nmp::Kind
@@ -5603,6 +5604,87 @@ reexport nmp::Binding => nmp_grammar::binding::Binding
                                                                               }
                                                                             },
                                                                             "name": "cache",
+                                                                            "visibility": "public"
+                                                                          },
+                                                                          {
+                                                                            "attrs": [],
+                                                                            "inner": {
+                                                                              "struct_field": {
+                                                                                "resolved_path": {
+                                                                                  "args": null,
+                                                                                  "path": "Freshness",
+                                                                                  "resolved_item": {
+                                                                                    "definition": {
+                                                                                      "attrs": [],
+                                                                                      "inner": {
+                                                                                        "enum": {
+                                                                                          "generics": {
+                                                                                            "params": [],
+                                                                                            "where_predicates": []
+                                                                                          },
+                                                                                          "has_stripped_variants": false,
+                                                                                          "variants": [
+                                                                                            {
+                                                                                              "attrs": [],
+                                                                                              "inner": {
+                                                                                                "variant": {
+                                                                                                  "discriminant": null,
+                                                                                                  "kind": "plain"
+                                                                                                }
+                                                                                              },
+                                                                                              "name": "Live",
+                                                                                              "visibility": "default"
+                                                                                            },
+                                                                                            {
+                                                                                              "attrs": [],
+                                                                                              "inner": {
+                                                                                                "variant": {
+                                                                                                  "discriminant": null,
+                                                                                                  "kind": {
+                                                                                                    "struct": {
+                                                                                                      "fields": [
+                                                                                                        {
+                                                                                                          "attrs": [],
+                                                                                                          "inner": {
+                                                                                                            "struct_field": {
+                                                                                                              "primitive": "u64"
+                                                                                                            }
+                                                                                                          },
+                                                                                                          "name": "seconds",
+                                                                                                          "visibility": "default"
+                                                                                                        }
+                                                                                                      ],
+                                                                                                      "has_stripped_fields": false
+                                                                                                    }
+                                                                                                  }
+                                                                                                }
+                                                                                              },
+                                                                                              "name": "MaxAge",
+                                                                                              "visibility": "default"
+                                                                                            },
+                                                                                            {
+                                                                                              "attrs": [],
+                                                                                              "inner": {
+                                                                                                "variant": {
+                                                                                                  "discriminant": null,
+                                                                                                  "kind": "plain"
+                                                                                                }
+                                                                                              },
+                                                                                              "name": "CacheOnly",
+                                                                                              "visibility": "default"
+                                                                                            }
+                                                                                          ]
+                                                                                        }
+                                                                                      },
+                                                                                      "name": "Freshness",
+                                                                                      "visibility": "public"
+                                                                                    },
+                                                                                    "path": "nmp_grammar::descriptor::Freshness"
+                                                                                  }
+                                                                                }
+                                                                              }
+                                                                            },
+                                                                            "name": "freshness",
                                                                             "visibility": "public"
                                                                           }
                                                                         ],
@@ -19654,6 +19736,10 @@ reexport nmp::EventId => nostr::event::id::EventId
 reexport nmp::Filter => nmp_grammar::binding::Filter
 {
   "previously_defined": "nmp_grammar::binding::Filter"
+}
+reexport nmp::Freshness => nmp_grammar::descriptor::Freshness
+{
+  "previously_defined": "nmp_grammar::descriptor::Freshness"
 }
 reexport nmp::IdentityField => nmp_grammar::selector::IdentityField
 {

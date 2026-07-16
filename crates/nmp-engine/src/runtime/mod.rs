@@ -2998,11 +2998,30 @@ fn translate_pool_event(event: PoolEvent) -> Option<EngineMsg> {
     }
 }
 
+#[cfg(test)]
 fn relay_frame_is_auth(frame: &RelayFrame) -> bool {
     matches!(
         frame,
         RelayFrame::Message(message)
             if matches!(message.as_ref(), RelayMessage::Auth { .. })
+    )
+}
+
+/// Frames whose reducer handling consumes wall-clock truth. EOSE and
+/// NEG-MSG may mint coverage; AUTH creates timestamped challenge state.
+/// Advance the pure reducer clock immediately before the batch containing
+/// them so coverage `through` is completion-time capped and can never be
+/// influenced by an EVENT's `created_at`.
+fn relay_frame_needs_wall_clock(frame: &RelayFrame) -> bool {
+    matches!(
+        frame,
+        RelayFrame::Message(message)
+            if matches!(
+                message.as_ref(),
+                RelayMessage::Auth { .. }
+                    | RelayMessage::EndOfStoredEvents(_)
+                    | RelayMessage::NegMsg { .. }
+            )
     )
 }
 
@@ -3380,7 +3399,7 @@ fn engine_loop<S, D>(
             }
             Cmd::RelayBatch { frames, applied } => {
                 if frames.iter().any(|(handle, session, frame)| {
-                    relay_frame_is_auth(frame)
+                    relay_frame_needs_wall_clock(frame)
                         && core.is_current_transport_session(*handle, session)
                 }) {
                     let tick_effects = core.handle(EngineMsg::Tick(Timestamp::now()));
@@ -3755,7 +3774,8 @@ fn engine_loop<S, D>(
                 );
             }
             Cmd::Subscribe { query, reply } => {
-                let effects = core.handle(EngineMsg::Subscribe(query, Box::new(NullRowSink)));
+                let mut effects = core.handle(EngineMsg::Tick(Timestamp::now()));
+                effects.extend(core.handle(EngineMsg::Subscribe(query, Box::new(NullRowSink))));
                 // `on_subscribe` always emits exactly one `Effect::EmitRows`
                 // for the handle it just created (its `last_evidence` starts
                 // `None`, which can never equal `Some(_)` -- see
@@ -3818,10 +3838,11 @@ fn engine_loop<S, D>(
                 );
             }
             Cmd::SubscribeHistory { query, reply } => {
-                let effects = core.handle(EngineMsg::SubscribeHistory(
+                let mut effects = core.handle(EngineMsg::Tick(Timestamp::now()));
+                effects.extend(core.handle(EngineMsg::SubscribeHistory(
                     query,
                     Box::new(NullHistorySink),
-                ));
+                )));
                 let Some(id) = effects.iter().find_map(|effect| match effect {
                     Effect::EmitHistory(id, _) if !history_channels.contains_key(id) => Some(*id),
                     _ => None,
@@ -4036,7 +4057,7 @@ fn engine_loop<S, D>(
                 retry_required_relay_workers(&core, &pool, &mut preambles);
             }
             Cmd::Engine(EngineMsg::RelayFrame(handle, session, frame)) => {
-                if relay_frame_is_auth(&frame)
+                if relay_frame_needs_wall_clock(&frame)
                     && core.is_current_transport_session(handle, &session)
                 {
                     let tick_effects = core.handle(EngineMsg::Tick(Timestamp::now()));

@@ -2928,6 +2928,45 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiFreshness",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Live",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "MaxAge",
+            discr: None,
+            fields: [
+                Field {
+                    name: "seconds",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "CacheOnly",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp_grammar::Freshness` mirror (#565). Whole seconds are the exact\nprecision of Nostr timestamps and persisted coverage watermarks.",
+    ),
+}
+
+enum Enum {
     name: "FfiIdentityField",
     module_path: "nmp_ffi",
     remote: false,
@@ -5352,9 +5391,18 @@ record Record {
             default: None,
             docstring: None,
         },
+        Field {
+            name: "freshness",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiFreshness",
+            },
+            default: None,
+            docstring: None,
+        },
     ],
     docstring: Some(
-        "The full live-query identity an app declares -- `selection + source +\naccess + cache` (`nmp_grammar::Demand` mirror, #106/#107). `NmpEngine::\nobserve` still accepts a bare [`FfiFilter`] for the common case (the\nstatic `AuthorOutboxes`/`Public` default, #106's `Demand::from_filter`);\nthis is the explicit constructor an app reaches for once it needs to\ndeclare `Pinned` wire authority or a non-`Agnostic` cache mode.",
+        "The full live-query declaration an app supplies -- `selection + source +\naccess + cache + freshness` (`nmp_grammar::Demand` mirror, #106/#107/#565). `NmpEngine::\nobserve` still accepts a bare [`FfiFilter`] for the common case (the\nstatic `AuthorOutboxes`/`Public` default, #106's `Demand::from_filter`);\nthis is the explicit constructor an app reaches for once it needs to\ndeclare `Pinned` wire authority or a non-`Agnostic` cache mode.",
     ),
 }
 

@@ -247,8 +247,17 @@ pub enum FfiCacheMode {
     Strict,
 }
 
-/// The full live-query identity an app declares -- `selection + source +
-/// access + cache` (`nmp_grammar::Demand` mirror, #106/#107). `NmpEngine::
+/// `nmp_grammar::Freshness` mirror (#565). Whole seconds are the exact
+/// precision of Nostr timestamps and persisted coverage watermarks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub enum FfiFreshness {
+    Live,
+    MaxAge { seconds: u64 },
+    CacheOnly,
+}
+
+/// The full live-query declaration an app supplies -- `selection + source +
+/// access + cache + freshness` (`nmp_grammar::Demand` mirror, #106/#107/#565). `NmpEngine::
 /// observe` still accepts a bare [`FfiFilter`] for the common case (the
 /// static `AuthorOutboxes`/`Public` default, #106's `Demand::from_filter`);
 /// this is the explicit constructor an app reaches for once it needs to
@@ -259,6 +268,7 @@ pub struct FfiDemand {
     pub source: FfiSourceAuthority,
     pub access: FfiAccessContext,
     pub cache: FfiCacheMode,
+    pub freshness: FfiFreshness,
 }
 
 /// Window policy on the read noun (#485, `nmp::Window` mirror). One real
