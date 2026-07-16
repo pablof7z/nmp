@@ -229,6 +229,7 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
             payload: WritePayload::Unsigned(unsigned_as_b),
             durability: Durability::AtMostOnce,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         })
         .expect("receipt id allocation");
     assert!(
@@ -255,6 +256,7 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
             payload: WritePayload::Unsigned(unsigned_as_a_while_b_active),
             durability: Durability::AtMostOnce,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         })
         .expect("receipt id allocation");
     assert!(
@@ -279,6 +281,7 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
             payload: WritePayload::Unsigned(unsigned_as_a),
             durability: Durability::AtMostOnce,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         })
         .expect("receipt id allocation");
     assert!(
@@ -326,6 +329,7 @@ fn no_active_account_cannot_select_an_arbitrary_registered_signer() {
             payload: WritePayload::Unsigned(unsigned),
             durability: Durability::AtMostOnce,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         })
         .expect("receipt id allocation");
 
@@ -368,6 +372,7 @@ fn active_a_rejects_b_authored_default_even_when_b_is_registered() {
             )),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         })
         .expect("receipt id allocation");
     assert!(wait_for_status(
@@ -425,6 +430,7 @@ fn stale_a_draft_after_switch_to_b_invokes_neither_signer() {
             payload: WritePayload::Unsigned(composed_as_a),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         })
         .expect("pre-acceptance failure still returns a local status stream");
     match receipt
@@ -474,6 +480,7 @@ fn attaching_matching_signer_rearms_awaiting_intent() {
             )),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         })
         .expect("receipt id allocation");
     assert!(wait_for_status(
@@ -524,6 +531,7 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
             )),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         })
         .expect("receipt id allocation");
     assert!(wait_for_status(
@@ -585,6 +593,7 @@ fn stale_registration_cannot_detach_replacement_for_same_pubkey() {
             )),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         })
         .expect("receipt id allocation");
     assert!(wait_for_status(
@@ -598,6 +607,264 @@ fn stale_registration_cannot_detach_replacement_for_same_pubkey() {
         !handle.remove_signer(registration_b),
         "detaching one registration must be idempotent"
     );
+    handle.shutdown();
+    engine_thread.join();
+}
+
+// ---- explicit per-write identity override (#47) --------------------------
+
+/// Drains `rx` for `window`, panicking if any status matches `forbidden`.
+/// The #47 no-retarget falsifiers need a bounded NEGATIVE observation: after
+/// a read-root change, a pinned parked intent must emit no progress at all.
+fn assert_no_status_within(
+    rx: &Receiver<WriteStatus>,
+    window: Duration,
+    forbidden: impl Fn(&WriteStatus) -> bool,
+) {
+    let deadline = Instant::now() + window;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        match rx.recv_timeout(remaining) {
+            Ok(status) if forbidden(&status) => {
+                panic!("forbidden status arrived within the window: {status:?}")
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
+/// #47 falsifier (a) at the registry seam: with A active and B merely
+/// REGISTERED, a B-authored draft carrying `identity_override: Some(B)`
+/// signs with B's own key -- `Signed` carries the exact id of the frozen
+/// B-authored body, which commits to both author and content -- and the
+/// stored row's promoted event verifies cryptographically. A default
+/// publish immediately after still signs as A, so the override moved
+/// nothing but its own write.
+#[test]
+fn identity_override_signs_as_registered_secondary_without_rerooting_active() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let (engine_thread, handle) = EngineThread::spawn(
+        MemoryStore::new(),
+        FixtureDirectory::new(),
+        10,
+        Default::default(),
+        RelayAdmissionPolicy::default(),
+    )
+    .expect("test engine thread construction");
+    handle
+        .add_signer(LocalKeySigner::new(a.clone()))
+        .expect("local signer has a public key");
+    handle
+        .add_signer(LocalKeySigner::new(b.clone()))
+        .expect("local signer has a public key");
+    handle.set_active_account(Some(a.public_key()));
+
+    let draft = UnsignedEvent::new(
+        b.public_key(),
+        Timestamp::now(),
+        Kind::TextNote,
+        vec![],
+        "published as b while a stays active",
+    );
+    // The frozen body's id commits to author+content; deriving it locally
+    // with B's key is the cryptographic pin the Signed status must match.
+    let expected = draft.clone().sign_with_keys(&b).expect("derive frozen id");
+    let receipt = handle
+        .publish(WriteIntent {
+            payload: WritePayload::Unsigned(draft),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: Some(b.public_key()),
+        })
+        .expect("receipt id allocation");
+    assert!(
+        wait_for_status(&receipt, Duration::from_secs(5), |status| {
+            matches!(status, WriteStatus::Signed(id) if *id == expected.id)
+        }),
+        "the override write must sign as B with the exact frozen body/id"
+    );
+
+    // The promoted row carries B's REAL signature -- fetch it and verify.
+    let (_qh, rows_rx) = handle
+        .subscribe(LiveQuery::from_filter(Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(Binding::Literal(BTreeSet::from([b.public_key().to_hex()]))),
+            ..Filter::default()
+        }))
+        .expect("test subscription construction");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let verified = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break false;
+        }
+        match rows_rx.recv_timeout(remaining) {
+            Ok((deltas, _coverage)) => {
+                if deltas.iter().any(|delta| {
+                    matches!(
+                        delta,
+                        RowDelta::Added(row) if row.event.id == expected.id
+                            && row.event.pubkey == b.public_key()
+                            && row.event.verify().is_ok()
+                    )
+                }) {
+                    break true;
+                }
+            }
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break false,
+        }
+    };
+    assert!(
+        verified,
+        "the promoted row must be B's cryptographically valid event"
+    );
+
+    // Active identity never moved: the default (no-override) path still
+    // roots on A and signs with A's key.
+    let a_draft = UnsignedEvent::new(
+        a.public_key(),
+        Timestamp::now(),
+        Kind::TextNote,
+        vec![],
+        "default path still signs as a",
+    );
+    let receipt_default = handle
+        .publish(WriteIntent {
+            payload: WritePayload::Unsigned(a_draft),
+            durability: Durability::AtMostOnce,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+        })
+        .expect("receipt id allocation");
+    assert!(wait_for_status(
+        &receipt_default,
+        Duration::from_secs(5),
+        |status| matches!(status, WriteStatus::Signed(_))
+    ));
+
+    handle.shutdown();
+    engine_thread.join();
+}
+
+/// #47 falsifier (d): an override naming a pubkey with NO registered
+/// capability is a durable park (`Accepted` then `AwaitingCapability`),
+/// never a silent failure. A later `set_active_account` to a DIFFERENT
+/// registered identity must not retarget the parked intent -- only
+/// registering the override key itself resumes it, and it signs as the
+/// ORIGINAL override pubkey with the exact frozen body.
+#[test]
+fn unregistered_override_parks_durably_and_never_retargets_on_account_switch() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let (engine_thread, handle) = EngineThread::spawn(
+        MemoryStore::new(),
+        FixtureDirectory::new(),
+        10,
+        Default::default(),
+        RelayAdmissionPolicy::default(),
+    )
+    .expect("test engine thread construction");
+    // Only A's capability exists; B is the override target with none.
+    handle
+        .add_signer(LocalKeySigner::new(a.clone()))
+        .expect("local signer has a public key");
+    handle.set_active_account(Some(a.public_key()));
+
+    let draft = UnsignedEvent::new(
+        b.public_key(),
+        Timestamp::now(),
+        Kind::TextNote,
+        vec![],
+        "parked until b's capability exists",
+    );
+    let expected = draft.clone().sign_with_keys(&b).expect("derive frozen id");
+    let receipt = handle
+        .publish(WriteIntent {
+            payload: WritePayload::Unsigned(draft),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: Some(b.public_key()),
+        })
+        .expect("receipt id allocation");
+    assert!(
+        wait_for_status(&receipt, Duration::from_secs(5), |status| {
+            matches!(status, WriteStatus::AwaitingCapability)
+        }),
+        "an override with no registered capability must park, not fail"
+    );
+
+    // Re-rooting the ACTIVE account onto A (whose signer is attached and
+    // eager) must not retarget the parked B-pinned intent: no Signed, no
+    // Failed -- silence.
+    handle.set_active_account(Some(a.public_key()));
+    assert_no_status_within(&receipt, Duration::from_millis(500), |status| {
+        matches!(status, WriteStatus::Signed(_) | WriteStatus::Failed(_))
+    });
+
+    // Registering the override key resumes the SAME intent as B.
+    handle
+        .add_signer(LocalKeySigner::new(b))
+        .expect("local signer has a public key");
+    assert!(
+        wait_for_status(&receipt, Duration::from_secs(5), |status| {
+            matches!(status, WriteStatus::Signed(id) if *id == expected.id)
+        }),
+        "attaching the override key's signer must complete the original write as B"
+    );
+
+    handle.shutdown();
+    engine_thread.join();
+}
+
+/// #47 falsifier (e): an explicit override needs NO active account at all --
+/// logged fully out, a B-authored draft with `identity_override: Some(B)`
+/// and B's registered capability still signs. (Contrast with
+/// [`no_active_account_cannot_select_an_arbitrary_registered_signer`]: the
+/// DEFAULT path in the same state fails closed.)
+#[test]
+fn identity_override_signs_while_logged_out() {
+    let b = Keys::generate();
+    let (engine_thread, handle) = EngineThread::spawn(
+        MemoryStore::new(),
+        FixtureDirectory::new(),
+        10,
+        Default::default(),
+        RelayAdmissionPolicy::default(),
+    )
+    .expect("test engine thread construction");
+    handle
+        .add_signer(LocalKeySigner::new(b.clone()))
+        .expect("local signer has a public key");
+    handle.set_active_account(None);
+
+    let draft = UnsignedEvent::new(
+        b.public_key(),
+        Timestamp::now(),
+        Kind::TextNote,
+        vec![],
+        "logged out, explicit consent",
+    );
+    let expected = draft.clone().sign_with_keys(&b).expect("derive frozen id");
+    let receipt = handle
+        .publish(WriteIntent {
+            payload: WritePayload::Unsigned(draft),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: Some(b.public_key()),
+        })
+        .expect("receipt id allocation");
+    assert!(
+        wait_for_status(&receipt, Duration::from_secs(5), |status| {
+            matches!(status, WriteStatus::Signed(id) if *id == expected.id)
+        }),
+        "an explicit override must not require an active account"
+    );
+
     handle.shutdown();
     engine_thread.join();
 }

@@ -296,6 +296,7 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
             payload: WritePayload::Unsigned(contact_list),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         })
         .expect("receipt id allocation");
 
@@ -1059,6 +1060,7 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
             )),
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
         })
         .expect("receipt id allocation");
     assert!(

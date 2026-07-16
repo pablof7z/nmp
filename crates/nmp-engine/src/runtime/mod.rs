@@ -2550,6 +2550,7 @@ mod relay_worker_reconciliation_tests {
                 payload: WritePayload::Unsigned(unsigned),
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
+                identity_override: None,
             },
             Box::new(NullReceiptSink),
         ));

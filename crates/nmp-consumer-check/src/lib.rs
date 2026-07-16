@@ -85,7 +85,10 @@ pub fn build_derived_index_query() -> LiveQuery {
 /// Proves an unsigned `WriteIntent` is fully constructible from `nmp` alone
 /// -- the advertised unsigned-write path (`UnsignedEvent`/`Kind`/`Tag`/
 /// `Timestamp`). Uses the same arbitrary caller-owned content kind as
-/// [`build_derived_index_query`], never a NIP-01 core kind.
+/// [`build_derived_index_query`], never a NIP-01 core kind. Composes the
+/// default identity contract (`identity_override: None`, #47): this intent
+/// signs as the active account, and the per-write override field is
+/// likewise reachable from `nmp` alone for callers that need it.
 pub fn build_unsigned_intent(author: PublicKey, content: &str) -> WriteIntent {
     let unsigned = UnsignedEvent::new(
         author,
@@ -98,6 +101,7 @@ pub fn build_unsigned_intent(author: PublicKey, content: &str) -> WriteIntent {
         payload: WritePayload::Unsigned(unsigned),
         durability: Durability::Ephemeral,
         routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
     }
 }
 

@@ -561,6 +561,25 @@ pub struct FfiWriteIntent {
     pub payload: FfiWritePayload,
     pub durability: FfiDurability,
     pub routing: FfiWriteRouting,
+    /// `nmp::WriteIntent::identity_override` mirror (#47 Unit A): the
+    /// identity this ONE write is published under, as 64-char hex (the
+    /// module-wide `convert::parse_pubkey` rule every other pubkey input
+    /// here follows) or bech32 `npub` (an identity is the one input an app
+    /// most plausibly holds in display form). `None` -- the default, and
+    /// what every existing caller gets -- means "the active account at
+    /// acceptance time", unchanged.
+    /// `Some` must name exactly the payload's own author; misuse fails
+    /// closed, never silently retargets: a MALFORMED string is a typed
+    /// synchronous [`crate::convert::FfiError::InvalidPublicKey`] before any
+    /// engine call, while a well-formed-but-MISMATCHED override (not the
+    /// draft/event author) is rejected at the engine's acceptance boundary
+    /// as `FfiWriteStatus::Failed` on the receipt stream -- no `Accepted`
+    /// ever precedes it. An override naming a pubkey with no registered
+    /// signer parks as `FfiWriteStatus::AwaitingCapability` (retained, not
+    /// terminated) until that capability attaches; acceptance PINS the
+    /// override, so a later `set_active_account` cannot retarget the write.
+    #[uniffi(default = None)]
+    pub identity_override: Option<String>,
 }
 
 /// One (relay, kind) event count -- `nmp::DiagnosticsSnapshot`'s
