@@ -35,10 +35,10 @@
 //! the two nouns are not just nameable but usable.
 
 use nmp::{
-    AcquisitionEvidence, CoverageInterval, Demand, Derived, DiagnosticsSnapshot, Durability,
-    Filter, FilterCoverageEntry, IdentityField, IndexedTagName, Kind, Lane, LiveQuery, PublicKey,
-    RelayDiagnosticsSnapshot, Selector, Tag, Timestamp, UnsignedEvent, WriteIntent, WritePayload,
-    WriteRouting,
+    AcquisitionEvidence, AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, CoverageInterval, Demand,
+    Derived, DiagnosticsSnapshot, Durability, Filter, FilterCoverageEntry, IdentityField,
+    IndexedTagName, Kind, Lane, LiveQuery, PublicKey, RelayDiagnosticsSnapshot, Selector, Tag,
+    Timestamp, UnsignedEvent, WriteIntent, WritePayload, WriteRouting,
 };
 
 /// The reactive index kind an app might declare its own membership list
@@ -149,17 +149,46 @@ pub fn describe_relay(snapshot: &RelayDiagnosticsSnapshot) -> String {
     )
 }
 
+/// Names `AuthDiagnosticsSnapshot` AND `AuthDiagnosticsPhase` (#8 Wave 5's
+/// facade-owned per-session AUTH read-out) as explicit types, exhaustively
+/// matching every phase -- so dropping either export, or a phase variant,
+/// breaks this `nmp`-only crate rather than merely a doc claim.
+pub fn describe_auth_session(session: &AuthDiagnosticsSnapshot) -> String {
+    let phase: AuthDiagnosticsPhase = session.phase;
+    let phase = match phase {
+        AuthDiagnosticsPhase::AwaitingChallenge => "awaiting challenge",
+        AuthDiagnosticsPhase::AwaitingPolicy => "awaiting policy",
+        AuthDiagnosticsPhase::AwaitingSignature => "awaiting signature",
+        AuthDiagnosticsPhase::AwaitingSend => "awaiting send",
+        AuthDiagnosticsPhase::AwaitingRelayAck => "awaiting relay ack",
+        AuthDiagnosticsPhase::Ready => "ready",
+        AuthDiagnosticsPhase::Denied => "denied",
+        AuthDiagnosticsPhase::Error => "error",
+    };
+    format!(
+        "{} gen {} epoch {:?}: {phase}",
+        session.relay, session.transport_generation, session.epoch_sequence,
+    )
+}
+
 /// Names the TOP-LEVEL `DiagnosticsSnapshot` type itself -- a prior version
 /// of this proof imported `RelayDiagnosticsSnapshot`/`Lane` but never named
 /// `DiagnosticsSnapshot` or `FilterCoverageEntry` anywhere, so the facade
 /// could have dropped either re-export without this crate noticing. This
-/// function's parameter type closes that gap.
+/// function's parameter type closes that gap. It also reads the documented
+/// `auth_sessions` read-out through [`describe_auth_session`].
 pub fn describe_snapshot(snapshot: &DiagnosticsSnapshot) -> String {
     let relays: Vec<String> = snapshot.relays.iter().map(describe_relay).collect();
+    let auth: Vec<String> = snapshot
+        .auth_sessions
+        .iter()
+        .map(describe_auth_session)
+        .collect();
     format!(
-        "{} uncovered authors; relays: [{}]",
+        "{} uncovered authors; relays: [{}]; auth sessions: [{}]",
         snapshot.uncovered_author_count,
         relays.join("; "),
+        auth.join("; "),
     )
 }
 
@@ -206,9 +235,10 @@ mod tests {
     fn engine_two_nouns_are_usable_from_nmp_alone() {
         let engine = Engine::new(EngineConfig::default()).expect("in-memory engine must build");
 
-        let author = engine
+        let account = engine
             .add_account(TEST_SECRET_KEY_HEX)
             .expect("fixed test secret key must parse");
+        let author = account.public_key();
 
         let subscription = engine
             .observe(build_derived_index_query(), None)
@@ -228,6 +258,92 @@ mod tests {
             let _ = describe_snapshot(&snapshot);
         }
 
+        // #8's ratified account model: the registration detaches exactly the
+        // installation it proves, and a second removal is a `false` no-op.
+        assert!(engine
+            .remove_account(&account)
+            .expect("remove_account must be reachable from nmp alone"));
+        assert!(!engine
+            .remove_account(&account)
+            .expect("stale removal must no-op, not error"));
+
+        engine.shutdown();
+    }
+
+    /// An external crate can implement a genuinely asynchronous NIP-42 AUTH
+    /// policy with only its `nmp` dependency (#8 Wave 5): the trait, the
+    /// request getters, the ready/pending operation constructors, the
+    /// pending completion door, and the exact-instance registration
+    /// lifecycle are all reachable from `nmp` alone -- no channel crate and
+    /// no mechanism crate appear in this manifest.
+    #[test]
+    fn external_auth_policy_needs_only_nmp() {
+        use nmp::{
+            AuthPolicy, AuthPolicyDecision, AuthPolicyError, AuthPolicyOp, AuthPolicyRequest,
+            AuthPolicyResolveError,
+        };
+
+        struct ExternalAsyncPolicy;
+
+        impl AuthPolicy for ExternalAsyncPolicy {
+            fn evaluate(&self, request: AuthPolicyRequest) -> AuthPolicyOp {
+                // The request's whole vocabulary is readable from nmp alone.
+                let _identity: PublicKey = request.expected_pubkey();
+                let _wire = format!(
+                    "{} challenged {:?} (gen {}, epoch {})",
+                    request.relay(),
+                    request.challenge(),
+                    request.transport_generation(),
+                    request.epoch_sequence(),
+                );
+                let (completion, operation) = AuthPolicyOp::pending_channel();
+                std::thread::spawn(move || {
+                    let _ = completion.resolve(Ok(AuthPolicyDecision::Deny {
+                        reason: "external asynchronous refusal".to_string(),
+                    }));
+                });
+                operation
+            }
+        }
+
+        // The ready constructors and both result arms are constructible.
+        let _ready = AuthPolicyOp::allow();
+        let _denied = AuthPolicyOp::deny("not now");
+        let _failed = AuthPolicyOp::ready(Err(AuthPolicyError::Technical {
+            reason: "policy backend offline".to_string(),
+        }));
+
+        // The pending door's typed refusals are observable.
+        let (sender, operation) = AuthPolicyOp::pending_channel();
+        drop(operation);
+        assert!(matches!(
+            sender.resolve(Ok(AuthPolicyDecision::Allow)),
+            Err(AuthPolicyResolveError::ReceiverDropped(Ok(
+                AuthPolicyDecision::Allow
+            )))
+        ));
+
+        let engine = Engine::new(EngineConfig::default()).expect("in-memory engine must build");
+        let identity: PublicKey =
+            "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+                .parse()
+                .expect("fixed public key must parse");
+        let registration = engine
+            .add_auth_policy(identity, ExternalAsyncPolicy)
+            .expect("policy must register from nmp alone");
+        assert_eq!(registration.expected_public_key(), identity);
+        let replacement = engine
+            .add_auth_policy(identity, ExternalAsyncPolicy)
+            .expect("replacement must register");
+        assert!(
+            !engine
+                .remove_auth_policy(&registration)
+                .expect("stale removal must be a typed no-op"),
+            "a stale registration must never detach its replacement"
+        );
+        assert!(engine
+            .remove_auth_policy(&replacement)
+            .expect("exact registration must detach"));
         engine.shutdown();
     }
 
