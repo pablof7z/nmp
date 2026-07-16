@@ -1,13 +1,12 @@
 //! UniFFI projection of the optional, UI-blind content semantic layer.
 
 use nmp_content::{
-    BlockKind, ClaimDecision, ContentDiagnostic, ContentSyntax, HydrationPolicy, InlineNode,
-    InlineStyle, ReferencePlacement, ReferenceTarget, ResolutionDecision, SourceRange,
+    BlockKind, ContentDiagnostic, ContentSyntax, InlineNode, InlineStyle, ReferencePlacement,
+    SourceRange,
 };
 use uniffi::{Enum, Record};
 
-use crate::convert::demand_to_ffi;
-use crate::types::{FfiDemand, FfiRow};
+use crate::reference::{target_to_ffi, FfiReferenceTarget};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub enum FfiContentSyntax {
@@ -53,26 +52,6 @@ pub enum FfiInlineStyle {
 pub enum FfiReferencePlacement {
     Inline,
     Standalone,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Enum)]
-pub enum FfiReferenceTarget {
-    Profile {
-        pubkey: String,
-        relay_hints: Vec<String>,
-    },
-    Event {
-        id: String,
-        author_hint: Option<String>,
-        kind_hint: Option<u16>,
-        relay_hints: Vec<String>,
-    },
-    Address {
-        kind: u16,
-        author: String,
-        identifier: String,
-        relay_hints: Vec<String>,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
@@ -142,162 +121,12 @@ pub struct FfiContentDocument {
     pub diagnostics: Vec<FfiContentDiagnostic>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Record)]
-pub struct FfiProfileMetadata {
-    pub pubkey: String,
-    pub name: Option<String>,
-    pub display_name: Option<String>,
-    pub about: Option<String>,
-    pub picture: Option<String>,
-    pub banner: Option<String>,
-    pub nip05: Option<String>,
-    pub lud06: Option<String>,
-    pub lud16: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Record)]
-pub struct FfiArticle {
-    pub event_id: String,
-    pub author: String,
-    pub created_at: u64,
-    pub identifier: String,
-    pub title: Option<String>,
-    pub summary: Option<String>,
-    pub image: Option<String>,
-    pub published_at: Option<u64>,
-    pub content: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Record)]
-pub struct FfiReferenceDemandPlan {
-    pub target_key: String,
-    pub canonical: FfiDemand,
-    pub helpers: Vec<FfiDemand>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Record)]
-pub struct FfiContentHydrationPolicy {
-    pub max_active_references: u32,
-    pub max_resolved_references: u32,
-    pub max_depth: u8,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Enum)]
-pub enum FfiContentClaimDecision {
-    Acquire,
-    Cycle { target_key: String },
-    DepthLimit { maximum: u8 },
-    ActiveLimit { maximum: u32 },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
-pub enum FfiContentResolutionDecision {
-    Accept,
-    ResolvedLimit { maximum: u32 },
-}
-
 #[uniffi::export]
 pub fn parse_nostr_content(content: String, syntax: FfiContentSyntax) -> FfiContentDocument {
     document_to_ffi(nmp_content::parse_content(
         &content,
         syntax_from_ffi(syntax),
     ))
-}
-
-#[uniffi::export]
-pub fn decode_profile_resource(row: FfiRow) -> FfiProfileMetadata {
-    let profile = nmp_content::decode_profile_from_raw(&row.pubkey, &row.content);
-    FfiProfileMetadata {
-        pubkey: profile.pubkey,
-        name: profile.name,
-        display_name: profile.display_name,
-        about: profile.about,
-        picture: profile.picture,
-        banner: profile.banner,
-        nip05: profile.nip05,
-        lud06: profile.lud06,
-        lud16: profile.lud16,
-    }
-}
-
-#[uniffi::export]
-pub fn decode_article_resource(row: FfiRow) -> FfiArticle {
-    let article = nmp_content::decode_article_from_raw(
-        &row.id,
-        &row.pubkey,
-        row.created_at,
-        row.tags.iter().map(Vec::as_slice),
-        &row.content,
-    );
-    FfiArticle {
-        event_id: article.event_id,
-        author: article.author,
-        created_at: article.created_at,
-        identifier: article.identifier,
-        title: article.title,
-        summary: article.summary,
-        image: article.image,
-        published_at: article.published_at,
-        content: article.content,
-    }
-}
-
-#[uniffi::export]
-pub fn content_reference_demand_plan(target: FfiReferenceTarget) -> FfiReferenceDemandPlan {
-    let plan = target_from_ffi(target).demand_plan();
-    FfiReferenceDemandPlan {
-        target_key: plan.target_key,
-        canonical: demand_to_ffi(plan.canonical),
-        helpers: plan.helpers.into_iter().map(demand_to_ffi).collect(),
-    }
-}
-
-#[uniffi::export]
-pub fn evaluate_content_claim(
-    target_key: String,
-    path: Vec<String>,
-    depth: u8,
-    active_references: u32,
-    policy: FfiContentHydrationPolicy,
-) -> FfiContentClaimDecision {
-    match nmp_content::evaluate_claim(
-        &target_key,
-        &path,
-        depth,
-        active_references,
-        hydration_policy_from_ffi(policy),
-    ) {
-        ClaimDecision::Acquire => FfiContentClaimDecision::Acquire,
-        ClaimDecision::Cycle { target_key } => FfiContentClaimDecision::Cycle { target_key },
-        ClaimDecision::DepthLimit { maximum } => FfiContentClaimDecision::DepthLimit { maximum },
-        ClaimDecision::ActiveLimit { maximum } => FfiContentClaimDecision::ActiveLimit { maximum },
-    }
-}
-
-#[uniffi::export]
-pub fn evaluate_content_resolution(
-    target_already_resolved: bool,
-    resolved_references: u32,
-    policy: FfiContentHydrationPolicy,
-) -> FfiContentResolutionDecision {
-    match nmp_content::evaluate_resolution(
-        target_already_resolved,
-        resolved_references,
-        hydration_policy_from_ffi(policy),
-    ) {
-        ResolutionDecision::Accept => FfiContentResolutionDecision::Accept,
-        ResolutionDecision::ResolvedLimit { maximum } => {
-            FfiContentResolutionDecision::ResolvedLimit { maximum }
-        }
-    }
-}
-
-fn hydration_policy_from_ffi(value: FfiContentHydrationPolicy) -> HydrationPolicy {
-    HydrationPolicy {
-        max_active_references: value.max_active_references,
-        max_resolved_references: value.max_resolved_references,
-        max_depth: value.max_depth,
-    }
 }
 
 fn syntax_from_ffi(value: FfiContentSyntax) -> ContentSyntax {
@@ -353,74 +182,6 @@ fn placement_to_ffi(value: ReferencePlacement) -> FfiReferencePlacement {
     match value {
         ReferencePlacement::Inline => FfiReferencePlacement::Inline,
         ReferencePlacement::Standalone => FfiReferencePlacement::Standalone,
-    }
-}
-
-fn target_to_ffi(value: ReferenceTarget) -> FfiReferenceTarget {
-    match value {
-        ReferenceTarget::Profile {
-            pubkey,
-            relay_hints,
-        } => FfiReferenceTarget::Profile {
-            pubkey,
-            relay_hints,
-        },
-        ReferenceTarget::Event {
-            id,
-            author_hint,
-            kind_hint,
-            relay_hints,
-        } => FfiReferenceTarget::Event {
-            id,
-            author_hint,
-            kind_hint,
-            relay_hints,
-        },
-        ReferenceTarget::Address {
-            kind,
-            author,
-            identifier,
-            relay_hints,
-        } => FfiReferenceTarget::Address {
-            kind,
-            author,
-            identifier,
-            relay_hints,
-        },
-    }
-}
-
-fn target_from_ffi(value: FfiReferenceTarget) -> ReferenceTarget {
-    match value {
-        FfiReferenceTarget::Profile {
-            pubkey,
-            relay_hints,
-        } => ReferenceTarget::Profile {
-            pubkey,
-            relay_hints,
-        },
-        FfiReferenceTarget::Event {
-            id,
-            author_hint,
-            kind_hint,
-            relay_hints,
-        } => ReferenceTarget::Event {
-            id,
-            author_hint,
-            kind_hint,
-            relay_hints,
-        },
-        FfiReferenceTarget::Address {
-            kind,
-            author,
-            identifier,
-            relay_hints,
-        } => ReferenceTarget::Address {
-            kind,
-            author,
-            identifier,
-            relay_hints,
-        },
     }
 }
 
@@ -532,20 +293,5 @@ mod tests {
             .inlines
             .iter()
             .any(|node| matches!(node, FfiInlineNode::Reference { .. })));
-    }
-
-    #[test]
-    fn ffi_profile_decode_is_infallible() {
-        let profile = decode_profile_resource(FfiRow {
-            id: "id".to_string(),
-            pubkey: "pk".to_string(),
-            created_at: 1,
-            kind: 0,
-            tags: vec![],
-            content: r#"{"display_name":"Alice"}"#.to_string(),
-            sig: "sig".to_string(),
-            sources: vec![],
-        });
-        assert_eq!(profile.display_name.as_deref(), Some("Alice"));
     }
 }

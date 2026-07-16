@@ -1669,12 +1669,10 @@ dependencies = [
 name = "nmp-content"
 version = "0.1.0"
 dependencies = [
- "nmp",
- "nostr 0.44.4",
+ "nmp-grammar",
  "proptest",
  "pulldown-cmark",
  "regex",
- "serde_json",
 ]
 
 [[package]]
