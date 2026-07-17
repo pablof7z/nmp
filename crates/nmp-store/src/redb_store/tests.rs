@@ -1580,8 +1580,18 @@ fn cardinality_planner_selects_smallest_real_tag_bucket_for_complete_query() {
 
     let dir = tempfile::tempdir().unwrap();
     let mut store = RedbStore::open(dir.path().join("cardinality-plan.redb")).unwrap();
-    let keys = nostr::Keys::generate();
-    let member = nostr::Keys::generate().public_key().to_hex();
+    let write_txn = store.db.begin_write().unwrap();
+    {
+        let mut sample_meta = write_txn.open_table(INDEX_CARDINALITY_SAMPLE_META).unwrap();
+        sample_meta
+            .insert(INDEX_CARDINALITY_SAMPLE_KEY, [0x42; 32].as_slice())
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+    let keys = nostr::Keys::new(nostr::SecretKey::from_slice(&[1; 32]).unwrap());
+    let member = nostr::Keys::new(nostr::SecretKey::from_slice(&[2; 32]).unwrap())
+        .public_key()
+        .to_hex();
     let relay = RelayUrl::parse("wss://cardinality.example").unwrap();
     let h = SingleLetterTag::lowercase(Alphabet::H);
     let p = SingleLetterTag::lowercase(Alphabet::P);
@@ -1627,7 +1637,10 @@ fn cardinality_planner_selects_smallest_real_tag_bucket_for_complete_query() {
     let read_txn = store.db.begin_read().unwrap();
     let plan = plan_ordered_query(&read_txn, &filter).unwrap();
     assert_eq!(plan.index, OrderedIndex::Tag(p));
-    assert_eq!(plan.estimated_rows, 6);
+    assert!(
+        plan.estimated_rows <= 6,
+        "sampled physical count cannot exceed the real bucket"
+    );
     drop(read_txn);
 
     store.reset_query_work();
@@ -1635,6 +1648,23 @@ fn cardinality_planner_selects_smallest_real_tag_bucket_for_complete_query() {
     assert_eq!(rows.len(), 5);
     assert_eq!(store.query_work(), (6, 6, 5));
     assert_canonical_integrity(&store.db);
+}
+
+#[test]
+fn cardinality_sampling_is_keyed_stable_and_near_one_sixteenth() {
+    let sample_key = [0x42; 32];
+    let sampled = (0..65_536u64)
+        .filter(|value| {
+            let mut id = [0u8; 32];
+            id[24..].copy_from_slice(&value.to_be_bytes());
+            event_is_cardinality_sample(&sample_key, &EventId::from_byte_array(id))
+        })
+        .count();
+    assert_eq!(sampled, 4_053);
+    assert!(!event_is_cardinality_sample(
+        &[0x43; 32],
+        &EventId::from_byte_array([0; 32])
+    ));
 }
 
 #[test]
@@ -1735,6 +1765,8 @@ fn missing_cardinality_epoch_rebuilds_atomically_from_fixed_ordered_indexes() {
     {
         let mut meta = write_txn.open_table(INDEX_CARDINALITY_META).unwrap();
         meta.remove(INDEX_CARDINALITY_VERSION_KEY).unwrap();
+        let mut sample_meta = write_txn.open_table(INDEX_CARDINALITY_SAMPLE_META).unwrap();
+        sample_meta.remove(INDEX_CARDINALITY_SAMPLE_KEY).unwrap();
         let mut cardinality = write_txn.open_table(INDEX_CARDINALITY).unwrap();
         cardinality
             .insert(global_cardinality_key().as_slice(), 999)
@@ -1750,6 +1782,17 @@ fn missing_cardinality_epoch_rebuilds_atomically_from_fixed_ordered_indexes() {
         "the unhealthy sidecar is rebuilt in one write transaction"
     );
     assert_eq!(reopened.query(&Filter::new()).unwrap().len(), 7);
+    let read_txn = reopened.db.begin_read().unwrap();
+    let sample_meta = read_txn.open_table(INDEX_CARDINALITY_SAMPLE_META).unwrap();
+    assert_eq!(
+        sample_meta
+            .get(INDEX_CARDINALITY_SAMPLE_KEY)
+            .unwrap()
+            .unwrap()
+            .value()
+            .len(),
+        32
+    );
     assert_canonical_integrity(&reopened.db);
 }
 

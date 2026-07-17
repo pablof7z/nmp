@@ -133,6 +133,7 @@ fn variant_name(variant: StoreBenchVariant) -> &'static str {
         StoreBenchVariant::AllOrdered => "all_ordered",
         StoreBenchVariant::AllOrderedTag => "all_ordered_tag",
         StoreBenchVariant::AllIndexesCardinality => "all_indexes_cardinality",
+        StoreBenchVariant::AllIndexesSampledCardinality => "all_indexes_sampled_cardinality",
         StoreBenchVariant::FullGoverned => "full_governed",
     }
 }
@@ -149,6 +150,7 @@ fn parse_variant(value: &str) -> Result<StoreBenchVariant, String> {
         StoreBenchVariant::AllOrdered,
         StoreBenchVariant::AllOrderedTag,
         StoreBenchVariant::AllIndexesCardinality,
+        StoreBenchVariant::AllIndexesSampledCardinality,
         StoreBenchVariant::FullGoverned,
     ]
     .into_iter()
@@ -405,6 +407,10 @@ fn matrix_cells() -> Vec<Cell> {
         },
         Cell {
             variant: StoreBenchVariant::AllIndexesCardinality,
+            batch_size: 4_096,
+        },
+        Cell {
+            variant: StoreBenchVariant::AllIndexesSampledCardinality,
             batch_size: 4_096,
         },
     ];

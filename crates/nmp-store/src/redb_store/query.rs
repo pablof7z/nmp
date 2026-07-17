@@ -8,9 +8,9 @@ use super::schema::{
 #[cfg(test)]
 use super::schema::{
     RelayKey, ADDR_INDEX, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS, EVENT_STORE_META,
-    EXPIRATION_INDEX, INDEX_CARDINALITY_META, INDEX_CARDINALITY_VERSION,
-    INDEX_CARDINALITY_VERSION_KEY, NEXT_EVENT_KEY, NEXT_RELAY_KEY, RELAYS, RELAY_KEYS, RELAY_META,
-    RELAY_REFS,
+    EXPIRATION_INDEX, INDEX_CARDINALITY_META, INDEX_CARDINALITY_SAMPLE_KEY,
+    INDEX_CARDINALITY_SAMPLE_META, INDEX_CARDINALITY_VERSION, INDEX_CARDINALITY_VERSION_KEY,
+    NEXT_EVENT_KEY, NEXT_RELAY_KEY, RELAYS, RELAY_KEYS, RELAY_META, RELAY_REFS,
 };
 #[cfg(test)]
 use super::{address_key_for, binary_event, Database, RelayUrl, StoredEventView, TableDefinition};
@@ -179,6 +179,11 @@ pub(super) const CARDINALITY_AUTHOR: u8 = 1;
 pub(super) const CARDINALITY_KIND: u8 = 2;
 pub(super) const CARDINALITY_AUTHOR_KIND: u8 = 3;
 pub(super) const CARDINALITY_TAG: u8 = 4;
+pub(super) const CARDINALITY_SAMPLE_MASK: u8 = 0x0f;
+
+pub(super) fn event_is_cardinality_sample(sample_key: &[u8; 32], id: &EventId) -> bool {
+    blake3::keyed_hash(sample_key, id.as_bytes()).as_bytes()[0] & CARDINALITY_SAMPLE_MASK == 0
+}
 
 pub(super) fn cardinality_key(namespace: u8, prefix: &[u8]) -> Vec<u8> {
     let mut key = Vec::with_capacity(1 + prefix.len());
@@ -239,7 +244,14 @@ pub(super) fn tag_index_key(
 }
 
 #[cfg(test)]
-pub(super) fn add_event_cardinalities(counts: &mut BTreeMap<Vec<u8>, u64>, event: &Event) {
+pub(super) fn add_event_cardinalities(
+    counts: &mut BTreeMap<Vec<u8>, u64>,
+    sample_key: &[u8; 32],
+    event: &Event,
+) {
+    if !event_is_cardinality_sample(sample_key, &event.id) {
+        return;
+    }
     let mut increment = |key: Vec<u8>| {
         let count = counts.entry(key).or_default();
         *count = count.checked_add(1).expect("event cardinality fits in u64");
@@ -264,10 +276,14 @@ pub(super) fn count_fixed_ordered_index_prefixes<const N: usize>(
     counts: &mut BTreeMap<Vec<u8>, u64>,
     index: &redb::Table<'_, &[u8; N], EventKey>,
     namespace: u8,
+    sample_key: &[u8; 32],
 ) -> Result<(), redb::StorageError> {
     for entry in index.iter()? {
         let (key, _event_key) = entry?;
         let key = key.value();
+        if !event_is_cardinality_sample(sample_key, &ordered_index_event_id(key)) {
+            continue;
+        }
         let prefix_len = key
             .len()
             .checked_sub(40)
@@ -286,10 +302,14 @@ pub(super) fn count_variable_ordered_index_prefixes(
     counts: &mut BTreeMap<Vec<u8>, u64>,
     index: &redb::Table<'_, &[u8], EventKey>,
     namespace: u8,
+    sample_key: &[u8; 32],
 ) -> Result<(), redb::StorageError> {
     for entry in index.iter()? {
         let (key, _event_key) = entry?;
         let key = key.value();
+        if !event_is_cardinality_sample(sample_key, &ordered_index_event_id(key)) {
+            continue;
+        }
         let prefix_len = key
             .len()
             .checked_sub(40)
@@ -315,6 +335,7 @@ pub(super) fn rebuild_index_cardinality(
     by_author_kind: &redb::Table<'_, &[u8; 74], EventKey>,
     by_tag: &redb::Table<'_, &[u8], EventKey>,
     cardinality: &mut redb::Table<'_, &[u8], u64>,
+    sample_key: &[u8; 32],
 ) -> Result<(), redb::StorageError> {
     let old_keys = cardinality
         .iter()?
@@ -325,11 +346,16 @@ pub(super) fn rebuild_index_cardinality(
     }
 
     let mut counts = BTreeMap::new();
-    count_fixed_ordered_index_prefixes(&mut counts, by_created_at, CARDINALITY_GLOBAL)?;
-    count_fixed_ordered_index_prefixes(&mut counts, by_author, CARDINALITY_AUTHOR)?;
-    count_fixed_ordered_index_prefixes(&mut counts, by_kind, CARDINALITY_KIND)?;
-    count_fixed_ordered_index_prefixes(&mut counts, by_author_kind, CARDINALITY_AUTHOR_KIND)?;
-    count_variable_ordered_index_prefixes(&mut counts, by_tag, CARDINALITY_TAG)?;
+    count_fixed_ordered_index_prefixes(&mut counts, by_created_at, CARDINALITY_GLOBAL, sample_key)?;
+    count_fixed_ordered_index_prefixes(&mut counts, by_author, CARDINALITY_AUTHOR, sample_key)?;
+    count_fixed_ordered_index_prefixes(&mut counts, by_kind, CARDINALITY_KIND, sample_key)?;
+    count_fixed_ordered_index_prefixes(
+        &mut counts,
+        by_author_kind,
+        CARDINALITY_AUTHOR_KIND,
+        sample_key,
+    )?;
+    count_variable_ordered_index_prefixes(&mut counts, by_tag, CARDINALITY_TAG, sample_key)?;
     for (key, count) in counts {
         cardinality.insert(key.as_slice(), count)?;
     }
@@ -431,6 +457,16 @@ pub(super) fn assert_canonical_integrity(db: &Database) {
             .value(),
         INDEX_CARDINALITY_VERSION
     );
+    let cardinality_sample_meta = read_txn
+        .open_table(INDEX_CARDINALITY_SAMPLE_META)
+        .expect("audit cardinality sample meta");
+    let cardinality_sample_key: [u8; 32] = cardinality_sample_meta
+        .get(INDEX_CARDINALITY_SAMPLE_KEY)
+        .expect("audit cardinality sample key")
+        .expect("cardinality sample key exists")
+        .value()
+        .try_into()
+        .expect("cardinality sample key is 32 bytes");
 
     let mut canonical = BTreeMap::new();
     for entry in events.iter().expect("iterate audit events") {
@@ -556,7 +592,7 @@ pub(super) fn assert_canonical_integrity(db: &Database) {
     let mut expected_expiration = BTreeSet::new();
     let mut expected_cardinality = BTreeMap::new();
     for (&event_key, event) in &canonical {
-        add_event_cardinalities(&mut expected_cardinality, event);
+        add_event_cardinalities(&mut expected_cardinality, &cardinality_sample_key, event);
         expected_created.insert((created_at_key(event).to_vec(), event_key));
         expected_author.insert((by_author_key(event).to_vec(), event_key));
         expected_kind.insert((by_kind_key(event).to_vec(), event_key));
@@ -1006,19 +1042,22 @@ pub(super) fn insert_query_index_rows(
         .insert(&author_kind, event_key)
         .map_err(persist_err)?;
     insert_tag_index_rows(&mut indexes.by_tag, event, event_key).map_err(persist_err)?;
-    canonical.adjust_cardinality(global_cardinality_key(), 1)?;
-    canonical.adjust_cardinality(author_cardinality_key(&event.pubkey), 1)?;
-    canonical.adjust_cardinality(kind_cardinality_key(event.kind), 1)?;
-    canonical.adjust_cardinality(author_kind_cardinality_key(&event.pubkey, event.kind), 1)?;
-    let mut tags = BTreeSet::new();
-    for tag in event.tags.iter() {
-        let (Some(single_letter), Some(value)) = (tag.single_letter_tag(), tag.content()) else {
-            continue;
-        };
-        tags.insert(tag_cardinality_key(single_letter, value));
-    }
-    for key in tags {
-        canonical.adjust_cardinality(key, 1)?;
+    if event_is_cardinality_sample(&canonical.cardinality_sample_key, &event.id) {
+        canonical.adjust_cardinality(global_cardinality_key(), 1)?;
+        canonical.adjust_cardinality(author_cardinality_key(&event.pubkey), 1)?;
+        canonical.adjust_cardinality(kind_cardinality_key(event.kind), 1)?;
+        canonical.adjust_cardinality(author_kind_cardinality_key(&event.pubkey, event.kind), 1)?;
+        let mut tags = BTreeSet::new();
+        for tag in event.tags.iter() {
+            let (Some(single_letter), Some(value)) = (tag.single_letter_tag(), tag.content())
+            else {
+                continue;
+            };
+            tags.insert(tag_cardinality_key(single_letter, value));
+        }
+        for key in tags {
+            canonical.adjust_cardinality(key, 1)?;
+        }
     }
     #[cfg(feature = "bench-instrumentation")]
     crate::ingest_attribution::index_insert(started.elapsed());
@@ -1045,19 +1084,22 @@ pub(super) fn remove_query_index_rows(
         .remove(&author_kind)
         .map_err(persist_err)?;
     remove_tag_index_rows(&mut indexes.by_tag, event).map_err(persist_err)?;
-    canonical.adjust_cardinality(global_cardinality_key(), -1)?;
-    canonical.adjust_cardinality(author_cardinality_key(&event.pubkey), -1)?;
-    canonical.adjust_cardinality(kind_cardinality_key(event.kind), -1)?;
-    canonical.adjust_cardinality(author_kind_cardinality_key(&event.pubkey, event.kind), -1)?;
-    let mut tags = BTreeSet::new();
-    for tag in event.tags.iter() {
-        let (Some(single_letter), Some(value)) = (tag.single_letter_tag(), tag.content()) else {
-            continue;
-        };
-        tags.insert(tag_cardinality_key(single_letter, value));
-    }
-    for key in tags {
-        canonical.adjust_cardinality(key, -1)?;
+    if event_is_cardinality_sample(&canonical.cardinality_sample_key, &event.id) {
+        canonical.adjust_cardinality(global_cardinality_key(), -1)?;
+        canonical.adjust_cardinality(author_cardinality_key(&event.pubkey), -1)?;
+        canonical.adjust_cardinality(kind_cardinality_key(event.kind), -1)?;
+        canonical.adjust_cardinality(author_kind_cardinality_key(&event.pubkey, event.kind), -1)?;
+        let mut tags = BTreeSet::new();
+        for tag in event.tags.iter() {
+            let (Some(single_letter), Some(value)) = (tag.single_letter_tag(), tag.content())
+            else {
+                continue;
+            };
+            tags.insert(tag_cardinality_key(single_letter, value));
+        }
+        for key in tags {
+            canonical.adjust_cardinality(key, -1)?;
+        }
     }
     Ok(())
 }
