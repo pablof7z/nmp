@@ -73,7 +73,8 @@ pub use persistent_store_lifetime::RedbStoreResetError;
 pub use redb_store::RedbStore;
 #[cfg(feature = "bench-instrumentation")]
 pub use redb_store::{
-    prepare_equivalent_store_corpus, run_prepared_redb_store_bench, run_store_bench_variant,
+    prepare_equivalent_store_corpus, run_fjall_governed_ingest_bench,
+    run_prepared_redb_store_bench, run_store_bench_variant, FjallGovernedIngestMetrics,
     StoreBenchAttribution, StoreBenchMetrics, StoreBenchPreparedBatch, StoreBenchPreparedCorpus,
     StoreBenchPreparedMetrics, StoreBenchPreparedRecord, StoreBenchPreparedTable,
     StoreBenchProcessCounters, StoreBenchVariant,
