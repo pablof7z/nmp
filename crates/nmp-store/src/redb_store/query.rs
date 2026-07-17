@@ -2,8 +2,7 @@ use super::canonical::CanonicalWriteTables;
 #[cfg(test)]
 use super::canonical::{observation_event_key, observation_relay_key};
 use super::schema::{
-    persist_err, EventKey, BY_AUTHOR, BY_AUTHOR_KIND, BY_CREATED_AT, BY_KIND, BY_TAG,
-    INDEX_CARDINALITY,
+    persist_err, EventKey, BY_AUTHOR, BY_CREATED_AT, BY_KIND, BY_TAG, INDEX_CARDINALITY,
 };
 #[cfg(test)]
 use super::schema::{
@@ -160,6 +159,7 @@ pub(super) fn by_kind_prefix(kind: Kind) -> Vec<u8> {
     kind.as_u16().to_be_bytes().to_vec()
 }
 
+#[cfg(feature = "bench-instrumentation")]
 pub(super) fn by_author_kind_key(event: &Event) -> [u8; 74] {
     let mut prefix = [0; 34];
     prefix[..32].copy_from_slice(event.pubkey.as_bytes());
@@ -167,17 +167,9 @@ pub(super) fn by_author_kind_key(event: &Event) -> [u8; 74] {
     ordered_fixed_key(&prefix, event.created_at, &event.id)
 }
 
-pub(super) fn by_author_kind_prefix(author: &PublicKey, kind: Kind) -> Vec<u8> {
-    let mut prefix = Vec::with_capacity(34);
-    prefix.extend_from_slice(author.as_bytes());
-    prefix.extend_from_slice(&kind.as_u16().to_be_bytes());
-    prefix
-}
-
 pub(super) const CARDINALITY_GLOBAL: u8 = 0;
 pub(super) const CARDINALITY_AUTHOR: u8 = 1;
 pub(super) const CARDINALITY_KIND: u8 = 2;
-pub(super) const CARDINALITY_AUTHOR_KIND: u8 = 3;
 pub(super) const CARDINALITY_TAG: u8 = 4;
 pub(super) const CARDINALITY_SAMPLE_MASK: u8 = 0x0f;
 
@@ -215,13 +207,6 @@ pub(super) fn author_cardinality_key(author: &PublicKey) -> Vec<u8> {
 
 pub(super) fn kind_cardinality_key(kind: Kind) -> Vec<u8> {
     cardinality_key(CARDINALITY_KIND, &kind.as_u16().to_be_bytes())
-}
-
-pub(super) fn author_kind_cardinality_key(author: &PublicKey, kind: Kind) -> Vec<u8> {
-    cardinality_key(
-        CARDINALITY_AUTHOR_KIND,
-        &by_author_kind_prefix(author, kind),
-    )
 }
 
 pub(super) fn tag_cardinality_key(tag: SingleLetterTag, value: &str) -> Vec<u8> {
@@ -272,7 +257,6 @@ pub(super) fn add_event_cardinalities(
     increment(global_cardinality_key());
     increment(author_cardinality_key(&event.pubkey));
     increment(kind_cardinality_key(event.kind));
-    increment(author_kind_cardinality_key(&event.pubkey, event.kind));
     let mut tags = BTreeSet::new();
     for tag in event.tags.iter() {
         let (Some(single_letter), Some(value)) = (tag.single_letter_tag(), tag.content()) else {
@@ -345,7 +329,6 @@ pub(super) fn rebuild_index_cardinality(
     by_created_at: &redb::Table<'_, &[u8; 40], EventKey>,
     by_author: &redb::Table<'_, &[u8; 72], EventKey>,
     by_kind: &redb::Table<'_, &[u8; 42], EventKey>,
-    by_author_kind: &redb::Table<'_, &[u8; 74], EventKey>,
     by_tag: &redb::Table<'_, &[u8], EventKey>,
     cardinality: &mut redb::Table<'_, &[u8], u64>,
     sample_key: &[u8; 32],
@@ -362,12 +345,6 @@ pub(super) fn rebuild_index_cardinality(
     count_fixed_ordered_index_prefixes(&mut counts, by_created_at, CARDINALITY_GLOBAL, sample_key)?;
     count_fixed_ordered_index_prefixes(&mut counts, by_author, CARDINALITY_AUTHOR, sample_key)?;
     count_fixed_ordered_index_prefixes(&mut counts, by_kind, CARDINALITY_KIND, sample_key)?;
-    count_fixed_ordered_index_prefixes(
-        &mut counts,
-        by_author_kind,
-        CARDINALITY_AUTHOR_KIND,
-        sample_key,
-    )?;
     count_variable_ordered_index_prefixes(&mut counts, by_tag, CARDINALITY_TAG, sample_key)?;
     for (key, count) in counts {
         cardinality.insert(key.as_slice(), count)?;
@@ -599,7 +576,6 @@ pub(super) fn assert_canonical_integrity(db: &Database) {
     let mut expected_created = BTreeSet::new();
     let mut expected_author = BTreeSet::new();
     let mut expected_kind = BTreeSet::new();
-    let mut expected_author_kind = BTreeSet::new();
     let mut expected_tag = BTreeSet::new();
     let mut expected_address = BTreeSet::new();
     let mut expected_expiration = BTreeSet::new();
@@ -609,7 +585,6 @@ pub(super) fn assert_canonical_integrity(db: &Database) {
         expected_created.insert((created_at_key(event).to_vec(), event_key));
         expected_author.insert((by_author_key(event).to_vec(), event_key));
         expected_kind.insert((by_kind_key(event).to_vec(), event_key));
-        expected_author_kind.insert((by_author_kind_key(event).to_vec(), event_key));
         for tag in event.tags.iter() {
             let (Some(single_letter), Some(value)) = (tag.single_letter_tag(), tag.content())
             else {
@@ -633,10 +608,6 @@ pub(super) fn assert_canonical_integrity(db: &Database) {
     );
     assert_eq!(fixed_ordered_rows(&read_txn, BY_AUTHOR), expected_author);
     assert_eq!(fixed_ordered_rows(&read_txn, BY_KIND), expected_kind);
-    assert_eq!(
-        fixed_ordered_rows(&read_txn, BY_AUTHOR_KIND),
-        expected_author_kind
-    );
     assert_eq!(variable_ordered_rows(&read_txn, BY_TAG), expected_tag);
     let actual_cardinality = cardinality
         .iter()
@@ -807,7 +778,6 @@ pub(super) enum OrderedIndex {
     Global,
     Author,
     Kind,
-    AuthorKind,
     Tag(SingleLetterTag),
 }
 
@@ -817,18 +787,16 @@ impl OrderedIndex {
             Self::Global => IndexedMatch::None,
             Self::Author => IndexedMatch::Author,
             Self::Kind => IndexedMatch::Kind,
-            Self::AuthorKind => IndexedMatch::AuthorKind,
             Self::Tag(tag) => IndexedMatch::Tag(tag),
         }
     }
 
     pub(super) fn tie_rank(self) -> u8 {
         match self {
-            Self::AuthorKind => 0,
-            Self::Author => 1,
-            Self::Tag(_) => 2,
-            Self::Kind => 3,
-            Self::Global => 4,
+            Self::Author => 0,
+            Self::Tag(_) => 1,
+            Self::Kind => 2,
+            Self::Global => 3,
         }
     }
 }
@@ -846,11 +814,6 @@ pub(super) struct OrderedWindow {
     pub(super) until: u64,
     pub(super) before: Option<EventCursor>,
 }
-
-// A composite author×kind index is useful only while its OR-range fan-out
-// remains bounded. Public `Filter` values are not trusted to respect relay
-// subscription limits, so never allocate an unbounded Cartesian product.
-pub(super) const MAX_COMPOSITE_QUERY_RANGES: usize = 4_096;
 
 pub(super) fn cardinality_of(
     table: &redb::ReadOnlyTable<&[u8], u64>,
@@ -927,47 +890,6 @@ pub(super) fn plan_ordered_query(
         });
     }
 
-    if let (Some(authors), Some(kinds)) = (authors, kinds) {
-        let range_count = authors.len().checked_mul(kinds.len());
-        if range_count.is_some_and(|count| count <= MAX_COMPOSITE_QUERY_RANGES) {
-            let best_rows = plans
-                .iter()
-                .map(|plan| plan.estimated_rows)
-                .min()
-                .expect("global ordered query plan always exists");
-            let mut estimated_rows = 0u64;
-            let mut can_win = true;
-            'authors: for author in authors {
-                for kind in kinds {
-                    estimated_rows = estimated_rows.saturating_add(cardinality_of(
-                        &cardinality,
-                        &author_kind_cardinality_key(author, *kind),
-                    )?);
-                    // Estimates are non-negative. Once the composite exceeds
-                    // the best already-materialized plan it cannot recover;
-                    // abandon before allocating its Cartesian prefixes.
-                    if estimated_rows > best_rows {
-                        can_win = false;
-                        break 'authors;
-                    }
-                }
-            }
-            if can_win {
-                let mut prefixes = Vec::with_capacity(range_count.expect("bounded above"));
-                for author in authors {
-                    for kind in kinds {
-                        prefixes.push(by_author_kind_prefix(author, *kind));
-                    }
-                }
-                plans.push(OrderedPlan {
-                    index: OrderedIndex::AuthorKind,
-                    prefixes,
-                    estimated_rows,
-                });
-            }
-        }
-    }
-
     Ok(plans
         .into_iter()
         .min_by_key(|plan| (plan.estimated_rows, plan.index.tie_rank()))
@@ -1003,14 +925,13 @@ pub(super) fn remove_tag_index_rows(
     Ok(())
 }
 
-/// The five physical query indexes are one mutation unit. Keeping their
+/// The four physical query indexes are one mutation unit. Keeping their
 /// tables bundled makes every governed writer go through the same
 /// insert/remove doors that also maintain prefix cardinalities.
 pub(super) struct QueryIndexWriteTables<'txn> {
     pub(super) by_created_at: redb::Table<'txn, &'static [u8; 40], EventKey>,
     pub(super) by_author: redb::Table<'txn, &'static [u8; 72], EventKey>,
     pub(super) by_kind: redb::Table<'txn, &'static [u8; 42], EventKey>,
-    pub(super) by_author_kind: redb::Table<'txn, &'static [u8; 74], EventKey>,
     pub(super) by_tag: redb::Table<'txn, &'static [u8], EventKey>,
 }
 
@@ -1020,7 +941,6 @@ impl<'txn> QueryIndexWriteTables<'txn> {
             by_created_at: write_txn.open_table(BY_CREATED_AT).map_err(persist_err)?,
             by_author: write_txn.open_table(BY_AUTHOR).map_err(persist_err)?,
             by_kind: write_txn.open_table(BY_KIND).map_err(persist_err)?,
-            by_author_kind: write_txn.open_table(BY_AUTHOR_KIND).map_err(persist_err)?,
             by_tag: write_txn.open_table(BY_TAG).map_err(persist_err)?,
         })
     }
@@ -1037,7 +957,6 @@ pub(super) fn insert_query_index_rows(
     let created = created_at_key(event);
     let author = by_author_key(event);
     let kind = by_kind_key(event);
-    let author_kind = by_author_kind_key(event);
     indexes
         .by_created_at
         .insert(&created, event_key)
@@ -1050,16 +969,11 @@ pub(super) fn insert_query_index_rows(
         .by_kind
         .insert(&kind, event_key)
         .map_err(persist_err)?;
-    indexes
-        .by_author_kind
-        .insert(&author_kind, event_key)
-        .map_err(persist_err)?;
     insert_tag_index_rows(&mut indexes.by_tag, event, event_key).map_err(persist_err)?;
     if event_is_cardinality_sample(&canonical.cardinality_sample_key, &event.id) {
         canonical.adjust_cardinality(global_cardinality_key(), 1)?;
         canonical.adjust_cardinality(author_cardinality_key(&event.pubkey), 1)?;
         canonical.adjust_cardinality(kind_cardinality_key(event.kind), 1)?;
-        canonical.adjust_cardinality(author_kind_cardinality_key(&event.pubkey, event.kind), 1)?;
         let mut tags = BTreeSet::new();
         for tag in event.tags.iter() {
             let (Some(single_letter), Some(value)) = (tag.single_letter_tag(), tag.content())
@@ -1085,23 +999,17 @@ pub(super) fn remove_query_index_rows(
     let created = created_at_key(event);
     let author = by_author_key(event);
     let kind = by_kind_key(event);
-    let author_kind = by_author_kind_key(event);
     indexes
         .by_created_at
         .remove(&created)
         .map_err(persist_err)?;
     indexes.by_author.remove(&author).map_err(persist_err)?;
     indexes.by_kind.remove(&kind).map_err(persist_err)?;
-    indexes
-        .by_author_kind
-        .remove(&author_kind)
-        .map_err(persist_err)?;
     remove_tag_index_rows(&mut indexes.by_tag, event).map_err(persist_err)?;
     if event_is_cardinality_sample(&canonical.cardinality_sample_key, &event.id) {
         canonical.adjust_cardinality(global_cardinality_key(), -1)?;
         canonical.adjust_cardinality(author_cardinality_key(&event.pubkey), -1)?;
         canonical.adjust_cardinality(kind_cardinality_key(event.kind), -1)?;
-        canonical.adjust_cardinality(author_kind_cardinality_key(&event.pubkey, event.kind), -1)?;
         let mut tags = BTreeSet::new();
         for tag in event.tags.iter() {
             let (Some(single_letter), Some(value)) = (tag.single_letter_tag(), tag.content())

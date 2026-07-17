@@ -16,7 +16,10 @@ fn v5_event_epoch_is_rejected_before_any_v6_table_is_created() {
         Ok(_) => panic!("v5 event epoch must not open as an empty v6 store"),
         Err(error) => error,
     };
-    assert!(matches!(error, redb::Error::UpgradeRequired(6)));
+    assert!(matches!(
+        error,
+        redb::Error::UpgradeRequired(version) if version == SCHEMA_VERSION as u8
+    ));
 
     let db = Database::create(&path).unwrap();
     let read_txn = db.begin_read().unwrap();
@@ -46,7 +49,10 @@ fn v5_displaced_epoch_is_rejected_before_any_v6_table_is_created() {
         Ok(_) => panic!("v5 displaced epoch must not open as an empty v6 store"),
         Err(error) => error,
     };
-    assert!(matches!(error, redb::Error::UpgradeRequired(6)));
+    assert!(matches!(
+        error,
+        redb::Error::UpgradeRequired(version) if version == SCHEMA_VERSION as u8
+    ));
 
     let db = Database::create(&path).unwrap();
     let read_txn = db.begin_read().unwrap();
@@ -63,7 +69,7 @@ fn v5_displaced_epoch_is_rejected_before_any_v6_table_is_created() {
 }
 
 #[test]
-fn healthy_v6_reopen_starts_no_application_write_transaction() {
+fn healthy_v7_reopen_starts_no_application_write_transaction() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("healthy-reopen.redb");
 
@@ -91,6 +97,80 @@ fn healthy_v6_reopen_starts_no_application_write_transaction() {
             .value(),
         SCHEMA_VERSION
     );
+}
+
+#[test]
+fn v6_author_kind_index_is_removed_and_cardinality_rebuilt_atomically() {
+    use nostr::EventBuilder;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v6-author-kind-migration.redb");
+    let keys = nostr::Keys::generate();
+    let event = EventBuilder::new(Kind::TextNote, "migrate")
+        .custom_created_at(Timestamp::from(10u64))
+        .sign_with_keys(&keys)
+        .unwrap();
+    let mut store = RedbStore::open(&path).unwrap();
+    store
+        .insert(
+            event,
+            RelayObserved::new(
+                RelayUrl::parse("wss://migration.example").unwrap(),
+                Timestamp::from(10u64),
+            ),
+        )
+        .unwrap();
+    drop(store);
+
+    let db = Database::create(&path).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut schema_meta = write_txn.open_table(SCHEMA_META).unwrap();
+        schema_meta
+            .insert(SCHEMA_VERSION_KEY, PREVIOUS_SCHEMA_VERSION)
+            .unwrap();
+        let mut cardinality_meta = write_txn.open_table(INDEX_CARDINALITY_META).unwrap();
+        cardinality_meta
+            .insert(INDEX_CARDINALITY_VERSION_KEY, 2)
+            .unwrap();
+        let mut retired = write_txn.open_table(LEGACY_BY_AUTHOR_KIND).unwrap();
+        retired.insert(&[0; 74], 1).unwrap();
+        let mut cardinality = write_txn.open_table(INDEX_CARDINALITY).unwrap();
+        cardinality.insert([3, 0].as_slice(), 1).unwrap();
+    }
+    write_txn.commit().unwrap();
+    drop(db);
+
+    let migrated = RedbStore::open(&path).unwrap();
+    assert_eq!(migrated.open_write_transactions(), 1);
+    assert_eq!(migrated.query(&Filter::new()).unwrap().len(), 1);
+    let read_txn = migrated.db.begin_read().unwrap();
+    let table_names: BTreeSet<_> = read_txn
+        .list_tables()
+        .unwrap()
+        .map(|table| table.name().to_owned())
+        .collect();
+    assert!(!table_names.contains(LEGACY_BY_AUTHOR_KIND.name()));
+    let schema_meta = read_txn.open_table(SCHEMA_META).unwrap();
+    assert_eq!(
+        schema_meta
+            .get(SCHEMA_VERSION_KEY)
+            .unwrap()
+            .unwrap()
+            .value(),
+        SCHEMA_VERSION
+    );
+    let cardinality = read_txn.open_table(INDEX_CARDINALITY).unwrap();
+    assert!(cardinality.iter().unwrap().all(|entry| {
+        entry
+            .unwrap()
+            .0
+            .value()
+            .first()
+            .is_some_and(|namespace| *namespace != 3)
+    }));
+    drop(read_txn);
+    assert_canonical_integrity(&migrated.db);
 }
 
 #[test]
@@ -1555,7 +1635,7 @@ fn fixed_ordered_indexes_use_inclusive_equal_time_ranges_and_id_ascending_ties()
                 .kind(kind)
                 .since(created_at)
                 .until(created_at),
-            OrderedIndex::AuthorKind,
+            OrderedIndex::Author,
         ),
     ];
 
@@ -1668,15 +1748,13 @@ fn cardinality_sampling_is_keyed_stable_and_near_one_sixteenth() {
 }
 
 #[test]
-fn cardinality_planner_never_materializes_unbounded_author_kind_products() {
+fn cardinality_planner_uses_one_dimension_for_author_kind_products() {
     let dir = tempfile::tempdir().unwrap();
     let store = RedbStore::open(dir.path().join("bounded-composite-plan.redb")).unwrap();
     let authors: BTreeSet<_> = (0..65)
         .map(|_| nostr::Keys::generate().public_key())
         .collect();
     let kinds: BTreeSet<_> = (0..65u16).map(Kind::from).collect();
-    assert!(authors.len() * kinds.len() > MAX_COMPOSITE_QUERY_RANGES);
-
     let filter = Filter::new().authors(authors).kinds(kinds);
     let read_txn = store.db.begin_read().unwrap();
     let plan = plan_ordered_query(&read_txn, &filter).unwrap();

@@ -50,7 +50,8 @@ pub(super) const LEGACY_EVENT_TABLES: [&str; 9] = [
 ];
 pub(super) const SCHEMA_META: TableDefinition<&str, u64> = TableDefinition::new("schema_meta_v6");
 pub(super) const SCHEMA_VERSION_KEY: &str = "version";
-pub(super) const SCHEMA_VERSION: u64 = 6;
+pub(super) const PREVIOUS_SCHEMA_VERSION: u64 = 6;
+pub(super) const SCHEMA_VERSION: u64 = 7;
 /// Bound redb's process-private page cache for mobile/desktop clients.
 ///
 /// redb 4.1 defaults this cache to 1 GiB. A million-event sequential ingest
@@ -93,7 +94,10 @@ pub(super) const BY_AUTHOR: TableDefinition<&[u8; 72], EventKey> =
     TableDefinition::new("by_author_time_v6");
 pub(super) const BY_KIND: TableDefinition<&[u8; 42], EventKey> =
     TableDefinition::new("by_kind_time_v6");
-pub(super) const BY_AUTHOR_KIND: TableDefinition<&[u8; 74], EventKey> =
+/// Removed from the v7 production query layout. Kept only so the v6 -> v7
+/// migration can atomically delete the old table and benchmark-only historical
+/// comparisons can name the retired physical shape.
+pub(super) const LEGACY_BY_AUTHOR_KIND: TableDefinition<&[u8; 74], EventKey> =
     TableDefinition::new("by_author_kind_time_v6");
 /// NIP-01 single-letter tag index, borrowing nostrdb's clustered
 /// `(tag,value,created_at)` layout. The binary key is:
@@ -109,8 +113,8 @@ pub(super) const BY_AUTHOR_KIND: TableDefinition<&[u8; 74], EventKey> =
 /// directly without rebuilding or hex-encoding its NIP-01 id.
 pub(super) const BY_TAG: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_tag_v6");
 /// Uniform sampled live-row counts for every ordered-index prefix. Keys are
-/// namespaced binary prefixes (global, author, kind, author+kind, or
-/// tag/value); values count sampled physical rows in that bucket. Sampling is
+/// namespaced binary prefixes (global, author, kind, or tag/value); values
+/// count sampled physical rows in that bucket. Sampling is
 /// sufficient for choosing an index and avoids one durable row for nearly
 /// every unique author/tag while never changing query correctness.
 pub(super) const INDEX_CARDINALITY: TableDefinition<&[u8], u64> =
@@ -118,7 +122,7 @@ pub(super) const INDEX_CARDINALITY: TableDefinition<&[u8], u64> =
 pub(super) const INDEX_CARDINALITY_META: TableDefinition<&str, u64> =
     TableDefinition::new("index_cardinality_meta_v1");
 pub(super) const INDEX_CARDINALITY_VERSION_KEY: &str = "version";
-pub(super) const INDEX_CARDINALITY_VERSION: u64 = 2;
+pub(super) const INDEX_CARDINALITY_VERSION: u64 = 3;
 pub(super) const INDEX_CARDINALITY_SAMPLE_META: TableDefinition<&str, &[u8]> =
     TableDefinition::new("index_cardinality_sample_meta_v1");
 pub(super) const INDEX_CARDINALITY_SAMPLE_KEY: &str = "key";

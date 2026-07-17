@@ -15,8 +15,8 @@ use redb::{
 use serde::{Deserialize, Serialize};
 
 use super::schema::{
-    BY_AUTHOR, BY_AUTHOR_KIND, BY_CREATED_AT, BY_KIND, BY_TAG, EVENTS, EVENT_IDS,
-    EVENT_OBSERVATIONS, INDEX_CARDINALITY, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_REFS,
+    BY_AUTHOR, BY_CREATED_AT, BY_KIND, BY_TAG, EVENTS, EVENT_IDS, EVENT_OBSERVATIONS,
+    INDEX_CARDINALITY, LEGACY_BY_AUTHOR_KIND, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_REFS,
 };
 use super::store_bench::{
     StoreBenchPreparedCorpus, StoreBenchPreparedMetrics, StoreBenchPreparedRecord,
@@ -178,7 +178,7 @@ fn init_database(path: &Path) -> Result<Database, String> {
     txn.open_table(BY_AUTHOR)
         .map_err(|error| error.to_string())?;
     txn.open_table(BY_KIND).map_err(|error| error.to_string())?;
-    txn.open_table(BY_AUTHOR_KIND)
+    txn.open_table(LEGACY_BY_AUTHOR_KIND)
         .map_err(|error| error.to_string())?;
     txn.open_table(BY_TAG).map_err(|error| error.to_string())?;
     txn.open_table(INDEX_CARDINALITY)
@@ -268,7 +268,7 @@ fn apply_indexes(
         .map_err(|error| error.to_string())?;
     let mut by_kind = txn.open_table(BY_KIND).map_err(|error| error.to_string())?;
     let mut by_author_kind = txn
-        .open_table(BY_AUTHOR_KIND)
+        .open_table(LEGACY_BY_AUTHOR_KIND)
         .map_err(|error| error.to_string())?;
     let mut by_tag = txn.open_table(BY_TAG).map_err(|error| error.to_string())?;
     let mut cardinality = txn
@@ -370,7 +370,7 @@ fn logical_row_counts(db: &Database) -> Result<(Vec<u64>, u64), String> {
             .len(),
         txn.open_table(BY_AUTHOR).map_err(|e| e.to_string())?.len(),
         txn.open_table(BY_KIND).map_err(|e| e.to_string())?.len(),
-        txn.open_table(BY_AUTHOR_KIND)
+        txn.open_table(LEGACY_BY_AUTHOR_KIND)
             .map_err(|e| e.to_string())?
             .len(),
         txn.open_table(BY_TAG).map_err(|e| e.to_string())?.len(),
