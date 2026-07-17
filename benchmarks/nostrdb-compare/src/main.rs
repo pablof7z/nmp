@@ -606,13 +606,27 @@ fn run_equivalent(
     let (corpus, meta) = open_corpus(corpus_path)?;
     let events = parse_prevalidated_events(&corpus)?;
     let preparation_started = Instant::now();
-    let prepared = prepare_equivalent_store_corpus(&events, batch_size)?;
-    let preparation_ns = duration_ns(preparation_started);
+    let prepared = (backend != "redb-full")
+        .then(|| prepare_equivalent_store_corpus(&events, batch_size))
+        .transpose()?;
+    let preparation_ns = prepared
+        .as_ref()
+        .map(|_| duration_ns(preparation_started))
+        .unwrap_or(0);
     let prepared_records = prepared
-        .batches
-        .iter()
-        .map(|batch| batch.records.len() as u64)
-        .sum();
+        .as_ref()
+        .map(|prepared| {
+            prepared
+                .batches
+                .iter()
+                .map(|batch| batch.records.len() as u64)
+                .sum()
+        })
+        .unwrap_or(0);
+    let prepared_record_bytes = prepared
+        .as_ref()
+        .map(|prepared| prepared.record_bytes)
+        .unwrap_or(0);
     let scratch = tempfile::tempdir()?;
     let database = match backend {
         "redb-prepared" | "redb-full" => scratch.path().join("store.redb"),
@@ -620,8 +634,15 @@ fn run_equivalent(
         _ => return Err(format!("unknown equivalent backend {backend}").into()),
     };
     let metrics = match backend {
-        "redb-prepared" => run_prepared_redb_store_bench(&database, &prepared, sample_process)?,
-        "lmdb-prepared" => run_prepared_lmdb(&database, &prepared)?,
+        "redb-prepared" => run_prepared_redb_store_bench(
+            &database,
+            prepared.as_ref().expect("prepared backend has corpus"),
+            sample_process,
+        )?,
+        "lmdb-prepared" => run_prepared_lmdb(
+            &database,
+            prepared.as_ref().expect("prepared backend has corpus"),
+        )?,
         "redb-full" => full_metrics_to_prepared(run_store_bench_variant(
             &database,
             events,
@@ -651,7 +672,7 @@ fn run_equivalent(
         payload_bytes: meta.payload_bytes,
         transaction_batch_size: batch_size,
         prepared_records,
-        prepared_record_bytes: prepared.record_bytes,
+        prepared_record_bytes,
         preparation_ns,
         events_per_second: metrics.events as f64 * 1_000_000_000.0 / metrics.wall_ns as f64,
         metrics,
