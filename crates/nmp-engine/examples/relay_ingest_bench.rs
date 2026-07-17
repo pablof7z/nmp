@@ -23,6 +23,9 @@ fn main() -> Result<(), ProbeError> {
             "--verified-cache-capacity" => {
                 config.verified_cache_capacity = value(&mut args, "--verified-cache-capacity")?
             }
+            "--verifier-workers" => {
+                config.verifier_workers = value(&mut args, "--verifier-workers")?
+            }
             "--verify-batch-size" => {
                 config.verify_batch_size = value(&mut args, "--verify-batch-size")?
             }
@@ -93,6 +96,7 @@ fn print_help() {
          --payload-bytes N   event content bytes (default 128)\n\
          --queue-capacity N  every bounded runtime queue (default 1024)\n\
          --verified-cache-capacity N  verified ID/signature entries (default 131072)\n\
+         --verifier-workers N  native signature workers; 0 uses default 2 (maximum 16)\n\
          --verify-batch-size N  signature verification batch ceiling (default 128)\n\
          --engine-batch-size N  store transaction batch ceiling (default 128)\n\
          --visible-limit N   live query window (default 200)\n\
