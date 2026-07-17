@@ -19,6 +19,7 @@ fn root_identifier(root: &CommentRoot) -> String {
             author,
             kind,
             identifier,
+            ..
         } => CommentRoot::address_coordinate(*kind, author, identifier),
         CommentRoot::External(target) => target.i_value().to_string(),
     }
@@ -56,7 +57,9 @@ mod tests {
         let i = IndexedTagName::new('I').unwrap();
         assert_eq!(
             demand.selection.tags.get(&i),
-            Some(&Binding::Literal(BTreeSet::from(["guid-1".to_string()])))
+            Some(&Binding::Literal(BTreeSet::from([
+                "podcast:item:guid:guid-1".to_string()
+            ])))
         );
         // Never a parent-only lowercase `#i` shortcut -- confirm no `i`
         // binding exists at all.

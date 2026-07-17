@@ -44,6 +44,10 @@ pub enum CommentDecodeError {
     MalformedRootReference,
     /// An `I`/`i` or `K`/`k` cell was the empty string.
     EmptyExternalValue,
+    /// An `I`/`i` value did not carry the prefix its `K`/`k` cell requires
+    /// (currently only `K == podcast:item:guid`, which requires the
+    /// `podcast:item:guid:` `I`/`i` prefix per NIP-73's own table).
+    MalformedExternalValue { got: String },
     /// No parent tag (`e`/`a`/`i`) was present at all.
     MissingParent,
     /// More than one distinct parent tag type was present.
@@ -74,6 +78,12 @@ impl std::fmt::Display for CommentDecodeError {
             Self::InvalidRootKind { got } => write!(f, "root K {got:?} is not a valid kind number"),
             Self::MalformedRootReference => f.write_str("root E/A reference did not parse"),
             Self::EmptyExternalValue => f.write_str("I/i or K/k cell was empty"),
+            Self::MalformedExternalValue { got } => {
+                write!(
+                    f,
+                    "I/i value {got:?} does not carry the prefix its K/k cell requires"
+                )
+            }
             Self::MissingParent => f.write_str("no parent (e/a/i) tag present"),
             Self::DuplicateContradictoryParent => {
                 f.write_str("more than one distinct parent (e/a/i) tag present")
@@ -103,6 +113,15 @@ enum RawRoot {
         coordinate: String,
         kind_tag: String,
     },
+    /// An addressable root that ALSO pins the event's own id (NIP-22:
+    /// "when the parent event is replaceable or addressable, also include
+    /// an `e`/`E` tag referencing its id") -- both `A` and `E` present
+    /// together, never a contradiction.
+    AddressWithEvent {
+        coordinate: String,
+        event_id: EventId,
+        kind_tag: String,
+    },
     External {
         i_value: String,
         k_value: String,
@@ -115,11 +134,16 @@ fn find_tag<'a>(tags: &'a [Vec<String>], name: &str) -> Option<&'a [String]> {
         .map(Vec::as_slice)
 }
 
-fn count_present(tags: &[Vec<String>], names: &[&str]) -> usize {
-    names
-        .iter()
-        .filter(|name| find_tag(tags, name).is_some())
+/// True when `name` appears MORE THAN ONCE among `tags` -- a same-letter
+/// duplication (e.g. two `I` tags, or two contradictory `K` tags), distinct
+/// from the cross-letter `E`+`I` contradiction the root/parent presence
+/// counts catch. `find_tag` only ever sees the first match, so without this
+/// check a duplicate of the SAME letter is silently invisible.
+fn has_duplicate_tag(tags: &[Vec<String>], name: &str) -> bool {
+    tags.iter()
+        .filter(|tag| tag.first().map(String::as_str) == Some(name))
         .count()
+        > 1
 }
 
 fn parse_address_coordinate(coordinate: &str) -> Option<(u16, PublicKey, String)> {
@@ -130,12 +154,61 @@ fn parse_address_coordinate(coordinate: &str) -> Option<(u16, PublicKey, String)
     Some((kind, pubkey, identifier))
 }
 
+/// The root's `A`+`E` co-presence case: an addressable root that ALSO pins
+/// the event's own id. Only reached once the caller has established both
+/// are present and `I` is absent.
+fn decode_root_address_with_event(tags: &[Vec<String>]) -> Result<RawRoot, CommentDecodeError> {
+    let a = find_tag(tags, "A").expect("A present: caller already checked");
+    let coordinate = a
+        .get(1)
+        .cloned()
+        .ok_or(CommentDecodeError::MalformedRootReference)?;
+    if parse_address_coordinate(&coordinate).is_none() {
+        return Err(CommentDecodeError::MalformedRootReference);
+    }
+    let e = find_tag(tags, "E").expect("E present: caller already checked");
+    let event_id = e
+        .get(1)
+        .and_then(|hex| EventId::from_hex(hex).ok())
+        .ok_or(CommentDecodeError::MalformedRootReference)?;
+    let kind_tag = find_tag(tags, "K")
+        .and_then(|k| k.get(1))
+        .cloned()
+        .ok_or(CommentDecodeError::MissingRootKind)?;
+    Ok(RawRoot::AddressWithEvent {
+        coordinate,
+        event_id,
+        kind_tag,
+    })
+}
+
 fn decode_root(tags: &[Vec<String>]) -> Result<RawRoot, CommentDecodeError> {
-    let present = count_present(tags, &["E", "A", "I"]);
+    // Same-letter duplicates (two `I` tags, two contradictory `K` tags,
+    // etc.) are a distinct malformation from the cross-letter `E`+`I`
+    // contradiction below -- `find_tag` only ever sees the first match, so
+    // this must be checked explicitly and first.
+    for letter in ["E", "A", "I", "K"] {
+        if has_duplicate_tag(tags, letter) {
+            return Err(CommentDecodeError::DuplicateContradictoryRoot);
+        }
+    }
+
+    let has_e = find_tag(tags, "E").is_some();
+    let has_a = find_tag(tags, "A").is_some();
+    let has_i = find_tag(tags, "I").is_some();
+    let present = has_e as usize + has_a as usize + has_i as usize;
     if present == 0 {
         return Err(CommentDecodeError::MissingRoot);
     }
     if present > 1 {
+        // The ONLY legal multi-tag root combination is `A`+`E` together
+        // (NIP-22's "when the parent event is replaceable or addressable,
+        // also include an e/E tag referencing its id" allowance, applied
+        // symmetrically at root scope). Anything else -- `E`+`I`, `A`+`I`,
+        // or all three -- is a genuine contradiction.
+        if has_e && has_a && !has_i {
+            return decode_root_address_with_event(tags);
+        }
         return Err(CommentDecodeError::DuplicateContradictoryRoot);
     }
 
@@ -203,18 +276,71 @@ enum RawParent {
         coordinate: String,
         kind_tag: String,
     },
+    /// The parent's `a`+`e` co-presence case -- NIP-22's spec example of a
+    /// top-level comment on an addressable root carries BOTH: "when the
+    /// parent event is replaceable or addressable, also include an `e` tag
+    /// referencing its id."
+    AddressWithEvent {
+        coordinate: String,
+        event_id: EventId,
+        kind_tag: String,
+    },
     External {
         i_value: String,
         k_value: String,
     },
 }
 
+/// The parent's `a`+`e` co-presence case: an addressable parent that ALSO
+/// pins the event's own id. Only reached once the caller has established
+/// both are present and `i` is absent.
+fn decode_parent_address_with_event(tags: &[Vec<String>]) -> Result<RawParent, CommentDecodeError> {
+    let a = find_tag(tags, "a").expect("a present: caller already checked");
+    let coordinate = a
+        .get(1)
+        .cloned()
+        .ok_or(CommentDecodeError::MalformedParentReference)?;
+    if parse_address_coordinate(&coordinate).is_none() {
+        return Err(CommentDecodeError::MalformedParentReference);
+    }
+    let e = find_tag(tags, "e").expect("e present: caller already checked");
+    let event_id = e
+        .get(1)
+        .and_then(|hex| EventId::from_hex(hex).ok())
+        .ok_or(CommentDecodeError::MalformedParentReference)?;
+    let kind_tag = find_tag(tags, "k")
+        .and_then(|k| k.get(1))
+        .cloned()
+        .ok_or(CommentDecodeError::MissingParentKind)?;
+    Ok(RawParent::AddressWithEvent {
+        coordinate,
+        event_id,
+        kind_tag,
+    })
+}
+
 fn decode_parent(tags: &[Vec<String>]) -> Result<RawParent, CommentDecodeError> {
-    let present = count_present(tags, &["e", "a", "i"]);
+    // Same-letter duplicates -- see `decode_root`'s identical check.
+    for letter in ["e", "a", "i", "k"] {
+        if has_duplicate_tag(tags, letter) {
+            return Err(CommentDecodeError::DuplicateContradictoryParent);
+        }
+    }
+
+    let has_e = find_tag(tags, "e").is_some();
+    let has_a = find_tag(tags, "a").is_some();
+    let has_i = find_tag(tags, "i").is_some();
+    let present = has_e as usize + has_a as usize + has_i as usize;
     if present == 0 {
         return Err(CommentDecodeError::MissingParent);
     }
     if present > 1 {
+        // The ONLY legal multi-tag parent combination is `a`+`e` together
+        // -- NIP-22's own canonical top-level-comment-on-an-addressable-
+        // root example. Anything else remains a genuine contradiction.
+        if has_e && has_a && !has_i {
+            return decode_parent_address_with_event(tags);
+        }
         return Err(CommentDecodeError::DuplicateContradictoryParent);
     }
 
@@ -303,18 +429,58 @@ fn root_to_typed(raw: RawRoot) -> Result<CommentRoot, CommentDecodeError> {
                 author,
                 kind,
                 identifier,
+                event_id: None,
+            })
+        }
+        RawRoot::AddressWithEvent {
+            coordinate,
+            event_id,
+            kind_tag,
+        } => {
+            let (coord_kind, author, identifier) =
+                parse_address_coordinate(&coordinate).expect("already validated in decode_root");
+            let kind = kind_tag
+                .parse::<u16>()
+                .map_err(|_| CommentDecodeError::InvalidRootKind { got: kind_tag })?;
+            if kind != coord_kind {
+                return Err(CommentDecodeError::MalformedRootReference);
+            }
+            Ok(CommentRoot::Address {
+                author,
+                kind,
+                identifier,
+                event_id: Some(event_id),
             })
         }
         RawRoot::External { i_value, k_value } => {
-            let target = if k_value == Nip73Target::PODCAST_EPISODE_GUID_KIND {
-                Nip73Target::podcast_episode_guid(&i_value)
-            } else {
-                Nip73Target::general(&i_value, &k_value)
-            }
-            .map_err(|_| CommentDecodeError::EmptyExternalValue)?;
+            let target = external_target_from_i_k(&i_value, &k_value)?;
             Ok(CommentRoot::External(target))
         }
     }
+}
+
+/// Construct the typed [`Nip73Target`] a decoded `I`/`i` + `K`/`k` cell
+/// pair names, mapping the target crate's construction error onto the
+/// right [`CommentDecodeError`]: a missing podcast-guid prefix is a
+/// [`CommentDecodeError::MalformedExternalValue`] (the cell's FORMAT is
+/// wrong for what `K`/`k` declares), while an empty cell remains
+/// [`CommentDecodeError::EmptyExternalValue`].
+fn external_target_from_i_k(
+    i_value: &str,
+    k_value: &str,
+) -> Result<Nip73Target, CommentDecodeError> {
+    if k_value == Nip73Target::PODCAST_EPISODE_GUID_KIND {
+        return Nip73Target::parse_podcast_episode_guid_i_value(i_value).map_err(|err| match err {
+            crate::target::Nip73TargetError::MissingPodcastGuidPrefix => {
+                CommentDecodeError::MalformedExternalValue {
+                    got: i_value.to_string(),
+                }
+            }
+            crate::target::Nip73TargetError::EmptyValue
+            | crate::target::Nip73TargetError::EmptyKind => CommentDecodeError::EmptyExternalValue,
+        });
+    }
+    Nip73Target::general(i_value, k_value).map_err(|_| CommentDecodeError::EmptyExternalValue)
 }
 
 /// Cross-validate the decoded parent against the decoded root, producing
@@ -339,9 +505,20 @@ fn parent_to_typed(
                     .map_err(|_| CommentDecodeError::InvalidParentKind {
                         got: kind_tag.clone(),
                     })?;
-            if pe == event_id && parent_kind == *kind {
-                Ok(CommentParent::Root)
-            } else if parent_kind == COMMENT_KIND {
+            if pe == event_id {
+                // Same id referenced: this can ONLY be the root-mirror
+                // case, so its kind MUST equal the root's own kind. A
+                // single event cannot simultaneously BE the root (kind
+                // `*kind`) and be a `k=1111` comment being replied to --
+                // that is a case-pair contradiction, not a coincidental
+                // reply, even when `parent_kind == COMMENT_KIND`.
+                return if parent_kind == *kind {
+                    Ok(CommentParent::Root)
+                } else {
+                    Err(CommentDecodeError::ParentDoesNotMatchRootOrComment)
+                };
+            }
+            if parent_kind == COMMENT_KIND {
                 Ok(CommentParent::Comment {
                     event_id: *pe,
                     author: *author,
@@ -381,6 +558,7 @@ fn parent_to_typed(
                 author: root_author,
                 kind,
                 identifier,
+                ..
             },
             RawParent::Address {
                 coordinate,
@@ -401,8 +579,44 @@ fn parent_to_typed(
                 Err(CommentDecodeError::ParentDoesNotMatchRootOrComment)
             }
         }
+        (
+            CommentRoot::Address {
+                author: root_author,
+                kind,
+                identifier,
+                event_id: root_event_id,
+            },
+            RawParent::AddressWithEvent {
+                coordinate,
+                event_id,
+                kind_tag,
+            },
+        ) => {
+            // NIP-22's own canonical top-level comment on an addressable
+            // root: the parent carries BOTH `a` (matching the root
+            // coordinate) and `e` (the addressable event's own id). Cross-
+            // check the `e` against the root's pinned id when the root
+            // has one; when it doesn't, accept the parent's `e` as
+            // unverified auxiliary info (the root simply didn't record it).
+            let parent_kind =
+                kind_tag
+                    .parse::<u16>()
+                    .map_err(|_| CommentDecodeError::InvalidParentKind {
+                        got: kind_tag.clone(),
+                    })?;
+            let expected = CommentRoot::address_coordinate(*kind, root_author, identifier);
+            if *coordinate != expected || parent_kind != *kind {
+                return Err(CommentDecodeError::ParentDoesNotMatchRootOrComment);
+            }
+            if let Some(root_event_id) = root_event_id {
+                if event_id != root_event_id {
+                    return Err(CommentDecodeError::ParentDoesNotMatchRootOrComment);
+                }
+            }
+            Ok(CommentParent::Root)
+        }
         (CommentRoot::External(target), RawParent::External { i_value, k_value }) => {
-            if i_value == target.i_value() && k_value == target.k_value() {
+            if *i_value == target.i_value() && k_value == target.k_value() {
                 Ok(CommentParent::Root)
             } else {
                 Err(CommentDecodeError::ParentDoesNotMatchRootOrComment)
@@ -560,9 +774,9 @@ mod tests {
     #[test]
     fn mismatched_i_and_lowercase_i_is_rejected() {
         let tags = vec![
-            row(&["I", "guid-1"]),
+            row(&["I", "podcast:item:guid:guid-1"]),
             row(&["K", "podcast:item:guid"]),
-            row(&["i", "guid-DIFFERENT"]),
+            row(&["i", "podcast:item:guid:guid-DIFFERENT"]),
             row(&["k", "podcast:item:guid"]),
         ];
         let err = decode_comment(
@@ -582,9 +796,9 @@ mod tests {
     #[test]
     fn wrong_external_kind_is_rejected() {
         let tags = vec![
-            row(&["I", "guid-1"]),
+            row(&["I", "podcast:item:guid:guid-1"]),
             row(&["K", "podcast:item:guid"]),
-            row(&["i", "guid-1"]),
+            row(&["i", "podcast:item:guid:guid-1"]),
             row(&["k", "some-other-namespace"]),
         ];
         let err = decode_comment(
@@ -599,15 +813,44 @@ mod tests {
         assert_eq!(err, CommentDecodeError::ParentDoesNotMatchRootOrComment);
     }
 
+    /// #572 review finding 1: a `K == podcast:item:guid` cell whose `I`
+    /// value is the BARE guid (no `podcast:item:guid:` prefix) is a typed
+    /// refusal, never silently accepted as-is -- a bare-guid comment would
+    /// split the episode's thread from conformant clients.
+    #[test]
+    fn podcast_guid_missing_prefix_is_rejected() {
+        let tags = vec![
+            row(&["I", "guid-1"]),
+            row(&["K", "podcast:item:guid"]),
+            row(&["i", "guid-1"]),
+            row(&["k", "podcast:item:guid"]),
+        ];
+        let err = decode_comment(
+            EventId::from_slice(&[11; 32]).unwrap(),
+            keys().public_key(),
+            1000,
+            COMMENT_KIND,
+            &tags,
+            "",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommentDecodeError::MalformedExternalValue {
+                got: "guid-1".to_string()
+            }
+        );
+    }
+
     /// Duplicate contradictory root tags (both E and I present) are
     /// rejected.
     #[test]
     fn duplicate_contradictory_root_tags_are_rejected() {
         let tags = vec![
             row(&["E", &EventId::from_slice(&[6; 32]).unwrap().to_hex()]),
-            row(&["I", "guid-1"]),
+            row(&["I", "podcast:item:guid:guid-1"]),
             row(&["K", "podcast:item:guid"]),
-            row(&["i", "guid-1"]),
+            row(&["i", "podcast:item:guid:guid-1"]),
             row(&["k", "podcast:item:guid"]),
         ];
         let err = decode_comment(
@@ -620,6 +863,178 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, CommentDecodeError::DuplicateContradictoryRoot);
+    }
+
+    /// #572 review finding 3: same-letter duplicates (two DIFFERENT `I`
+    /// tags) are a typed rejection, not a silent "first one wins".
+    #[test]
+    fn duplicate_same_letter_root_tags_are_rejected() {
+        let tags = vec![
+            row(&["I", "podcast:item:guid:guid-1"]),
+            row(&["I", "podcast:item:guid:guid-2"]),
+            row(&["K", "podcast:item:guid"]),
+            row(&["i", "podcast:item:guid:guid-1"]),
+            row(&["k", "podcast:item:guid"]),
+        ];
+        let err = decode_comment(
+            EventId::from_slice(&[12; 32]).unwrap(),
+            keys().public_key(),
+            1000,
+            COMMENT_KIND,
+            &tags,
+            "",
+        )
+        .unwrap_err();
+        assert_eq!(err, CommentDecodeError::DuplicateContradictoryRoot);
+    }
+
+    /// #572 review finding 3: two contradictory `K` root tags are rejected
+    /// the same way.
+    #[test]
+    fn duplicate_contradictory_k_root_tags_are_rejected() {
+        let tags = vec![
+            row(&["I", "podcast:item:guid:guid-1"]),
+            row(&["K", "podcast:item:guid"]),
+            row(&["K", "some-other-namespace"]),
+            row(&["i", "podcast:item:guid:guid-1"]),
+            row(&["k", "podcast:item:guid"]),
+        ];
+        let err = decode_comment(
+            EventId::from_slice(&[13; 32]).unwrap(),
+            keys().public_key(),
+            1000,
+            COMMENT_KIND,
+            &tags,
+            "",
+        )
+        .unwrap_err();
+        assert_eq!(err, CommentDecodeError::DuplicateContradictoryRoot);
+    }
+
+    /// #572 review finding 3: same-letter duplicate PARENT tags (two `i`
+    /// tags) are rejected the same way as root duplicates.
+    #[test]
+    fn duplicate_same_letter_parent_tags_are_rejected() {
+        let tags = vec![
+            row(&["I", "podcast:item:guid:guid-1"]),
+            row(&["K", "podcast:item:guid"]),
+            row(&["i", "podcast:item:guid:guid-1"]),
+            row(&["i", "podcast:item:guid:guid-2"]),
+            row(&["k", "podcast:item:guid"]),
+        ];
+        let err = decode_comment(
+            EventId::from_slice(&[14; 32]).unwrap(),
+            keys().public_key(),
+            1000,
+            COMMENT_KIND,
+            &tags,
+            "",
+        )
+        .unwrap_err();
+        assert_eq!(err, CommentDecodeError::DuplicateContradictoryParent);
+    }
+
+    /// #572 review finding 2: NIP-22's own canonical top-level comment on
+    /// an addressable root -- the spec example carries BOTH `a`/`A` AND
+    /// `e`/`E` in the parent/root scope ("when the parent event is
+    /// replaceable or addressable, also include an `e` tag referencing its
+    /// id"). This must decode, not be rejected as
+    /// `DuplicateContradictoryRoot`/`Parent`.
+    #[test]
+    fn spec_canonical_address_root_with_accompanying_event_id_decodes() {
+        let root_author = keys().public_key();
+        let pinned_id = EventId::from_slice(&[15; 32]).unwrap();
+        let coordinate = format!("30023:{}:my-article", root_author.to_hex());
+        let tags = vec![
+            row(&["A", &coordinate]),
+            row(&["K", "30023"]),
+            row(&["P", &root_author.to_hex()]),
+            row(&["E", &pinned_id.to_hex()]),
+            row(&["a", &coordinate]),
+            row(&["k", "30023"]),
+            row(&["p", &root_author.to_hex()]),
+            row(&["e", &pinned_id.to_hex()]),
+        ];
+        let decoded = decode_comment(
+            EventId::from_slice(&[16; 32]).unwrap(),
+            keys().public_key(),
+            1000,
+            COMMENT_KIND,
+            &tags,
+            "nice post",
+        )
+        .expect("NIP-22's own canonical addressable-root shape must decode");
+        assert_eq!(
+            decoded.root,
+            CommentRoot::Address {
+                author: root_author,
+                kind: 30023,
+                identifier: "my-article".to_string(),
+                event_id: Some(pinned_id),
+            }
+        );
+        assert_eq!(decoded.parent, CommentParent::Root);
+    }
+
+    /// The accompanying `e`/`E` is a SHOULD, not a MUST: an addressable
+    /// root/parent WITHOUT it remains fully legal (already covered by
+    /// `top_level_comment_on_address_root_mirrors_the_coordinate` in
+    /// `build.rs`'s own tests) -- this is the a-only decode counterpart,
+    /// proven directly against raw tags.
+    #[test]
+    fn address_root_without_accompanying_event_id_still_decodes() {
+        let root_author = keys().public_key();
+        let coordinate = format!("30023:{}:my-article", root_author.to_hex());
+        let tags = vec![
+            row(&["A", &coordinate]),
+            row(&["K", "30023"]),
+            row(&["a", &coordinate]),
+            row(&["k", "30023"]),
+        ];
+        let decoded = decode_comment(
+            EventId::from_slice(&[17; 32]).unwrap(),
+            keys().public_key(),
+            1000,
+            COMMENT_KIND,
+            &tags,
+            "hi",
+        )
+        .expect("a-only address root must decode");
+        assert_eq!(
+            decoded.root,
+            CommentRoot::Address {
+                author: root_author,
+                kind: 30023,
+                identifier: "my-article".to_string(),
+                event_id: None,
+            }
+        );
+        assert_eq!(decoded.parent, CommentParent::Root);
+    }
+
+    /// #572 review finding 3: an Event root's parent `e` pointing at the
+    /// SAME id as the root, but whose `k` is `1111` while the root's `K`
+    /// says a different kind, is a case-pair DISAGREEMENT -- never silently
+    /// accepted as "a reply to the root treated as a comment".
+    #[test]
+    fn same_id_parent_with_mismatched_kind_is_a_case_pair_disagreement() {
+        let root_id = EventId::from_slice(&[18; 32]).unwrap();
+        let tags = vec![
+            row(&["E", &root_id.to_hex()]),
+            row(&["K", "1"]),
+            row(&["e", &root_id.to_hex()]),
+            row(&["k", "1111"]),
+        ];
+        let err = decode_comment(
+            EventId::from_slice(&[19; 32]).unwrap(),
+            keys().public_key(),
+            1000,
+            COMMENT_KIND,
+            &tags,
+            "",
+        )
+        .unwrap_err();
+        assert_eq!(err, CommentDecodeError::ParentDoesNotMatchRootOrComment);
     }
 
     /// A malformed event reference (bad hex) is rejected.
@@ -687,6 +1102,7 @@ mod tests {
             CommentDecodeError::InvalidRootKind { got: String::new() },
             CommentDecodeError::MalformedRootReference,
             CommentDecodeError::EmptyExternalValue,
+            CommentDecodeError::MalformedExternalValue { got: String::new() },
             CommentDecodeError::MissingParent,
             CommentDecodeError::DuplicateContradictoryParent,
             CommentDecodeError::MissingParentKind,
@@ -703,6 +1119,7 @@ mod tests {
                 | CommentDecodeError::InvalidRootKind { .. }
                 | CommentDecodeError::MalformedRootReference
                 | CommentDecodeError::EmptyExternalValue
+                | CommentDecodeError::MalformedExternalValue { .. }
                 | CommentDecodeError::MissingParent
                 | CommentDecodeError::DuplicateContradictoryParent
                 | CommentDecodeError::MissingParentKind

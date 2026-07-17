@@ -23,14 +23,21 @@ pub enum CommentRoot {
         kind: u16,
         author: Option<PublicKey>,
     },
-    /// A root that is an addressable/replaceable Nostr event -- `A`/`K`/`P`.
-    /// `identifier` is the address's `d` tag value (may be empty per
-    /// NIP-01, but the coordinate string is always well-formed since
-    /// `author`/`kind` are structurally typed).
+    /// A root that is an addressable/replaceable Nostr event -- `A`/`K`/`P`,
+    /// optionally with an accompanying `E` (NIP-22: "when the parent event
+    /// is replaceable or addressable, also include an `e`/`E` tag
+    /// referencing its id" -- since a coordinate alone doesn't pin a
+    /// specific revision). `identifier` is the address's `d` tag value (may
+    /// be empty per NIP-01, but the coordinate string is always well-formed
+    /// since `author`/`kind` are structurally typed).
     Address {
         author: PublicKey,
         kind: u16,
         identifier: String,
+        /// The addressable event's own id, when the composer/decoded event
+        /// pinned one alongside the coordinate. `None` is still a fully
+        /// legal root -- the accompanying `E`/`e` is a SHOULD, not a MUST.
+        event_id: Option<EventId>,
     },
     /// A root outside Nostr entirely -- `I`/`K` (NIP-73).
     External(Nip73Target),

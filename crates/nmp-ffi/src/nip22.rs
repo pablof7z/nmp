@@ -35,6 +35,11 @@ pub enum FfiCommentRoot {
         author_pubkey: String,
         kind: u16,
         identifier: String,
+        /// The addressable event's own id, when pinned alongside the
+        /// coordinate (NIP-22: "when the parent event is replaceable or
+        /// addressable, also include an `e`/`E` tag referencing its id").
+        /// `None` remains a fully legal root.
+        event_id: Option<String>,
     },
     External {
         target: FfiNip73Target,
@@ -68,19 +73,37 @@ pub struct FfiDecodedComment {
 /// (Reachability Gate).
 #[derive(uniffi::Error, Debug, Clone, PartialEq, Eq)]
 pub enum FfiCommentDecodeError {
-    WrongKind { got: u16 },
+    WrongKind {
+        got: u16,
+    },
     MissingRoot,
     DuplicateContradictoryRoot,
     MissingRootKind,
-    InvalidRootKind { got: String },
+    InvalidRootKind {
+        got: String,
+    },
     MalformedRootReference,
     EmptyExternalValue,
+    MalformedExternalValue {
+        got: String,
+    },
     MissingParent,
     DuplicateContradictoryParent,
     MissingParentKind,
-    InvalidParentKind { got: String },
+    InvalidParentKind {
+        got: String,
+    },
     MalformedParentReference,
     ParentDoesNotMatchRootOrComment,
+    /// FFI-boundary-only: the delivered [`FfiRow`]'s OWN `id`/`pubkey`
+    /// envelope fields were not valid hex -- distinct from
+    /// [`Self::MalformedRootReference`], which describes a root `E`/`A`
+    /// TAG reference, never the row's own envelope (#572 review nit: the
+    /// two were conflated, misdirecting a caller debugging a bad row id at
+    /// the wrong tag).
+    MalformedRowEnvelope {
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for FfiCommentDecodeError {
@@ -101,6 +124,9 @@ impl From<nmp_nip22::CommentDecodeError> for FfiCommentDecodeError {
             nmp_nip22::CommentDecodeError::InvalidRootKind { got } => Self::InvalidRootKind { got },
             nmp_nip22::CommentDecodeError::MalformedRootReference => Self::MalformedRootReference,
             nmp_nip22::CommentDecodeError::EmptyExternalValue => Self::EmptyExternalValue,
+            nmp_nip22::CommentDecodeError::MalformedExternalValue { got } => {
+                Self::MalformedExternalValue { got }
+            }
             nmp_nip22::CommentDecodeError::MissingParent => Self::MissingParent,
             nmp_nip22::CommentDecodeError::DuplicateContradictoryParent => {
                 Self::DuplicateContradictoryParent
@@ -163,10 +189,16 @@ fn root_from_ffi(root: FfiCommentRoot) -> Result<nmp_nip22::CommentRoot, FfiErro
             author_pubkey,
             kind,
             identifier,
+            event_id,
         } => nmp_nip22::CommentRoot::Address {
             author: parse_pubkey(&author_pubkey)?,
             kind,
             identifier,
+            event_id: event_id
+                .map(|hex| {
+                    EventId::from_hex(&hex).map_err(|_| FfiError::InvalidEventId { got: hex })
+                })
+                .transpose()?,
         },
         FfiCommentRoot::External { target } => {
             nmp_nip22::CommentRoot::External(target_from_ffi(target)?)
@@ -189,10 +221,12 @@ fn root_to_ffi(root: &nmp_nip22::CommentRoot) -> FfiCommentRoot {
             author,
             kind,
             identifier,
+            event_id,
         } => FfiCommentRoot::Address {
             author_pubkey: author.to_hex(),
             kind: *kind,
             identifier: identifier.clone(),
+            event_id: event_id.map(|id| id.to_hex()),
         },
         nmp_nip22::CommentRoot::External(target) => FfiCommentRoot::External {
             target: target_to_ffi(target),
@@ -240,9 +274,14 @@ pub fn comment_thread_demand(root: FfiCommentRoot) -> Result<FfiDemand, FfiError
 #[uniffi::export]
 pub fn decode_comment(row: FfiRow) -> Result<FfiDecodedComment, FfiCommentDecodeError> {
     let event_id =
-        EventId::from_hex(&row.id).map_err(|_| FfiCommentDecodeError::MalformedRootReference)?;
-    let author = PublicKey::from_hex(&row.pubkey)
-        .map_err(|_| FfiCommentDecodeError::MalformedRootReference)?;
+        EventId::from_hex(&row.id).map_err(|_| FfiCommentDecodeError::MalformedRowEnvelope {
+            reason: format!("row.id is not valid event-id hex: {}", row.id),
+        })?;
+    let author = PublicKey::from_hex(&row.pubkey).map_err(|_| {
+        FfiCommentDecodeError::MalformedRowEnvelope {
+            reason: format!("row.pubkey is not valid public-key hex: {}", row.pubkey),
+        }
+    })?;
     let decoded = nmp_nip22::decode_comment(
         event_id,
         author,
