@@ -16,13 +16,13 @@ use serde::{Deserialize, Serialize};
 
 use super::canonical::observation_key;
 use super::query::{
-    author_cardinality_key, author_kind_cardinality_key, by_author_key, by_author_kind_key,
-    by_kind_key, created_at_key, event_is_cardinality_sample, global_cardinality_key,
-    insert_tag_index_rows, kind_cardinality_key, tag_cardinality_key, tag_index_key,
+    author_cardinality_key, by_author_key, by_author_kind_key, by_kind_key, created_at_key,
+    event_is_cardinality_sample, global_cardinality_key, insert_tag_index_rows,
+    kind_cardinality_key, tag_cardinality_key, tag_index_key,
 };
 use super::schema::{
-    BY_AUTHOR, BY_AUTHOR_KIND, BY_CREATED_AT, BY_KIND, BY_TAG, EVENTS, EVENT_IDS,
-    EVENT_OBSERVATIONS, INDEX_CARDINALITY, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_REFS,
+    BY_AUTHOR, BY_CREATED_AT, BY_KIND, BY_TAG, EVENTS, EVENT_IDS, EVENT_OBSERVATIONS,
+    INDEX_CARDINALITY, LEGACY_BY_AUTHOR_KIND, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_REFS,
 };
 use super::*;
 
@@ -86,14 +86,7 @@ impl StoreBenchVariant {
     }
 
     fn has_author_kind(self) -> bool {
-        matches!(
-            self,
-            Self::IndexAuthorKind
-                | Self::AllOrdered
-                | Self::AllOrderedTag
-                | Self::AllIndexesCardinality
-                | Self::AllIndexesSampledCardinality
-        )
+        matches!(self, Self::IndexAuthorKind)
     }
 
     fn has_tag(self) -> bool {
@@ -342,11 +335,6 @@ pub fn prepare_equivalent_store_corpus(
                 by_kind_key(event),
                 event_key_bytes,
             ));
-            records.push(prepared_record(
-                StoreBenchPreparedTable::ByAuthorKind,
-                by_author_kind_key(event),
-                event_key_bytes,
-            ));
             for tag in event.tags.iter() {
                 let (Some(letter), Some(value)) = (tag.single_letter_tag(), tag.content()) else {
                     continue;
@@ -364,7 +352,6 @@ pub fn prepare_equivalent_store_corpus(
             increment(global_cardinality_key());
             increment(author_cardinality_key(&event.pubkey));
             increment(kind_cardinality_key(event.kind));
-            increment(author_kind_cardinality_key(&event.pubkey, event.kind));
             let mut tags = BTreeSet::new();
             for tag in event.tags.iter() {
                 let (Some(letter), Some(value)) = (tag.single_letter_tag(), tag.content()) else {
@@ -488,7 +475,7 @@ fn init_reduced_database(path: &Path, variant: StoreBenchVariant) -> Result<Data
     }
     if variant.has_author_kind() {
         write_txn
-            .open_table(BY_AUTHOR_KIND)
+            .open_table(LEGACY_BY_AUTHOR_KIND)
             .map_err(|error| error.to_string())?;
     }
     if variant.has_tag() {
@@ -579,7 +566,7 @@ fn run_reduced(
             .map_err(|error| error.to_string())?;
         let mut by_author_kind = variant
             .has_author_kind()
-            .then(|| write_txn.open_table(BY_AUTHOR_KIND))
+            .then(|| write_txn.open_table(LEGACY_BY_AUTHOR_KIND))
             .transpose()
             .map_err(|error| error.to_string())?;
         let mut by_tag = variant
@@ -662,7 +649,6 @@ fn run_reduced(
                 increment(global_cardinality_key());
                 increment(author_cardinality_key(&event.pubkey));
                 increment(kind_cardinality_key(event.kind));
-                increment(author_kind_cardinality_key(&event.pubkey, event.kind));
                 let mut tags = BTreeSet::new();
                 for tag in event.tags.iter() {
                     let (Some(letter), Some(value)) = (tag.single_letter_tag(), tag.content())
@@ -1183,7 +1169,7 @@ pub fn run_prepared_redb_store_bench(
             .open_table(BY_KIND)
             .map_err(|error| error.to_string())?;
         let mut by_author_kind = write_txn
-            .open_table(BY_AUTHOR_KIND)
+            .open_table(LEGACY_BY_AUTHOR_KIND)
             .map_err(|error| error.to_string())?;
         let mut by_tag = write_txn
             .open_table(BY_TAG)
@@ -1357,7 +1343,7 @@ pub fn run_prepared_redb_store_bench(
             .map_err(|e| e.to_string())?
             .len(),
         read_txn
-            .open_table(BY_AUTHOR_KIND)
+            .open_table(LEGACY_BY_AUTHOR_KIND)
             .map_err(|e| e.to_string())?
             .len(),
         read_txn
@@ -1552,7 +1538,7 @@ mod prepared_tests {
             .iter()
             .flat_map(|batch| batch.records.iter().map(|record| record.table as u32))
             .collect();
-        assert_eq!(tables, (0..=11).collect());
+        assert_eq!(tables, (0..=11).filter(|table| *table != 9).collect());
 
         let global_key = global_cardinality_key();
         let global_values: Vec<_> = prepared
