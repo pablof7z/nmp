@@ -1,5 +1,4 @@
-//! Issue #637 equivalent-work comparison of per-index Redb trees against one
-//! collision-free prefixed index tree.
+//! Equivalent-work Redb physical-layout experiments for issues #637 and #639.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::env;
@@ -12,7 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use nmp_store::{
     prepare_equivalent_store_corpus, run_prepared_redb_store_bench,
-    run_prepared_redb_unified_index_bench, StoreBenchPreparedMetrics, StoreBenchProcessCounters,
+    run_prepared_redb_unified_index_bench, StoreBenchPreparedMetrics, StoreBenchPreparedRecord,
+    StoreBenchPreparedTable, StoreBenchProcessCounters,
 };
 use nostr::{Event, JsonUtil};
 use serde::{Deserialize, Serialize};
@@ -50,6 +50,8 @@ const SCHEMA: &str = "nmp-redb-index-layout-v1";
 enum IndexLayout {
     PerIndexTrees,
     UnifiedIndexTree,
+    GroupedArrivalOrder,
+    SortedIndexKeys,
 }
 
 impl IndexLayout {
@@ -57,14 +59,21 @@ impl IndexLayout {
         match self {
             Self::PerIndexTrees => "per_index_trees",
             Self::UnifiedIndexTree => "unified_index_tree",
+            Self::GroupedArrivalOrder => "grouped_arrival_order",
+            Self::SortedIndexKeys => "sorted_index_keys",
         }
     }
 
     fn parse(value: &str) -> Result<Self, String> {
-        [Self::PerIndexTrees, Self::UnifiedIndexTree]
-            .into_iter()
-            .find(|layout| layout.name() == value)
-            .ok_or_else(|| format!("unknown index layout: {value}"))
+        [
+            Self::PerIndexTrees,
+            Self::UnifiedIndexTree,
+            Self::GroupedArrivalOrder,
+            Self::SortedIndexKeys,
+        ]
+        .into_iter()
+        .find(|layout| layout.name() == value)
+        .ok_or_else(|| format!("unknown index layout: {value}"))
     }
 }
 
@@ -87,6 +96,8 @@ struct RunRecord {
     repetition: usize,
     ordinal: usize,
     metrics: StoreBenchPreparedMetrics,
+    staging_ns: u64,
+    effective_wall_ns: u64,
     events_per_second: f64,
     database_allocated_bytes: u64,
 }
@@ -223,6 +234,31 @@ fn load_corpus(path: &Path) -> Result<(Vec<Event>, CorpusIdentity), String> {
     Ok((events, identity))
 }
 
+fn index_namespace(table: StoreBenchPreparedTable) -> Option<u8> {
+    match table {
+        StoreBenchPreparedTable::ByCreatedAt => Some(0),
+        StoreBenchPreparedTable::ByAuthor => Some(1),
+        StoreBenchPreparedTable::ByKind => Some(2),
+        StoreBenchPreparedTable::ByAuthorKind => Some(3),
+        StoreBenchPreparedTable::ByTag => Some(4),
+        _ => None,
+    }
+}
+
+fn order_index_records(records: &mut [StoreBenchPreparedRecord], sort_index_keys: bool) {
+    records.sort_by(|left, right| {
+        match (index_namespace(left.table), index_namespace(right.table)) {
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (Some(left_namespace), Some(right_namespace)) if sort_index_keys => left_namespace
+                .cmp(&right_namespace)
+                .then_with(|| left.key.cmp(&right.key)),
+            (Some(_), Some(_)) => std::cmp::Ordering::Equal,
+        }
+    });
+}
+
 fn run_child(
     corpus_path: &Path,
     layout: IndexLayout,
@@ -231,7 +267,25 @@ fn run_child(
     ordinal: usize,
 ) -> Result<RunRecord, String> {
     let (events, corpus_identity) = load_corpus(corpus_path)?;
-    let prepared = prepare_equivalent_store_corpus(&events, batch_size)?;
+    let mut prepared = prepare_equivalent_store_corpus(&events, batch_size)?;
+    let staging_started = std::time::Instant::now();
+    match layout {
+        IndexLayout::GroupedArrivalOrder => {
+            for batch in &mut prepared.batches {
+                order_index_records(&mut batch.records, false);
+            }
+        }
+        IndexLayout::SortedIndexKeys => {
+            for batch in &mut prepared.batches {
+                order_index_records(&mut batch.records, true);
+            }
+        }
+        IndexLayout::PerIndexTrees | IndexLayout::UnifiedIndexTree => {}
+    }
+    let staging_ns = staging_started
+        .elapsed()
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64;
     let scratch = tempfile::tempdir().map_err(|error| error.to_string())?;
     let database = scratch.path().join("store.redb");
     let metrics = match layout {
@@ -241,6 +295,9 @@ fn run_child(
         IndexLayout::UnifiedIndexTree => {
             run_prepared_redb_unified_index_bench(&database, &prepared, sample_process)?
         }
+        IndexLayout::GroupedArrivalOrder | IndexLayout::SortedIndexKeys => {
+            run_prepared_redb_store_bench(&database, &prepared, sample_process)?
+        }
     };
     if !metrics.exact_reopen {
         return Err(format!("{} failed exact logical reopen", layout.name()));
@@ -249,7 +306,8 @@ fn run_child(
         .map_err(|error| error.to_string())?
         .blocks()
         * 512;
-    let events_per_second = metrics.events as f64 * 1_000_000_000.0 / metrics.wall_ns as f64;
+    let effective_wall_ns = metrics.wall_ns.saturating_add(staging_ns);
+    let events_per_second = metrics.events as f64 * 1_000_000_000.0 / effective_wall_ns as f64;
     Ok(RunRecord {
         schema: SCHEMA.to_owned(),
         nmp_commit: git_commit(),
@@ -260,6 +318,8 @@ fn run_child(
         repetition,
         ordinal,
         metrics,
+        staging_ns,
+        effective_wall_ns,
         events_per_second,
         database_allocated_bytes,
     })
@@ -270,14 +330,23 @@ fn run_matrix(
     output: &Path,
     batch_size: usize,
     repetitions: usize,
+    comparison: &str,
 ) -> Result<(), String> {
     if batch_size == 0 || repetitions == 0 {
         return Err("batch size and repetitions must be nonzero".to_owned());
     }
     let current_exe = env::current_exe().map_err(|error| error.to_string())?;
     let mut runs = Vec::new();
+    let base_layouts = match comparison {
+        "tree-layout" => [IndexLayout::PerIndexTrees, IndexLayout::UnifiedIndexTree],
+        "index-order" => [
+            IndexLayout::GroupedArrivalOrder,
+            IndexLayout::SortedIndexKeys,
+        ],
+        other => return Err(format!("unknown comparison: {other}")),
+    };
     for repetition in 0..repetitions {
-        let mut layouts = [IndexLayout::PerIndexTrees, IndexLayout::UnifiedIndexTree];
+        let mut layouts = base_layouts;
         if repetition % 2 == 1 {
             layouts.reverse();
         }
@@ -322,7 +391,12 @@ fn run_matrix(
     let record = MatrixRecord {
         schema: SCHEMA.to_owned(),
         command: format!(
-            "cargo run -q -p nmp-store --release --features bench-instrumentation --example redb_index_layout -- matrix {} {} {} {}",
+            "cargo run -q -p nmp-store --release --features bench-instrumentation --example redb_index_layout -- {} {} {} {} {}",
+            if comparison == "index-order" {
+                "order-matrix"
+            } else {
+                "matrix"
+            },
             corpus_path.display(),
             output.display(),
             batch_size,
@@ -352,7 +426,7 @@ fn run_matrix(
 fn main() -> Result<(), String> {
     let mut args = env::args_os().skip(1);
     let command = args.next().ok_or_else(|| {
-        "usage: redb_index_layout <run|matrix> <corpus> <layout|output> ...".to_owned()
+        "usage: redb_index_layout <run|matrix|order-matrix> <corpus> <layout|output> ...".to_owned()
     })?;
     match command.to_string_lossy().as_ref() {
         "run" => {
@@ -411,7 +485,30 @@ fn main() -> Result<(), String> {
                 .transpose()
                 .map_err(|error| format!("invalid repetitions: {error}"))?
                 .unwrap_or(5);
-            run_matrix(&corpus, &output, batch_size, repetitions)?;
+            run_matrix(&corpus, &output, batch_size, repetitions, "tree-layout")?;
+        }
+        "order-matrix" => {
+            let corpus = PathBuf::from(
+                args.next()
+                    .ok_or_else(|| "order-matrix requires corpus path".to_owned())?,
+            );
+            let output = PathBuf::from(
+                args.next()
+                    .ok_or_else(|| "order-matrix requires output path".to_owned())?,
+            );
+            let batch_size = args
+                .next()
+                .map(|value| value.to_string_lossy().parse())
+                .transpose()
+                .map_err(|error| format!("invalid batch size: {error}"))?
+                .unwrap_or(4_096);
+            let repetitions = args
+                .next()
+                .map(|value| value.to_string_lossy().parse())
+                .transpose()
+                .map_err(|error| format!("invalid repetitions: {error}"))?
+                .unwrap_or(11);
+            run_matrix(&corpus, &output, batch_size, repetitions, "index-order")?;
         }
         other => return Err(format!("unknown command: {other}")),
     }
