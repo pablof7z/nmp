@@ -31,6 +31,9 @@ members = [
     "crates/nmp-media",
     "crates/nmp-content",
     "crates/nmp-test-support",
+    # Typed NIP-22 comments over NIP-73 external targets (#572), exclusive
+    # kind:1111 schema owner.
+    "crates/nmp-nip22",
 ]
 
 [workspace.package]
@@ -71,6 +74,7 @@ nmp-nip68 = { path = "crates/nmp-nip68" }
 nmp-media = { path = "crates/nmp-media" }
 nmp-content = { path = "crates/nmp-content" }
 nmp-test-support = { path = "crates/nmp-test-support" }
+nmp-nip22 = { path = "crates/nmp-nip22" }
 proptest = "1"
 uniffi = "0.29"
 serde = { version = "1", features = ["derive"] }

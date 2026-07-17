@@ -768,6 +768,33 @@ impl NmpEngine {
         )
     }
 
+    /// Compose a durable, author-outbox-routed NIP-22 comment `WriteIntent`
+    /// (#572). Unlike [`Self::group_message_intent`], this needs no engine
+    /// state at all -- `nmp_nip22::comment_intent` takes author/time as
+    /// explicit caller parameters -- but lives here for the same "engine
+    /// door" naming symmetry. `correlation` (#591) passes straight through
+    /// to `WriteIntent.correlation`. Publish the returned take-once value
+    /// through [`Self::publish_composed`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn comment_intent(
+        &self,
+        root: crate::nip22::FfiCommentRoot,
+        parent: crate::nip22::FfiCommentParent,
+        author_pubkey: String,
+        created_at: u64,
+        content: String,
+        correlation: Option<String>,
+    ) -> Result<Arc<crate::nip29::FfiComposedWriteIntent>, FfiError> {
+        crate::nip22::comment_intent(
+            root,
+            parent,
+            author_pubkey,
+            created_at,
+            content,
+            correlation,
+        )
+    }
+
     /// Publish a `nmp_nip29::compose_group_send`-composed intent (#115).
     /// Take-once: `intent` is consumed by this call (`FfiComposedWriteIntent
     /// ::take`) -- a second call on the SAME handle fails closed with

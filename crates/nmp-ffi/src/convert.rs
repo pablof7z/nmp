@@ -205,6 +205,11 @@ pub enum FfiError {
         got: String,
         reason: String,
     },
+    /// #572: an `FfiNip73Target` failed `nmp_nip22::Nip73Target`'s
+    /// constructor validation (an empty `I`/`K` cell).
+    InvalidNip73Target {
+        reason: String,
+    },
 }
 
 /// Exact failure returned by `NmpQueryHandle::request_rows`
@@ -347,6 +352,7 @@ impl std::fmt::Display for FfiError {
             Self::InvalidCorrelationToken { got, reason } => {
                 write!(f, "invalid correlation token {got:?}: {reason}")
             }
+            Self::InvalidNip73Target { reason } => write!(f, "invalid NIP-73 target: {reason}"),
         }
     }
 }
@@ -1652,12 +1658,15 @@ fn parse_identity_override(input: &str) -> Result<PublicKey, FfiError> {
     parse_pubkey(input).or_else(|err| PublicKey::from_bech32(input).map_err(|_| err))
 }
 
-/// #591: `FfiWriteIntent.correlation`'s dedicated parse. Delegates entirely
+/// #591: `FfiWriteIntent.correlation`'s dedicated parse (also used by
+/// `nip22.rs`'s `comment_intent`, hence `pub(crate)`). Delegates entirely
 /// to `nmp_grammar::CorrelationToken`'s `TryFrom<&str>` bounded/non-empty
 /// validation; a rejection becomes a typed, synchronous
 /// [`FfiError::InvalidCorrelationToken`] naming both the offending input and
 /// the reason, BEFORE any engine call.
-fn parse_correlation_token(input: &str) -> Result<nmp_grammar::CorrelationToken, FfiError> {
+pub(crate) fn parse_correlation_token(
+    input: &str,
+) -> Result<nmp_grammar::CorrelationToken, FfiError> {
     nmp_grammar::CorrelationToken::try_from(input).map_err(|err| {
         FfiError::InvalidCorrelationToken {
             got: input.to_string(),

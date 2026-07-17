@@ -1616,6 +1616,7 @@ dependencies = [
  "nmp-blossom",
  "nmp-media",
  "nmp-nip02",
+ "nmp-nip22",
  "nmp-nip29",
  "nmp-nip51",
  "nmp-nip68",
@@ -1732,6 +1733,7 @@ dependencies = [
  "nmp-content",
  "nmp-grammar",
  "nmp-nip02",
+ "nmp-nip22",
  "nmp-nip29",
  "nmp-nip51",
  "nmp-signer",
@@ -1775,6 +1777,15 @@ dependencies = [
  "nmp-ownership",
  "nostr 0.44.4",
  "tempfile",
+]
+
+[[package]]
+name = "nmp-nip22"
+version = "0.1.0"
+dependencies = [
+ "nmp-grammar",
+ "nmp-ownership",
+ "nostr 0.44.4",
 ]
 
 [[package]]
