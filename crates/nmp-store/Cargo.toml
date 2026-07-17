@@ -23,6 +23,10 @@ name = "redb_index_layout"
 required-features = ["bench-instrumentation"]
 
 [[example]]
+name = "packed_postings"
+required-features = ["bench-instrumentation"]
+
+[[example]]
 name = "cardinality_query_bench"
 required-features = ["bench-instrumentation"]
 
