@@ -6,6 +6,21 @@ LSM maintenance. It does **not** prove a production `EventStore` migration:
 governance, real queries, outbox state, crash seams, and platform packaging
 remain outside this prepared physical-store harness.
 
+## Representative corpus governance coverage
+
+The 100k corpus contains 42,270 kind:5 deletion events with 57,200 `e` target
+tags and 540 `a` target tags. None of the `e` targets name another id in this
+generated corpus, so the governed production path would create durable
+tombstones but would not remove a held target. The corpus has no duplicate ids
+and no competing replaceable/addressable keys.
+
+The 12-keyspace prepared schema deliberately excludes tombstone/outbox tables,
+so the results below compare byte-identical canonical/index physical work, not
+all writes the representative corpus causes in `RedbStore`. A first real Fjall
+path must cover canonical insert, tombstone creation, and crash-atomic index
+updates; an insert-only prototype would skip governed behavior carried by 42%
+of this corpus and is not an acceptable migration falsifier.
+
 ## Qualified profile
 
 The compared Fjall 3.1.6 profile uses:
