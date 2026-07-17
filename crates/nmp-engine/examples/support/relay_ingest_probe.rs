@@ -467,6 +467,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         .checked_mul(config.relays as u64)
         .and_then(|value| value.checked_mul(config.passes as u64))
         .ok_or("expected frame count overflow")?;
+    let expected_last_id = EventId::from_hex(&corpus.last_id)?;
     let ingest_started = Instant::now();
     let memory_before_ingest = current_memory();
     let memory_sampler = MemorySampler::start(config.trim_allocator_during_ingest);
@@ -490,7 +491,11 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             .visible_limit
             .map_or(config.events, |limit| config.events.min(limit));
         let rows_complete = observations.final_visible_rows(&config) == expected_visible_rows;
-        if observed_frames >= expected_frames && rows_complete {
+        let newest_visible = observations
+            .visible_ids
+            .as_ref()
+            .is_none_or(|ids| ids.contains(&expected_last_id));
+        if observed_frames >= expected_frames && rows_complete && newest_visible {
             accepted_quiet_since.get_or_insert_with(Instant::now);
         } else {
             accepted_quiet_since = None;
