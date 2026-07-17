@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 blake3 = "1"
+fjall = "3.1.6"
 libc = "0.2"
 memmap2 = "0.9"
 nmp-store = { path = "../../crates/nmp-store", features = ["bench-instrumentation"] }
