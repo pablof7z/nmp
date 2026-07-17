@@ -113,8 +113,8 @@ pub(super) const LEGACY_BY_AUTHOR_KIND: TableDefinition<&[u8; 74], EventKey> =
 /// directly without rebuilding or hex-encoding its NIP-01 id.
 pub(super) const BY_TAG: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_tag_v6");
 /// Uniform sampled live-row counts for every ordered-index prefix. Keys are
-/// namespaced binary prefixes (global, author, kind, author+kind, or
-/// tag/value); values count sampled physical rows in that bucket. Sampling is
+/// namespaced binary prefixes (global, author, kind, or tag/value); values
+/// count sampled physical rows in that bucket. Sampling is
 /// sufficient for choosing an index and avoids one durable row for nearly
 /// every unique author/tag while never changing query correctness.
 pub(super) const INDEX_CARDINALITY: TableDefinition<&[u8], u64> =
