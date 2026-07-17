@@ -1,11 +1,11 @@
-use super::canonical::CanonicalWriteTables;
-use super::ingest::{insert_with_tables, InsertWriteTables};
+use super::ingest::insert_with_tables;
+use super::ingest_txn::RedbIngestTxn;
 use super::mutation::remove_row_in_txn;
 use super::outbox::{is_suppressed_in_txn, OUTBOX_SUPPRESS_BY_ADDR, OUTBOX_SUPPRESS_BY_ID};
-use super::query::{expiration_key_upper_bound, plan_ordered_query, QueryIndexWriteTables};
+use super::query::{expiration_key_upper_bound, plan_ordered_query};
 use super::schema::{
-    persist_err, EventKey, ADDR_INDEX, COVERAGE, EVENTS, EVENT_IDS, EVENT_LOCAL,
-    EVENT_OBSERVATIONS, EXPIRATION_INDEX, RELAYS,
+    persist_err, EventKey, COVERAGE, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS,
+    EXPIRATION_INDEX, RELAYS,
 };
 #[cfg(test)]
 use super::store::RedbCrashPoint;
@@ -46,7 +46,7 @@ pub(super) fn insert(
 ) -> Result<InsertOutcome, PersistenceError> {
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let outcome = {
-        let mut tables = InsertWriteTables::open(&write_txn)?;
+        let mut tables = RedbIngestTxn::open(&write_txn)?;
         let outcome = insert_with_tables(&mut tables, event, from)?;
         tables.canonical.flush_pending()?;
         outcome
@@ -77,7 +77,7 @@ pub(super) fn insert_batch(
     {
         #[cfg(feature = "bench-instrumentation")]
         let open_started = std::time::Instant::now();
-        let mut tables = InsertWriteTables::open(&write_txn)?;
+        let mut tables = RedbIngestTxn::open(&write_txn)?;
         #[cfg(feature = "bench-instrumentation")]
         crate::ingest_attribution::open_tables(open_started.elapsed());
         #[cfg(feature = "bench-instrumentation")]
@@ -429,21 +429,9 @@ pub(super) fn remove(
 ) -> Result<Option<StoredEvent>, PersistenceError> {
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let removed = {
-        let mut canonical = CanonicalWriteTables::open(&write_txn)?;
-        let mut addr_index = write_txn.open_table(ADDR_INDEX).map_err(persist_err)?;
-        let mut expiration_index = write_txn
-            .open_table(EXPIRATION_INDEX)
-            .map_err(persist_err)?;
-        let mut indexes = QueryIndexWriteTables::open(&write_txn)?;
-        let removed = remove_row_in_txn(
-            &mut canonical,
-            &mut addr_index,
-            &mut expiration_index,
-            &mut indexes,
-            id,
-            |_| true,
-        )?;
-        canonical.flush_pending()?;
+        let mut txn = RedbIngestTxn::open(&write_txn)?;
+        let removed = remove_row_in_txn(&mut txn, id, |_| true)?;
+        txn.canonical.flush_pending()?;
         removed
     };
     write_txn.commit().map_err(persist_err)?;
@@ -456,19 +444,15 @@ pub(super) fn expire_due(
 ) -> Result<Vec<StoredEvent>, PersistenceError> {
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let removed = {
-        let mut canonical = CanonicalWriteTables::open(&write_txn)?;
-        let mut addr_index = write_txn.open_table(ADDR_INDEX).map_err(persist_err)?;
-        let mut expiration_index = write_txn
-            .open_table(EXPIRATION_INDEX)
-            .map_err(persist_err)?;
-        let mut indexes = QueryIndexWriteTables::open(&write_txn)?;
+        let mut txn = RedbIngestTxn::open(&write_txn)?;
 
         let upper = expiration_key_upper_bound(now);
         // Collect due ids first, propagating any redb read error out of
         // the iterator (a plain `for` accumulate rather than a `.map()`
         // closure so `?` reaches this fn, not the closure).
         let mut due_keys: Vec<EventKey> = Vec::new();
-        for entry in expiration_index
+        for entry in txn
+            .expiration_index
             .range::<&[u8; 40]>(..=&upper)
             .map_err(persist_err)?
         {
@@ -478,21 +462,14 @@ pub(super) fn expire_due(
 
         let mut removed = Vec::new();
         for event_key in due_keys {
-            let Some(stored) = canonical.load_by_key(event_key)? else {
+            let Some(stored) = txn.canonical.load_by_key(event_key)? else {
                 continue;
             };
-            if let Some(row) = remove_row_in_txn(
-                &mut canonical,
-                &mut addr_index,
-                &mut expiration_index,
-                &mut indexes,
-                stored.event.id,
-                |_| true,
-            )? {
+            if let Some(row) = remove_row_in_txn(&mut txn, stored.event.id, |_| true)? {
                 removed.push(row);
             }
         }
-        canonical.flush_pending()?;
+        txn.canonical.flush_pending()?;
         removed
     };
     write_txn.commit().map_err(persist_err)?;
@@ -566,19 +543,8 @@ pub(super) fn gc(store: &mut RedbStore, claims: &ClaimSet) -> Result<GcReport, P
 
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     {
-        let mut canonical = CanonicalWriteTables::open(&write_txn)?;
-        let mut addr_index = write_txn.open_table(ADDR_INDEX).map_err(persist_err)?;
-        let mut expiration_index = write_txn
-            .open_table(EXPIRATION_INDEX)
-            .map_err(persist_err)?;
+        let mut txn = RedbIngestTxn::open(&write_txn)?;
         let mut coverage = write_txn.open_table(COVERAGE).map_err(persist_err)?;
-        let mut indexes = QueryIndexWriteTables::open(&write_txn)?;
-        let outbox_suppress_by_id = write_txn
-            .open_table(OUTBOX_SUPPRESS_BY_ID)
-            .map_err(persist_err)?;
-        let outbox_suppress_by_addr = write_txn
-            .open_table(OUTBOX_SUPPRESS_BY_ADDR)
-            .map_err(persist_err)?;
 
         // Pass 1: find victims (regular events matched by no claim, and
         // not an open — unsigned — local intent: Fable checkpoint R5,
@@ -590,13 +556,14 @@ pub(super) fn gc(store: &mut RedbStore, claims: &ClaimSet) -> Result<GcReport, P
         // Collected up front into owned values so the removal pass
         // below never holds a borrow across a mutation.
         let mut victims: Vec<Event> = Vec::new();
-        for entry in canonical.events.iter().map_err(persist_err)? {
+        for entry in txn.canonical.events.iter().map_err(persist_err)? {
             let (key, value) = entry.map_err(persist_err)?;
             let event = StoredEventView::from_trusted(value.value())
                 .expect("redb: decode canonical event view")
                 .materialize_event()
                 .expect("redb: materialize canonical event");
-            let local = canonical
+            let local = txn
+                .canonical
                 .local
                 .get(key.value())
                 .map_err(persist_err)?
@@ -612,7 +579,11 @@ pub(super) fn gc(store: &mut RedbStore, claims: &ClaimSet) -> Result<GcReport, P
                         ..
                     })
                 )
-                && !is_suppressed_in_txn(&outbox_suppress_by_id, &outbox_suppress_by_addr, &event)?
+                && !is_suppressed_in_txn(
+                    &txn.outbox_suppress_by_id,
+                    &txn.outbox_suppress_by_addr,
+                    &event,
+                )?
                 && !claims.is_claimed(&event)
             {
                 victims.push(event);
@@ -620,15 +591,8 @@ pub(super) fn gc(store: &mut RedbStore, claims: &ClaimSet) -> Result<GcReport, P
         }
 
         for event in &victims {
-            remove_row_in_txn(
-                &mut canonical,
-                &mut addr_index,
-                &mut expiration_index,
-                &mut indexes,
-                event.id,
-                |_| true,
-            )?
-            .expect("gc victim must remain present until removal");
+            remove_row_in_txn(&mut txn, event.id, |_| true)?
+                .expect("gc victim must remain present until removal");
             report.events_evicted += 1;
         }
 
@@ -712,7 +676,7 @@ pub(super) fn gc(store: &mut RedbStore, claims: &ClaimSet) -> Result<GcReport, P
             coverage.remove(row_key.as_str()).map_err(persist_err)?;
             report.legacy_coverage_rows_purged += 1;
         }
-        canonical.flush_pending()?;
+        txn.canonical.flush_pending()?;
     }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::GcBeforeCommit);

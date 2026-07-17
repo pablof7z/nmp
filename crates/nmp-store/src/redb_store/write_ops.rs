@@ -1,7 +1,8 @@
 use super::canonical::{
     decode_stored_event_record, encode_stored_event, encode_stored_event_record,
-    record_to_stored_event, stored_event_to_record, try_decode_stored_event, CanonicalWriteTables,
+    record_to_stored_event, stored_event_to_record, try_decode_stored_event,
 };
+use super::ingest_txn::RedbIngestTxn;
 use super::mutation::{
     fan_out_signed_in_txn, find_any_displaced_key_by_event_id_in_txn,
     find_displaced_key_by_event_id_in_txn, process_kind5_deletions_provisional_in_txn,
@@ -11,13 +12,10 @@ use super::outbox::{
     alloc_intent_id_in_txn, alloc_receipt_id_in_txn, decrement_pending_ephemeral_in_txn,
     intent_key, is_suppressed_in_txn, receipt_key, remove_addr_claimant_in_txn,
     remove_claimant_in_txn, update_outbox_receipt, OutboxIntentRecord, OutboxReceiptRecord,
-    SuppressClaimRecord, OUTBOX_KIND5_CLAIMS, OUTBOX_SUPPRESS_BY_ADDR, OUTBOX_SUPPRESS_BY_ID,
+    SuppressClaimRecord,
 };
-use super::query::{expiration_key, insert_query_index_rows, QueryIndexWriteTables};
-use super::schema::{
-    persist_err, EventKey, ADDR_INDEX, ADDR_TOMBSTONES, EXPIRATION_INDEX, OUTBOX_CORRELATIONS,
-    OUTBOX_DISPLACED, OUTBOX_INTENTS, OUTBOX_META, OUTBOX_RECEIPTS, TOMBSTONES,
-};
+use super::query::{expiration_key, insert_query_index_rows};
+use super::schema::{persist_err, EventKey, OUTBOX_CORRELATIONS, OUTBOX_META, OUTBOX_RECEIPTS};
 #[cfg(test)]
 use super::store::RedbCrashPoint;
 use super::store::RedbStore;
@@ -61,31 +59,10 @@ pub(super) fn accept_write(
 
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let outcome = {
-        let mut canonical = CanonicalWriteTables::open(&write_txn)?;
-        let mut addr_index = write_txn.open_table(ADDR_INDEX).map_err(persist_err)?;
-        let tombstones = write_txn.open_table(TOMBSTONES).map_err(persist_err)?;
-        let addr_tombstones = write_txn.open_table(ADDR_TOMBSTONES).map_err(persist_err)?;
-        let mut expiration_index = write_txn
-            .open_table(EXPIRATION_INDEX)
-            .map_err(persist_err)?;
-        let mut indexes = QueryIndexWriteTables::open(&write_txn)?;
-        let mut outbox_intents = write_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?;
-        let mut outbox_displaced = write_txn
-            .open_table(OUTBOX_DISPLACED)
-            .map_err(persist_err)?;
+        let mut ingest = RedbIngestTxn::open(&write_txn)?;
         let mut outbox_meta = write_txn.open_table(OUTBOX_META).map_err(persist_err)?;
-        let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
         let mut outbox_correlations = write_txn
             .open_table(OUTBOX_CORRELATIONS)
-            .map_err(persist_err)?;
-        let mut outbox_kind5_claims = write_txn
-            .open_table(OUTBOX_KIND5_CLAIMS)
-            .map_err(persist_err)?;
-        let mut outbox_suppress_by_id = write_txn
-            .open_table(OUTBOX_SUPPRESS_BY_ID)
-            .map_err(persist_err)?;
-        let mut outbox_suppress_by_addr = write_txn
-            .open_table(OUTBOX_SUPPRESS_BY_ADDR)
             .map_err(persist_err)?;
 
         if let Some(expected) = replaceable_base {
@@ -95,12 +72,14 @@ pub(super) fn accept_write(
                 ));
             };
             let address_key = address.to_redb_key();
-            let actual = match addr_index
+            let actual = match ingest
+                .addr_index
                 .get(address_key.as_str())
                 .map_err(persist_err)?
                 .map(|guard| guard.value())
             {
-                Some(event_key) => canonical
+                Some(event_key) => ingest
+                    .canonical
                     .load_by_key(event_key)?
                     .map(|stored| stored.event.id),
                 None => None,
@@ -112,7 +91,7 @@ pub(super) fn accept_write(
             }
         }
 
-        let existing = canonical.load_by_id(&frozen.id)?;
+        let existing = ingest.canonical.load_by_id(&frozen.id)?;
         let is_deletion = frozen.kind == Kind::EventDeletion;
 
         // Dedup detection: checked against BOTH the live `EVENTS` row
@@ -132,7 +111,7 @@ pub(super) fn accept_write(
         let dup_loc = if let Some((event_key, stored)) = existing {
             Some(DupLoc::Live(event_key, Box::new(stored)))
         } else {
-            find_any_displaced_key_by_event_id_in_txn(&outbox_displaced, frozen.id)?
+            find_any_displaced_key_by_event_id_in_txn(&ingest.outbox_displaced, frozen.id)?
                 .map(DupLoc::Stash)
         };
 
@@ -149,7 +128,8 @@ pub(super) fn accept_write(
             let mut existing_record = match &dup_loc {
                 DupLoc::Live(_event_key, stored) => stored_event_to_record(stored),
                 DupLoc::Stash(key) => decode_stored_event_record(
-                    outbox_displaced
+                    ingest
+                        .outbox_displaced
                         .get(key.as_str())
                         .map_err(persist_err)?
                         .expect("just found this key")
@@ -196,11 +176,14 @@ pub(super) fn accept_write(
             });
             match &dup_loc {
                 DupLoc::Live(event_key, _stored) => {
-                    canonical.replace_local(*event_key, existing_record.local.clone())?;
+                    ingest
+                        .canonical
+                        .replace_local(*event_key, existing_record.local.clone())?;
                 }
                 DupLoc::Stash(key) => {
                     let encoded = encode_stored_event_record(&existing_record);
-                    outbox_displaced
+                    ingest
+                        .outbox_displaced
                         .insert(key.as_str(), encoded.as_slice())
                         .map_err(persist_err)?;
                 }
@@ -215,16 +198,11 @@ pub(super) fn accept_write(
             // already-signed kind:5's tombstones are already
             // permanent, nothing provisional left to claim.
             if frozen.kind == Kind::EventDeletion && !already_signed {
-                let (_hidden, claims) = process_kind5_deletions_provisional_in_txn(
-                    &canonical,
-                    &addr_index,
-                    &mut outbox_suppress_by_id,
-                    &mut outbox_suppress_by_addr,
-                    intent_id,
-                    &frozen,
-                )?;
+                let (_hidden, claims) =
+                    process_kind5_deletions_provisional_in_txn(&mut ingest, intent_id, &frozen)?;
                 let encoded_claims = serde_json::to_string(&claims).expect("redb: encode claims");
-                outbox_kind5_claims
+                ingest
+                    .outbox_kind5_claims
                     .insert(intent_key(intent_id).as_str(), encoded_claims.as_str())
                     .map_err(persist_err)?;
             }
@@ -254,7 +232,7 @@ pub(super) fn accept_write(
                 },
                 None,
             )
-        } else if tombstone_refuses(&tombstones, &addr_tombstones, &frozen)? {
+        } else if tombstone_refuses(&ingest, &frozen)? {
             (AcceptOutcome::Refused(RefuseReason::Tombstoned), None)
         } else {
             let intent_id = alloc_intent_id_in_txn(&mut outbox_meta)?;
@@ -272,12 +250,20 @@ pub(super) fn accept_write(
             };
             match address_key_for(&frozen) {
                 None => {
-                    let event_key = canonical.insert_new(&stored.event, &stored.provenance)?;
-                    insert_query_index_rows(&mut canonical, &mut indexes, &frozen, event_key)
-                        .map_err(persist_err)?;
+                    let event_key = ingest
+                        .canonical
+                        .insert_new(&stored.event, &stored.provenance)?;
+                    insert_query_index_rows(
+                        &mut ingest.canonical,
+                        &mut ingest.indexes,
+                        &frozen,
+                        event_key,
+                    )
+                    .map_err(persist_err)?;
                     if let Some(ts) = frozen.tags.expiration().copied() {
                         let exp_key = expiration_key(ts, &frozen.id);
-                        expiration_index
+                        ingest
+                            .expiration_index
                             .insert(&exp_key, event_key)
                             .map_err(persist_err)?;
                     }
@@ -300,16 +286,14 @@ pub(super) fn accept_write(
                     // the row they always did.
                     if is_deletion {
                         let (hidden, claims) = process_kind5_deletions_provisional_in_txn(
-                            &canonical,
-                            &addr_index,
-                            &mut outbox_suppress_by_id,
-                            &mut outbox_suppress_by_addr,
+                            &mut ingest,
                             intent_id,
                             &frozen,
                         )?;
                         let encoded_claims =
                             serde_json::to_string(&claims).expect("redb: encode claims");
-                        outbox_kind5_claims
+                        ingest
+                            .outbox_kind5_claims
                             .insert(intent_key(intent_id).as_str(), encoded_claims.as_str())
                             .map_err(persist_err)?;
                         (
@@ -334,28 +318,32 @@ pub(super) fn accept_write(
                 }
                 Some(addr_key) => {
                     let addr_key_str = addr_key.to_redb_key();
-                    let current_key = addr_index
+                    let current_key = ingest
+                        .addr_index
                         .get(addr_key_str.as_str())
                         .map_err(persist_err)?
                         .map(|guard| guard.value());
 
                     match current_key {
                         None => {
-                            let event_key =
-                                canonical.insert_new(&stored.event, &stored.provenance)?;
-                            addr_index
+                            let event_key = ingest
+                                .canonical
+                                .insert_new(&stored.event, &stored.provenance)?;
+                            ingest
+                                .addr_index
                                 .insert(addr_key_str.as_str(), event_key)
                                 .map_err(persist_err)?;
                             insert_query_index_rows(
-                                &mut canonical,
-                                &mut indexes,
+                                &mut ingest.canonical,
+                                &mut ingest.indexes,
                                 &frozen,
                                 event_key,
                             )
                             .map_err(persist_err)?;
                             if let Some(ts) = frozen.tags.expiration().copied() {
                                 let exp_key = expiration_key(ts, &frozen.id);
-                                expiration_index
+                                ingest
+                                    .expiration_index
                                     .insert(&exp_key, event_key)
                                     .map_err(persist_err)?;
                             }
@@ -369,37 +357,35 @@ pub(super) fn accept_write(
                             )
                         }
                         Some(current_key) => {
-                            let current = canonical
+                            let current = ingest
+                                .canonical
                                 .load_by_key(current_key)?
                                 .expect("addr_index must always point at a stored event");
                             let current_event = &current.event;
 
                             if candidate_wins(&frozen, current_event) {
-                                let replaced = remove_row_in_txn(
-                                    &mut canonical,
-                                    &mut addr_index,
-                                    &mut expiration_index,
-                                    &mut indexes,
-                                    current_event.id,
-                                    |_| true,
-                                )?
-                                .expect("addr_index must always point at a stored event");
+                                let replaced =
+                                    remove_row_in_txn(&mut ingest, current_event.id, |_| true)?
+                                        .expect("addr_index must always point at a stored event");
 
-                                let event_key =
-                                    canonical.insert_new(&stored.event, &stored.provenance)?;
-                                addr_index
+                                let event_key = ingest
+                                    .canonical
+                                    .insert_new(&stored.event, &stored.provenance)?;
+                                ingest
+                                    .addr_index
                                     .insert(addr_key_str.as_str(), event_key)
                                     .map_err(persist_err)?;
                                 insert_query_index_rows(
-                                    &mut canonical,
-                                    &mut indexes,
+                                    &mut ingest.canonical,
+                                    &mut ingest.indexes,
                                     &frozen,
                                     event_key,
                                 )
                                 .map_err(persist_err)?;
                                 if let Some(ts) = frozen.tags.expiration().copied() {
                                     let exp_key = expiration_key(ts, &frozen.id);
-                                    expiration_index
+                                    ingest
+                                        .expiration_index
                                         .insert(&exp_key, event_key)
                                         .map_err(persist_err)?;
                                 }
@@ -452,13 +438,15 @@ pub(super) fn accept_write(
             };
             let encoded_intent =
                 serde_json::to_string(&intent_record).expect("redb: encode outbox intent");
-            outbox_intents
+            ingest
+                .outbox_intents
                 .insert(key.as_str(), encoded_intent.as_str())
                 .map_err(persist_err)?;
 
             if let Some(displaced) = &displaced {
                 let encoded_displaced = encode_stored_event(displaced);
-                outbox_displaced
+                ingest
+                    .outbox_displaced
                     .insert(key.as_str(), encoded_displaced.as_slice())
                     .map_err(persist_err)?;
             }
@@ -476,7 +464,8 @@ pub(super) fn accept_write(
             };
             let encoded_receipt =
                 serde_json::to_string(&receipt_record).expect("redb: encode outbox receipt");
-            outbox_receipts
+            ingest
+                .outbox_receipts
                 .insert(receipt_key(receipt_id).as_str(), encoded_receipt.as_str())
                 .map_err(persist_err)?;
 
@@ -494,7 +483,7 @@ pub(super) fn accept_write(
             }
         }
 
-        canonical.flush_pending()?;
+        ingest.canonical.flush_pending()?;
         result
     };
     #[cfg(test)]
@@ -510,31 +499,11 @@ pub(super) fn promote_signed(
 ) -> Result<PromoteOutcome, PersistenceError> {
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let outcome = {
-        let mut canonical = CanonicalWriteTables::open(&write_txn)?;
-        let mut outbox_intents = write_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?;
-        let mut outbox_displaced = write_txn
-            .open_table(OUTBOX_DISPLACED)
-            .map_err(persist_err)?;
-        let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
-        let mut outbox_kind5_claims = write_txn
-            .open_table(OUTBOX_KIND5_CLAIMS)
-            .map_err(persist_err)?;
-        let mut outbox_suppress_by_id = write_txn
-            .open_table(OUTBOX_SUPPRESS_BY_ID)
-            .map_err(persist_err)?;
-        let mut outbox_suppress_by_addr = write_txn
-            .open_table(OUTBOX_SUPPRESS_BY_ADDR)
-            .map_err(persist_err)?;
-        let mut addr_index = write_txn.open_table(ADDR_INDEX).map_err(persist_err)?;
-        let mut tombstones = write_txn.open_table(TOMBSTONES).map_err(persist_err)?;
-        let mut addr_tombstones = write_txn.open_table(ADDR_TOMBSTONES).map_err(persist_err)?;
-        let mut expiration_index = write_txn
-            .open_table(EXPIRATION_INDEX)
-            .map_err(persist_err)?;
-        let mut indexes = QueryIndexWriteTables::open(&write_txn)?;
+        let mut ingest = RedbIngestTxn::open(&write_txn)?;
 
         let key = intent_key(intent_id);
-        let intent_json = outbox_intents
+        let intent_json = ingest
+            .outbox_intents
             .get(key.as_str())
             .map_err(persist_err)?
             .map(|guard| guard.value().to_string());
@@ -569,7 +538,8 @@ pub(super) fn promote_signed(
                 // (issue #2, team-lead decision): an exact `Duplicate`
                 // is a CO-OWNER of the SAME canonical row, not a
                 // second row of its own — see `LocalOrigin`'s doc.
-                let live_record = canonical
+                let live_record = ingest
+                    .canonical
                     .load_by_id(&frozen_id)?
                     .map(|(event_key, stored)| (event_key, stored_event_to_record(&stored)));
                 let is_live = live_record.as_ref().is_some_and(|(_key, r)| {
@@ -592,10 +562,13 @@ pub(super) fn promote_signed(
                         .as_ref()
                         .and_then(|(_key, r)| r.local.as_ref())
                         .is_some_and(|l| l.sig_state == SigState::Signed)
-                } else if let Some(other_key) =
-                    find_displaced_key_by_event_id_in_txn(&outbox_displaced, frozen_id, intent_id)?
-                {
-                    let other_bytes = outbox_displaced
+                } else if let Some(other_key) = find_displaced_key_by_event_id_in_txn(
+                    &ingest.outbox_displaced,
+                    frozen_id,
+                    intent_id,
+                )? {
+                    let other_bytes = ingest
+                        .outbox_displaced
                         .get(other_key.as_str())
                         .map_err(persist_err)?
                         .expect("just found this key")
@@ -626,8 +599,10 @@ pub(super) fn promote_signed(
                         local.sig_state = SigState::Signed;
                         record.local = Some(local);
                         record.event = signed_frozen_event.clone();
-                        canonical.replace_event(event_key, &record.event)?;
-                        canonical.replace_local(event_key, record.local.clone())?;
+                        ingest.canonical.replace_event(event_key, &record.event)?;
+                        ingest
+                            .canonical
+                            .replace_local(event_key, record.local.clone())?;
                     }
                     let owners = record
                         .local
@@ -645,9 +620,11 @@ pub(super) fn promote_signed(
                         },
                         owners,
                     )
-                } else if let Some(other_key) =
-                    find_displaced_key_by_event_id_in_txn(&outbox_displaced, frozen_id, intent_id)?
-                {
+                } else if let Some(other_key) = find_displaced_key_by_event_id_in_txn(
+                    &ingest.outbox_displaced,
+                    frozen_id,
+                    intent_id,
+                )? {
                     // Not live. If this intent's exact frozen bytes
                     // are sitting in some OTHER intent's displaced
                     // stash (it was superseded by a later local edit
@@ -656,7 +633,8 @@ pub(super) fn promote_signed(
                     // restore of it would resurrect a stale sentinel
                     // copy of an intent that actually did sign. Same
                     // `already_signed` skip as the live case above.
-                    let other_bytes = outbox_displaced
+                    let other_bytes = ingest
+                        .outbox_displaced
                         .get(other_key.as_str())
                         .map_err(persist_err)?
                         .expect("just found this key")
@@ -669,7 +647,8 @@ pub(super) fn promote_signed(
                             local.sig_state = SigState::Signed;
                         }
                         let encoded_other = encode_stored_event_record(&other_record);
-                        outbox_displaced
+                        ingest
+                            .outbox_displaced
                             .insert(other_key.as_str(), encoded_other.as_slice())
                             .map_err(persist_err)?;
                     }
@@ -723,25 +702,11 @@ pub(super) fn promote_signed(
                 // that's already validly signed. Shared with
                 // `reinsert_stashed_in_txn`'s dedup collision and
                 // `insert`'s relay-dedup-onto-pending path.
-                let co_signed: Vec<IntentId> = fan_out_signed_in_txn(
-                    &mut canonical,
-                    &mut addr_index,
-                    &mut tombstones,
-                    &mut addr_tombstones,
-                    &mut expiration_index,
-                    &mut indexes,
-                    &mut outbox_intents,
-                    &mut outbox_receipts,
-                    &mut outbox_displaced,
-                    &mut outbox_kind5_claims,
-                    &mut outbox_suppress_by_id,
-                    &mut outbox_suppress_by_addr,
-                    &owners,
-                    &row.event,
-                )?
-                .into_iter()
-                .filter(|owner_id| *owner_id != intent_id)
-                .collect();
+                let co_signed: Vec<IntentId> =
+                    fan_out_signed_in_txn(&mut ingest, &owners, &row.event)?
+                        .into_iter()
+                        .filter(|owner_id| *owner_id != intent_id)
+                        .collect();
 
                 PromoteOutcome::Promoted {
                     row: Box::new(row),
@@ -749,7 +714,7 @@ pub(super) fn promote_signed(
                 }
             }
         };
-        canonical.flush_pending()?;
+        ingest.canonical.flush_pending()?;
         outcome
     };
     #[cfg(test)]
@@ -769,31 +734,11 @@ pub(super) fn compensate_write_with_state(
     };
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let outcome = {
-        let mut canonical = CanonicalWriteTables::open(&write_txn)?;
-        let mut addr_index = write_txn.open_table(ADDR_INDEX).map_err(persist_err)?;
-        let mut tombstones = write_txn.open_table(TOMBSTONES).map_err(persist_err)?;
-        let mut addr_tombstones = write_txn.open_table(ADDR_TOMBSTONES).map_err(persist_err)?;
-        let mut expiration_index = write_txn
-            .open_table(EXPIRATION_INDEX)
-            .map_err(persist_err)?;
-        let mut indexes = QueryIndexWriteTables::open(&write_txn)?;
-        let mut outbox_intents = write_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?;
-        let mut outbox_displaced = write_txn
-            .open_table(OUTBOX_DISPLACED)
-            .map_err(persist_err)?;
-        let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
-        let mut outbox_kind5_claims = write_txn
-            .open_table(OUTBOX_KIND5_CLAIMS)
-            .map_err(persist_err)?;
-        let mut outbox_suppress_by_id = write_txn
-            .open_table(OUTBOX_SUPPRESS_BY_ID)
-            .map_err(persist_err)?;
-        let mut outbox_suppress_by_addr = write_txn
-            .open_table(OUTBOX_SUPPRESS_BY_ADDR)
-            .map_err(persist_err)?;
+        let mut ingest = RedbIngestTxn::open(&write_txn)?;
 
         let key = intent_key(intent_id);
-        let intent_json = outbox_intents
+        let intent_json = ingest
+            .outbox_intents
             .get(key.as_str())
             .map_err(persist_err)?
             .map(|guard| guard.value().to_string());
@@ -818,7 +763,7 @@ pub(super) fn compensate_write_with_state(
                             ))
                         })?;
                     let frozen_id = frozen_event.id;
-                    let live = canonical.load_by_id(&frozen_id)?;
+                    let live = ingest.canonical.load_by_id(&frozen_id)?;
                     let is_live = live.as_ref().is_some_and(|(_event_key, stored)| {
                         let r = stored_event_to_record(stored);
                         r.local
@@ -849,20 +794,13 @@ pub(super) fn compensate_write_with_state(
                             && local.sig_state == SigState::Pending
                             && record.provenance.is_empty();
                         if should_retract {
-                            remove_row_in_txn(
-                                &mut canonical,
-                                &mut addr_index,
-                                &mut expiration_index,
-                                &mut indexes,
-                                frozen_id,
-                                |_| true,
-                            )?;
+                            remove_row_in_txn(&mut ingest, frozen_id, |_| true)?;
                         } else {
                             record.local = Some(local);
-                            canonical.replace_local(*event_key, record.local)?;
+                            ingest.canonical.replace_local(*event_key, record.local)?;
                         }
                     } else if let Some(other_key) = find_displaced_key_by_event_id_in_txn(
-                        &outbox_displaced,
+                        &ingest.outbox_displaced,
                         frozen_id,
                         intent_id,
                     )? {
@@ -875,7 +813,8 @@ pub(super) fn compensate_write_with_state(
                         // co-owner (or a signed/relay-confirmed state)
                         // sitting in the SAME stash slot must survive
                         // this intent's cancellation too.
-                        let other_bytes = outbox_displaced
+                        let other_bytes = ingest
+                            .outbox_displaced
                             .get(other_key.as_str())
                             .map_err(persist_err)?
                             .expect("just found this key")
@@ -894,19 +833,24 @@ pub(super) fn compensate_write_with_state(
                             && local.sig_state == SigState::Pending
                             && other_record.provenance.is_empty();
                         if should_drop {
-                            outbox_displaced
+                            ingest
+                                .outbox_displaced
                                 .remove(other_key.as_str())
                                 .map_err(persist_err)?;
                         } else {
                             other_record.local = Some(local);
                             let encoded_other = encode_stored_event_record(&other_record);
-                            outbox_displaced
+                            ingest
+                                .outbox_displaced
                                 .insert(other_key.as_str(), encoded_other.as_slice())
                                 .map_err(persist_err)?;
                         }
                     }
 
-                    outbox_intents.remove(key.as_str()).map_err(persist_err)?;
+                    ingest
+                        .outbox_intents
+                        .remove(key.as_str())
+                        .map_err(persist_err)?;
                     // THIS intent's OWN displaced predecessor (if any)
                     // is restored through the same one door regardless
                     // of whether its row was live or already gone for
@@ -914,27 +858,16 @@ pub(super) fn compensate_write_with_state(
                     // supersession) — `reinsert_stashed_in_txn`'s own
                     // tombstone check makes this safe even if the
                     // predecessor was itself since deleted or expired.
-                    let displaced_bytes = outbox_displaced
+                    let displaced_bytes = ingest
+                        .outbox_displaced
                         .remove(key.as_str())
                         .map_err(persist_err)?
                         .map(|guard| guard.value().to_vec());
                     let restored = match displaced_bytes {
-                        Some(bytes) => reinsert_stashed_in_txn(
-                            &mut canonical,
-                            &mut addr_index,
-                            &mut tombstones,
-                            &mut addr_tombstones,
-                            &mut expiration_index,
-                            &mut indexes,
-                            &mut outbox_intents,
-                            &mut outbox_receipts,
-                            &mut outbox_displaced,
-                            &mut outbox_kind5_claims,
-                            &mut outbox_suppress_by_id,
-                            &mut outbox_suppress_by_addr,
-                            try_decode_stored_event(&bytes)?,
-                        )?
-                        .map(Box::new),
+                        Some(bytes) => {
+                            reinsert_stashed_in_txn(&mut ingest, try_decode_stored_event(&bytes)?)?
+                                .map(Box::new)
+                        }
                         None => None,
                     };
 
@@ -955,7 +888,8 @@ pub(super) fn compensate_write_with_state(
                     // wrong-author e-tag claim on a row some OTHER
                     // author holds), is correctly excluded.
                     let mut revealed = Vec::new();
-                    let claims_json = outbox_kind5_claims
+                    let claims_json = ingest
+                        .outbox_kind5_claims
                         .remove(key.as_str())
                         .map_err(persist_err)?
                         .map(|guard| guard.value().to_string());
@@ -991,12 +925,14 @@ pub(super) fn compensate_write_with_state(
                                     })?)
                                 }
                                 SuppressClaimRecord::Addr { key: addr_key, .. } => {
-                                    let event_key = addr_index
+                                    let event_key = ingest
+                                        .addr_index
                                         .get(addr_key.as_str())
                                         .map_err(persist_err)?
                                         .map(|guard| guard.value());
                                     match event_key {
-                                        Some(event_key) => canonical
+                                        Some(event_key) => ingest
+                                            .canonical
                                             .load_by_key(event_key)?
                                             .map(|stored| stored.event.id),
                                         None => None,
@@ -1012,11 +948,11 @@ pub(super) fn compensate_write_with_state(
 
                         let mut visible_before: HashMap<EventId, bool> = HashMap::new();
                         for id in &candidate_ids {
-                            let visible = match canonical.load_by_id(id)? {
+                            let visible = match ingest.canonical.load_by_id(id)? {
                                 None => false,
                                 Some((_key, se)) => !is_suppressed_in_txn(
-                                    &outbox_suppress_by_id,
-                                    &outbox_suppress_by_addr,
+                                    &ingest.outbox_suppress_by_id,
+                                    &ingest.outbox_suppress_by_addr,
                                     &se.event,
                                 )?,
                             };
@@ -1027,14 +963,14 @@ pub(super) fn compensate_write_with_state(
                             match claim {
                                 SuppressClaimRecord::Id(id_key) => {
                                     remove_claimant_in_txn(
-                                        &mut outbox_suppress_by_id,
+                                        &mut ingest.outbox_suppress_by_id,
                                         &id_key,
                                         intent_id,
                                     )?;
                                 }
                                 SuppressClaimRecord::Addr { key: addr_key, .. } => {
                                     remove_addr_claimant_in_txn(
-                                        &mut outbox_suppress_by_addr,
+                                        &mut ingest.outbox_suppress_by_addr,
                                         &addr_key,
                                         intent_id,
                                     )?;
@@ -1046,10 +982,10 @@ pub(super) fn compensate_write_with_state(
                             if visible_before.get(&id).copied().unwrap_or(false) {
                                 continue;
                             }
-                            if let Some((_key, se)) = canonical.load_by_id(&id)? {
+                            if let Some((_key, se)) = ingest.canonical.load_by_id(&id)? {
                                 if !is_suppressed_in_txn(
-                                    &outbox_suppress_by_id,
-                                    &outbox_suppress_by_addr,
+                                    &ingest.outbox_suppress_by_id,
+                                    &ingest.outbox_suppress_by_addr,
                                     &se.event,
                                 )? {
                                     revealed.push(se);
@@ -1059,7 +995,7 @@ pub(super) fn compensate_write_with_state(
                     }
 
                     update_outbox_receipt(
-                        &mut outbox_receipts,
+                        &mut ingest.outbox_receipts,
                         intent_record.receipt_id,
                         terminal_state,
                     )?;
@@ -1068,7 +1004,7 @@ pub(super) fn compensate_write_with_state(
                 }
             }
         };
-        canonical.flush_pending()?;
+        ingest.canonical.flush_pending()?;
         outcome
     };
     #[cfg(test)]

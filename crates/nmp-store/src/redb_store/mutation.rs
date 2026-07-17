@@ -1,14 +1,11 @@
-use super::canonical::{stored_event_to_record, try_decode_stored_event, CanonicalWriteTables};
+use super::canonical::{stored_event_to_record, try_decode_stored_event};
+use super::ingest_txn::{GovernedIngestTxn, GovernedStringMap, RedbIngestTxn};
 use super::outbox::{
-    add_addr_claimant_in_txn, add_claimant_in_txn, intent_key, is_suppressed_in_txn,
-    remove_addr_claimant_in_txn, remove_claimant_in_txn, update_outbox_receipt, OutboxIntentRecord,
-    SuppressClaimRecord,
+    add_addr_claimant_in_txn, add_claimant_in_txn, intent_key, is_suppressed_in_txn, receipt_key,
+    AddrClaimant, OutboxIntentRecord, OutboxReceiptRecord, SuppressClaimRecord,
 };
-use super::query::{
-    expiration_key, insert_query_index_rows, remove_query_index_rows, AddrTombstoneRecord,
-    QueryIndexWriteTables,
-};
-use super::schema::{id_tombstone_key, persist_err, EventKey};
+use super::query::{expiration_key, insert_query_index_rows, AddrTombstoneRecord};
+use super::schema::{id_tombstone_key, persist_err};
 use super::{
     address_key_for, address_key_for_coordinate, candidate_wins, BTreeSet, Event, EventId, HashMap,
     HashSet, IntentId, IntentSigState, Kind, LocalOrigin, PersistenceError, ReceiptState,
@@ -24,20 +21,24 @@ use redb::ReadableTable;
 /// written before its target ever arrived: refused iff `event.pubkey`
 /// itself claimed this exact id, regardless of any OTHER author's
 /// (irrelevant) claim on the same id.
-pub(super) fn tombstone_refuses(
-    tombstones: &redb::Table<'_, &str, &str>,
-    addr_tombstones: &redb::Table<'_, &str, &str>,
+pub(super) fn tombstone_refuses<T: GovernedIngestTxn>(
+    txn: &T,
     event: &Event,
 ) -> Result<bool, PersistenceError> {
     let key = id_tombstone_key(&event.id, &event.pubkey);
-    if tombstones.get(key.as_str()).map_err(persist_err)?.is_some() {
+    if txn
+        .string_get(GovernedStringMap::Tombstones, key.as_str())?
+        .is_some()
+    {
         return Ok(true);
     }
     if let Some(key) = address_key_for(event) {
         let key_str = key.to_redb_key();
-        if let Some(guard) = addr_tombstones.get(key_str.as_str()).map_err(persist_err)? {
+        if let Some(encoded) =
+            txn.string_get(GovernedStringMap::AddrTombstones, key_str.as_str())?
+        {
             let rec: AddrTombstoneRecord =
-                serde_json::from_str(guard.value()).expect("redb: decode addr tombstone");
+                serde_json::from_str(&encoded).expect("store: decode addr tombstone");
             if event.created_at.as_secs() <= rec.ceiling {
                 return Ok(true);
             }
@@ -54,41 +55,32 @@ pub(super) fn tombstone_refuses(
 /// `true`) and kind:5 processing (`predicate` is the NIP-09 author-only
 /// check).
 #[allow(clippy::too_many_arguments)]
-pub(super) fn remove_row_in_txn(
-    canonical: &mut CanonicalWriteTables<'_>,
-    addr_index: &mut redb::Table<'_, &str, EventKey>,
-    expiration_index: &mut redb::Table<'_, &[u8; 40], EventKey>,
-    indexes: &mut QueryIndexWriteTables<'_>,
+pub(super) fn remove_row_in_txn<T: GovernedIngestTxn>(
+    txn: &mut T,
     id: EventId,
     predicate: impl FnOnce(&StoredEvent) -> bool,
 ) -> Result<Option<StoredEvent>, PersistenceError> {
-    let Some((event_key, se)) = canonical.load_by_id(&id)? else {
+    let Some((event_key, se)) = txn.load_by_id(&id)? else {
         return Ok(None);
     };
     if !predicate(&se) {
         return Ok(None);
     }
 
-    canonical.remove_by_key(event_key, &id)?;
-    remove_query_index_rows(canonical, indexes, &se.event)?;
+    txn.remove_canonical(event_key, &id)?;
+    txn.remove_indexes(&se.event)?;
 
     if let Some(addr_key) = address_key_for(&se.event) {
         let addr_key_str = addr_key.to_redb_key();
-        let still_points_here = addr_index
-            .get(addr_key_str.as_str())
-            .map_err(persist_err)?
-            .map(|guard| guard.value())
-            == Some(event_key);
+        let still_points_here = txn.address_get(addr_key_str.as_str())? == Some(event_key);
         if still_points_here {
-            addr_index
-                .remove(addr_key_str.as_str())
-                .map_err(persist_err)?;
+            txn.address_remove(addr_key_str.as_str())?;
         }
     }
 
     if let Some(ts) = se.event.tags.expiration().copied() {
         let exp_key = expiration_key(ts, &id);
-        expiration_index.remove(&exp_key).map_err(persist_err)?;
+        txn.expiration_remove(&exp_key)?;
     }
 
     Ok(Some(se))
@@ -102,13 +94,8 @@ pub(super) fn remove_row_in_txn(
 /// the PERMANENT tombstone, and drop the row if currently held. Returns
 /// every row actually dropped.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn process_kind5_deletions(
-    canonical: &mut CanonicalWriteTables<'_>,
-    addr_index: &mut redb::Table<'_, &str, EventKey>,
-    tombstones: &mut redb::Table<'_, &str, &str>,
-    addr_tombstones: &mut redb::Table<'_, &str, &str>,
-    expiration_index: &mut redb::Table<'_, &[u8; 40], EventKey>,
-    indexes: &mut QueryIndexWriteTables<'_>,
+pub(super) fn process_kind5_deletions<T: GovernedIngestTxn>(
+    txn: &mut T,
     deleting: &Event,
 ) -> Result<Vec<StoredEvent>, PersistenceError> {
     let mut deleted = Vec::new();
@@ -117,14 +104,9 @@ pub(super) fn process_kind5_deletions(
 
     let target_ids: Vec<EventId> = deleting.tags.event_ids().copied().collect();
     for target_id in target_ids {
-        if let Some(removed) = remove_row_in_txn(
-            canonical,
-            addr_index,
-            expiration_index,
-            indexes,
-            target_id,
-            |se| se.event.pubkey == deleting.pubkey,
-        )? {
+        if let Some(removed) =
+            remove_row_in_txn(txn, target_id, |se| se.event.pubkey == deleting.pubkey)?
+        {
             deleted.push(removed);
         }
         // Claim recorded regardless of hold state right now -- a target
@@ -133,9 +115,11 @@ pub(super) fn process_kind5_deletions(
         // existing claim on this same id (composite key -- see
         // `TOMBSTONES`'s doc): each claiming author gets its own row.
         let key = id_tombstone_key(&target_id, &deleting.pubkey);
-        tombstones
-            .insert(key.as_str(), deleting_id_hex.as_str())
-            .map_err(persist_err)?;
+        txn.string_put(
+            GovernedStringMap::Tombstones,
+            key.as_str(),
+            deleting_id_hex.as_str(),
+        )?;
     }
 
     let coords: Vec<_> = deleting.tags.coordinates().cloned().collect();
@@ -151,12 +135,11 @@ pub(super) fn process_kind5_deletions(
         };
         let key_str = key.to_redb_key();
 
-        let existing_ceiling = addr_tombstones
-            .get(key_str.as_str())
-            .map_err(persist_err)?
-            .map(|guard| {
+        let existing_ceiling = txn
+            .string_get(GovernedStringMap::AddrTombstones, key_str.as_str())?
+            .map(|encoded| {
                 let rec: AddrTombstoneRecord =
-                    serde_json::from_str(guard.value()).expect("redb: decode addr tombstone");
+                    serde_json::from_str(&encoded).expect("store: decode addr tombstone");
                 rec.ceiling
             });
         let new_ceiling = deleting.created_at.as_secs();
@@ -167,28 +150,22 @@ pub(super) fn process_kind5_deletions(
                 deleting_author: deleting_author_hex.clone(),
             };
             let encoded = serde_json::to_string(&record).expect("redb: encode addr tombstone");
-            addr_tombstones
-                .insert(key_str.as_str(), encoded.as_str())
-                .map_err(persist_err)?;
+            txn.string_put(
+                GovernedStringMap::AddrTombstones,
+                key_str.as_str(),
+                encoded.as_str(),
+            )?;
         }
 
-        let current_key = addr_index
-            .get(key_str.as_str())
-            .map_err(persist_err)?
-            .map(|guard| guard.value());
+        let current_key = txn.address_get(key_str.as_str())?;
         if let Some(current_key) = current_key {
-            let current = canonical
+            let current = txn
                 .load_by_key(current_key)?
                 .expect("addr_index must always point at a stored event");
             let current_id = current.event.id;
-            if let Some(removed) = remove_row_in_txn(
-                canonical,
-                addr_index,
-                expiration_index,
-                indexes,
-                current_id,
-                |se| se.event.created_at <= deleting.created_at,
-            )? {
+            if let Some(removed) = remove_row_in_txn(txn, current_id, |se| {
+                se.event.created_at <= deleting.created_at
+            })? {
                 deleted.push(removed);
             }
         }
@@ -212,20 +189,69 @@ pub(super) fn process_kind5_deletions(
 /// `MemoryStore::fan_out_signed` exactly. Returns every intent THIS call
 /// actually transitioned (an already-`Signed` owner is left untouched and
 /// excluded).
-#[allow(clippy::too_many_arguments)]
-pub(super) fn fan_out_signed_in_txn(
-    canonical: &mut CanonicalWriteTables<'_>,
-    addr_index: &mut redb::Table<'_, &str, EventKey>,
-    tombstones: &mut redb::Table<'_, &str, &str>,
-    addr_tombstones: &mut redb::Table<'_, &str, &str>,
-    expiration_index: &mut redb::Table<'_, &[u8; 40], EventKey>,
-    indexes: &mut QueryIndexWriteTables<'_>,
-    outbox_intents: &mut redb::Table<'_, &str, &str>,
-    outbox_receipts: &mut redb::Table<'_, &str, &str>,
-    outbox_displaced: &mut redb::Table<'_, &str, &[u8]>,
-    outbox_kind5_claims: &mut redb::Table<'_, &str, &str>,
-    outbox_suppress_by_id: &mut redb::Table<'_, &str, &str>,
-    outbox_suppress_by_addr: &mut redb::Table<'_, &str, &str>,
+fn update_outbox_receipt<T: GovernedIngestTxn>(
+    txn: &mut T,
+    receipt_id: u64,
+    state: ReceiptState,
+) -> Result<(), PersistenceError> {
+    let key = receipt_key(receipt_id);
+    let json = txn
+        .string_get(GovernedStringMap::OutboxReceipts, &key)?
+        .ok_or_else(|| PersistenceError(format!("missing outbox receipt {receipt_id}")))?;
+    let mut record: OutboxReceiptRecord = serde_json::from_str(&json).map_err(|error| {
+        PersistenceError(format!("decode outbox receipt {receipt_id}: {error}"))
+    })?;
+    record.state = state;
+    let encoded = serde_json::to_string(&record).map_err(|error| {
+        PersistenceError(format!("encode outbox receipt {receipt_id}: {error}"))
+    })?;
+    txn.string_put(GovernedStringMap::OutboxReceipts, &key, &encoded)
+}
+
+fn remove_claimant<T: GovernedIngestTxn>(
+    txn: &mut T,
+    map: GovernedStringMap,
+    key: &str,
+    intent_id: IntentId,
+) -> Result<(), PersistenceError> {
+    let Some(json) = txn.string_get(map, key)? else {
+        return Ok(());
+    };
+    let mut claimants: Vec<u64> = serde_json::from_str(&json)
+        .map_err(|error| PersistenceError(format!("decode claimant set: {error}")))?;
+    claimants.retain(|id| *id != intent_id.0);
+    if claimants.is_empty() {
+        txn.string_remove(map, key)?;
+    } else {
+        let encoded = serde_json::to_string(&claimants).expect("store: encode claimant set");
+        txn.string_put(map, key, &encoded)?;
+    }
+    Ok(())
+}
+
+fn remove_addr_claimant<T: GovernedIngestTxn>(
+    txn: &mut T,
+    key: &str,
+    intent_id: IntentId,
+) -> Result<(), PersistenceError> {
+    let map = GovernedStringMap::OutboxSuppressByAddr;
+    let Some(json) = txn.string_get(map, key)? else {
+        return Ok(());
+    };
+    let mut claimants: Vec<AddrClaimant> = serde_json::from_str(&json)
+        .map_err(|error| PersistenceError(format!("decode address claimant set: {error}")))?;
+    claimants.retain(|claimant| claimant.intent_id != intent_id.0);
+    if claimants.is_empty() {
+        txn.string_remove(map, key)?;
+    } else {
+        let encoded = serde_json::to_string(&claimants).expect("store: encode addr claimant set");
+        txn.string_put(map, key, &encoded)?;
+    }
+    Ok(())
+}
+
+pub(super) fn fan_out_signed_in_txn<T: GovernedIngestTxn>(
+    txn: &mut T,
     owners: &BTreeSet<IntentId>,
     canonical_event: &Event,
 ) -> Result<Vec<IntentId>, PersistenceError> {
@@ -234,13 +260,9 @@ pub(super) fn fan_out_signed_in_txn(
     let canonical_json = canonical_event.as_json();
     for owner_id in owners {
         let owner_key = intent_key(*owner_id);
-        outbox_displaced
-            .remove(owner_key.as_str())
-            .map_err(persist_err)?;
-        let owner_intent_json = outbox_intents
-            .get(owner_key.as_str())
-            .map_err(persist_err)?
-            .map(|guard| guard.value().to_string());
+        txn.displaced_remove(owner_key.as_str())?;
+        let owner_intent_json =
+            txn.string_get(GovernedStringMap::OutboxIntents, owner_key.as_str())?;
         if let Some(owner_intent_json) = owner_intent_json {
             let mut owner_record: OutboxIntentRecord =
                 serde_json::from_str(&owner_intent_json).expect("redb: decode outbox intent");
@@ -249,36 +271,33 @@ pub(super) fn fan_out_signed_in_txn(
                 owner_record.frozen_json = canonical_json.clone();
                 let encoded_owner =
                     serde_json::to_string(&owner_record).expect("redb: encode outbox intent");
-                outbox_intents
-                    .insert(owner_key.as_str(), encoded_owner.as_str())
-                    .map_err(persist_err)?;
-                update_outbox_receipt(
-                    outbox_receipts,
-                    owner_record.receipt_id,
-                    ReceiptState::Signed,
+                txn.string_put(
+                    GovernedStringMap::OutboxIntents,
+                    owner_key.as_str(),
+                    encoded_owner.as_str(),
                 )?;
+                update_outbox_receipt(txn, owner_record.receipt_id, ReceiptState::Signed)?;
                 transitioned.push(*owner_id);
             }
         }
         if is_deletion {
-            let claims_json = outbox_kind5_claims
-                .remove(owner_key.as_str())
-                .map_err(persist_err)?
-                .map(|guard| guard.value().to_string());
+            let claims_json =
+                txn.string_remove(GovernedStringMap::OutboxKind5Claims, owner_key.as_str())?;
             if let Some(claims_json) = claims_json {
                 let claims: Vec<SuppressClaimRecord> =
                     serde_json::from_str(&claims_json).expect("redb: decode claims");
                 for claim in claims {
                     match claim {
                         SuppressClaimRecord::Id(id_key) => {
-                            remove_claimant_in_txn(outbox_suppress_by_id, &id_key, *owner_id)?;
-                        }
-                        SuppressClaimRecord::Addr { key: addr_key, .. } => {
-                            remove_addr_claimant_in_txn(
-                                outbox_suppress_by_addr,
-                                &addr_key,
+                            remove_claimant(
+                                txn,
+                                GovernedStringMap::OutboxSuppressById,
+                                &id_key,
                                 *owner_id,
                             )?;
+                        }
+                        SuppressClaimRecord::Addr { key: addr_key, .. } => {
+                            remove_addr_claimant(txn, &addr_key, *owner_id)?;
                         }
                     }
                 }
@@ -286,15 +305,7 @@ pub(super) fn fan_out_signed_in_txn(
         }
     }
     if is_deletion {
-        process_kind5_deletions(
-            canonical,
-            addr_index,
-            tombstones,
-            addr_tombstones,
-            expiration_index,
-            indexes,
-            canonical_event,
-        )?;
+        process_kind5_deletions(txn, canonical_event)?;
     }
     Ok(transitioned)
 }
@@ -316,10 +327,7 @@ pub(super) fn fan_out_signed_in_txn(
 /// — and the exact claims staged (for `OUTBOX_KIND5_CLAIMS`). Mirrors
 /// `MemoryStore::process_kind5_deletions_provisional` exactly.
 pub(super) fn process_kind5_deletions_provisional_in_txn(
-    canonical: &CanonicalWriteTables<'_>,
-    addr_index: &redb::Table<'_, &str, EventKey>,
-    outbox_suppress_by_id: &mut redb::Table<'_, &str, &str>,
-    outbox_suppress_by_addr: &mut redb::Table<'_, &str, &str>,
+    txn: &mut RedbIngestTxn<'_>,
     intent_id: IntentId,
     deleting: &Event,
 ) -> Result<(Vec<StoredEvent>, Vec<SuppressClaimRecord>), PersistenceError> {
@@ -339,12 +347,14 @@ pub(super) fn process_kind5_deletions_provisional_in_txn(
         }
         if let Some(key) = address_key_for_coordinate(coord) {
             let key_str = key.to_redb_key();
-            let current_key = addr_index
+            let current_key = txn
+                .addr_index
                 .get(key_str.as_str())
                 .map_err(persist_err)?
                 .map(|guard| guard.value());
             if let Some(current_key) = current_key {
-                let current_id = canonical
+                let current_id = txn
+                    .canonical
                     .load_by_key(current_key)?
                     .expect("addr_index must always point at a stored event")
                     .event
@@ -358,11 +368,13 @@ pub(super) fn process_kind5_deletions_provisional_in_txn(
 
     let mut visible_before: HashMap<EventId, bool> = HashMap::new();
     for id in &candidate_ids {
-        let visible = match canonical.load_by_id(id)? {
+        let visible = match txn.canonical.load_by_id(id)? {
             None => false,
-            Some((_key, se)) => {
-                !is_suppressed_in_txn(outbox_suppress_by_id, outbox_suppress_by_addr, &se.event)?
-            }
+            Some((_key, se)) => !is_suppressed_in_txn(
+                &txn.outbox_suppress_by_id,
+                &txn.outbox_suppress_by_addr,
+                &se.event,
+            )?,
         };
         visible_before.insert(*id, visible);
     }
@@ -370,7 +382,7 @@ pub(super) fn process_kind5_deletions_provisional_in_txn(
     let mut claims = Vec::new();
     for target_id in target_ids {
         let key = id_tombstone_key(&target_id, &deleting.pubkey);
-        add_claimant_in_txn(outbox_suppress_by_id, &key, intent_id)?;
+        add_claimant_in_txn(&mut txn.outbox_suppress_by_id, &key, intent_id)?;
         claims.push(SuppressClaimRecord::Id(key));
     }
     for coord in coords {
@@ -385,7 +397,7 @@ pub(super) fn process_kind5_deletions_provisional_in_txn(
         };
         let key_str = key.to_redb_key();
         add_addr_claimant_in_txn(
-            outbox_suppress_by_addr,
+            &mut txn.outbox_suppress_by_addr,
             &key_str,
             intent_id,
             deleting.created_at,
@@ -402,8 +414,12 @@ pub(super) fn process_kind5_deletions_provisional_in_txn(
         if !visible_before.get(&id).copied().unwrap_or(false) {
             continue;
         }
-        if let Some((_key, se)) = canonical.load_by_id(&id)? {
-            if is_suppressed_in_txn(outbox_suppress_by_id, outbox_suppress_by_addr, &se.event)? {
+        if let Some((_key, se)) = txn.canonical.load_by_id(&id)? {
+            if is_suppressed_in_txn(
+                &txn.outbox_suppress_by_id,
+                &txn.outbox_suppress_by_addr,
+                &se.event,
+            )? {
                 hidden.push(se);
             }
         }
@@ -491,23 +507,11 @@ pub(super) fn find_any_displaced_key_by_event_id_in_txn(
 /// stands if `se` actually (re)claims a slot; `None` if it is refused,
 /// deduped away, or loses the address race (`Stale` — the correct, silent
 /// §3.4 outcome for a re-offered grand-predecessor: nothing churns).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn reinsert_stashed_in_txn(
-    canonical: &mut CanonicalWriteTables<'_>,
-    addr_index: &mut redb::Table<'_, &str, EventKey>,
-    tombstones: &mut redb::Table<'_, &str, &str>,
-    addr_tombstones: &mut redb::Table<'_, &str, &str>,
-    expiration_index: &mut redb::Table<'_, &[u8; 40], EventKey>,
-    indexes: &mut QueryIndexWriteTables<'_>,
-    outbox_intents: &mut redb::Table<'_, &str, &str>,
-    outbox_receipts: &mut redb::Table<'_, &str, &str>,
-    outbox_displaced: &mut redb::Table<'_, &str, &[u8]>,
-    outbox_kind5_claims: &mut redb::Table<'_, &str, &str>,
-    outbox_suppress_by_id: &mut redb::Table<'_, &str, &str>,
-    outbox_suppress_by_addr: &mut redb::Table<'_, &str, &str>,
+    txn: &mut RedbIngestTxn<'_>,
     se: StoredEvent,
 ) -> Result<Option<StoredEvent>, PersistenceError> {
-    if let Some((event_key, existing)) = canonical.load_by_id(&se.event.id)? {
+    if let Some((event_key, existing)) = txn.canonical.load_by_id(&se.event.id)? {
         // Architecture review requirement (issue #2 P0 correction,
         // codex-nova ruling): union the owner sets and apply Signed
         // dominance — never silently drop the stashed entry's OWN
@@ -546,7 +550,7 @@ pub(super) fn reinsert_stashed_in_txn(
                 // event bytes (NIP-01 id never depends on `sig`, so this
                 // is a pure value update, no id churn).
                 event.sig = se.event.sig;
-                canonical.replace_event(event_key, &event)?;
+                txn.canonical.replace_event(event_key, &event)?;
             }
             let mut owners = provenance
                 .local
@@ -574,39 +578,24 @@ pub(super) fn reinsert_stashed_in_txn(
                 fan_out_owners = Some(owners);
             }
         }
-        canonical.replace_provenance(event_key, &provenance)?;
+        txn.canonical.replace_provenance(event_key, &provenance)?;
         if let Some(owners) = &fan_out_owners {
-            fan_out_signed_in_txn(
-                canonical,
-                addr_index,
-                tombstones,
-                addr_tombstones,
-                expiration_index,
-                indexes,
-                outbox_intents,
-                outbox_receipts,
-                outbox_displaced,
-                outbox_kind5_claims,
-                outbox_suppress_by_id,
-                outbox_suppress_by_addr,
-                owners,
-                &event,
-            )?;
+            fan_out_signed_in_txn(txn, owners, &event)?;
         }
         return Ok(Some(StoredEvent { event, provenance }));
     }
-    if tombstone_refuses(tombstones, addr_tombstones, &se.event)? {
+    if tombstone_refuses(txn, &se.event)? {
         return Ok(None);
     }
 
     let result = match address_key_for(&se.event) {
         None => {
-            let event_key = canonical.insert_new(&se.event, &se.provenance)?;
-            insert_query_index_rows(canonical, indexes, &se.event, event_key)
+            let event_key = txn.canonical.insert_new(&se.event, &se.provenance)?;
+            insert_query_index_rows(&mut txn.canonical, &mut txn.indexes, &se.event, event_key)
                 .map_err(persist_err)?;
             if let Some(ts) = se.event.tags.expiration().copied() {
                 let exp_key = expiration_key(ts, &se.event.id);
-                expiration_index
+                txn.expiration_index
                     .insert(&exp_key, event_key)
                     .map_err(persist_err)?;
             }
@@ -614,54 +603,59 @@ pub(super) fn reinsert_stashed_in_txn(
         }
         Some(addr_key) => {
             let addr_key_str = addr_key.to_redb_key();
-            let current_key = addr_index
+            let current_key = txn
+                .addr_index
                 .get(addr_key_str.as_str())
                 .map_err(persist_err)?
                 .map(|guard| guard.value());
 
             match current_key {
                 None => {
-                    let event_key = canonical.insert_new(&se.event, &se.provenance)?;
-                    addr_index
+                    let event_key = txn.canonical.insert_new(&se.event, &se.provenance)?;
+                    txn.addr_index
                         .insert(addr_key_str.as_str(), event_key)
                         .map_err(persist_err)?;
-                    insert_query_index_rows(canonical, indexes, &se.event, event_key)
-                        .map_err(persist_err)?;
+                    insert_query_index_rows(
+                        &mut txn.canonical,
+                        &mut txn.indexes,
+                        &se.event,
+                        event_key,
+                    )
+                    .map_err(persist_err)?;
                     if let Some(ts) = se.event.tags.expiration().copied() {
                         let exp_key = expiration_key(ts, &se.event.id);
-                        expiration_index
+                        txn.expiration_index
                             .insert(&exp_key, event_key)
                             .map_err(persist_err)?;
                     }
                     Some(se)
                 }
                 Some(current_key) => {
-                    let current_event = canonical
+                    let current_event = txn
+                        .canonical
                         .load_by_key(current_key)?
                         .expect("addr_index must always point at a stored event")
                         .event;
 
                     if candidate_wins(&se.event, &current_event) {
                         let current_id = current_event.id;
-                        remove_row_in_txn(
-                            canonical,
-                            addr_index,
-                            expiration_index,
-                            indexes,
-                            current_id,
-                            |_| true,
-                        )?
-                        .expect("addr_index must always point at a stored event");
+                        remove_row_in_txn(txn, current_id, |_| true)?
+                            .expect("addr_index must always point at a stored event");
 
-                        let event_key = canonical.insert_new(&se.event, &se.provenance)?;
-                        addr_index
+                        let event_key = txn.canonical.insert_new(&se.event, &se.provenance)?;
+                        txn.addr_index
                             .insert(addr_key_str.as_str(), event_key)
                             .map_err(persist_err)?;
-                        insert_query_index_rows(canonical, indexes, &se.event, event_key)
-                            .map_err(persist_err)?;
+                        insert_query_index_rows(
+                            &mut txn.canonical,
+                            &mut txn.indexes,
+                            &se.event,
+                            event_key,
+                        )
+                        .map_err(persist_err)?;
                         if let Some(ts) = se.event.tags.expiration().copied() {
                             let exp_key = expiration_key(ts, &se.event.id);
-                            expiration_index
+                            txn.expiration_index
                                 .insert(&exp_key, event_key)
                                 .map_err(persist_err)?;
                         }
