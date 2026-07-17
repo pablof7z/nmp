@@ -2167,6 +2167,282 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiCommentDecodeError",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "WrongKind",
+            discr: None,
+            fields: [
+                Field {
+                    name: "got",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "MissingRoot",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "DuplicateContradictoryRoot",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "MissingRootKind",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "InvalidRootKind",
+            discr: None,
+            fields: [
+                Field {
+                    name: "got",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "MalformedRootReference",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "EmptyExternalValue",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "MalformedExternalValue",
+            discr: None,
+            fields: [
+                Field {
+                    name: "got",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "MissingParent",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "DuplicateContradictoryParent",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "MissingParentKind",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "InvalidParentKind",
+            discr: None,
+            fields: [
+                Field {
+                    name: "got",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "MalformedParentReference",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "ParentDoesNotMatchRootOrComment",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "MalformedRowEnvelope",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "FFI-boundary-only: the delivered [`FfiRow`]'s OWN `id`/`pubkey`\nenvelope fields were not valid hex -- distinct from\n[`Self::MalformedRootReference`], which describes a root `E`/`A`\nTAG reference, never the row's own envelope (#572 review nit: the\ntwo were conflated, misdirecting a caller debugging a bad row id at\nthe wrong tag).",
+            ),
+        },
+    ],
+    shape: Error {
+        flat: false,
+    },
+    non_exhaustive: false,
+    docstring: Some(
+        "[`decode_comment`]'s typed rejection (`nmp_nip22::CommentDecodeError`\nmirror). Exhaustive; every variant is constructed by a test\n(Reachability Gate).",
+    ),
+}
+
+enum Enum {
+    name: "FfiCommentParent",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Root",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Comment",
+            discr: None,
+            fields: [
+                Field {
+                    name: "event_id",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "author_pubkey",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "A comment's direct parent (`nmp_nip22::CommentParent` mirror).",
+    ),
+}
+
+enum Enum {
+    name: "FfiCommentRoot",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Event",
+            discr: None,
+            fields: [
+                Field {
+                    name: "event_id",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "kind",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "author_pubkey",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Address",
+            discr: None,
+            fields: [
+                Field {
+                    name: "author_pubkey",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "kind",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "identifier",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "event_id",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: Some(
+                        "The addressable event's own id, when pinned alongside the\ncoordinate (NIP-22: \"when the parent event is replaceable or\naddressable, also include an `e`/`E` tag referencing its id\").\n`None` remains a fully legal root.",
+                    ),
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "External",
+            discr: None,
+            fields: [
+                Field {
+                    name: "target",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiNip73Target",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "The root of a NIP-22 comment thread (`nmp_nip22::CommentRoot` mirror).",
+    ),
+}
+
+enum Enum {
     name: "FfiContentDiagnostic",
     module_path: "nmp_ffi",
     remote: false,
@@ -2683,6 +2959,21 @@ enum Enum {
             ],
             docstring: Some(
                 "#591: `FfiWriteIntent.correlation` was `Some` but failed\n`nmp_grammar::CorrelationToken`'s `TryFrom<&str>` bounded/non-empty\nvalidation (empty, or over `CorrelationToken::MAX_LEN` bytes). Synchronous,\nbefore any engine call -- same discipline as `InvalidPublicKey`/\n`InvalidTag` above.",
+            ),
+        },
+        Variant {
+            name: "InvalidNip73Target",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "#572: an `FfiNip73Target` failed `nmp_nip22::Nip73Target`'s\nconstructor validation (an empty `I`/`K` cell).",
             ),
         },
     ],
@@ -3550,6 +3841,52 @@ enum Enum {
     non_exhaustive: false,
     docstring: Some(
         "`nmp_signer::Nip46Origin` mirror (#571): distinguishes a session paired\nvia `nostrconnect://` from one dialed via `bunker://`. Restore mechanics\nare identical either way -- kept because \"absence of a reusable client\ncheckpoint is observable rather than guessed from partial metadata\" is a\nhard requirement, not because restore branches on it.",
+    ),
+}
+
+enum Enum {
+    name: "FfiNip73Target",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "PodcastEpisodeGuid",
+            discr: None,
+            fields: [
+                Field {
+                    name: "guid",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "General",
+            discr: None,
+            fields: [
+                Field {
+                    name: "value",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "kind",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "A validated NIP-73 external-content target (`nmp_nip22::Nip73Target`\nmirror).",
     ),
 }
 
@@ -5380,6 +5717,59 @@ record Record {
     ],
     docstring: Some(
         "`nmp::CoverageInterval` mirror -- a proven, retained `[from, through]`\ninterval (`nmp_store::coverage::CoverageInterval`). This is the\nengine-global DIAGNOSTICS watermark, deliberately distinct from the\nscoped, per-query [`FfiAcquisitionEvidence`] surface above (M5 plan §1\nvs. `docs/design/scoped-evidence-49-12-plan.md` §4) -- never reused as a\nquery-level verdict.",
+    ),
+}
+
+record Record {
+    name: "FfiDecodedComment",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "event_id",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "author_pubkey",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "created_at",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "content",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "root",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiCommentRoot",
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "parent",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiCommentParent",
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "A successfully decoded, typed NIP-22 comment (`nmp_nip22::DecodedComment`\nmirror).",
     ),
 }
 
@@ -7351,6 +7741,138 @@ function Function {
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_blossom_upload_authorization_draft",
     checksum: Some(
         22765,
+    ),
+}
+
+function Function {
+    name: "comment_thread_demand",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "root",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiCommentRoot",
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiDemand",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_comment_thread_demand",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "root",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiCommentRoot",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiDemand",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "The demand for an entire NIP-22 comment thread rooted at `root`:\n`kinds:[1111]`, scoped by the uppercase root reference on `#I`\n(`nmp_nip22::comment_thread_demand` mirror).",
+    ),
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_comment_thread_demand",
+    checksum: Some(
+        40171,
+    ),
+}
+
+function Function {
+    name: "decode_comment",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "row",
+            type_: Record {
+                module_path: "nmp_ffi",
+                name: "FfiRow",
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiDecodedComment",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_decode_comment",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "row",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiRow",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiDecodedComment",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Decode a delivered kind:1111 [`FfiRow`] into a typed\n[`FfiDecodedComment`] (`nmp_nip22::decode_comment` mirror). Fallible:\nmalformed or mismatched tag sets stay raw rows, they never become a\ntyped comment.",
+    ),
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiCommentDecodeError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_decode_comment",
+    checksum: Some(
+        13437,
     ),
 }
 
@@ -10147,6 +10669,149 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_cancel",
             checksum: Some(
                 28491,
+            ),
+        },
+        Method {
+            name: "comment_intent",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "root",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiCommentRoot",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "parent",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiCommentParent",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "author_pubkey",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "created_at",
+                    type_: UInt64,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "content",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "correlation",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "FfiComposedWriteIntent",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_comment_intent",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "root",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiCommentRoot",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                    FfiArgument {
+                        name: "parent",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiCommentParent",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                    FfiArgument {
+                        name: "author_pubkey",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "created_at",
+                        type_: UInt64,
+                    },
+                    FfiArgument {
+                        name: "content",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "correlation",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiComposedWriteIntent",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Compose a durable, author-outbox-routed NIP-22 comment `WriteIntent`\n(#572). Unlike [`Self::group_message_intent`], this needs no engine\nstate at all -- `nmp_nip22::comment_intent` takes author/time as\nexplicit caller parameters -- but lives here for the same \"engine\ndoor\" naming symmetry. `correlation` (#591) passes straight through\nto `WriteIntent.correlation`. Publish the returned take-once value\nthrough [`Self::publish_composed`].",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_comment_intent",
+            checksum: Some(
+                13206,
             ),
         },
         Method {
