@@ -77,10 +77,10 @@ pub use redb_store::{
     run_prepared_redb_compact_index_bench, run_prepared_redb_redo_index_bench,
     run_prepared_redb_store_bench, run_prepared_redb_unified_index_bench, run_store_bench_variant,
     set_bench_exact_cardinality, FjallGovernedIngestMetrics, PackedPostingsBackend,
-    PackedPostingsMetrics, RedbRedoIndexMetrics, StoreBenchAttribution, StoreBenchMetrics,
-    StoreBenchPreparedBatch, StoreBenchPreparedCorpus, StoreBenchPreparedMetrics,
-    StoreBenchPreparedRecord, StoreBenchPreparedTable, StoreBenchProcessCounters,
-    StoreBenchVariant,
+    PackedPostingsMetrics, PackedQueryMetrics, RedbRedoIndexMetrics, StoreBenchAttribution,
+    StoreBenchMetrics, StoreBenchPreparedBatch, StoreBenchPreparedCorpus,
+    StoreBenchPreparedMetrics, StoreBenchPreparedRecord, StoreBenchPreparedTable,
+    StoreBenchProcessCounters, StoreBenchVariant,
 };
 
 use std::collections::{BTreeMap, BTreeSet};

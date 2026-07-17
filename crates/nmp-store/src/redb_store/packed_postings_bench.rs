@@ -8,7 +8,7 @@
 //! `created_at DESC, event_id ASC` order. Redb and Fjall consume byte-identical
 //! segment values; this module is evidence, not a production backend.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::time::Instant;
 
@@ -27,7 +27,7 @@ use super::schema::{
 use super::store_bench::{duration_ns, nearest_rank};
 use super::{binary_event, StoreBenchProcessCounters};
 
-const PACKED_SEGMENTS: TableDefinition<&[u8; 10], &[u8]> =
+const PACKED_SEGMENTS: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("packed_postings_segments_v1");
 const SEGMENT_MAGIC: &[u8; 8] = b"NMPPS\0\x01\0";
 const SHARD_KEY: [u8; 32] = [0x91; 32];
@@ -73,6 +73,18 @@ pub struct PackedPostingsMetrics {
     pub reopened_rows: u64,
     pub reopened_memberships: [u64; FAMILY_COUNT],
     pub exact_reopen: bool,
+    pub queries: Vec<PackedQueryMetrics>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackedQueryMetrics {
+    pub name: String,
+    pub returned_rows: u64,
+    pub iterations: u64,
+    pub p50_ns: u64,
+    pub p95_ns: u64,
+    pub p99_ns: u64,
+    pub exact: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -247,7 +259,7 @@ fn run_redb(
             totals.segment_rows += 1;
             totals.segment_bytes = totals.segment_bytes.saturating_add(value.len() as u64);
             segments
-                .insert(&key, value.as_slice())
+                .insert(key.as_slice(), value.as_slice())
                 .map_err(|error| error.to_string())?;
         }
         relay_refs
@@ -301,6 +313,9 @@ fn run_redb(
             reopened_memberships[family as usize].saturating_add(decoded.postings);
         reopened_segment_rows += 1;
     }
+    let queries = run_query_benchmarks(&events, |family, prefix, limit| {
+        query_redb(&read, family, prefix, limit)
+    })?;
     drop(segment_table);
     drop(read);
     drop(reopened);
@@ -318,6 +333,7 @@ fn run_redb(
         reopened_rows,
         reopened_segment_rows,
         reopened_memberships,
+        queries,
     )
 }
 
@@ -465,6 +481,9 @@ fn run_fjall(
             reopened_memberships[family as usize].saturating_add(decoded.postings);
         reopened_segment_rows += 1;
     }
+    let queries = run_query_benchmarks(&events, |family, prefix, limit| {
+        query_fjall(&read, &reopened_keyspaces, family, prefix, limit)
+    })?;
     drop(read);
     drop(reopened_keyspaces);
     drop(reopened);
@@ -482,6 +501,7 @@ fn run_fjall(
         reopened_rows,
         reopened_segment_rows,
         reopened_memberships,
+        queries,
     )?;
     metrics.database_logical_bytes = logical_bytes;
     Ok(metrics)
@@ -512,6 +532,7 @@ fn finish_metrics(
     reopened_rows: u64,
     reopened_segment_rows: u64,
     reopened_memberships: [u64; FAMILY_COUNT],
+    queries: Vec<PackedQueryMetrics>,
 ) -> Result<PackedPostingsMetrics, String> {
     let exact_reopen = reopened_rows == event_count
         && reopened_segment_rows == totals.segment_rows
@@ -542,7 +563,345 @@ fn finish_metrics(
         reopened_rows,
         reopened_memberships,
         exact_reopen,
+        queries,
     })
+}
+
+const QUERY_ITERATIONS: usize = 50;
+const QUERY_LIMIT: usize = 200;
+
+struct QueryRequest {
+    name: &'static str,
+    family: Family,
+    prefix: Vec<u8>,
+    limit: usize,
+    expected: Vec<u64>,
+}
+
+fn run_query_benchmarks(
+    events: &[Event],
+    mut query: impl FnMut(Family, &[u8], usize) -> Result<Vec<u64>, String>,
+) -> Result<Vec<PackedQueryMetrics>, String> {
+    let requests = representative_query_requests(events)?;
+    let mut metrics = Vec::with_capacity(requests.len());
+    for request in requests {
+        let mut latencies = Vec::with_capacity(QUERY_ITERATIONS);
+        let mut exact = true;
+        for _ in 0..QUERY_ITERATIONS {
+            let started = Instant::now();
+            let rows = query(request.family, &request.prefix, request.limit)?;
+            latencies.push(duration_ns(started));
+            exact &= rows == request.expected;
+        }
+        if !exact {
+            return Err(format!(
+                "packed query {} disagrees with corpus oracle",
+                request.name
+            ));
+        }
+        metrics.push(PackedQueryMetrics {
+            name: request.name.to_owned(),
+            returned_rows: request.expected.len() as u64,
+            iterations: QUERY_ITERATIONS as u64,
+            p50_ns: nearest_rank(&latencies, 50).unwrap_or(0),
+            p95_ns: nearest_rank(&latencies, 95).unwrap_or(0),
+            p99_ns: nearest_rank(&latencies, 99).unwrap_or(0),
+            exact,
+        });
+    }
+    Ok(metrics)
+}
+
+fn representative_query_requests(events: &[Event]) -> Result<Vec<QueryRequest>, String> {
+    let first = events
+        .first()
+        .ok_or_else(|| "query corpus must not be empty".to_owned())?;
+    let mut kind_counts = BTreeMap::<[u8; 2], u64>::new();
+    let mut tag_counts = BTreeMap::<Vec<u8>, u64>::new();
+    for event in events {
+        *kind_counts
+            .entry(event.kind.as_u16().to_be_bytes())
+            .or_default() += 1;
+        let mut unique_tags = BTreeSet::new();
+        for tag in event.tags.iter() {
+            let (Some(letter), Some(value)) = (tag.single_letter_tag(), tag.content()) else {
+                continue;
+            };
+            unique_tags.insert(tag_index_prefix(letter, value));
+        }
+        for prefix in unique_tags {
+            *tag_counts.entry(prefix).or_default() += 1;
+        }
+    }
+    let busiest_kind = kind_counts
+        .into_iter()
+        .max_by(|(left_prefix, left_count), (right_prefix, right_count)| {
+            left_count
+                .cmp(right_count)
+                .then_with(|| right_prefix.cmp(left_prefix))
+        })
+        .map(|(prefix, _)| prefix.to_vec())
+        .ok_or_else(|| "query corpus has no kind".to_owned())?;
+    let busiest_tag = tag_counts
+        .into_iter()
+        .max_by(|(left_prefix, left_count), (right_prefix, right_count)| {
+            left_count
+                .cmp(right_count)
+                .then_with(|| right_prefix.cmp(left_prefix))
+        })
+        .map(|(prefix, _)| prefix)
+        .ok_or_else(|| "query corpus has no indexed tag".to_owned())?;
+
+    let shapes = [
+        ("global_newest_200", Family::Global, Vec::new(), QUERY_LIMIT),
+        (
+            "first_author",
+            Family::Author,
+            first.pubkey.as_bytes().to_vec(),
+            QUERY_LIMIT,
+        ),
+        ("busiest_kind_200", Family::Kind, busiest_kind, QUERY_LIMIT),
+        ("busiest_tag_200", Family::Tag, busiest_tag, QUERY_LIMIT),
+    ];
+    Ok(shapes
+        .into_iter()
+        .map(|(name, family, prefix, limit)| QueryRequest {
+            name,
+            expected: expected_query_keys(events, family, &prefix, limit),
+            family,
+            prefix,
+            limit,
+        })
+        .collect())
+}
+
+fn expected_query_keys(events: &[Event], family: Family, prefix: &[u8], limit: usize) -> Vec<u64> {
+    let mut rows: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event_matches_prefix(event, family, prefix))
+        .map(|(index, event)| Posting {
+            created_at: event.created_at.as_secs(),
+            id: *event.id.as_bytes(),
+            event_key: index as u64 + 1,
+        })
+        .collect();
+    rows.sort_unstable_by(posting_order);
+    rows.truncate(limit);
+    rows.into_iter().map(|row| row.event_key).collect()
+}
+
+fn event_matches_prefix(event: &Event, family: Family, prefix: &[u8]) -> bool {
+    match family {
+        Family::Global => true,
+        Family::Author => event.pubkey.as_bytes() == prefix,
+        Family::Kind => event.kind.as_u16().to_be_bytes() == prefix,
+        Family::Tag => event.tags.iter().any(|tag| {
+            let (Some(letter), Some(value)) = (tag.single_letter_tag(), tag.content()) else {
+                return false;
+            };
+            tag_index_prefix(letter, value) == prefix
+        }),
+    }
+}
+
+fn query_redb(
+    read: &redb::ReadTransaction,
+    family: Family,
+    prefix: &[u8],
+    limit: usize,
+) -> Result<Vec<u64>, String> {
+    let shard = shard_for(family, prefix);
+    let lower = segment_key(family, shard, 0);
+    let upper = segment_key(family, shard, u64::MAX);
+    let segments = read
+        .open_table(PACKED_SEGMENTS)
+        .map_err(|error| error.to_string())?;
+    let mut runs = Vec::new();
+    for entry in segments
+        .range(lower.as_slice()..=upper.as_slice())
+        .map_err(|error| error.to_string())?
+    {
+        let (_key, value) = entry.map_err(|error| error.to_string())?;
+        let postings = decode_prefix_postings(value.value(), family, prefix, limit)?;
+        if !postings.is_empty() {
+            runs.push(postings);
+        }
+    }
+    let events = read.open_table(EVENTS).map_err(|error| error.to_string())?;
+    merge_query_runs(runs, limit, |event_key| {
+        let value = events
+            .get(event_key)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("missing canonical event {event_key}"))?;
+        let view = binary_event::StoredEventView::from_trusted(value.value())
+            .map_err(|error| error.to_string())?;
+        Ok(*view.id_bytes())
+    })
+}
+
+fn query_fjall(
+    read: &fjall::Snapshot,
+    keyspaces: &FjallKeyspaces,
+    family: Family,
+    prefix: &[u8],
+    limit: usize,
+) -> Result<Vec<u64>, String> {
+    let shard = shard_for(family, prefix);
+    let key_prefix = [family as u8, shard];
+    let mut runs = Vec::new();
+    for entry in read.prefix(&keyspaces.segments, key_prefix) {
+        let (_key, value) = entry.into_inner().map_err(|error| error.to_string())?;
+        let postings = decode_prefix_postings(&value, family, prefix, limit)?;
+        if !postings.is_empty() {
+            runs.push(postings);
+        }
+    }
+    merge_query_runs(runs, limit, |event_key| {
+        let value = read
+            .get(&keyspaces.events, event_key.to_be_bytes())
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("missing canonical event {event_key}"))?;
+        let view = binary_event::StoredEventView::from_trusted(&value)
+            .map_err(|error| error.to_string())?;
+        Ok(*view.id_bytes())
+    })
+}
+
+fn merge_query_runs(
+    runs: Vec<Vec<(u64, u64)>>,
+    limit: usize,
+    mut load_id: impl FnMut(u64) -> Result<[u8; 32], String>,
+) -> Result<Vec<u64>, String> {
+    let mut positions = vec![0usize; runs.len()];
+    let mut ids = HashMap::<u64, [u8; 32]>::new();
+    let mut output = Vec::with_capacity(limit);
+    while output.len() < limit {
+        let newest = runs
+            .iter()
+            .enumerate()
+            .filter_map(|(run, postings)| postings.get(positions[run]).map(|row| row.0))
+            .max();
+        let Some(newest) = newest else {
+            break;
+        };
+        let tied: Vec<_> = runs
+            .iter()
+            .enumerate()
+            .filter_map(|(run, postings)| {
+                let &(created_at, event_key) = postings.get(positions[run])?;
+                (created_at == newest).then_some((run, event_key))
+            })
+            .collect();
+        let selected_run = if tied.len() == 1 {
+            tied[0].0
+        } else {
+            let mut selected: Option<(usize, [u8; 32])> = None;
+            for (run, event_key) in tied {
+                let id = match ids.get(&event_key) {
+                    Some(id) => *id,
+                    None => {
+                        let id = load_id(event_key)?;
+                        ids.insert(event_key, id);
+                        id
+                    }
+                };
+                if selected.is_none_or(|(_, selected_id)| id < selected_id) {
+                    selected = Some((run, id));
+                }
+            }
+            selected.expect("nonempty tie set").0
+        };
+        let event_key = runs[selected_run][positions[selected_run]].1;
+        if let std::collections::hash_map::Entry::Vacant(entry) = ids.entry(event_key) {
+            entry.insert(load_id(event_key)?);
+        }
+        output.push(event_key);
+        positions[selected_run] += 1;
+    }
+    Ok(output)
+}
+
+fn decode_prefix_postings(
+    value: &[u8],
+    expected_family: Family,
+    wanted_prefix: &[u8],
+    limit: usize,
+) -> Result<Vec<(u64, u64)>, String> {
+    let mut cursor = 0usize;
+    if take(value, &mut cursor, SEGMENT_MAGIC.len())? != SEGMENT_MAGIC {
+        return Err("invalid packed-postings magic".to_owned());
+    }
+    let family = Family::from_u8(*take(value, &mut cursor, 1)?.first().unwrap())?;
+    if family != expected_family {
+        return Err("packed query opened the wrong index family".to_owned());
+    }
+    let prefix_count = read_varint(value, &mut cursor)?;
+    for _ in 0..prefix_count {
+        let prefix_len = usize::try_from(read_varint(value, &mut cursor)?)
+            .map_err(|_| "prefix length does not fit usize".to_owned())?;
+        let prefix = take(value, &mut cursor, prefix_len)?;
+        let posting_count = read_varint(value, &mut cursor)?;
+        let stream_len = u32::from_be_bytes(
+            take(value, &mut cursor, 4)?
+                .try_into()
+                .expect("fixed posting-stream length width"),
+        ) as usize;
+        let stream = take(value, &mut cursor, stream_len)?;
+        match prefix.cmp(wanted_prefix) {
+            std::cmp::Ordering::Less => continue,
+            std::cmp::Ordering::Greater => return Ok(Vec::new()),
+            std::cmp::Ordering::Equal => {
+                return decode_posting_stream(stream, posting_count, limit);
+            }
+        }
+    }
+    Ok(Vec::new())
+}
+
+fn decode_posting_stream(
+    stream: &[u8],
+    posting_count: u64,
+    limit: usize,
+) -> Result<Vec<(u64, u64)>, String> {
+    let mut cursor = 0usize;
+    let wanted = posting_count.min(limit as u64);
+    let mut rows = Vec::with_capacity(wanted.min(usize::MAX as u64) as usize);
+    let mut previous_created_at: Option<u64> = None;
+    let mut previous_event_key: Option<u64> = None;
+    for ordinal in 0..wanted {
+        let created_at = if ordinal == 0 {
+            u64::from_be_bytes(
+                take(stream, &mut cursor, 8)?
+                    .try_into()
+                    .expect("fixed timestamp width"),
+            )
+        } else {
+            previous_created_at
+                .expect("non-first posting has predecessor")
+                .checked_sub(read_varint(stream, &mut cursor)?)
+                .ok_or_else(|| "timestamp delta underflow".to_owned())?
+        };
+        let encoded_event_key = read_varint(stream, &mut cursor)?;
+        let event_key = match previous_event_key {
+            None => encoded_event_key,
+            Some(previous) => {
+                let delta = i128::from(zigzag_decode(encoded_event_key));
+                u64::try_from(i128::from(previous) + delta)
+                    .map_err(|_| "event-key delta overflow".to_owned())?
+            }
+        };
+        if previous_created_at.is_some_and(|previous| previous < created_at) {
+            return Err("posting list violates newest-first order".to_owned());
+        }
+        rows.push((created_at, event_key));
+        previous_created_at = Some(created_at);
+        previous_event_key = Some(event_key);
+    }
+    if wanted == posting_count && cursor != stream.len() {
+        return Err("posting-stream length mismatch".to_owned());
+    }
+    Ok(rows)
 }
 
 fn add_event_memberships(
@@ -672,6 +1031,9 @@ fn encode_segment(family: Family, memberships: &[Membership]) -> Result<Vec<u8>,
         put_varint(&mut value, prefix.len() as u64);
         value.extend_from_slice(prefix);
         put_varint(&mut value, postings.len() as u64);
+        let stream_len_offset = value.len();
+        value.extend_from_slice(&0u32.to_be_bytes());
+        let stream_start = value.len();
         let mut previous_created_at: Option<u64> = None;
         let mut previous_event_key: Option<u64> = None;
         for membership in postings {
@@ -698,6 +1060,9 @@ fn encode_segment(family: Family, memberships: &[Membership]) -> Result<Vec<u8>,
             previous_created_at = Some(posting.created_at);
             previous_event_key = Some(posting.event_key);
         }
+        let stream_len = u32::try_from(value.len() - stream_start)
+            .map_err(|_| "posting stream exceeds u32".to_owned())?;
+        value[stream_len_offset..stream_len_offset + 4].copy_from_slice(&stream_len.to_be_bytes());
         prefix_start = prefix_end;
     }
     Ok(value)
@@ -732,22 +1097,29 @@ fn decode_segment(value: &[u8]) -> Result<DecodedSegment, String> {
         if posting_count == 0 {
             return Err("empty posting list".to_owned());
         }
+        let stream_len = u32::from_be_bytes(
+            take(value, &mut cursor, 4)?
+                .try_into()
+                .expect("fixed posting-stream length width"),
+        ) as usize;
+        let stream = take(value, &mut cursor, stream_len)?;
+        let mut stream_cursor = 0usize;
         let mut previous_created_at: Option<u64> = None;
         let mut previous_event_key: Option<u64> = None;
         for ordinal in 0..posting_count {
             let created_at = if ordinal == 0 {
                 u64::from_be_bytes(
-                    take(value, &mut cursor, 8)?
+                    take(stream, &mut stream_cursor, 8)?
                         .try_into()
                         .expect("fixed timestamp width"),
                 )
             } else {
                 previous_created_at
                     .expect("non-first posting has predecessor")
-                    .checked_sub(read_varint(value, &mut cursor)?)
+                    .checked_sub(read_varint(stream, &mut stream_cursor)?)
                     .ok_or_else(|| "timestamp delta underflow".to_owned())?
             };
-            let encoded_event_key = read_varint(value, &mut cursor)?;
+            let encoded_event_key = read_varint(stream, &mut stream_cursor)?;
             let event_key = match previous_event_key {
                 None => encoded_event_key,
                 Some(previous) => {
@@ -762,6 +1134,9 @@ fn decode_segment(value: &[u8]) -> Result<DecodedSegment, String> {
             previous_created_at = Some(created_at);
             previous_event_key = Some(event_key);
             total = total.saturating_add(1);
+        }
+        if stream_cursor != stream.len() {
+            return Err("posting-stream length mismatch".to_owned());
         }
     }
     if cursor != value.len() {
@@ -932,5 +1307,13 @@ mod tests {
         let mut encoded = encode_segment(Family::Global, &[membership]).unwrap();
         encoded.push(0);
         assert!(decode_segment(&encoded).is_err());
+    }
+
+    #[test]
+    fn cross_run_equal_timestamp_merge_uses_full_canonical_id() {
+        let runs = vec![vec![(10, 1), (9, 3)], vec![(10, 2)]];
+        let ids = BTreeMap::from([(1, [2; 32]), (2, [1; 32]), (3, [0; 32])]);
+        let merged = merge_query_runs(runs, 3, |event_key| Ok(ids[&event_key])).unwrap();
+        assert_eq!(merged, vec![2, 1, 3]);
     }
 }

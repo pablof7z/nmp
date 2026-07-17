@@ -69,7 +69,7 @@ pub use compact_index_bench::run_prepared_redb_compact_index_bench;
 pub use fjall_ingest_bench::{run_fjall_governed_ingest_bench, FjallGovernedIngestMetrics};
 #[cfg(feature = "bench-instrumentation")]
 pub use packed_postings_bench::{
-    run_packed_postings_bench, PackedPostingsBackend, PackedPostingsMetrics,
+    run_packed_postings_bench, PackedPostingsBackend, PackedPostingsMetrics, PackedQueryMetrics,
 };
 #[cfg(feature = "bench-instrumentation")]
 pub use redo_index_bench::{run_prepared_redb_redo_index_bench, RedbRedoIndexMetrics};
