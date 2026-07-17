@@ -1,0 +1,38 @@
+{
+  "schema": "nmp-storage-equivalent-manifest-v1",
+  "issue": 614,
+  "epic": 612,
+  "harness_commit": "1e35ed166b6f4e95015f5da39711dbb9e3953ebc",
+  "stacked_on_pr": 624,
+  "git_dirty_during_matrix": false,
+  "nostrdb_lmdb_commit": "f4591db9524bc4936af76af4750ec425e67700be",
+  "durability": {
+    "redb": "ordinary synchronous commit",
+    "lmdb": "synchronous default; no MDB_NOSYNC or MDB_NOMETASYNC"
+  },
+  "repetitions": 5,
+  "matrix_cells": 25,
+  "prepared_cells_with_all_12_tables_exact": 20,
+  "full_governed_cells_with_canonical_reopen_exact": 5,
+  "corpus": {
+    "path": "/dev/shm/nmp-ndb-100k/corpus.jsonl",
+    "events": 100000,
+    "payload_bytes": 128,
+    "file_bytes": 50610025,
+    "blake3": "597105545b9904afd14a44f60695a3edc90876b68c182d8487c7788f8e06efa2"
+  },
+  "host": {
+    "hostname": "kind2",
+    "kernel": "Linux 6.1.0-42-amd64 x86_64",
+    "cpu": "Intel(R) Core(TM) Ultra 7 265",
+    "logical_cpus": 20,
+    "memory_bytes": 66998853632,
+    "database_filesystem": "/dev/md1 ext4",
+    "corpus_filesystem": "tmpfs"
+  },
+  "matrix_command": "NOSTRDB_DIR=/home/pablo/Work/nostrdb-nmp-bench cargo run --release --manifest-path benchmarks/nostrdb-compare/Cargo.toml -- matrix-equivalent /dev/shm/nmp-ndb-100k/corpus.jsonl 5 benchmarks/nostrdb-compare/results/2026-07-17/issue-614/equivalent-matrix.json",
+  "crash_command": "NOSTRDB_DIR=/home/pablo/Work/nostrdb-nmp-bench benchmarks/nostrdb-compare/target/release/nmp-nostrdb-compare crash-probe benchmarks/nostrdb-compare/results/2026-07-17/issue-614/crash-probe.json",
+  "raw_matrix": "equivalent-matrix.json",
+  "crash_results": "crash-probe.json",
+  "decision": "retain-redb"
+}
