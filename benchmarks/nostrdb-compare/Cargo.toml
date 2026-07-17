@@ -11,7 +11,7 @@ publish = false
 blake3 = "1"
 libc = "0.2"
 memmap2 = "0.9"
-nmp-store = { path = "../../crates/nmp-store" }
+nmp-store = { path = "../../crates/nmp-store", features = ["bench-instrumentation"] }
 nostr = "0.44.4"
 rayon = "1"
 serde = { version = "1", features = ["derive"] }

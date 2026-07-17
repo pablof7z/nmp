@@ -1,0 +1,35 @@
+{
+  "schema": "nmp-query-projection-run-v1",
+  "date_utc": "2026-07-17",
+  "filesystem": "/dev/shm (tmpfs)",
+  "nmp_base_commit": "f3c1dc478da0dbf969496e2629a5d87138f69b75",
+  "nostrdb_commit": "f4591db9524bc4936af76af4750ec425e67700be",
+  "host": "Linux 6.1.0-42-amd64 x86_64; Intel Core Ultra 7 265; 20 logical CPUs",
+  "corpus": {
+    "events": 10000,
+    "payload_bytes": 65536,
+    "blake3": "b046e7c99056115a4b5709e872aad95a05fc06db92b350564121038303abe71a"
+  },
+  "command": "nmp-nostrdb-compare run-nmp <corpus.jsonl> <store.redb> 128 2 200 <result.json>",
+  "results": [
+    {"name": "global_top_200", "before_p50_ms": 1.318279, "after_p50_ms": 0.067385, "speedup": 19.563389478370556},
+    {"name": "kind9_top_200", "before_p50_ms": 1.312427, "after_p50_ms": 0.068582, "speedup": 19.136610189262488},
+    {"name": "hot_tag_top_200", "before_p50_ms": 1.359118, "after_p50_ms": 0.068055, "speedup": 19.970876496950996},
+    {"name": "author0_top_200", "before_p50_ms": 1.354977, "after_p50_ms": 0.067875, "speedup": 19.96282872928177},
+    {"name": "author0_kind9_top_200", "before_p50_ms": 1.334596, "after_p50_ms": 0.07176, "speedup": 18.598049052396878}
+  ],
+  "projected_work_per_selective_query": {
+    "index_rows": 200,
+    "event_values": 0,
+    "owned_events_materialized": 0
+  },
+  "ordered_ids_equal_to_before": true,
+  "nostrdb_equivalent_queries": [
+    "kind9_top_200",
+    "hot_tag_top_200",
+    "author0_top_200",
+    "author0_kind9_top_200",
+    "exact_first_id"
+  ],
+  "nostrdb_global_top_200_known_incorrect": true
+}

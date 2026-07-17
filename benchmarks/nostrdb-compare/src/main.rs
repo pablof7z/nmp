@@ -68,6 +68,12 @@ struct QueryResult {
     ids: Vec<String>,
     p50_ms: f64,
     p95_ms: f64,
+    #[serde(default)]
+    index_rows: Option<u64>,
+    #[serde(default)]
+    event_values: Option<u64>,
+    #[serde(default)]
+    owned_events_materialized: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -653,16 +659,28 @@ fn nmp_query(
     iterations: usize,
 ) -> Result<QueryResult, Box<dyn std::error::Error>> {
     let filter = Filter::from_json(&filter_json)?;
-    let warm = store.query_newest(&filter, QUERY_LIMIT)?;
-    let expected: Vec<_> = warm.iter().map(|row| row.event.id.to_hex()).collect();
+    store.reset_query_work();
+    let expected: Vec<_> = store
+        .query_newest_ids(&filter, QUERY_LIMIT)?
+        .into_iter()
+        .map(|id| id.to_hex())
+        .collect();
+    let expected_work = store.query_work();
     let mut samples = Vec::with_capacity(iterations);
     for _ in 0..iterations {
+        store.reset_query_work();
         let started = Instant::now();
-        let rows = store.query_newest(&filter, QUERY_LIMIT)?;
+        let ids: Vec<_> = store
+            .query_newest_ids(&filter, QUERY_LIMIT)?
+            .into_iter()
+            .map(|id| id.to_hex())
+            .collect();
         samples.push(started.elapsed().as_secs_f64() * 1000.0);
-        let ids: Vec<_> = rows.iter().map(|row| row.event.id.to_hex()).collect();
         if ids != expected {
             return Err(format!("unstable NMP query {name}").into());
+        }
+        if store.query_work() != expected_work {
+            return Err(format!("unstable NMP query work {name}").into());
         }
     }
     let (p50, p95) = percentiles(&mut samples);
@@ -673,6 +691,9 @@ fn nmp_query(
         ids: expected,
         p50_ms: p50,
         p95_ms: p95,
+        index_rows: Some(expected_work.0),
+        event_values: Some(expected_work.1),
+        owned_events_materialized: Some(expected_work.2),
     })
 }
 
@@ -720,6 +741,9 @@ fn ndb_query(
         ids: expected,
         p50_ms: p50,
         p95_ms: p95,
+        index_rows: None,
+        event_values: None,
+        owned_events_materialized: None,
     })
 }
 

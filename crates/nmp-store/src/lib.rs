@@ -1132,6 +1132,24 @@ pub trait EventStore {
         Ok(rows)
     }
 
+    /// Return only the canonical ids from [`EventStore::query_newest`].
+    ///
+    /// Consumers that need selection identity but not event payloads use this
+    /// door so persistent backends can project ids from ordered indexes
+    /// without allocating owned content. The default preserves correctness
+    /// for backends without a projected read path.
+    fn query_newest_ids(
+        &self,
+        filter: &Filter,
+        limit: usize,
+    ) -> Result<Vec<EventId>, PersistenceError> {
+        Ok(self
+            .query_newest(filter, limit)?
+            .into_iter()
+            .map(|row| row.event.id)
+            .collect())
+    }
+
     /// Return the first `limit` canonical newest rows whose canonical relay
     /// provenance intersects `relays`.
     ///
