@@ -23,6 +23,7 @@ fn main() {
     cc::Build::new()
         .file("src/nostrdb_bridge.c")
         .include(root.join("src"))
+        .include(root.join("deps/lmdb"))
         .include(root.join("ccan"))
         .include(root.join("deps/flatcc/include"))
         .warnings(true)
