@@ -12,11 +12,12 @@ use super::schema::{
     persist_err, EventKey, RelayKey, ADDR_INDEX, ADDR_TOMBSTONES, BY_AUTHOR, BY_AUTHOR_KIND,
     BY_CREATED_AT, BY_KIND, BY_TAG, COVERAGE, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS,
     EVENT_STORE_META, EXPIRATION_INDEX, INDEX_CARDINALITY, INDEX_CARDINALITY_META,
-    INDEX_CARDINALITY_VERSION, INDEX_CARDINALITY_VERSION_KEY, LEGACY_EVENT_TABLES, OUTBOX_ATTEMPTS,
-    OUTBOX_ATTEMPT_DETAILS, OUTBOX_CORRELATIONS, OUTBOX_DEADLINES, OUTBOX_DEADLINES_BY_INTENT,
-    OUTBOX_DISPLACED, OUTBOX_INTENTS, OUTBOX_LANES, OUTBOX_META, OUTBOX_RECEIPTS,
-    OUTBOX_ROUTE_REVISIONS, PENDING_EPHEMERAL_RECEIPTS_KEY, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS,
-    RELAY_META, RELAY_REFS, SCHEMA_META, SCHEMA_VERSION, SCHEMA_VERSION_KEY, TOMBSTONES,
+    INDEX_CARDINALITY_SAMPLE_KEY, INDEX_CARDINALITY_SAMPLE_META, INDEX_CARDINALITY_VERSION,
+    INDEX_CARDINALITY_VERSION_KEY, LEGACY_EVENT_TABLES, OUTBOX_ATTEMPTS, OUTBOX_ATTEMPT_DETAILS,
+    OUTBOX_CORRELATIONS, OUTBOX_DEADLINES, OUTBOX_DEADLINES_BY_INTENT, OUTBOX_DISPLACED,
+    OUTBOX_INTENTS, OUTBOX_LANES, OUTBOX_META, OUTBOX_RECEIPTS, OUTBOX_ROUTE_REVISIONS,
+    PENDING_EPHEMERAL_RECEIPTS_KEY, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_META, RELAY_REFS,
+    SCHEMA_META, SCHEMA_VERSION, SCHEMA_VERSION_KEY, TOMBSTONES,
 };
 #[cfg(any(test, feature = "bench-instrumentation"))]
 use super::AtomicU64;
@@ -30,7 +31,7 @@ use super::{
     Path, PersistenceError, PreparedFilter, Provenance, RecoveredLane, RegisteredOpen, RelayUrl,
     StoredEvent, StoredEventView, Timestamp,
 };
-use redb::{ReadableDatabase, ReadableTableMetadata, TableHandle};
+use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableHandle};
 
 /// A persistent, `redb`-backed `EventStore`. One database, MVCC, ACID; the
 /// same insert door and coverage/GC contract as [`crate::MemoryStore`], the
@@ -165,6 +166,15 @@ impl RedbStore {
                 let cardinality_version = cardinality_meta
                     .get(INDEX_CARDINALITY_VERSION_KEY)?
                     .map(|guard| guard.value());
+                let cardinality_sample_meta = read_txn.open_table(INDEX_CARDINALITY_SAMPLE_META)?;
+                let cardinality_sample_key_len = cardinality_sample_meta
+                    .get(INDEX_CARDINALITY_SAMPLE_KEY)?
+                    .map(|value| value.value().len());
+                if cardinality_sample_key_len.is_some_and(|len| len != 32) {
+                    return Err(redb::Error::Corrupted(
+                        "invalid cardinality sample key length".to_owned(),
+                    ));
+                }
                 let outbox_meta = read_txn.open_table(OUTBOX_META)?;
                 let pending_ephemeral = outbox_meta
                     .get(PENDING_EPHEMERAL_RECEIPTS_KEY)?
@@ -177,7 +187,8 @@ impl RedbStore {
                     })?
                     .unwrap_or(0);
                 (
-                    cardinality_version != Some(INDEX_CARDINALITY_VERSION),
+                    cardinality_version != Some(INDEX_CARDINALITY_VERSION)
+                        || cardinality_sample_key_len.is_none(),
                     pending_ephemeral,
                 )
             };
@@ -185,6 +196,25 @@ impl RedbStore {
                 let write_txn = db.begin_write()?;
                 {
                     if needs_cardinality_rebuild {
+                        let mut cardinality_sample_meta =
+                            write_txn.open_table(INDEX_CARDINALITY_SAMPLE_META)?;
+                        let existing_sample_key = cardinality_sample_meta
+                            .get(INDEX_CARDINALITY_SAMPLE_KEY)?
+                            .map(|value| value.value().to_vec());
+                        let sample_key = match existing_sample_key {
+                            Some(value) => value.as_slice().try_into().map_err(|_| {
+                                redb::Error::Corrupted(
+                                    "invalid cardinality sample key length".to_owned(),
+                                )
+                            })?,
+                            None => {
+                                let key = nostr::SecretKey::generate().to_secret_bytes();
+                                cardinality_sample_meta
+                                    .insert(INDEX_CARDINALITY_SAMPLE_KEY, key.as_slice())?;
+                                key
+                            }
+                        };
+                        drop(cardinality_sample_meta);
                         let by_created_at = write_txn.open_table(BY_CREATED_AT)?;
                         let by_author = write_txn.open_table(BY_AUTHOR)?;
                         let by_kind = write_txn.open_table(BY_KIND)?;
@@ -198,6 +228,7 @@ impl RedbStore {
                             &by_author_kind,
                             &by_tag,
                             &mut cardinality,
+                            &sample_key,
                         )?;
                         let mut cardinality_meta = write_txn.open_table(INDEX_CARDINALITY_META)?;
                         cardinality_meta
@@ -251,6 +282,11 @@ impl RedbStore {
                 let mut cardinality_meta = write_txn.open_table(INDEX_CARDINALITY_META)?;
                 cardinality_meta
                     .insert(INDEX_CARDINALITY_VERSION_KEY, INDEX_CARDINALITY_VERSION)?;
+                let sample_key = nostr::SecretKey::generate().to_secret_bytes();
+                let mut cardinality_sample_meta =
+                    write_txn.open_table(INDEX_CARDINALITY_SAMPLE_META)?;
+                cardinality_sample_meta
+                    .insert(INDEX_CARDINALITY_SAMPLE_KEY, sample_key.as_slice())?;
                 write_txn.open_table(OUTBOX_INTENTS)?;
                 write_txn.open_table(OUTBOX_DISPLACED)?;
                 write_txn.open_table(OUTBOX_ATTEMPTS)?;

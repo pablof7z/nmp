@@ -1,7 +1,8 @@
 use super::schema::{
     persist_err, EventKey, RelayKey, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS,
-    EVENT_STORE_META, INDEX_CARDINALITY, NEXT_EVENT_KEY, NEXT_RELAY_KEY, RELAYS, RELAY_KEYS,
-    RELAY_META, RELAY_REFS,
+    EVENT_STORE_META, INDEX_CARDINALITY, INDEX_CARDINALITY_SAMPLE_KEY,
+    INDEX_CARDINALITY_SAMPLE_META, NEXT_EVENT_KEY, NEXT_RELAY_KEY, RELAYS, RELAY_KEYS, RELAY_META,
+    RELAY_REFS,
 };
 use super::{
     binary_event, BTreeMap, Event, EventId, HashMap, LocalOrigin, PersistenceError, Provenance,
@@ -123,6 +124,7 @@ pub(super) struct CanonicalWriteTables<'txn> {
     /// touch the same busy room/kind hundreds of times; persisting once per
     /// prefix keeps the single-writer transaction cheap.
     pub(super) cardinality_deltas: HashMap<Vec<u8>, i64>,
+    pub(super) cardinality_sample_key: [u8; 32],
 }
 
 impl<'txn> CanonicalWriteTables<'txn> {
@@ -141,6 +143,17 @@ impl<'txn> CanonicalWriteTables<'txn> {
             .map_err(persist_err)?
             .map(|guard| guard.value())
             .unwrap_or(1);
+        let cardinality_sample_meta = write_txn
+            .open_table(INDEX_CARDINALITY_SAMPLE_META)
+            .map_err(persist_err)?;
+        let cardinality_sample_key = cardinality_sample_meta
+            .get(INDEX_CARDINALITY_SAMPLE_KEY)
+            .map_err(persist_err)?
+            .ok_or_else(|| PersistenceError("missing cardinality sample key".to_owned()))?
+            .value()
+            .try_into()
+            .map_err(|_| PersistenceError("invalid cardinality sample key length".to_owned()))?;
+        drop(cardinality_sample_meta);
         Ok(Self {
             events: write_txn.open_table(EVENTS).map_err(persist_err)?,
             event_ids: write_txn.open_table(EVENT_IDS).map_err(persist_err)?,
@@ -162,6 +175,7 @@ impl<'txn> CanonicalWriteTables<'txn> {
             relay_allocator_dirty: false,
             relay_ref_counts: HashMap::new(),
             cardinality_deltas: HashMap::new(),
+            cardinality_sample_key,
         })
     }
 

@@ -108,17 +108,20 @@ pub(super) const BY_AUTHOR_KIND: TableDefinition<&[u8; 74], EventKey> =
 /// Values are compact event keys, so a hit dereferences the immutable note
 /// directly without rebuilding or hex-encoding its NIP-01 id.
 pub(super) const BY_TAG: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_tag_v6");
-/// Exact live-row counts for every ordered-index prefix. Keys are namespaced
-/// binary prefixes (global, author, kind, author+kind, or tag/value); values
-/// count physical index rows in that bucket. Mutations accumulate deltas in
-/// memory and flush each hot prefix once in the same crash-atomic write
-/// transaction as the canonical row and indexes.
+/// Uniform sampled live-row counts for every ordered-index prefix. Keys are
+/// namespaced binary prefixes (global, author, kind, author+kind, or
+/// tag/value); values count sampled physical rows in that bucket. Sampling is
+/// sufficient for choosing an index and avoids one durable row for nearly
+/// every unique author/tag while never changing query correctness.
 pub(super) const INDEX_CARDINALITY: TableDefinition<&[u8], u64> =
     TableDefinition::new("index_cardinality_v1");
 pub(super) const INDEX_CARDINALITY_META: TableDefinition<&str, u64> =
     TableDefinition::new("index_cardinality_meta_v1");
 pub(super) const INDEX_CARDINALITY_VERSION_KEY: &str = "version";
-pub(super) const INDEX_CARDINALITY_VERSION: u64 = 1;
+pub(super) const INDEX_CARDINALITY_VERSION: u64 = 2;
+pub(super) const INDEX_CARDINALITY_SAMPLE_META: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("index_cardinality_sample_meta_v1");
+pub(super) const INDEX_CARDINALITY_SAMPLE_KEY: &str = "key";
 /// The durable write-outbox journal (crashsafe-accepted-2-3-plan.md §2.2,
 /// Fable checkpoint Q2 — APPROVED as co-resident in this same `Database`:
 /// redb atomicity is a per-`Database` property, so the one crash-atomic

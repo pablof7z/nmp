@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use super::canonical::observation_key;
 use super::query::{
     author_cardinality_key, author_kind_cardinality_key, by_author_key, by_author_kind_key,
-    by_kind_key, created_at_key, global_cardinality_key, insert_tag_index_rows,
-    kind_cardinality_key, tag_cardinality_key, tag_index_key,
+    by_kind_key, created_at_key, event_is_cardinality_sample, global_cardinality_key,
+    insert_tag_index_rows, kind_cardinality_key, tag_cardinality_key, tag_index_key,
 };
 use super::schema::{
     BY_AUTHOR, BY_AUTHOR_KIND, BY_CREATED_AT, BY_KIND, BY_TAG, EVENTS, EVENT_IDS,
@@ -28,6 +28,7 @@ use super::*;
 
 const UNIFIED_BENCH_INDEXES: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("unified_bench_indexes_v1");
+const BENCH_CARDINALITY_SAMPLE_KEY: [u8; 32] = [0x42; 32];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -42,6 +43,7 @@ pub enum StoreBenchVariant {
     AllOrdered,
     AllOrderedTag,
     AllIndexesCardinality,
+    AllIndexesSampledCardinality,
     FullGoverned,
 }
 
@@ -57,6 +59,7 @@ impl StoreBenchVariant {
                 | Self::AllOrdered
                 | Self::AllOrderedTag
                 | Self::AllIndexesCardinality
+                | Self::AllIndexesSampledCardinality
         )
     }
 
@@ -67,13 +70,18 @@ impl StoreBenchVariant {
                 | Self::AllOrdered
                 | Self::AllOrderedTag
                 | Self::AllIndexesCardinality
+                | Self::AllIndexesSampledCardinality
         )
     }
 
     fn has_kind(self) -> bool {
         matches!(
             self,
-            Self::IndexKind | Self::AllOrdered | Self::AllOrderedTag | Self::AllIndexesCardinality
+            Self::IndexKind
+                | Self::AllOrdered
+                | Self::AllOrderedTag
+                | Self::AllIndexesCardinality
+                | Self::AllIndexesSampledCardinality
         )
     }
 
@@ -84,15 +92,26 @@ impl StoreBenchVariant {
                 | Self::AllOrdered
                 | Self::AllOrderedTag
                 | Self::AllIndexesCardinality
+                | Self::AllIndexesSampledCardinality
         )
     }
 
     fn has_tag(self) -> bool {
-        matches!(self, Self::AllOrderedTag | Self::AllIndexesCardinality)
+        matches!(
+            self,
+            Self::AllOrderedTag | Self::AllIndexesCardinality | Self::AllIndexesSampledCardinality
+        )
     }
 
     fn has_cardinality(self) -> bool {
-        matches!(self, Self::AllIndexesCardinality)
+        matches!(
+            self,
+            Self::AllIndexesCardinality | Self::AllIndexesSampledCardinality
+        )
+    }
+
+    fn has_sampled_cardinality(self) -> bool {
+        matches!(self, Self::AllIndexesSampledCardinality)
     }
 }
 
@@ -633,7 +652,10 @@ fn run_reduced(
                 insert_tag_index_rows(index, event, event_key)
                     .map_err(|error| error.to_string())?;
             }
-            if variant.has_cardinality() {
+            if variant.has_cardinality()
+                && (!variant.has_sampled_cardinality()
+                    || event_is_cardinality_sample(&BENCH_CARDINALITY_SAMPLE_KEY, &event.id))
+            {
                 let mut increment = |key: Vec<u8>| {
                     *cardinality_deltas.entry(key).or_default() += 1;
                 };
