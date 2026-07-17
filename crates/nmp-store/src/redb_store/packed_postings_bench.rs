@@ -29,7 +29,10 @@ use super::{binary_event, StoreBenchProcessCounters};
 
 const PACKED_SEGMENTS: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("packed_postings_segments_v1");
+const PACKED_DEAD_KEYS: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("packed_postings_dead_keys_v1");
 const SEGMENT_MAGIC: &[u8; 8] = b"NMPPS\0\x01\0";
+const DEAD_KEYS_MAGIC: &[u8; 8] = b"NMPPD\0\x01\0";
 const SHARD_KEY: [u8; 32] = [0x91; 32];
 const SHARD_MASK: u8 = 0x3f;
 const FAMILY_COUNT: usize = 4;
@@ -58,6 +61,13 @@ pub struct PackedPostingsMetrics {
     pub commit_p50_ns: u64,
     pub commit_p95_ns: u64,
     pub commit_p99_ns: u64,
+    pub deletion_events: u64,
+    pub deletion_overlay_rows: u64,
+    pub deletion_overlay_bytes: u64,
+    pub deletion_ns: u64,
+    pub deletion_process_write_bytes: Option<u64>,
+    pub maintenance_ns: u64,
+    pub maintenance_process_write_bytes: Option<u64>,
     pub cpu_ns: u64,
     pub allocation_ops: u64,
     pub allocated_bytes: u64,
@@ -67,6 +77,8 @@ pub struct PackedPostingsMetrics {
     pub encoded_event_bytes: u64,
     pub segment_rows: u64,
     pub segment_bytes: u64,
+    pub active_segment_rows: u64,
+    pub active_segment_bytes: u64,
     pub memberships: [u64; FAMILY_COUNT],
     pub database_logical_bytes: u64,
     pub database_stored_bytes: u64,
@@ -185,6 +197,8 @@ fn run_redb(
         .map_err(|error| error.to_string())?;
     init.open_table(PACKED_SEGMENTS)
         .map_err(|error| error.to_string())?;
+    init.open_table(PACKED_DEAD_KEYS)
+        .map_err(|error| error.to_string())?;
     init.commit().map_err(|error| error.to_string())?;
 
     let relay =
@@ -258,6 +272,7 @@ fn run_redb(
             let key = segment_key(family, shard, batch_index as u64);
             totals.segment_rows += 1;
             totals.segment_bytes = totals.segment_bytes.saturating_add(value.len() as u64);
+            totals.segment_keys.push(key);
             segments
                 .insert(key.as_slice(), value.as_slice())
                 .map_err(|error| error.to_string())?;
@@ -281,7 +296,23 @@ fn run_redb(
         totals.transactions += 1;
     }
     let wall_ns = duration_ns(started);
-    let process = sample_process().delta(process_before);
+    let process_after_ingest = sample_process();
+    let process = process_after_ingest.delta(process_before);
+    let mut deletion = apply_redb_deletion_overlay(&db, &events, batch_size)?;
+    let process_after_deletion = sample_process();
+    deletion.process_write_bytes = process_after_deletion
+        .delta(process_after_ingest)
+        .process_write_bytes;
+    let mut maintenance = compact_redb_segments(
+        &db,
+        &events,
+        batch_size,
+        &totals.segment_keys,
+        &deletion.event_keys,
+    )?;
+    maintenance.process_write_bytes = sample_process()
+        .delta(process_after_deletion)
+        .process_write_bytes;
     let stats = db.begin_write().map_err(|error| error.to_string())?;
     let stored_bytes = stats
         .stats()
@@ -300,8 +331,12 @@ fn run_redb(
     let segment_table = read
         .open_table(PACKED_SEGMENTS)
         .map_err(|error| error.to_string())?;
+    let dead_key_table = read
+        .open_table(PACKED_DEAD_KEYS)
+        .map_err(|error| error.to_string())?;
     let mut reopened_memberships = [0u64; FAMILY_COUNT];
     let mut reopened_segment_rows = 0u64;
+    let mut active_segment_bytes = 0u64;
     for entry in segment_table.iter().map_err(|error| error.to_string())? {
         let (key, value) = entry.map_err(|error| error.to_string())?;
         let family = Family::from_u8(key.value()[0])?;
@@ -312,10 +347,13 @@ fn run_redb(
         reopened_memberships[family as usize] =
             reopened_memberships[family as usize].saturating_add(decoded.postings);
         reopened_segment_rows += 1;
+        active_segment_bytes = active_segment_bytes.saturating_add(value.value().len() as u64);
     }
-    let queries = run_query_benchmarks(&events, |family, prefix, limit| {
-        query_redb(&read, family, prefix, limit)
+    let active_dead_keys = decode_redb_dead_keys(&dead_key_table)?;
+    let queries = run_query_benchmarks(&events, &deletion.event_keys, |family, prefix, limit| {
+        query_redb(&read, &active_dead_keys, family, prefix, limit)
     })?;
+    drop(dead_key_table);
     drop(segment_table);
     drop(read);
     drop(reopened);
@@ -333,6 +371,9 @@ fn run_redb(
         reopened_rows,
         reopened_segment_rows,
         reopened_memberships,
+        active_segment_bytes,
+        deletion,
+        maintenance,
         queries,
     )
 }
@@ -345,6 +386,7 @@ struct FjallKeyspaces {
     relay_keys: SingleWriterTxKeyspace,
     relay_refs: SingleWriterTxKeyspace,
     segments: SingleWriterTxKeyspace,
+    dead_keys: SingleWriterTxKeyspace,
 }
 
 impl FjallKeyspaces {
@@ -364,6 +406,7 @@ impl FjallKeyspaces {
             relay_keys: open("packed_relay_keys")?,
             relay_refs: open("packed_relay_refs")?,
             segments: open("packed_segments")?,
+            dead_keys: open("packed_dead_keys")?,
         })
     }
 }
@@ -432,6 +475,7 @@ fn run_fjall(
             let key = segment_key(family, shard, batch_index as u64);
             totals.segment_rows += 1;
             totals.segment_bytes = totals.segment_bytes.saturating_add(value.len() as u64);
+            totals.segment_keys.push(key);
             write.insert(&keyspaces.segments, key, value);
         }
         write.insert(
@@ -448,7 +492,24 @@ fn run_fjall(
         totals.transactions += 1;
     }
     let wall_ns = duration_ns(started);
-    let process = sample_process().delta(process_before);
+    let process_after_ingest = sample_process();
+    let process = process_after_ingest.delta(process_before);
+    let mut deletion = apply_fjall_deletion_overlay(&database, &keyspaces, &events, batch_size)?;
+    let process_after_deletion = sample_process();
+    deletion.process_write_bytes = process_after_deletion
+        .delta(process_after_ingest)
+        .process_write_bytes;
+    let mut maintenance = compact_fjall_segments(
+        &database,
+        &keyspaces,
+        &events,
+        batch_size,
+        &totals.segment_keys,
+        &deletion.event_keys,
+    )?;
+    maintenance.process_write_bytes = sample_process()
+        .delta(process_after_deletion)
+        .process_write_bytes;
     let stored_bytes = database.disk_space().map_err(|error| error.to_string())?;
     drop(keyspaces);
     drop(database);
@@ -467,6 +528,7 @@ fn run_fjall(
         .map_err(|error| error.to_string())? as u64;
     let mut reopened_memberships = [0u64; FAMILY_COUNT];
     let mut reopened_segment_rows = 0u64;
+    let mut active_segment_bytes = 0u64;
     for entry in read.iter(&reopened_keyspaces.segments) {
         let (key, value) = entry.into_inner().map_err(|error| error.to_string())?;
         let family = Family::from_u8(
@@ -480,9 +542,18 @@ fn run_fjall(
         reopened_memberships[family as usize] =
             reopened_memberships[family as usize].saturating_add(decoded.postings);
         reopened_segment_rows += 1;
+        active_segment_bytes = active_segment_bytes.saturating_add(value.len() as u64);
     }
-    let queries = run_query_benchmarks(&events, |family, prefix, limit| {
-        query_fjall(&read, &reopened_keyspaces, family, prefix, limit)
+    let active_dead_keys = decode_fjall_dead_keys(&read, &reopened_keyspaces)?;
+    let queries = run_query_benchmarks(&events, &deletion.event_keys, |family, prefix, limit| {
+        query_fjall(
+            &read,
+            &reopened_keyspaces,
+            &active_dead_keys,
+            family,
+            prefix,
+            limit,
+        )
     })?;
     drop(read);
     drop(reopened_keyspaces);
@@ -501,6 +572,9 @@ fn run_fjall(
         reopened_rows,
         reopened_segment_rows,
         reopened_memberships,
+        active_segment_bytes,
+        deletion,
+        maintenance,
         queries,
     )?;
     metrics.database_logical_bytes = logical_bytes;
@@ -516,6 +590,323 @@ struct RunTotals {
     segment_rows: u64,
     segment_bytes: u64,
     memberships: [u64; FAMILY_COUNT],
+    segment_keys: Vec<[u8; 10]>,
+}
+
+#[derive(Default)]
+struct MaintenanceMetrics {
+    wall_ns: u64,
+    process_write_bytes: Option<u64>,
+    active_segment_rows: u64,
+    active_memberships: [u64; FAMILY_COUNT],
+}
+
+#[derive(Default)]
+struct DeletionMetrics {
+    event_keys: BTreeSet<u64>,
+    overlay_rows: u64,
+    overlay_bytes: u64,
+    wall_ns: u64,
+    process_write_bytes: Option<u64>,
+}
+
+const COMPACTION_FAN_IN: usize = 8;
+const COMPACTED_GENERATION_BIT: u64 = 1 << 63;
+const DELETION_STRIDE: u64 = 8;
+
+fn deletion_event_keys(events: &[Event]) -> BTreeSet<u64> {
+    (1..=events.len() as u64)
+        .filter(|event_key| event_key % DELETION_STRIDE == 0)
+        .collect()
+}
+
+fn deletion_blocks(
+    event_keys: &BTreeSet<u64>,
+    batch_size: usize,
+) -> Result<Vec<(u64, Vec<u8>)>, String> {
+    let mut grouped = BTreeMap::<u64, Vec<u64>>::new();
+    for &event_key in event_keys {
+        let generation = (event_key - 1) / batch_size as u64;
+        grouped.entry(generation).or_default().push(event_key);
+    }
+    grouped
+        .into_iter()
+        .map(|(generation, keys)| Ok((generation, encode_dead_keys(&keys)?)))
+        .collect()
+}
+
+fn apply_redb_deletion_overlay(
+    db: &Database,
+    events: &[Event],
+    batch_size: usize,
+) -> Result<DeletionMetrics, String> {
+    let started = Instant::now();
+    let event_keys = deletion_event_keys(events);
+    let blocks = deletion_blocks(&event_keys, batch_size)?;
+    let overlay_rows = blocks.len() as u64;
+    let overlay_bytes = blocks.iter().map(|(_, value)| value.len() as u64).sum();
+    let write = db.begin_write().map_err(|error| error.to_string())?;
+    let mut event_rows = write
+        .open_table(EVENTS)
+        .map_err(|error| error.to_string())?;
+    let mut event_ids = write
+        .open_table(EVENT_IDS)
+        .map_err(|error| error.to_string())?;
+    let mut observations = write
+        .open_table(EVENT_OBSERVATIONS)
+        .map_err(|error| error.to_string())?;
+    let mut dead_key_table = write
+        .open_table(PACKED_DEAD_KEYS)
+        .map_err(|error| error.to_string())?;
+    for &event_key in &event_keys {
+        let event = &events[event_key as usize - 1];
+        event_rows
+            .remove(event_key)
+            .map_err(|error| error.to_string())?;
+        event_ids
+            .remove(event.id.as_bytes())
+            .map_err(|error| error.to_string())?;
+        observations
+            .remove(&observation_key(event_key, 1))
+            .map_err(|error| error.to_string())?;
+    }
+    for (generation, value) in blocks {
+        dead_key_table
+            .insert(generation, value.as_slice())
+            .map_err(|error| error.to_string())?;
+    }
+    drop(dead_key_table);
+    drop(observations);
+    drop(event_ids);
+    drop(event_rows);
+    write.commit().map_err(|error| error.to_string())?;
+    Ok(DeletionMetrics {
+        event_keys,
+        overlay_rows,
+        overlay_bytes,
+        wall_ns: duration_ns(started),
+        process_write_bytes: None,
+    })
+}
+
+fn apply_fjall_deletion_overlay(
+    database: &SingleWriterTxDatabase,
+    keyspaces: &FjallKeyspaces,
+    events: &[Event],
+    batch_size: usize,
+) -> Result<DeletionMetrics, String> {
+    let started = Instant::now();
+    let event_keys = deletion_event_keys(events);
+    let blocks = deletion_blocks(&event_keys, batch_size)?;
+    let overlay_rows = blocks.len() as u64;
+    let overlay_bytes = blocks.iter().map(|(_, value)| value.len() as u64).sum();
+    let mut write = database.write_tx().durability(Some(PersistMode::SyncAll));
+    for &event_key in &event_keys {
+        let event = &events[event_key as usize - 1];
+        write.remove(&keyspaces.events, event_key.to_be_bytes());
+        write.remove(&keyspaces.event_ids, event.id.as_bytes());
+        write.remove(&keyspaces.observations, observation_key(event_key, 1));
+    }
+    for (generation, value) in blocks {
+        write.insert(&keyspaces.dead_keys, generation.to_be_bytes(), value);
+    }
+    write.commit().map_err(|error| error.to_string())?;
+    Ok(DeletionMetrics {
+        event_keys,
+        overlay_rows,
+        overlay_bytes,
+        wall_ns: duration_ns(started),
+        process_write_bytes: None,
+    })
+}
+
+fn expected_active_memberships(
+    events: &[Event],
+    batch_size: usize,
+    dead_keys: &BTreeSet<u64>,
+) -> [u64; FAMILY_COUNT] {
+    let total_batches = events.len().div_ceil(batch_size);
+    let compacted_events = (total_batches / COMPACTION_FAN_IN)
+        .saturating_mul(COMPACTION_FAN_IN)
+        .saturating_mul(batch_size)
+        .min(events.len());
+    let mut counts = [0u64; FAMILY_COUNT];
+    let mut ignored = BatchSegments::new();
+    for (index, event) in events.iter().enumerate() {
+        let event_key = index as u64 + 1;
+        if index < compacted_events && dead_keys.contains(&event_key) {
+            continue;
+        }
+        add_event_memberships(&mut ignored, &mut counts, event, event_key);
+        ignored.clear();
+    }
+    counts
+}
+
+fn compact_redb_segments(
+    db: &Database,
+    events: &[Event],
+    batch_size: usize,
+    initial_keys: &[[u8; 10]],
+    dead_keys: &BTreeSet<u64>,
+) -> Result<MaintenanceMetrics, String> {
+    let started = Instant::now();
+    let mut active_keys = initial_keys.to_vec();
+    compact_segment_levels(
+        events,
+        batch_size,
+        dead_keys,
+        &mut active_keys,
+        |removed, added| {
+            let write = db.begin_write().map_err(|error| error.to_string())?;
+            let mut segments = write
+                .open_table(PACKED_SEGMENTS)
+                .map_err(|error| error.to_string())?;
+            let mut dead_key_table = write
+                .open_table(PACKED_DEAD_KEYS)
+                .map_err(|error| error.to_string())?;
+            let removed_generations: BTreeSet<_> = removed.iter().map(segment_generation).collect();
+            for key in removed {
+                segments
+                    .remove(key.as_slice())
+                    .map_err(|error| error.to_string())?;
+            }
+            for (key, value) in added {
+                segments
+                    .insert(key.as_slice(), value.as_slice())
+                    .map_err(|error| error.to_string())?;
+            }
+            for generation in removed_generations {
+                dead_key_table
+                    .remove(generation)
+                    .map_err(|error| error.to_string())?;
+            }
+            drop(dead_key_table);
+            drop(segments);
+            write.commit().map_err(|error| error.to_string())
+        },
+    )?;
+    Ok(MaintenanceMetrics {
+        wall_ns: duration_ns(started),
+        process_write_bytes: None,
+        active_segment_rows: active_keys.len() as u64,
+        active_memberships: expected_active_memberships(events, batch_size, dead_keys),
+    })
+}
+
+fn compact_fjall_segments(
+    database: &SingleWriterTxDatabase,
+    keyspaces: &FjallKeyspaces,
+    events: &[Event],
+    batch_size: usize,
+    initial_keys: &[[u8; 10]],
+    dead_keys: &BTreeSet<u64>,
+) -> Result<MaintenanceMetrics, String> {
+    let started = Instant::now();
+    let mut active_keys = initial_keys.to_vec();
+    compact_segment_levels(
+        events,
+        batch_size,
+        dead_keys,
+        &mut active_keys,
+        |removed, added| {
+            let mut write = database.write_tx().durability(Some(PersistMode::SyncAll));
+            let removed_generations: BTreeSet<_> = removed.iter().map(segment_generation).collect();
+            for key in removed {
+                write.remove(&keyspaces.segments, key);
+            }
+            for generation in removed_generations {
+                write.remove(&keyspaces.dead_keys, generation.to_be_bytes());
+            }
+            for (key, value) in added {
+                write.insert(&keyspaces.segments, key, value);
+            }
+            write.commit().map_err(|error| error.to_string())
+        },
+    )?;
+    Ok(MaintenanceMetrics {
+        wall_ns: duration_ns(started),
+        process_write_bytes: None,
+        active_segment_rows: active_keys.len() as u64,
+        active_memberships: expected_active_memberships(events, batch_size, dead_keys),
+    })
+}
+
+fn compact_segment_levels(
+    events: &[Event],
+    batch_size: usize,
+    dead_keys: &BTreeSet<u64>,
+    active_keys: &mut Vec<[u8; 10]>,
+    mut apply: impl FnMut(Vec<[u8; 10]>, Vec<([u8; 10], Vec<u8>)>) -> Result<(), String>,
+) -> Result<(), String> {
+    let total_batches = events.len().div_ceil(batch_size);
+    let mut level = 1u8;
+    let mut run_span = COMPACTION_FAN_IN;
+    while total_batches / run_span > 0 {
+        let output_runs = total_batches / run_span;
+        for output_run in 0..output_runs {
+            let source_generations: BTreeSet<_> = if level == 1 {
+                (0..COMPACTION_FAN_IN)
+                    .map(|offset| (output_run * COMPACTION_FAN_IN + offset) as u64)
+                    .collect()
+            } else {
+                (0..COMPACTION_FAN_IN)
+                    .map(|offset| {
+                        compacted_generation(level - 1, output_run * COMPACTION_FAN_IN + offset)
+                    })
+                    .collect()
+            };
+            let removed: Vec<_> = active_keys
+                .iter()
+                .copied()
+                .filter(|key| source_generations.contains(&segment_generation(key)))
+                .collect();
+            if removed.is_empty() {
+                return Err(format!(
+                    "compaction level {level} run {output_run} has no source segments"
+                ));
+            }
+            let start_batch = output_run * run_span;
+            let end_batch = start_batch + run_span;
+            let start_event = start_batch * batch_size;
+            let end_event = (end_batch * batch_size).min(events.len());
+            let mut grouped =
+                BatchSegments::with_capacity((end_event - start_event).saturating_mul(5));
+            let mut ignored_counts = [0u64; FAMILY_COUNT];
+            for (offset, event) in events[start_event..end_event].iter().enumerate() {
+                let event_key = start_event as u64 + offset as u64 + 1;
+                if dead_keys.contains(&event_key) {
+                    continue;
+                }
+                add_event_memberships(&mut grouped, &mut ignored_counts, event, event_key);
+            }
+            let generation = compacted_generation(level, output_run);
+            let added: Vec<_> = encode_segments(grouped)?
+                .into_iter()
+                .map(|(family, shard, value)| (segment_key(family, shard, generation), value))
+                .collect();
+            let added_keys: Vec<_> = added.iter().map(|(key, _)| *key).collect();
+            apply(removed.clone(), added)?;
+            let removed_set: BTreeSet<_> = removed.into_iter().collect();
+            active_keys.retain(|key| !removed_set.contains(key));
+            active_keys.extend(added_keys);
+        }
+        level = level
+            .checked_add(1)
+            .ok_or_else(|| "compaction level overflow".to_owned())?;
+        run_span = run_span
+            .checked_mul(COMPACTION_FAN_IN)
+            .ok_or_else(|| "compaction span overflow".to_owned())?;
+    }
+    Ok(())
+}
+
+fn compacted_generation(level: u8, run: usize) -> u64 {
+    COMPACTED_GENERATION_BIT | (u64::from(level) << 56) | run as u64
+}
+
+fn segment_generation(key: &[u8; 10]) -> u64 {
+    u64::from_be_bytes(key[2..].try_into().expect("fixed segment generation width"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -532,11 +923,15 @@ fn finish_metrics(
     reopened_rows: u64,
     reopened_segment_rows: u64,
     reopened_memberships: [u64; FAMILY_COUNT],
+    active_segment_bytes: u64,
+    deletion: DeletionMetrics,
+    maintenance: MaintenanceMetrics,
     queries: Vec<PackedQueryMetrics>,
 ) -> Result<PackedPostingsMetrics, String> {
-    let exact_reopen = reopened_rows == event_count
-        && reopened_segment_rows == totals.segment_rows
-        && reopened_memberships == totals.memberships;
+    let exact_reopen = reopened_rows
+        == event_count.saturating_sub(deletion.event_keys.len() as u64)
+        && reopened_segment_rows == maintenance.active_segment_rows
+        && reopened_memberships == maintenance.active_memberships;
     Ok(PackedPostingsMetrics {
         backend,
         events: event_count,
@@ -548,6 +943,13 @@ fn finish_metrics(
         commit_p50_ns: nearest_rank(commit_latencies, 50).unwrap_or(0),
         commit_p95_ns: nearest_rank(commit_latencies, 95).unwrap_or(0),
         commit_p99_ns: nearest_rank(commit_latencies, 99).unwrap_or(0),
+        deletion_events: deletion.event_keys.len() as u64,
+        deletion_overlay_rows: deletion.overlay_rows,
+        deletion_overlay_bytes: deletion.overlay_bytes,
+        deletion_ns: deletion.wall_ns,
+        deletion_process_write_bytes: deletion.process_write_bytes,
+        maintenance_ns: maintenance.wall_ns,
+        maintenance_process_write_bytes: maintenance.process_write_bytes,
         cpu_ns: process.cpu_ns,
         allocation_ops: process.allocation_ops,
         allocated_bytes: process.allocated_bytes,
@@ -557,6 +959,8 @@ fn finish_metrics(
         encoded_event_bytes: totals.encoded_event_bytes,
         segment_rows: totals.segment_rows,
         segment_bytes: totals.segment_bytes,
+        active_segment_rows: maintenance.active_segment_rows,
+        active_segment_bytes,
         memberships: totals.memberships,
         database_logical_bytes: path_size(path).map_err(|error| error.to_string())?,
         database_stored_bytes: stored_bytes,
@@ -580,9 +984,10 @@ struct QueryRequest {
 
 fn run_query_benchmarks(
     events: &[Event],
+    dead_keys: &BTreeSet<u64>,
     mut query: impl FnMut(Family, &[u8], usize) -> Result<Vec<u64>, String>,
 ) -> Result<Vec<PackedQueryMetrics>, String> {
-    let requests = representative_query_requests(events)?;
+    let requests = representative_query_requests(events, dead_keys)?;
     let mut metrics = Vec::with_capacity(requests.len());
     for request in requests {
         let mut latencies = Vec::with_capacity(QUERY_ITERATIONS);
@@ -612,7 +1017,10 @@ fn run_query_benchmarks(
     Ok(metrics)
 }
 
-fn representative_query_requests(events: &[Event]) -> Result<Vec<QueryRequest>, String> {
+fn representative_query_requests(
+    events: &[Event],
+    dead_keys: &BTreeSet<u64>,
+) -> Result<Vec<QueryRequest>, String> {
     let first = events
         .first()
         .ok_or_else(|| "query corpus must not be empty".to_owned())?;
@@ -667,7 +1075,7 @@ fn representative_query_requests(events: &[Event]) -> Result<Vec<QueryRequest>, 
         .into_iter()
         .map(|(name, family, prefix, limit)| QueryRequest {
             name,
-            expected: expected_query_keys(events, family, &prefix, limit),
+            expected: expected_query_keys(events, dead_keys, family, &prefix, limit),
             family,
             prefix,
             limit,
@@ -675,10 +1083,17 @@ fn representative_query_requests(events: &[Event]) -> Result<Vec<QueryRequest>, 
         .collect())
 }
 
-fn expected_query_keys(events: &[Event], family: Family, prefix: &[u8], limit: usize) -> Vec<u64> {
+fn expected_query_keys(
+    events: &[Event],
+    dead_keys: &BTreeSet<u64>,
+    family: Family,
+    prefix: &[u8],
+    limit: usize,
+) -> Vec<u64> {
     let mut rows: Vec<_> = events
         .iter()
         .enumerate()
+        .filter(|(index, _)| !dead_keys.contains(&(*index as u64 + 1)))
         .filter(|(_, event)| event_matches_prefix(event, family, prefix))
         .map(|(index, event)| Posting {
             created_at: event.created_at.as_secs(),
@@ -705,8 +1120,32 @@ fn event_matches_prefix(event: &Event, family: Family, prefix: &[u8]) -> bool {
     }
 }
 
+fn decode_redb_dead_keys(
+    table: &impl ReadableTable<u64, &'static [u8]>,
+) -> Result<BTreeSet<u64>, String> {
+    let mut dead_keys = BTreeSet::new();
+    for entry in table.iter().map_err(|error| error.to_string())? {
+        let (_generation, value) = entry.map_err(|error| error.to_string())?;
+        dead_keys.extend(decode_dead_keys(value.value())?);
+    }
+    Ok(dead_keys)
+}
+
+fn decode_fjall_dead_keys(
+    read: &fjall::Snapshot,
+    keyspaces: &FjallKeyspaces,
+) -> Result<BTreeSet<u64>, String> {
+    let mut dead_keys = BTreeSet::new();
+    for entry in read.iter(&keyspaces.dead_keys) {
+        let (_generation, value) = entry.into_inner().map_err(|error| error.to_string())?;
+        dead_keys.extend(decode_dead_keys(&value)?);
+    }
+    Ok(dead_keys)
+}
+
 fn query_redb(
     read: &redb::ReadTransaction,
+    dead_keys: &BTreeSet<u64>,
     family: Family,
     prefix: &[u8],
     limit: usize,
@@ -723,7 +1162,7 @@ fn query_redb(
         .map_err(|error| error.to_string())?
     {
         let (_key, value) = entry.map_err(|error| error.to_string())?;
-        let postings = decode_prefix_postings(value.value(), family, prefix, limit)?;
+        let postings = decode_prefix_postings(value.value(), family, prefix, limit, dead_keys)?;
         if !postings.is_empty() {
             runs.push(postings);
         }
@@ -743,6 +1182,7 @@ fn query_redb(
 fn query_fjall(
     read: &fjall::Snapshot,
     keyspaces: &FjallKeyspaces,
+    dead_keys: &BTreeSet<u64>,
     family: Family,
     prefix: &[u8],
     limit: usize,
@@ -752,7 +1192,7 @@ fn query_fjall(
     let mut runs = Vec::new();
     for entry in read.prefix(&keyspaces.segments, key_prefix) {
         let (_key, value) = entry.into_inner().map_err(|error| error.to_string())?;
-        let postings = decode_prefix_postings(&value, family, prefix, limit)?;
+        let postings = decode_prefix_postings(&value, family, prefix, limit, dead_keys)?;
         if !postings.is_empty() {
             runs.push(postings);
         }
@@ -827,6 +1267,7 @@ fn decode_prefix_postings(
     expected_family: Family,
     wanted_prefix: &[u8],
     limit: usize,
+    dead_keys: &BTreeSet<u64>,
 ) -> Result<Vec<(u64, u64)>, String> {
     let mut cursor = 0usize;
     if take(value, &mut cursor, SEGMENT_MAGIC.len())? != SEGMENT_MAGIC {
@@ -852,7 +1293,7 @@ fn decode_prefix_postings(
             std::cmp::Ordering::Less => continue,
             std::cmp::Ordering::Greater => return Ok(Vec::new()),
             std::cmp::Ordering::Equal => {
-                return decode_posting_stream(stream, posting_count, limit);
+                return decode_posting_stream(stream, posting_count, limit, dead_keys);
             }
         }
     }
@@ -863,13 +1304,15 @@ fn decode_posting_stream(
     stream: &[u8],
     posting_count: u64,
     limit: usize,
+    dead_keys: &BTreeSet<u64>,
 ) -> Result<Vec<(u64, u64)>, String> {
     let mut cursor = 0usize;
     let wanted = posting_count.min(limit as u64);
     let mut rows = Vec::with_capacity(wanted.min(usize::MAX as u64) as usize);
     let mut previous_created_at: Option<u64> = None;
     let mut previous_event_key: Option<u64> = None;
-    for ordinal in 0..wanted {
+    let mut decoded = 0u64;
+    for ordinal in 0..posting_count {
         let created_at = if ordinal == 0 {
             u64::from_be_bytes(
                 take(stream, &mut cursor, 8)?
@@ -894,11 +1337,17 @@ fn decode_posting_stream(
         if previous_created_at.is_some_and(|previous| previous < created_at) {
             return Err("posting list violates newest-first order".to_owned());
         }
-        rows.push((created_at, event_key));
+        if !dead_keys.contains(&event_key) {
+            rows.push((created_at, event_key));
+        }
         previous_created_at = Some(created_at);
         previous_event_key = Some(event_key);
+        decoded += 1;
+        if rows.len() == limit {
+            break;
+        }
     }
-    if wanted == posting_count && cursor != stream.len() {
+    if decoded == posting_count && cursor != stream.len() {
         return Err("posting-stream length mismatch".to_owned());
     }
     Ok(rows)
@@ -1066,6 +1515,63 @@ fn encode_segment(family: Family, memberships: &[Membership]) -> Result<Vec<u8>,
         prefix_start = prefix_end;
     }
     Ok(value)
+}
+
+fn encode_dead_keys(event_keys: &[u64]) -> Result<Vec<u8>, String> {
+    if event_keys.is_empty() {
+        return Err("cannot encode an empty dead-key block".to_owned());
+    }
+    let mut value = Vec::new();
+    value.extend_from_slice(DEAD_KEYS_MAGIC);
+    put_varint(&mut value, event_keys.len() as u64);
+    let mut previous = 0u64;
+    for (index, &event_key) in event_keys.iter().enumerate() {
+        if index > 0 && event_key <= previous {
+            return Err("dead keys are not strictly ordered".to_owned());
+        }
+        put_varint(
+            &mut value,
+            if index == 0 {
+                event_key
+            } else {
+                event_key - previous
+            },
+        );
+        previous = event_key;
+    }
+    Ok(value)
+}
+
+fn decode_dead_keys(value: &[u8]) -> Result<Vec<u64>, String> {
+    let mut cursor = 0usize;
+    if take(value, &mut cursor, DEAD_KEYS_MAGIC.len())? != DEAD_KEYS_MAGIC {
+        return Err("invalid dead-key block magic".to_owned());
+    }
+    let count = read_varint(value, &mut cursor)?;
+    if count == 0 {
+        return Err("empty dead-key block".to_owned());
+    }
+    let mut keys = Vec::with_capacity(count.min(usize::MAX as u64) as usize);
+    let mut previous = 0u64;
+    for index in 0..count {
+        let encoded = read_varint(value, &mut cursor)?;
+        let event_key = if index == 0 {
+            encoded
+        } else {
+            previous
+                .checked_add(encoded)
+                .ok_or_else(|| "dead-key delta overflow".to_owned())?
+        };
+        if index > 0 && event_key <= previous {
+            return Err("dead keys are not strictly ordered".to_owned());
+        }
+        keys.push(event_key);
+        previous = event_key;
+    }
+    if cursor != value.len() {
+        return Err("trailing bytes in dead-key block".to_owned());
+    }
+    Ok(keys)
 }
 
 struct DecodedSegment {
@@ -1239,6 +1745,8 @@ fn directory_bytes(path: &Path) -> std::io::Result<u64> {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
     use super::*;
@@ -1310,10 +1818,81 @@ mod tests {
     }
 
     #[test]
+    fn dead_key_block_roundtrip_is_delta_encoded_and_exact() {
+        let keys = [8, 16, 24, 4_096];
+        let encoded = encode_dead_keys(&keys).unwrap();
+        assert_eq!(decode_dead_keys(&encoded).unwrap(), keys);
+        assert!(encoded.len() < DEAD_KEYS_MAGIC.len() + keys.len() * size_of::<u64>());
+    }
+
+    #[test]
     fn cross_run_equal_timestamp_merge_uses_full_canonical_id() {
         let runs = vec![vec![(10, 1), (9, 3)], vec![(10, 2)]];
         let ids = BTreeMap::from([(1, [2; 32]), (2, [1; 32]), (3, [0; 32])]);
         let merged = merge_query_runs(runs, 3, |event_key| Ok(ids[&event_key])).unwrap();
         assert_eq!(merged, vec![2, 1, 3]);
+    }
+
+    #[test]
+    fn packed_postings_crash_worker() {
+        let Ok(path) = std::env::var("NMP_PACKED_POSTINGS_CRASH_PATH") else {
+            return;
+        };
+        let db = Database::create(path).unwrap();
+        let init = db.begin_write().unwrap();
+        init.open_table(EVENTS).unwrap();
+        init.open_table(PACKED_SEGMENTS).unwrap();
+        init.commit().unwrap();
+
+        let committed = db.begin_write().unwrap();
+        committed
+            .open_table(EVENTS)
+            .unwrap()
+            .insert(1, &[1][..])
+            .unwrap();
+        committed
+            .open_table(PACKED_SEGMENTS)
+            .unwrap()
+            .insert(&[0, 0, 0][..], &[1][..])
+            .unwrap();
+        committed.commit().unwrap();
+
+        let staged = db.begin_write().unwrap();
+        staged
+            .open_table(EVENTS)
+            .unwrap()
+            .insert(2, &[2][..])
+            .unwrap();
+        staged
+            .open_table(PACKED_SEGMENTS)
+            .unwrap()
+            .insert(&[0, 0, 1][..], &[2][..])
+            .unwrap();
+        unsafe { libc::_exit(73) }
+    }
+
+    #[test]
+    fn committed_segment_survives_abrupt_exit_and_staged_generation_does_not() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path().join("packed-crash.redb");
+        let status = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("redb_store::packed_postings_bench::tests::packed_postings_crash_worker")
+            .arg("--nocapture")
+            .env("NMP_PACKED_POSTINGS_CRASH_PATH", &path)
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(73));
+
+        let reopened = Database::open(path).unwrap();
+        let read = reopened.begin_read().unwrap();
+        let events = read.open_table(EVENTS).unwrap();
+        let segments = read.open_table(PACKED_SEGMENTS).unwrap();
+        assert_eq!(events.len().unwrap(), 1);
+        assert_eq!(segments.len().unwrap(), 1);
+        assert_eq!(events.get(1).unwrap().unwrap().value(), &[1]);
+        assert!(events.get(2).unwrap().is_none());
+        assert!(segments.get(&[0, 0, 0][..]).unwrap().is_some());
+        assert!(segments.get(&[0, 0, 1][..]).unwrap().is_none());
     }
 }
