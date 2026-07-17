@@ -10,9 +10,10 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use nmp_store::{
-    prepare_equivalent_store_corpus, run_prepared_redb_store_bench,
-    run_prepared_redb_unified_index_bench, StoreBenchPreparedMetrics, StoreBenchPreparedRecord,
-    StoreBenchPreparedTable, StoreBenchProcessCounters,
+    prepare_equivalent_store_corpus, run_prepared_redb_redo_index_bench,
+    run_prepared_redb_store_bench, run_prepared_redb_unified_index_bench, RedbRedoIndexMetrics,
+    StoreBenchPreparedMetrics, StoreBenchPreparedRecord, StoreBenchPreparedTable,
+    StoreBenchProcessCounters,
 };
 use nostr::{Event, JsonUtil};
 use serde::{Deserialize, Serialize};
@@ -114,6 +115,59 @@ struct MatrixRecord {
     repetitions: usize,
     alternating_order: bool,
     runs: Vec<RunRecord>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RedoLayout {
+    AtomicAllIndexes,
+    RedoNonsyncIndexes,
+}
+
+impl RedoLayout {
+    fn name(self) -> &'static str {
+        match self {
+            Self::AtomicAllIndexes => "atomic_all_indexes",
+            Self::RedoNonsyncIndexes => "redo_nonsync_indexes",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, String> {
+        [Self::AtomicAllIndexes, Self::RedoNonsyncIndexes]
+            .into_iter()
+            .find(|layout| layout.name() == value)
+            .ok_or_else(|| format!("unknown redo layout: {value}"))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RedoRunRecord {
+    schema: String,
+    nmp_commit: String,
+    git_dirty: bool,
+    host: String,
+    corpus: CorpusIdentity,
+    layout: RedoLayout,
+    repetition: usize,
+    ordinal: usize,
+    metrics: StoreBenchPreparedMetrics,
+    redo: Option<RedbRedoIndexMetrics>,
+    events_per_second: f64,
+    database_allocated_bytes: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RedoMatrixRecord {
+    schema: String,
+    command: String,
+    nmp_commit: String,
+    git_dirty: bool,
+    host: String,
+    corpus: CorpusIdentity,
+    transaction_batch_size: usize,
+    repetitions: usize,
+    alternating_order: bool,
+    runs: Vec<RedoRunRecord>,
 }
 
 fn repo_root() -> PathBuf {
@@ -423,10 +477,139 @@ fn run_matrix(
     Ok(())
 }
 
+fn run_redo_child(
+    corpus_path: &Path,
+    layout: RedoLayout,
+    batch_size: usize,
+    repetition: usize,
+    ordinal: usize,
+) -> Result<RedoRunRecord, String> {
+    let (events, corpus_identity) = load_corpus(corpus_path)?;
+    let prepared = prepare_equivalent_store_corpus(&events, batch_size)?;
+    let scratch = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let database = scratch.path().join("store.redb");
+    let (metrics, redo) = match layout {
+        RedoLayout::AtomicAllIndexes => (
+            run_prepared_redb_store_bench(&database, &prepared, sample_process)?,
+            None,
+        ),
+        RedoLayout::RedoNonsyncIndexes => {
+            let result = run_prepared_redb_redo_index_bench(&database, &prepared, sample_process)?;
+            (result.metrics.clone(), Some(result))
+        }
+    };
+    if !metrics.exact_reopen {
+        return Err(format!("{} failed exact logical reopen", layout.name()));
+    }
+    let database_allocated_bytes = std::fs::metadata(&database)
+        .map_err(|error| error.to_string())?
+        .blocks()
+        * 512;
+    let events_per_second = metrics.events as f64 * 1_000_000_000.0 / metrics.wall_ns as f64;
+    Ok(RedoRunRecord {
+        schema: "nmp-redb-redo-index-v1".to_owned(),
+        nmp_commit: git_commit(),
+        git_dirty: git_dirty(),
+        host: host(),
+        corpus: corpus_identity,
+        layout,
+        repetition,
+        ordinal,
+        metrics,
+        redo,
+        events_per_second,
+        database_allocated_bytes,
+    })
+}
+
+fn run_redo_matrix(
+    corpus_path: &Path,
+    output: &Path,
+    batch_size: usize,
+    repetitions: usize,
+) -> Result<(), String> {
+    if batch_size == 0 || repetitions == 0 {
+        return Err("batch size and repetitions must be nonzero".to_owned());
+    }
+    let current_exe = env::current_exe().map_err(|error| error.to_string())?;
+    let mut runs = Vec::new();
+    for repetition in 0..repetitions {
+        let mut layouts = [RedoLayout::AtomicAllIndexes, RedoLayout::RedoNonsyncIndexes];
+        if repetition % 2 == 1 {
+            layouts.reverse();
+        }
+        for (ordinal, layout) in layouts.into_iter().enumerate() {
+            eprintln!(
+                "repetition={repetition} ordinal={ordinal} layout={}",
+                layout.name()
+            );
+            let child = Command::new(&current_exe)
+                .arg("redo-run")
+                .arg(corpus_path)
+                .arg(layout.name())
+                .arg(batch_size.to_string())
+                .arg(repetition.to_string())
+                .arg(ordinal.to_string())
+                .output()
+                .map_err(|error| error.to_string())?;
+            if !child.status.success() {
+                return Err(format!(
+                    "child failed for {}: {}",
+                    layout.name(),
+                    String::from_utf8_lossy(&child.stderr)
+                ));
+            }
+            runs.push(
+                serde_json::from_slice::<RedoRunRecord>(&child.stdout)
+                    .map_err(|error| format!("decode redo child result: {error}"))?,
+            );
+        }
+    }
+    let first = runs
+        .first()
+        .ok_or_else(|| "redo matrix produced no runs".to_owned())?;
+    if runs.iter().any(|run| {
+        run.corpus.blake3 != first.corpus.blake3
+            || run.corpus.events != first.corpus.events
+            || run.nmp_commit != first.nmp_commit
+            || run.git_dirty != first.git_dirty
+    }) {
+        return Err("redo matrix child identity changed during the run".to_owned());
+    }
+    let record = RedoMatrixRecord {
+        schema: "nmp-redb-redo-index-v1".to_owned(),
+        command: format!(
+            "cargo run -q -p nmp-store --release --features bench-instrumentation --example redb_index_layout -- redo-matrix {} {} {} {}",
+            corpus_path.display(),
+            output.display(),
+            batch_size,
+            repetitions
+        ),
+        nmp_commit: first.nmp_commit.clone(),
+        git_dirty: first.git_dirty,
+        host: first.host.clone(),
+        corpus: first.corpus.clone(),
+        transaction_batch_size: batch_size,
+        repetitions,
+        alternating_order: true,
+        runs,
+    };
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::write(
+        output,
+        serde_json::to_vec_pretty(&record).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    println!("wrote {}", output.display());
+    Ok(())
+}
+
 fn main() -> Result<(), String> {
     let mut args = env::args_os().skip(1);
     let command = args.next().ok_or_else(|| {
-        "usage: redb_index_layout <run|matrix|order-matrix> <corpus> <layout|output> ...".to_owned()
+        "usage: redb_index_layout <run|matrix|order-matrix|redo-run|redo-matrix> ...".to_owned()
     })?;
     match command.to_string_lossy().as_ref() {
         "run" => {
@@ -459,6 +642,41 @@ fn main() -> Result<(), String> {
                 .map_err(|error| format!("invalid ordinal: {error}"))?
                 .unwrap_or(0);
             let result = run_child(&corpus, layout, batch_size, repetition, ordinal)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result).map_err(|error| error.to_string())?
+            );
+        }
+        "redo-run" => {
+            let corpus = PathBuf::from(
+                args.next()
+                    .ok_or_else(|| "redo-run requires corpus path".to_owned())?,
+            );
+            let layout = RedoLayout::parse(
+                &args
+                    .next()
+                    .ok_or_else(|| "redo-run requires layout".to_owned())?
+                    .to_string_lossy(),
+            )?;
+            let batch_size = args
+                .next()
+                .ok_or_else(|| "redo-run requires batch size".to_owned())?
+                .to_string_lossy()
+                .parse()
+                .map_err(|error| format!("invalid batch size: {error}"))?;
+            let repetition = args
+                .next()
+                .map(|value| value.to_string_lossy().parse())
+                .transpose()
+                .map_err(|error| format!("invalid repetition: {error}"))?
+                .unwrap_or(0);
+            let ordinal = args
+                .next()
+                .map(|value| value.to_string_lossy().parse())
+                .transpose()
+                .map_err(|error| format!("invalid ordinal: {error}"))?
+                .unwrap_or(0);
+            let result = run_redo_child(&corpus, layout, batch_size, repetition, ordinal)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&result).map_err(|error| error.to_string())?
@@ -509,6 +727,29 @@ fn main() -> Result<(), String> {
                 .map_err(|error| format!("invalid repetitions: {error}"))?
                 .unwrap_or(11);
             run_matrix(&corpus, &output, batch_size, repetitions, "index-order")?;
+        }
+        "redo-matrix" => {
+            let corpus = PathBuf::from(
+                args.next()
+                    .ok_or_else(|| "redo-matrix requires corpus path".to_owned())?,
+            );
+            let output = PathBuf::from(
+                args.next()
+                    .ok_or_else(|| "redo-matrix requires output path".to_owned())?,
+            );
+            let batch_size = args
+                .next()
+                .map(|value| value.to_string_lossy().parse())
+                .transpose()
+                .map_err(|error| format!("invalid batch size: {error}"))?
+                .unwrap_or(4_096);
+            let repetitions = args
+                .next()
+                .map(|value| value.to_string_lossy().parse())
+                .transpose()
+                .map_err(|error| format!("invalid repetitions: {error}"))?
+                .unwrap_or(5);
+            run_redo_matrix(&corpus, &output, batch_size, repetitions)?;
         }
         other => return Err(format!("unknown command: {other}")),
     }
