@@ -611,6 +611,8 @@ fn translator_loop(
     while let Ok(event) = worker_event_rx.recv() {
         let mut events = vec![event];
         events.extend(worker_event_rx.try_iter().take(max_batch - 1));
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::translator_burst(events.len());
         let Ok(guard) = inner.lock() else { break };
         // Project generation changes in per-worker FIFO order without
         // mutating the real slots (the retirement reaper is a separate
@@ -701,7 +703,11 @@ fn translator_loop(
         // unwrap each frame's Arc<Event> without cloning content or tags.
         drop(candidates);
         for pool_event in pool_events {
+            #[cfg(feature = "bench-instrumentation")]
+            let delivery_started = std::time::Instant::now();
             sink.on_event(pool_event);
+            #[cfg(feature = "bench-instrumentation")]
+            crate::ingest_attribution::delivery(delivery_started.elapsed());
         }
     }
 }
