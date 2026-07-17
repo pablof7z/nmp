@@ -2441,7 +2441,10 @@ fn run_direct_correlation() -> CorrelationProof {
         .expect("direct account must activate");
 
     let token = || {
-        Some(CorrelationToken::new(CORRELATION_TOKEN).expect("token is within the bounded range"))
+        Some(
+            CorrelationToken::try_from(CORRELATION_TOKEN)
+                .expect("token is within the bounded range"),
+        )
     };
 
     let first = engine

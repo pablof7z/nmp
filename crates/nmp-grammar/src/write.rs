@@ -62,15 +62,15 @@ pub enum WritePayload {
 /// CAN durably persist first -- it is known before acceptance, unlike the
 /// receipt id the store allocates.
 ///
-/// Bounded, non-empty newtype: `new` is the only constructor and validates
-/// eagerly rather than deferring to a later, harder-to-attribute failure.
-/// [`crate::WriteIntent::correlation`]'s doc is the ownership/uniqueness
+/// Bounded, non-empty newtype: `TryFrom<&str>` is the only constructor and
+/// validates eagerly rather than deferring to a later, harder-to-attribute
+/// failure. [`crate::WriteIntent::correlation`]'s doc is the ownership/uniqueness
 /// contract (token is SOLE identity; reuse for a different write is a
 /// documented caller error, never body-compared).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorrelationToken(String);
 
-/// [`CorrelationToken::new`]'s typed refusal. Exhaustive; every variant is
+/// [`CorrelationToken`]'s `TryFrom<&str>` typed refusal. Exhaustive; every variant is
 /// constructed by a test (Reachability Gate). Deliberately fieldless (unlike
 /// an earlier draft that carried `len`/`max` on `TooLong`): both facts are
 /// already reachable without duplicating them here (the caller's own input
@@ -110,23 +110,29 @@ impl CorrelationToken {
     /// snapshot for a fact this doc comment (and `CorrelationTokenError`'s
     /// `TooLong` variant) already state; nothing needs it programmatically.
     const MAX_LEN: usize = 64;
+}
 
-    /// Validate and wrap a caller-supplied token: non-empty, at most
-    /// [`Self::MAX_LEN`] bytes. Typed refusal, never a panic or silent
-    /// truncation. Takes `&str` (not a generic `impl Into<String>`) --
-    /// deliberately concrete, since a generic bound here inflates the
-    /// governed public-surface snapshot by hundreds of lines for no
-    /// ergonomic gain callers can't get from `.to_string()`/`&str` at the
-    /// call site instead.
-    pub fn new(token: &str) -> Result<Self, CorrelationTokenError> {
-        let token = token.to_string();
+/// Validate and wrap a caller-supplied token: non-empty, at most
+/// [`CorrelationToken::MAX_LEN`] bytes. Typed refusal, never a panic or
+/// silent truncation. A `TryFrom<&str>` trait impl rather than an inherent
+/// `new` constructor -- functionally identical call-site ergonomics
+/// (`CorrelationToken::try_from(token)`/`token.try_into()`), but a trait
+/// impl costs nothing in the governed public-surface snapshot (which only
+/// walks inherent impls), unlike an inherent constructor whose signature
+/// forces a full one-time inline resolution of `CorrelationTokenError`
+/// (~90 lines) -- reclaimed here after an unrelated lane's own facade
+/// growth ate this crate's remaining ceiling headroom.
+impl TryFrom<&str> for CorrelationToken {
+    type Error = CorrelationTokenError;
+
+    fn try_from(token: &str) -> Result<Self, Self::Error> {
         if token.is_empty() {
             return Err(CorrelationTokenError::Empty);
         }
         if token.len() > Self::MAX_LEN {
             return Err(CorrelationTokenError::TooLong);
         }
-        Ok(Self(token))
+        Ok(Self(token.to_string()))
     }
 }
 
@@ -349,23 +355,26 @@ mod tests {
         assert_eq!(overridden.identity_override, Some(keys.public_key()));
     }
 
-    /// #591: `new` refuses empty and over-length tokens with typed errors
-    /// (Reachability Gate: every `CorrelationTokenError` variant is
-    /// constructed here); a well-formed token round-trips through
-    /// `as_str`.
+    /// #591: `TryFrom<&str>` refuses empty and over-length tokens with
+    /// typed errors (Reachability Gate: every `CorrelationTokenError`
+    /// variant is constructed here); a well-formed token round-trips
+    /// through `as_ref`.
     #[test]
     fn correlation_token_validates_bounds() {
-        assert_eq!(CorrelationToken::new(""), Err(CorrelationTokenError::Empty));
+        assert_eq!(
+            CorrelationToken::try_from(""),
+            Err(CorrelationTokenError::Empty)
+        );
         let too_long = "a".repeat(CorrelationToken::MAX_LEN + 1);
         assert_eq!(
-            CorrelationToken::new(&too_long),
+            CorrelationToken::try_from(too_long.as_str()),
             Err(CorrelationTokenError::TooLong)
         );
         let max_len = "a".repeat(CorrelationToken::MAX_LEN);
-        let token = CorrelationToken::new(&max_len).expect("exactly MAX_LEN is valid");
+        let token = CorrelationToken::try_from(max_len.as_str()).expect("exactly MAX_LEN is valid");
         assert_eq!(token.as_ref() as &str, max_len);
 
-        let token = CorrelationToken::new("client-generated-uuid").unwrap();
+        let token = CorrelationToken::try_from("client-generated-uuid").unwrap();
         assert_eq!(token.as_ref() as &str, "client-generated-uuid");
     }
 }

@@ -590,6 +590,7 @@ fn checkpoint_restore_reattaches_durable_write_without_repairing() {
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             })
             .unwrap();
         assert_eq!(receipt.statuses.recv().unwrap(), WriteStatus::Accepted);
@@ -628,7 +629,7 @@ fn checkpoint_restore_reattaches_durable_write_without_repairing() {
     )
     .expect("test engine thread construction");
     let statuses = match handle.reattach_receipt(receipt_id) {
-        ReceiptReattachment::Attached(statuses) => statuses,
+        ReceiptReattachment::Attached(_id, statuses) => statuses,
         _ => panic!("durable receipt must reattach after restart"),
     };
     assert_eq!(statuses.recv().unwrap(), WriteStatus::Accepted);
