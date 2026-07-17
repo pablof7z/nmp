@@ -13,7 +13,7 @@
 //! `Instant::now()` inside — so this FSM is deterministically testable and
 //! the worker integration is a thin wrapper.
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Production default: emit a ping after this much inbound silence.
 pub const KEEPALIVE_IDLE_THRESHOLD: Duration = Duration::from_secs(30);
@@ -21,6 +21,17 @@ pub const KEEPALIVE_IDLE_THRESHOLD: Duration = Duration::from_secs(30);
 /// Production default: declare the socket dead if no inbound frame arrives
 /// within this window after a ping is emitted.
 pub const KEEPALIVE_PONG_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Threshold for [`SuspendGapDetector`]: a gap this large between two
+/// consecutive worker-loop iterations, measured on a clock that keeps
+/// advancing while the process is suspended, means the process itself was
+/// frozen (e.g. iOS backgrounding) rather than merely idle. Comfortably
+/// above the worst-case ordinary inter-iteration wait — bounded by
+/// [`KEEPALIVE_IDLE_THRESHOLD`]/[`KEEPALIVE_PONG_TIMEOUT`], each 30s — so a
+/// healthy idle relay never trips it, and far below any real suspend
+/// interval (iOS backgrounding is measured in seconds to minutes before the
+/// socket is killed and the process frozen).
+pub const SUSPEND_GAP_THRESHOLD: Duration = Duration::from_secs(45);
 
 /// Verdict returned by [`KeepaliveState::step`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,10 +123,80 @@ impl KeepaliveState {
         }
     }
 
-    /// Whether a ping is currently outstanding. Diagnostic-only.
-    #[cfg(test)]
+    /// Whether a ping is currently outstanding. Used by the resume-gap
+    /// heuristic (see [`SuspendGapDetector`]) to avoid emitting a second
+    /// ping on top of one already awaiting its pong, and by tests as a
+    /// diagnostic.
     pub(crate) fn ping_in_flight(&self) -> bool {
         self.ping_sent_at.is_some()
+    }
+}
+
+/// Detects a resume-after-suspend gap between consecutive worker-loop
+/// iterations (issue #4). Callers supply a wall-clock (or otherwise
+/// sleep-advancing) reading at each iteration; this struct never reads a
+/// clock itself, mirroring [`KeepaliveState`]'s injected-time design so it
+/// stays deterministically testable.
+///
+/// CRITICAL: on Apple platforms, `std::time::Instant` is backed by
+/// `CLOCK_UPTIME_RAW`, which does **not** advance while the device sleeps —
+/// two `Instant::now()` reads taken immediately before suspend and
+/// immediately after resume can show near-zero elapsed time even though
+/// wall-clock minutes passed. `KeepaliveState` above is intentionally kept
+/// on `Instant` (it drives a pure, deterministic FSM and its correctness
+/// does not depend on wall-clock accounting: the worker thread itself is
+/// frozen for the same interval `Instant` fails to observe, so nothing
+/// running on that clock inside one suspended process ever observes a
+/// skewed relative duration). Detecting THAT a suspension happened at all —
+/// which is the whole point here — requires a clock that keeps advancing
+/// across it: `std::time::SystemTime` (wall clock) or a platform continuous
+/// monotonic clock. `SystemTime` is used here; a backward jump (e.g. an NTP
+/// correction) is treated as no gap rather than a spurious huge one.
+pub struct SuspendGapDetector {
+    last_seen: SystemTime,
+    threshold: Duration,
+}
+
+impl SuspendGapDetector {
+    /// Build a fresh detector. `now` is the first iteration's wall-clock
+    /// reading.
+    #[must_use]
+    pub fn new(now: SystemTime, threshold: Duration) -> Self {
+        Self {
+            last_seen: now,
+            threshold,
+        }
+    }
+
+    /// Record one worker-loop iteration's wall-clock reading. Returns `true`
+    /// when the elapsed time since the previous call reached the threshold —
+    /// the caller's signal to accelerate keepalive (see
+    /// [`SUSPEND_GAP_THRESHOLD`]'s doc). Always updates the internal
+    /// reading, gap or not, so the next call measures from here.
+    pub fn observe(&mut self, now: SystemTime) -> bool {
+        let gap = now.duration_since(self.last_seen).unwrap_or(Duration::ZERO);
+        self.last_seen = now;
+        gap >= self.threshold
+    }
+}
+
+/// Combine one loop iteration's [`SuspendGapDetector::observe`] result with
+/// [`KeepaliveState::step`]'s verdict: a detected gap upgrades an `Idle`
+/// verdict to `EmitPing` so a dead/half-open socket is probed immediately
+/// on resume instead of waiting out the remaining idle threshold. A ping
+/// already in flight is left alone -- that case is already governed by the
+/// existing pong-timeout clock, and must never receive a second ping on
+/// top of it. `Dead` passes through unchanged (already worse than a ping).
+#[must_use]
+pub(crate) fn apply_resume_gap(
+    action: KeepaliveAction,
+    ping_in_flight: bool,
+    gap_detected: bool,
+) -> KeepaliveAction {
+    if gap_detected && !ping_in_flight && action == KeepaliveAction::Idle {
+        KeepaliveAction::EmitPing
+    } else {
+        action
     }
 }
 
@@ -200,5 +281,93 @@ mod tests {
         k.on_ping_flushed(t0 + s(35));
         assert_eq!(k.step(t0 + s(59)), KeepaliveAction::Idle);
         assert_eq!(k.step(t0 + s(60)), KeepaliveAction::Dead);
+    }
+
+    #[test]
+    fn suspend_gap_detector_reports_no_gap_under_threshold() {
+        let t0 = SystemTime::now();
+        let mut detector = SuspendGapDetector::new(t0, s(45));
+        assert!(!detector.observe(t0 + s(10)));
+        assert!(!detector.observe(t0 + s(20)));
+        assert!(!detector.observe(t0 + s(44)));
+    }
+
+    #[test]
+    fn suspend_gap_detector_reports_gap_at_or_over_threshold() {
+        let t0 = SystemTime::now();
+        let mut detector = SuspendGapDetector::new(t0, s(45));
+        assert!(detector.observe(t0 + s(45)));
+    }
+
+    #[test]
+    fn suspend_gap_detector_reports_large_gap_after_simulated_suspend() {
+        let t0 = SystemTime::now();
+        let mut detector = SuspendGapDetector::new(t0, s(45));
+        // A device backgrounded for 10+ minutes: exactly the acceptance
+        // scenario in issue #4.
+        assert!(detector.observe(t0 + Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn suspend_gap_detector_measures_from_the_previous_observation_not_the_start() {
+        let t0 = SystemTime::now();
+        let mut detector = SuspendGapDetector::new(t0, s(45));
+        assert!(!detector.observe(t0 + s(40)));
+        // Only 10s elapsed since the last observation (t0+40), even though
+        // 50s elapsed since construction -- must not falsely report a gap.
+        assert!(!detector.observe(t0 + s(50)));
+    }
+
+    #[test]
+    fn suspend_gap_detector_treats_backward_clock_jump_as_no_gap() {
+        let t0 = SystemTime::now();
+        let mut detector = SuspendGapDetector::new(t0, s(45));
+        // An NTP correction moving the wall clock backward must never be
+        // reported as a (nonsensical negative) gap.
+        assert!(!detector.observe(t0 - s(120)));
+    }
+
+    #[test]
+    fn apply_resume_gap_upgrades_idle_to_ping_only_when_gap_and_no_ping_in_flight() {
+        assert_eq!(
+            apply_resume_gap(KeepaliveAction::Idle, false, true),
+            KeepaliveAction::EmitPing,
+            "a resume gap with no outstanding ping must trigger an immediate ping"
+        );
+    }
+
+    #[test]
+    fn apply_resume_gap_is_inert_without_a_gap() {
+        assert_eq!(
+            apply_resume_gap(KeepaliveAction::Idle, false, false),
+            KeepaliveAction::Idle,
+            "no gap observed must never produce an early ping"
+        );
+    }
+
+    #[test]
+    fn apply_resume_gap_never_double_pings_an_outstanding_ping() {
+        assert_eq!(
+            apply_resume_gap(KeepaliveAction::Idle, true, true),
+            KeepaliveAction::Idle,
+            "a ping already awaiting its pong must not receive a second one"
+        );
+    }
+
+    #[test]
+    fn apply_resume_gap_leaves_emit_ping_unchanged() {
+        assert_eq!(
+            apply_resume_gap(KeepaliveAction::EmitPing, false, true),
+            KeepaliveAction::EmitPing
+        );
+    }
+
+    #[test]
+    fn apply_resume_gap_leaves_dead_unchanged() {
+        assert_eq!(
+            apply_resume_gap(KeepaliveAction::Dead, false, true),
+            KeepaliveAction::Dead,
+            "a gap must never mask an already-Dead verdict"
+        );
     }
 }

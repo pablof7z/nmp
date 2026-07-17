@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
@@ -38,7 +38,9 @@ use tungstenite::stream::MaybeTlsStream;
 use tungstenite::Message;
 
 use crate::backoff;
-use crate::keepalive::{KeepaliveAction, KeepaliveState};
+use crate::keepalive::{
+    apply_resume_gap, KeepaliveAction, KeepaliveState, SuspendGapDetector, SUSPEND_GAP_THRESHOLD,
+};
 
 use super::connect::{open_relay_socket, RelaySocket};
 use super::frame::classify_message;
@@ -456,6 +458,30 @@ fn run_worker(
                 }
                 let mut keepalive =
                     KeepaliveState::new(Instant::now(), keepalive_idle, keepalive_pong_timeout);
+                // Resume-gap heuristic (issue #4): a fresh detector per
+                // connected generation, seeded from wall-clock `now` at
+                // connect time so a suspension DURING the reconnect/backoff
+                // wait doesn't retroactively look like a gap the instant the
+                // new socket comes up.
+                //
+                // `SUSPEND_GAP_THRESHOLD`'s safety margin (never firing on an
+                // ordinary idle wait) is only sound relative to whatever
+                // idle/pong timeouts THIS pool is actually configured with --
+                // its doc assumes the production defaults. A `PoolConfig`
+                // override that pushes either past the threshold would let a
+                // legitimate idle wait masquerade as a resume gap; debug
+                // builds catch that misconfiguration here rather than
+                // silently changing ping cadence in production.
+                debug_assert!(
+                    SUSPEND_GAP_THRESHOLD > keepalive_idle
+                        && SUSPEND_GAP_THRESHOLD > keepalive_pong_timeout,
+                    "SUSPEND_GAP_THRESHOLD ({SUSPEND_GAP_THRESHOLD:?}) must exceed the configured \
+                     keepalive idle/pong timeouts ({keepalive_idle:?}/{keepalive_pong_timeout:?}), \
+                     or an ordinary idle wait under this config can spuriously trip the resume-gap \
+                     heuristic"
+                );
+                let mut suspend_gap =
+                    SuspendGapDetector::new(SystemTime::now(), SUSPEND_GAP_THRESHOLD);
                 let outcome = run_connected(
                     slot,
                     generation,
@@ -466,6 +492,7 @@ fn run_worker(
                     &mut pending,
                     &mut socket,
                     &mut keepalive,
+                    &mut suspend_gap,
                     &mut preamble,
                     &mut durable,
                     &mut write_accepted,
@@ -821,6 +848,7 @@ fn run_connected(
     pending: &mut VecDeque<String>,
     socket: &mut RelaySocket,
     keepalive: &mut KeepaliveState,
+    suspend_gap: &mut SuspendGapDetector,
     preamble: &mut Vec<String>,
     durable: &mut VecDeque<(AttemptCorrelation, String)>,
     write_accepted: &mut Vec<AttemptCorrelation>,
@@ -839,6 +867,7 @@ fn run_connected(
         pending,
         socket,
         keepalive,
+        suspend_gap,
         preamble,
         durable,
         write_accepted,
@@ -870,6 +899,7 @@ fn run_connected_inner(
     pending: &mut VecDeque<String>,
     socket: &mut RelaySocket,
     keepalive: &mut KeepaliveState,
+    suspend_gap: &mut SuspendGapDetector,
     preamble: &mut Vec<String>,
     durable: &mut VecDeque<(AttemptCorrelation, String)>,
     write_accepted: &mut Vec<AttemptCorrelation>,
@@ -955,6 +985,20 @@ fn run_connected_inner(
         }
     }
 
+    // Resume-gap heuristic (issue #4): sticky across iterations, NOT a
+    // one-shot mirror of `suspend_gap.observe`'s return value. A detected
+    // gap sets this; it is cleared only once a ping actually reaches the
+    // wire (`FlushResult::Flushed`), never merely attempted. Without this,
+    // a `Blocked` write on the very first post-resume iteration -- likely
+    // exactly then, since `flush_generation_writes` above already tried to
+    // push any suspension-queued writes into the same still-dead socket --
+    // would silently drop the accelerated probe: `suspend_gap.observe`
+    // already consumed the gap for this iteration, so nothing would
+    // re-arm the upgrade on the next one, and detection would quietly fall
+    // back to the ordinary ~60s idle+pong schedule this heuristic exists
+    // to cut.
+    let mut pending_gap = false;
+
     loop {
         // Authoritative terminal check (issue #506 Fix 2): `retire` wakes the
         // mio waker (unparking `poller.wait` below) and sets this atomic. The
@@ -1013,7 +1057,20 @@ fn run_connected_inner(
             }
         };
 
-        match keepalive.step(Instant::now()) {
+        // Resume-gap heuristic (issue #4): always observe this iteration's
+        // wall-clock reading (so the detector's baseline never goes stale
+        // across an iteration that happened not to trip it). A fresh
+        // detection latches the sticky `pending_gap` flag (see its doc
+        // above the loop); `apply_resume_gap` reads that sticky flag, not
+        // the one-shot `observe` result, so a gap that couldn't be probed
+        // this iteration (ping write `Blocked`) stays armed for the next
+        // one instead of silently expiring.
+        if suspend_gap.observe(SystemTime::now()) {
+            pending_gap = true;
+        }
+        let action = keepalive.step(Instant::now());
+        let action = apply_resume_gap(action, keepalive.ping_in_flight(), pending_gap);
+        match action {
             KeepaliveAction::Idle => {}
             KeepaliveAction::EmitPing => {
                 match flush_message(
@@ -1025,7 +1082,13 @@ fn run_connected_inner(
                     slot,
                     generation,
                 ) {
-                    FlushResult::Flushed => keepalive.on_ping_flushed(Instant::now()),
+                    FlushResult::Flushed => {
+                        keepalive.on_ping_flushed(Instant::now());
+                        // The probe this heuristic exists to send actually
+                        // reached the wire -- whether this ping was ordinary
+                        // or gap-upgraded, the pending intent is satisfied.
+                        pending_gap = false;
+                    }
                     FlushResult::Blocked => wants_write = true,
                     FlushResult::Broken(message) => {
                         return ConnectedOutcome::Reconnect {
@@ -1067,7 +1130,14 @@ fn run_connected_inner(
         // simultaneously with a waker must never be silently skipped. A
         // non-readable socket's `read()` just returns `WouldBlock`
         // immediately, so this is cheap.
-        if let Some(outcome) = drain_reads(slot, generation, event_tx, socket, keepalive) {
+        if let Some(outcome) = drain_reads(
+            slot,
+            generation,
+            event_tx,
+            socket,
+            keepalive,
+            Some(&mut pending_gap),
+        ) {
             return outcome;
         }
     }
@@ -1080,7 +1150,7 @@ fn complete_initial_read(
     socket: &mut RelaySocket,
     keepalive: &mut KeepaliveState,
 ) -> Option<ConnectedOutcome> {
-    if let Some(outcome) = drain_reads(slot, generation, event_tx, socket, keepalive) {
+    if let Some(outcome) = drain_reads(slot, generation, event_tx, socket, keepalive, None) {
         return Some(outcome);
     }
     event_tx
@@ -1370,11 +1440,22 @@ fn drain_reads(
     event_tx: &SyncSender<WorkerEvent>,
     socket: &mut RelaySocket,
     keepalive: &mut KeepaliveState,
+    mut pending_gap: Option<&mut bool>,
 ) -> Option<ConnectedOutcome> {
     loop {
         match socket.read() {
             Ok(message) => {
                 keepalive.on_inbound(Instant::now());
+                // Resume-gap heuristic (issue #4): any inbound frame proves
+                // the socket is alive and responsive, so the sticky
+                // pending-gap flag (see its doc above the established loop)
+                // is satisfied the same as an actually-flushed ping would --
+                // there is nothing left for the accelerated probe to prove.
+                // `None` during the initial-read handshake window: that
+                // phase predates the flag entirely.
+                if let Some(flag) = pending_gap.as_mut() {
+                    **flag = false;
+                }
                 if matches!(message, Message::Close(_)) {
                     return Some(ConnectedOutcome::Reconnect {
                         message: "peer closed websocket".to_string(),
@@ -1769,6 +1850,7 @@ mod tests {
                 Duration::from_secs(60),
                 Duration::from_secs(10),
             );
+            let mut suspend_gap = SuspendGapDetector::new(SystemTime::now(), SUSPEND_GAP_THRESHOLD);
             let mut preamble = Vec::new();
             let mut durable = VecDeque::new();
             let mut write_accepted = Vec::new();
@@ -1786,6 +1868,7 @@ mod tests {
                 &mut pending,
                 &mut socket,
                 &mut keepalive,
+                &mut suspend_gap,
                 &mut preamble,
                 &mut durable,
                 &mut write_accepted,
@@ -1806,6 +1889,174 @@ mod tests {
                 .all(|event| !matches!(event.kind, WorkerEventKind::InitialReadCompleted)),
             "a public session must never enter the protected marker handshake"
         );
+        command_tx.send(WorkerCommand::Shutdown).unwrap();
+        if let Some(waker) = waker.lock().unwrap().as_ref() {
+            waker.wake().unwrap();
+        }
+        assert!(matches!(worker.join().unwrap(), ConnectedOutcome::Shutdown));
+    }
+
+    /// The resume-gap heuristic (issue #4), exercised end to end against a
+    /// real socket: a `SuspendGapDetector` seeded with a deliberately stale
+    /// baseline observes a huge gap on its very first real-wall-clock
+    /// `observe()` call inside the loop -- simulating "the process was just
+    /// resumed after a long suspension" without an actual sleep. With a
+    /// long (60s) keepalive idle threshold, no ordinary ping would fire for
+    /// a full minute; the heuristic must instead emit one immediately.
+    #[test]
+    fn resume_gap_triggers_immediate_ping_bypassing_the_idle_threshold() {
+        let (mut socket, mut peer) = real_websocket_pair();
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, _event_rx) = mpsc::sync_channel(TEST_EVENT_QUEUE_CAPACITY);
+        let waker = Arc::new(Mutex::new(None));
+        let worker_waker = Arc::clone(&waker);
+        let worker = std::thread::spawn(move || {
+            let mut pending = VecDeque::new();
+            let mut keepalive = KeepaliveState::new(
+                Instant::now(),
+                Duration::from_secs(60),
+                Duration::from_secs(10),
+            );
+            let stale_baseline = SystemTime::now() - Duration::from_secs(120);
+            let mut suspend_gap = SuspendGapDetector::new(stale_baseline, SUSPEND_GAP_THRESHOLD);
+            let mut preamble = Vec::new();
+            let mut durable = VecDeque::new();
+            let mut write_accepted = Vec::new();
+            let mut ephemeral = VecDeque::new();
+            let mut ephemeral_write_accepted = Vec::new();
+            let mut outbound_released = true;
+            let shutdown = AtomicBool::new(false);
+            run_connected_inner(
+                3,
+                12,
+                &event_tx,
+                &command_rx,
+                &worker_waker,
+                &shutdown,
+                &mut pending,
+                &mut socket,
+                &mut keepalive,
+                &mut suspend_gap,
+                &mut preamble,
+                &mut durable,
+                &mut write_accepted,
+                &mut ephemeral,
+                &mut ephemeral_write_accepted,
+                &mut outbound_released,
+                false,
+            )
+        });
+
+        assert!(
+            matches!(peer.read().unwrap(), Message::Ping(_)),
+            "a detected resume gap must emit an immediate ping instead of waiting \
+             out the 60s idle threshold"
+        );
+
+        command_tx.send(WorkerCommand::Shutdown).unwrap();
+        if let Some(waker) = waker.lock().unwrap().as_ref() {
+            waker.wake().unwrap();
+        }
+        assert!(matches!(worker.join().unwrap(), ConnectedOutcome::Shutdown));
+    }
+
+    /// Review regression guard: a gap-triggered ping that hits a `Blocked`
+    /// write on its first attempt -- the exact scenario a suspension-queued
+    /// write earlier in the same resume iteration produces against a still-
+    /// stalled socket -- must not silently drop the accelerated probe.
+    /// `SuspendGapDetector::observe` is one-shot (it already consumed the
+    /// gap for this iteration by the time the ping write is attempted), so
+    /// only the sticky `pending_gap` flag can make the loop retry `EmitPing`
+    /// on a LATER iteration, once the socket actually has room.
+    #[test]
+    fn resume_gap_survives_a_blocked_first_ping_attempt() {
+        // `real_buffered_socket`'s peer stream is nonblocking (unlike
+        // `real_websocket_pair`'s), so a plain `peer.read()` can spuriously
+        // observe `WouldBlock` before the worker thread has written
+        // anything yet; retry past that instead of treating it as failure.
+        fn read_blocking(peer: &mut tungstenite::WebSocket<MaybeTlsStream<TcpStream>>) -> Message {
+            loop {
+                match peer.read() {
+                    Ok(message) => return message,
+                    Err(tungstenite::Error::Io(error))
+                        if error.kind() == io::ErrorKind::WouldBlock =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("peer read failed: {error}"),
+                }
+            }
+        }
+
+        let (mut socket, peer_stream) = real_buffered_socket();
+        let mut peer = tungstenite::WebSocket::from_raw_socket(
+            MaybeTlsStream::Plain(peer_stream),
+            Role::Server,
+            None,
+        );
+
+        // Saturate the socket so the worker's first gap-triggered ping
+        // attempt genuinely blocks, before the loop ever gets to run.
+        let _ = socket.write(Message::Text("x".repeat(LARGE_FRAME_BYTES).into()));
+        assert!(
+            matches!(socket.flush(), Err(ref error) if is_nonblocking_io(error)),
+            "setup: the giant frame must leave the socket genuinely blocked"
+        );
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, _event_rx) = mpsc::sync_channel(TEST_EVENT_QUEUE_CAPACITY);
+        let waker = Arc::new(Mutex::new(None));
+        let worker_waker = Arc::clone(&waker);
+        let worker = std::thread::spawn(move || {
+            let mut pending = VecDeque::new();
+            let mut keepalive = KeepaliveState::new(
+                Instant::now(),
+                Duration::from_secs(60),
+                Duration::from_secs(10),
+            );
+            let stale_baseline = SystemTime::now() - Duration::from_secs(120);
+            let mut suspend_gap = SuspendGapDetector::new(stale_baseline, SUSPEND_GAP_THRESHOLD);
+            let mut preamble = Vec::new();
+            let mut durable = VecDeque::new();
+            let mut write_accepted = Vec::new();
+            let mut ephemeral = VecDeque::new();
+            let mut ephemeral_write_accepted = Vec::new();
+            let mut outbound_released = true;
+            let shutdown = AtomicBool::new(false);
+            run_connected_inner(
+                3,
+                12,
+                &event_tx,
+                &command_rx,
+                &worker_waker,
+                &shutdown,
+                &mut pending,
+                &mut socket,
+                &mut keepalive,
+                &mut suspend_gap,
+                &mut preamble,
+                &mut durable,
+                &mut write_accepted,
+                &mut ephemeral,
+                &mut ephemeral_write_accepted,
+                &mut outbound_released,
+                false,
+            )
+        });
+
+        // Draining the giant frame is what finally gives the worker's
+        // blocked ping room to flush on a subsequent loop iteration.
+        assert!(matches!(
+            read_blocking(&mut peer),
+            Message::Text(text) if text.len() == LARGE_FRAME_BYTES
+        ));
+        assert!(
+            matches!(read_blocking(&mut peer), Message::Ping(_)),
+            "the sticky pending-gap flag must retry the ping once the blocked \
+             write clears, not only on the one iteration that first detected \
+             the gap"
+        );
+
         command_tx.send(WorkerCommand::Shutdown).unwrap();
         if let Some(waker) = waker.lock().unwrap().as_ref() {
             waker.wake().unwrap();
