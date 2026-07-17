@@ -13,6 +13,8 @@ fn websocket_runtime_to_redb_smoke_crosses_every_bounded_queue() {
         passes: 2,
         payload_bytes: 256,
         shape_corpus: None,
+        corpus_output: None,
+        memory_store: false,
         queue_capacity: 8,
         verified_cache_capacity: 257,
         verifier_workers: 0,
@@ -39,6 +41,40 @@ fn websocket_runtime_to_redb_smoke_crosses_every_bounded_queue() {
 }
 
 #[test]
+fn websocket_runtime_to_memory_store_pins_the_no_persistence_ceiling() {
+    let result = relay_ingest_probe::run(ProbeConfig {
+        events: 65,
+        relays: 1,
+        passes: 1,
+        payload_bytes: 128,
+        shape_corpus: None,
+        corpus_output: None,
+        memory_store: true,
+        queue_capacity: 8,
+        verified_cache_capacity: 65,
+        verifier_workers: 0,
+        verify_batch_size: 7,
+        engine_batch_size: 7,
+        engine_batch_bytes: 8 * 1024 * 1024,
+        engine_batch_wait: Duration::ZERO,
+        visible_limit: Some(32),
+        trim_allocator_during_ingest: false,
+        frame_delay: Duration::ZERO,
+        expect_rejection: false,
+        timeout: Duration::from_secs(30),
+        store_path: None,
+    })
+    .expect("end-to-end memory-store ceiling smoke");
+
+    assert_eq!(result.store_backend, "memory");
+    assert_eq!(result.expected_relay_frames, 65);
+    assert_eq!(result.observed_relay_frames, 65);
+    assert_eq!(result.final_visible_rows, 32);
+    assert_eq!(result.database_bytes, 0);
+    assert_eq!(result.reopen_and_verify_ms, 0.0);
+}
+
+#[test]
 fn websocket_runtime_rejects_a_message_above_the_one_mib_ceiling() {
     let result = relay_ingest_probe::run(ProbeConfig {
         events: 1,
@@ -46,6 +82,8 @@ fn websocket_runtime_rejects_a_message_above_the_one_mib_ceiling() {
         passes: 1,
         payload_bytes: 1_049_000,
         shape_corpus: None,
+        corpus_output: None,
+        memory_store: false,
         queue_capacity: 8,
         verified_cache_capacity: 1,
         verifier_workers: 0,

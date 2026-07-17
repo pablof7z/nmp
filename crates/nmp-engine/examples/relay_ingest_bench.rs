@@ -22,6 +22,10 @@ fn main() -> Result<(), ProbeError> {
             "--shape-corpus" => {
                 config.shape_corpus = Some(path_value(&mut args, "--shape-corpus")?)
             }
+            "--corpus-output" => {
+                config.corpus_output = Some(path_value(&mut args, "--corpus-output")?)
+            }
+            "--memory-store" => config.memory_store = true,
             "--queue-capacity" => config.queue_capacity = value(&mut args, "--queue-capacity")?,
             "--verified-cache-capacity" => {
                 config.verified_cache_capacity = value(&mut args, "--verified-cache-capacity")?
@@ -105,6 +109,8 @@ fn print_help() {
          --passes N          full corpus replays per relay (default 1)\n\
          --payload-bytes N   event content bytes (default 128)\n\
          --shape-corpus PATH generate the signed workload from a #620 private-free shape corpus\n\
+         --corpus-output PATH retain the generated signed JSONL corpus\n\
+         --memory-store       use the volatile semantic oracle as a no-persistence ceiling\n\
          --queue-capacity N  every bounded runtime queue (default 1024)\n\
          --verified-cache-capacity N  verified ID/signature entries (default 131072)\n\
          --verifier-workers N  native signature workers; 0 uses default 2 (maximum 16)\n\
