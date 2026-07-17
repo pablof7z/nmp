@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn comment_intent_passes_through_the_correlation_token() {
         let author = Keys::generate().public_key();
-        let token = CorrelationToken::new("nip22-correlation").unwrap();
+        let token = CorrelationToken::try_from("nip22-correlation").unwrap();
         let intent = comment_intent(
             &podcast_root(),
             CommentParent::Comment {
