@@ -81,6 +81,9 @@ public enum NMPError: Error, Sendable, Equatable {
     /// given a token that failed `CorrelationToken`'s bounded/non-empty
     /// validation.
     case invalidCorrelationToken(got: String, reason: String)
+    /// #572: an `Nip73Target` failed its constructor validation (an empty
+    /// `I`/`K` cell).
+    case invalidNip73Target(reason: String)
 
     init(_ ffi: FfiError) {
         switch ffi {
@@ -123,6 +126,8 @@ public enum NMPError: Error, Sendable, Equatable {
             self = .relayInformationWaitersSaturated(capacity: capacity)
         case .InvalidCorrelationToken(let got, let reason):
             self = .invalidCorrelationToken(got: got, reason: reason)
+        case .InvalidNip73Target(let reason):
+            self = .invalidNip73Target(reason: reason)
         }
     }
 }
