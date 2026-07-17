@@ -57,6 +57,8 @@ mod compact_index_bench;
 #[cfg(feature = "bench-instrumentation")]
 mod fjall_ingest_bench;
 #[cfg(feature = "bench-instrumentation")]
+mod packed_postings_bench;
+#[cfg(feature = "bench-instrumentation")]
 mod redo_index_bench;
 #[cfg(feature = "bench-instrumentation")]
 mod store_bench;
@@ -65,6 +67,10 @@ mod store_bench;
 pub use compact_index_bench::run_prepared_redb_compact_index_bench;
 #[cfg(feature = "bench-instrumentation")]
 pub use fjall_ingest_bench::{run_fjall_governed_ingest_bench, FjallGovernedIngestMetrics};
+#[cfg(feature = "bench-instrumentation")]
+pub use packed_postings_bench::{
+    run_packed_postings_bench, PackedPostingsBackend, PackedPostingsMetrics,
+};
 #[cfg(feature = "bench-instrumentation")]
 pub use redo_index_bench::{run_prepared_redb_redo_index_bench, RedbRedoIndexMetrics};
 #[cfg(feature = "bench-instrumentation")]
