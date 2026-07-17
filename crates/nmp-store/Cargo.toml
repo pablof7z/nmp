@@ -18,6 +18,10 @@ required-features = ["bench-instrumentation"]
 name = "store_decomposition"
 required-features = ["bench-instrumentation"]
 
+[[example]]
+name = "redb_index_layout"
+required-features = ["bench-instrumentation"]
+
 [dependencies]
 nostr.workspace = true
 nmp-grammar.workspace = true

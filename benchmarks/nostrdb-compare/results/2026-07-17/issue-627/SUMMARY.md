@@ -127,3 +127,40 @@ materialization: a naive serial attribution of the 1.28x prepared-store gain
 projects only about 1.16x whole-pipeline throughput. That estimate selects work;
 it is not a claimed production result.
 
+## Compact ordered-ID selection experiment
+
+Follow-up commit `cc900e4127a9041cd5e1595371a1e7e2c04e535c` tests the most
+direct nostrdb-inspired reduction that NMP had not already adopted. NMP already
+decodes 64-character hexadecimal event IDs, pubkeys, and identity-shaped tag
+atoms to 32 raw bytes. The remaining difference is that NMP repeats the full
+32-byte event ID in every ordered index key to make equal-timestamp rows unique
+and preserve exact `created_at DESC, event_id ASC` pagination.
+
+The selection layout retains only the first 8 ordered ID bytes, removing 24
+bytes from each global, author, kind, author-kind, and tag mutation. It rejects
+distinct compact-key collisions instead of silently overwriting them. This is
+not a production format: an exact collision sidecar would be mandatory if the
+ceiling justified implementation.
+
+Fifteen fresh-process pairs alternated the production-width and compact layouts
+over the representative 100,000-event corpus at batch 4,096. All 30 runs
+reopened every expected logical row. Paired medians:
+
+| Metric | Compact / baseline | Result |
+| --- | ---: | ---: |
+| throughput | 1.030x | 3.0% faster |
+| commit wall | 0.924x | 7.6% lower |
+| process writes | 0.865x | 13.5% lower |
+| Redb stored bytes | 0.875x | 12.5% lower |
+| prepared key/value bytes | 89.25 / 101.93 MB | 12.4% lower |
+
+The compact layout won 10 of 15 throughput pairs, but host variance was much
+larger than the median wall-time effect. The deterministic write and size
+reductions are real; the sustained throughput multiplier is not.
+
+Decision: do not build the exact collision sidecar on this ceiling. Shortening
+the repeated ordered ID materially reduces bytes but does not approach #627's
+2x production gate, and the benchmark excludes the extra collision metadata,
+lookups, migration, and query logic a correct implementation would require.
+This rules out straightforward ordered-ID truncation as the massive lever; it
+does not relax exact tie ordering or discard the observed write reduction.

@@ -220,7 +220,7 @@ pub struct StoreBenchPreparedMetrics {
     pub exact_reopen: bool,
 }
 
-fn nearest_rank(values: &[u64], percentile: usize) -> Option<u64> {
+pub(super) fn nearest_rank(values: &[u64], percentile: usize) -> Option<u64> {
     if values.is_empty() {
         return None;
     }
@@ -407,7 +407,7 @@ fn cardinality_entry(counts: &mut BTreeMap<Vec<u8>, u64>, key: Vec<u8>) -> &mut 
 }
 
 impl StoreBenchProcessCounters {
-    fn delta(self, before: Self) -> Self {
+    pub(super) fn delta(self, before: Self) -> Self {
         Self {
             cpu_ns: self.cpu_ns.saturating_sub(before.cpu_ns),
             allocation_ops: self.allocation_ops.saturating_sub(before.allocation_ops),
@@ -422,7 +422,7 @@ impl StoreBenchProcessCounters {
     }
 }
 
-fn duration_ns(started: Instant) -> u64 {
+pub(super) fn duration_ns(started: Instant) -> u64 {
     started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
 }
 
@@ -830,7 +830,7 @@ fn run_full(
     })
 }
 
-fn prepared_array<const N: usize>(bytes: &[u8], field: &str) -> Result<[u8; N], String> {
+pub(super) fn prepared_array<const N: usize>(bytes: &[u8], field: &str) -> Result<[u8; N], String> {
     bytes
         .try_into()
         .map_err(|_| format!("prepared {field} must be {N} bytes, got {}", bytes.len()))

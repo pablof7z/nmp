@@ -77,10 +77,28 @@ target/release/examples/relay_ingest_bench "${common[@]}" \
   --store /home/pablo/Work/nmp-627-ceiling-redb-N.redb --output redb-N.json
 ```
 
+Run the compact ordered-ID selection matrix from clean harness commit
+`cc900e4127a9041cd5e1595371a1e7e2c04e535c`:
+
+```sh
+cargo run -q -p nmp-store --release \
+  --features bench-instrumentation \
+  --example redb_index_layout -- \
+  compact-matrix \
+  /dev/shm/nmp-627-representative-100k.jsonl \
+  benchmarks/nostrdb-compare/results/2026-07-17/issue-627/compact-index-id-matrix.json \
+  4096 15
+```
+
+The matrix records `git_dirty: false`, the representative corpus BLAKE3,
+alternating fresh-process order, prepared and applied record bytes, process
+writes, Redb sizes, per-table cardinalities, and exact reopen for every run.
+
 ## SHA-256
 
 ```text
-a4cbbb1744f965f6896e016ce2f6c29fbca05699064590636a3f7ea549a4ff89  SUMMARY.md
+954821239673f6e22aa0621049d8a79ee821c6ca047e2c658e040120422d1a32  SUMMARY.md
+01138a4a6e850f5ae58d1c8b97a8f02e8503656e7646575894220336be566e6e  compact-index-id-matrix.json
 be1579a8b51637386243455acd1ea4963352efcc88e937f1ac02333f69259415  crash-probe.json
 1d8a1628210d3c0fd850ebdf4edc40113bb813eab184dd52289459e079e3378a  memory-1.json
 086d1bea6c2d6f43e15465020fd3c6c94b9a64654cd29ed7a6c2f31b41e6ce0f  memory-2.json
