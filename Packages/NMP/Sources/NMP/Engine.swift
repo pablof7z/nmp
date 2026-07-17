@@ -128,20 +128,53 @@ public struct NMPConfig: Sendable {
 /// entire adoption cost.
 public final class NMPEngine: Sendable {
     /// Lock-guarded record of which pubkey the configured checkpoint file
-    /// currently holds (#529). Set on the init restore path and on every
-    /// successful `addAccount` checkpoint save; consulted by
-    /// `removeAccount` so removing that exact account also clears the
-    /// on-disk checkpoint instead of letting it resurrect on restart.
+    /// currently holds (#529), plus -- when that pubkey was installed on the
+    /// init-restore path -- the exact `NMPAccountRegistration` created for it
+    /// (#589). Set on the init restore path (`setRestored`) and on every
+    /// successful `addAccount` checkpoint save or `removeAccount`/
+    /// `clearPersistedAccount` clear (plain `set`, which always drops the
+    /// restored registration: a later `addAccount` or a clear both mean the
+    /// checkpoint no longer holds -- or no longer only holds -- the
+    /// originally-restored installation). Consulted by `removeAccount` so
+    /// removing that exact account also clears the on-disk checkpoint
+    /// instead of letting it resurrect on restart, and by
+    /// `detachPersistedAccount` so it can recover the exact restored
+    /// registration to detach.
     private final class CheckpointTracker: @unchecked Sendable {
         private let lock = NSLock()
         private var pubkey: String?
+        private var restoredRegistration: NMPAccountRegistration?
 
         func set(_ value: String?) {
-            lock.withLock { pubkey = value }
+            lock.withLock {
+                pubkey = value
+                restoredRegistration = nil
+            }
         }
 
         func holds(_ candidate: String) -> Bool {
             lock.withLock { pubkey == candidate }
+        }
+
+        /// Record the exact registration created on the init-restore path.
+        func setRestored(_ registration: NMPAccountRegistration) {
+            lock.withLock {
+                pubkey = registration.publicKey
+                restoredRegistration = registration
+            }
+        }
+
+        /// The restored registration, but only while the checkpoint still
+        /// holds exactly that pubkey -- `nil` when there was no restored
+        /// registration, a previous detach/removal already spent it, or a
+        /// later `addAccount` has since overwritten the checkpoint.
+        func restoredRegistrationIfCurrent() -> NMPAccountRegistration? {
+            lock.withLock {
+                guard let restoredRegistration, pubkey == restoredRegistration.publicKey else {
+                    return nil
+                }
+                return restoredRegistration
+            }
         }
     }
 
@@ -184,12 +217,12 @@ public final class NMPEngine: Sendable {
         self.localAccountStore = localAccountCheckpoint
         do {
             if let secretKey = try localAccountCheckpoint?.loadSecretKey() {
-                let registration = try nmpRethrowing {
+                let ffiRegistration = try nmpRethrowing {
                     try ffi.addAccount(secretKey: secretKey)
                 }
-                let pubkey = registration.publicKey()
-                try nmpRethrowing { try ffi.setActiveAccount(pubkey: pubkey) }
-                checkpointedPubkey.set(pubkey)
+                let registration = NMPAccountRegistration(ffi: ffiRegistration)
+                try nmpRethrowing { try ffi.setActiveAccount(pubkey: registration.publicKey) }
+                checkpointedPubkey.setRestored(registration)
             }
         } catch {
             ffi.shutdown()
@@ -262,6 +295,30 @@ public final class NMPEngine: Sendable {
             checkpointedPubkey.set(nil)
         }
         return removed
+    }
+
+    /// Detach exactly the local account this engine restored from its
+    /// configured checkpoint at construction (#589). Delegates to
+    /// `removeAccount(_:)`, so it inherits that method's atomic
+    /// checkpoint-clear behavior verbatim, including the typed
+    /// `NMPAccountCheckpointClearError` partial-failure/recovery contract --
+    /// see `removeAccount`'s doc.
+    ///
+    /// Returns `false` -- and removes nothing -- when there is no exact
+    /// restored registration left to detach: no account was restored at
+    /// construction (no checkpoint configured, or the checkpoint was empty),
+    /// a previous `detachPersistedAccount()` or `removeAccount` call already
+    /// spent it, a later `addAccount` has since overwritten the checkpoint
+    /// with a different installation, or `clearPersistedAccount()` was
+    /// called directly (it also spends the tracked restored registration --
+    /// after that call the live restored signer can only be removed by
+    /// shutting down the engine, never by a later `detachPersistedAccount()`
+    /// call).
+    public func detachPersistedAccount() throws -> Bool {
+        guard let registration = checkpointedPubkey.restoredRegistrationIfCurrent() else {
+            return false
+        }
+        return try removeAccount(registration)
     }
 
     /// Re-root every reactive query AND the active signing capability
