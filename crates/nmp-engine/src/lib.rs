@@ -19,6 +19,8 @@
 //! declares vs. defers to the A/B/C/D/E builders (plan §6).
 
 pub mod core;
+#[cfg(feature = "bench-instrumentation")]
+pub mod ingest_attribution;
 pub mod negentropy;
 pub mod outbox;
 pub mod relay_information;

@@ -6,7 +6,11 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-bench-instrumentation = ["nmp-store/bench-instrumentation"]
+bench-instrumentation = [
+    "nmp-store/bench-instrumentation",
+    "nmp-resolver/bench-instrumentation",
+    "nmp-transport/bench-instrumentation",
+]
 test-instrumentation = []
 
 [[example]]

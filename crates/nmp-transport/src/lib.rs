@@ -46,3 +46,5 @@ pub use pool::{
     RelayFrame, RelayOpenError, RelaySessionKey, ThreadRole, ThreadSpawnError, WireFrame,
     DEFAULT_MAX_RELAYS, DEFAULT_VERIFIER_WORKERS,
 };
+#[cfg(feature = "bench-instrumentation")]
+pub mod ingest_attribution;

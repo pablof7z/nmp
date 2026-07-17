@@ -1716,6 +1716,10 @@ fn pool_bridge_loop(
                 }
             };
             let (applied_tx, applied_rx) = cb::bounded(1);
+            #[cfg(feature = "bench-instrumentation")]
+            crate::ingest_attribution::bridge_batch(frames.len());
+            #[cfg(feature = "bench-instrumentation")]
+            let send_started = std::time::Instant::now();
             if engine_inbox
                 .send(Cmd::RelayBatch {
                     frames,
@@ -1725,10 +1729,16 @@ fn pool_bridge_loop(
             {
                 break;
             }
+            #[cfg(feature = "bench-instrumentation")]
+            crate::ingest_attribution::bridge_send(send_started.elapsed());
+            #[cfg(feature = "bench-instrumentation")]
+            let applied_started = std::time::Instant::now();
             let applied = cb::select_biased! {
                 recv(stopping) -> _ => false,
                 recv(applied_rx) -> result => result.is_ok(),
             };
+            #[cfg(feature = "bench-instrumentation")]
+            crate::ingest_attribution::bridge_applied_wait(applied_started.elapsed());
             if !applied {
                 break;
             }
@@ -3461,6 +3471,8 @@ fn engine_loop<S, D>(
                 );
             }
             Cmd::RelayBatch { frames, applied } => {
+                #[cfg(feature = "bench-instrumentation")]
+                let batch_started = std::time::Instant::now();
                 if frames.iter().any(|(handle, session, frame)| {
                     relay_frame_needs_wall_clock(frame)
                         && core.is_current_transport_session(*handle, session)
@@ -3490,6 +3502,8 @@ fn engine_loop<S, D>(
                     &registry,
                     dispatch_runtime,
                 );
+                #[cfg(feature = "bench-instrumentation")]
+                crate::ingest_attribution::engine_batch_process(batch_started.elapsed());
                 let _ = applied.send(());
             }
             Cmd::AddSigner { signer, reply } => {

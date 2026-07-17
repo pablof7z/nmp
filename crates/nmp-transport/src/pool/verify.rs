@@ -126,6 +126,8 @@ impl VerifierPool {
     /// `Arc<Event>` lets the translator hand the exact parsed value to a
     /// worker and later reuse it without cloning its strings or tags.
     pub(super) fn verify_batch(&mut self, events: &[Arc<Event>]) -> Vec<VerificationOutcome> {
+        #[cfg(feature = "bench-instrumentation")]
+        let started = std::time::Instant::now();
         #[cfg(not(target_arch = "wasm32"))]
         {
             if events.is_empty() {
@@ -173,12 +175,14 @@ impl VerifierPool {
                     VerificationOutcome::Invalid
                 };
             }
+            #[cfg(feature = "bench-instrumentation")]
+            crate::ingest_attribution::verify(started.elapsed(), events.len());
             ordered
         }
 
         #[cfg(target_arch = "wasm32")]
         {
-            events
+            let outcomes = events
                 .iter()
                 .map(|event| {
                     if event.verify_signature_with_ctx(&self.secp) {
@@ -187,7 +191,10 @@ impl VerifierPool {
                         VerificationOutcome::Invalid
                     }
                 })
-                .collect()
+                .collect();
+            #[cfg(feature = "bench-instrumentation")]
+            crate::ingest_attribution::verify(started.elapsed(), events.len());
+            outcomes
         }
     }
 

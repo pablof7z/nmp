@@ -23,7 +23,7 @@ use tungstenite::{accept, Message};
 
 pub type ProbeError = Box<dyn Error + Send + Sync>;
 
-const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v5";
+const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v6";
 const CORPUS_SCHEMA: &str = "nmp-relay-ingest-corpus-v1";
 const BASE_CREATED_AT: u64 = 1_700_000_000;
 
@@ -163,6 +163,7 @@ pub struct ProbeResult {
     pub last_event_id: String,
     pub server_send_ms: Vec<f64>,
     pub server_bytes: Vec<u64>,
+    pub ingest_attribution: Option<serde_json::Value>,
 }
 
 struct Corpus {
@@ -391,6 +392,8 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         AccessContext::Public,
     )?;
     let store = RedbStore::open(&store_path)?;
+    #[cfg(feature = "bench-instrumentation")]
+    nmp_engine::ingest_attribution::reset();
     let queue_capacity = config.queue_capacity;
     let verified_cache_capacity = config.verified_cache_capacity;
     let verify_batch_size = config.verify_batch_size;
@@ -535,6 +538,10 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     handle.shutdown();
     engine_thread.join();
     let shutdown_elapsed = shutdown_started.elapsed();
+    #[cfg(feature = "bench-instrumentation")]
+    let ingest_attribution = Some(ingest_attribution_json());
+    #[cfg(not(feature = "bench-instrumentation"))]
+    let ingest_attribution = None;
     while let Ok((deltas, _)) = rows.recv_timeout(Duration::ZERO) {
         observations.apply(deltas, &config, &sent_at, base, ingest_started)?;
     }
@@ -709,6 +716,44 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             .map(|stats| duration_ms(stats.send_elapsed))
             .collect(),
         server_bytes: server_stats.iter().map(|stats| stats.bytes).collect(),
+        ingest_attribution,
+    })
+}
+
+#[cfg(feature = "bench-instrumentation")]
+fn ingest_attribution_json() -> serde_json::Value {
+    let transport = nmp_transport::ingest_attribution::snapshot();
+    let engine = nmp_engine::ingest_attribution::snapshot();
+    let resolver = nmp_resolver::ingest_attribution::snapshot();
+    let store = nmp_store::ingest_attribution::snapshot();
+    serde_json::json!({
+        "transport": {
+            "parse_attempts": transport.parse_attempts, "parsed_frames": transport.parsed_frames,
+            "parse_ns": transport.parse_ns, "translator_bursts": transport.translator_bursts,
+            "translator_events": transport.translator_events, "max_translator_burst": transport.max_translator_burst,
+            "verify_batches": transport.verify_batches, "verify_candidates": transport.verify_candidates,
+            "verify_ns": transport.verify_ns, "delivered_events": transport.delivered_events,
+            "delivery_ns": transport.delivery_ns
+        },
+        "engine": {
+            "bridge_batches": engine.bridge_batches, "bridge_frames": engine.bridge_frames,
+            "max_bridge_batch": engine.max_bridge_batch, "bridge_send_ns": engine.bridge_send_ns,
+            "bridge_applied_wait_ns": engine.bridge_applied_wait_ns,
+            "engine_batch_process_ns": engine.engine_batch_process_ns
+        },
+        "resolver": {
+            "batches": resolver.batches, "events": resolver.events, "max_batch_events": resolver.max_batch_events,
+            "total_ns": resolver.total_ns, "prepare_ns": resolver.prepare_ns, "store_ns": resolver.store_ns,
+            "classify_ns": resolver.classify_ns, "react_and_affected_ns": resolver.react_and_affected_ns
+        },
+        "store": {
+            "batches": store.batches, "events": store.events, "max_batch_events": store.max_batch_events,
+            "transaction_total_ns": store.transaction_total_ns, "begin_write_ns": store.begin_write_ns,
+            "open_tables_ns": store.open_tables_ns, "apply_events_ns": store.apply_events_ns,
+            "flush_ns": store.flush_ns, "commit_ns": store.commit_ns, "encode_event_ns": store.encode_event_ns,
+            "encoded_event_bytes": store.encoded_event_bytes, "canonical_insert_ns": store.canonical_insert_ns,
+            "index_insert_ns": store.index_insert_ns
+        }
     })
 }
 

@@ -1443,8 +1443,14 @@ impl<'txn> CanonicalWriteTables<'txn> {
     ) -> Result<EventKey, PersistenceError> {
         debug_assert!(self.key_for_id(&event.id)?.is_none());
         let key = self.allocate_key()?;
+        #[cfg(feature = "bench-instrumentation")]
+        let encode_started = std::time::Instant::now();
         let event_bytes =
             binary_event::encode_event(event).expect("redb: encode immutable canonical event");
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::encode_event(encode_started.elapsed(), event_bytes.len());
+        #[cfg(feature = "bench-instrumentation")]
+        let insert_started = std::time::Instant::now();
         self.events
             .insert(key, event_bytes.as_slice())
             .map_err(persist_err)?;
@@ -1461,6 +1467,8 @@ impl<'txn> CanonicalWriteTables<'txn> {
         for (relay, at) in &provenance.seen {
             self.merge_observation(key, relay, *at)?;
         }
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::canonical_insert(insert_started.elapsed());
         Ok(key)
     }
 
@@ -2497,6 +2505,8 @@ fn insert_query_index_rows(
     event: &Event,
     event_key: EventKey,
 ) -> Result<(), PersistenceError> {
+    #[cfg(feature = "bench-instrumentation")]
+    let started = std::time::Instant::now();
     let created = created_at_key(event);
     let author = by_author_key(event);
     let kind = by_kind_key(event);
@@ -2532,6 +2542,8 @@ fn insert_query_index_rows(
     for key in tags {
         canonical.adjust_cardinality(key, 1)?;
     }
+    #[cfg(feature = "bench-instrumentation")]
+    crate::ingest_attribution::index_insert(started.elapsed());
     Ok(())
 }
 
@@ -4366,18 +4378,45 @@ impl EventStore for RedbStore {
         if events.is_empty() {
             return Ok(Vec::new());
         }
+        #[cfg(feature = "bench-instrumentation")]
+        let transaction_started = std::time::Instant::now();
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::record_batch(events.len());
+        #[cfg(feature = "bench-instrumentation")]
+        let begin_started = std::time::Instant::now();
         let write_txn = self.db.begin_write().map_err(persist_err)?;
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::begin_write(begin_started.elapsed());
         let mut outcomes = Vec::with_capacity(events.len());
         {
+            #[cfg(feature = "bench-instrumentation")]
+            let open_started = std::time::Instant::now();
             let mut tables = InsertWriteTables::open(&write_txn)?;
+            #[cfg(feature = "bench-instrumentation")]
+            crate::ingest_attribution::open_tables(open_started.elapsed());
+            #[cfg(feature = "bench-instrumentation")]
+            let apply_started = std::time::Instant::now();
             for (event, from) in events {
                 outcomes.push(insert_with_tables(&mut tables, event, from)?);
             }
+            #[cfg(feature = "bench-instrumentation")]
+            crate::ingest_attribution::apply_events(apply_started.elapsed());
+            #[cfg(feature = "bench-instrumentation")]
+            let flush_started = std::time::Instant::now();
             tables.canonical.flush_pending()?;
+            #[cfg(feature = "bench-instrumentation")]
+            crate::ingest_attribution::flush(flush_started.elapsed());
         }
         #[cfg(test)]
         self.crash_if(RedbCrashPoint::ObservationBeforeCommit);
+        #[cfg(feature = "bench-instrumentation")]
+        let commit_started = std::time::Instant::now();
         write_txn.commit().map_err(persist_err)?;
+        #[cfg(feature = "bench-instrumentation")]
+        {
+            crate::ingest_attribution::commit(commit_started.elapsed());
+            crate::ingest_attribution::transaction_total(transaction_started.elapsed());
+        }
         Ok(outcomes)
     }
 
