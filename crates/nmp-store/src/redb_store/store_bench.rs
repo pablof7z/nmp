@@ -11,7 +11,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use nostr::{Event, Filter, RelayUrl, Timestamp};
-use redb::{Database, ReadableDatabase, ReadableTableMetadata};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 
 use super::canonical::observation_key;
@@ -25,6 +25,9 @@ use super::schema::{
     EVENT_OBSERVATIONS, INDEX_CARDINALITY, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_REFS,
 };
 use super::*;
+
+const UNIFIED_BENCH_INDEXES: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("unified_bench_indexes_v1");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -809,6 +812,274 @@ fn prepared_array<const N: usize>(bytes: &[u8], field: &str) -> Result<[u8; N], 
         .map_err(|_| format!("prepared {field} must be {N} bytes, got {}", bytes.len()))
 }
 
+fn unified_index_namespace(table: StoreBenchPreparedTable) -> Option<u8> {
+    match table {
+        StoreBenchPreparedTable::ByCreatedAt => Some(0),
+        StoreBenchPreparedTable::ByAuthor => Some(1),
+        StoreBenchPreparedTable::ByKind => Some(2),
+        StoreBenchPreparedTable::ByAuthorKind => Some(3),
+        StoreBenchPreparedTable::ByTag => Some(4),
+        _ => None,
+    }
+}
+
+fn unified_index_key(table: StoreBenchPreparedTable, key: &[u8]) -> Result<Vec<u8>, String> {
+    let namespace = unified_index_namespace(table)
+        .ok_or_else(|| format!("prepared table {table:?} is not an ordered index"))?;
+    let mut unified = Vec::with_capacity(1 + key.len());
+    unified.push(namespace);
+    unified.extend_from_slice(key);
+    Ok(unified)
+}
+
+fn init_prepared_unified_database(path: &Path) -> Result<Database, String> {
+    let db = Database::builder()
+        .set_cache_size(REDB_CACHE_BYTES)
+        .create(path)
+        .map_err(|error| error.to_string())?;
+    let write_txn = db.begin_write().map_err(|error| error.to_string())?;
+    write_txn
+        .open_table(EVENTS)
+        .map_err(|error| error.to_string())?;
+    write_txn
+        .open_table(EVENT_IDS)
+        .map_err(|error| error.to_string())?;
+    write_txn
+        .open_table(EVENT_OBSERVATIONS)
+        .map_err(|error| error.to_string())?;
+    write_txn
+        .open_table(RELAYS)
+        .map_err(|error| error.to_string())?;
+    write_txn
+        .open_table(RELAY_KEYS)
+        .map_err(|error| error.to_string())?;
+    write_txn
+        .open_table(RELAY_REFS)
+        .map_err(|error| error.to_string())?;
+    write_txn
+        .open_table(UNIFIED_BENCH_INDEXES)
+        .map_err(|error| error.to_string())?;
+    write_txn
+        .open_table(INDEX_CARDINALITY)
+        .map_err(|error| error.to_string())?;
+    write_txn.commit().map_err(|error| error.to_string())?;
+    Ok(db)
+}
+
+/// Apply the same prepared corpus as [`run_prepared_redb_store_bench`], but
+/// place the five ordered/tag indexes in one collision-free prefixed Redb
+/// tree. Canonical, provenance, relay, and cardinality tables are unchanged.
+pub fn run_prepared_redb_unified_index_bench(
+    path: &Path,
+    corpus: &StoreBenchPreparedCorpus,
+    sample_process: fn() -> StoreBenchProcessCounters,
+) -> Result<StoreBenchPreparedMetrics, String> {
+    if corpus.events == 0 || corpus.batches.is_empty() {
+        return Err("prepared benchmark corpus must not be empty".to_owned());
+    }
+    let db = init_prepared_unified_database(path)?;
+    let process_before = sample_process();
+    let started = Instant::now();
+    let mut commit_ns = 0u64;
+
+    for batch in &corpus.batches {
+        let write_txn = db.begin_write().map_err(|error| error.to_string())?;
+        let mut events = write_txn
+            .open_table(EVENTS)
+            .map_err(|error| error.to_string())?;
+        let mut event_ids = write_txn
+            .open_table(EVENT_IDS)
+            .map_err(|error| error.to_string())?;
+        let mut observations = write_txn
+            .open_table(EVENT_OBSERVATIONS)
+            .map_err(|error| error.to_string())?;
+        let mut relays = write_txn
+            .open_table(RELAYS)
+            .map_err(|error| error.to_string())?;
+        let mut relay_keys = write_txn
+            .open_table(RELAY_KEYS)
+            .map_err(|error| error.to_string())?;
+        let mut relay_refs = write_txn
+            .open_table(RELAY_REFS)
+            .map_err(|error| error.to_string())?;
+        let mut indexes = write_txn
+            .open_table(UNIFIED_BENCH_INDEXES)
+            .map_err(|error| error.to_string())?;
+        let mut cardinality = write_txn
+            .open_table(INDEX_CARDINALITY)
+            .map_err(|error| error.to_string())?;
+
+        for record in &batch.records {
+            match record.table {
+                StoreBenchPreparedTable::Events => {
+                    let key = u64::from_be_bytes(prepared_array(&record.key, "event key")?);
+                    events
+                        .insert(key, record.value.as_slice())
+                        .map_err(|error| error.to_string())?;
+                }
+                StoreBenchPreparedTable::EventIds => {
+                    let key = prepared_array::<32>(&record.key, "event id")?;
+                    let value =
+                        u64::from_be_bytes(prepared_array(&record.value, "event id value")?);
+                    event_ids
+                        .insert(&key, value)
+                        .map_err(|error| error.to_string())?;
+                }
+                StoreBenchPreparedTable::EventObservations => {
+                    let key = prepared_array::<12>(&record.key, "observation key")?;
+                    let value =
+                        u64::from_be_bytes(prepared_array(&record.value, "observation value")?);
+                    observations
+                        .insert(&key, value)
+                        .map_err(|error| error.to_string())?;
+                }
+                StoreBenchPreparedTable::Relays => {
+                    let key = u32::from_be_bytes(prepared_array(&record.key, "relay key")?);
+                    let value = std::str::from_utf8(&record.value).map_err(|e| e.to_string())?;
+                    relays
+                        .insert(key, value)
+                        .map_err(|error| error.to_string())?;
+                }
+                StoreBenchPreparedTable::RelayKeys => {
+                    let key = std::str::from_utf8(&record.key).map_err(|e| e.to_string())?;
+                    let value = u32::from_be_bytes(prepared_array(&record.value, "relay id")?);
+                    relay_keys
+                        .insert(key, value)
+                        .map_err(|error| error.to_string())?;
+                }
+                StoreBenchPreparedTable::RelayRefs => {
+                    let key = u32::from_be_bytes(prepared_array(&record.key, "relay ref key")?);
+                    let value =
+                        u64::from_be_bytes(prepared_array(&record.value, "relay ref value")?);
+                    relay_refs
+                        .insert(key, value)
+                        .map_err(|error| error.to_string())?;
+                }
+                StoreBenchPreparedTable::IndexCardinality => {
+                    let value =
+                        u64::from_be_bytes(prepared_array(&record.value, "cardinality value")?);
+                    cardinality
+                        .insert(record.key.as_slice(), value)
+                        .map_err(|error| error.to_string())?;
+                }
+                table => {
+                    let key = unified_index_key(table, &record.key)?;
+                    indexes
+                        .insert(key.as_slice(), record.value.as_slice())
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+        }
+        drop(cardinality);
+        drop(indexes);
+        drop(relay_refs);
+        drop(relay_keys);
+        drop(relays);
+        drop(observations);
+        drop(event_ids);
+        drop(events);
+        let commit_started = Instant::now();
+        write_txn.commit().map_err(|error| error.to_string())?;
+        commit_ns = commit_ns.saturating_add(duration_ns(commit_started));
+    }
+    let wall_ns = duration_ns(started);
+    let process = sample_process().delta(process_before);
+    let stats_txn = db.begin_write().map_err(|error| error.to_string())?;
+    let database_stored_bytes = stats_txn
+        .stats()
+        .map_err(|error| error.to_string())?
+        .stored_bytes();
+    drop(stats_txn);
+    drop(db);
+
+    let reopen_started = Instant::now();
+    let reopened = Database::open(path).map_err(|error| error.to_string())?;
+    let read_txn = reopened.begin_read().map_err(|error| error.to_string())?;
+    let mut reopened_table_rows = vec![0u64; corpus.expected_table_rows.len()];
+    reopened_table_rows[StoreBenchPreparedTable::Events as usize] = read_txn
+        .open_table(EVENTS)
+        .map_err(|e| e.to_string())?
+        .len()
+        .map_err(|e| e.to_string())?;
+    reopened_table_rows[StoreBenchPreparedTable::EventIds as usize] = read_txn
+        .open_table(EVENT_IDS)
+        .map_err(|e| e.to_string())?
+        .len()
+        .map_err(|e| e.to_string())?;
+    reopened_table_rows[StoreBenchPreparedTable::EventObservations as usize] = read_txn
+        .open_table(EVENT_OBSERVATIONS)
+        .map_err(|e| e.to_string())?
+        .len()
+        .map_err(|e| e.to_string())?;
+    reopened_table_rows[StoreBenchPreparedTable::Relays as usize] = read_txn
+        .open_table(RELAYS)
+        .map_err(|e| e.to_string())?
+        .len()
+        .map_err(|e| e.to_string())?;
+    reopened_table_rows[StoreBenchPreparedTable::RelayKeys as usize] = read_txn
+        .open_table(RELAY_KEYS)
+        .map_err(|e| e.to_string())?
+        .len()
+        .map_err(|e| e.to_string())?;
+    reopened_table_rows[StoreBenchPreparedTable::RelayRefs as usize] = read_txn
+        .open_table(RELAY_REFS)
+        .map_err(|e| e.to_string())?
+        .len()
+        .map_err(|e| e.to_string())?;
+    let indexes = read_txn
+        .open_table(UNIFIED_BENCH_INDEXES)
+        .map_err(|e| e.to_string())?;
+    for entry in indexes.iter().map_err(|e| e.to_string())? {
+        let (key, _) = entry.map_err(|e| e.to_string())?;
+        let namespace = key
+            .value()
+            .first()
+            .copied()
+            .ok_or_else(|| "unified index key is missing its namespace".to_owned())?;
+        let table = match namespace {
+            0 => StoreBenchPreparedTable::ByCreatedAt,
+            1 => StoreBenchPreparedTable::ByAuthor,
+            2 => StoreBenchPreparedTable::ByKind,
+            3 => StoreBenchPreparedTable::ByAuthorKind,
+            4 => StoreBenchPreparedTable::ByTag,
+            other => return Err(format!("unknown unified index namespace {other}")),
+        };
+        reopened_table_rows[table as usize] += 1;
+    }
+    reopened_table_rows[StoreBenchPreparedTable::IndexCardinality as usize] = read_txn
+        .open_table(INDEX_CARDINALITY)
+        .map_err(|e| e.to_string())?
+        .len()
+        .map_err(|e| e.to_string())?;
+    let reopened_rows = reopened_table_rows[StoreBenchPreparedTable::Events as usize];
+    drop(indexes);
+    drop(read_txn);
+    drop(reopened);
+    let reopen_ns = duration_ns(reopen_started);
+
+    Ok(StoreBenchPreparedMetrics {
+        events: corpus.events,
+        transactions: corpus.batches.len() as u64,
+        wall_ns,
+        commit_ns,
+        reopen_ns,
+        cpu_ns: process.cpu_ns,
+        allocation_ops: process.allocation_ops,
+        allocated_bytes: process.allocated_bytes,
+        rss_before_bytes: process.current_rss_bytes,
+        peak_rss_bytes: process.peak_rss_bytes,
+        process_write_bytes: process.process_write_bytes,
+        database_logical_bytes: std::fs::metadata(path)
+            .map_err(|error| error.to_string())?
+            .len(),
+        database_stored_bytes,
+        reopened_rows,
+        expected_table_rows: corpus.expected_table_rows.clone(),
+        exact_reopen: reopened_table_rows == corpus.expected_table_rows,
+        reopened_table_rows,
+    })
+}
+
 /// Apply an already-prepared equivalent-work corpus through Redb. Preparation
 /// and NMP governance are intentionally outside the timed region; this is the
 /// storage-engine half of issue #614's controlled comparison.
@@ -1128,13 +1399,68 @@ pub fn run_store_bench_variant(
 #[cfg(test)]
 mod prepared_tests {
     use std::collections::BTreeSet;
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
 
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+    use wait_timeout::ChildExt;
 
     use super::*;
 
     fn counters() -> StoreBenchProcessCounters {
         StoreBenchProcessCounters::default()
+    }
+
+    #[test]
+    fn unified_index_crash_worker() {
+        let Ok(path) = std::env::var("NMP_UNIFIED_INDEX_CRASH_DB") else {
+            return;
+        };
+        let db = init_prepared_unified_database(Path::new(&path)).unwrap();
+        let committed = db.begin_write().unwrap();
+        {
+            let mut indexes = committed.open_table(UNIFIED_BENCH_INDEXES).unwrap();
+            indexes.insert(&[0, 1][..], &[1][..]).unwrap();
+        }
+        committed.commit().unwrap();
+
+        let uncommitted = db.begin_write().unwrap();
+        {
+            let mut indexes = uncommitted.open_table(UNIFIED_BENCH_INDEXES).unwrap();
+            indexes.insert(&[0, 2][..], &[2][..]).unwrap();
+        }
+        unsafe { libc::_exit(73) }
+    }
+
+    #[test]
+    fn unified_index_commit_survives_abrupt_exit_while_uncommitted_row_does_not() {
+        const WORKER: &str = "redb_store::store_bench::prepared_tests::unified_index_crash_worker";
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path().join("crash.redb");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(WORKER)
+            .arg("--nocapture")
+            .env("NMP_UNIFIED_INDEX_CRASH_DB", &path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let status = match child.wait_timeout(Duration::from_secs(10)).unwrap() {
+            Some(status) => status,
+            None => {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("unified-index crash worker timed out");
+            }
+        };
+        assert_eq!(status.code(), Some(73));
+
+        let db = Database::open(&path).unwrap();
+        let read = db.begin_read().unwrap();
+        let indexes = read.open_table(UNIFIED_BENCH_INDEXES).unwrap();
+        assert_eq!(indexes.get(&[0, 1][..]).unwrap().unwrap().value(), &[1]);
+        assert!(indexes.get(&[0, 2][..]).unwrap().is_none());
     }
 
     #[test]
