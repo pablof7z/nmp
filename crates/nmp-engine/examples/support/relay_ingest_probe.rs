@@ -160,6 +160,7 @@ pub struct ProbeResult {
     pub peak_ingest_rss_bytes: Option<u64>,
     pub peak_ingest_rss_growth_bytes: Option<u64>,
     pub peak_ingest_anonymous_bytes: Option<u64>,
+    pub process_write_bytes: Option<u64>,
     pub rss_after_ingest_bytes: Option<u64>,
     pub anonymous_after_ingest_bytes: Option<u64>,
     pub rss_after_shutdown_bytes: Option<u64>,
@@ -468,6 +469,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         .and_then(|value| value.checked_mul(config.passes as u64))
         .ok_or("expected frame count overflow")?;
     let expected_last_id = EventId::from_hex(&corpus.last_id)?;
+    let process_write_bytes_before = process_write_bytes();
     let ingest_started = Instant::now();
     let memory_before_ingest = current_memory();
     let memory_sampler = MemorySampler::start(config.trim_allocator_during_ingest);
@@ -562,6 +564,9 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     handle.shutdown();
     engine_thread.join();
     let shutdown_elapsed = shutdown_started.elapsed();
+    let process_write_bytes = process_write_bytes()
+        .zip(process_write_bytes_before)
+        .map(|(after, before)| after.saturating_sub(before));
     #[cfg(feature = "bench-instrumentation")]
     let ingest_attribution = Some(ingest_attribution_json());
     #[cfg(not(feature = "bench-instrumentation"))]
@@ -722,6 +727,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             .zip(memory_before_ingest.rss_bytes)
             .map(|(peak, before)| peak.saturating_sub(before)),
         peak_ingest_anonymous_bytes: peak_ingest_memory.anonymous_bytes,
+        process_write_bytes,
         rss_after_ingest_bytes: memory_after_ingest.rss_bytes,
         anonymous_after_ingest_bytes: memory_after_ingest.anonymous_bytes,
         rss_after_shutdown_bytes: memory_after_shutdown.rss_bytes,
@@ -1365,6 +1371,19 @@ fn memory_field_bytes(rollup: &str, field: &str) -> Option<u64> {
     let line = rollup.lines().find(|line| line.starts_with(field))?;
     let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
     kib.checked_mul(1_024)
+}
+
+#[cfg(target_os = "linux")]
+fn process_write_bytes() -> Option<u64> {
+    fs::read_to_string("/proc/self/io")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("write_bytes:")?.trim().parse().ok())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_write_bytes() -> Option<u64> {
+    None
 }
 
 #[cfg(not(target_os = "linux"))]
