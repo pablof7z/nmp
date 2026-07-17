@@ -336,6 +336,26 @@ class NMPEngine(
      * -- see [publishComposedReceipt]'s own doc. */
     fun publishComposed(intent: GroupSendIntent): Receipt = publishComposedReceipt(ffi, intent)
 
+    /** Compose a durable, author-outbox-routed NIP-22 comment `WriteIntent`
+     * (#572). Unlike [groupMessageIntent], this needs no engine state at all
+     * -- author/time are explicit caller parameters -- but lives here for
+     * the same "engine door" naming symmetry. [correlation] (#591) passes
+     * straight through to `WriteIntent.correlation`. Publish the returned
+     * take-once value through [publishComposed]. */
+    fun commentIntent(
+        root: CommentRoot,
+        parent: CommentParent,
+        authorPubkey: String,
+        createdAt: ULong,
+        content: String,
+        correlation: String? = null,
+    ): CommentIntent =
+        composeCommentIntent(ffi, root, parent, authorPubkey, createdAt, content, correlation)
+
+    /** Publish a [CommentIntent] from `commentIntent` (#572). Take-once --
+     * see [publishComposedReceipt]'s own doc. */
+    fun publishComposed(intent: CommentIntent): Receipt = publishComposedReceipt(ffi, intent)
+
     /** Attach to retained facts without conflating corruption with absence. */
     fun reattachReceipt(id: ULong): ReceiptReattachment = reattachReceipt(ffi, id)
 

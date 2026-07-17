@@ -38,6 +38,11 @@ uniffi = { workspace = true, features = ["cli"] }
 nmp-nip51.workspace = true
 nmp-nip02.workspace = true
 nmp-nip29 = { workspace = true, features = ["engine"] }
+# #572: typed NIP-22 comments over NIP-73 external targets. Engine-free
+# (no `engine` feature exists on nmp-nip22 at all -- `comment_intent` takes
+# its author explicitly), same direct-dep bundling treatment as
+# nmp-nip51/nmp-nip29/nmp-blossom above.
+nmp-nip22.workspace = true
 nmp-content.workspace = true
 # #555 (epic #216 T15-A-BLOSSOM): the opt-in Blossom blob projection, same
 # direct-dep treatment as nmp-nip51/nmp-nip29 above -- nmp-ffi is the ONE

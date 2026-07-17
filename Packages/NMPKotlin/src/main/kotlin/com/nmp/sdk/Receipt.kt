@@ -111,6 +111,15 @@ fun publishComposedReceipt(engine: NmpEngineInterface, intent: GroupSendIntent):
     return bridge.receipt(id)
 }
 
+/** Publish a [CommentIntent] from `commentIntent` (#572). Take-once -- see
+ * [publishComposedReceipt]'s own doc; identical contract, just for the
+ * NIP-22 composed intent. */
+fun publishComposedReceipt(engine: NmpEngineInterface, intent: CommentIntent): Receipt {
+    val bridge = ReceiptBridge()
+    val id = nmpRethrowing { engine.publishComposed(intent.ffi, bridge.observer) }
+    return bridge.receipt(id)
+}
+
 internal fun mapReceiptReattachment(
     result: FfiReceiptReattachment,
     id: ULong,

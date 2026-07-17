@@ -130,6 +130,19 @@ extension NMPEngine {
         return Receipt(id: id, status: stream)
     }
 
+    /// Publish a `CommentIntent` from `commentIntent` (#572). Take-once --
+    /// see `publishComposed(_ intent: GroupSendIntent)`'s own doc; identical
+    /// contract, just for the NIP-22 composed intent.
+    public func publishComposed(_ intent: CommentIntent) async throws -> Receipt {
+        var continuation: AsyncStream<WriteStatus>.Continuation!
+        let stream = AsyncStream<WriteStatus> { continuation = $0 }
+        let bridge = ReceiptBridge(continuation: continuation)
+        let id = try nmpRethrowing {
+            try ffi.publishComposed(intent: intent.ffi, observer: bridge)
+        }
+        return Receipt(id: id, status: stream)
+    }
+
     /// Attach a new observer to retained receipt facts. Corrupt durable
     /// evidence is reported distinctly and never treated as absence.
     public func reattachReceipt(id: UInt64) throws -> ReceiptReattachment {

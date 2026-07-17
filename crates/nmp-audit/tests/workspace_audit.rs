@@ -57,6 +57,7 @@ fn registry() -> Vec<(&'static str, Enrollment)> {
                     lib.rs ownership_audit module (#559)",
             },
         ),
+        ("nmp-nip22", Enrollment::Claims(nmp_nip22::claims())),
     ]
 }
 
