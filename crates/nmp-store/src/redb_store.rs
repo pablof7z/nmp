@@ -3671,17 +3671,14 @@ impl RedbStore {
         })
     }
 
-    fn scan_fixed_ordered<const N: usize>(
+    fn scan_fixed_ordered<const N: usize, T>(
         &self,
         index: &redb::ReadOnlyTable<&[u8; N], EventKey>,
         prefixes: &[Vec<u8>],
         window: OrderedWindow,
         limit: Option<usize>,
-        materialize_if_visible: &mut impl FnMut(
-            EventKey,
-        )
-            -> Result<Option<StoredEvent>, PersistenceError>,
-    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        project_if_visible: &mut impl FnMut(EventKey, EventId) -> Result<Option<T>, PersistenceError>,
+    ) -> Result<Vec<T>, PersistenceError> {
         if let [prefix] = prefixes {
             let Some((lower, upper, exclusive_upper)) =
                 ordered_fixed_page_range(prefix, window.since, window.until, window.before)
@@ -3699,11 +3696,13 @@ impl RedbStore {
             };
             let mut out = limit.map_or_else(Vec::new, Vec::with_capacity);
             for entry in entries.rev() {
-                let (_key, value) = entry.map_err(persist_err)?;
+                let (key, value) = entry.map_err(persist_err)?;
                 #[cfg(any(test, feature = "bench-instrumentation"))]
                 self.query_index_rows.fetch_add(1, Ordering::Relaxed);
-                if let Some(stored) = materialize_if_visible(value.value())? {
-                    out.push(stored);
+                if let Some(projected) =
+                    project_if_visible(value.value(), ordered_index_event_id(key.value()))?
+                {
+                    out.push(projected);
                     if limit.is_some_and(|limit| out.len() == limit) {
                         break;
                     }
@@ -3735,8 +3734,8 @@ impl RedbStore {
         while let Some(head) = heap.pop() {
             let is_new = last_event_key.replace(head.event_key) != Some(head.event_key);
             if is_new {
-                if let Some(stored) = materialize_if_visible(head.event_key)? {
-                    out.push(stored);
+                if let Some(projected) = project_if_visible(head.event_key, head.id)? {
+                    out.push(projected);
                     if limit.is_some_and(|limit| out.len() == limit) {
                         break;
                     }
@@ -3751,17 +3750,14 @@ impl RedbStore {
         Ok(out)
     }
 
-    fn scan_variable_ordered(
+    fn scan_variable_ordered<T>(
         &self,
         index: &redb::ReadOnlyTable<&[u8], EventKey>,
         prefixes: &[Vec<u8>],
         window: OrderedWindow,
         limit: Option<usize>,
-        materialize_if_visible: &mut impl FnMut(
-            EventKey,
-        )
-            -> Result<Option<StoredEvent>, PersistenceError>,
-    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        project_if_visible: &mut impl FnMut(EventKey, EventId) -> Result<Option<T>, PersistenceError>,
+    ) -> Result<Vec<T>, PersistenceError> {
         if let [prefix] = prefixes {
             let Some((lower, upper, exclusive_upper)) =
                 ordered_vec_page_range(prefix, window.since, window.until, window.before)
@@ -3779,11 +3775,13 @@ impl RedbStore {
             };
             let mut out = limit.map_or_else(Vec::new, Vec::with_capacity);
             for entry in entries.rev() {
-                let (_key, value) = entry.map_err(persist_err)?;
+                let (key, value) = entry.map_err(persist_err)?;
                 #[cfg(any(test, feature = "bench-instrumentation"))]
                 self.query_index_rows.fetch_add(1, Ordering::Relaxed);
-                if let Some(stored) = materialize_if_visible(value.value())? {
-                    out.push(stored);
+                if let Some(projected) =
+                    project_if_visible(value.value(), ordered_index_event_id(key.value()))?
+                {
+                    out.push(projected);
                     if limit.is_some_and(|limit| out.len() == limit) {
                         break;
                     }
@@ -3815,8 +3813,8 @@ impl RedbStore {
         while let Some(head) = heap.pop() {
             let is_new = last_event_key.replace(head.event_key) != Some(head.event_key);
             if is_new {
-                if let Some(stored) = materialize_if_visible(head.event_key)? {
-                    out.push(stored);
+                if let Some(projected) = project_if_visible(head.event_key, head.id)? {
+                    out.push(projected);
                     if limit.is_some_and(|limit| out.len() == limit) {
                         break;
                     }
@@ -3835,6 +3833,125 @@ impl RedbStore {
     /// Each cursor asks redb for exactly its next key; once `limit` visible
     /// rows have survived the borrowed binary post-filter, no older key or
     /// event value is touched.
+    fn query_ordered_ids(
+        &self,
+        read_txn: &redb::ReadTransaction,
+        plan: &OrderedPlan,
+        filter: &Filter,
+        limit: usize,
+    ) -> Result<Vec<EventId>, PersistenceError> {
+        let events = read_txn.open_table(EVENTS).map_err(persist_err)?;
+        let event_ids = read_txn.open_table(EVENT_IDS).map_err(persist_err)?;
+        let outbox_suppress_by_id = read_txn
+            .open_table(OUTBOX_SUPPRESS_BY_ID)
+            .map_err(persist_err)?;
+        let outbox_suppress_by_addr = read_txn
+            .open_table(OUTBOX_SUPPRESS_BY_ADDR)
+            .map_err(persist_err)?;
+        let suppression_possible = !outbox_suppress_by_id.is_empty().map_err(persist_err)?
+            || !outbox_suppress_by_addr.is_empty().map_err(persist_err)?;
+        let window = OrderedWindow {
+            since: filter.since.map(|ts| ts.as_secs()).unwrap_or(0),
+            until: filter.until.map(|ts| ts.as_secs()).unwrap_or(u64::MAX),
+            before: None,
+        };
+        let prepared_filter = PreparedFilter::new(filter);
+        let needs_event_value = prepared_filter.needs_event_value_after_index(plan.index.matched())
+            || suppression_possible;
+        let mut project_if_visible = |event_key: EventKey,
+                                      event_id: EventId|
+         -> Result<Option<EventId>, PersistenceError> {
+            let canonical_key = event_ids
+                .get(event_id.as_bytes())
+                .map_err(persist_err)?
+                .map(|guard| guard.value());
+            if canonical_key != Some(event_key) {
+                return Err(PersistenceError(format!(
+                    "ordered index disagrees with canonical id map for {event_id}"
+                )));
+            }
+            if !needs_event_value {
+                return Ok(Some(event_id));
+            }
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            self.query_event_values.fetch_add(1, Ordering::Relaxed);
+            let Some(value) = events.get(event_key).map_err(persist_err)? else {
+                return Err(PersistenceError(format!(
+                    "ordered index points at missing canonical event {event_key}"
+                )));
+            };
+            let view = StoredEventView::from_trusted(value.value())
+                .expect("redb: decode portable stored event view");
+            if !view.matches_prepared_filter_after_index(&prepared_filter, plan.index.matched()) {
+                return Ok(None);
+            }
+            if suppression_possible {
+                #[cfg(any(test, feature = "bench-instrumentation"))]
+                self.examined_rows.fetch_add(1, Ordering::Relaxed);
+                let event = view
+                    .materialize_event()
+                    .expect("redb: materialize validated portable event");
+                if is_suppressed_in_txn(&outbox_suppress_by_id, &outbox_suppress_by_addr, &event)? {
+                    return Ok(None);
+                }
+            }
+            Ok(Some(event_id))
+        };
+
+        match plan.index {
+            OrderedIndex::Global => {
+                let index = read_txn.open_table(BY_CREATED_AT).map_err(persist_err)?;
+                self.scan_fixed_ordered(
+                    &index,
+                    &plan.prefixes,
+                    window,
+                    Some(limit),
+                    &mut project_if_visible,
+                )
+            }
+            OrderedIndex::Author => {
+                let index = read_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
+                self.scan_fixed_ordered(
+                    &index,
+                    &plan.prefixes,
+                    window,
+                    Some(limit),
+                    &mut project_if_visible,
+                )
+            }
+            OrderedIndex::Kind => {
+                let index = read_txn.open_table(BY_KIND).map_err(persist_err)?;
+                self.scan_fixed_ordered(
+                    &index,
+                    &plan.prefixes,
+                    window,
+                    Some(limit),
+                    &mut project_if_visible,
+                )
+            }
+            OrderedIndex::AuthorKind => {
+                let index = read_txn.open_table(BY_AUTHOR_KIND).map_err(persist_err)?;
+                self.scan_fixed_ordered(
+                    &index,
+                    &plan.prefixes,
+                    window,
+                    Some(limit),
+                    &mut project_if_visible,
+                )
+            }
+            OrderedIndex::Tag(_) => {
+                let index = read_txn.open_table(BY_TAG).map_err(persist_err)?;
+                self.scan_variable_ordered(
+                    &index,
+                    &plan.prefixes,
+                    window,
+                    Some(limit),
+                    &mut project_if_visible,
+                )
+            }
+        }
+    }
+
     fn query_ordered(
         &self,
         read_txn: &redb::ReadTransaction,
@@ -3877,52 +3994,52 @@ impl RedbStore {
             None
         };
         let prepared_filter = PreparedFilter::new(filter);
-        let mut materialize_if_visible =
-            |event_key: EventKey| -> Result<Option<StoredEvent>, PersistenceError> {
-                if let Some(eligible) = &eligible_relay_keys {
-                    let mut observed = false;
-                    for relay_key in eligible {
-                        let key = observation_key(event_key, *relay_key);
-                        if observations.get(&key).map_err(persist_err)?.is_some() {
-                            observed = true;
-                            break;
-                        }
-                    }
-                    if !observed {
-                        return Ok(None);
+        let mut materialize_if_visible = |event_key: EventKey,
+                                          _event_id: EventId|
+         -> Result<Option<StoredEvent>, PersistenceError> {
+            if let Some(eligible) = &eligible_relay_keys {
+                let mut observed = false;
+                for relay_key in eligible {
+                    let key = observation_key(event_key, *relay_key);
+                    if observations.get(&key).map_err(persist_err)?.is_some() {
+                        observed = true;
+                        break;
                     }
                 }
-                #[cfg(any(test, feature = "bench-instrumentation"))]
-                self.query_event_values.fetch_add(1, Ordering::Relaxed);
-                let Some(value) = events.get(event_key).map_err(persist_err)? else {
-                    return Err(PersistenceError(format!(
-                        "ordered index points at missing canonical event {event_key}"
-                    )));
-                };
-                let view = StoredEventView::from_trusted(value.value())
-                    .expect("redb: decode portable stored event view");
-                if !view.matches_prepared_filter_after_index(&prepared_filter, plan.index.matched())
-                {
+                if !observed {
                     return Ok(None);
                 }
-                let local_value = local.get(event_key).map_err(persist_err)?;
-                let stored = self.decode_row(
-                    event_key,
-                    view,
-                    local_value.as_ref().map(|value| value.value()),
-                    &observations,
-                    &relays,
-                    &mut relay_cache,
-                )?;
-                if is_suppressed_in_txn(
-                    &outbox_suppress_by_id,
-                    &outbox_suppress_by_addr,
-                    &stored.event,
-                )? {
-                    return Ok(None);
-                }
-                Ok(Some(stored))
+            }
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            self.query_event_values.fetch_add(1, Ordering::Relaxed);
+            let Some(value) = events.get(event_key).map_err(persist_err)? else {
+                return Err(PersistenceError(format!(
+                    "ordered index points at missing canonical event {event_key}"
+                )));
             };
+            let view = StoredEventView::from_trusted(value.value())
+                .expect("redb: decode portable stored event view");
+            if !view.matches_prepared_filter_after_index(&prepared_filter, plan.index.matched()) {
+                return Ok(None);
+            }
+            let local_value = local.get(event_key).map_err(persist_err)?;
+            let stored = self.decode_row(
+                event_key,
+                view,
+                local_value.as_ref().map(|value| value.value()),
+                &observations,
+                &relays,
+                &mut relay_cache,
+            )?;
+            if is_suppressed_in_txn(
+                &outbox_suppress_by_id,
+                &outbox_suppress_by_addr,
+                &stored.event,
+            )? {
+                return Ok(None);
+            }
+            Ok(Some(stored))
+        };
 
         match plan.index {
             OrderedIndex::Global => {
@@ -4367,6 +4484,33 @@ impl EventStore for RedbStore {
 
         let plan = plan_ordered_query(&read_txn, filter)?;
         self.query_ordered(&read_txn, &plan, filter, None, Some(limit), None)
+    }
+
+    fn query_newest_ids(
+        &self,
+        filter: &Filter,
+        limit: usize,
+    ) -> Result<Vec<EventId>, PersistenceError> {
+        if limit == 0
+            || filter
+                .since
+                .zip(filter.until)
+                .is_some_and(|(since, until)| since > until)
+            || filter.generic_tags.values().any(BTreeSet::is_empty)
+        {
+            return Ok(Vec::new());
+        }
+        if filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
+            return Ok(self
+                .query_newest(filter, limit)?
+                .into_iter()
+                .map(|row| row.event.id)
+                .collect());
+        }
+
+        let read_txn = self.db.begin_read().map_err(persist_err)?;
+        let plan = plan_ordered_query(&read_txn, filter)?;
+        self.query_ordered_ids(&read_txn, &plan, filter, limit)
     }
 
     fn query_newest_observed_by(
@@ -8343,6 +8487,143 @@ mod tests {
     }
 
     #[test]
+    fn query_newest_ids_projects_covered_filters_without_event_values() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = RedbStore::open(dir.path().join("projected-ids.redb")).unwrap();
+        let keys = nostr::Keys::generate();
+        let relay = RelayUrl::parse("wss://projected.example").unwrap();
+
+        for i in 0..40u64 {
+            store
+                .insert(
+                    room_event(&keys, "target", 1_000 + i, &"x".repeat(64 * 1024)),
+                    RelayObserved::new(relay.clone(), Timestamp::from(2_000 + i)),
+                )
+                .unwrap();
+        }
+
+        let filter = Filter::new().kind(Kind::from(9u16));
+        let expected: Vec<_> = store
+            .query_newest(&filter, 25)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.event.id)
+            .collect();
+        store.reset_query_work();
+        let projected = store.query_newest_ids(&filter, 25).unwrap();
+
+        assert_eq!(projected, expected);
+        assert_eq!(
+            store.query_work(),
+            (25, 0, 0),
+            "an index-covered ID projection must not read or own 64 KiB event values"
+        );
+    }
+
+    #[test]
+    fn query_newest_ids_postfilters_borrowed_values_without_materializing_events() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = RedbStore::open(dir.path().join("projected-postfilter.redb")).unwrap();
+        let wanted = nostr::Keys::generate();
+        let noise = nostr::Keys::generate();
+        let relay = RelayUrl::parse("wss://projected.example").unwrap();
+
+        let wanted = room_event(&wanted, "target", 1_000, "wanted");
+        store
+            .insert(
+                wanted.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(2_000u64)),
+            )
+            .unwrap();
+        for i in 0..20u64 {
+            store
+                .insert(
+                    room_event(&noise, "target", 2_000 + i, &format!("noise-{i}")),
+                    RelayObserved::new(relay.clone(), Timestamp::from(3_000 + i)),
+                )
+                .unwrap();
+        }
+
+        store.reset_query_work();
+        let ids = store
+            .query_newest_ids(&Filter::new().kind(Kind::from(9u16)).search("wanted"), 1)
+            .unwrap();
+
+        assert_eq!(ids, vec![wanted.id]);
+        let (index_rows, event_values, materialized) = store.query_work();
+        assert_eq!(index_rows, 21);
+        assert_eq!(event_values, 21);
+        assert_eq!(materialized, 0);
+    }
+
+    #[test]
+    fn query_newest_ids_preserves_provisional_suppression() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = RedbStore::open(dir.path().join("projected-suppression.redb")).unwrap();
+        let keys = nostr::Keys::generate();
+        let relay = RelayUrl::parse("wss://projected.example").unwrap();
+        let visible = room_event(&keys, "target", 1_000, "visible");
+        let hidden = room_event(&keys, "target", 2_000, "hidden");
+        for event in [visible.clone(), hidden.clone()] {
+            store
+                .insert(
+                    event,
+                    RelayObserved::new(relay.clone(), Timestamp::from(3_000u64)),
+                )
+                .unwrap();
+        }
+        let claim_key = id_tombstone_key(&hidden.id, &hidden.pubkey);
+        let write_txn = store.db.begin_write().unwrap();
+        {
+            let mut claims = write_txn.open_table(OUTBOX_SUPPRESS_BY_ID).unwrap();
+            add_claimant_in_txn(&mut claims, &claim_key, IntentId(1)).unwrap();
+        }
+        write_txn.commit().unwrap();
+
+        let filter = Filter::new().kind(Kind::from(9u16));
+        let expected: Vec<_> = store
+            .query_newest(&filter, 2)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.event.id)
+            .collect();
+        store.reset_query_work();
+        let projected = store.query_newest_ids(&filter, 2).unwrap();
+
+        assert_eq!(expected, vec![visible.id]);
+        assert_eq!(projected, expected);
+        assert_eq!(store.query_work(), (2, 2, 2));
+    }
+
+    #[test]
+    fn query_newest_ids_fails_closed_on_stale_ordered_index() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = RedbStore::open(dir.path().join("projected-corruption.redb")).unwrap();
+        let keys = nostr::Keys::generate();
+        let event = room_event(&keys, "target", 1_000, "event");
+        store
+            .insert(
+                event.clone(),
+                RelayObserved::new(
+                    RelayUrl::parse("wss://projected.example").unwrap(),
+                    Timestamp::from(2_000u64),
+                ),
+            )
+            .unwrap();
+        let write_txn = store.db.begin_write().unwrap();
+        {
+            let mut event_ids = write_txn.open_table(EVENT_IDS).unwrap();
+            event_ids.remove(event.id.as_bytes()).unwrap();
+        }
+        write_txn.commit().unwrap();
+
+        let error = store
+            .query_newest_ids(&Filter::new().kind(Kind::from(9u16)), 1)
+            .unwrap_err();
+        assert!(error.0.contains("canonical id map"));
+    }
+
+    #[test]
     fn query_newest_merges_multiple_tag_values_in_global_order() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("tag-merge.redb");
@@ -8979,6 +9260,11 @@ mod tests {
                 .map(|row| row.event.id)
                 .collect();
             assert_eq!(redb_newest, memory_newest, "bounded round {round}");
+            assert_eq!(
+                redb.query_newest_ids(&filter, limit).unwrap(),
+                memory.query_newest_ids(&filter, limit).unwrap(),
+                "projected bounded round {round}"
+            );
         }
         assert_canonical_integrity(&redb.db);
     }
