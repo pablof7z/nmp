@@ -1875,6 +1875,7 @@ dependencies = [
 name = "nmp-store"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "libc",
  "nmp-grammar",
  "nostr 0.44.4",
