@@ -213,11 +213,7 @@ fn nearest_rank(values: &[u64], percentile: usize) -> Option<u64> {
     }
     let mut sorted = values.to_vec();
     sorted.sort_unstable();
-    let rank = sorted
-        .len()
-        .saturating_mul(percentile)
-        .saturating_add(99)
-        / 100;
+    let rank = sorted.len().saturating_mul(percentile).saturating_add(99) / 100;
     sorted.get(rank.saturating_sub(1)).copied()
 }
 
