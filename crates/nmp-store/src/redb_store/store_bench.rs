@@ -11,9 +11,19 @@ use std::path::Path;
 use std::time::Instant;
 
 use nostr::{Event, Filter, RelayUrl, Timestamp};
-use redb::{Database, ReadableTableMetadata};
+use redb::{Database, ReadableDatabase, ReadableTableMetadata};
 use serde::{Deserialize, Serialize};
 
+use super::canonical::observation_key;
+use super::query::{
+    author_cardinality_key, author_kind_cardinality_key, by_author_key, by_author_kind_key,
+    by_kind_key, created_at_key, global_cardinality_key, insert_tag_index_rows,
+    kind_cardinality_key, tag_cardinality_key,
+};
+use super::schema::{
+    BY_AUTHOR, BY_AUTHOR_KIND, BY_CREATED_AT, BY_KIND, BY_TAG, EVENTS, EVENT_IDS,
+    EVENT_OBSERVATIONS, INDEX_CARDINALITY, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_REFS,
+};
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -384,7 +394,7 @@ fn run_reduced(
         }
         if let Some(cardinality) = cardinality.as_mut() {
             for (key, delta) in cardinality_deltas {
-                let current = cardinality
+                let current: u64 = cardinality
                     .get(key.as_slice())
                     .map_err(|error| error.to_string())?
                     .map(|guard| guard.value())
