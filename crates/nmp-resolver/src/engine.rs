@@ -640,6 +640,14 @@ impl<S: EventStore> Engine<S> {
         &mut self,
         events: Vec<(nostr::Event, RelayObserved)>,
     ) -> Result<RelayIngestResult, PersistenceError> {
+        #[cfg(feature = "bench-instrumentation")]
+        let total_started = std::time::Instant::now();
+        #[cfg(feature = "bench-instrumentation")]
+        {
+            crate::ingest_attribution::batch(events.len());
+        }
+        #[cfg(feature = "bench-instrumentation")]
+        let prepare_started = std::time::Instant::now();
         // Snapshot only graph/filter shapes, never store rows. This is the
         // cheap side of targeted invalidation: after recompute we can tell
         // exactly which shared roots changed without re-querying every
@@ -658,7 +666,15 @@ impl<S: EventStore> Engine<S> {
             entry.1.insert(observed.relay.clone());
         }
         let input_events: Vec<_> = events.iter().map(|(event, _from)| event.clone()).collect();
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::prepare(prepare_started.elapsed());
+        #[cfg(feature = "bench-instrumentation")]
+        let store_started = std::time::Instant::now();
         let outcomes = self.store.insert_batch(events)?;
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::store(store_started.elapsed());
+        #[cfg(feature = "bench-instrumentation")]
+        let classify_started = std::time::Instant::now();
         for (event, outcome) in input_events.into_iter().zip(outcomes) {
             match outcome {
                 InsertOutcome::Inserted => inserted.push(event),
@@ -735,6 +751,10 @@ impl<S: EventStore> Engine<S> {
             .chain(provenance_grew.iter())
             .cloned()
             .collect();
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::classify(classify_started.elapsed());
+        #[cfg(feature = "bench-instrumentation")]
+        let react_started = std::time::Instant::now();
         // A duplicate whose provenance grew can change selector routing
         // evidence even though its projected VALUE is unchanged. Seed the
         // same generic Derived recompute lane so the old atom is replaced
@@ -743,6 +763,11 @@ impl<S: EventStore> Engine<S> {
         inserted_or_provenance_changed.extend(provenance_grew);
         let delta = self.react(inserted_or_provenance_changed, removed)?;
         let affected_handles = self.affected_handles(&before_shapes, &changed_events);
+        #[cfg(feature = "bench-instrumentation")]
+        {
+            crate::ingest_attribution::react(react_started.elapsed());
+            crate::ingest_attribution::total(total_started.elapsed());
+        }
         Ok(RelayIngestResult {
             committed: CommittedMutationResult {
                 delta,

@@ -34,7 +34,12 @@ pub(super) fn classify_message(message: &Message) -> Option<RelayFrame> {
 /// and engine ingest. Malformed or unsupported relay messages fail closed at
 /// this boundary and never become a pool event.
 pub(super) fn classify_text(text: &str) -> Option<RelayFrame> {
-    let message: RelayMessage<'static> = RelayMessage::from_json(text).ok()?;
+    #[cfg(feature = "bench-instrumentation")]
+    let started = std::time::Instant::now();
+    let parsed = RelayMessage::from_json(text).ok();
+    #[cfg(feature = "bench-instrumentation")]
+    crate::ingest_attribution::parse(started.elapsed(), parsed.is_some());
+    let message: RelayMessage<'static> = parsed?;
     if matches!(&message, RelayMessage::Auth { challenge } if challenge.is_empty()) {
         return None;
     }
