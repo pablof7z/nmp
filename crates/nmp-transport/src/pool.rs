@@ -486,7 +486,7 @@ impl Default for PoolConfig {
             event_sink_queue_capacity: 1_024,
             verifier_workers: 0,
             verifier_queue_capacity: 64,
-            verified_cache_capacity: 65_536,
+            verified_cache_capacity: 131_072,
             max_verify_batch: 128,
             max_engine_batch: 128,
             keepalive_idle: None,
@@ -876,6 +876,11 @@ mod thread_budget_tests {
             inner::configured_verifier_workers(usize::MAX),
             DEFAULT_VERIFIER_WORKERS
         );
+    }
+
+    #[test]
+    fn default_verification_cache_covers_a_hundred_thousand_event_replay() {
+        assert!(PoolConfig::default().verified_cache_capacity >= 100_000);
     }
 }
 

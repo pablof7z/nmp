@@ -1,0 +1,37 @@
+{
+  "schema": "nmp-ingest-optimization-run-v1",
+  "date_utc": "2026-07-17",
+  "filesystem": "/dev/shm (tmpfs)",
+  "nmp_commit": "ca9ce3b1c613d1ea30bcc0d3d122b281f4c4908f",
+  "host": "Linux 6.1.0-42-amd64 x86_64; Intel Core Ultra 7 265; 20 logical CPUs",
+  "workload": {
+    "canonical_events": 100000,
+    "relay_frames": 200000,
+    "passes": 2,
+    "payload_bytes": 128,
+    "queue_capacity": 1024,
+    "verify_batch_size": 128,
+    "engine_batch_size": 128,
+    "visible_limit": 200
+  },
+  "command": "cargo run --release -p nmp-engine --example relay_ingest_bench -- --events 100000 --relays 1 --passes 2 --payload-bytes 128 --queue-capacity 1024 --verified-cache-capacity <capacity> --verify-batch-size 128 --engine-batch-size 128 --visible-limit 200 --timeout-secs 300 --store <store.redb> --output <result.json>",
+  "before": {
+    "verified_cache_capacity": 65536,
+    "runs": ["before-65536-a.json", "before-65536-b.json"],
+    "mean_relay_frames_per_second": 25709.5101717601,
+    "mean_peak_rss_growth_bytes": 76933120
+  },
+  "after": {
+    "verified_cache_capacity": 131072,
+    "runs": ["after-131072-a.json", "after-131072-b.json"],
+    "mean_relay_frames_per_second": 41029.08529783456,
+    "mean_peak_rss_growth_bytes": 98256896
+  },
+  "throughput_improvement_percent": 59.5871863509,
+  "additional_mean_peak_rss_growth_bytes": 21323776,
+  "invariants": {
+    "observed_relay_frames": 200000,
+    "canonical_events_after_reopen": 100000,
+    "final_visible_rows": 200
+  }
+}
