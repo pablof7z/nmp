@@ -109,6 +109,11 @@ sealed class NMPError(message: String) : Exception(message) {
     data class InvalidCorrelationToken(val got: String, val reason: String) :
         NMPError("invalid correlation token $got: $reason")
 
+    /** #572: an `Nip73Target` failed its constructor validation (an empty
+     * `I`/`K` cell). */
+    data class InvalidNip73Target(val reason: String) :
+        NMPError("invalid NIP-73 target: $reason")
+
     companion object {
         fun from(ffi: FfiException): NMPError =
             when (ffi) {
@@ -147,6 +152,7 @@ sealed class NMPError(message: String) : Exception(message) {
                     RelayInformationWaitersSaturated(ffi.capacity)
                 is FfiException.InvalidCorrelationToken ->
                     InvalidCorrelationToken(ffi.got, ffi.reason)
+                is FfiException.InvalidNip73Target -> InvalidNip73Target(ffi.reason)
             }
     }
 }
