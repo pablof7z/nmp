@@ -1,3 +1,4 @@
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::env;
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::fs::{self, File};
@@ -6,12 +7,21 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use memmap2::{Mmap, MmapOptions};
-use nmp_store::{EventStore, InsertOutcome, RedbStore, RelayObserved};
+use nmp_store::{
+    prepare_equivalent_store_corpus, run_prepared_redb_store_bench, run_store_bench_variant,
+    EventStore, InsertOutcome, RedbStore, RelayObserved, StoreBenchMetrics,
+    StoreBenchPreparedCorpus, StoreBenchPreparedMetrics, StoreBenchProcessCounters,
+    StoreBenchVariant,
+};
 use nostr::{Event, EventBuilder, Filter, JsonUtil, Keys, Kind, RelayUrl, Tag, Timestamp};
 use rayon::prelude::*;
+use redb::{
+    Database as ProbeRedb, ReadableDatabase, ReadableTableMetadata, TableDefinition,
+};
 use serde::{Deserialize, Serialize};
 
 const SCHEMA: &str = "nmp-nostrdb-direct-v1";
@@ -20,6 +30,42 @@ const BASE_CREATED_AT: u64 = 1_700_000_000;
 const AUTHORS: usize = 64;
 const QUERY_LIMIT: usize = 200;
 const NOSTRDB_MAP_SIZE: u64 = 32 * 1024 * 1024 * 1024;
+const EQUIVALENT_SCHEMA: &str = "nmp-storage-equivalent-v1";
+
+struct CountingAllocator;
+
+static ALLOCATION_OPS: AtomicU64 = AtomicU64::new(0);
+static ALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
+
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        ALLOCATION_OPS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        ALLOCATION_OPS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATED_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+}
+
+#[global_allocator]
+static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator;
+
+#[repr(C)]
+struct LmdbRecord {
+    table: u32,
+    key: *const u8,
+    key_len: usize,
+    value: *const u8,
+    value_len: usize,
+}
 
 unsafe extern "C" {
     fn bench_ndb_open(path: *const c_char, mapsize: u64, ingest_threads: c_int) -> *mut c_void;
@@ -34,6 +80,26 @@ unsafe extern "C" {
         count: *mut c_int,
     ) -> c_int;
     fn bench_ndb_note_count(handle: *mut c_void) -> u64;
+    fn bench_lmdb_open(path: *const c_char, mapsize: u64, error_out: *mut c_int) -> *mut c_void;
+    fn bench_lmdb_begin(handle: *mut c_void, error_out: *mut c_int) -> *mut c_void;
+    fn bench_lmdb_put_batch(
+        handle: *mut c_void,
+        transaction: *mut c_void,
+        records: *const LmdbRecord,
+        count: usize,
+    ) -> c_int;
+    fn bench_lmdb_commit(transaction: *mut c_void) -> c_int;
+    fn bench_lmdb_abort(transaction: *mut c_void);
+    fn bench_lmdb_count(handle: *mut c_void, table: u32, error_out: *mut c_int) -> u64;
+    fn bench_lmdb_has(
+        handle: *mut c_void,
+        table: u32,
+        key: *const u8,
+        key_len: usize,
+        error_out: *mut c_int,
+    ) -> c_int;
+    fn bench_lmdb_error(error: c_int) -> *const c_char;
+    fn bench_lmdb_close(handle: *mut c_void);
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -132,6 +198,159 @@ struct Comparison {
     nmp_to_nostrdb_logical_size_ratio: f64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct EquivalentRun {
+    schema: String,
+    backend: String,
+    nmp_commit: String,
+    nostrdb_commit: String,
+    git_dirty: bool,
+    host: String,
+    corpus_blake3: String,
+    events: u64,
+    payload_bytes: usize,
+    transaction_batch_size: usize,
+    prepared_records: u64,
+    prepared_record_bytes: u64,
+    preparation_ns: u64,
+    metrics: StoreBenchPreparedMetrics,
+    events_per_second: f64,
+    database_allocated_bytes: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct EquivalentMatrixEntry {
+    repetition: usize,
+    ordinal: usize,
+    run: EquivalentRun,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct EquivalentMatrix {
+    schema: String,
+    command: String,
+    nmp_commit: String,
+    nostrdb_commit: String,
+    git_dirty: bool,
+    host: String,
+    corpus_blake3: String,
+    repetitions: usize,
+    alternating_order: bool,
+    runs: Vec<EquivalentMatrixEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CrashProbeEngine {
+    backend: String,
+    durability: String,
+    child_exit_code: i32,
+    committed_rows_after_crash: u64,
+    uncommitted_row_absent: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CrashProbeResult {
+    schema: String,
+    nmp_commit: String,
+    nostrdb_commit: String,
+    host: String,
+    engines: Vec<CrashProbeEngine>,
+}
+
+const CRASH_PROBE_TABLE: TableDefinition<&str, &str> =
+    TableDefinition::new("storage_engine_crash_probe_v1");
+
+struct LmdbHandle(*mut c_void);
+
+impl LmdbHandle {
+    fn open(path: &Path) -> Result<Self, String> {
+        fs::create_dir_all(path).map_err(|error| error.to_string())?;
+        let path = CString::new(path.as_os_str().as_bytes()).map_err(|error| error.to_string())?;
+        let mut error = 0;
+        let raw = unsafe { bench_lmdb_open(path.as_ptr(), NOSTRDB_MAP_SIZE, &mut error) };
+        if raw.is_null() {
+            Err(lmdb_error(error))
+        } else {
+            Ok(Self(raw))
+        }
+    }
+
+    fn begin(&self) -> Result<LmdbTransaction, String> {
+        let mut error = 0;
+        let raw = unsafe { bench_lmdb_begin(self.0, &mut error) };
+        if raw.is_null() {
+            Err(lmdb_error(error))
+        } else {
+            Ok(LmdbTransaction(raw))
+        }
+    }
+
+    fn count(&self, table: u32) -> Result<u64, String> {
+        let mut error = 0;
+        let count = unsafe { bench_lmdb_count(self.0, table, &mut error) };
+        (error == 0).then_some(count).ok_or_else(|| lmdb_error(error))
+    }
+
+    fn contains(&self, table: u32, key: &[u8]) -> Result<bool, String> {
+        let mut error = 0;
+        let found = unsafe { bench_lmdb_has(self.0, table, key.as_ptr(), key.len(), &mut error) };
+        if error != 0 || found < 0 {
+            Err(lmdb_error(error))
+        } else {
+            Ok(found == 1)
+        }
+    }
+
+    fn close(mut self) {
+        unsafe { bench_lmdb_close(self.0) };
+        self.0 = std::ptr::null_mut();
+    }
+}
+
+impl Drop for LmdbHandle {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { bench_lmdb_close(self.0) };
+        }
+    }
+}
+
+struct LmdbTransaction(*mut c_void);
+
+impl LmdbTransaction {
+    fn put_batch(&self, handle: &LmdbHandle, records: &[LmdbRecord]) -> Result<(), String> {
+        let error = unsafe {
+            bench_lmdb_put_batch(handle.0, self.0, records.as_ptr(), records.len())
+        };
+        (error == 0).then_some(()).ok_or_else(|| lmdb_error(error))
+    }
+
+    fn commit(mut self) -> Result<(), String> {
+        let error = unsafe { bench_lmdb_commit(self.0) };
+        self.0 = std::ptr::null_mut();
+        (error == 0).then_some(()).ok_or_else(|| lmdb_error(error))
+    }
+}
+
+impl Drop for LmdbTransaction {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { bench_lmdb_abort(self.0) };
+        }
+    }
+}
+
+fn lmdb_error(error: c_int) -> String {
+    let raw = unsafe { bench_lmdb_error(error) };
+    if raw.is_null() {
+        format!("LMDB error {error}")
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(raw) }
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct QueryMismatch {
     name: String,
@@ -192,7 +411,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args_os().skip(1);
     let command = args
         .next()
-        .ok_or("usage: nmp-nostrdb-compare <generate|run-nmp|run-nostrdb|compare> ...")?;
+        .ok_or(
+            "usage: nmp-nostrdb-compare <generate|run-nmp|run-nostrdb|compare|run-equivalent|matrix-equivalent|crash-probe|crash-child> ...",
+        )?;
     match command.to_string_lossy().as_ref() {
         "generate" => {
             let corpus = path_arg(&mut args, "corpus")?;
@@ -223,8 +444,442 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let output = path_arg(&mut args, "output")?;
             compare(&nmp, &nostrdb, &output)?;
         }
+        "run-equivalent" => {
+            let corpus = path_arg(&mut args, "corpus")?;
+            let backend = args
+                .next()
+                .ok_or("missing backend (redb-prepared|lmdb-prepared|redb-full)")?
+                .to_string_lossy()
+                .into_owned();
+            let batch = number_arg::<usize>(&mut args, "batch-size")?;
+            let output = path_arg(&mut args, "output")?;
+            run_equivalent(&corpus, &backend, batch, &output)?;
+        }
+        "matrix-equivalent" => {
+            let corpus = path_arg(&mut args, "corpus")?;
+            let repetitions = number_arg::<usize>(&mut args, "repetitions")?;
+            let output = path_arg(&mut args, "output")?;
+            run_equivalent_matrix(&corpus, repetitions, &output)?;
+        }
+        "crash-probe" => {
+            let output = path_arg(&mut args, "output")?;
+            run_crash_probe(&output)?;
+        }
+        "crash-child" => {
+            let backend = args
+                .next()
+                .ok_or("missing crash backend")?
+                .to_string_lossy()
+                .into_owned();
+            let database = path_arg(&mut args, "database")?;
+            run_crash_child(&backend, &database)?;
+        }
         other => return Err(format!("unknown command {other}").into()),
     }
+    Ok(())
+}
+
+fn parse_prevalidated_events(corpus: &Mmap) -> Result<Vec<Event>, String> {
+    corpus
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| Event::from_json(line).map_err(|error| format!("parse corpus event: {error:?}")))
+        .collect()
+}
+
+fn lmdb_descriptors(corpus: &StoreBenchPreparedCorpus) -> Vec<Vec<LmdbRecord>> {
+    corpus
+        .batches
+        .iter()
+        .map(|batch| {
+            batch
+                .records
+                .iter()
+                .map(|record| LmdbRecord {
+                    table: record.table as u32,
+                    key: record.key.as_ptr(),
+                    key_len: record.key.len(),
+                    value: record.value.as_ptr(),
+                    value_len: record.value.len(),
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn counters_delta(
+    after: StoreBenchProcessCounters,
+    before: StoreBenchProcessCounters,
+) -> StoreBenchProcessCounters {
+    StoreBenchProcessCounters {
+        cpu_ns: after.cpu_ns.saturating_sub(before.cpu_ns),
+        allocation_ops: after.allocation_ops.saturating_sub(before.allocation_ops),
+        allocated_bytes: after.allocated_bytes.saturating_sub(before.allocated_bytes),
+        current_rss_bytes: before.current_rss_bytes,
+        peak_rss_bytes: after.peak_rss_bytes,
+        process_write_bytes: after
+            .process_write_bytes
+            .zip(before.process_write_bytes)
+            .map(|(after, before)| after.saturating_sub(before)),
+    }
+}
+
+fn run_prepared_lmdb(
+    path: &Path,
+    corpus: &StoreBenchPreparedCorpus,
+) -> Result<StoreBenchPreparedMetrics, String> {
+    let descriptors = lmdb_descriptors(corpus);
+    let handle = LmdbHandle::open(path)?;
+    let process_before = sample_process();
+    let started = Instant::now();
+    let mut commit_ns = 0u64;
+    for batch in &descriptors {
+        let transaction = handle.begin()?;
+        transaction.put_batch(&handle, batch)?;
+        let commit_started = Instant::now();
+        transaction.commit()?;
+        commit_ns = commit_ns.saturating_add(duration_ns(commit_started));
+    }
+    let wall_ns = duration_ns(started);
+    let process = counters_delta(sample_process(), process_before);
+    handle.close();
+    let (database_logical_bytes, _) = path_size(path).map_err(|error| error.to_string())?;
+
+    let reopen_started = Instant::now();
+    let reopened = LmdbHandle::open(path)?;
+    let reopened_table_rows = (0..=11)
+        .map(|table| reopened.count(table))
+        .collect::<Result<Vec<_>, _>>()?;
+    let reopened_rows = reopened_table_rows[0];
+    reopened.close();
+    let reopen_ns = duration_ns(reopen_started);
+
+    Ok(StoreBenchPreparedMetrics {
+        events: corpus.events,
+        transactions: corpus.batches.len() as u64,
+        wall_ns,
+        commit_ns,
+        reopen_ns,
+        cpu_ns: process.cpu_ns,
+        allocation_ops: process.allocation_ops,
+        allocated_bytes: process.allocated_bytes,
+        rss_before_bytes: process.current_rss_bytes,
+        peak_rss_bytes: process.peak_rss_bytes,
+        process_write_bytes: process.process_write_bytes,
+        database_logical_bytes,
+        database_stored_bytes: database_logical_bytes,
+        reopened_rows,
+        expected_table_rows: corpus.expected_table_rows.clone(),
+        exact_reopen: reopened_table_rows == corpus.expected_table_rows,
+        reopened_table_rows,
+    })
+}
+
+fn full_metrics_to_prepared(metrics: StoreBenchMetrics) -> StoreBenchPreparedMetrics {
+    StoreBenchPreparedMetrics {
+        events: metrics.events,
+        transactions: metrics.transactions,
+        wall_ns: metrics.wall_ns,
+        commit_ns: metrics.commit_ns,
+        reopen_ns: 0,
+        cpu_ns: metrics.cpu_ns,
+        allocation_ops: metrics.allocation_ops,
+        allocated_bytes: metrics.allocated_bytes,
+        rss_before_bytes: metrics.rss_before_bytes,
+        peak_rss_bytes: metrics.peak_rss_bytes,
+        process_write_bytes: metrics.process_write_bytes,
+        database_logical_bytes: metrics.database_logical_bytes,
+        database_stored_bytes: metrics.database_stored_bytes,
+        reopened_rows: metrics.reopened_rows,
+        expected_table_rows: Vec::new(),
+        reopened_table_rows: Vec::new(),
+        exact_reopen: metrics.exact_reopen,
+    }
+}
+
+fn run_equivalent(
+    corpus_path: &Path,
+    backend: &str,
+    batch_size: usize,
+    output: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (corpus, meta) = open_corpus(corpus_path)?;
+    let events = parse_prevalidated_events(&corpus)?;
+    let preparation_started = Instant::now();
+    let prepared = (backend != "redb-full")
+        .then(|| prepare_equivalent_store_corpus(&events, batch_size))
+        .transpose()?;
+    let preparation_ns = prepared
+        .as_ref()
+        .map(|_| duration_ns(preparation_started))
+        .unwrap_or(0);
+    let prepared_records = prepared
+        .as_ref()
+        .map(|prepared| {
+            prepared
+                .batches
+                .iter()
+                .map(|batch| batch.records.len() as u64)
+                .sum()
+        })
+        .unwrap_or(0);
+    let prepared_record_bytes = prepared
+        .as_ref()
+        .map(|prepared| prepared.record_bytes)
+        .unwrap_or(0);
+    let scratch = tempfile::tempdir()?;
+    let database = match backend {
+        "redb-prepared" | "redb-full" => scratch.path().join("store.redb"),
+        "lmdb-prepared" => scratch.path().join("store.lmdb"),
+        _ => return Err(format!("unknown equivalent backend {backend}").into()),
+    };
+    let metrics = match backend {
+        "redb-prepared" => run_prepared_redb_store_bench(
+            &database,
+            prepared.as_ref().expect("prepared backend has corpus"),
+            sample_process,
+        )?,
+        "lmdb-prepared" => run_prepared_lmdb(
+            &database,
+            prepared.as_ref().expect("prepared backend has corpus"),
+        )?,
+        "redb-full" => full_metrics_to_prepared(run_store_bench_variant(
+            &database,
+            events,
+            batch_size,
+            StoreBenchVariant::FullGoverned,
+            sample_process,
+        )?),
+        _ => unreachable!(),
+    };
+    if !metrics.exact_reopen {
+        return Err(format!(
+            "{backend} reopened {} of {} events",
+            metrics.reopened_rows, metrics.events
+        )
+        .into());
+    }
+    let (_, database_allocated_bytes) = path_size(&database)?;
+    let result = EquivalentRun {
+        schema: EQUIVALENT_SCHEMA.to_owned(),
+        backend: backend.to_owned(),
+        nmp_commit: git_commit(repo_root()),
+        nostrdb_commit: nostrdb_commit(),
+        git_dirty: git_dirty(repo_root()),
+        host: host(),
+        corpus_blake3: meta.blake3,
+        events: meta.events,
+        payload_bytes: meta.payload_bytes,
+        transaction_batch_size: batch_size,
+        prepared_records,
+        prepared_record_bytes,
+        preparation_ns,
+        events_per_second: metrics.events as f64 * 1_000_000_000.0 / metrics.wall_ns as f64,
+        metrics,
+        database_allocated_bytes,
+    };
+    write_json(output, &result)?;
+    println!("wrote {}", output.display());
+    Ok(())
+}
+
+fn run_equivalent_matrix(
+    corpus: &Path,
+    repetitions: usize,
+    output: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if repetitions == 0 {
+        return Err("equivalent matrix repetitions must be nonzero".into());
+    }
+    let executable = env::current_exe()?;
+    let base_cells = [
+        ("redb-prepared", 128usize),
+        ("lmdb-prepared", 128usize),
+        ("redb-prepared", 4_096usize),
+        ("lmdb-prepared", 4_096usize),
+        ("redb-full", 4_096usize),
+    ];
+    let scratch = tempfile::tempdir()?;
+    let mut runs = Vec::new();
+    for repetition in 0..repetitions {
+        let mut cells = base_cells;
+        if !repetition.is_multiple_of(2) {
+            cells.reverse();
+        }
+        for (ordinal, (backend, batch_size)) in cells.into_iter().enumerate() {
+            eprintln!(
+                "repetition={repetition} ordinal={ordinal} backend={backend} batch={batch_size}"
+            );
+            let child_output = scratch.path().join(format!(
+                "{repetition}-{ordinal}-{backend}-{batch_size}.json"
+            ));
+            let child = Command::new(&executable)
+                .arg("run-equivalent")
+                .arg(corpus)
+                .arg(backend)
+                .arg(batch_size.to_string())
+                .arg(&child_output)
+                .output()?;
+            if !child.status.success() {
+                return Err(format!(
+                    "equivalent child failed for {backend}/{batch_size}: {}",
+                    String::from_utf8_lossy(&child.stderr)
+                )
+                .into());
+            }
+            let run: EquivalentRun = serde_json::from_slice(&fs::read(&child_output)?)?;
+            runs.push(EquivalentMatrixEntry {
+                repetition,
+                ordinal,
+                run,
+            });
+        }
+    }
+    let first = runs.first().ok_or("equivalent matrix produced no runs")?;
+    if runs.iter().any(|entry| {
+        entry.run.nmp_commit != first.run.nmp_commit
+            || entry.run.nostrdb_commit != first.run.nostrdb_commit
+            || entry.run.git_dirty != first.run.git_dirty
+            || entry.run.corpus_blake3 != first.run.corpus_blake3
+    }) {
+        return Err("equivalent matrix identity changed during the run".into());
+    }
+    let matrix = EquivalentMatrix {
+        schema: EQUIVALENT_SCHEMA.to_owned(),
+        command: format!(
+            "NOSTRDB_DIR={} cargo run --release --manifest-path benchmarks/nostrdb-compare/Cargo.toml -- matrix-equivalent {} {} {}",
+            nostrdb_root().display(),
+            corpus.display(),
+            repetitions,
+            output.display()
+        ),
+        nmp_commit: first.run.nmp_commit.clone(),
+        nostrdb_commit: first.run.nostrdb_commit.clone(),
+        git_dirty: first.run.git_dirty,
+        host: first.run.host.clone(),
+        corpus_blake3: first.run.corpus_blake3.clone(),
+        repetitions,
+        alternating_order: true,
+        runs,
+    };
+    write_json(output, &matrix)?;
+    println!("wrote {}", output.display());
+    Ok(())
+}
+
+fn run_crash_child(backend: &str, database: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    match backend {
+        "redb" => {
+            let db = ProbeRedb::create(database)?;
+            let committed = db.begin_write()?;
+            {
+                let mut table = committed.open_table(CRASH_PROBE_TABLE)?;
+                table.insert("committed", "visible")?;
+            }
+            committed.commit()?;
+            let uncommitted = db.begin_write()?;
+            {
+                let mut table = uncommitted.open_table(CRASH_PROBE_TABLE)?;
+                table.insert("uncommitted", "must-not-survive")?;
+            }
+            unsafe { libc::_exit(73) };
+        }
+        "lmdb" => {
+            let handle = LmdbHandle::open(database)?;
+            let committed_key = b"committed";
+            let committed_value = b"visible";
+            let committed_record = LmdbRecord {
+                table: 0,
+                key: committed_key.as_ptr(),
+                key_len: committed_key.len(),
+                value: committed_value.as_ptr(),
+                value_len: committed_value.len(),
+            };
+            let committed = handle.begin()?;
+            committed.put_batch(&handle, std::slice::from_ref(&committed_record))?;
+            committed.commit()?;
+            let uncommitted_key = b"uncommitted";
+            let uncommitted_value = b"must-not-survive";
+            let uncommitted_record = LmdbRecord {
+                table: 0,
+                key: uncommitted_key.as_ptr(),
+                key_len: uncommitted_key.len(),
+                value: uncommitted_value.as_ptr(),
+                value_len: uncommitted_value.len(),
+            };
+            let uncommitted = handle.begin()?;
+            uncommitted.put_batch(&handle, std::slice::from_ref(&uncommitted_record))?;
+            unsafe { libc::_exit(73) };
+        }
+        _ => Err(format!("unknown crash backend {backend}").into()),
+    }
+}
+
+fn reopen_redb_crash_probe(path: &Path) -> Result<(u64, bool), Box<dyn std::error::Error>> {
+    let db = ProbeRedb::open(path)?;
+    let read = db.begin_read()?;
+    let table = read.open_table(CRASH_PROBE_TABLE)?;
+    let rows = table.len()?;
+    let uncommitted_absent = table.get("uncommitted")?.is_none();
+    Ok((rows, uncommitted_absent))
+}
+
+fn reopen_lmdb_crash_probe(path: &Path) -> Result<(u64, bool), Box<dyn std::error::Error>> {
+    let handle = LmdbHandle::open(path)?;
+    let rows = handle.count(0)?;
+    let committed_present = handle.contains(0, b"committed")?;
+    let uncommitted_absent = !handle.contains(0, b"uncommitted")?;
+    handle.close();
+    Ok((rows, committed_present && uncommitted_absent))
+}
+
+fn run_crash_probe(output: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let executable = env::current_exe()?;
+    let scratch = tempfile::tempdir()?;
+    let mut engines = Vec::new();
+    for backend in ["redb", "lmdb"] {
+        let database = if backend == "redb" {
+            scratch.path().join("crash.redb")
+        } else {
+            scratch.path().join("crash.lmdb")
+        };
+        let status = Command::new(&executable)
+            .arg("crash-child")
+            .arg(backend)
+            .arg(&database)
+            .status()?;
+        let exit_code = status.code().unwrap_or(-1);
+        if exit_code != 73 {
+            return Err(format!("{backend} crash child exited {exit_code}, expected 73").into());
+        }
+        let (rows, uncommitted_absent) = if backend == "redb" {
+            reopen_redb_crash_probe(&database)?
+        } else {
+            reopen_lmdb_crash_probe(&database)?
+        };
+        if rows != 1 || !uncommitted_absent {
+            return Err(format!(
+                "{backend} crash reopen had {rows} rows; uncommitted_absent={uncommitted_absent}"
+            )
+            .into());
+        }
+        engines.push(CrashProbeEngine {
+            backend: backend.to_owned(),
+            durability: "synchronous default; no no-sync flags".to_owned(),
+            child_exit_code: exit_code,
+            committed_rows_after_crash: rows,
+            uncommitted_row_absent: uncommitted_absent,
+        });
+    }
+    let result = CrashProbeResult {
+        schema: EQUIVALENT_SCHEMA.to_owned(),
+        nmp_commit: git_commit(repo_root()),
+        nostrdb_commit: nostrdb_commit(),
+        host: host(),
+        engines,
+    };
+    write_json(output, &result)?;
+    println!("wrote {}", output.display());
     Ok(())
 }
 
@@ -894,6 +1549,41 @@ fn current_rss_bytes() -> Option<u64> {
     proc_status_kib("VmRSS").map(|value| value * 1024)
 }
 
+fn process_write_bytes() -> Option<u64> {
+    fs::read_to_string("/proc/self/io")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("write_bytes:")?.trim().parse().ok())
+}
+
+fn process_cpu_ns() -> u64 {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    assert_eq!(rc, 0, "getrusage(RUSAGE_SELF) must succeed");
+    let usage = unsafe { usage.assume_init() };
+    let timeval_ns = |value: libc::timeval| {
+        (value.tv_sec as u64)
+            .saturating_mul(1_000_000_000)
+            .saturating_add((value.tv_usec as u64).saturating_mul(1_000))
+    };
+    timeval_ns(usage.ru_utime).saturating_add(timeval_ns(usage.ru_stime))
+}
+
+fn sample_process() -> StoreBenchProcessCounters {
+    StoreBenchProcessCounters {
+        cpu_ns: process_cpu_ns(),
+        allocation_ops: ALLOCATION_OPS.load(Ordering::Relaxed),
+        allocated_bytes: ALLOCATED_BYTES.load(Ordering::Relaxed),
+        current_rss_bytes: current_rss_bytes(),
+        peak_rss_bytes: peak_rss_bytes(),
+        process_write_bytes: process_write_bytes(),
+    }
+}
+
+fn duration_ns(started: Instant) -> u64 {
+    started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
 fn peak_rss_bytes() -> Option<u64> {
     proc_status_kib("VmHWM").map(|value| value * 1024)
 }
@@ -931,6 +1621,16 @@ fn git_commit(path: PathBuf) -> String {
             .arg(path)
             .args(["rev-parse", "HEAD"]),
     )
+}
+
+fn git_dirty(path: PathBuf) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["status", "--porcelain"])
+        .output()
+        .map(|output| !output.stdout.is_empty())
+        .unwrap_or(true)
 }
 
 fn nostrdb_commit() -> String {
