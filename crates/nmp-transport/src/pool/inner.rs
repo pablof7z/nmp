@@ -717,7 +717,7 @@ pub(super) fn configured_verifier_workers(configured: usize) -> usize {
     if configured == 0 {
         super::DEFAULT_VERIFIER_WORKERS
     } else {
-        configured.min(super::DEFAULT_VERIFIER_WORKERS)
+        configured.min(super::MAX_VERIFIER_WORKERS)
     }
 }
 

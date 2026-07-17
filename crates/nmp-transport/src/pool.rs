@@ -42,6 +42,11 @@ pub const DEFAULT_MAX_RELAYS: usize = 10;
 /// every engine multiplied OS threads without imposing a process budget.
 pub const DEFAULT_VERIFIER_WORKERS: usize = 2;
 
+/// Hard ceiling for an explicitly configured per-engine verifier pool.
+/// The default remains deliberately small; embedders opting into a wider
+/// pool still cannot create an unbounded number of OS threads.
+pub const MAX_VERIFIER_WORKERS: usize = 16;
+
 /// The finite thread role whose OS spawn was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadRole {
@@ -428,7 +433,8 @@ pub struct PoolConfig {
     /// Maximum translated pool events waiting for the engine bridge.
     pub event_sink_queue_capacity: usize,
     /// Persistent native verification workers. Zero selects the small fixed
-    /// [`DEFAULT_VERIFIER_WORKERS`] set; it never mirrors host parallelism.
+    /// [`DEFAULT_VERIFIER_WORKERS`] set. Explicit values are capped at
+    /// [`MAX_VERIFIER_WORKERS`]; this never mirrors host parallelism.
     pub verifier_workers: usize,
     /// Maximum verification tasks queued at each persistent worker.
     pub verifier_queue_capacity: usize,
@@ -866,15 +872,16 @@ mod thread_budget_tests {
     }
 
     #[test]
-    fn verifier_worker_configuration_saturates_at_fixed_engine_budget() {
+    fn verifier_worker_configuration_honors_an_explicit_bounded_budget() {
         assert_eq!(
             inner::configured_verifier_workers(0),
             DEFAULT_VERIFIER_WORKERS
         );
         assert_eq!(inner::configured_verifier_workers(1), 1);
+        assert_eq!(inner::configured_verifier_workers(4), 4);
         assert_eq!(
             inner::configured_verifier_workers(usize::MAX),
-            DEFAULT_VERIFIER_WORKERS
+            MAX_VERIFIER_WORKERS
         );
     }
 

@@ -1,0 +1,108 @@
+{
+  "schema": "nmp-tiny-ingest-matrix-summary-v1",
+  "issue": 617,
+  "git_commit": "525958ab5dfb674db7c60b935c2268dcc6a45524",
+  "host": {
+    "cpu": "Intel(R) Core(TM) Ultra 7 265",
+    "logical_cpus": 20,
+    "os": "linux",
+    "arch": "x86_64"
+  },
+  "corpus": {
+    "events": 100000,
+    "payload_bytes": 128,
+    "relays": 1,
+    "passes": 1
+  },
+  "current_default": {
+    "repetitions": 1,
+    "verifier_workers": 2,
+    "verify_batch_events": 128,
+    "engine_batch_events": 128,
+    "active_events_per_second": 9311.79,
+    "end_to_end_ms_including_quiet_confirmation": 11840.66,
+    "first_row_ms": 13.25,
+    "apply_latency_p95_ms": 2345.23,
+    "peak_rss_mib": 93.21,
+    "store_transactions": 783,
+    "commit_ms": 9019.63
+  },
+  "worker_matrix": [
+    {
+      "verifier_workers": 2,
+      "repetitions": 3,
+      "median_active_events_per_second": 29524.88,
+      "median_end_to_end_ms": 4487.77,
+      "median_apply_latency_p95_ms": 920.27,
+      "median_peak_rss_mib": 120.93,
+      "median_verify_ms": 3242.85,
+      "median_store_ms": 3003.63,
+      "median_store_transactions": 174
+    },
+    {
+      "verifier_workers": 8,
+      "repetitions": 3,
+      "median_active_events_per_second": 65481.66,
+      "median_end_to_end_ms": 2628.38,
+      "median_apply_latency_p95_ms": 557.96,
+      "median_peak_rss_mib": 135.65,
+      "median_verify_ms": 926.97,
+      "median_store_ms": 1186.98,
+      "median_store_transactions": 29
+    },
+    {
+      "verifier_workers": 16,
+      "repetitions": 3,
+      "median_active_events_per_second": 68129.11,
+      "median_end_to_end_ms": 2568.60,
+      "median_apply_latency_p95_ms": 545.29,
+      "median_peak_rss_mib": 141.02,
+      "median_verify_ms": 528.02,
+      "median_store_ms": 1142.17,
+      "median_store_transactions": 27
+    }
+  ],
+  "candidate": {
+    "verifier_workers": 8,
+    "verify_batch_events": 512,
+    "engine_batch_events": 4096,
+    "queue_capacity": 8192,
+    "reason": "Eight workers retain 96 percent of the sixteen-worker median active throughput with half the verifier threads and lower median RSS.",
+    "relative_to_current_default": {
+      "active_throughput_multiple": 7.03,
+      "end_to_end_speedup_multiple": 4.51,
+      "apply_latency_p95_reduction_percent": 76.21,
+      "peak_rss_increase_percent": 45.53
+    }
+  },
+  "large_run": {
+    "events": 1000000,
+    "verifier_workers": 16,
+    "active_events_per_second": 52197.94,
+    "end_to_end_ms_including_quiet_confirmation": 20259.14,
+    "first_row_ms": 13.94,
+    "apply_latency_p95_ms": 836.47,
+    "peak_rss_mib": 348.77,
+    "database_mib": 2056.00,
+    "store_transactions": 247,
+    "commit_ms": 8146.95,
+    "exact_reopen_verified": true
+  },
+  "duplicate_run": {
+    "frames": 200000,
+    "unique_events": 100000,
+    "verifier_candidates": 100000,
+    "aggregate_active_frames_per_second": 136666.35,
+    "exact_reopen_verified": true
+  },
+  "decision": {
+    "merge_explicit_verifier_width": true,
+    "change_default_verifier_width": false,
+    "packed_event_rewrite_justified": false,
+    "ordered_transaction_assembler_required": true,
+    "parent_initial_ingest_gate_met": false,
+    "parent_duplicate_gate_met": false,
+    "next_issue": 616,
+    "reason": "The useful region is multiple times faster and exact at one million events, but store transaction formation still depends on verifier production rate and throughput remains below the 150k initial and 500k duplicate gates."
+  }
+}

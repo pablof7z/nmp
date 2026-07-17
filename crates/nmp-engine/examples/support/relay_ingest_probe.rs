@@ -35,6 +35,7 @@ pub struct ProbeConfig {
     pub payload_bytes: usize,
     pub queue_capacity: usize,
     pub verified_cache_capacity: usize,
+    pub verifier_workers: usize,
     pub verify_batch_size: usize,
     pub engine_batch_size: usize,
     pub visible_limit: Option<usize>,
@@ -54,6 +55,7 @@ impl Default for ProbeConfig {
             payload_bytes: 128,
             queue_capacity: 1_024,
             verified_cache_capacity: 131_072,
+            verifier_workers: 0,
             verify_batch_size: 128,
             engine_batch_size: 128,
             visible_limit: Some(200),
@@ -114,6 +116,7 @@ pub struct ProbeResult {
     pub payload_bytes: usize,
     pub queue_capacity: usize,
     pub verified_cache_capacity: usize,
+    pub verifier_workers: usize,
     pub verify_batch_size: usize,
     pub engine_batch_size: usize,
     pub visible_limit: Option<usize>,
@@ -396,6 +399,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     nmp_engine::ingest_attribution::reset();
     let queue_capacity = config.queue_capacity;
     let verified_cache_capacity = config.verified_cache_capacity;
+    let verifier_workers = config.verifier_workers;
     let verify_batch_size = config.verify_batch_size;
     let engine_batch_size = config.engine_batch_size;
     let (engine_thread, handle) = EngineThread::spawn(
@@ -409,6 +413,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             event_sink_queue_capacity: queue_capacity,
             verifier_queue_capacity: queue_capacity,
             verified_cache_capacity,
+            verifier_workers,
             max_verify_batch: verify_batch_size,
             max_engine_batch: engine_batch_size,
             reconnect_delay_initial: Some(Duration::from_secs(3600)),
@@ -656,6 +661,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         payload_bytes: config.payload_bytes,
         queue_capacity,
         verified_cache_capacity,
+        verifier_workers,
         verify_batch_size,
         engine_batch_size,
         visible_limit: config.visible_limit,
