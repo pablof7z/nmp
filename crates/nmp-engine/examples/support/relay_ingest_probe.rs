@@ -17,8 +17,8 @@ use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
 use nmp_store::{EventStore, RedbStore};
 use nmp_transport::PoolConfig;
-use nostr::{EventBuilder, EventId, JsonUtil, Keys, Kind, RelayUrl, Timestamp};
-use serde::Serialize;
+use nostr::{EventBuilder, EventId, JsonUtil, Keys, Kind, RelayUrl, Tag, Timestamp};
+use serde::{Deserialize, Serialize};
 use tungstenite::{accept, Message};
 
 pub type ProbeError = Box<dyn Error + Send + Sync>;
@@ -33,6 +33,7 @@ pub struct ProbeConfig {
     pub relays: usize,
     pub passes: usize,
     pub payload_bytes: usize,
+    pub shape_corpus: Option<PathBuf>,
     pub queue_capacity: usize,
     pub verified_cache_capacity: usize,
     pub verifier_workers: usize,
@@ -55,6 +56,7 @@ impl Default for ProbeConfig {
             relays: 1,
             passes: 1,
             payload_bytes: 128,
+            shape_corpus: None,
             queue_capacity: 1_024,
             verified_cache_capacity: 131_072,
             verifier_workers: 0,
@@ -121,6 +123,8 @@ pub struct ProbeResult {
     pub relays: usize,
     pub passes: usize,
     pub payload_bytes: usize,
+    pub corpus_mode: &'static str,
+    pub shape_source_blake3: Option<String>,
     pub queue_capacity: usize,
     pub verified_cache_capacity: usize,
     pub verifier_workers: usize,
@@ -181,7 +185,9 @@ pub struct ProbeResult {
 struct Corpus {
     path: PathBuf,
     bytes: u64,
-    author: String,
+    selection: Filter,
+    mode: &'static str,
+    shape_source_blake3: Option<String>,
     first_id: String,
     last_id: String,
     generation: Duration,
@@ -298,7 +304,7 @@ impl ObservationState {
         for delta in deltas {
             match delta {
                 RowDelta::Added(row) => {
-                    let ordinal = parse_ordinal(&row.event.content)?;
+                    let ordinal = parse_ordinal(row.event.created_at)?;
                     if ordinal >= config.events {
                         return Err(format!("out-of-range event ordinal {ordinal}").into());
                     }
@@ -392,12 +398,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     }
     let relay_urls: BTreeSet<_> = servers.iter().map(|server| server.url.clone()).collect();
 
-    let selection = Filter {
-        kinds: Some(BTreeSet::from([Kind::TextNote.as_u16()])),
-        authors: Some(Binding::Literal(BTreeSet::from([corpus.author.clone()]))),
-        limit: None,
-        ..Filter::default()
-    };
+    let selection = corpus.selection.clone();
     let demand = Demand::new(
         selection.clone(),
         SourceAuthority::Pinned(relay_urls.clone()),
@@ -672,6 +673,8 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         relays: config.relays,
         passes: config.passes,
         payload_bytes: config.payload_bytes,
+        corpus_mode: corpus.mode,
+        shape_source_blake3: corpus.shape_source_blake3,
         queue_capacity,
         verified_cache_capacity,
         verifier_workers,
@@ -781,6 +784,13 @@ fn ingest_attribution_json() -> serde_json::Value {
 }
 
 fn generate_corpus(dir: &Path, config: &ProbeConfig) -> Result<Corpus, ProbeError> {
+    match &config.shape_corpus {
+        Some(path) => generate_shape_corpus(dir, config, path),
+        None => generate_uniform_corpus(dir, config),
+    }
+}
+
+fn generate_uniform_corpus(dir: &Path, config: &ProbeConfig) -> Result<Corpus, ProbeError> {
     let started = Instant::now();
     let path = dir.join("events.jsonl");
     let mut writer = BufWriter::new(File::create(&path)?);
@@ -812,11 +822,249 @@ fn generate_corpus(dir: &Path, config: &ProbeConfig) -> Result<Corpus, ProbeErro
     Ok(Corpus {
         bytes: fs::metadata(&path)?.len(),
         path,
-        author,
+        selection: Filter {
+            kinds: Some(BTreeSet::from([Kind::TextNote.as_u16()])),
+            authors: Some(Binding::Literal(BTreeSet::from([author]))),
+            limit: None,
+            ..Filter::default()
+        },
+        mode: "uniform-text-note",
+        shape_source_blake3: None,
         first_id: first_id.expect("nonempty corpus"),
         last_id,
         generation: started.elapsed(),
     })
+}
+
+#[derive(Deserialize)]
+struct ShapeCorpusInput {
+    schema: String,
+    source_capture_blake3: String,
+    shapes: Vec<EventShapeInput>,
+}
+
+#[derive(Deserialize)]
+struct EventShapeInput {
+    kind: u16,
+    content: StringShapeInput,
+    tags: Vec<TagShapeInput>,
+}
+
+#[derive(Deserialize)]
+struct StringShapeInput {
+    utf8_bytes: usize,
+    json_bytes: usize,
+    class: StringClassInput,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StringClassInput {
+    Empty,
+    LowerHex64,
+    Url,
+    Plain,
+}
+
+#[derive(Deserialize)]
+struct TagShapeInput {
+    name: TagNameShapeInput,
+    values: Vec<StringShapeInput>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "class", rename_all = "snake_case")]
+enum TagNameShapeInput {
+    PublicProtocol {
+        value: String,
+    },
+    SingleLetter {
+        value: char,
+    },
+    Synthetic {
+        utf8_bytes: usize,
+        json_bytes: usize,
+    },
+}
+
+fn generate_shape_corpus(
+    dir: &Path,
+    config: &ProbeConfig,
+    shape_path: &Path,
+) -> Result<Corpus, ProbeError> {
+    let started = Instant::now();
+    let source = fs::read(shape_path)?;
+    let corpus: ShapeCorpusInput = serde_json::from_slice(&source)?;
+    if corpus.schema != "nmp-private-free-event-shapes-v1" {
+        return Err(format!("unsupported shape corpus schema {}", corpus.schema).into());
+    }
+    if corpus.source_capture_blake3.len() != 64
+        || !corpus
+            .source_capture_blake3
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("shape corpus source_capture_blake3 must be 64 lowercase hex bytes".into());
+    }
+    if corpus.shapes.is_empty() {
+        return Err("shape corpus contains no shapes".into());
+    }
+
+    let path = dir.join("events.jsonl");
+    let mut writer = BufWriter::new(File::create(&path)?);
+    let mut first_id = None;
+    let mut last_id = String::new();
+    let kind_one_shape = corpus
+        .shapes
+        .iter()
+        .position(|shape| shape.kind == Kind::TextNote.as_u16())
+        .unwrap_or(0);
+    for ordinal in 0..config.events {
+        let shape_index = if ordinal == 0 || ordinal + 1 == config.events {
+            kind_one_shape
+        } else {
+            ordinal.wrapping_mul(7_919) % corpus.shapes.len()
+        };
+        let shape = &corpus.shapes[shape_index];
+        let keys = Keys::parse(&format!("{:064x}", ordinal as u128 + 1))?;
+        let content = shaped_string(&shape.content, ordinal as u64)?;
+        let tags = shape
+            .tags
+            .iter()
+            .enumerate()
+            .map(|(tag_index, shape)| shaped_tag(shape, ordinal as u64, tag_index, config.events))
+            .collect::<Result<Vec<_>, ProbeError>>()?;
+        let event = EventBuilder::new(Kind::from(shape.kind), content)
+            .tags(tags)
+            .custom_created_at(Timestamp::from(BASE_CREATED_AT + ordinal as u64))
+            .sign_with_keys(&keys)?;
+        first_id.get_or_insert_with(|| event.id.to_hex());
+        last_id = event.id.to_hex();
+        writeln!(writer, "{}", event.as_json())?;
+    }
+    writer.flush()?;
+
+    Ok(Corpus {
+        bytes: fs::metadata(&path)?.len(),
+        path,
+        selection: Filter {
+            since: Some(BASE_CREATED_AT),
+            until: Some(BASE_CREATED_AT + config.events as u64 - 1),
+            limit: None,
+            ..Filter::default()
+        },
+        mode: "representative-private-free-shapes",
+        shape_source_blake3: Some(corpus.source_capture_blake3),
+        first_id: first_id.expect("nonempty corpus"),
+        last_id,
+        generation: started.elapsed(),
+    })
+}
+
+fn shaped_tag(
+    shape: &TagShapeInput,
+    ordinal: u64,
+    tag_index: usize,
+    events: usize,
+) -> Result<Tag, ProbeError> {
+    let name = match &shape.name {
+        TagNameShapeInput::PublicProtocol { value } => value.clone(),
+        TagNameShapeInput::SingleLetter { value } => value.to_string(),
+        TagNameShapeInput::Synthetic {
+            utf8_bytes,
+            json_bytes,
+        } => shaped_text(*utf8_bytes, *json_bytes, ordinal)?,
+    };
+    let mut atoms = Vec::with_capacity(shape.values.len() + 1);
+    atoms.push(name.clone());
+    for (value_index, value) in shape.values.iter().enumerate() {
+        atoms.push(shaped_tag_value(
+            &name,
+            value,
+            ordinal,
+            tag_index,
+            value_index,
+            events,
+        )?);
+    }
+    Ok(Tag::parse(atoms)?)
+}
+
+fn shaped_tag_value(
+    name: &str,
+    shape: &StringShapeInput,
+    ordinal: u64,
+    tag_index: usize,
+    value_index: usize,
+    events: usize,
+) -> Result<String, ProbeError> {
+    if name == "expiration" && value_index == 0 && shape.utf8_bytes >= 10 {
+        // Keep generated NIP-40 rows alive independently of the wall clock on
+        // the machine reproducing the benchmark. This is outside the timed
+        // path and remains a ten-digit Unix timestamp until 2096.
+        let future = 4_000_000_000_u64.saturating_add(events as u64);
+        let value = future.to_string();
+        if value.len() == shape.utf8_bytes && value.len() + 2 == shape.json_bytes {
+            return Ok(value);
+        }
+    }
+    if matches!(shape.class, StringClassInput::LowerHex64) {
+        let seed = ordinal
+            .wrapping_mul(1_000_003)
+            .wrapping_add((tag_index as u64) << 16)
+            .wrapping_add(value_index as u64);
+        let value = format!("{seed:064x}");
+        if value.len() == shape.utf8_bytes && value.len() + 2 == shape.json_bytes {
+            return Ok(value);
+        }
+    }
+    shaped_string(
+        shape,
+        ordinal ^ ((tag_index as u64) << 32) ^ value_index as u64,
+    )
+}
+
+fn shaped_string(shape: &StringShapeInput, seed: u64) -> Result<String, ProbeError> {
+    match shape.class {
+        StringClassInput::Empty => {
+            if shape.utf8_bytes != 0 || shape.json_bytes != 2 {
+                return Err("empty string shape has inconsistent byte counts".into());
+            }
+            Ok(String::new())
+        }
+        StringClassInput::LowerHex64 if shape.utf8_bytes == 64 && shape.json_bytes == 66 => {
+            Ok(format!("{seed:064x}"))
+        }
+        StringClassInput::Url | StringClassInput::Plain | StringClassInput::LowerHex64 => {
+            shaped_text(shape.utf8_bytes, shape.json_bytes, seed)
+        }
+    }
+}
+
+fn shaped_text(utf8_bytes: usize, json_bytes: usize, seed: u64) -> Result<String, ProbeError> {
+    let base_json_bytes = utf8_bytes.checked_add(2).ok_or("shape byte overflow")?;
+    let overhead = json_bytes
+        .checked_sub(base_json_bytes)
+        .ok_or("JSON string is shorter than its UTF-8 payload plus quotes")?;
+    for controls in (0..=utf8_bytes.min(overhead / 5)).rev() {
+        let quotes = overhead - controls * 5;
+        if controls + quotes > utf8_bytes {
+            continue;
+        }
+        let plain = utf8_bytes - controls - quotes;
+        let mut value = String::with_capacity(utf8_bytes);
+        value.extend(std::iter::repeat_n('\0', controls));
+        value.extend(std::iter::repeat_n('"', quotes));
+        let fill = char::from(b'a' + u8::try_from(seed % 26)?);
+        value.extend(std::iter::repeat_n(fill, plain));
+        if value.len() == utf8_bytes && serde_json::to_string(&value)?.len() == json_bytes {
+            return Ok(value);
+        }
+    }
+    Err(
+        format!("cannot synthesize string with utf8_bytes={utf8_bytes} json_bytes={json_bytes}")
+            .into(),
+    )
 }
 
 fn spawn_server(
@@ -1010,27 +1258,33 @@ fn serve_corpus(
     })
 }
 
-fn parse_ordinal(content: &str) -> Result<usize, ProbeError> {
-    let marker = "ordinal=";
-    let start = content.find(marker).ok_or("event content has no ordinal")? + marker.len();
-    let end = content[start..]
-        .find(' ')
-        .map(|offset| start + offset)
-        .unwrap_or(content.len());
-    Ok(content[start..end].parse()?)
+fn parse_ordinal(created_at: Timestamp) -> Result<usize, ProbeError> {
+    let ordinal = created_at
+        .as_secs()
+        .checked_sub(BASE_CREATED_AT)
+        .ok_or("event timestamp precedes corpus base")?;
+    Ok(usize::try_from(ordinal)?)
 }
 
 fn selection_to_nostr(selection: &Filter) -> Result<nostr::Filter, ProbeError> {
-    let authors = match &selection.authors {
-        Some(Binding::Literal(authors)) => authors,
-        _ => return Err("probe selection must have literal authors".into()),
-    };
     let mut filter = nostr::Filter::new();
     if let Some(kinds) = &selection.kinds {
         filter = filter.kinds(kinds.iter().copied().map(Kind::from));
     }
-    for author in authors {
-        filter = filter.author(nostr::PublicKey::parse(author)?);
+    match &selection.authors {
+        Some(Binding::Literal(authors)) => {
+            for author in authors {
+                filter = filter.author(nostr::PublicKey::parse(author)?);
+            }
+        }
+        Some(_) => return Err("probe selection authors must be literal".into()),
+        None => {}
+    }
+    if let Some(since) = selection.since {
+        filter = filter.since(Timestamp::from(since));
+    }
+    if let Some(until) = selection.until {
+        filter = filter.until(Timestamp::from(until));
     }
     Ok(filter)
 }
@@ -1123,4 +1377,50 @@ fn trim_allocator() -> bool {
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 fn trim_allocator() -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn string_shape(
+        utf8_bytes: usize,
+        json_bytes: usize,
+        class: StringClassInput,
+    ) -> StringShapeInput {
+        StringShapeInput {
+            utf8_bytes,
+            json_bytes,
+            class,
+        }
+    }
+
+    #[test]
+    fn shaped_text_preserves_utf8_and_json_costs() {
+        for (utf8_bytes, json_bytes) in [(0, 2), (5, 7), (3, 7), (3, 12)] {
+            let value = shaped_text(utf8_bytes, json_bytes, 3).unwrap();
+            assert_eq!(value.len(), utf8_bytes);
+            assert_eq!(serde_json::to_string(&value).unwrap().len(), json_bytes);
+        }
+    }
+
+    #[test]
+    fn generated_expiration_stays_live_and_preserves_shape() {
+        let shape = string_shape(10, 12, StringClassInput::Plain);
+        let value = shaped_tag_value("expiration", &shape, 0, 0, 0, 1_000_000).unwrap();
+        assert_eq!(value, "4001000000");
+        assert_eq!(serde_json::to_string(&value).unwrap().len(), 12);
+    }
+
+    #[test]
+    fn lower_hex_values_are_deterministic_and_shape_exact() {
+        let shape = string_shape(64, 66, StringClassInput::LowerHex64);
+        let first = shaped_tag_value("e", &shape, 7, 2, 1, 10).unwrap();
+        let second = shaped_tag_value("e", &shape, 7, 2, 1, 10).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64);
+        assert!(first
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    }
 }
