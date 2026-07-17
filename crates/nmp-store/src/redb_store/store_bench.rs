@@ -905,6 +905,7 @@ pub fn run_prepared_redb_unified_index_bench(
     let process_before = sample_process();
     let started = Instant::now();
     let mut commit_ns = 0u64;
+    let mut commit_latencies = Vec::with_capacity(corpus.batches.len());
 
     for batch in &corpus.batches {
         let write_txn = db.begin_write().map_err(|error| error.to_string())?;
@@ -1004,7 +1005,9 @@ pub fn run_prepared_redb_unified_index_bench(
         drop(events);
         let commit_started = Instant::now();
         write_txn.commit().map_err(|error| error.to_string())?;
-        commit_ns = commit_ns.saturating_add(duration_ns(commit_started));
+        let elapsed = duration_ns(commit_started);
+        commit_ns = commit_ns.saturating_add(elapsed);
+        commit_latencies.push(elapsed);
     }
     let wall_ns = duration_ns(started);
     let process = sample_process().delta(process_before);
@@ -1086,6 +1089,13 @@ pub fn run_prepared_redb_unified_index_bench(
         transactions: corpus.batches.len() as u64,
         wall_ns,
         commit_ns,
+        commit_p50_ns: nearest_rank(&commit_latencies, 50),
+        commit_p95_ns: nearest_rank(&commit_latencies, 95),
+        commit_p99_ns: nearest_rank(&commit_latencies, 99),
+        maintenance_ns: None,
+        ending_write_buffer_bytes: None,
+        l0_tables: None,
+        sst_tables: None,
         reopen_ns,
         cpu_ns: process.cpu_ns,
         allocation_ops: process.allocation_ops,
