@@ -1,0 +1,88 @@
+{
+  "schema": "nmp-ordered-assembler-summary-v1",
+  "issues": [616, 617],
+  "git_commit": "6eb3832b21164db91e4e2a0890450ef1245c21a7",
+  "host": {
+    "cpu": "Intel(R) Core(TM) Ultra 7 265",
+    "logical_cpus": 20,
+    "os": "linux",
+    "arch": "x86_64"
+  },
+  "scope": {
+    "events": 100000,
+    "payload_bytes": 128,
+    "relays": 1,
+    "repetitions": 3,
+    "measurement_order": "alternating baseline then candidate",
+    "exactness": "Every run required the expected relay-frame count, live-query cardinality, reopened Redb cardinality, relay provenance, and corpus boundary IDs."
+  },
+  "baseline": {
+    "queue_capacity": 1024,
+    "verifier_workers": 2,
+    "verify_batch_events": 128,
+    "engine_batch_events": 128,
+    "engine_batch_bytes": 8388608,
+    "engine_batch_wait_us": 0,
+    "median_active_events_per_second": 10124.05,
+    "median_end_to_end_ms_including_quiet_confirmation": 10978.89,
+    "median_first_row_ms": 15.25,
+    "median_apply_latency_p95_ms": 1984.53,
+    "median_peak_rss_mib": 93.62,
+    "median_store_transactions": 783,
+    "median_commit_ms": 8236.09
+  },
+  "candidate": {
+    "queue_capacity": 8192,
+    "verifier_workers": 8,
+    "verify_batch_events": 512,
+    "engine_batch_events": 4096,
+    "engine_batch_bytes": 8388608,
+    "engine_batch_wait_us": 0,
+    "median_active_events_per_second": 57421.80,
+    "median_end_to_end_ms_including_quiet_confirmation": 2842.41,
+    "median_first_row_ms": 12.20,
+    "median_apply_latency_p95_ms": 651.44,
+    "median_peak_rss_mib": 134.05,
+    "median_store_transactions": 29,
+    "median_commit_ms": 750.73,
+    "max_observed_batch_events": 4096,
+    "max_observed_conservative_batch_bytes": 1310720
+  },
+  "relative_change": {
+    "active_throughput_multiple": 5.67,
+    "end_to_end_speedup_multiple": 3.86,
+    "apply_latency_p95_reduction_percent": 67.17,
+    "peak_rss_increase_percent": 43.19,
+    "store_transaction_reduction_percent": 96.30,
+    "commit_time_reduction_percent": 90.88
+  },
+  "million_tiny_events": {
+    "events": 1000000,
+    "payload_bytes": 128,
+    "active_events_per_second": 49173.38,
+    "end_to_end_ms_including_quiet_confirmation": 21437.63,
+    "first_row_ms": 34.85,
+    "apply_latency_p95_ms": 937.81,
+    "peak_rss_mib": 346.58,
+    "database_mib": 2056.00,
+    "store_transactions": 249,
+    "commit_ms": 9046.68,
+    "exact_reopen_verified": true
+  },
+  "duplicate_replay": {
+    "unique_events": 100000,
+    "passes": 2,
+    "relay_frames": 200000,
+    "aggregate_active_frames_per_second": 133633.83,
+    "verifier_candidates": 100000,
+    "exact_reopen_verified": true
+  },
+  "decision": {
+    "merge_candidate": true,
+    "issue_616_two_x_gate_met": true,
+    "parent_initial_ingest_gate_met": false,
+    "parent_duplicate_gate_met": false,
+    "large_payload_optimization_in_scope": false,
+    "reason": "The ordered assembler removes transaction-count amplification without weakening ordering or backpressure and exceeds the issue's two-times production-path gate. Initial and duplicate throughput still miss the parent epic gates, so storage commit/index work remains open. The byte ceiling is retained only as a memory safety bound; large payload throughput is not an optimization target."
+  }
+}

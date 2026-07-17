@@ -32,6 +32,13 @@ fn main() -> Result<(), ProbeError> {
             "--engine-batch-size" => {
                 config.engine_batch_size = value(&mut args, "--engine-batch-size")?
             }
+            "--engine-batch-bytes" => {
+                config.engine_batch_bytes = value(&mut args, "--engine-batch-bytes")?
+            }
+            "--engine-batch-wait-us" => {
+                config.engine_batch_wait =
+                    Duration::from_micros(value(&mut args, "--engine-batch-wait-us")?)
+            }
             "--visible-limit" => config.visible_limit = Some(value(&mut args, "--visible-limit")?),
             "--unlimited" => config.visible_limit = None,
             "--trim-allocator-during-ingest" => config.trim_allocator_during_ingest = true,
@@ -99,6 +106,8 @@ fn print_help() {
          --verifier-workers N  native signature workers; 0 uses default 2 (maximum 16)\n\
          --verify-batch-size N  signature verification batch ceiling (default 128)\n\
          --engine-batch-size N  store transaction batch ceiling (default 128)\n\
+         --engine-batch-bytes N  conservative encoded-byte ceiling (default 8388608)\n\
+         --engine-batch-wait-us N  maximum EVENT coalescing wait (default 0)\n\
          --visible-limit N   live query window (default 200)\n\
          --unlimited         retain every matching row in the live query\n\
          --trim-allocator-during-ingest\n\

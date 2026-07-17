@@ -38,6 +38,8 @@ pub struct ProbeConfig {
     pub verifier_workers: usize,
     pub verify_batch_size: usize,
     pub engine_batch_size: usize,
+    pub engine_batch_bytes: usize,
+    pub engine_batch_wait: Duration,
     pub visible_limit: Option<usize>,
     pub trim_allocator_during_ingest: bool,
     pub frame_delay: Duration,
@@ -58,6 +60,8 @@ impl Default for ProbeConfig {
             verifier_workers: 0,
             verify_batch_size: 128,
             engine_batch_size: 128,
+            engine_batch_bytes: 8 * 1024 * 1024,
+            engine_batch_wait: Duration::ZERO,
             visible_limit: Some(200),
             trim_allocator_during_ingest: false,
             frame_delay: Duration::ZERO,
@@ -87,6 +91,9 @@ impl ProbeConfig {
         }
         if self.engine_batch_size == 0 {
             return Err("engine-batch-size must be nonzero".into());
+        }
+        if self.engine_batch_bytes == 0 {
+            return Err("engine-batch-bytes must be nonzero".into());
         }
         if self.visible_limit == Some(0) {
             return Err("visible-limit must be nonzero".into());
@@ -119,6 +126,8 @@ pub struct ProbeResult {
     pub verifier_workers: usize,
     pub verify_batch_size: usize,
     pub engine_batch_size: usize,
+    pub engine_batch_bytes: usize,
+    pub engine_batch_wait_us: u128,
     pub visible_limit: Option<usize>,
     pub delivery_mode: &'static str,
     pub trim_allocator_during_ingest: bool,
@@ -402,6 +411,8 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     let verifier_workers = config.verifier_workers;
     let verify_batch_size = config.verify_batch_size;
     let engine_batch_size = config.engine_batch_size;
+    let engine_batch_bytes = config.engine_batch_bytes;
+    let engine_batch_wait = config.engine_batch_wait;
     let (engine_thread, handle) = EngineThread::spawn(
         store,
         FixtureDirectory::new(),
@@ -416,6 +427,8 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             verifier_workers,
             max_verify_batch: verify_batch_size,
             max_engine_batch: engine_batch_size,
+            max_engine_batch_bytes: engine_batch_bytes,
+            max_engine_batch_wait: engine_batch_wait,
             reconnect_delay_initial: Some(Duration::from_secs(3600)),
             reconnect_jitter_max: Some(Duration::ZERO),
             ..PoolConfig::default()
@@ -664,6 +677,8 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         verifier_workers,
         verify_batch_size,
         engine_batch_size,
+        engine_batch_bytes,
+        engine_batch_wait_us: engine_batch_wait.as_micros(),
         visible_limit: config.visible_limit,
         delivery_mode: if config.visible_limit.is_some() {
             "bounded-latest-window"
@@ -744,6 +759,8 @@ fn ingest_attribution_json() -> serde_json::Value {
         "engine": {
             "bridge_batches": engine.bridge_batches, "bridge_frames": engine.bridge_frames,
             "max_bridge_batch": engine.max_bridge_batch, "bridge_send_ns": engine.bridge_send_ns,
+            "bridge_event_bytes": engine.bridge_event_bytes,
+            "max_bridge_batch_bytes": engine.max_bridge_batch_bytes,
             "bridge_applied_wait_ns": engine.bridge_applied_wait_ns,
             "engine_batch_process_ns": engine.engine_batch_process_ns
         },
