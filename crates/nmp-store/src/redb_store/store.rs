@@ -9,15 +9,16 @@ use super::query::{
     VariableOrderedCursor,
 };
 use super::schema::{
-    persist_err, EventKey, RelayKey, ADDR_INDEX, ADDR_TOMBSTONES, BY_AUTHOR, BY_AUTHOR_KIND,
-    BY_CREATED_AT, BY_KIND, BY_TAG, COVERAGE, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS,
+    persist_err, EventKey, RelayKey, ADDR_INDEX, ADDR_TOMBSTONES, BY_AUTHOR, BY_CREATED_AT,
+    BY_KIND, BY_TAG, COVERAGE, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS,
     EVENT_STORE_META, EXPIRATION_INDEX, INDEX_CARDINALITY, INDEX_CARDINALITY_META,
     INDEX_CARDINALITY_SAMPLE_KEY, INDEX_CARDINALITY_SAMPLE_META, INDEX_CARDINALITY_VERSION,
-    INDEX_CARDINALITY_VERSION_KEY, LEGACY_EVENT_TABLES, OUTBOX_ATTEMPTS, OUTBOX_ATTEMPT_DETAILS,
-    OUTBOX_CORRELATIONS, OUTBOX_DEADLINES, OUTBOX_DEADLINES_BY_INTENT, OUTBOX_DISPLACED,
-    OUTBOX_INTENTS, OUTBOX_LANES, OUTBOX_META, OUTBOX_RECEIPTS, OUTBOX_ROUTE_REVISIONS,
-    PENDING_EPHEMERAL_RECEIPTS_KEY, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_META, RELAY_REFS,
-    SCHEMA_META, SCHEMA_VERSION, SCHEMA_VERSION_KEY, TOMBSTONES,
+    INDEX_CARDINALITY_VERSION_KEY, LEGACY_BY_AUTHOR_KIND, LEGACY_EVENT_TABLES, OUTBOX_ATTEMPTS,
+    OUTBOX_ATTEMPT_DETAILS, OUTBOX_CORRELATIONS, OUTBOX_DEADLINES, OUTBOX_DEADLINES_BY_INTENT,
+    OUTBOX_DISPLACED, OUTBOX_INTENTS, OUTBOX_LANES, OUTBOX_META, OUTBOX_RECEIPTS,
+    OUTBOX_ROUTE_REVISIONS, PENDING_EPHEMERAL_RECEIPTS_KEY, PREVIOUS_SCHEMA_VERSION,
+    REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_META, RELAY_REFS, SCHEMA_META, SCHEMA_VERSION,
+    SCHEMA_VERSION_KEY, TOMBSTONES,
 };
 #[cfg(any(test, feature = "bench-instrumentation"))]
 use super::AtomicU64;
@@ -118,7 +119,7 @@ impl RedbStore {
 
     /// Open (creating if absent) a `redb` database file at `path`.
     ///
-    /// A healthy v6 database takes only a read transaction: the explicit
+    /// A healthy v7 database takes only a read transaction: the explicit
     /// schema marker proves every table exists, and one exact metadata count
     /// tells us whether crash-abandoned ephemeral receipts need recovery.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, redb::Error> {
@@ -128,8 +129,8 @@ impl RedbStore {
                 .create(path)
         })?;
         let db = &registered.value;
-        // Schema v6 deliberately carries no event-row migration. Refuse any
-        // older NMP event epoch before creating a single v6 table: otherwise
+        // Schema v6 deliberately carried no event-row migration. Refuse any
+        // older NMP event epoch before creating a single v7 table: otherwise
         // canonical events would appear empty while unversioned durable
         // outbox/coverage/tombstone facts from the old epoch remained live.
         // A caller opting into this breaking release must recreate the whole
@@ -153,15 +154,16 @@ impl RedbStore {
 
         let mut _open_write_transactions = 0;
         if has_schema_marker {
-            let (needs_cardinality_rebuild, pending_ephemeral) = {
+            let (needs_schema_migration, needs_cardinality_rebuild, pending_ephemeral) = {
                 let read_txn = db.begin_read()?;
                 let schema_meta = read_txn.open_table(SCHEMA_META)?;
                 let version = schema_meta
                     .get(SCHEMA_VERSION_KEY)?
                     .map(|guard| guard.value());
-                if version != Some(SCHEMA_VERSION) {
+                if version != Some(SCHEMA_VERSION) && version != Some(PREVIOUS_SCHEMA_VERSION) {
                     return Err(redb::Error::UpgradeRequired(SCHEMA_VERSION as u8));
                 }
+                let needs_schema_migration = version == Some(PREVIOUS_SCHEMA_VERSION);
                 let cardinality_meta = read_txn.open_table(INDEX_CARDINALITY_META)?;
                 let cardinality_version = cardinality_meta
                     .get(INDEX_CARDINALITY_VERSION_KEY)?
@@ -187,14 +189,21 @@ impl RedbStore {
                     })?
                     .unwrap_or(0);
                 (
-                    cardinality_version != Some(INDEX_CARDINALITY_VERSION)
+                    needs_schema_migration,
+                    needs_schema_migration
+                        || cardinality_version != Some(INDEX_CARDINALITY_VERSION)
                         || cardinality_sample_key_len.is_none(),
                     pending_ephemeral,
                 )
             };
-            if needs_cardinality_rebuild || pending_ephemeral > 0 {
+            if needs_schema_migration || needs_cardinality_rebuild || pending_ephemeral > 0 {
                 let write_txn = db.begin_write()?;
                 {
+                    if needs_schema_migration {
+                        write_txn.delete_table(LEGACY_BY_AUTHOR_KIND)?;
+                        let mut schema_meta = write_txn.open_table(SCHEMA_META)?;
+                        schema_meta.insert(SCHEMA_VERSION_KEY, SCHEMA_VERSION)?;
+                    }
                     if needs_cardinality_rebuild {
                         let mut cardinality_sample_meta =
                             write_txn.open_table(INDEX_CARDINALITY_SAMPLE_META)?;
@@ -218,14 +227,12 @@ impl RedbStore {
                         let by_created_at = write_txn.open_table(BY_CREATED_AT)?;
                         let by_author = write_txn.open_table(BY_AUTHOR)?;
                         let by_kind = write_txn.open_table(BY_KIND)?;
-                        let by_author_kind = write_txn.open_table(BY_AUTHOR_KIND)?;
                         let by_tag = write_txn.open_table(BY_TAG)?;
                         let mut cardinality = write_txn.open_table(INDEX_CARDINALITY)?;
                         rebuild_index_cardinality(
                             &by_created_at,
                             &by_author,
                             &by_kind,
-                            &by_author_kind,
                             &by_tag,
                             &mut cardinality,
                             &sample_key,
@@ -276,7 +283,6 @@ impl RedbStore {
                 write_txn.open_table(BY_CREATED_AT)?;
                 write_txn.open_table(BY_AUTHOR)?;
                 write_txn.open_table(BY_KIND)?;
-                write_txn.open_table(BY_AUTHOR_KIND)?;
                 write_txn.open_table(BY_TAG)?;
                 write_txn.open_table(INDEX_CARDINALITY)?;
                 let mut cardinality_meta = write_txn.open_table(INDEX_CARDINALITY_META)?;
@@ -754,16 +760,6 @@ impl RedbStore {
                     &mut project_if_visible,
                 )
             }
-            OrderedIndex::AuthorKind => {
-                let index = read_txn.open_table(BY_AUTHOR_KIND).map_err(persist_err)?;
-                self.scan_fixed_ordered(
-                    &index,
-                    &plan.prefixes,
-                    window,
-                    Some(limit),
-                    &mut project_if_visible,
-                )
-            }
             OrderedIndex::Tag(_) => {
                 let index = read_txn.open_table(BY_TAG).map_err(persist_err)?;
                 self.scan_variable_ordered(
@@ -889,16 +885,6 @@ impl RedbStore {
             }
             OrderedIndex::Kind => {
                 let index = read_txn.open_table(BY_KIND).map_err(persist_err)?;
-                self.scan_fixed_ordered(
-                    &index,
-                    &plan.prefixes,
-                    window,
-                    limit,
-                    &mut materialize_if_visible,
-                )
-            }
-            OrderedIndex::AuthorKind => {
-                let index = read_txn.open_table(BY_AUTHOR_KIND).map_err(persist_err)?;
                 self.scan_fixed_ordered(
                     &index,
                     &plan.prefixes,

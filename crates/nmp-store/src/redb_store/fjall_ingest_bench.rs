@@ -20,9 +20,8 @@ use serde::{Deserialize, Serialize};
 use super::ingest::insert_with_tables;
 use super::ingest_txn::{GovernedIngestTxn, GovernedStringMap};
 use super::query::{
-    author_cardinality_key, author_kind_cardinality_key, by_author_key, by_author_kind_key,
-    by_kind_key, created_at_key, global_cardinality_key, kind_cardinality_key, tag_cardinality_key,
-    tag_index_key,
+    author_cardinality_key, by_author_key, by_kind_key, created_at_key, global_cardinality_key,
+    kind_cardinality_key, tag_cardinality_key, tag_index_key,
 };
 use super::schema::EventKey;
 use super::{
@@ -78,7 +77,6 @@ struct FjallKeyspaces {
     by_created_at: SingleWriterTxKeyspace,
     by_author: SingleWriterTxKeyspace,
     by_kind: SingleWriterTxKeyspace,
-    by_author_kind: SingleWriterTxKeyspace,
     by_tag: SingleWriterTxKeyspace,
     cardinality: SingleWriterTxKeyspace,
     outbox_intents: SingleWriterTxKeyspace,
@@ -110,7 +108,6 @@ impl FjallKeyspaces {
             by_created_at: open("governed_by_created_at")?,
             by_author: open("governed_by_author")?,
             by_kind: open("governed_by_kind")?,
-            by_author_kind: open("governed_by_author_kind")?,
             by_tag: open("governed_by_tag")?,
             cardinality: open("governed_cardinality")?,
             outbox_intents: open("governed_outbox_intents")?,
@@ -261,10 +258,6 @@ impl<'borrow, 'txn> FjallIngestTxn<'borrow, 'txn> {
             ),
             (&self.keyspaces.by_author, by_author_key(event).to_vec()),
             (&self.keyspaces.by_kind, by_kind_key(event).to_vec()),
-            (
-                &self.keyspaces.by_author_kind,
-                by_author_kind_key(event).to_vec(),
-            ),
         ];
         for (keyspace, index_key) in fixed {
             if insert {
@@ -291,10 +284,6 @@ impl<'borrow, 'txn> FjallIngestTxn<'borrow, 'txn> {
         self.adjust_cardinality(global_cardinality_key(), delta)?;
         self.adjust_cardinality(author_cardinality_key(&event.pubkey), delta)?;
         self.adjust_cardinality(kind_cardinality_key(event.kind), delta)?;
-        self.adjust_cardinality(
-            author_kind_cardinality_key(&event.pubkey, event.kind),
-            delta,
-        )?;
         for cardinality in tag_cardinalities {
             self.adjust_cardinality(cardinality, delta)?;
         }
@@ -825,7 +814,7 @@ mod tests {
         let read = database.read_tx();
         assert_eq!(read.len(&keyspaces.expiration).unwrap(), 1);
         assert_eq!(read.len(&keyspaces.by_tag).unwrap(), 1);
-        assert_eq!(read.len(&keyspaces.cardinality).unwrap(), 5);
+        assert_eq!(read.len(&keyspaces.cardinality).unwrap(), 4);
     }
 
     #[test]
