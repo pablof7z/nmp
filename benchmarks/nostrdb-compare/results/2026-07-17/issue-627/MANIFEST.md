@@ -94,11 +94,55 @@ The matrix records `git_dirty: false`, the representative corpus BLAKE3,
 alternating fresh-process order, prepared and applied record bytes, process
 writes, Redb sizes, per-table cardinalities, and exact reopen for every run.
 
+Run the sampled-cardinality equivalent-writer matrix from clean harness commit
+`5b1d0d594fd0e5502cb840ba5ec8319e449089e1`:
+
+```sh
+cargo run -p nmp-store --release \
+  --features bench-instrumentation \
+  --example store_decomposition -- \
+  cardinality-matrix \
+  /dev/shm/nmp-627-representative-100k.jsonl \
+  benchmarks/nostrdb-compare/results/2026-07-17/issue-627/sampled-cardinality-matrix.json \
+  15
+```
+
+Run the exact-versus-sampled production/query falsifiers. The benchmark-only
+`exact` mode keeps every production event in the planner sidecar; `sampled`
+uses the production keyed one-in-sixteen predicate. Both modes otherwise run
+the same governed `RedbStore` code.
+
+```sh
+# Query matrix: clean harness commit 25e57c7e703a636afb5193fb1c56655576d24bdb
+cargo run -p nmp-store --release \
+  --features bench-instrumentation \
+  --example cardinality_query_bench -- \
+  matrix \
+  /dev/shm/nmp-627-representative-100k.jsonl \
+  benchmarks/nostrdb-compare/results/2026-07-17/issue-627/sampled-cardinality-query-matrix.json \
+  50 5
+
+# Production import matrix: clean harness commit 4c40c9f8b92c53931e2c8b3f1b136590c1eec523
+cargo run -p nmp-store --release \
+  --features bench-instrumentation \
+  --example cardinality_query_bench -- \
+  matrix \
+  /dev/shm/nmp-627-representative-100k.jsonl \
+  benchmarks/nostrdb-compare/results/2026-07-17/issue-627/sampled-cardinality-production-import-matrix.json \
+  1 15
+```
+
+Every child records `git_dirty: false`; all exact/sample pairs returned the
+same canonical and query row counts.
+
 ## SHA-256
 
 ```text
-954821239673f6e22aa0621049d8a79ee821c6ca047e2c658e040120422d1a32  SUMMARY.md
+2a178ded6d401a0e3b22c9a5841844c76af14f7ec356676d6d9f3fab3c927d10  SUMMARY.md
 01138a4a6e850f5ae58d1c8b97a8f02e8503656e7646575894220336be566e6e  compact-index-id-matrix.json
+df15801f9b648521571d69d0a6b0333564af1927d54f6ee8082d30dd2bc4bee9  sampled-cardinality-matrix.json
+a6bf5396903fc923d4051e4ba1d4470dee25c85e783c5d7cb97419a1a7fd8131  sampled-cardinality-query-matrix.json
+d02e1fe934c6783c228e5e5f1d86e45e264bd9ecb5952e0f1071ee3a51cc2bd9  sampled-cardinality-production-import-matrix.json
 be1579a8b51637386243455acd1ea4963352efcc88e937f1ac02333f69259415  crash-probe.json
 1d8a1628210d3c0fd850ebdf4edc40113bb813eab184dd52289459e079e3378a  memory-1.json
 086d1bea6c2d6f43e15465020fd3c6c94b9a64654cd29ed7a6c2f31b41e6ce0f  memory-2.json

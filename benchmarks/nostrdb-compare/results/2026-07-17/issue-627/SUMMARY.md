@@ -164,3 +164,47 @@ the repeated ordered ID materially reduces bytes but does not approach #627's
 lookups, migration, and query logic a correct implementation would require.
 This rules out straightforward ordered-ID truncation as the massive lever; it
 does not relax exact tie ordering or discard the observed write reduction.
+
+## Sampled planner-cardinality implementation
+
+The representative decomposition exposed a different high-cardinality write:
+exact query-planner counts create one durable Redb row for nearly every unique
+author, author-kind pair, and tag value. Those counts choose a physical index;
+they do not determine query membership, ordering, replacement, deletion, or
+coverage semantics.
+
+The implemented sidecar counts a keyed uniform one-in-sixteen event sample.
+The 32-byte per-store key prevents a relay from cheaply grinding event IDs to
+control planner estimates. Insert and removal use the same stable predicate;
+the sampled delta commits with the exact event indexes. Sidecar version 2
+rebuilds from ordered-index ID suffixes under the persisted key before queries,
+and a healthy reopen remains read-only. Query execution and post-filtering are
+unchanged and exact.
+
+Fifteen alternating fresh-process pairs on the 100,000-event representative
+corpus measured the full equivalent index set:
+
+| Metric | Sampled / exact | Result |
+| --- | ---: | ---: |
+| throughput | 1.492x | 49.2% faster |
+| commit wall | 0.693x | 30.7% lower |
+| process writes | 0.750x | 25.0% lower |
+| Redb stored bytes | 0.885x | 11.5% lower |
+| peak RSS | 0.948x | 5.2% lower |
+
+That reduced writer is the physical ceiling. A separate fifteen-pair run
+through the real governed `RedbStore::insert_batch` path measured a paired
+median import ratio of 0.734: **26.6% faster** while producing the same 100,000
+canonical rows in every run.
+
+Five paired query runs then exercised complete kind, author, author-kind, tag,
+two-tag, 43-author union, and bounded kind/tag shapes. Every exact and sampled
+run returned identical row counts. The worst paired-median p95 ratio was 1.017
+for the 42,270-row complete-kind scan; every other shape was neutral or faster.
+This passes #627's no-more-than-10% selective-query regression gate without
+claiming that sampling makes reads faster.
+
+Decision: ship sampled planner cardinalities as a measured incremental win.
+They do not satisfy #627's 2x ingest gate alone, so #627 remains open; they do
+remove the first large, semantically unnecessary mutation class without
+changing any app-visible result or weakening event-store atomicity.

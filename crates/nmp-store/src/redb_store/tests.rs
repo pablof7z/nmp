@@ -1797,6 +1797,30 @@ fn missing_cardinality_epoch_rebuilds_atomically_from_fixed_ordered_indexes() {
 }
 
 #[test]
+fn malformed_cardinality_sample_key_fails_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("malformed-cardinality-sample-key.redb");
+    drop(RedbStore::open(&path).unwrap());
+
+    let db = Database::create(&path).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut sample_meta = write_txn.open_table(INDEX_CARDINALITY_SAMPLE_META).unwrap();
+        sample_meta
+            .insert(INDEX_CARDINALITY_SAMPLE_KEY, [1u8, 2].as_slice())
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+    drop(db);
+
+    assert!(matches!(
+        RedbStore::open(&path),
+        Err(redb::Error::Corrupted(message))
+            if message == "invalid cardinality sample key length"
+    ));
+}
+
+#[test]
 fn multi_value_tag_merge_deduplicates_one_event_without_candidate_set() {
     use nostr::{Alphabet, EventBuilder, Tag};
 

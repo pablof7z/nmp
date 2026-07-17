@@ -167,9 +167,14 @@ impl RedbStore {
                     .get(INDEX_CARDINALITY_VERSION_KEY)?
                     .map(|guard| guard.value());
                 let cardinality_sample_meta = read_txn.open_table(INDEX_CARDINALITY_SAMPLE_META)?;
-                let has_cardinality_sample_key = cardinality_sample_meta
+                let cardinality_sample_key_len = cardinality_sample_meta
                     .get(INDEX_CARDINALITY_SAMPLE_KEY)?
-                    .is_some();
+                    .map(|value| value.value().len());
+                if cardinality_sample_key_len.is_some_and(|len| len != 32) {
+                    return Err(redb::Error::Corrupted(
+                        "invalid cardinality sample key length".to_owned(),
+                    ));
+                }
                 let outbox_meta = read_txn.open_table(OUTBOX_META)?;
                 let pending_ephemeral = outbox_meta
                     .get(PENDING_EPHEMERAL_RECEIPTS_KEY)?
@@ -183,7 +188,7 @@ impl RedbStore {
                     .unwrap_or(0);
                 (
                     cardinality_version != Some(INDEX_CARDINALITY_VERSION)
-                        || !has_cardinality_sample_key,
+                        || cardinality_sample_key_len.is_none(),
                     pending_ephemeral,
                 )
             };
