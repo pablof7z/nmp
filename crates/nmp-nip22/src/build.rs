@@ -28,14 +28,18 @@ fn root_tags(root: &CommentRoot) -> Vec<Tag> {
             author,
             kind,
             identifier,
+            event_id,
         } => {
             let coordinate = CommentRoot::address_coordinate(*kind, author, identifier);
             tags.push(Tag::parse(["A", &coordinate]).expect("non-empty A row"));
             tags.push(Tag::parse(["K", &kind.to_string()]).expect("non-empty K row"));
             tags.push(Tag::parse(["P", &author.to_hex()]).expect("non-empty P row"));
+            if let Some(event_id) = event_id {
+                tags.push(Tag::parse(["E", &event_id.to_hex()]).expect("non-empty E row"));
+            }
         }
         CommentRoot::External(target) => {
-            tags.push(Tag::parse(["I", target.i_value()]).expect("non-empty I row"));
+            tags.push(Tag::parse(["I", &target.i_value()]).expect("non-empty I row"));
             tags.push(Tag::parse(["K", target.k_value()]).expect("non-empty K row"));
         }
     }
@@ -63,14 +67,21 @@ fn parent_mirrors_root_tags(root: &CommentRoot) -> Vec<Tag> {
             author,
             kind,
             identifier,
+            event_id,
         } => {
             let coordinate = CommentRoot::address_coordinate(*kind, author, identifier);
             tags.push(Tag::parse(["a", &coordinate]).expect("non-empty a row"));
             tags.push(Tag::parse(["k", &kind.to_string()]).expect("non-empty k row"));
             tags.push(Tag::parse(["p", &author.to_hex()]).expect("non-empty p row"));
+            if let Some(event_id) = event_id {
+                // NIP-22: "when the parent event is replaceable or
+                // addressable, also include an `e` tag referencing its id"
+                // -- the coordinate alone doesn't pin a specific revision.
+                tags.push(Tag::parse(["e", &event_id.to_hex()]).expect("non-empty e row"));
+            }
         }
         CommentRoot::External(target) => {
-            tags.push(Tag::parse(["i", target.i_value()]).expect("non-empty i row"));
+            tags.push(Tag::parse(["i", &target.i_value()]).expect("non-empty i row"));
             tags.push(Tag::parse(["k", target.k_value()]).expect("non-empty k row"));
         }
     }
@@ -172,9 +183,9 @@ mod tests {
         assert_eq!(
             tag_rows(&event),
             vec![
-                vec!["I".to_string(), "guid-123".to_string()],
+                vec!["I".to_string(), "podcast:item:guid:guid-123".to_string()],
                 vec!["K".to_string(), "podcast:item:guid".to_string()],
-                vec!["i".to_string(), "guid-123".to_string()],
+                vec!["i".to_string(), "podcast:item:guid:guid-123".to_string()],
                 vec!["k".to_string(), "podcast:item:guid".to_string()],
             ]
         );
@@ -200,7 +211,7 @@ mod tests {
         assert_eq!(
             tag_rows(&event),
             vec![
-                vec!["I".to_string(), "guid-123".to_string()],
+                vec!["I".to_string(), "podcast:item:guid:guid-123".to_string()],
                 vec!["K".to_string(), "podcast:item:guid".to_string()],
                 vec!["e".to_string(), parent_id.to_hex()],
                 vec!["k".to_string(), "1111".to_string()],
@@ -265,7 +276,9 @@ mod tests {
         );
     }
 
-    /// A top-level comment on an Address root mirrors the coordinate.
+    /// A top-level comment on an Address root with no pinned event id
+    /// mirrors the coordinate alone -- no `E`/`e` tag when there is nothing
+    /// to pin.
     #[test]
     fn top_level_comment_on_address_root_mirrors_the_coordinate() {
         let root_author = author();
@@ -273,6 +286,7 @@ mod tests {
             author: root_author,
             kind: 30023,
             identifier: "my-article".to_string(),
+            event_id: None,
         };
         let event = compose_top_level_comment(&root, author(), fixed_time(), "hi".to_string());
         let coordinate = format!("30023:{}:my-article", root_author.to_hex());
@@ -287,5 +301,104 @@ mod tests {
                 vec!["p".to_string(), root_author.to_hex()],
             ]
         );
+    }
+
+    /// #572 review finding 2: an Address root that DOES pin an event id
+    /// gets the accompanying `E`/`e` NIP-22 instructs writers to include
+    /// ("when the parent event is replaceable or addressable, also include
+    /// an `e` tag referencing its id") at both root and parent-mirror
+    /// scope.
+    #[test]
+    fn top_level_comment_on_address_root_with_event_id_also_emits_e() {
+        let root_author = author();
+        let pinned_id = EventId::from_slice(&[5; 32]).unwrap();
+        let root = CommentRoot::Address {
+            author: root_author,
+            kind: 30023,
+            identifier: "my-article".to_string(),
+            event_id: Some(pinned_id),
+        };
+        let event = compose_top_level_comment(&root, author(), fixed_time(), "hi".to_string());
+        let coordinate = format!("30023:{}:my-article", root_author.to_hex());
+        assert_eq!(
+            tag_rows(&event),
+            vec![
+                vec!["A".to_string(), coordinate.clone()],
+                vec!["K".to_string(), "30023".to_string()],
+                vec!["P".to_string(), root_author.to_hex()],
+                vec!["E".to_string(), pinned_id.to_hex()],
+                vec!["a".to_string(), coordinate],
+                vec!["k".to_string(), "30023".to_string()],
+                vec!["p".to_string(), root_author.to_hex()],
+                vec!["e".to_string(), pinned_id.to_hex()],
+            ]
+        );
+    }
+}
+
+/// #572 review finding 4 ("test honesty"): a REAL golden fixture -- a fixed
+/// secret key, timestamp, content, and podcast target -- whose composed
+/// event id and exact NIP-01 JSON body are pinned as literal constants and
+/// asserted identical in Rust (here), Swift (`NIP22Tests.swift`), and
+/// Kotlin (`NIP22Test.kt`). Structural identity (all composition happens in
+/// Rust behind FFI) is a fair argument for why Swift/Kotlin composing the
+/// SAME bytes is likely, but it isn't the demanded proof; this fixture
+/// pins the ACTUAL bytes so all three languages assert the same literal,
+/// not merely "my own two calls agree with each other".
+#[cfg(test)]
+pub(crate) mod golden_fixture {
+    /// A fixed, arbitrary-but-valid secp256k1 secret key (32 bytes of
+    /// `0x01`) -- deterministic across every language/run, never
+    /// `Keys::generate()`.
+    pub(crate) const SECRET_KEY_HEX: &str =
+        "0101010101010101010101010101010101010101010101010101010101010101";
+    pub(crate) const AUTHOR_PUBKEY_HEX: &str =
+        "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f";
+    pub(crate) const CREATED_AT: u64 = 1_700_000_000;
+    pub(crate) const GUID: &str = "golden-guid-572";
+    pub(crate) const CONTENT: &str = "golden fixture content";
+    pub(crate) const EXPECTED_EVENT_ID_HEX: &str =
+        "b1981e70a89150af5ca02548324f3ca2a1fff1b97581d46ab53e11116a553938";
+    pub(crate) const EXPECTED_JSON: &str = concat!(
+        "{\"id\":\"b1981e70a89150af5ca02548324f3ca2a1fff1b97581d46ab53e11116a553938\",",
+        "\"pubkey\":\"1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f\",",
+        "\"created_at\":1700000000,\"kind\":1111,",
+        "\"tags\":[[\"I\",\"podcast:item:guid:golden-guid-572\"],",
+        "[\"K\",\"podcast:item:guid\"],",
+        "[\"i\",\"podcast:item:guid:golden-guid-572\"],",
+        "[\"k\",\"podcast:item:guid\"]],",
+        "\"content\":\"golden fixture content\"}"
+    );
+}
+
+#[cfg(test)]
+mod golden_fixture_tests {
+    use super::golden_fixture::*;
+    use super::*;
+    use crate::target::Nip73Target;
+    use nostr::util::JsonUtil;
+    use nostr::Keys;
+
+    /// #572 review finding 4: pins the ACTUAL composed bytes (event id +
+    /// exact JSON body) for a fixed key/timestamp/content/target -- the
+    /// falsifier the issue's decision comment demands, not merely two
+    /// in-process Rust calls agreeing with each other
+    /// (`compose_is_deterministic`, above, is a DIFFERENT and weaker
+    /// falsifier). Swift's and Kotlin's SDK tests assert these SAME
+    /// literal constants.
+    #[test]
+    fn golden_fixture_pins_the_exact_composed_bytes() {
+        let keys = Keys::parse(SECRET_KEY_HEX).unwrap();
+        let author = keys.public_key();
+        assert_eq!(author.to_hex(), AUTHOR_PUBKEY_HEX);
+        let root = CommentRoot::External(Nip73Target::podcast_episode_guid(GUID).unwrap());
+        let event = compose_top_level_comment(
+            &root,
+            author,
+            Timestamp::from(CREATED_AT),
+            CONTENT.to_string(),
+        );
+        assert_eq!(event.id.unwrap().to_hex(), EXPECTED_EVENT_ID_HEX);
+        assert_eq!(event.as_json(), EXPECTED_JSON);
     }
 }

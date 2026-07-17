@@ -47,14 +47,23 @@ sealed class Nip73Target {
 sealed class CommentRoot {
     data class Event(val eventId: String, val kind: UShort, val authorPubkey: String?) : CommentRoot()
 
-    data class Address(val authorPubkey: String, val kind: UShort, val identifier: String) : CommentRoot()
+    /** [eventId]: the addressable event's own id, when pinned alongside the
+     * coordinate (NIP-22: "when the parent event is replaceable or
+     * addressable, also include an `e`/`E` tag referencing its id"). `null`
+     * remains a fully legal root. */
+    data class Address(
+        val authorPubkey: String,
+        val kind: UShort,
+        val identifier: String,
+        val eventId: String? = null,
+    ) : CommentRoot()
 
     data class External(val target: Nip73Target) : CommentRoot()
 
     internal fun toFfi(): FfiCommentRoot =
         when (this) {
             is Event -> FfiCommentRoot.Event(eventId, kind, authorPubkey)
-            is Address -> FfiCommentRoot.Address(authorPubkey, kind, identifier)
+            is Address -> FfiCommentRoot.Address(authorPubkey, kind, identifier, eventId)
             is External -> FfiCommentRoot.External(target.toFfi())
         }
 
@@ -62,7 +71,8 @@ sealed class CommentRoot {
         internal fun from(ffi: FfiCommentRoot): CommentRoot =
             when (ffi) {
                 is FfiCommentRoot.Event -> Event(ffi.eventId, ffi.kind, ffi.authorPubkey)
-                is FfiCommentRoot.Address -> Address(ffi.authorPubkey, ffi.kind, ffi.identifier)
+                is FfiCommentRoot.Address ->
+                    Address(ffi.authorPubkey, ffi.kind, ffi.identifier, ffi.eventId)
                 is FfiCommentRoot.External -> External(Nip73Target.from(ffi.target))
             }
     }
@@ -134,6 +144,11 @@ sealed class CommentDecodeError(message: String) : Exception(message) {
 
     data object EmptyExternalValue : CommentDecodeError("I/i or K/k cell was empty")
 
+    /** A `K`/`k` cell of `podcast:item:guid` declared an `I`/`i` value that
+     * did NOT carry the required `podcast:item:guid:` prefix. */
+    data class MalformedExternalValue(val got: String) :
+        CommentDecodeError("I/i value $got does not carry the prefix its K/k cell requires")
+
     data object MissingParent : CommentDecodeError("no parent (e/a/i) tag present")
 
     data object DuplicateContradictoryParent :
@@ -150,6 +165,12 @@ sealed class CommentDecodeError(message: String) : Exception(message) {
         "parent tag neither mirrors the root nor is a valid e+k=1111 comment reference",
     )
 
+    /** The delivered [Row]'s OWN `id`/`pubkey` envelope fields were not
+     * valid hex -- distinct from [MalformedRootReference], which describes
+     * a root `E`/`A` TAG reference, never the row's own envelope. */
+    data class MalformedRowEnvelope(val reason: String) :
+        CommentDecodeError("row envelope is malformed: $reason")
+
     companion object {
         internal fun from(ffi: FfiCommentDecodeException): CommentDecodeError =
             when (ffi) {
@@ -160,6 +181,7 @@ sealed class CommentDecodeError(message: String) : Exception(message) {
                 is FfiCommentDecodeException.InvalidRootKind -> InvalidRootKind(ffi.got)
                 is FfiCommentDecodeException.MalformedRootReference -> MalformedRootReference
                 is FfiCommentDecodeException.EmptyExternalValue -> EmptyExternalValue
+                is FfiCommentDecodeException.MalformedExternalValue -> MalformedExternalValue(ffi.got)
                 is FfiCommentDecodeException.MissingParent -> MissingParent
                 is FfiCommentDecodeException.DuplicateContradictoryParent -> DuplicateContradictoryParent
                 is FfiCommentDecodeException.MissingParentKind -> MissingParentKind
@@ -167,6 +189,8 @@ sealed class CommentDecodeError(message: String) : Exception(message) {
                 is FfiCommentDecodeException.MalformedParentReference -> MalformedParentReference
                 is FfiCommentDecodeException.ParentDoesNotMatchRootOrComment ->
                     ParentDoesNotMatchRootOrComment
+                is FfiCommentDecodeException.MalformedRowEnvelope ->
+                    MalformedRowEnvelope(ffi.reason)
             }
     }
 }

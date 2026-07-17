@@ -33,15 +33,21 @@ public enum Nip73Target: Sendable, Hashable {
 /// root value.
 public enum CommentRoot: Sendable, Hashable {
     case event(eventID: String, kind: UInt16, authorPubkey: String?)
-    case address(authorPubkey: String, kind: UInt16, identifier: String)
+    /// `eventID`: the addressable event's own id, when pinned alongside the
+    /// coordinate (NIP-22: "when the parent event is replaceable or
+    /// addressable, also include an `e`/`E` tag referencing its id"). `nil`
+    /// remains a fully legal root.
+    case address(authorPubkey: String, kind: UInt16, identifier: String, eventID: String?)
     case external(target: Nip73Target)
 
     func toFfi() -> FfiCommentRoot {
         switch self {
         case .event(let eventID, let kind, let authorPubkey):
             return .event(eventId: eventID, kind: kind, authorPubkey: authorPubkey)
-        case .address(let authorPubkey, let kind, let identifier):
-            return .address(authorPubkey: authorPubkey, kind: kind, identifier: identifier)
+        case .address(let authorPubkey, let kind, let identifier, let eventID):
+            return .address(
+                authorPubkey: authorPubkey, kind: kind, identifier: identifier, eventId: eventID
+            )
         case .external(let target):
             return .external(target: target.toFfi())
         }
@@ -51,8 +57,10 @@ public enum CommentRoot: Sendable, Hashable {
         switch ffi {
         case .event(let eventId, let kind, let authorPubkey):
             self = .event(eventID: eventId, kind: kind, authorPubkey: authorPubkey)
-        case .address(let authorPubkey, let kind, let identifier):
-            self = .address(authorPubkey: authorPubkey, kind: kind, identifier: identifier)
+        case .address(let authorPubkey, let kind, let identifier, let eventId):
+            self = .address(
+                authorPubkey: authorPubkey, kind: kind, identifier: identifier, eventID: eventId
+            )
         case .external(let target):
             self = .external(target: Nip73Target(target))
         }
@@ -114,12 +122,20 @@ public enum CommentDecodeError: Error, Sendable, Equatable {
     case invalidRootKind(got: String)
     case malformedRootReference
     case emptyExternalValue
+    /// A `K`/`k` cell of `podcast:item:guid` declared an `I`/`i` value that
+    /// did NOT carry the required `podcast:item:guid:` prefix.
+    case malformedExternalValue(got: String)
     case missingParent
     case duplicateContradictoryParent
     case missingParentKind
     case invalidParentKind(got: String)
     case malformedParentReference
     case parentDoesNotMatchRootOrComment
+    /// The delivered `Row`'s OWN `id`/`pubkey` envelope fields were not
+    /// valid hex -- distinct from `.malformedRootReference`, which
+    /// describes a root `E`/`A` TAG reference, never the row's own
+    /// envelope.
+    case malformedRowEnvelope(reason: String)
 
     init(_ ffi: FfiCommentDecodeError) {
         switch ffi {
@@ -130,12 +146,14 @@ public enum CommentDecodeError: Error, Sendable, Equatable {
         case .InvalidRootKind(let got): self = .invalidRootKind(got: got)
         case .MalformedRootReference: self = .malformedRootReference
         case .EmptyExternalValue: self = .emptyExternalValue
+        case .MalformedExternalValue(let got): self = .malformedExternalValue(got: got)
         case .MissingParent: self = .missingParent
         case .DuplicateContradictoryParent: self = .duplicateContradictoryParent
         case .MissingParentKind: self = .missingParentKind
         case .InvalidParentKind(let got): self = .invalidParentKind(got: got)
         case .MalformedParentReference: self = .malformedParentReference
         case .ParentDoesNotMatchRootOrComment: self = .parentDoesNotMatchRootOrComment
+        case .MalformedRowEnvelope(let reason): self = .malformedRowEnvelope(reason: reason)
         }
     }
 }
