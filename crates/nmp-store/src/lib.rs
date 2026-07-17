@@ -71,6 +71,11 @@ pub use coverage::{coverage_key, ClaimSet, CoverageInterval, CoverageKey, GcRepo
 pub use memory_store::MemoryStore;
 pub use persistent_store_lifetime::RedbStoreResetError;
 pub use redb_store::RedbStore;
+#[cfg(feature = "bench-instrumentation")]
+pub use redb_store::{
+    run_store_bench_variant, StoreBenchAttribution, StoreBenchMetrics, StoreBenchProcessCounters,
+    StoreBenchVariant,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 

@@ -7365,6 +7365,15 @@ fn decode_interval(json: &str) -> CoverageInterval {
     )
 }
 
+#[cfg(feature = "bench-instrumentation")]
+mod store_bench;
+
+#[cfg(feature = "bench-instrumentation")]
+pub use store_bench::{
+    run_store_bench_variant, StoreBenchAttribution, StoreBenchMetrics, StoreBenchProcessCounters,
+    StoreBenchVariant,
+};
+
 #[cfg(test)]
 mod crash_atomicity_tests;
 
