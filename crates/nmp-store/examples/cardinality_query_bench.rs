@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 struct Measurement {
     name: String,
     expected_rows: usize,
-    p50_us: u64,
-    p95_us: u64,
+    p50_ns: u64,
+    p95_ns: u64,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -73,16 +73,16 @@ fn measure(name: &'static str, iterations: usize, mut query: impl FnMut() -> usi
     for _ in 0..iterations {
         let started = Instant::now();
         assert_eq!(query(), expected_rows, "{name} result changed");
-        samples.push(started.elapsed().as_micros() as u64);
+        samples.push(started.elapsed().as_nanos() as u64);
     }
     samples.sort_unstable();
-    let p50_us = samples[samples.len() / 2];
-    let p95_us = samples[((samples.len() * 95).div_ceil(100)).saturating_sub(1)];
+    let p50_ns = samples[samples.len() / 2];
+    let p95_ns = samples[((samples.len() * 95).div_ceil(100)).saturating_sub(1)];
     Measurement {
         name: name.to_owned(),
         expected_rows,
-        p50_us,
-        p95_us,
+        p50_ns,
+        p95_ns,
     }
 }
 
