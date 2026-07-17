@@ -96,6 +96,14 @@ if a cloned engine handle, live subscription, or cancellation token survives.
 The independent 250 ms capability-decision grace remains an engine-loop
 deadline, so a slow HTTP endpoint cannot hold the WebSocket NIP-77 fallback.
 
+Hickory DNS resolution for this acquisition path is runtime-qualified on iOS,
+not only compile-qualified: a repo-owned iOS Simulator test host (`apps/
+Falsifier`'s `FalsifierTests` target) executes a hostname NIP-11 fetch
+through `NMPEngine.relayInformation(for:policy:)` on an actual iOS Simulator
+process as a required CI gate, proving the governed resolver initializes and
+resolves inside the iOS runtime with no blocking-GAI fallback
+([#465](https://github.com/pablof7z/nmp/issues/465)).
+
 ## Current implementation
 
 Some platform adapters already coalesce newest snapshots, while end-to-end
