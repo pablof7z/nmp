@@ -3891,6 +3891,26 @@ impl<S: EventStore> EngineCore<S> {
             correlation,
         } = intent;
 
+        // #591 review (PR #604 finding 2): `Durability::Ephemeral` has no
+        // outbox row for a correlation token to name -- `accept_ephemeral`
+        // below never receives `correlation`, so a token on an ephemeral
+        // write would otherwise be silently dropped (never journaled, no
+        // later `reattach_by_correlation` could ever find it) WHILE the
+        // pre-lookup just below still ran unconditionally, so an ephemeral
+        // publish reusing a token that earlier named a DURABLE receipt
+        // would silently reattach that unrelated durable obligation instead
+        // of ever creating the ephemeral write the caller asked for. Refuse
+        // closed instead of accepting either silent behavior.
+        if durability == Durability::Ephemeral && correlation.is_some() {
+            return self.fail_unaccepted(
+                sink,
+                "ephemeral writes cannot carry a correlation token: there is no durable outbox \
+                 row for the token to name, and reusing an earlier durable token here would \
+                 silently reattach that unrelated obligation instead of accepting this write"
+                    .to_string(),
+            );
+        }
+
         // #591: a token that already resolves to a previously-accepted
         // receipt REATTACHES that existing obligation -- this call enqueues
         // no second write, and `payload`/`durability`/`routing`/
@@ -3904,14 +3924,40 @@ impl<S: EventStore> EngineCore<S> {
             match self.resolver.store().lookup_correlation(token.as_ref()) {
                 Ok(Some(existing_receipt_id)) => {
                     let receipt_id = ReceiptId(existing_receipt_id);
-                    self.reattach_receipt(receipt_id, sink);
+                    let outcome = self.reattach_receipt(receipt_id, sink);
                     // `reattach_receipt` already fed `sink` synchronously
-                    // (or dropped it, for the same rare corrupt/quarantined
-                    // cases the ordinary by-id reattach door tolerates);
-                    // this effect exists only so `publish_result` can
+                    // when `outcome` is `Attached` (or dropped it, closing
+                    // the caller's stream with zero statuses, for the same
+                    // rare corrupt/quarantined cases the ordinary by-id
+                    // reattach door tolerates -- the sink is gone by this
+                    // point either way, so this call cannot redeliver
+                    // anything onto it). Review (#591, PR #604 finding 1):
+                    // an unconditional `Accepted`-shaped effect here
+                    // previously masked a `RetainedButUnreadable`/
+                    // `NotFound` outcome behind a synchronous "Accepted"
+                    // reply -- surface the typed outcome in the effect
+                    // itself instead, so effect-level inspection (tests,
+                    // diagnostics) sees the truth rather than a fabricated
+                    // success. A caller that needs to keep distinguishing
+                    // "retained but unreadable" from "not found" after this
+                    // stream goes silent still has `reattach_by_correlation`
+                    // as the door that reports the outcome honestly.
+                    let status = match outcome {
+                        ReattachOutcome::Attached => WriteStatus::Accepted,
+                        ReattachOutcome::NotFound => WriteStatus::Failed(
+                            "correlation token resolved to a receipt id the store can no longer find"
+                                .to_string(),
+                        ),
+                        ReattachOutcome::RetainedButUnreadable => WriteStatus::Failed(
+                            "correlation token resolved to a retained but unreadable receipt"
+                                .to_string(),
+                        ),
+                    };
+                    // This effect exists only so `publish_result` can
                     // extract the EXISTING receipt id for the synchronous
-                    // `publish_tracked` reply.
-                    return vec![Effect::EmitReceipt(receipt_id, WriteStatus::Accepted)];
+                    // `publish_tracked` reply -- `publish_result` matches
+                    // any `EmitReceipt` regardless of status.
+                    return vec![Effect::EmitReceipt(receipt_id, status)];
                 }
                 Ok(None) => {}
                 Err(err) => return self.fail_unaccepted(sink, err.to_string()),

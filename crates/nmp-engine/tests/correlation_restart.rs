@@ -504,3 +504,95 @@ fn partial_relay_ack_survives_restart_and_replays_by_token() {
         "the token must replay the SAME partial per-relay ACK evidence after restart, got {statuses:?}"
     );
 }
+
+/// #591 review (PR #604 finding 4): the partial-ACK boundary above proved
+/// only the ACK half by token-replay -- the reject half was covered
+/// generically by the by-id door's own tests, but never through the
+/// correlation-token door specifically. Same shape as
+/// `partial_relay_ack_survives_restart_and_replays_by_token`, but the
+/// relay's `OK` frame carries `false` (rejected) instead of `true`.
+#[test]
+fn partial_relay_reject_survives_restart_and_replays_by_token() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("partial-reject.redb");
+    let keys = Keys::generate();
+    let relay = RelayUrl::parse("wss://partial-reject.example").unwrap();
+    let session = signer_session(&relay, keys.public_key());
+    let tok = "partial-reject-token";
+    let event = EventBuilder::new(Kind::TextNote, "partial reject correlation")
+        .custom_created_at(Timestamp::from(401))
+        .sign_with_keys(&keys)
+        .unwrap();
+
+    {
+        let store = RedbStore::open(&path).unwrap();
+        let mut core = EngineCore::new(
+            store,
+            Box::new(directory(keys.public_key(), relay.clone())),
+            10,
+        );
+        let handle = RelayHandle {
+            slot: 0,
+            generation: 1,
+        };
+        core.handle(EngineMsg::RelayConnected(handle, session.clone()));
+        authenticate(&mut core, handle, &session, &keys);
+        let effects = core.handle(EngineMsg::Publish(
+            WriteIntent {
+                payload: WritePayload::Signed(event.clone()),
+                durability: Durability::Durable,
+                routing: WriteRouting::AuthorOutbox,
+                identity_override: None,
+                correlation: Some(token(tok)),
+            },
+            Box::new(Sink::default()),
+        ));
+        assert!(effects.iter().any(|effect| matches!(effect,
+            Effect::PublishEvent(r, e, _) if r == &session && e == &event
+        )));
+        let correlation = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::PublishEvent(r, _, correlation) if r == &session => Some(*correlation),
+                _ => None,
+            })
+            .unwrap();
+        core.handle(EngineMsg::EventHandoff(
+            correlation,
+            nmp_transport::HandoffResult::Written,
+        ));
+        let rejected = core.handle(EngineMsg::RelayFrame(
+            handle,
+            session.clone(),
+            RelayFrame::from(RelayMessage::ok(event.id, false, "rate-limited")),
+        ));
+        assert!(rejected.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(_, WriteStatus::Rejected(rejected_relay, reason))
+                if rejected_relay == &relay && reason == "rate-limited"
+        )));
+        // The process dies right here, before persisting the receipt id.
+    }
+
+    let store = RedbStore::open(&path).unwrap();
+    let mut core = EngineCore::new(
+        store,
+        Box::new(directory(keys.public_key(), relay.clone())),
+        10,
+    );
+    core.recover_on_boot();
+    let replay = Sink::default();
+    let (outcome, resolved_id) =
+        core.reattach_by_correlation(tok.to_string(), Box::new(replay.clone()));
+    assert_eq!(outcome, ReattachOutcome::Attached);
+    assert!(resolved_id.is_some());
+    let statuses = replay.0.lock().unwrap();
+    assert!(
+        statuses.iter().any(|status| matches!(
+            status,
+            WriteStatus::Rejected(rejected_relay, reason)
+                if rejected_relay == &relay && reason == "rate-limited"
+        )),
+        "the token must replay the SAME partial per-relay REJECT evidence after restart, got {statuses:?}"
+    );
+}

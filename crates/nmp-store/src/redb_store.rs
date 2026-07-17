@@ -222,9 +222,12 @@ const PENDING_EPHEMERAL_RECEIPTS_KEY: &str = "pending_ephemeral_receipts";
 /// [`crate::ReceiptState`]'s doc for why this separation exists). Never
 /// pruned by this unit.
 const OUTBOX_RECEIPTS: TableDefinition<&str, &str> = TableDefinition::new("outbox_receipts");
-/// #591: caller correlation token -> the receipt id it was journaled under
-/// (decimal, no zero-padding -- this table is only ever point-looked-up by
-/// token, never range-scanned). Written inside the SAME transaction as the
+/// #591: caller correlation token -> the receipt id it was journaled under,
+/// stored as [`receipt_key`]'s SAME zero-padded decimal string (this table
+/// is only ever point-looked-up by token, never range-scanned, so the
+/// padding is not load-bearing here -- it is simply reusing the existing
+/// key format rather than introducing a second one). Written inside the
+/// SAME transaction as the
 /// `OUTBOX_RECEIPTS` row it names (see `accept_write`'s doc), retained
 /// forever like `OUTBOX_RECEIPTS` -- there is no removal door.
 const OUTBOX_CORRELATIONS: TableDefinition<&str, &str> =
