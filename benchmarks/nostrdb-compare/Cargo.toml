@@ -14,8 +14,10 @@ memmap2 = "0.9"
 nmp-store = { path = "../../crates/nmp-store", features = ["bench-instrumentation"] }
 nostr = "0.44.4"
 rayon = "1"
+redb = "4.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tempfile = "3"
 
 [build-dependencies]
 cc = "1"

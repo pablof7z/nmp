@@ -1,0 +1,22 @@
+{
+  "schema": "nmp-storage-equivalent-v1",
+  "nmp_commit": "1e35ed166b6f4e95015f5da39711dbb9e3953ebc",
+  "nostrdb_commit": "f4591db9524bc4936af76af4750ec425e67700be",
+  "host": "Linux kind2 6.1.0-42-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.159-1 (2025-12-30) x86_64 GNU/Linux",
+  "engines": [
+    {
+      "backend": "redb",
+      "durability": "synchronous default; no no-sync flags",
+      "child_exit_code": 73,
+      "committed_rows_after_crash": 1,
+      "uncommitted_row_absent": true
+    },
+    {
+      "backend": "lmdb",
+      "durability": "synchronous default; no no-sync flags",
+      "child_exit_code": 73,
+      "committed_rows_after_crash": 1,
+      "uncommitted_row_absent": true
+    }
+  ]
+}
