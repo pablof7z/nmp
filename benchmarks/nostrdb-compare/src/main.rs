@@ -6,7 +6,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use memmap2::{Mmap, MmapOptions};
 use nmp_store::{EventStore, InsertOutcome, RedbStore, RelayObserved};
@@ -54,6 +54,10 @@ struct PhaseResult {
     events_per_second: f64,
     rss_before_bytes: Option<u64>,
     peak_rss_bytes: Option<u64>,
+    #[serde(default)]
+    parse_verify_ms: Option<f64>,
+    #[serde(default)]
+    store_commit_ms: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -380,6 +384,8 @@ fn nmp_ingest_pass(
         .build()?;
     let rss_before = current_rss_bytes();
     let started = Instant::now();
+    let mut parse_verify_elapsed = Duration::ZERO;
+    let mut store_commit_elapsed = Duration::ZERO;
     let mut lines = corpus
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty());
@@ -389,6 +395,7 @@ fn nmp_ingest_pass(
         if raw.is_empty() {
             break;
         }
+        let parse_started = Instant::now();
         let parsed: Result<Vec<Event>, String> = pool.install(|| {
             raw.par_iter()
                 .map(|json| {
@@ -398,11 +405,14 @@ fn nmp_ingest_pass(
                 })
                 .collect()
         });
+        parse_verify_elapsed += parse_started.elapsed();
         let rows: Vec<_> = parsed?
             .into_iter()
             .map(|event| (event, RelayObserved::new(relay.clone(), observed)))
             .collect();
+        let store_started = Instant::now();
         let outcomes = store.insert_batch(rows)?;
+        store_commit_elapsed += store_started.elapsed();
         for outcome in outcomes {
             match (duplicate, outcome) {
                 (false, InsertOutcome::Inserted) => {}
@@ -417,7 +427,13 @@ fn nmp_ingest_pass(
     if seen != events {
         return Err(format!("NMP processed {seen}, expected {events}").into());
     }
-    Ok(phase(events, elapsed.as_secs_f64(), rss_before))
+    Ok(phase(
+        events,
+        elapsed.as_secs_f64(),
+        rss_before,
+        Some(parse_verify_elapsed),
+        Some(store_commit_elapsed),
+    ))
 }
 
 fn run_nmp(
@@ -496,7 +512,13 @@ fn run_nostrdb(
         return Err(error.into());
     }
     handle.close();
-    let ingest = phase(meta.events, started.elapsed().as_secs_f64(), rss_before);
+    let ingest = phase(
+        meta.events,
+        started.elapsed().as_secs_f64(),
+        rss_before,
+        None,
+        None,
+    );
 
     let handle = NdbHandle::open(database, workers)?;
     let rss_before = current_rss_bytes();
@@ -507,7 +529,13 @@ fn run_nostrdb(
         return Err(error.into());
     }
     handle.close();
-    let duplicate_ingest = phase(meta.events, started.elapsed().as_secs_f64(), rss_before);
+    let duplicate_ingest = phase(
+        meta.events,
+        started.elapsed().as_secs_f64(),
+        rss_before,
+        None,
+        None,
+    );
 
     let handle = NdbHandle::open(database, workers)?;
     let canonical_events = handle.note_count()?;
@@ -763,12 +791,20 @@ fn compare(
     Ok(())
 }
 
-fn phase(events: u64, elapsed_seconds: f64, rss_before: Option<u64>) -> PhaseResult {
+fn phase(
+    events: u64,
+    elapsed_seconds: f64,
+    rss_before: Option<u64>,
+    parse_verify: Option<Duration>,
+    store_commit: Option<Duration>,
+) -> PhaseResult {
     PhaseResult {
         elapsed_ms: elapsed_seconds * 1000.0,
         events_per_second: events as f64 / elapsed_seconds,
         rss_before_bytes: rss_before,
         peak_rss_bytes: peak_rss_bytes(),
+        parse_verify_ms: parse_verify.map(|elapsed| elapsed.as_secs_f64() * 1000.0),
+        store_commit_ms: store_commit.map(|elapsed| elapsed.as_secs_f64() * 1000.0),
     }
 }
 

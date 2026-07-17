@@ -23,7 +23,7 @@ use tungstenite::{accept, Message};
 
 pub type ProbeError = Box<dyn Error + Send + Sync>;
 
-const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v4";
+const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v5";
 const CORPUS_SCHEMA: &str = "nmp-relay-ingest-corpus-v1";
 const BASE_CREATED_AT: u64 = 1_700_000_000;
 
@@ -34,7 +34,9 @@ pub struct ProbeConfig {
     pub passes: usize,
     pub payload_bytes: usize,
     pub queue_capacity: usize,
-    pub batch_size: usize,
+    pub verified_cache_capacity: usize,
+    pub verify_batch_size: usize,
+    pub engine_batch_size: usize,
     pub visible_limit: Option<usize>,
     pub trim_allocator_during_ingest: bool,
     pub frame_delay: Duration,
@@ -51,7 +53,9 @@ impl Default for ProbeConfig {
             passes: 1,
             payload_bytes: 128,
             queue_capacity: 1_024,
-            batch_size: 128,
+            verified_cache_capacity: 131_072,
+            verify_batch_size: 128,
+            engine_batch_size: 128,
             visible_limit: Some(200),
             trim_allocator_during_ingest: false,
             frame_delay: Duration::ZERO,
@@ -76,8 +80,11 @@ impl ProbeConfig {
         if self.queue_capacity == 0 {
             return Err("queue-capacity must be nonzero".into());
         }
-        if self.batch_size == 0 {
-            return Err("batch-size must be nonzero".into());
+        if self.verify_batch_size == 0 {
+            return Err("verify-batch-size must be nonzero".into());
+        }
+        if self.engine_batch_size == 0 {
+            return Err("engine-batch-size must be nonzero".into());
         }
         if self.visible_limit == Some(0) {
             return Err("visible-limit must be nonzero".into());
@@ -106,7 +113,9 @@ pub struct ProbeResult {
     pub passes: usize,
     pub payload_bytes: usize,
     pub queue_capacity: usize,
-    pub batch_size: usize,
+    pub verified_cache_capacity: usize,
+    pub verify_batch_size: usize,
+    pub engine_batch_size: usize,
     pub visible_limit: Option<usize>,
     pub delivery_mode: &'static str,
     pub trim_allocator_during_ingest: bool,
@@ -383,7 +392,9 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     )?;
     let store = RedbStore::open(&store_path)?;
     let queue_capacity = config.queue_capacity;
-    let batch_size = config.batch_size;
+    let verified_cache_capacity = config.verified_cache_capacity;
+    let verify_batch_size = config.verify_batch_size;
+    let engine_batch_size = config.engine_batch_size;
     let (engine_thread, handle) = EngineThread::spawn(
         store,
         FixtureDirectory::new(),
@@ -394,8 +405,9 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             command_queue_capacity: queue_capacity,
             event_sink_queue_capacity: queue_capacity,
             verifier_queue_capacity: queue_capacity,
-            max_verify_batch: batch_size,
-            max_engine_batch: batch_size,
+            verified_cache_capacity,
+            max_verify_batch: verify_batch_size,
+            max_engine_batch: engine_batch_size,
             reconnect_delay_initial: Some(Duration::from_secs(3600)),
             reconnect_jitter_max: Some(Duration::ZERO),
             ..PoolConfig::default()
@@ -636,7 +648,9 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         passes: config.passes,
         payload_bytes: config.payload_bytes,
         queue_capacity,
-        batch_size,
+        verified_cache_capacity,
+        verify_batch_size,
+        engine_batch_size,
         visible_limit: config.visible_limit,
         delivery_mode: if config.visible_limit.is_some() {
             "bounded-latest-window"

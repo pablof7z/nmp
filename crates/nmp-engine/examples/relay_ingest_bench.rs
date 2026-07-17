@@ -20,7 +20,15 @@ fn main() -> Result<(), ProbeError> {
             "--passes" => config.passes = value(&mut args, "--passes")?,
             "--payload-bytes" => config.payload_bytes = value(&mut args, "--payload-bytes")?,
             "--queue-capacity" => config.queue_capacity = value(&mut args, "--queue-capacity")?,
-            "--batch-size" => config.batch_size = value(&mut args, "--batch-size")?,
+            "--verified-cache-capacity" => {
+                config.verified_cache_capacity = value(&mut args, "--verified-cache-capacity")?
+            }
+            "--verify-batch-size" => {
+                config.verify_batch_size = value(&mut args, "--verify-batch-size")?
+            }
+            "--engine-batch-size" => {
+                config.engine_batch_size = value(&mut args, "--engine-batch-size")?
+            }
             "--visible-limit" => config.visible_limit = Some(value(&mut args, "--visible-limit")?),
             "--unlimited" => config.visible_limit = None,
             "--trim-allocator-during-ingest" => config.trim_allocator_during_ingest = true,
@@ -84,7 +92,9 @@ fn print_help() {
          --passes N          full corpus replays per relay (default 1)\n\
          --payload-bytes N   event content bytes (default 128)\n\
          --queue-capacity N  every bounded runtime queue (default 1024)\n\
-         --batch-size N      verify and engine batch ceiling (default 128)\n\
+         --verified-cache-capacity N  verified ID/signature entries (default 131072)\n\
+         --verify-batch-size N  signature verification batch ceiling (default 128)\n\
+         --engine-batch-size N  store transaction batch ceiling (default 128)\n\
          --visible-limit N   live query window (default 200)\n\
          --unlimited         retain every matching row in the live query\n\
          --trim-allocator-during-ingest\n\
