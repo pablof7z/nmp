@@ -1,0 +1,22 @@
+{
+  "schema": "nmp-nostrdb-direct-failure-v1",
+  "backend": "nostrdb",
+  "nmp_commit": "7f8153c834776c4e62023b1fa11a1b6702ff7f4f",
+  "nostrdb_commit": "f4591db9524bc4936af76af4750ec425e67700be",
+  "nostrdb_secp256k1": "1ad5185cd42c0636104129fcc9f6a4bf9c67cc40",
+  "host": "Linux kind2 6.1.0-42-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.159-1 (2025-12-30) x86_64 GNU/Linux",
+  "corpus": {
+    "schema": "nmp-nostrdb-corpus-v1",
+    "events": 1000000,
+    "payload_bytes": 128,
+    "bytes": 506105626,
+    "blake3": "f045bf7225fed97a492240e1133d52d99544e7addee73fa723ceab1635ffda72",
+    "author0": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+    "first_id": "af31a03e81e17a52a0e72866dd1cc3a7a82597e7e4a11e92974b175007ff3970",
+    "last_id": "b47c46a1cc71ac43f36ef4eed0908fa9720b9313288f5fb23f9104f683e92523"
+  },
+  "workers": 32,
+  "stage": "post_ingest_cardinality",
+  "error": "nostrdb stored 353914, expected 1000000",
+  "canonical_events_after_failure": 353914
+}
