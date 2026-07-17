@@ -10,10 +10,10 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use nmp_store::{
-    prepare_equivalent_store_corpus, run_prepared_redb_redo_index_bench,
-    run_prepared_redb_store_bench, run_prepared_redb_unified_index_bench, RedbRedoIndexMetrics,
-    StoreBenchPreparedMetrics, StoreBenchPreparedRecord, StoreBenchPreparedTable,
-    StoreBenchProcessCounters,
+    prepare_equivalent_store_corpus, run_prepared_redb_compact_index_bench,
+    run_prepared_redb_redo_index_bench, run_prepared_redb_store_bench,
+    run_prepared_redb_unified_index_bench, RedbRedoIndexMetrics, StoreBenchPreparedMetrics,
+    StoreBenchPreparedRecord, StoreBenchPreparedTable, StoreBenchProcessCounters,
 };
 use nostr::{Event, JsonUtil};
 use serde::{Deserialize, Serialize};
@@ -53,6 +53,7 @@ enum IndexLayout {
     UnifiedIndexTree,
     GroupedArrivalOrder,
     SortedIndexKeys,
+    CompactIdPrefix,
 }
 
 impl IndexLayout {
@@ -62,6 +63,7 @@ impl IndexLayout {
             Self::UnifiedIndexTree => "unified_index_tree",
             Self::GroupedArrivalOrder => "grouped_arrival_order",
             Self::SortedIndexKeys => "sorted_index_keys",
+            Self::CompactIdPrefix => "compact_id_prefix",
         }
     }
 
@@ -71,6 +73,7 @@ impl IndexLayout {
             Self::UnifiedIndexTree,
             Self::GroupedArrivalOrder,
             Self::SortedIndexKeys,
+            Self::CompactIdPrefix,
         ]
         .into_iter()
         .find(|layout| layout.name() == value)
@@ -97,6 +100,8 @@ struct RunRecord {
     repetition: usize,
     ordinal: usize,
     metrics: StoreBenchPreparedMetrics,
+    prepared_record_bytes: u64,
+    applied_record_bytes: u64,
     staging_ns: u64,
     effective_wall_ns: u64,
     events_per_second: f64,
@@ -334,8 +339,22 @@ fn run_child(
                 order_index_records(&mut batch.records, true);
             }
         }
-        IndexLayout::PerIndexTrees | IndexLayout::UnifiedIndexTree => {}
+        IndexLayout::PerIndexTrees
+        | IndexLayout::UnifiedIndexTree
+        | IndexLayout::CompactIdPrefix => {}
     }
+    let prepared_record_bytes = prepared.record_bytes;
+    let ordered_records = prepared
+        .batches
+        .iter()
+        .flat_map(|batch| &batch.records)
+        .filter(|record| index_namespace(record.table).is_some())
+        .count() as u64;
+    let applied_record_bytes = if layout == IndexLayout::CompactIdPrefix {
+        prepared_record_bytes.saturating_sub(ordered_records.saturating_mul(24))
+    } else {
+        prepared_record_bytes
+    };
     let staging_ns = staging_started
         .elapsed()
         .as_nanos()
@@ -351,6 +370,9 @@ fn run_child(
         }
         IndexLayout::GroupedArrivalOrder | IndexLayout::SortedIndexKeys => {
             run_prepared_redb_store_bench(&database, &prepared, sample_process)?
+        }
+        IndexLayout::CompactIdPrefix => {
+            run_prepared_redb_compact_index_bench(&database, &prepared, sample_process)?
         }
     };
     if !metrics.exact_reopen {
@@ -372,6 +394,8 @@ fn run_child(
         repetition,
         ordinal,
         metrics,
+        prepared_record_bytes,
+        applied_record_bytes,
         staging_ns,
         effective_wall_ns,
         events_per_second,
@@ -397,6 +421,7 @@ fn run_matrix(
             IndexLayout::GroupedArrivalOrder,
             IndexLayout::SortedIndexKeys,
         ],
+        "compact-id" => [IndexLayout::PerIndexTrees, IndexLayout::CompactIdPrefix],
         other => return Err(format!("unknown comparison: {other}")),
     };
     for repetition in 0..repetitions {
@@ -446,10 +471,10 @@ fn run_matrix(
         schema: SCHEMA.to_owned(),
         command: format!(
             "cargo run -q -p nmp-store --release --features bench-instrumentation --example redb_index_layout -- {} {} {} {} {}",
-            if comparison == "index-order" {
-                "order-matrix"
-            } else {
-                "matrix"
+            match comparison {
+                "index-order" => "order-matrix",
+                "compact-id" => "compact-matrix",
+                _ => "matrix",
             },
             corpus_path.display(),
             output.display(),
@@ -609,7 +634,7 @@ fn run_redo_matrix(
 fn main() -> Result<(), String> {
     let mut args = env::args_os().skip(1);
     let command = args.next().ok_or_else(|| {
-        "usage: redb_index_layout <run|matrix|order-matrix|redo-run|redo-matrix> ...".to_owned()
+        "usage: redb_index_layout <run|matrix|order-matrix|compact-matrix|redo-run|redo-matrix> ...".to_owned()
     })?;
     match command.to_string_lossy().as_ref() {
         "run" => {
@@ -727,6 +752,29 @@ fn main() -> Result<(), String> {
                 .map_err(|error| format!("invalid repetitions: {error}"))?
                 .unwrap_or(11);
             run_matrix(&corpus, &output, batch_size, repetitions, "index-order")?;
+        }
+        "compact-matrix" => {
+            let corpus = PathBuf::from(
+                args.next()
+                    .ok_or_else(|| "compact-matrix requires corpus path".to_owned())?,
+            );
+            let output = PathBuf::from(
+                args.next()
+                    .ok_or_else(|| "compact-matrix requires output path".to_owned())?,
+            );
+            let batch_size = args
+                .next()
+                .map(|value| value.to_string_lossy().parse())
+                .transpose()
+                .map_err(|error| format!("invalid batch size: {error}"))?
+                .unwrap_or(4_096);
+            let repetitions = args
+                .next()
+                .map(|value| value.to_string_lossy().parse())
+                .transpose()
+                .map_err(|error| format!("invalid repetitions: {error}"))?
+                .unwrap_or(5);
+            run_matrix(&corpus, &output, batch_size, repetitions, "compact-id")?;
         }
         "redo-matrix" => {
             let corpus = PathBuf::from(
