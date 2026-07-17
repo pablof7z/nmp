@@ -205,6 +205,11 @@ pub(crate) fn compose_group_send_with_tags(
         // Composed group sends keep the default identity contract (#47):
         // `author` must be the active account at publish time.
         identity_override: None,
+        // #591: this lower-level seam has no correlation parameter of its
+        // own; a caller wanting crash-safe reattachment composes through a
+        // higher-level door that threads one through (mirrors nip22's
+        // `comment_intent`).
+        correlation: None,
     }
 }
 

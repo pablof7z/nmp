@@ -178,6 +178,10 @@ impl EventStore for FailingReadStore {
         self.inner.reattach_receipt(receipt_id)
     }
 
+    fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
+        self.inner.lookup_correlation(token)
+    }
+
     fn record_route_revision(
         &mut self,
         intent_id: IntentId,

@@ -98,6 +98,18 @@ data class WriteIntent(
     val durability: Durability,
     val routing: WriteRouting,
     val identityOverride: String? = null,
+    /** Crash-safe client correlation token (#591). `null` -- the default --
+     * opts this write out of correlation entirely. A non-`null` token is
+     * validated (non-empty, length-capped) on the way across the boundary;
+     * a malformed token throws `NMPError.InvalidCorrelationToken`
+     * synchronously from `publish`, before any engine call. A token that
+     * already resolves to a previously-accepted receipt reattaches that
+     * existing obligation instead of enqueuing a second write -- no body
+     * comparison against [payload]. See [NMPEngine.reattachReceipt] (the
+     * correlation overload) for the door that recovers a receipt after a
+     * crash that happened BEFORE the app could durably persist the id
+     * `publish` returned. */
+    val correlation: String? = null,
 ) {
     fun toFfi(): FfiWriteIntent =
         FfiWriteIntent(
@@ -105,6 +117,7 @@ data class WriteIntent(
             durability = durability.toFfi(),
             routing = routing.toFfi(),
             identityOverride = identityOverride,
+            correlation = correlation,
         )
 }
 

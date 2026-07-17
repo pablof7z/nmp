@@ -160,6 +160,9 @@ pub struct MemoryStore {
     /// `outbox_intents`'s open-work rows (architecture review correction —
     /// see `ReceiptState`'s doc). Never pruned by this unit.
     outbox_receipts: HashMap<u64, RecoveredReceipt>,
+    /// `OUTBOX_CORRELATIONS` mirror (#591): caller correlation token ->
+    /// the receipt id it was journaled under. Never pruned by this unit.
+    outbox_correlations: HashMap<String, u64>,
     /// Typed mirror of `OUTBOX_ATTEMPTS`, keyed by its complete stable key.
     outbox_attempts: BTreeMap<(IntentId, RelayUrl, u64), RecoveredAttempt>,
     outbox_attempt_details: BTreeMap<(IntentId, RelayUrl, u64), RecoveredAttemptDetails>,
@@ -372,6 +375,7 @@ impl MemoryStore {
         intent_id: IntentId,
         frozen_id: EventId,
         expected_pubkey: PublicKey,
+        correlation: &Option<nmp_grammar::CorrelationToken>,
     ) {
         self.outbox_receipts.insert(
             receipt_id,
@@ -383,6 +387,12 @@ impl MemoryStore {
                 state: ReceiptState::Accepted,
             },
         );
+        // #591: journal the caller's correlation token alongside the
+        // receipt id it now names -- same call, same in-memory mutation.
+        if let Some(token) = correlation {
+            self.outbox_correlations
+                .insert(token.as_ref().to_string(), receipt_id);
+        }
     }
 
     /// Re-admit a durably-stashed predecessor `se` through the ordinary
@@ -1448,6 +1458,7 @@ impl EventStore for MemoryStore {
             routing,
             sig_state,
             accepted_at,
+            correlation,
         } = accept;
 
         // Refused at the door FIRST, same as `insert`: never journaled,
@@ -1625,7 +1636,13 @@ impl EventStore for MemoryStore {
                 accepted_at,
                 None,
             );
-            self.journal_receipt(receipt_id, intent_id, frozen_id, expected_pubkey);
+            self.journal_receipt(
+                receipt_id,
+                intent_id,
+                frozen_id,
+                expected_pubkey,
+                &correlation,
+            );
             if already_signed {
                 if let Some(receipt) = self.outbox_receipts.get_mut(&receipt_id) {
                     receipt.state = ReceiptState::Signed;
@@ -1754,7 +1771,13 @@ impl EventStore for MemoryStore {
             accepted_at,
             displaced,
         );
-        self.journal_receipt(receipt_id, intent_id, frozen_id, expected_pubkey);
+        self.journal_receipt(
+            receipt_id,
+            intent_id,
+            frozen_id,
+            expected_pubkey,
+            &correlation,
+        );
 
         Ok(outcome)
     }
@@ -2135,6 +2158,10 @@ impl EventStore for MemoryStore {
         // the contract here, and `MemoryStore` retains faithfully for the
         // life of the process — see `EventStore::reattach_receipt`'s doc.
         Ok(self.outbox_receipts.get(&receipt_id).cloned())
+    }
+
+    fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
+        Ok(self.outbox_correlations.get(token).copied())
     }
 
     fn record_route_revision(
@@ -2803,6 +2830,7 @@ mod lane_atomicity_tests {
                 routing: "atomic".into(),
                 sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(900u64),
+                correlation: None,
             })
             .unwrap();
         let intent = accepted.journaled_intent_id().unwrap();

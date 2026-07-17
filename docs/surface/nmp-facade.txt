@@ -8,6 +8,8 @@ pub use nmp::AcquisitionEvidence
 pub use nmp::AuthPhase
 pub use nmp::Binding
 pub use nmp::CacheMode
+pub use nmp::CorrelationToken
+pub use nmp::CorrelationTokenError
 pub use nmp::CoverageInterval
 pub use nmp::Demand
 pub use nmp::DemandError
@@ -532,6 +534,7 @@ pub fn nmp::Engine::observe(&self, nmp_resolver::engine::LiveQuery, core::option
 pub fn nmp::Engine::observe_diagnostics(&self) -> core::result::Result<nmp::DiagnosticsSubscription, nmp::EngineError>
 pub fn nmp::Engine::publish(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<std::sync::mpsc::Receiver<nmp_engine::outbox::WriteStatus>, nmp::EngineError>
 pub fn nmp::Engine::publish_tracked(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<nmp_engine::runtime::ReceiptStream, nmp::EngineError>
+pub fn nmp::Engine::reattach_by_correlation(&self, alloc::string::String) -> core::result::Result<nmp_engine::runtime::ReceiptReattachment, nmp::EngineError>
 pub fn nmp::Engine::reattach_receipt(&self, nmp_engine::core::ReceiptId) -> core::result::Result<nmp_engine::runtime::ReceiptReattachment, nmp::EngineError>
 pub async fn nmp::Engine::relay_information(&self, &str, nmp::RelayInformationCachePolicy) -> core::result::Result<nmp::RelayInformationSnapshot, nmp::RelayInformationRequestError>
 pub fn nmp::Engine::remove_account(&self, &nmp::AccountRegistration) -> core::result::Result<bool, nmp::EngineError>
@@ -6061,6 +6064,64 @@ reexport nmp::Binding => nmp_grammar::binding::Binding
 reexport nmp::CacheMode => nmp_grammar::descriptor::CacheMode
 {
   "previously_defined": "nmp_grammar::descriptor::CacheMode"
+}
+reexport nmp::CorrelationToken => nmp_grammar::write::CorrelationToken
+{
+  "attrs": [],
+  "inner": {
+    "struct": {
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "kind": {
+        "tuple": [
+          null
+        ]
+      }
+    }
+  },
+  "name": "CorrelationToken",
+  "visibility": "public"
+}
+reexport nmp::CorrelationTokenError => nmp_grammar::write::CorrelationTokenError
+{
+  "attrs": [],
+  "inner": {
+    "enum": {
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "has_stripped_variants": false,
+      "variants": [
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "Empty",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "TooLong",
+          "visibility": "default"
+        }
+      ]
+    }
+  },
+  "name": "CorrelationTokenError",
+  "visibility": "public"
 }
 reexport nmp::CoverageInterval => nmp_store::coverage::CoverageInterval
 {
@@ -24539,6 +24600,25 @@ reexport nmp::ReceiptReattachment => nmp_engine::runtime::ReceiptReattachment
                     "inner": {
                       "struct_field": {
                         "resolved_path": {
+                          "args": null,
+                          "path": "crate::core::ReceiptId",
+                          "resolved_item": {
+                            "definition": {
+                              "previously_defined": "nmp_engine::core::ReceiptId"
+                            },
+                            "path": "nmp_engine::core::ReceiptId"
+                          }
+                        }
+                      }
+                    },
+                    "name": "0",
+                    "visibility": "default"
+                  },
+                  {
+                    "attrs": [],
+                    "inner": {
+                      "struct_field": {
+                        "resolved_path": {
                           "args": {
                             "angle_bracketed": {
                               "args": [
@@ -25321,7 +25401,7 @@ reexport nmp::ReceiptReattachment => nmp_engine::runtime::ReceiptReattachment
                         }
                       }
                     },
-                    "name": "0",
+                    "name": "1",
                     "visibility": "default"
                   }
                 ]
@@ -29662,6 +29742,42 @@ reexport nmp::WriteIntent => nmp_grammar::write::WriteIntent
                 }
               },
               "name": "identity_override",
+              "visibility": "public"
+            },
+            {
+              "attrs": [],
+              "inner": {
+                "struct_field": {
+                  "resolved_path": {
+                    "args": {
+                      "angle_bracketed": {
+                        "args": [
+                          {
+                            "type": {
+                              "resolved_path": {
+                                "args": null,
+                                "path": "CorrelationToken",
+                                "resolved_item": {
+                                  "definition": {
+                                    "previously_defined": "nmp_grammar::write::CorrelationToken"
+                                  },
+                                  "path": "nmp_grammar::write::CorrelationToken"
+                                }
+                              }
+                            }
+                          }
+                        ],
+                        "constraints": []
+                      }
+                    },
+                    "path": "Option",
+                    "resolved_item": {
+                      "path": "core::option::Option"
+                    }
+                  }
+                }
+              },
+              "name": "correlation",
               "visibility": "public"
             }
           ],

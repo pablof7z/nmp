@@ -2664,6 +2664,27 @@ enum Enum {
                 "A single relay's in-flight NIP-11 waiter set reached its finite\nadmission bound. The refused caller was not retained.",
             ),
         },
+        Variant {
+            name: "InvalidCorrelationToken",
+            discr: None,
+            fields: [
+                Field {
+                    name: "got",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "#591: `FfiWriteIntent.correlation` was `Some` but failed\n`nmp_grammar::CorrelationToken`'s `TryFrom<&str>` bounded/non-empty\nvalidation (empty, or over `CorrelationToken::MAX_LEN` bytes). Synchronous,\nbefore any engine call -- same discipline as `InvalidPublicKey`/\n`InvalidTag` above.",
+            ),
+        },
     ],
     shape: Error {
         flat: false,
@@ -5312,6 +5333,34 @@ record Record {
 }
 
 record Record {
+    name: "FfiCorrelationReattachment",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "outcome",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiReceiptReattachment",
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "receipt_id",
+            type_: Optional {
+                inner_type: UInt64,
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "#591: `NmpEngine::reattachByCorrelation`'s result. Reuses\n[`FfiReceiptReattachment`]'s exact three-way outcome vocabulary\nunchanged -- this is not a new outcome enum, only a pairing with the\nresolved receipt id a correlation-token caller cannot otherwise learn\n(the by-id door needs no such pairing: the caller already supplied the\nid). `receipt_id` is `Some` iff `outcome == Attached`, `None` otherwise.",
+    ),
+}
+
+record Record {
     name: "FfiCoverageInterval",
     module_path: "nmp_ffi",
     remote: false,
@@ -6839,6 +6888,18 @@ record Record {
             ),
             docstring: Some(
                 "`nmp::WriteIntent::identity_override` mirror (#47 Unit A): the\nidentity this ONE write is published under, as 64-char hex (the\nmodule-wide `convert::parse_pubkey` rule every other pubkey input\nhere follows) or bech32 `npub` (an identity is the one input an app\nmost plausibly holds in display form). `None` -- the default, and\nwhat every existing caller gets -- means \"the active account at\nacceptance time\", unchanged.\n`Some` must name exactly the payload's own author; misuse fails\nclosed, never silently retargets: a MALFORMED string is a typed\nsynchronous [`crate::convert::FfiError::InvalidPublicKey`] before any\nengine call, while a well-formed-but-MISMATCHED override (not the\ndraft/event author) is rejected at the engine's acceptance boundary\nas `FfiWriteStatus::Failed` on the receipt stream -- no `Accepted`\never precedes it. An override naming a pubkey with no registered\nsigner parks as `FfiWriteStatus::AwaitingCapability` (retained, not\nterminated) until that capability attaches; acceptance PINS the\noverride, so a later `set_active_account` cannot retarget the write.",
+            ),
+        },
+        Field {
+            name: "correlation",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: Some(
+                None,
+            ),
+            docstring: Some(
+                "`nmp_grammar::WriteIntent::correlation` mirror (#591): a caller-\ngenerated crash-safe correlation/idempotency token. `None` -- the\ndefault -- opts this write out of correlation entirely. `Some`\ncrosses the boundary as a plain string and is validated by\n`nmp_grammar::CorrelationToken`'s `TryFrom<&str>` on the way in\n(non-empty, length-capped): a malformed token is a typed synchronous\n[`crate::convert::FfiError::InvalidCorrelationToken`] before any\nengine call. A token that already resolves to a previously-accepted\nreceipt reattaches that existing obligation instead of enqueuing a\nsecond write -- see that type's doc for the full contract.",
             ),
         },
     ],
@@ -11175,6 +11236,86 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_publish_composed",
             checksum: Some(
                 4438,
+            ),
+        },
+        Method {
+            name: "reattach_by_correlation",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "correlation",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "observer",
+                    type_: CallbackInterface {
+                        module_path: "nmp_ffi",
+                        name: "ReceiptObserver",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiCorrelationReattachment",
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_reattach_by_correlation",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "correlation",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "observer",
+                        type_: UInt64,
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        Some(
+                            ExternalFfiMetadata {
+                                name: "FfiCorrelationReattachment",
+                                module_path: "nmp_ffi",
+                            },
+                        ),
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "#591: recover a receipt after a crash that happened BEFORE the app\ncould durably persist the receipt id `publish`/`publish_composed`\nreturned -- looked up by the caller's own crash-safe correlation\ntoken instead. Otherwise identical to [`Self::reattach_receipt`],\nexcept the caller cannot already know the receipt id (that is\nexactly what a token recovers) -- `FfiCorrelationReattachment.\nreceipt_id` carries it back, `Some` iff `outcome == Attached`.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_reattach_by_correlation",
+            checksum: Some(
+                29977,
             ),
         },
         Method {

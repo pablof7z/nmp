@@ -230,6 +230,7 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
             durability: Durability::AtMostOnce,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         })
         .expect("receipt id allocation");
     assert!(
@@ -257,6 +258,7 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
             durability: Durability::AtMostOnce,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         })
         .expect("receipt id allocation");
     assert!(
@@ -282,6 +284,7 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
             durability: Durability::AtMostOnce,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         })
         .expect("receipt id allocation");
     assert!(
@@ -330,6 +333,7 @@ fn no_active_account_cannot_select_an_arbitrary_registered_signer() {
             durability: Durability::AtMostOnce,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         })
         .expect("receipt id allocation");
 
@@ -373,6 +377,7 @@ fn active_a_rejects_b_authored_default_even_when_b_is_registered() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         })
         .expect("receipt id allocation");
     assert!(wait_for_status(
@@ -431,6 +436,7 @@ fn stale_a_draft_after_switch_to_b_invokes_neither_signer() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         })
         .expect("pre-acceptance failure still returns a local status stream");
     match receipt
@@ -481,6 +487,7 @@ fn attaching_matching_signer_rearms_awaiting_intent() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         })
         .expect("receipt id allocation");
     assert!(wait_for_status(
@@ -537,6 +544,7 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         })
         .expect("receipt id allocation");
     assert!(wait_for_status(
@@ -604,6 +612,7 @@ fn stale_registration_cannot_detach_replacement_for_same_pubkey() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         })
         .expect("receipt id allocation");
     assert!(wait_for_status(
@@ -690,6 +699,7 @@ fn identity_override_signs_as_registered_secondary_without_rerooting_active() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: Some(b.public_key()),
+            correlation: None,
         })
         .expect("receipt id allocation");
     assert!(
@@ -749,6 +759,7 @@ fn identity_override_signs_as_registered_secondary_without_rerooting_active() {
             durability: Durability::AtMostOnce,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         })
         .expect("receipt id allocation");
     assert!(wait_for_status(
@@ -799,6 +810,7 @@ fn unregistered_override_parks_durably_and_never_retargets_on_account_switch() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: Some(b.public_key()),
+            correlation: None,
         })
         .expect("receipt id allocation");
     assert!(
@@ -870,6 +882,7 @@ fn identity_override_signs_while_logged_out() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: Some(b.public_key()),
+            correlation: None,
         })
         .expect("receipt id allocation");
     assert!(

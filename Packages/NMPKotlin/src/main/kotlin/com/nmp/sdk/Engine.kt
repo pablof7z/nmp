@@ -339,6 +339,14 @@ class NMPEngine(
     /** Attach to retained facts without conflating corruption with absence. */
     fun reattachReceipt(id: ULong): ReceiptReattachment = reattachReceipt(ffi, id)
 
+    /** #591: recover a receipt after a crash that happened BEFORE the app
+     * could durably persist the receipt id `publish`/`publishComposed`
+     * returned -- looked up by the caller's own crash-safe correlation
+     * token instead. Otherwise identical to [reattachReceipt] (the by-id
+     * overload). */
+    fun reattachReceipt(correlation: String): ReceiptReattachment =
+        reattachReceiptByCorrelation(ffi, correlation)
+
     /** Explicitly cancel an accepted unsigned write by stable receipt id. */
     fun cancel(receiptId: ULong): WriteCancellationOutcome = cancelWrite(ffi, receiptId)
 

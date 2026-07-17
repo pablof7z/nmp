@@ -54,7 +54,7 @@ use nostr_relay_builder::prelude::{
 
 fn expect_attached(result: ReceiptReattachment) -> Receiver<WriteStatus> {
     match result {
-        ReceiptReattachment::Attached(statuses) => statuses,
+        ReceiptReattachment::Attached(_id, statuses) => statuses,
         ReceiptReattachment::NotFound => panic!("known receipt was not found"),
         ReceiptReattachment::RetainedButUnreadable => {
             panic!("known receipt evidence was unreadable")
@@ -388,6 +388,7 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         })
         .expect("receipt id allocation");
 
@@ -1103,6 +1104,7 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
         "observe_diagnostics",
         "publish",
         "publish_tracked",
+        "reattach_by_correlation",
         "reattach_receipt",
         "relay_information",
         "remove_auth_policy",
@@ -1174,6 +1176,7 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         })
         .expect("receipt id allocation");
     assert!(
@@ -1265,6 +1268,7 @@ fn runtime_boot_recovery_precedes_first_reattach_command() {
                 routing: "author-outbox".into(),
                 sig_state: IntentSigState::AwaitingSigner,
                 accepted_at: Timestamp::now(),
+                correlation: None,
             })
             .unwrap();
         nmp_engine::core::ReceiptId(outcome.journaled_receipt_id().unwrap())

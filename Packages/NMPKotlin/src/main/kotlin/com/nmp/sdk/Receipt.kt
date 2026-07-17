@@ -132,3 +132,25 @@ fun reattachReceipt(engine: NmpEngineInterface, id: ULong): ReceiptReattachment 
     }
     return mapReceiptReattachment(result, id, bridge.channel.receiveAsFlow())
 }
+
+/** #591: recover a receipt after a crash that happened BEFORE the app could
+ * durably persist the receipt id `publish`/`publishComposed` returned --
+ * looked up by the caller's own crash-safe correlation token instead.
+ * Otherwise identical to [reattachReceipt] (the by-id overload). */
+fun reattachReceiptByCorrelation(engine: NmpEngineInterface, correlation: String): ReceiptReattachment {
+    val bridge = ReceiptBridge()
+    val result = nmpRethrowing { engine.reattachByCorrelation(correlation, bridge.observer) }
+    if (result.outcome != FfiReceiptReattachment.ATTACHED) {
+        bridge.channel.close()
+    }
+    val id =
+        result.receiptId
+            ?: return when (result.outcome) {
+                FfiReceiptReattachment.ATTACHED ->
+                    error("FfiCorrelationReattachment.receiptId must be present when outcome is ATTACHED")
+                FfiReceiptReattachment.NOT_FOUND -> ReceiptReattachment.NotFound
+                FfiReceiptReattachment.RETAINED_BUT_UNREADABLE ->
+                    ReceiptReattachment.RetainedButUnreadable
+            }
+    return mapReceiptReattachment(result.outcome, id, bridge.channel.receiveAsFlow())
+}
