@@ -181,7 +181,20 @@ pub(super) const CARDINALITY_AUTHOR_KIND: u8 = 3;
 pub(super) const CARDINALITY_TAG: u8 = 4;
 pub(super) const CARDINALITY_SAMPLE_MASK: u8 = 0x0f;
 
+#[cfg(feature = "bench-instrumentation")]
+static BENCH_EXACT_CARDINALITY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(feature = "bench-instrumentation")]
+pub fn set_bench_exact_cardinality(enabled: bool) {
+    BENCH_EXACT_CARDINALITY.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub(super) fn event_is_cardinality_sample(sample_key: &[u8; 32], id: &EventId) -> bool {
+    #[cfg(feature = "bench-instrumentation")]
+    if BENCH_EXACT_CARDINALITY.load(std::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
     blake3::keyed_hash(sample_key, id.as_bytes()).as_bytes()[0] & CARDINALITY_SAMPLE_MASK == 0
 }
 

@@ -422,12 +422,49 @@ fn matrix_cells() -> Vec<Cell> {
 }
 
 fn run_matrix(corpus: &Path, output: &Path, repetitions: usize) -> Result<(), String> {
+    run_matrix_cells(
+        corpus,
+        output,
+        repetitions,
+        "matrix",
+        matrix_cells(),
+        vec![128, 256, 512, 1_024, 2_048, 4_096],
+    )
+}
+
+fn run_cardinality_matrix(corpus: &Path, output: &Path, repetitions: usize) -> Result<(), String> {
+    run_matrix_cells(
+        corpus,
+        output,
+        repetitions,
+        "cardinality-matrix",
+        vec![
+            Cell {
+                variant: StoreBenchVariant::AllIndexesCardinality,
+                batch_size: 4_096,
+            },
+            Cell {
+                variant: StoreBenchVariant::AllIndexesSampledCardinality,
+                batch_size: 4_096,
+            },
+        ],
+        vec![4_096],
+    )
+}
+
+fn run_matrix_cells(
+    corpus: &Path,
+    output: &Path,
+    repetitions: usize,
+    command_name: &str,
+    base_cells: Vec<Cell>,
+    transaction_batch_sizes: Vec<usize>,
+) -> Result<(), String> {
     if repetitions == 0 {
         return Err("matrix repetitions must be nonzero".to_owned());
     }
     let current_exe = env::current_exe().map_err(|error| error.to_string())?;
     let mut runs = Vec::new();
-    let base_cells = matrix_cells();
     for repetition in 0..repetitions {
         let mut cells = base_cells.clone();
         if repetition % 2 == 1 {
@@ -476,7 +513,7 @@ fn run_matrix(corpus: &Path, output: &Path, repetitions: usize) -> Result<(), St
     let record = MatrixRecord {
         schema: SCHEMA.to_owned(),
         command: format!(
-            "cargo run -p nmp-store --release --features bench-instrumentation --example store_decomposition -- matrix {} {} {}",
+            "cargo run -p nmp-store --release --features bench-instrumentation --example store_decomposition -- {command_name} {} {} {}",
             corpus.display(),
             output.display(),
             repetitions
@@ -486,7 +523,7 @@ fn run_matrix(corpus: &Path, output: &Path, repetitions: usize) -> Result<(), St
         host: first.host.clone(),
         corpus: first.corpus.clone(),
         repetitions,
-        transaction_batch_sizes: vec![128, 256, 512, 1_024, 2_048, 4_096],
+        transaction_batch_sizes,
         alternating_order: true,
         runs,
     };
@@ -713,6 +750,23 @@ fn main() -> Result<(), String> {
                 .map_err(|error| format!("invalid repetitions: {error}"))?
                 .unwrap_or(3);
             run_matrix(&corpus, &output, repetitions)?;
+        }
+        "cardinality-matrix" => {
+            let corpus = PathBuf::from(
+                args.next()
+                    .ok_or_else(|| "cardinality-matrix requires corpus path".to_owned())?,
+            );
+            let output = PathBuf::from(
+                args.next()
+                    .ok_or_else(|| "cardinality-matrix requires output path".to_owned())?,
+            );
+            let repetitions = args
+                .next()
+                .map(|value| value.to_string_lossy().parse())
+                .transpose()
+                .map_err(|error| format!("invalid repetitions: {error}"))?
+                .unwrap_or(15);
+            run_cardinality_matrix(&corpus, &output, repetitions)?;
         }
         other => return Err(format!("unknown command: {other}")),
     }

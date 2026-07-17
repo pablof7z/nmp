@@ -1,34 +1,60 @@
 //! Query-latency falsifier for sampled planner cardinalities.
 //!
-//! Usage: `cardinality_query_bench <events.jsonl> [iterations]`
+//! Usage: `cardinality_query_bench <exact|sampled> <events.jsonl> [iterations]`
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Instant;
 
-use nmp_store::{EventStore, RedbStore, RelayObserved};
+use nmp_store::{set_bench_exact_cardinality, EventStore, RedbStore, RelayObserved};
 use nostr::{Event, Filter, JsonUtil, Kind, PublicKey, RelayUrl, SingleLetterTag, Timestamp};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct Measurement {
-    name: &'static str,
+    name: String,
     expected_rows: usize,
     p50_us: u64,
     p95_us: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct Report {
+    mode: String,
+    nmp_commit: String,
+    git_dirty: bool,
     corpus: String,
     input_events: usize,
     canonical_events: usize,
     iterations: usize,
     import_ms: u64,
     measurements: Vec<Measurement>,
+}
+
+#[derive(Serialize)]
+struct MatrixReport {
+    schema: &'static str,
+    command: String,
+    repetitions: usize,
+    alternating_order: bool,
+    runs: Vec<Report>,
+}
+
+fn git_output(args: &[&str]) -> String {
+    String::from_utf8(
+        Command::new("git")
+            .args(args)
+            .output()
+            .expect("run git")
+            .stdout,
+    )
+    .expect("git output is utf8")
+    .trim()
+    .to_owned()
 }
 
 fn load_events(path: &PathBuf) -> Vec<Event> {
@@ -53,7 +79,7 @@ fn measure(name: &'static str, iterations: usize, mut query: impl FnMut() -> usi
     let p50_us = samples[samples.len() / 2];
     let p95_us = samples[((samples.len() * 95).div_ceil(100)).saturating_sub(1)];
     Measurement {
-        name,
+        name: name.to_owned(),
         expected_rows,
         p50_us,
         p95_us,
@@ -62,10 +88,93 @@ fn measure(name: &'static str, iterations: usize, mut query: impl FnMut() -> usi
 
 fn main() {
     let mut args = env::args_os().skip(1);
+    let mode = args
+        .next()
+        .map(|value| value.to_string_lossy().into_owned())
+        .expect("usage: cardinality_query_bench <exact|sampled|matrix> ...");
+    if mode == "matrix" {
+        let corpus = PathBuf::from(args.next().expect("matrix requires corpus path"));
+        let output = PathBuf::from(args.next().expect("matrix requires output path"));
+        let iterations = args
+            .next()
+            .map(|value| {
+                value
+                    .to_string_lossy()
+                    .parse()
+                    .expect("iterations is usize")
+            })
+            .unwrap_or(30usize);
+        let repetitions = args
+            .next()
+            .map(|value| {
+                value
+                    .to_string_lossy()
+                    .parse()
+                    .expect("repetitions is usize")
+            })
+            .unwrap_or(5usize);
+        let current_exe = env::current_exe().expect("current query benchmark executable");
+        let mut runs = Vec::new();
+        for repetition in 0..repetitions {
+            let modes = if repetition % 2 == 0 {
+                ["exact", "sampled"]
+            } else {
+                ["sampled", "exact"]
+            };
+            for child_mode in modes {
+                eprintln!("repetition={repetition} mode={child_mode}");
+                let child = Command::new(&current_exe)
+                    .arg(child_mode)
+                    .arg(&corpus)
+                    .arg(iterations.to_string())
+                    .output()
+                    .expect("run query benchmark child");
+                assert!(
+                    child.status.success(),
+                    "{child_mode} child failed: {}",
+                    String::from_utf8_lossy(&child.stderr)
+                );
+                runs.push(serde_json::from_slice::<Report>(&child.stdout).expect("decode child"));
+            }
+        }
+        let first = runs.first().expect("matrix has runs");
+        assert!(runs.iter().all(|run| {
+            run.nmp_commit == first.nmp_commit
+                && run.git_dirty == first.git_dirty
+                && run.corpus == first.corpus
+                && run.input_events == first.input_events
+        }));
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent).expect("create output directory");
+        }
+        let record = MatrixReport {
+            schema: "nmp-cardinality-query-matrix-v1",
+            command: format!(
+                "cargo run -p nmp-store --release --features bench-instrumentation --example cardinality_query_bench -- matrix {} {} {iterations} {repetitions}",
+                corpus.display(),
+                output.display()
+            ),
+            repetitions,
+            alternating_order: true,
+            runs,
+        };
+        std::fs::write(
+            &output,
+            serde_json::to_vec_pretty(&record).expect("encode matrix"),
+        )
+        .expect("write matrix");
+        println!("wrote {}", output.display());
+        return;
+    }
+    match mode.as_str() {
+        "exact" => set_bench_exact_cardinality(true),
+        "sampled" => set_bench_exact_cardinality(false),
+        _ => panic!("mode must be exact or sampled"),
+    }
     let corpus = args
         .next()
         .map(PathBuf::from)
-        .expect("usage: cardinality_query_bench <events.jsonl> [iterations]");
+        .expect("usage: cardinality_query_bench <exact|sampled> <events.jsonl> [iterations]");
     let iterations = args
         .next()
         .map(|value| {
@@ -223,6 +332,9 @@ fn main() {
     println!(
         "{}",
         serde_json::to_string_pretty(&Report {
+            mode,
+            nmp_commit: git_output(&["rev-parse", "HEAD"]),
+            git_dirty: !git_output(&["status", "--porcelain"]).is_empty(),
             corpus: corpus.display().to_string(),
             input_events,
             canonical_events,

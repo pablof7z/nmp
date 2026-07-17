@@ -22,6 +22,10 @@ required-features = ["bench-instrumentation"]
 name = "redb_index_layout"
 required-features = ["bench-instrumentation"]
 
+[[example]]
+name = "cardinality_query_bench"
+required-features = ["bench-instrumentation"]
+
 [dependencies]
 nostr.workspace = true
 nmp-grammar.workspace = true
