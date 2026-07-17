@@ -15,7 +15,7 @@ use nmp_engine::runtime::{EngineThread, HistoryReceiver, RowsMsg, RowsReceiver};
 use nmp_grammar::{AccessContext, Binding, Demand, Filter, SourceAuthority};
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
-use nmp_store::{EventStore, RedbStore};
+use nmp_store::{EventStore, MemoryStore, RedbStore};
 use nmp_transport::PoolConfig;
 use nostr::{EventBuilder, EventId, JsonUtil, Keys, Kind, RelayUrl, Tag, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ use tungstenite::{accept, Message};
 
 pub type ProbeError = Box<dyn Error + Send + Sync>;
 
-const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v6";
+const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v7";
 const CORPUS_SCHEMA: &str = "nmp-relay-ingest-corpus-v1";
 const BASE_CREATED_AT: u64 = 1_700_000_000;
 
@@ -34,6 +34,8 @@ pub struct ProbeConfig {
     pub passes: usize,
     pub payload_bytes: usize,
     pub shape_corpus: Option<PathBuf>,
+    pub corpus_output: Option<PathBuf>,
+    pub memory_store: bool,
     pub queue_capacity: usize,
     pub verified_cache_capacity: usize,
     pub verifier_workers: usize,
@@ -57,6 +59,8 @@ impl Default for ProbeConfig {
             passes: 1,
             payload_bytes: 128,
             shape_corpus: None,
+            corpus_output: None,
+            memory_store: false,
             queue_capacity: 1_024,
             verified_cache_capacity: 131_072,
             verifier_workers: 0,
@@ -105,6 +109,9 @@ impl ProbeConfig {
                 "expect-rejection requires exactly one event, one relay, and one pass".into(),
             );
         }
+        if self.memory_store && self.store_path.is_some() {
+            return Err("memory-store cannot retain a persistent --store path".into());
+        }
         Ok(())
     }
 }
@@ -125,6 +132,7 @@ pub struct ProbeResult {
     pub payload_bytes: usize,
     pub corpus_mode: &'static str,
     pub shape_source_blake3: Option<String>,
+    pub store_backend: &'static str,
     pub queue_capacity: usize,
     pub verified_cache_capacity: usize,
     pub verifier_workers: usize,
@@ -160,6 +168,7 @@ pub struct ProbeResult {
     pub peak_ingest_rss_bytes: Option<u64>,
     pub peak_ingest_rss_growth_bytes: Option<u64>,
     pub peak_ingest_anonymous_bytes: Option<u64>,
+    pub process_write_bytes: Option<u64>,
     pub rss_after_ingest_bytes: Option<u64>,
     pub anonymous_after_ingest_bytes: Option<u64>,
     pub rss_after_shutdown_bytes: Option<u64>,
@@ -358,19 +367,32 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     config.validate()?;
     let scratch = tempfile::tempdir()?;
     let corpus = generate_corpus(scratch.path(), &config)?;
+    if let Some(output) = &config.corpus_output {
+        if output.exists() {
+            return Err(
+                format!("refusing to overwrite existing corpus {}", output.display()).into(),
+            );
+        }
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&corpus.path, output)?;
+    }
     let store_path = config
         .store_path
         .clone()
         .unwrap_or_else(|| scratch.path().join("probe.redb"));
-    if store_path.exists() {
+    if !config.memory_store && store_path.exists() {
         return Err(format!(
             "refusing to overwrite existing store {}",
             store_path.display()
         )
         .into());
     }
-    if let Some(parent) = store_path.parent() {
-        fs::create_dir_all(parent)?;
+    if !config.memory_store {
+        if let Some(parent) = store_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
     }
 
     let base = Instant::now();
@@ -404,7 +426,6 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         SourceAuthority::Pinned(relay_urls.clone()),
         AccessContext::Public,
     )?;
-    let store = RedbStore::open(&store_path)?;
     #[cfg(feature = "bench-instrumentation")]
     nmp_engine::ingest_attribution::reset();
     let queue_capacity = config.queue_capacity;
@@ -414,28 +435,39 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     let engine_batch_size = config.engine_batch_size;
     let engine_batch_bytes = config.engine_batch_bytes;
     let engine_batch_wait = config.engine_batch_wait;
-    let (engine_thread, handle) = EngineThread::spawn(
-        store,
-        FixtureDirectory::new(),
-        config.relays,
-        PoolConfig {
-            max_relays: config.relays,
-            ingest_queue_capacity: queue_capacity,
-            command_queue_capacity: queue_capacity,
-            event_sink_queue_capacity: queue_capacity,
-            verifier_queue_capacity: queue_capacity,
-            verified_cache_capacity,
-            verifier_workers,
-            max_verify_batch: verify_batch_size,
-            max_engine_batch: engine_batch_size,
-            max_engine_batch_bytes: engine_batch_bytes,
-            max_engine_batch_wait: engine_batch_wait,
-            reconnect_delay_initial: Some(Duration::from_secs(3600)),
-            reconnect_jitter_max: Some(Duration::ZERO),
-            ..PoolConfig::default()
-        },
-        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
-    )?;
+    let pool_config = PoolConfig {
+        max_relays: config.relays,
+        ingest_queue_capacity: queue_capacity,
+        command_queue_capacity: queue_capacity,
+        event_sink_queue_capacity: queue_capacity,
+        verifier_queue_capacity: queue_capacity,
+        verified_cache_capacity,
+        verifier_workers,
+        max_verify_batch: verify_batch_size,
+        max_engine_batch: engine_batch_size,
+        max_engine_batch_bytes: engine_batch_bytes,
+        max_engine_batch_wait: engine_batch_wait,
+        reconnect_delay_initial: Some(Duration::from_secs(3600)),
+        reconnect_jitter_max: Some(Duration::ZERO),
+        ..PoolConfig::default()
+    };
+    let (engine_thread, handle) = if config.memory_store {
+        EngineThread::spawn(
+            MemoryStore::default(),
+            FixtureDirectory::new(),
+            config.relays,
+            pool_config,
+            RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+        )?
+    } else {
+        EngineThread::spawn(
+            RedbStore::open(&store_path)?,
+            FixtureDirectory::new(),
+            config.relays,
+            pool_config,
+            RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+        )?
+    };
     let live_query = LiveQuery(demand);
     let rows = match config.visible_limit {
         Some(limit) => {
@@ -468,6 +500,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         .and_then(|value| value.checked_mul(config.passes as u64))
         .ok_or("expected frame count overflow")?;
     let expected_last_id = EventId::from_hex(&corpus.last_id)?;
+    let process_write_bytes_before = process_write_bytes();
     let ingest_started = Instant::now();
     let memory_before_ingest = current_memory();
     let memory_sampler = MemorySampler::start(config.trim_allocator_during_ingest);
@@ -562,6 +595,9 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     handle.shutdown();
     engine_thread.join();
     let shutdown_elapsed = shutdown_started.elapsed();
+    let process_write_bytes = process_write_bytes()
+        .zip(process_write_bytes_before)
+        .map(|(after, before)| after.saturating_sub(before));
     #[cfg(feature = "bench-instrumentation")]
     let ingest_attribution = Some(ingest_attribution_json());
     #[cfg(not(feature = "bench-instrumentation"))]
@@ -635,34 +671,38 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     let allocator_trim_attempted = trim_allocator();
     let memory_after_allocator_trim = current_memory();
 
-    let verify_started = Instant::now();
-    let reopened = RedbStore::open(&store_path)?;
-    let mut persisted_selection = selection.clone();
-    persisted_selection.limit = None;
-    let stored = reopened.query(&selection_to_nostr(&persisted_selection)?)?;
-    if stored.len() != expected_stored_events {
-        return Err(format!(
-            "reopened cardinality {}, expected {}",
-            stored.len(),
-            expected_stored_events
-        )
-        .into());
-    }
-    if stored
-        .iter()
-        .any(|row| row.provenance.seen.len() != config.relays)
-    {
-        return Err("one or more rows did not retain every relay provenance".into());
-    }
-    let ids: HashSet<_> = stored.iter().map(|row| row.event.id.to_hex()).collect();
-    if !config.expect_rejection
-        && (!ids.contains(&corpus.first_id) || !ids.contains(&corpus.last_id))
-    {
-        return Err("reopened store is missing the corpus boundary ids".into());
-    }
-    drop(stored);
-    drop(reopened);
-    let reopen_and_verify = verify_started.elapsed();
+    let (database_bytes, reopen_and_verify) = if config.memory_store {
+        (0, Duration::ZERO)
+    } else {
+        let verify_started = Instant::now();
+        let reopened = RedbStore::open(&store_path)?;
+        let mut persisted_selection = selection.clone();
+        persisted_selection.limit = None;
+        let stored = reopened.query(&selection_to_nostr(&persisted_selection)?)?;
+        if stored.len() != expected_stored_events {
+            return Err(format!(
+                "reopened cardinality {}, expected {}",
+                stored.len(),
+                expected_stored_events
+            )
+            .into());
+        }
+        if stored
+            .iter()
+            .any(|row| row.provenance.seen.len() != config.relays)
+        {
+            return Err("one or more rows did not retain every relay provenance".into());
+        }
+        let ids: HashSet<_> = stored.iter().map(|row| row.event.id.to_hex()).collect();
+        if !config.expect_rejection
+            && (!ids.contains(&corpus.first_id) || !ids.contains(&corpus.last_id))
+        {
+            return Err("reopened store is missing the corpus boundary ids".into());
+        }
+        drop(stored);
+        drop(reopened);
+        (fs::metadata(&store_path)?.len(), verify_started.elapsed())
+    };
 
     let ingest_seconds = ingest_elapsed.as_secs_f64();
     Ok(ProbeResult {
@@ -680,6 +720,11 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         payload_bytes: config.payload_bytes,
         corpus_mode: corpus.mode,
         shape_source_blake3: corpus.shape_source_blake3,
+        store_backend: if config.memory_store {
+            "memory"
+        } else {
+            "redb"
+        },
         queue_capacity,
         verified_cache_capacity,
         verifier_workers,
@@ -704,7 +749,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         final_visible_rows,
         all_sources_reconciled,
         corpus_bytes: corpus.bytes,
-        database_bytes: fs::metadata(&store_path)?.len(),
+        database_bytes,
         generation_ms: duration_ms(corpus.generation),
         ingest_ms: duration_ms(ingest_elapsed),
         relay_frames_per_second: expected_frames as f64 / ingest_seconds,
@@ -722,6 +767,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             .zip(memory_before_ingest.rss_bytes)
             .map(|(peak, before)| peak.saturating_sub(before)),
         peak_ingest_anonymous_bytes: peak_ingest_memory.anonymous_bytes,
+        process_write_bytes,
         rss_after_ingest_bytes: memory_after_ingest.rss_bytes,
         anonymous_after_ingest_bytes: memory_after_ingest.anonymous_bytes,
         rss_after_shutdown_bytes: memory_after_shutdown.rss_bytes,
@@ -1365,6 +1411,19 @@ fn memory_field_bytes(rollup: &str, field: &str) -> Option<u64> {
     let line = rollup.lines().find(|line| line.starts_with(field))?;
     let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
     kib.checked_mul(1_024)
+}
+
+#[cfg(target_os = "linux")]
+fn process_write_bytes() -> Option<u64> {
+    fs::read_to_string("/proc/self/io")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("write_bytes:")?.trim().parse().ok())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_write_bytes() -> Option<u64> {
+    None
 }
 
 #[cfg(not(target_os = "linux"))]

@@ -10,18 +10,19 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use fjall::{
+    KeyspaceCreateOptions, PersistMode, Readable, SingleWriterTxDatabase, SingleWriterTxKeyspace,
+};
 use memmap2::{Mmap, MmapOptions};
 use nmp_store::{
     prepare_equivalent_store_corpus, run_prepared_redb_store_bench, run_store_bench_variant,
     EventStore, InsertOutcome, RedbStore, RelayObserved, StoreBenchMetrics,
-    StoreBenchPreparedCorpus, StoreBenchPreparedMetrics, StoreBenchProcessCounters,
-    StoreBenchVariant,
+    StoreBenchPreparedCorpus, StoreBenchPreparedMetrics, StoreBenchPreparedTable,
+    StoreBenchProcessCounters, StoreBenchVariant,
 };
 use nostr::{Event, EventBuilder, Filter, JsonUtil, Keys, Kind, RelayUrl, Tag, Timestamp};
 use rayon::prelude::*;
-use redb::{
-    Database as ProbeRedb, ReadableDatabase, ReadableTableMetadata, TableDefinition,
-};
+use redb::{Database as ProbeRedb, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 
 const SCHEMA: &str = "nmp-nostrdb-direct-v1";
@@ -31,6 +32,20 @@ const AUTHORS: usize = 64;
 const QUERY_LIMIT: usize = 200;
 const NOSTRDB_MAP_SIZE: u64 = 32 * 1024 * 1024 * 1024;
 const EQUIVALENT_SCHEMA: &str = "nmp-storage-equivalent-v1";
+const FJALL_KEYSPACES: [&str; 12] = [
+    "events",
+    "event_ids",
+    "event_observations",
+    "relays",
+    "relay_keys",
+    "relay_refs",
+    "by_created_at",
+    "by_author",
+    "by_kind",
+    "by_author_kind",
+    "by_tag",
+    "index_cardinality",
+];
 
 struct CountingAllocator;
 
@@ -288,7 +303,9 @@ impl LmdbHandle {
     fn count(&self, table: u32) -> Result<u64, String> {
         let mut error = 0;
         let count = unsafe { bench_lmdb_count(self.0, table, &mut error) };
-        (error == 0).then_some(count).ok_or_else(|| lmdb_error(error))
+        (error == 0)
+            .then_some(count)
+            .ok_or_else(|| lmdb_error(error))
     }
 
     fn contains(&self, table: u32, key: &[u8]) -> Result<bool, String> {
@@ -319,9 +336,8 @@ struct LmdbTransaction(*mut c_void);
 
 impl LmdbTransaction {
     fn put_batch(&self, handle: &LmdbHandle, records: &[LmdbRecord]) -> Result<(), String> {
-        let error = unsafe {
-            bench_lmdb_put_batch(handle.0, self.0, records.as_ptr(), records.len())
-        };
+        let error =
+            unsafe { bench_lmdb_put_batch(handle.0, self.0, records.as_ptr(), records.len()) };
         (error == 0).then_some(()).ok_or_else(|| lmdb_error(error))
     }
 
@@ -412,7 +428,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let command = args
         .next()
         .ok_or(
-            "usage: nmp-nostrdb-compare <generate|run-nmp|run-nostrdb|compare|run-equivalent|matrix-equivalent|crash-probe|crash-child> ...",
+            "usage: nmp-nostrdb-compare <generate|describe-corpus|run-nmp|run-nostrdb|compare|run-equivalent|matrix-equivalent|matrix-prepared|crash-probe|crash-child> ...",
         )?;
     match command.to_string_lossy().as_ref() {
         "generate" => {
@@ -420,6 +436,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let events = number_arg::<u64>(&mut args, "events")?;
             let payload = number_arg::<usize>(&mut args, "payload-bytes")?;
             generate(&corpus, events, payload)?;
+        }
+        "describe-corpus" => {
+            let corpus = path_arg(&mut args, "corpus")?;
+            describe_corpus(&corpus)?;
         }
         "run-nmp" => {
             let corpus = path_arg(&mut args, "corpus")?;
@@ -448,7 +468,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let corpus = path_arg(&mut args, "corpus")?;
             let backend = args
                 .next()
-                .ok_or("missing backend (redb-prepared|lmdb-prepared|redb-full)")?
+                .ok_or("missing backend (redb-prepared|lmdb-prepared|fjall-prepared|redb-full)")?
                 .to_string_lossy()
                 .into_owned();
             let batch = number_arg::<usize>(&mut args, "batch-size")?;
@@ -459,7 +479,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let corpus = path_arg(&mut args, "corpus")?;
             let repetitions = number_arg::<usize>(&mut args, "repetitions")?;
             let output = path_arg(&mut args, "output")?;
-            run_equivalent_matrix(&corpus, repetitions, &output)?;
+            run_equivalent_matrix(&corpus, repetitions, &output, true)?;
+        }
+        "matrix-prepared" => {
+            let corpus = path_arg(&mut args, "corpus")?;
+            let repetitions = number_arg::<usize>(&mut args, "repetitions")?;
+            let output = path_arg(&mut args, "output")?;
+            run_equivalent_matrix(&corpus, repetitions, &output, false)?;
         }
         "crash-probe" => {
             let output = path_arg(&mut args, "output")?;
@@ -483,7 +509,9 @@ fn parse_prevalidated_events(corpus: &Mmap) -> Result<Vec<Event>, String> {
     corpus
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
-        .map(|line| Event::from_json(line).map_err(|error| format!("parse corpus event: {error:?}")))
+        .map(|line| {
+            Event::from_json(line).map_err(|error| format!("parse corpus event: {error:?}"))
+        })
         .collect()
 }
 
@@ -575,6 +603,95 @@ fn run_prepared_lmdb(
     })
 }
 
+fn open_fjall_keyspaces(
+    database: &SingleWriterTxDatabase,
+) -> Result<Vec<SingleWriterTxKeyspace>, String> {
+    FJALL_KEYSPACES
+        .iter()
+        .map(|name| {
+            database
+                .keyspace(name, KeyspaceCreateOptions::default)
+                .map_err(|error| error.to_string())
+        })
+        .collect()
+}
+
+fn run_prepared_fjall(
+    path: &Path,
+    corpus: &StoreBenchPreparedCorpus,
+) -> Result<StoreBenchPreparedMetrics, String> {
+    let database = SingleWriterTxDatabase::builder(path)
+        .open()
+        .map_err(|error| error.to_string())?;
+    let keyspaces = open_fjall_keyspaces(&database)?;
+    database
+        .persist(PersistMode::SyncAll)
+        .map_err(|error| error.to_string())?;
+
+    let process_before = sample_process();
+    let started = Instant::now();
+    let mut commit_ns = 0u64;
+    for batch in &corpus.batches {
+        let mut transaction = database.write_tx().durability(Some(PersistMode::SyncAll));
+        for record in &batch.records {
+            transaction.insert(
+                &keyspaces[record.table as usize],
+                record.key.as_slice(),
+                record.value.as_slice(),
+            );
+        }
+        let commit_started = Instant::now();
+        transaction.commit().map_err(|error| error.to_string())?;
+        commit_ns = commit_ns.saturating_add(duration_ns(commit_started));
+    }
+    let wall_ns = duration_ns(started);
+    let process = counters_delta(sample_process(), process_before);
+    let database_stored_bytes = database.disk_space().map_err(|error| error.to_string())?;
+    drop(keyspaces);
+    drop(database);
+    let (database_logical_bytes, _) = path_size(path).map_err(|error| error.to_string())?;
+
+    let reopen_started = Instant::now();
+    let reopened = SingleWriterTxDatabase::builder(path)
+        .open()
+        .map_err(|error| error.to_string())?;
+    let reopened_keyspaces = open_fjall_keyspaces(&reopened)?;
+    let read = reopened.read_tx();
+    let reopened_table_rows = reopened_keyspaces
+        .iter()
+        .map(|keyspace| {
+            read.len(keyspace)
+                .map(|rows| rows as u64)
+                .map_err(|error| error.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let reopened_rows = reopened_table_rows[StoreBenchPreparedTable::Events as usize];
+    drop(read);
+    drop(reopened_keyspaces);
+    drop(reopened);
+    let reopen_ns = duration_ns(reopen_started);
+
+    Ok(StoreBenchPreparedMetrics {
+        events: corpus.events,
+        transactions: corpus.batches.len() as u64,
+        wall_ns,
+        commit_ns,
+        reopen_ns,
+        cpu_ns: process.cpu_ns,
+        allocation_ops: process.allocation_ops,
+        allocated_bytes: process.allocated_bytes,
+        rss_before_bytes: process.current_rss_bytes,
+        peak_rss_bytes: process.peak_rss_bytes,
+        process_write_bytes: process.process_write_bytes,
+        database_logical_bytes,
+        database_stored_bytes,
+        reopened_rows,
+        expected_table_rows: corpus.expected_table_rows.clone(),
+        exact_reopen: reopened_table_rows == corpus.expected_table_rows,
+        reopened_table_rows,
+    })
+}
+
 fn full_metrics_to_prepared(metrics: StoreBenchMetrics) -> StoreBenchPreparedMetrics {
     StoreBenchPreparedMetrics {
         events: metrics.events,
@@ -631,6 +748,7 @@ fn run_equivalent(
     let database = match backend {
         "redb-prepared" | "redb-full" => scratch.path().join("store.redb"),
         "lmdb-prepared" => scratch.path().join("store.lmdb"),
+        "fjall-prepared" => scratch.path().join("store.fjall"),
         _ => return Err(format!("unknown equivalent backend {backend}").into()),
     };
     let metrics = match backend {
@@ -640,6 +758,10 @@ fn run_equivalent(
             sample_process,
         )?,
         "lmdb-prepared" => run_prepared_lmdb(
+            &database,
+            prepared.as_ref().expect("prepared backend has corpus"),
+        )?,
+        "fjall-prepared" => run_prepared_fjall(
             &database,
             prepared.as_ref().expect("prepared backend has corpus"),
         )?,
@@ -687,22 +809,27 @@ fn run_equivalent_matrix(
     corpus: &Path,
     repetitions: usize,
     output: &Path,
+    include_full_governed: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if repetitions == 0 {
         return Err("equivalent matrix repetitions must be nonzero".into());
     }
     let executable = env::current_exe()?;
-    let base_cells = [
+    let mut base_cells = vec![
         ("redb-prepared", 128usize),
         ("lmdb-prepared", 128usize),
+        ("fjall-prepared", 128usize),
         ("redb-prepared", 4_096usize),
         ("lmdb-prepared", 4_096usize),
-        ("redb-full", 4_096usize),
+        ("fjall-prepared", 4_096usize),
     ];
+    if include_full_governed {
+        base_cells.push(("redb-full", 4_096usize));
+    }
     let scratch = tempfile::tempdir()?;
     let mut runs = Vec::new();
     for repetition in 0..repetitions {
-        let mut cells = base_cells;
+        let mut cells = base_cells.clone();
         if !repetition.is_multiple_of(2) {
             cells.reverse();
         }
@@ -747,8 +874,13 @@ fn run_equivalent_matrix(
     let matrix = EquivalentMatrix {
         schema: EQUIVALENT_SCHEMA.to_owned(),
         command: format!(
-            "NOSTRDB_DIR={} cargo run --release --manifest-path benchmarks/nostrdb-compare/Cargo.toml -- matrix-equivalent {} {} {}",
+            "NOSTRDB_DIR={} cargo run --release --manifest-path benchmarks/nostrdb-compare/Cargo.toml -- {} {} {} {}",
             nostrdb_root().display(),
+            if include_full_governed {
+                "matrix-equivalent"
+            } else {
+                "matrix-prepared"
+            },
             corpus.display(),
             repetitions,
             output.display()
@@ -811,6 +943,17 @@ fn run_crash_child(backend: &str, database: &Path) -> Result<(), Box<dyn std::er
             uncommitted.put_batch(&handle, std::slice::from_ref(&uncommitted_record))?;
             unsafe { libc::_exit(73) };
         }
+        "fjall" => {
+            let db = SingleWriterTxDatabase::builder(database).open()?;
+            let keyspace = db.keyspace("crash_probe", KeyspaceCreateOptions::default)?;
+            db.persist(PersistMode::SyncAll)?;
+            let mut committed = db.write_tx().durability(Some(PersistMode::SyncAll));
+            committed.insert(&keyspace, "committed", "visible");
+            committed.commit()?;
+            let mut uncommitted = db.write_tx().durability(Some(PersistMode::SyncAll));
+            uncommitted.insert(&keyspace, "uncommitted", "must-not-survive");
+            unsafe { libc::_exit(73) };
+        }
         _ => Err(format!("unknown crash backend {backend}").into()),
     }
 }
@@ -833,15 +976,26 @@ fn reopen_lmdb_crash_probe(path: &Path) -> Result<(u64, bool), Box<dyn std::erro
     Ok((rows, committed_present && uncommitted_absent))
 }
 
+fn reopen_fjall_crash_probe(path: &Path) -> Result<(u64, bool), Box<dyn std::error::Error>> {
+    let db = SingleWriterTxDatabase::builder(path).open()?;
+    let keyspace = db.keyspace("crash_probe", KeyspaceCreateOptions::default)?;
+    let read = db.read_tx();
+    let rows = read.len(&keyspace)? as u64;
+    let committed_present = read.contains_key(&keyspace, b"committed")?;
+    let uncommitted_absent = !read.contains_key(&keyspace, b"uncommitted")?;
+    Ok((rows, committed_present && uncommitted_absent))
+}
+
 fn run_crash_probe(output: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let executable = env::current_exe()?;
     let scratch = tempfile::tempdir()?;
     let mut engines = Vec::new();
-    for backend in ["redb", "lmdb"] {
-        let database = if backend == "redb" {
-            scratch.path().join("crash.redb")
-        } else {
-            scratch.path().join("crash.lmdb")
+    for backend in ["redb", "lmdb", "fjall"] {
+        let database = match backend {
+            "redb" => scratch.path().join("crash.redb"),
+            "lmdb" => scratch.path().join("crash.lmdb"),
+            "fjall" => scratch.path().join("crash.fjall"),
+            _ => unreachable!(),
         };
         let status = Command::new(&executable)
             .arg("crash-child")
@@ -852,10 +1006,11 @@ fn run_crash_probe(output: &Path) -> Result<(), Box<dyn std::error::Error>> {
         if exit_code != 73 {
             return Err(format!("{backend} crash child exited {exit_code}, expected 73").into());
         }
-        let (rows, uncommitted_absent) = if backend == "redb" {
-            reopen_redb_crash_probe(&database)?
-        } else {
-            reopen_lmdb_crash_probe(&database)?
+        let (rows, uncommitted_absent) = match backend {
+            "redb" => reopen_redb_crash_probe(&database)?,
+            "lmdb" => reopen_lmdb_crash_probe(&database)?,
+            "fjall" => reopen_fjall_crash_probe(&database)?,
+            _ => unreachable!(),
         };
         if rows != 1 || !uncommitted_absent {
             return Err(format!(
@@ -865,7 +1020,11 @@ fn run_crash_probe(output: &Path) -> Result<(), Box<dyn std::error::Error>> {
         }
         engines.push(CrashProbeEngine {
             backend: backend.to_owned(),
-            durability: "synchronous default; no no-sync flags".to_owned(),
+            durability: if backend == "fjall" {
+                "explicit PersistMode::SyncAll per committed transaction".to_owned()
+            } else {
+                "synchronous default; no no-sync flags".to_owned()
+            },
             child_exit_code: exit_code,
             committed_rows_after_crash: rows,
             uncommitted_row_absent: uncommitted_absent,
@@ -1009,6 +1168,27 @@ fn generate(
         author0: authors[0].public_key().to_hex(),
         first_id: first_id.expect("nonempty corpus"),
         last_id: last_id.expect("nonempty corpus"),
+    };
+    write_json(&meta_path(path), &meta)?;
+    println!("{}", serde_json::to_string_pretty(&meta)?);
+    Ok(())
+}
+
+fn describe_corpus(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let file = File::open(path)?;
+    let corpus = unsafe { MmapOptions::new().map(&file)? };
+    let events = parse_prevalidated_events(&corpus)?;
+    let first = events.first().ok_or("corpus must not be empty")?;
+    let last = events.last().expect("nonempty corpus has a last event");
+    let meta = CorpusMeta {
+        schema: CORPUS_SCHEMA.to_owned(),
+        events: events.len() as u64,
+        payload_bytes: 0,
+        bytes: corpus.len() as u64,
+        blake3: blake3::hash(&corpus).to_hex().to_string(),
+        author0: first.pubkey.to_hex(),
+        first_id: first.id.to_hex(),
+        last_id: last.id.to_hex(),
     };
     write_json(&meta_path(path), &meta)?;
     println!("{}", serde_json::to_string_pretty(&meta)?);
