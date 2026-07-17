@@ -8,7 +8,7 @@ publish.workspace = true
 [features]
 # Opt-in counters for evidence binaries. Kept out of production builds so the
 # query hot path pays no atomic-increment cost merely to support benchmarks.
-bench-instrumentation = []
+bench-instrumentation = ["dep:fjall"]
 
 [[example]]
 name = "scale_bench"
@@ -26,6 +26,7 @@ nmp-grammar.workspace = true
 # ACID key-value store — no C toolchain/`build.rs`, no wasm landmine. A1
 # lands `RedbStore`.
 redb = "4.1"
+fjall = { version = "=3.1.6", optional = true }
 # `RedbStore` canonical event rows use a versioned portable binary envelope
 # for borrowed query filtering. Outbox/coverage control records remain typed
 # serde JSON where they are not event-query hot-path values.
