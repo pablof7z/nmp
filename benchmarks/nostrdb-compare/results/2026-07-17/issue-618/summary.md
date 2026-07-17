@@ -97,9 +97,13 @@ Adding the tag index to the other ordered indexes adds 120.4 MB of process write
 ## Decision
 
 The epic's 150,000 events/s gate is 2.24x above the full-path median. Encoding is
-only 0.45% of production transaction time, so #615 packed parsing cannot supply
-that multiplier. Allocation cleanup in #613 can still improve memory and CPU,
-but this store-only ceiling shows it is not the primary throughput lever.
+only 0.45% of production transaction time, so store re-encoding is not the next
+multiplier. JSON parsing, signature verification, and initial owned-event
+materialization happen before this harness's prevalidated store boundary; this
+result therefore does not close #615. Keep that prototype behind #614 and use a
+post-storage production profile to decide whether its broader packed parse path
+is justified. Allocation cleanup in #613 can still improve memory and CPU, but
+this store-only ceiling shows it is not the primary throughput lever.
 
 Proceed with #614: compare an equivalent required index set and exact reopen
 semantics against a different storage representation/engine, with special focus
