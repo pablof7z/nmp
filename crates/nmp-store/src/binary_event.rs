@@ -745,6 +745,8 @@ impl<'a> PreparedFilter<'a> {
         }
     }
 
+    /// Whether at least one predicate remains unproven by the chosen index
+    /// and therefore requires the borrowed canonical event value.
     pub(crate) fn needs_event_value_after_index(&self, indexed: IndexedMatch) -> bool {
         let filter = self.filter;
         filter.ids.as_ref().is_some_and(|ids| !ids.is_empty())
