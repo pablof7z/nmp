@@ -53,8 +53,12 @@ use crate::{
 };
 
 #[cfg(feature = "bench-instrumentation")]
+mod fjall_ingest_bench;
+#[cfg(feature = "bench-instrumentation")]
 mod store_bench;
 
+#[cfg(feature = "bench-instrumentation")]
+pub use fjall_ingest_bench::{run_fjall_governed_ingest_bench, FjallGovernedIngestMetrics};
 #[cfg(feature = "bench-instrumentation")]
 pub use store_bench::{
     prepare_equivalent_store_corpus, run_prepared_redb_store_bench, run_store_bench_variant,
