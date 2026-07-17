@@ -73,6 +73,7 @@ use canonical::*;
 mod query;
 #[cfg(test)]
 use query::*;
+mod ingest_txn;
 mod mutation;
 mod store;
 #[cfg(test)]
