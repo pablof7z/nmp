@@ -8,6 +8,7 @@ package com.nmp.sdk
 import kotlinx.coroutines.flow.Flow
 import uniffi.nmp_ffi.NmpEngine
 import uniffi.nmp_ffi.NmpEngineConfig
+import uniffi.nmp_ffi.generateAccountSecretKey as ffiGenerateAccountSecretKey
 import uniffi.nmp_ffi.resetPersistentStore as ffiResetPersistentStore
 
 /** Construction config for `NMPEngine`. The only relay facts this app ever
@@ -114,6 +115,15 @@ class NMPEngine(
     }
 
     // MARK: - Identity (P3; multi-account)
+
+    /** Generate and register a brand-new local account (#588) -- the
+     * NMP-owned door for a clean-start client that has no existing secret
+     * material to hand in. Composes one keygen-only FFI call with the
+     * existing [addAccount], so it inherits that method's save-with-rollback
+     * choreography and checkpoint tracking wholesale rather than a second,
+     * parallel registration pipeline. Mirrors [addAccount]'s own "does not
+     * activate" semantics -- call [setActiveAccount] for that. */
+    fun generateAccount(): NMPAccountRegistration = addAccount(ffiGenerateAccountSecretKey())
 
     /** Register an account from its secret key (hex or bech32 `nsec`). The
      * key crosses this boundary exactly once and lives engine-side from
