@@ -510,7 +510,29 @@ pub fn run_prepared_redb_redo_index_bench(
 
 #[cfg(test)]
 mod tests {
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    use wait_timeout::ChildExt;
+
     use super::*;
+
+    const CRASH_WORKER: &str = "redb_store::redo_index_bench::tests::redo_index_crash_worker";
+
+    fn crash_records() -> Vec<StoreBenchPreparedRecord> {
+        vec![
+            StoreBenchPreparedRecord {
+                table: StoreBenchPreparedTable::Events,
+                key: 1u64.to_be_bytes().to_vec(),
+                value: vec![1],
+            },
+            StoreBenchPreparedRecord {
+                table: StoreBenchPreparedTable::ByCreatedAt,
+                key: vec![2; 40],
+                value: 1u64.to_be_bytes().to_vec(),
+            },
+        ]
+    }
 
     #[test]
     fn redo_codec_round_trips_derived_records_and_rejects_trailing_bytes() {
@@ -534,5 +556,77 @@ mod tests {
         let mut malformed = encoded;
         malformed.push(0);
         assert!(decode_redo(&malformed).is_err());
+    }
+
+    #[test]
+    fn redo_index_crash_worker() {
+        let Ok(path) = std::env::var("NMP_REDO_CRASH_DB") else {
+            return;
+        };
+        let point = std::env::var("NMP_REDO_CRASH_POINT").unwrap();
+        let records = crash_records();
+        let payload = encode_redo(&records).unwrap();
+        let db = init_database(Path::new(&path)).unwrap();
+
+        let immediate = db.begin_write().unwrap();
+        apply_facts(&immediate, &records).unwrap();
+        {
+            let mut redo = immediate.open_table(INDEX_REDO).unwrap();
+            redo.insert(0, payload.as_slice()).unwrap();
+        }
+        immediate.commit().unwrap();
+        if point == "after_immediate" {
+            unsafe { libc::_exit(73) }
+        }
+
+        let mut indexes = db.begin_write().unwrap();
+        indexes.set_durability(Durability::None).unwrap();
+        apply_indexes(&indexes, &records).unwrap();
+        {
+            let mut redo = indexes.open_table(INDEX_REDO).unwrap();
+            redo.remove(0).unwrap();
+        }
+        indexes.commit().unwrap();
+        if point == "after_nonsync" {
+            unsafe { libc::_exit(73) }
+        }
+
+        let durable = db.begin_write().unwrap();
+        durable.commit().unwrap();
+        unsafe { libc::_exit(73) }
+    }
+
+    #[test]
+    fn every_crash_phase_recovers_one_fully_indexed_state() {
+        for point in ["after_immediate", "after_nonsync", "after_later_immediate"] {
+            let scratch = tempfile::tempdir().unwrap();
+            let path = scratch.path().join(format!("{point}.redb"));
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg(CRASH_WORKER)
+                .arg("--nocapture")
+                .env("NMP_REDO_CRASH_DB", &path)
+                .env("NMP_REDO_CRASH_POINT", point)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let status = match child.wait_timeout(Duration::from_secs(10)).unwrap() {
+                Some(status) => status,
+                None => {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("redo crash worker timed out at {point}");
+                }
+            };
+            assert_eq!(status.code(), Some(73), "unexpected status at {point}");
+
+            let db = Database::open(&path).unwrap();
+            recover_pending(&db).unwrap();
+            let read = db.begin_read().unwrap();
+            assert_eq!(read.open_table(EVENTS).unwrap().len().unwrap(), 1);
+            assert_eq!(read.open_table(BY_CREATED_AT).unwrap().len().unwrap(), 1);
+            assert_eq!(read.open_table(INDEX_REDO).unwrap().len().unwrap(), 0);
+        }
     }
 }
