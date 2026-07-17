@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use nmp_signer::{
     pending_signer_cancellation, CryptoCapability, Nip46Cancellation, Nip46ClientMetadata,
-    Nip46ConnectionEvent, Nip46Invitation, Nip46Signer, SignerError, SignerOp, SigningCapability,
+    Nip46ConnectionEvent, Nip46Invitation, Nip46Origin, Nip46Signer, SignerError, SignerOp,
+    SigningCapability,
 };
 use nostr::nips::nip44;
 use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
@@ -252,6 +253,364 @@ fn spawn_unresponsive_remote_signer() -> (String, Keys, Keys, mpsc::Receiver<()>
     });
 
     (relay_url, remote, user, closed_rx, sign_seen_rx)
+}
+
+/// A bunker-style mock that accepts and fully serves an arbitrary number of
+/// SEQUENTIAL client connections against the same `remote`/`user` identity
+/// (#571): pairing (session 1) followed by a checkpoint-restored session
+/// (session 2) reconnect to the same relay URL as two independent TCP
+/// connections. Returns the observed method-name sequence per connection so
+/// a test can prove the restored connection never re-sends `connect`.
+fn spawn_multi_session_signer_relay(
+    remote: Keys,
+    user: Keys,
+) -> (String, mpsc::Receiver<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let relay_url = format!("ws://{}", listener.local_addr().unwrap());
+    let (seen_tx, seen_rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        while let Ok((stream, _)) = listener.accept() {
+            let mut socket = tungstenite::accept(stream).unwrap();
+            let mut subscription_id = None;
+            let mut seen_methods = Vec::new();
+            while let Ok(message) = socket.read() {
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                let Ok(frame) = serde_json::from_str::<Value>(text.as_ref()) else {
+                    continue;
+                };
+                let Some(parts) = frame.as_array() else {
+                    continue;
+                };
+                match parts.first().and_then(Value::as_str) {
+                    Some("REQ") => {
+                        subscription_id = parts.get(1).and_then(Value::as_str).map(str::to_string);
+                    }
+                    Some("EVENT") => {
+                        let event = Event::from_json(parts[1].to_string()).unwrap();
+                        let plaintext = nip44::decrypt(
+                            remote.secret_key(),
+                            &event.pubkey,
+                            event.content.as_bytes(),
+                        )
+                        .unwrap();
+                        let request: Value = serde_json::from_str(&plaintext).unwrap();
+                        let id = request["id"].as_str().unwrap();
+                        let method = request["method"].as_str().unwrap();
+                        let params = request["params"].as_array().unwrap();
+                        seen_methods.push(method.to_string());
+                        let result = match method {
+                            "connect" => {
+                                assert_eq!(params[0], remote.public_key().to_hex());
+                                "ack".to_string()
+                            }
+                            "get_public_key" => user.public_key().to_hex(),
+                            "switch_relays" => "null".to_string(),
+                            "sign_event" => {
+                                let body: SignBody =
+                                    serde_json::from_str(params[0].as_str().unwrap()).unwrap();
+                                let tags = body
+                                    .tags
+                                    .iter()
+                                    .map(Tag::parse)
+                                    .collect::<Result<Vec<_>, _>>()
+                                    .unwrap();
+                                UnsignedEvent::new(
+                                    user.public_key(),
+                                    Timestamp::from(body.created_at),
+                                    Kind::from_u16(body.kind),
+                                    tags,
+                                    body.content,
+                                )
+                                .sign_with_keys(&user)
+                                .unwrap()
+                                .as_json()
+                            }
+                            other => panic!("unexpected method {other}"),
+                        };
+                        let response =
+                            response_event(&remote, event.pubkey, id, Some(result), None);
+                        socket
+                            .send(Message::Text(
+                                event_frame(subscription_id.as_deref().unwrap(), response).into(),
+                            ))
+                            .unwrap();
+                    }
+                    _ => {}
+                }
+            }
+            let _ = seen_tx.send(seen_methods);
+        }
+    });
+
+    (relay_url, seen_rx)
+}
+
+/// #571 falsifier: a checkpoint read from an already-authorized session
+/// reconnects through `Nip46Signer::from_parts` with NO re-pairing
+/// handshake (no second `connect` RPC), reaches the identical user pubkey,
+/// and can still sign -- proving restore is a genuine reconnect, not a
+/// disguised re-pair.
+#[test]
+fn checkpoint_then_from_parts_reconnects_without_repairing_and_signs() {
+    let remote = Keys::generate();
+    let user = Keys::generate();
+    let (relay, seen) = spawn_multi_session_signer_relay(remote.clone(), user.clone());
+
+    let uri = format!(
+        "bunker://{}?relay={}&secret=checkpoint-proof",
+        remote.public_key().to_hex(),
+        url::form_urlencoded::byte_serialize(relay.as_bytes()).collect::<String>()
+    );
+    let paired = Nip46Signer::connect_bunker(&uri, Duration::from_secs(5)).unwrap();
+    assert_eq!(paired.user_public_key(), user.public_key());
+
+    let checkpoint = paired.checkpoint();
+    assert_eq!(checkpoint.user_public_key, user.public_key());
+    assert_eq!(checkpoint.remote_signer_public_key, remote.public_key());
+    assert_eq!(checkpoint.origin, Nip46Origin::Bunker);
+    assert_eq!(
+        checkpoint.relays,
+        vec![nostr::RelayUrl::parse(&relay).unwrap()]
+    );
+
+    // Session 1 ends (its process would exit here); the checkpoint outlives
+    // it.
+    drop(paired);
+    let first_session_methods = seen.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(
+        first_session_methods
+            .iter()
+            .filter(|m| *m == "connect")
+            .count(),
+        1
+    );
+
+    // Session 2: a fresh process restores from the checkpoint alone.
+    let restored = Nip46Signer::from_parts(checkpoint, Duration::from_secs(5)).unwrap();
+    assert_eq!(restored.user_public_key(), user.public_key());
+    assert_eq!(restored.remote_signer_public_key(), remote.public_key());
+
+    let unsigned = UnsignedEvent::new(
+        user.public_key(),
+        Timestamp::from(1_700_000_050),
+        Kind::TextNote,
+        Vec::new(),
+        "resumed after restore",
+    );
+    let signed = restored
+        .sign(unsigned.clone())
+        .wait(Duration::from_secs(5))
+        .unwrap();
+    signed.verify().unwrap();
+    assert_eq!(signed.pubkey, user.public_key());
+    drop(restored);
+
+    let second_session_methods = seen.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(
+        !second_session_methods.contains(&"connect".to_string()),
+        "restore must never re-send the pairing `connect` RPC: {second_session_methods:?}"
+    );
+    assert!(second_session_methods.contains(&"get_public_key".to_string()));
+    assert!(second_session_methods.contains(&"sign_event".to_string()));
+}
+
+/// #571 falsifier: a checkpoint/import whose live `get_public_key` answer
+/// does not match the expected identity fails closed -- no signer is ever
+/// produced, so it can never be attached under another pubkey.
+#[test]
+fn from_parts_fails_closed_on_user_public_key_mismatch() {
+    let remote = Keys::generate();
+    let actual_user = Keys::generate();
+    let wrong_expected_user = Keys::generate();
+    let (relay, _seen) = spawn_multi_session_signer_relay(remote.clone(), actual_user.clone());
+
+    let checkpoint = nmp_signer::Nip46SessionCheckpoint {
+        client_secret_key: Keys::generate().secret_key().clone(),
+        user_public_key: wrong_expected_user.public_key(),
+        remote_signer_public_key: remote.public_key(),
+        relays: vec![nostr::RelayUrl::parse(&relay).unwrap()],
+        origin: Nip46Origin::ClientInitiated,
+    };
+
+    let error = Nip46Signer::from_parts(checkpoint, Duration::from_secs(5)).unwrap_err();
+    assert_eq!(
+        error,
+        nmp_signer::Nip46Error::RestoredIdentityMismatch {
+            expected: wrong_expected_user.public_key(),
+            actual: actual_user.public_key(),
+        }
+    );
+}
+
+/// #571 falsifier -- the issue's HEADLINE path: a real `nostrconnect://`
+/// client-initiated pairing (not `bunker://`), checkpointed and restored
+/// through `from_parts` over a SECOND connection with NO re-pairing
+/// handshake. Proves `Nip46Invitation::connect`'s generated `client_keys`
+/// (the exact identity `checkpoint()` reads out) survives the full round
+/// trip, reaches the identical user pubkey, and can still sign.
+#[test]
+fn client_initiated_checkpoint_then_from_parts_reconnects_without_repairing() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let relay = format!("ws://{}", listener.local_addr().unwrap());
+    let invitation = Nip46Invitation::new(
+        vec![nostr::RelayUrl::parse(&relay).unwrap()],
+        None,
+        Nip46ClientMetadata::default(),
+    )
+    .unwrap();
+    let uri = url::Url::parse(&invitation.uri()).unwrap();
+    let client = PublicKey::from_hex(uri.host_str().unwrap()).unwrap();
+    let secret = uri
+        .query_pairs()
+        .find(|(key, _)| key == "secret")
+        .map(|(_, value)| value.into_owned())
+        .unwrap();
+    let remote = Keys::generate();
+    let user = Keys::generate();
+    let remote_thread = remote.clone();
+    let user_thread = user.clone();
+
+    // A two-phase mock over the SAME listener: session 1 completes the
+    // `nostrconnect://` pairing handshake (an unsolicited valid `connect`
+    // response keyed to the invitation secret, matching
+    // `client_invitation_ignores_forged_secret_then_accepts_valid_signer`'s
+    // precedent) then answers `get_public_key`/`switch_relays`; session 2
+    // (the restore) never receives a `connect` response at all -- it only
+    // answers `get_public_key`/`switch_relays`/`sign_event`.
+    thread::spawn(move || {
+        let remote = remote_thread;
+        let user = user_thread;
+        let mut paired = false;
+        while let Ok((stream, _)) = listener.accept() {
+            let mut socket = tungstenite::accept(stream).unwrap();
+            let mut subscription_id = None;
+            while let Ok(message) = socket.read() {
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                let Ok(frame) = serde_json::from_str::<Value>(text.as_ref()) else {
+                    continue;
+                };
+                let Some(parts) = frame.as_array() else {
+                    continue;
+                };
+                match parts.first().and_then(Value::as_str) {
+                    Some("REQ") => {
+                        subscription_id = parts.get(1).and_then(Value::as_str).map(str::to_string);
+                        if !paired {
+                            let valid = response_event(
+                                &remote,
+                                client,
+                                "connect-valid",
+                                Some(secret.clone()),
+                                None,
+                            );
+                            socket
+                                .send(Message::Text(
+                                    event_frame(subscription_id.as_deref().unwrap(), valid).into(),
+                                ))
+                                .unwrap();
+                        }
+                    }
+                    Some("EVENT") => {
+                        let event = Event::from_json(parts[1].to_string()).unwrap();
+                        let plaintext = nip44::decrypt(
+                            remote.secret_key(),
+                            &event.pubkey,
+                            event.content.as_bytes(),
+                        )
+                        .unwrap();
+                        let request: Value = serde_json::from_str(&plaintext).unwrap();
+                        let id = request["id"].as_str().unwrap();
+                        let method = request["method"].as_str().unwrap();
+                        let params = request["params"].as_array().unwrap();
+                        let result = match method {
+                            "get_public_key" => user.public_key().to_hex(),
+                            "switch_relays" => "null".to_string(),
+                            "sign_event" => {
+                                let body: SignBody =
+                                    serde_json::from_str(params[0].as_str().unwrap()).unwrap();
+                                let tags = body
+                                    .tags
+                                    .iter()
+                                    .map(Tag::parse)
+                                    .collect::<Result<Vec<_>, _>>()
+                                    .unwrap();
+                                UnsignedEvent::new(
+                                    user.public_key(),
+                                    Timestamp::from(body.created_at),
+                                    Kind::from_u16(body.kind),
+                                    tags,
+                                    body.content,
+                                )
+                                .sign_with_keys(&user)
+                                .unwrap()
+                                .as_json()
+                            }
+                            other => panic!("unexpected method {other}"),
+                        };
+                        let response =
+                            response_event(&remote, event.pubkey, id, Some(result), None);
+                        socket
+                            .send(Message::Text(
+                                event_frame(subscription_id.as_deref().unwrap(), response).into(),
+                            ))
+                            .unwrap();
+                        // `connect()` only synchronously waits on
+                        // `get_public_key` -- `switch_relays` is a
+                        // best-effort background request fired afterward
+                        // (never awaited by the caller), so ending session 1
+                        // here (rather than waiting for a `switch_relays`
+                        // that may race with the test's own
+                        // checkpoint+drop) matches the real dependency
+                        // order and avoids a flaky teardown race.
+                        if !paired && method == "get_public_key" {
+                            paired = true;
+                            break;
+                        }
+                        if paired && method == "sign_event" {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    let paired_signer = invitation.connect(Duration::from_secs(5)).unwrap();
+    assert_eq!(paired_signer.user_public_key(), user.public_key());
+    assert_eq!(
+        paired_signer.remote_signer_public_key(),
+        remote.public_key()
+    );
+
+    let checkpoint = paired_signer.checkpoint();
+    assert_eq!(checkpoint.origin, Nip46Origin::ClientInitiated);
+    assert_eq!(checkpoint.user_public_key, user.public_key());
+    assert_eq!(checkpoint.remote_signer_public_key, remote.public_key());
+    drop(paired_signer);
+
+    let restored = Nip46Signer::from_parts(checkpoint, Duration::from_secs(5)).unwrap();
+    assert_eq!(restored.user_public_key(), user.public_key());
+    assert_eq!(restored.remote_signer_public_key(), remote.public_key());
+
+    let unsigned = UnsignedEvent::new(
+        user.public_key(),
+        Timestamp::from(1_700_000_070),
+        Kind::TextNote,
+        Vec::new(),
+        "resumed after client-initiated restore",
+    );
+    let signed = restored
+        .sign(unsigned.clone())
+        .wait(Duration::from_secs(5))
+        .unwrap();
+    signed.verify().unwrap();
+    assert_eq!(signed.pubkey, user.public_key());
 }
 
 #[test]

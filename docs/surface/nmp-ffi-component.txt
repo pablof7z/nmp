@@ -3477,11 +3477,58 @@ enum Enum {
                 "`nmp::Engine::add_signer` maps every internal `AddSignerError` to\n`EngineError::SignerMissingPublicKey` (crates/nmp/src/engine.rs). This\nis the signer-side engine-attach failure; the other reachable\n`add_signer` outcome, `EngineError::EngineClosed` (engine shut down\nmid-handshake), is surfaced as `Disconnected` instead so the two are\nnot conflated. It is not a `Nip46Error` variant; it crosses a different\ninternal taxonomy (`nmp::EngineError`) at the same observer seam.",
             ),
         },
+        Variant {
+            name: "RestoredIdentityMismatch",
+            discr: None,
+            fields: [
+                Field {
+                    name: "expected",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "actual",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "A restore/import's live `get_public_key` answer did not match the\ncheckpoint's expected identity (#571). No signer was attached under\nthe wrong pubkey.",
+            ),
+        },
     ],
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
         "`nmp_signer::Nip46Error` mirror (#494) -- every live discriminant a NIP-46\nconnection attempt can fail with, so a native caller can branch on\n\"auth required\" vs. \"timeout\" vs. \"malformed\" instead of parsing English.\n`Nip46Error::InvalidRelay`/`InvalidInvitation`/`SecretMismatch` are not\nmirrored: nothing in the workspace ever constructs them (see that type's\nown doc).",
+    ),
+}
+
+enum Enum {
+    name: "FfiNip46Origin",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "ClientInitiated",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Bunker",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp_signer::Nip46Origin` mirror (#571): distinguishes a session paired\nvia `nostrconnect://` from one dialed via `bunker://`. Restore mechanics\nare identical either way -- kept because \"absence of a reusable client\ncheckpoint is observable rather than guessed from partial metadata\" is a\nhard requirement, not because restore branches on it.",
     ),
 }
 
@@ -5858,6 +5905,52 @@ record Record {
         },
     ],
     docstring: None,
+}
+
+record Record {
+    name: "FfiNip46SessionCheckpoint",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "client_secret_key",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "user_public_key",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "remote_signer_public_key",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "relays",
+            type_: Sequence {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "origin",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiNip46Origin",
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "`nmp_signer::Nip46SessionCheckpoint` mirror (#571) -- the minimum secrets\nand descriptor needed to reconnect an already-authorized NIP-46 client\nsession without another pairing handshake. `client_secret_key` crosses\nthis boundary once, matching `add_account`'s existing precedent; native\ncallers must never log, print, serialize to diagnostics, or otherwise\nsurface it outside their own secure checkpoint store.",
+    ),
 }
 
 record Record {
@@ -9438,6 +9531,58 @@ object Object {
     constructors: [],
     methods: [
         Method {
+            name: "checkpoint",
+            object_name: "Nip46Connection",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiNip46SessionCheckpoint",
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nip46connection_checkpoint",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "Nip46Connection",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        Some(
+                            ExternalFfiMetadata {
+                                name: "FfiNip46SessionCheckpoint",
+                                module_path: "nmp_ffi",
+                            },
+                        ),
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Read out this session's checkpoint (#571): the minimum secrets and\ndescriptor needed to reconnect without another pairing handshake.\nRefused with a typed error before this connection has reached ready\n(its signer attached to this engine) -- checkpointing a session that\nnever authenticated would persist meaningless material.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nip46connection_checkpoint",
+            checksum: Some(
+                39441,
+            ),
+        },
+        Method {
             name: "disconnect",
             object_name: "Nip46Connection",
             object_module_path: "nmp_ffi",
@@ -10443,6 +10588,101 @@ object Object {
             ),
         },
         Method {
+            name: "nip46_session_from_parts",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "parts",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiNip46SessionCheckpoint",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "timeout_millis",
+                    type_: UInt64,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "observer",
+                    type_: CallbackInterface {
+                        module_path: "nmp_ffi",
+                        name: "Nip46ConnectionObserver",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "Nip46Connection",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_nip46_session_from_parts",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "parts",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiNip46SessionCheckpoint",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                    FfiArgument {
+                        name: "timeout_millis",
+                        type_: UInt64,
+                    },
+                    FfiArgument {
+                        name: "observer",
+                        type_: UInt64,
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "Nip46Connection",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Brownfield migration door (#571): import a pre-NMP legacy client\nsession (for example Pod0's Keychain-persisted `nostrconnect://`\nmaterial) directly from its raw parts, without an NMP-owned\ncheckpoint ever having been written. Same reconnect-and-validate\nmechanics as [`Self::restore_nip46_session`] -- a mismatch/corrupt\nimport never attaches under another pubkey and never deletes or\noverwrites the caller's legacy material (this function reads its\ninput by value and touches no external storage itself).",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_nip46_session_from_parts",
+            checksum: Some(
+                54568,
+            ),
+        },
+        Method {
             name: "observe",
             object_name: "NmpEngine",
             object_module_path: "nmp_ffi",
@@ -11213,6 +11453,101 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_remove_auth_policy",
             checksum: Some(
                 53111,
+            ),
+        },
+        Method {
+            name: "restore_nip46_session",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "checkpoint",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiNip46SessionCheckpoint",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "timeout_millis",
+                    type_: UInt64,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "observer",
+                    type_: CallbackInterface {
+                        module_path: "nmp_ffi",
+                        name: "Nip46ConnectionObserver",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "Nip46Connection",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_restore_nip46_session",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "checkpoint",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiNip46SessionCheckpoint",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                    FfiArgument {
+                        name: "timeout_millis",
+                        type_: UInt64,
+                    },
+                    FfiArgument {
+                        name: "observer",
+                        type_: UInt64,
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "Nip46Connection",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Restore an already-authorized NIP-46 client session from `checkpoint`\n(#571) -- reconnects the SAME client transport identity to the SAME\nremote signer with NO re-pairing handshake, returning an ordinary\n[`Nip46Connection`] that reuses the existing observer/attachment\nlifecycle: `.ready(user_public_key)` fires only once the checkpoint's\nexpected identity is validated against a live answer and the signer\nis attached to this engine. A corrupt/malformed `checkpoint` is\nrefused synchronously; a live mismatch/unavailable/disconnected\noutcome surfaces asynchronously as a typed `on_failed`, exactly like\n`connect_nip46_bunker`/`connect_nip46_invitation`.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_restore_nip46_session",
+            checksum: Some(
+                49651,
             ),
         },
         Method {
