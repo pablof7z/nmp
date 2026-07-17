@@ -107,6 +107,20 @@ struct MatrixRecord {
     runs: Vec<RunRecord>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct GovernedBackendMatrixRecord {
+    schema: String,
+    command: String,
+    nmp_commit: String,
+    git_dirty: bool,
+    host: String,
+    corpus: CorpusIdentity,
+    repetitions: usize,
+    transaction_batch_size: usize,
+    alternating_order: bool,
+    runs: Vec<serde_json::Value>,
+}
+
 fn variant_name(variant: StoreBenchVariant) -> &'static str {
     match variant {
         StoreBenchVariant::EncodeOnly => "encode_only",
@@ -482,6 +496,108 @@ fn run_matrix(corpus: &Path, output: &Path, repetitions: usize) -> Result<(), St
     Ok(())
 }
 
+fn run_governed_backend_matrix(
+    corpus: &Path,
+    output: &Path,
+    batch_size: usize,
+    repetitions: usize,
+) -> Result<(), String> {
+    if batch_size == 0 || repetitions == 0 {
+        return Err("batch size and repetitions must be nonzero".to_owned());
+    }
+    let current_exe = env::current_exe().map_err(|error| error.to_string())?;
+    let mut runs = Vec::new();
+    for repetition in 0..repetitions {
+        let backends = if repetition % 2 == 0 {
+            ["redb", "fjall"]
+        } else {
+            ["fjall", "redb"]
+        };
+        for (ordinal, backend) in backends.into_iter().enumerate() {
+            eprintln!("repetition={repetition} ordinal={ordinal} backend={backend}");
+            let mut command = Command::new(&current_exe);
+            match backend {
+                "redb" => {
+                    command
+                        .arg("run")
+                        .arg(corpus)
+                        .arg("full_governed")
+                        .arg(batch_size.to_string());
+                }
+                "fjall" => {
+                    command
+                        .arg("fjall-run")
+                        .arg(corpus)
+                        .arg(batch_size.to_string());
+                }
+                _ => unreachable!(),
+            }
+            let child = command
+                .arg(repetition.to_string())
+                .arg(ordinal.to_string())
+                .output()
+                .map_err(|error| error.to_string())?;
+            if !child.status.success() {
+                return Err(format!(
+                    "{backend} child failed: {}",
+                    String::from_utf8_lossy(&child.stderr)
+                ));
+            }
+            let mut value: serde_json::Value = serde_json::from_slice(&child.stdout)
+                .map_err(|error| format!("decode {backend} result: {error}"))?;
+            value["backend"] = serde_json::Value::String(backend.to_owned());
+            runs.push(value);
+        }
+    }
+    let first = runs
+        .first()
+        .ok_or_else(|| "governed backend matrix produced no runs".to_owned())?;
+    let nmp_commit = first["nmp_commit"]
+        .as_str()
+        .ok_or_else(|| "matrix result lacks nmp_commit".to_owned())?
+        .to_owned();
+    let dirty = first["git_dirty"]
+        .as_bool()
+        .ok_or_else(|| "matrix result lacks git_dirty".to_owned())?;
+    let corpus_identity: CorpusIdentity = serde_json::from_value(first["corpus"].clone())
+        .map_err(|error| format!("decode matrix corpus: {error}"))?;
+    if runs.iter().any(|run| {
+        run["nmp_commit"].as_str() != Some(nmp_commit.as_str())
+            || run["git_dirty"].as_bool() != Some(dirty)
+            || run["corpus"]["blake3"].as_str() != Some(corpus_identity.blake3.as_str())
+    }) {
+        return Err("matrix child identity changed during the run".to_owned());
+    }
+    let record = GovernedBackendMatrixRecord {
+        schema: "nmp-governed-backend-matrix-v1".to_owned(),
+        command: format!(
+            "cargo run -p nmp-store --release --features bench-instrumentation --example store_decomposition -- fjall-matrix {} {} {} {}",
+            corpus.display(),
+            output.display(),
+            batch_size,
+            repetitions
+        ),
+        nmp_commit,
+        git_dirty: dirty,
+        host: host(),
+        corpus: corpus_identity,
+        repetitions,
+        transaction_batch_size: batch_size,
+        alternating_order: true,
+        runs,
+    };
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::write(
+        output,
+        serde_json::to_vec_pretty(&record).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    println!("wrote {}", output.display());
+    Ok(())
+}
+
 fn main() -> Result<(), String> {
     let mut args = env::args_os().skip(1);
     let command = args
@@ -551,6 +667,29 @@ fn main() -> Result<(), String> {
                 "{}",
                 serde_json::to_string_pretty(&result).map_err(|error| error.to_string())?
             );
+        }
+        "fjall-matrix" => {
+            let corpus = PathBuf::from(
+                args.next()
+                    .ok_or_else(|| "fjall-matrix requires corpus path".to_owned())?,
+            );
+            let output = PathBuf::from(
+                args.next()
+                    .ok_or_else(|| "fjall-matrix requires output path".to_owned())?,
+            );
+            let batch_size = args
+                .next()
+                .ok_or_else(|| "fjall-matrix requires batch size".to_owned())?
+                .to_string_lossy()
+                .parse()
+                .map_err(|error| format!("invalid batch size: {error}"))?;
+            let repetitions = args
+                .next()
+                .map(|value| value.to_string_lossy().parse())
+                .transpose()
+                .map_err(|error| format!("invalid repetitions: {error}"))?
+                .unwrap_or(3);
+            run_governed_backend_matrix(&corpus, &output, batch_size, repetitions)?;
         }
         "matrix" => {
             let corpus = PathBuf::from(
