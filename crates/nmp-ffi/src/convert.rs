@@ -197,8 +197,8 @@ pub enum FfiError {
         capacity: u64,
     },
     /// #591: `FfiWriteIntent.correlation` was `Some` but failed
-    /// `nmp_grammar::CorrelationToken::new`'s bounded/non-empty validation
-    /// (empty, or over `CorrelationToken::MAX_LEN` bytes). Synchronous,
+    /// `nmp_grammar::CorrelationToken`'s `TryFrom<&str>` bounded/non-empty
+    /// validation (empty, or over `CorrelationToken::MAX_LEN` bytes). Synchronous,
     /// before any engine call -- same discipline as `InvalidPublicKey`/
     /// `InvalidTag` above.
     InvalidCorrelationToken {
@@ -1653,13 +1653,16 @@ fn parse_identity_override(input: &str) -> Result<PublicKey, FfiError> {
 }
 
 /// #591: `FfiWriteIntent.correlation`'s dedicated parse. Delegates entirely
-/// to `nmp_grammar::CorrelationToken::new`'s bounded/non-empty validation;
-/// a rejection becomes a typed, synchronous [`FfiError::InvalidCorrelationToken`]
-/// naming both the offending input and the reason, BEFORE any engine call.
+/// to `nmp_grammar::CorrelationToken`'s `TryFrom<&str>` bounded/non-empty
+/// validation; a rejection becomes a typed, synchronous
+/// [`FfiError::InvalidCorrelationToken`] naming both the offending input and
+/// the reason, BEFORE any engine call.
 fn parse_correlation_token(input: &str) -> Result<nmp_grammar::CorrelationToken, FfiError> {
-    nmp_grammar::CorrelationToken::new(input).map_err(|err| FfiError::InvalidCorrelationToken {
-        got: input.to_string(),
-        reason: err.to_string(),
+    nmp_grammar::CorrelationToken::try_from(input).map_err(|err| {
+        FfiError::InvalidCorrelationToken {
+            got: input.to_string(),
+            reason: err.to_string(),
+        }
     })
 }
 

@@ -6068,123 +6068,6 @@ reexport nmp::CacheMode => nmp_grammar::descriptor::CacheMode
 reexport nmp::CorrelationToken => nmp_grammar::write::CorrelationToken
 {
   "attrs": [],
-  "inherent_impls": [
-    {
-      "generics": {
-        "params": [],
-        "where_predicates": []
-      },
-      "items": [
-        {
-          "attrs": [],
-          "inner": {
-            "function": {
-              "default_unstable": null,
-              "generics": {
-                "params": [],
-                "where_predicates": []
-              },
-              "has_body": true,
-              "header": {
-                "abi": "Rust",
-                "is_async": false,
-                "is_const": false,
-                "is_unsafe": false
-              },
-              "sig": {
-                "inputs": [
-                  [
-                    "token",
-                    {
-                      "borrowed_ref": {
-                        "is_mutable": false,
-                        "lifetime": null,
-                        "type": {
-                          "primitive": "str"
-                        }
-                      }
-                    }
-                  ]
-                ],
-                "is_c_variadic": false,
-                "output": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "generic": "Self"
-                            }
-                          },
-                          {
-                            "type": {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "CorrelationTokenError",
-                                "resolved_item": {
-                                  "definition": {
-                                    "attrs": [],
-                                    "inner": {
-                                      "enum": {
-                                        "generics": {
-                                          "params": [],
-                                          "where_predicates": []
-                                        },
-                                        "has_stripped_variants": false,
-                                        "variants": [
-                                          {
-                                            "attrs": [],
-                                            "inner": {
-                                              "variant": {
-                                                "discriminant": null,
-                                                "kind": "plain"
-                                              }
-                                            },
-                                            "name": "Empty",
-                                            "visibility": "default"
-                                          },
-                                          {
-                                            "attrs": [],
-                                            "inner": {
-                                              "variant": {
-                                                "discriminant": null,
-                                                "kind": "plain"
-                                              }
-                                            },
-                                            "name": "TooLong",
-                                            "visibility": "default"
-                                          }
-                                        ]
-                                      }
-                                    },
-                                    "name": "CorrelationTokenError",
-                                    "visibility": "public"
-                                  },
-                                  "path": "nmp_grammar::write::CorrelationTokenError"
-                                }
-                              }
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "Result",
-                    "resolved_item": {
-                      "path": "core::result::Result"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "name": "new",
-          "visibility": "public"
-        }
-      ]
-    }
-  ],
   "inner": {
     "struct": {
       "generics": {
@@ -6203,7 +6086,42 @@ reexport nmp::CorrelationToken => nmp_grammar::write::CorrelationToken
 }
 reexport nmp::CorrelationTokenError => nmp_grammar::write::CorrelationTokenError
 {
-  "previously_defined": "nmp_grammar::write::CorrelationTokenError"
+  "attrs": [],
+  "inner": {
+    "enum": {
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "has_stripped_variants": false,
+      "variants": [
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "Empty",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "TooLong",
+          "visibility": "default"
+        }
+      ]
+    }
+  },
+  "name": "CorrelationTokenError",
+  "visibility": "public"
 }
 reexport nmp::CoverageInterval => nmp_store::coverage::CoverageInterval
 {

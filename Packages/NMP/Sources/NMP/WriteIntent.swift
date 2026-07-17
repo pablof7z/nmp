@@ -86,7 +86,7 @@ public struct WriteIntent: Sendable, Hashable {
     public var identityOverride: String?
     /// Crash-safe client correlation token (#591). `nil` -- the default --
     /// opts this write out of correlation entirely. A non-`nil` token is
-    /// validated by `nmp_grammar::CorrelationToken::new` on the way across
+    /// validated by `nmp_grammar::CorrelationToken`'s `TryFrom<&str>` on the way across
     /// the boundary (non-empty, length-capped); a malformed token throws
     /// `NMPError.invalidCorrelationToken` synchronously from `publish`,
     /// before any engine call. A token that already resolves to a

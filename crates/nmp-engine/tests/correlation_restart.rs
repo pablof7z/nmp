@@ -53,7 +53,7 @@ fn directory(pk: PublicKey, relay: RelayUrl) -> FixtureDirectory {
 }
 
 fn token(value: &str) -> CorrelationToken {
-    CorrelationToken::new(value).expect("fixture token is within the bounded range")
+    CorrelationToken::try_from(value).expect("fixture token is within the bounded range")
 }
 
 fn unsigned_draft(author: PublicKey, created_at: u64, content: &str) -> UnsignedEvent {

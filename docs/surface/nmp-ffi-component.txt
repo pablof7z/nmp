@@ -2682,7 +2682,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "#591: `FfiWriteIntent.correlation` was `Some` but failed\n`nmp_grammar::CorrelationToken::new`'s bounded/non-empty validation\n(empty, or over `CorrelationToken::MAX_LEN` bytes). Synchronous,\nbefore any engine call -- same discipline as `InvalidPublicKey`/\n`InvalidTag` above.",
+                "#591: `FfiWriteIntent.correlation` was `Some` but failed\n`nmp_grammar::CorrelationToken`'s `TryFrom<&str>` bounded/non-empty\nvalidation (empty, or over `CorrelationToken::MAX_LEN` bytes). Synchronous,\nbefore any engine call -- same discipline as `InvalidPublicKey`/\n`InvalidTag` above.",
             ),
         },
     ],
@@ -6899,7 +6899,7 @@ record Record {
                 None,
             ),
             docstring: Some(
-                "`nmp_grammar::WriteIntent::correlation` mirror (#591): a caller-\ngenerated crash-safe correlation/idempotency token. `None` -- the\ndefault -- opts this write out of correlation entirely. `Some`\ncrosses the boundary as a plain string and is validated by\n`nmp_grammar::CorrelationToken::new` on the way in\n(non-empty, length-capped): a malformed token is a typed synchronous\n[`crate::convert::FfiError::InvalidCorrelationToken`] before any\nengine call. A token that already resolves to a previously-accepted\nreceipt reattaches that existing obligation instead of enqueuing a\nsecond write -- see that type's doc for the full contract.",
+                "`nmp_grammar::WriteIntent::correlation` mirror (#591): a caller-\ngenerated crash-safe correlation/idempotency token. `None` -- the\ndefault -- opts this write out of correlation entirely. `Some`\ncrosses the boundary as a plain string and is validated by\n`nmp_grammar::CorrelationToken`'s `TryFrom<&str>` on the way in\n(non-empty, length-capped): a malformed token is a typed synchronous\n[`crate::convert::FfiError::InvalidCorrelationToken`] before any\nengine call. A token that already resolves to a previously-accepted\nreceipt reattaches that existing obligation instead of enqueuing a\nsecond write -- see that type's doc for the full contract.",
             ),
         },
     ],

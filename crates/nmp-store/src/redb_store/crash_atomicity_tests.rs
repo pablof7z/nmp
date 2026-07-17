@@ -83,7 +83,7 @@ fn accept(frozen: Event) -> AcceptWrite {
 fn accept_with_correlation(frozen: Event, token: &str) -> AcceptWrite {
     AcceptWrite {
         correlation: Some(
-            nmp_grammar::CorrelationToken::new(token).expect("fixture token is well-formed"),
+            nmp_grammar::CorrelationToken::try_from(token).expect("fixture token is well-formed"),
         ),
         ..accept(frozen)
     }

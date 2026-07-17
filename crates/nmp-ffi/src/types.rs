@@ -594,7 +594,7 @@ pub struct FfiWriteIntent {
     /// generated crash-safe correlation/idempotency token. `None` -- the
     /// default -- opts this write out of correlation entirely. `Some`
     /// crosses the boundary as a plain string and is validated by
-    /// `nmp_grammar::CorrelationToken::new` on the way in
+    /// `nmp_grammar::CorrelationToken`'s `TryFrom<&str>` on the way in
     /// (non-empty, length-capped): a malformed token is a typed synchronous
     /// [`crate::convert::FfiError::InvalidCorrelationToken`] before any
     /// engine call. A token that already resolves to a previously-accepted
