@@ -464,6 +464,10 @@ pub struct AcceptWrite {
     /// `promote_signed`).
     pub sig_state: IntentSigState,
     pub accepted_at: Timestamp,
+    /// #591 crash-safe correlation token. When `Some`, checked (and, on a
+    /// first sighting, journaled) inside this SAME acceptance transaction
+    /// -- see [`EventStore::accept_write`]'s doc for the exact protocol.
+    pub correlation: Option<nmp_grammar::CorrelationToken>,
 }
 
 /// The result of an [`EventStore::accept_write`] call — mirrors
@@ -1527,6 +1531,17 @@ pub trait EventStore {
         &self,
         receipt_id: u64,
     ) -> Result<Option<RecoveredReceipt>, PersistenceError>;
+
+    /// #591: resolve a caller's [`AcceptWrite::correlation`] token to the
+    /// receipt id it was journaled under, if any. `Ok(None)` means the
+    /// token has never been accepted (or this store never received it) --
+    /// distinct from a persistence failure. `accept_write` uses this same
+    /// mapping internally (checked inside its own transaction) to decide
+    /// whether a token is a first sighting; the engine's
+    /// `reattach_by_correlation` lookup door uses it directly to translate
+    /// a token into an ordinary [`Self::reattach_receipt`] call. Retained
+    /// forever, exactly like `OUTBOX_RECEIPTS` -- there is no removal door.
+    fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError>;
 
     /// Append the next canonical resolved-route revision for an open intent.
     /// This must commit before any attempt starts or wire publication for a

@@ -317,6 +317,9 @@ impl EventStore for FailOnceCompensationStore {
     ) -> Result<Option<RecoveredReceipt>, PersistenceError> {
         self.inner.reattach_receipt(receipt_id)
     }
+    fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
+        self.inner.lookup_correlation(token)
+    }
     fn record_route_revision(
         &mut self,
         intent_id: nmp_store::IntentId,
@@ -463,6 +466,9 @@ impl EventStore for SharedFailStartStore {
         receipt_id: u64,
     ) -> Result<Option<RecoveredReceipt>, PersistenceError> {
         self.inner.reattach_receipt(receipt_id)
+    }
+    fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
+        self.inner.lookup_correlation(token)
     }
     fn record_route_revision(
         &mut self,
@@ -619,6 +625,9 @@ impl EventStore for RedbFailStartStore {
         receipt_id: u64,
     ) -> Result<Option<RecoveredReceipt>, PersistenceError> {
         self.inner.reattach_receipt(receipt_id)
+    }
+    fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
+        self.inner.lookup_correlation(token)
     }
     fn record_route_revision(
         &mut self,
@@ -999,6 +1008,7 @@ fn publish_private<S: EventStore>(
                 relays: NarrowOnly::new(relays),
             }),
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink),
     ));
@@ -2859,6 +2869,7 @@ fn enqueue_is_not_converged() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink.clone()),
     ));
@@ -2879,6 +2890,7 @@ fn enqueue_is_not_converged() {
             durability: Durability::Ephemeral,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(eph_sink.clone()),
     ));
@@ -2915,6 +2927,7 @@ fn enqueue_is_not_converged() {
             durability: Durability::AtMostOnce,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(amo_sink.clone()),
     ));
@@ -3895,6 +3908,7 @@ fn durable_pending_row_is_visible_before_signer_and_tamper_compensates() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(receipt_sink.clone()),
     ));
@@ -3950,6 +3964,7 @@ fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(CapturingReceiptSink::default()),
     ));
@@ -3969,6 +3984,7 @@ fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(cancel_sink.clone()),
     ));
@@ -4012,6 +4028,7 @@ fn cancellation_outcomes_are_typed_idempotent_and_late_signers_are_inert() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink.clone()),
     ));
@@ -4048,6 +4065,7 @@ fn cancellation_outcomes_are_typed_idempotent_and_late_signers_are_inert() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(signed_sink),
     ));
@@ -4083,6 +4101,7 @@ fn signer_unavailable_keeps_accepted_row_visible() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink.clone()),
     ));
@@ -4125,6 +4144,7 @@ fn identity_override_accepts_secondary_author_and_pins_it_through_signing() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: Some(b.public_key()),
+            correlation: None,
         },
         Box::new(sink.clone()),
     ));
@@ -4160,6 +4180,7 @@ fn identity_override_accepts_secondary_author_and_pins_it_through_signing() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(default_sink.clone()),
     ));
@@ -4190,6 +4211,7 @@ fn default_publish_without_override_still_fails_closed_for_non_active_author() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink.clone()),
     ));
@@ -4212,6 +4234,7 @@ fn default_publish_without_override_still_fails_closed_for_non_active_author() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(logged_out.clone()),
     ));
@@ -4245,6 +4268,7 @@ fn identity_override_author_mismatch_fails_closed_for_unsigned_and_signed() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: Some(b.public_key()),
+            correlation: None,
         },
         Box::new(sink.clone()),
     ));
@@ -4270,6 +4294,7 @@ fn identity_override_author_mismatch_fails_closed_for_unsigned_and_signed() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: Some(b.public_key()),
+            correlation: None,
         },
         Box::new(signed_sink.clone()),
     ));
@@ -4304,6 +4329,7 @@ fn ephemeral_is_receipt_only_and_never_creates_a_pending_row() {
             durability: Durability::Ephemeral,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink.clone()),
     ));
@@ -4341,6 +4367,7 @@ fn relay_rejection_after_promotion_does_not_retract_the_signed_row() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(CapturingReceiptSink::default()),
     ));
@@ -4389,6 +4416,7 @@ fn cancelling_displaced_pending_then_newest_never_resurrects_cancelled_row() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(CapturingReceiptSink::default()),
     ));
@@ -4407,6 +4435,7 @@ fn cancelling_displaced_pending_then_newest_never_resurrects_cancelled_row() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(CapturingReceiptSink::default()),
     ));
@@ -4426,6 +4455,7 @@ fn cancelling_displaced_pending_then_newest_never_resurrects_cancelled_row() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(CapturingReceiptSink::default()),
     ));
@@ -4470,6 +4500,7 @@ fn expired_local_acceptance_is_first_and_only_failed_with_no_side_effects() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink.clone()),
     ));
@@ -4498,6 +4529,7 @@ fn exact_duplicate_intents_get_distinct_store_ids_and_one_promotion_advances_bot
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(CapturingReceiptSink::default()),
     ));
@@ -4508,6 +4540,7 @@ fn exact_duplicate_intents_get_distinct_store_ids_and_one_promotion_advances_bot
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(CapturingReceiptSink::default()),
     ));
@@ -4571,6 +4604,7 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
                 relays: NarrowOnly::new([ack.clone(), drop_relay.clone()]),
             }),
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink_a.clone()),
     ));
@@ -4583,6 +4617,7 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
                 relays: NarrowOnly::new([nack.clone()]),
             }),
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink_b.clone()),
     ));
@@ -4676,6 +4711,7 @@ fn relay_signature_satisfies_all_pending_coowners_and_late_signers_are_ignored()
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink_a.clone()),
     ));
@@ -4686,6 +4722,7 @@ fn relay_signature_satisfies_all_pending_coowners_and_late_signers_are_ignored()
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink_b.clone()),
     ));
@@ -4765,6 +4802,7 @@ fn repeated_signer_notifications_never_start_concurrent_operations() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink.clone()),
     ));
@@ -4822,6 +4860,7 @@ fn retryable_signer_errors_retain_and_rearm_the_exact_write() {
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             },
             Box::new(sink.clone()),
         ));
@@ -4877,6 +4916,7 @@ fn terminal_signer_errors_compensate_the_write() {
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             },
             Box::new(sink.clone()),
         ));
@@ -4914,6 +4954,7 @@ fn compensation_persistence_failure_is_nonterminal_and_retryable() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink.clone()),
     ));
@@ -4970,6 +5011,7 @@ fn explicit_cancellation_persistence_failure_keeps_the_obligation_live_until_ret
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink.clone()),
     ));
@@ -5058,6 +5100,7 @@ fn direct_publish_of_forged_signed_event_is_rejected_before_acceptance() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink.clone()),
     ));
@@ -5106,6 +5149,7 @@ fn direct_publish_of_valid_signed_event_still_publishes() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink.clone()),
     ));
@@ -5154,6 +5198,7 @@ fn private_route_fails_closed() {
                 relays: NarrowOnly::new(std::iter::empty::<RelayUrl>()),
             }),
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink.clone()),
     ));
@@ -5340,6 +5385,7 @@ fn ephemeral_written_handoff_cannot_mint_persisted_sent_truth() {
                 relays: NarrowOnly::new([relay_a.clone(), relay_b.clone()]),
             }),
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink.clone()),
     ));
@@ -5668,6 +5714,7 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             },
             Box::new(CapturingReceiptSink::default()),
         ));
@@ -5746,6 +5793,7 @@ fn inbox_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vol
                 durability: Durability::Durable,
                 routing: WriteRouting::ToInboxes(vec![recipient.public_key()]),
                 identity_override: None,
+                correlation: None,
             },
             Box::new(CapturingReceiptSink::default()),
         ));
@@ -5882,6 +5930,7 @@ fn route_revision_failure_emits_no_attempt_or_wire_and_claims_no_crash_durable_u
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             },
             Box::new(CapturingReceiptSink::default()),
         ));
@@ -5933,6 +5982,7 @@ fn write_ack_per_relay() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink.clone()),
     ));
@@ -6014,6 +6064,7 @@ fn uncommitted_attempt_terminal_emits_no_receipt_and_keeps_lane_live() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(CapturingReceiptSink::default()),
     ));
@@ -6061,6 +6112,7 @@ fn unaccepted_failure_ids_are_distinct_and_disjoint_from_store_receipts() {
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             },
             Box::new(CapturingReceiptSink::default()),
         ))
@@ -7408,6 +7460,7 @@ fn to_inboxes_routes_to_recipient_read_relays_only() {
             durability: Durability::Durable,
             routing: WriteRouting::ToInboxes(vec![recipient.public_key()]),
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink.clone()),
     ));
@@ -7472,6 +7525,7 @@ fn to_inboxes_write_only_recipient_fails_closed() {
             durability: Durability::Durable,
             routing: WriteRouting::ToInboxes(vec![recipient.public_key()]),
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink.clone()),
     ));
@@ -7522,6 +7576,7 @@ fn to_inboxes_unknown_recipient_fails_the_whole_intent_closed() {
             durability: Durability::Durable,
             routing: WriteRouting::ToInboxes(vec![known.public_key(), unknown.public_key()]),
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink.clone()),
     ));
@@ -7652,6 +7707,9 @@ impl EventStore for FailIngestStore {
         receipt_id: u64,
     ) -> Result<Option<RecoveredReceipt>, PersistenceError> {
         self.inner.reattach_receipt(receipt_id)
+    }
+    fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
+        self.inner.lookup_correlation(token)
     }
     fn record_route_revision(
         &mut self,
@@ -7881,6 +7939,9 @@ impl EventStore for WakeLaneProbeStore {
     ) -> Result<Option<RecoveredReceipt>, PersistenceError> {
         self.inner.reattach_receipt(receipt_id)
     }
+    fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
+        self.inner.lookup_correlation(token)
+    }
     fn record_route_revision(
         &mut self,
         intent_id: nmp_store::IntentId,
@@ -8063,6 +8124,7 @@ fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
                     relays: NarrowOnly::new([relay.clone()]),
                 }),
                 identity_override: None,
+                correlation: None,
             },
             Box::new(sink),
         ));
@@ -8144,6 +8206,7 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
                 relays: NarrowOnly::new([relay.clone()]),
             }),
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink1),
     ));
@@ -8171,6 +8234,7 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
                 relays: NarrowOnly::new([relay.clone()]),
             }),
             identity_override: None,
+            correlation: None,
         },
         Box::new(sink2),
     ));

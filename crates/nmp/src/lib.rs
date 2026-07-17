@@ -126,7 +126,9 @@ pub use nmp_engine::runtime::{
     ReceiptReattachment, ReceiptStream, SignEventCancel, SignEventError, SignEventOperation,
     SignerRegistration,
 };
-pub use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
+pub use nmp_grammar::{
+    CorrelationToken, CorrelationTokenError, Durability, WriteIntent, WritePayload, WriteRouting,
+};
 
 // Read outputs `Subscription`/`DiagnosticsSubscription` deliver -- every
 // field type `DiagnosticsSnapshot` names must be reachable from here too,

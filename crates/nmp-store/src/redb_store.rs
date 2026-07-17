@@ -222,6 +222,16 @@ const PENDING_EPHEMERAL_RECEIPTS_KEY: &str = "pending_ephemeral_receipts";
 /// [`crate::ReceiptState`]'s doc for why this separation exists). Never
 /// pruned by this unit.
 const OUTBOX_RECEIPTS: TableDefinition<&str, &str> = TableDefinition::new("outbox_receipts");
+/// #591: caller correlation token -> the receipt id it was journaled under,
+/// stored as [`receipt_key`]'s SAME zero-padded decimal string (this table
+/// is only ever point-looked-up by token, never range-scanned, so the
+/// padding is not load-bearing here -- it is simply reusing the existing
+/// key format rather than introducing a second one). Written inside the
+/// SAME transaction as the
+/// `OUTBOX_RECEIPTS` row it names (see `accept_write`'s doc), retained
+/// forever like `OUTBOX_RECEIPTS` -- there is no removal door.
+const OUTBOX_CORRELATIONS: TableDefinition<&str, &str> =
+    TableDefinition::new("outbox_correlations");
 
 fn attempt_prefix(intent_id: IntentId, relay: &RelayUrl) -> String {
     // Length-prefixing makes relay-prefix pairs (`wss://x` and
@@ -3465,6 +3475,7 @@ impl RedbStore {
                 write_txn.open_table(OUTBOX_SUPPRESS_BY_ID)?;
                 write_txn.open_table(OUTBOX_SUPPRESS_BY_ADDR)?;
                 write_txn.open_table(OUTBOX_RECEIPTS)?;
+                write_txn.open_table(OUTBOX_CORRELATIONS)?;
                 let mut schema_meta = write_txn.open_table(SCHEMA_META)?;
                 schema_meta.insert(SCHEMA_VERSION_KEY, SCHEMA_VERSION)?;
             }
@@ -4847,6 +4858,7 @@ impl EventStore for RedbStore {
             routing,
             mut sig_state,
             accepted_at,
+            correlation,
         } = accept;
         // Overridden inside the `Duplicate` branch when the existing row
         // is ALREADY signed (codex-nova ruling) — the shared R7 journal
@@ -4878,6 +4890,9 @@ impl EventStore for RedbStore {
                 .map_err(persist_err)?;
             let mut outbox_meta = write_txn.open_table(OUTBOX_META).map_err(persist_err)?;
             let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
+            let mut outbox_correlations = write_txn
+                .open_table(OUTBOX_CORRELATIONS)
+                .map_err(persist_err)?;
             let mut outbox_kind5_claims = write_txn
                 .open_table(OUTBOX_KIND5_CLAIMS)
                 .map_err(persist_err)?;
@@ -5280,6 +5295,19 @@ impl EventStore for RedbStore {
                 outbox_receipts
                     .insert(receipt_key(receipt_id).as_str(), encoded_receipt.as_str())
                     .map_err(persist_err)?;
+
+                // #591: journal the caller's correlation token, in this
+                // SAME transaction, alongside the receipt id it now names.
+                // Overwrite-safe even on a (contract-violating) reused
+                // token: the door that would ever observe a stale mapping
+                // is `lookup_correlation`, and the caller's own reuse is
+                // documented as their contract violation, not a case this
+                // store detects or refuses.
+                if let Some(token) = &correlation {
+                    outbox_correlations
+                        .insert(token.as_ref() as &str, receipt_key(receipt_id).as_str())
+                        .map_err(persist_err)?;
+                }
             }
 
             canonical.flush_pending()?;
@@ -6017,6 +6045,32 @@ impl EventStore for RedbStore {
             expected_pubkey: record.expected_pubkey,
             state: record.state,
         }))
+    }
+
+    fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
+        let read_txn = self.db.begin_read().map_err(persist_err)?;
+        // A store that has never accepted ANY correlated write never
+        // created this table at all -- `ReadTransaction::open_table`
+        // returns `TableDoesNotExist` in that case (unlike a write
+        // transaction, a read transaction never creates tables). That is
+        // exactly "no token has ever been journaled here", not a
+        // persistence failure.
+        let table = match read_txn.open_table(OUTBOX_CORRELATIONS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(err) => return Err(persist_err(err)),
+        };
+        let Some(encoded) = table
+            .get(token)
+            .map_err(persist_err)?
+            .map(|guard| guard.value().to_string())
+        else {
+            return Ok(None);
+        };
+        let receipt_id: u64 = encoded
+            .parse()
+            .map_err(|err| PersistenceError(format!("decode correlation receipt id: {err}")))?;
+        Ok(Some(receipt_id))
     }
 
     fn record_route_revision(
@@ -7325,6 +7379,7 @@ mod tests {
                 routing: "range-proof".into(),
                 sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(created_at),
+                correlation: None,
             })
             .expect("accept fixture intent");
         let intent = outcome.journaled_intent_id().expect("intent id");
@@ -8140,6 +8195,7 @@ mod tests {
                 routing: "integrity".into(),
                 sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(80u64),
+                correlation: None,
             })
             .unwrap();
         assert_canonical_integrity(&store.db);

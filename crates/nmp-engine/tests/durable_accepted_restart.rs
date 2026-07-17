@@ -207,6 +207,7 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             },
             Box::new(Sink::default()),
         ));
@@ -374,6 +375,7 @@ fn at_most_once_started_attempt_becomes_outcome_unknown_and_is_never_resent() {
                 durability: Durability::AtMostOnce,
                 routing: WriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             },
             Box::new(Sink::default()),
         ));
@@ -443,6 +445,7 @@ fn pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates() {
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             },
             Box::new(Sink::default()),
         ));
@@ -534,6 +537,7 @@ fn overridden_unsigned_intent_replays_and_resumes_pinned_to_override_after_reope
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
                 identity_override: Some(override_keys.public_key()),
+                correlation: None,
             },
             Box::new(Sink::default()),
         ));
@@ -664,6 +668,7 @@ fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
                     durability: Durability::Durable,
                     routing: WriteRouting::AuthorOutbox,
                     identity_override: None,
+                    correlation: None,
                 },
                 Box::new(Sink::default()),
             ))
@@ -753,6 +758,7 @@ fn malformed_persisted_routing_fails_closed_without_dropping_the_obligation() {
                 routing: "future-routing-version-with-no-decoder".into(),
                 sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(104u64),
+                correlation: None,
             })
             .unwrap();
         let intent_id = outcome.journaled_intent_id().unwrap();
@@ -845,6 +851,7 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
                 routing: "author-outbox".to_string(),
                 sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(777),
+                correlation: None,
             })
             .unwrap();
         ReceiptId(outcome.journaled_receipt_id().unwrap())
@@ -935,6 +942,7 @@ fn signed_ephemeral_receipt_replays_signed_and_refuses_cancellation_after_reopen
                 durability: Durability::Ephemeral,
                 routing: WriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             },
             Box::new(Sink::default()),
         ));
@@ -999,6 +1007,7 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             },
             Box::new(Sink::default()),
         ));
@@ -1077,6 +1086,7 @@ fn retained_terminal_receipt_is_attached_and_replays_terminal_fact() {
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         },
         Box::new(Sink::default()),
     ));
@@ -1113,6 +1123,7 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             },
             Box::new(Sink::default()),
         ));
@@ -1220,6 +1231,7 @@ fn pinned_host_routing_round_trips_across_a_restart() {
                 durability: Durability::Durable,
                 routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(host.clone())),
                 identity_override: None,
+                correlation: None,
             },
             Box::new(Sink::default()),
         ));
@@ -1278,6 +1290,7 @@ fn corrupt_route_lane_evidence_is_unreadable_not_absent() {
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             },
             Box::new(Sink::default()),
         ));
