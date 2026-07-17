@@ -46,6 +46,32 @@ const FJALL_KEYSPACES: [&str; 12] = [
     "by_tag",
     "index_cardinality",
 ];
+const FJALL_BOUNDED_WORKERS: usize = 1;
+const FJALL_BOUNDED_CACHE_BYTES: u64 = 16 * 1_024 * 1_024;
+const FJALL_BOUNDED_WRITE_BUFFER_BYTES: u64 = 32 * 1_024 * 1_024;
+const FJALL_BOUNDED_MEMTABLE_BYTES: u64 = 4 * 1_024 * 1_024;
+
+#[derive(Debug, Clone, Copy)]
+enum FjallProfile {
+    Default,
+    Bounded,
+    Balanced,
+    Settled,
+}
+
+impl FjallProfile {
+    fn is_bounded(self) -> bool {
+        matches!(self, Self::Bounded | Self::Balanced | Self::Settled)
+    }
+
+    fn worker_threads(self) -> usize {
+        match self {
+            Self::Default => 0,
+            Self::Bounded | Self::Settled => FJALL_BOUNDED_WORKERS,
+            Self::Balanced => 2,
+        }
+    }
+}
 
 struct CountingAllocator;
 
@@ -230,6 +256,23 @@ struct EquivalentRun {
     preparation_ns: u64,
     metrics: StoreBenchPreparedMetrics,
     events_per_second: f64,
+    database_allocated_bytes: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SustainedRun {
+    schema: String,
+    backend: String,
+    nmp_commit: String,
+    git_dirty: bool,
+    host: String,
+    corpus_blake3: String,
+    events_per_cycle: u64,
+    cycles: usize,
+    logical_event_mutations: u64,
+    transaction_batch_size: usize,
+    metrics: StoreBenchPreparedMetrics,
+    logical_events_per_second: f64,
     database_allocated_bytes: u64,
 }
 
@@ -428,7 +471,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let command = args
         .next()
         .ok_or(
-            "usage: nmp-nostrdb-compare <generate|describe-corpus|run-nmp|run-nostrdb|compare|run-equivalent|matrix-equivalent|matrix-prepared|crash-probe|crash-child> ...",
+            "usage: nmp-nostrdb-compare <generate|describe-corpus|run-nmp|run-nostrdb|compare|run-equivalent|run-sustained|matrix-equivalent|matrix-prepared|crash-probe|crash-child> ...",
         )?;
     match command.to_string_lossy().as_ref() {
         "generate" => {
@@ -468,12 +511,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let corpus = path_arg(&mut args, "corpus")?;
             let backend = args
                 .next()
-                .ok_or("missing backend (redb-prepared|lmdb-prepared|fjall-prepared|redb-full)")?
+                .ok_or("missing backend (redb-prepared|lmdb-prepared|fjall-prepared|fjall-bounded-prepared|fjall-balanced-prepared|fjall-settled-prepared|redb-full)")?
                 .to_string_lossy()
                 .into_owned();
             let batch = number_arg::<usize>(&mut args, "batch-size")?;
             let output = path_arg(&mut args, "output")?;
             run_equivalent(&corpus, &backend, batch, &output)?;
+        }
+        "run-sustained" => {
+            let corpus = path_arg(&mut args, "corpus")?;
+            let backend = args
+                .next()
+                .ok_or("missing backend (redb-prepared|fjall-bounded-prepared|fjall-balanced-prepared)")?
+                .to_string_lossy()
+                .into_owned();
+            let batch = number_arg::<usize>(&mut args, "batch-size")?;
+            let cycles = number_arg::<usize>(&mut args, "cycles")?;
+            let output = path_arg(&mut args, "output")?;
+            run_sustained(&corpus, &backend, batch, cycles, &output)?;
         }
         "matrix-equivalent" => {
             let corpus = path_arg(&mut args, "corpus")?;
@@ -552,6 +607,16 @@ fn counters_delta(
     }
 }
 
+fn nearest_rank(values: &[u64], percentile: usize) -> Option<u64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let rank = sorted.len().saturating_mul(percentile).saturating_add(99) / 100;
+    sorted.get(rank.saturating_sub(1)).copied()
+}
+
 fn run_prepared_lmdb(
     path: &Path,
     corpus: &StoreBenchPreparedCorpus,
@@ -561,12 +626,15 @@ fn run_prepared_lmdb(
     let process_before = sample_process();
     let started = Instant::now();
     let mut commit_ns = 0u64;
+    let mut commit_latencies = Vec::with_capacity(corpus.batches.len());
     for batch in &descriptors {
         let transaction = handle.begin()?;
         transaction.put_batch(&handle, batch)?;
         let commit_started = Instant::now();
         transaction.commit()?;
-        commit_ns = commit_ns.saturating_add(duration_ns(commit_started));
+        let latency = duration_ns(commit_started);
+        commit_ns = commit_ns.saturating_add(latency);
+        commit_latencies.push(latency);
     }
     let wall_ns = duration_ns(started);
     let process = counters_delta(sample_process(), process_before);
@@ -587,6 +655,13 @@ fn run_prepared_lmdb(
         transactions: corpus.batches.len() as u64,
         wall_ns,
         commit_ns,
+        commit_p50_ns: nearest_rank(&commit_latencies, 50),
+        commit_p95_ns: nearest_rank(&commit_latencies, 95),
+        commit_p99_ns: nearest_rank(&commit_latencies, 99),
+        maintenance_ns: None,
+        ending_write_buffer_bytes: None,
+        l0_tables: None,
+        sst_tables: None,
         reopen_ns,
         cpu_ns: process.cpu_ns,
         allocation_ops: process.allocation_ops,
@@ -605,25 +680,44 @@ fn run_prepared_lmdb(
 
 fn open_fjall_keyspaces(
     database: &SingleWriterTxDatabase,
+    profile: FjallProfile,
 ) -> Result<Vec<SingleWriterTxKeyspace>, String> {
     FJALL_KEYSPACES
         .iter()
         .map(|name| {
+            let options = match profile {
+                FjallProfile::Default => KeyspaceCreateOptions::default(),
+                FjallProfile::Bounded | FjallProfile::Balanced | FjallProfile::Settled => {
+                    KeyspaceCreateOptions::default().max_memtable_size(FJALL_BOUNDED_MEMTABLE_BYTES)
+                }
+            };
             database
-                .keyspace(name, KeyspaceCreateOptions::default)
+                .keyspace(name, move || options)
                 .map_err(|error| error.to_string())
         })
         .collect()
 }
 
+// Fjall 3.1.6 exposes its database-wide write-buffer ceiling as a hidden,
+// deprecated API while the replacement is still unresolved. The bounded
+// experiment requests it deliberately and records the actual ending buffer.
+// Sustained evidence shows a one-worker flush backlog can temporarily exceed
+// the requested ceiling, so the metric—not the setting—is the falsifier.
+#[allow(deprecated)]
 fn run_prepared_fjall(
     path: &Path,
     corpus: &StoreBenchPreparedCorpus,
+    profile: FjallProfile,
 ) -> Result<StoreBenchPreparedMetrics, String> {
-    let database = SingleWriterTxDatabase::builder(path)
-        .open()
-        .map_err(|error| error.to_string())?;
-    let keyspaces = open_fjall_keyspaces(&database)?;
+    let mut builder = SingleWriterTxDatabase::builder(path);
+    if profile.is_bounded() {
+        builder = builder
+            .worker_threads(profile.worker_threads())
+            .cache_size(FJALL_BOUNDED_CACHE_BYTES)
+            .max_write_buffer_size(Some(FJALL_BOUNDED_WRITE_BUFFER_BYTES));
+    }
+    let database = builder.open().map_err(|error| error.to_string())?;
+    let keyspaces = open_fjall_keyspaces(&database, profile)?;
     database
         .persist(PersistMode::SyncAll)
         .map_err(|error| error.to_string())?;
@@ -631,6 +725,7 @@ fn run_prepared_fjall(
     let process_before = sample_process();
     let started = Instant::now();
     let mut commit_ns = 0u64;
+    let mut commit_latencies = Vec::with_capacity(corpus.batches.len());
     for batch in &corpus.batches {
         let mut transaction = database.write_tx().durability(Some(PersistMode::SyncAll));
         for record in &batch.records {
@@ -642,20 +737,53 @@ fn run_prepared_fjall(
         }
         let commit_started = Instant::now();
         transaction.commit().map_err(|error| error.to_string())?;
-        commit_ns = commit_ns.saturating_add(duration_ns(commit_started));
+        let latency = duration_ns(commit_started);
+        commit_ns = commit_ns.saturating_add(latency);
+        commit_latencies.push(latency);
     }
+    let maintenance_started = Instant::now();
+    if matches!(profile, FjallProfile::Settled) {
+        for keyspace in &keyspaces {
+            keyspace
+                .as_ref()
+                .rotate_memtable_and_wait()
+                .map_err(|error| error.to_string())?;
+        }
+        for keyspace in &keyspaces {
+            keyspace
+                .as_ref()
+                .major_compact()
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    let maintenance_ns =
+        matches!(profile, FjallProfile::Settled).then(|| duration_ns(maintenance_started));
     let wall_ns = duration_ns(started);
     let process = counters_delta(sample_process(), process_before);
+    let ending_write_buffer_bytes = database.write_buffer_size();
+    let l0_tables = keyspaces
+        .iter()
+        .map(|keyspace| keyspace.as_ref().l0_table_count() as u64)
+        .sum();
+    let sst_tables = keyspaces
+        .iter()
+        .map(|keyspace| keyspace.as_ref().table_count() as u64)
+        .sum();
     let database_stored_bytes = database.disk_space().map_err(|error| error.to_string())?;
     drop(keyspaces);
     drop(database);
     let (database_logical_bytes, _) = path_size(path).map_err(|error| error.to_string())?;
 
     let reopen_started = Instant::now();
-    let reopened = SingleWriterTxDatabase::builder(path)
-        .open()
-        .map_err(|error| error.to_string())?;
-    let reopened_keyspaces = open_fjall_keyspaces(&reopened)?;
+    let mut reopen_builder = SingleWriterTxDatabase::builder(path);
+    if profile.is_bounded() {
+        reopen_builder = reopen_builder
+            .worker_threads(profile.worker_threads())
+            .cache_size(FJALL_BOUNDED_CACHE_BYTES)
+            .max_write_buffer_size(Some(FJALL_BOUNDED_WRITE_BUFFER_BYTES));
+    }
+    let reopened = reopen_builder.open().map_err(|error| error.to_string())?;
+    let reopened_keyspaces = open_fjall_keyspaces(&reopened, profile)?;
     let read = reopened.read_tx();
     let reopened_table_rows = reopened_keyspaces
         .iter()
@@ -676,6 +804,13 @@ fn run_prepared_fjall(
         transactions: corpus.batches.len() as u64,
         wall_ns,
         commit_ns,
+        commit_p50_ns: nearest_rank(&commit_latencies, 50),
+        commit_p95_ns: nearest_rank(&commit_latencies, 95),
+        commit_p99_ns: nearest_rank(&commit_latencies, 99),
+        maintenance_ns,
+        ending_write_buffer_bytes: Some(ending_write_buffer_bytes),
+        l0_tables: Some(l0_tables),
+        sst_tables: Some(sst_tables),
         reopen_ns,
         cpu_ns: process.cpu_ns,
         allocation_ops: process.allocation_ops,
@@ -698,6 +833,13 @@ fn full_metrics_to_prepared(metrics: StoreBenchMetrics) -> StoreBenchPreparedMet
         transactions: metrics.transactions,
         wall_ns: metrics.wall_ns,
         commit_ns: metrics.commit_ns,
+        commit_p50_ns: None,
+        commit_p95_ns: None,
+        commit_p99_ns: None,
+        maintenance_ns: None,
+        ending_write_buffer_bytes: None,
+        l0_tables: None,
+        sst_tables: None,
         reopen_ns: 0,
         cpu_ns: metrics.cpu_ns,
         allocation_ops: metrics.allocation_ops,
@@ -748,7 +890,10 @@ fn run_equivalent(
     let database = match backend {
         "redb-prepared" | "redb-full" => scratch.path().join("store.redb"),
         "lmdb-prepared" => scratch.path().join("store.lmdb"),
-        "fjall-prepared" => scratch.path().join("store.fjall"),
+        "fjall-prepared"
+        | "fjall-bounded-prepared"
+        | "fjall-balanced-prepared"
+        | "fjall-settled-prepared" => scratch.path().join("store.fjall"),
         _ => return Err(format!("unknown equivalent backend {backend}").into()),
     };
     let metrics = match backend {
@@ -764,6 +909,22 @@ fn run_equivalent(
         "fjall-prepared" => run_prepared_fjall(
             &database,
             prepared.as_ref().expect("prepared backend has corpus"),
+            FjallProfile::Default,
+        )?,
+        "fjall-bounded-prepared" => run_prepared_fjall(
+            &database,
+            prepared.as_ref().expect("prepared backend has corpus"),
+            FjallProfile::Bounded,
+        )?,
+        "fjall-balanced-prepared" => run_prepared_fjall(
+            &database,
+            prepared.as_ref().expect("prepared backend has corpus"),
+            FjallProfile::Balanced,
+        )?,
+        "fjall-settled-prepared" => run_prepared_fjall(
+            &database,
+            prepared.as_ref().expect("prepared backend has corpus"),
+            FjallProfile::Settled,
         )?,
         "redb-full" => full_metrics_to_prepared(run_store_bench_variant(
             &database,
@@ -805,6 +966,80 @@ fn run_equivalent(
     Ok(())
 }
 
+fn run_sustained(
+    corpus_path: &Path,
+    backend: &str,
+    batch_size: usize,
+    cycles: usize,
+    output: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if batch_size == 0 || cycles < 2 {
+        return Err("sustained batch size must be nonzero and cycles must be at least 2".into());
+    }
+    if !matches!(
+        backend,
+        "redb-prepared" | "fjall-bounded-prepared" | "fjall-balanced-prepared"
+    ) {
+        return Err(format!("unsupported sustained backend {backend}").into());
+    }
+
+    let (corpus, meta) = open_corpus(corpus_path)?;
+    let events = parse_prevalidated_events(&corpus)?;
+    let mut prepared = prepare_equivalent_store_corpus(&events, batch_size)?;
+    let one_cycle = prepared.batches.clone();
+    prepared.batches = (0..cycles)
+        .flat_map(|_| one_cycle.iter().cloned())
+        .collect();
+
+    let scratch = tempfile::tempdir()?;
+    let database = match backend {
+        "redb-prepared" => scratch.path().join("store.redb"),
+        "fjall-bounded-prepared" | "fjall-balanced-prepared" => scratch.path().join("store.fjall"),
+        _ => unreachable!(),
+    };
+    let metrics = match backend {
+        "redb-prepared" => run_prepared_redb_store_bench(&database, &prepared, sample_process)?,
+        "fjall-bounded-prepared" => {
+            run_prepared_fjall(&database, &prepared, FjallProfile::Bounded)?
+        }
+        "fjall-balanced-prepared" => {
+            run_prepared_fjall(&database, &prepared, FjallProfile::Balanced)?
+        }
+        _ => unreachable!(),
+    };
+    if !metrics.exact_reopen {
+        return Err(format!(
+            "{backend} sustained reopen did not reproduce the exact final table rows"
+        )
+        .into());
+    }
+
+    let logical_event_mutations = meta
+        .events
+        .checked_mul(cycles as u64)
+        .ok_or("sustained logical event count overflow")?;
+    let (_, database_allocated_bytes) = path_size(&database)?;
+    let result = SustainedRun {
+        schema: "nmp-storage-sustained-v1".to_owned(),
+        backend: backend.to_owned(),
+        nmp_commit: git_commit(repo_root()),
+        git_dirty: git_dirty(repo_root()),
+        host: host(),
+        corpus_blake3: meta.blake3,
+        events_per_cycle: meta.events,
+        cycles,
+        logical_event_mutations,
+        transaction_batch_size: batch_size,
+        logical_events_per_second: logical_event_mutations as f64 * 1_000_000_000.0
+            / metrics.wall_ns as f64,
+        metrics,
+        database_allocated_bytes,
+    };
+    write_json(output, &result)?;
+    println!("wrote {}", output.display());
+    Ok(())
+}
+
 fn run_equivalent_matrix(
     corpus: &Path,
     repetitions: usize,
@@ -822,6 +1057,9 @@ fn run_equivalent_matrix(
         ("redb-prepared", 4_096usize),
         ("lmdb-prepared", 4_096usize),
         ("fjall-prepared", 4_096usize),
+        ("fjall-bounded-prepared", 4_096usize),
+        ("fjall-balanced-prepared", 4_096usize),
+        ("fjall-settled-prepared", 4_096usize),
     ];
     if include_full_governed {
         base_cells.push(("redb-full", 4_096usize));
