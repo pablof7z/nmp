@@ -47,6 +47,11 @@ pub const DEFAULT_VERIFIER_WORKERS: usize = 2;
 /// pool still cannot create an unbounded number of OS threads.
 pub const MAX_VERIFIER_WORKERS: usize = 16;
 
+/// Upper bound for the host-aware verifier width selected by
+/// [`PoolConfig::default`]. Explicit configurations may still request up to
+/// [`MAX_VERIFIER_WORKERS`].
+pub const MAX_DEFAULT_VERIFIER_WORKERS: usize = 8;
+
 /// The finite thread role whose OS spawn was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadRole {
@@ -433,8 +438,9 @@ pub struct PoolConfig {
     /// Maximum translated pool events waiting for the engine bridge.
     pub event_sink_queue_capacity: usize,
     /// Persistent native verification workers. Zero selects the small fixed
-    /// [`DEFAULT_VERIFIER_WORKERS`] set. Explicit values are capped at
-    /// [`MAX_VERIFIER_WORKERS`]; this never mirrors host parallelism.
+    /// [`DEFAULT_VERIFIER_WORKERS`] set. The production default uses half the
+    /// host parallelism, capped at [`MAX_DEFAULT_VERIFIER_WORKERS`]; explicit
+    /// values are capped at [`MAX_VERIFIER_WORKERS`].
     pub verifier_workers: usize,
     /// Maximum verification tasks queued at each persistent worker.
     pub verifier_queue_capacity: usize,
@@ -447,6 +453,14 @@ pub struct PoolConfig {
     /// This separately caps transaction size even if producers continuously
     /// refill the bounded event queue while the bridge is draining it.
     pub max_engine_batch: usize,
+    /// Maximum conservative encoded bytes admitted to one engine/store batch.
+    /// A single event larger than this bound is still admitted alone; the
+    /// websocket message ceiling remains the absolute per-event bound.
+    pub max_engine_batch_bytes: usize,
+    /// Maximum time the engine bridge may wait for more consecutive EVENT
+    /// frames after receiving the first one. Control frames and lifecycle
+    /// events always end the batch immediately.
+    pub max_engine_batch_wait: Duration,
     /// Override for the keepalive idle threshold; `None` uses the
     /// production default ([`crate::keepalive::KEEPALIVE_IDLE_THRESHOLD`]).
     /// Tests on millisecond budgets pass a small value.
@@ -485,16 +499,22 @@ pub struct PoolConfig {
 
 impl Default for PoolConfig {
     fn default() -> Self {
+        let verifier_workers = std::thread::available_parallelism()
+            .map_or(DEFAULT_VERIFIER_WORKERS, usize::from)
+            .div_ceil(2)
+            .clamp(DEFAULT_VERIFIER_WORKERS, MAX_DEFAULT_VERIFIER_WORKERS);
         Self {
             max_relays: DEFAULT_MAX_RELAYS,
-            ingest_queue_capacity: 1_024,
+            ingest_queue_capacity: 8_192,
             command_queue_capacity: 1_024,
-            event_sink_queue_capacity: 1_024,
-            verifier_workers: 0,
+            event_sink_queue_capacity: 8_192,
+            verifier_workers,
             verifier_queue_capacity: 64,
             verified_cache_capacity: 131_072,
-            max_verify_batch: 128,
-            max_engine_batch: 128,
+            max_verify_batch: 512,
+            max_engine_batch: 4_096,
+            max_engine_batch_bytes: 8 * 1024 * 1024,
+            max_engine_batch_wait: Duration::ZERO,
             keepalive_idle: None,
             keepalive_pong_timeout: None,
             reconnect_delay_initial: None,
@@ -802,6 +822,7 @@ mod thread_budget_tests {
         let pool = Pool::new_with_spawner(
             PoolConfig {
                 max_relays,
+                verifier_workers: DEFAULT_VERIFIER_WORKERS,
                 ..PoolConfig::default()
             },
             Arc::new(sink),
@@ -882,6 +903,15 @@ mod thread_budget_tests {
         assert_eq!(
             inner::configured_verifier_workers(usize::MAX),
             MAX_VERIFIER_WORKERS
+        );
+    }
+
+    #[test]
+    fn default_verifier_width_uses_half_the_host_up_to_eight() {
+        let available = std::thread::available_parallelism().map_or(2, usize::from);
+        assert_eq!(
+            PoolConfig::default().verifier_workers,
+            available.div_ceil(2).clamp(2, MAX_DEFAULT_VERIFIER_WORKERS)
         );
     }
 

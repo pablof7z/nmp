@@ -1264,6 +1264,10 @@ impl EngineThread {
         #[cfg(test)]
         let runtime_threads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let max_engine_batch = pool_config.max_engine_batch.max(1);
+        let max_engine_batch_bytes = pool_config.max_engine_batch_bytes.max(1);
+        let max_engine_batch_wait = pool_config
+            .max_engine_batch_wait
+            .min(Duration::from_millis(100));
         let (pool_evt_tx, pool_evt_rx) =
             cb::bounded::<PoolEvent>(pool_config.event_sink_queue_capacity.max(1));
         let (pool_stop_tx, pool_stop_rx) = cb::bounded::<()>(0);
@@ -1292,7 +1296,14 @@ impl EngineThread {
             .spawn(move || {
                 #[cfg(test)]
                 let _thread_count = RuntimeThreadCountGuard::enter(bridge_runtime_threads);
-                pool_bridge_loop(&pool_evt_rx, &pool_stop_rx, &bridge_inbox, max_engine_batch)
+                pool_bridge_loop(
+                    &pool_evt_rx,
+                    &pool_stop_rx,
+                    &bridge_inbox,
+                    max_engine_batch,
+                    max_engine_batch_bytes,
+                    max_engine_batch_wait,
+                )
             }) {
             Ok(join) => join,
             Err(error) => {
@@ -1685,13 +1696,19 @@ fn pool_bridge_loop(
     stopping: &cb::Receiver<()>,
     engine_inbox: &Sender<Cmd>,
     max_engine_batch: usize,
+    max_engine_batch_bytes: usize,
+    max_engine_batch_wait: Duration,
 ) {
+    let mut pending = None;
     loop {
-        let event = cb::select_biased! {
-            recv(stopping) -> _ => break,
-            recv(pool_evt_rx) -> event => match event {
-                Ok(event) => event,
-                Err(_) => break,
+        let event = match pending.take() {
+            Some(event) => event,
+            None => cb::select_biased! {
+                recv(stopping) -> _ => break,
+                recv(pool_evt_rx) -> event => match event {
+                    Ok(event) => event,
+                    Err(_) => break,
+                },
             },
         };
         if let PoolEvent::Frame {
@@ -1700,52 +1717,87 @@ fn pool_bridge_loop(
             frame,
         } = event
         {
-            let mut frames = vec![(handle, session, frame)];
-            let trailing = loop {
-                if frames.len() == max_engine_batch {
-                    break None;
+            let Some(first_bytes) = encoded_event_upper_bound(&frame) else {
+                if !send_relay_batch(vec![(handle, session, frame)], stopping, engine_inbox) {
+                    break;
                 }
-                match pool_evt_rx.try_recv() {
-                    Ok(PoolEvent::Frame {
+                continue;
+            };
+            let mut frames = vec![(handle, session, frame)];
+            let mut encoded_bytes = first_bytes;
+            let deadline = std::time::Instant::now()
+                .checked_add(max_engine_batch_wait)
+                .unwrap_or_else(std::time::Instant::now);
+            let mut input_closed = false;
+            let mut stopped = false;
+            loop {
+                if frames.len() >= max_engine_batch || encoded_bytes >= max_engine_batch_bytes {
+                    break;
+                }
+                let next = match pool_evt_rx.try_recv() {
+                    Ok(event) => Some(event),
+                    Err(cb::TryRecvError::Disconnected) => {
+                        input_closed = true;
+                        None
+                    }
+                    Err(cb::TryRecvError::Empty) => {
+                        let remaining =
+                            deadline.saturating_duration_since(std::time::Instant::now());
+                        if remaining.is_zero() {
+                            None
+                        } else {
+                            let timeout = cb::after(remaining);
+                            cb::select_biased! {
+                                recv(stopping) -> _ => {
+                                    stopped = true;
+                                    None
+                                },
+                                recv(pool_evt_rx) -> event => match event {
+                                    Ok(event) => Some(event),
+                                    Err(_) => {
+                                        input_closed = true;
+                                        None
+                                    },
+                                },
+                                recv(timeout) -> _ => None,
+                            }
+                        }
+                    }
+                };
+                let Some(next) = next else { break };
+                let PoolEvent::Frame {
+                    handle,
+                    session,
+                    frame,
+                } = next
+                else {
+                    pending = Some(next);
+                    break;
+                };
+                let Some(next_bytes) = encoded_event_upper_bound(&frame) else {
+                    pending = Some(PoolEvent::Frame {
                         handle,
                         session,
                         frame,
-                    }) => frames.push((handle, session, frame)),
-                    Ok(other) => break Some(other),
-                    Err(cb::TryRecvError::Empty | cb::TryRecvError::Disconnected) => break None,
-                }
-            };
-            let (applied_tx, applied_rx) = cb::bounded(1);
-            #[cfg(feature = "bench-instrumentation")]
-            crate::ingest_attribution::bridge_batch(frames.len());
-            #[cfg(feature = "bench-instrumentation")]
-            let send_started = std::time::Instant::now();
-            if engine_inbox
-                .send(Cmd::RelayBatch {
-                    frames,
-                    applied: applied_tx,
-                })
-                .is_err()
-            {
-                break;
-            }
-            #[cfg(feature = "bench-instrumentation")]
-            crate::ingest_attribution::bridge_send(send_started.elapsed());
-            #[cfg(feature = "bench-instrumentation")]
-            let applied_started = std::time::Instant::now();
-            let applied = cb::select_biased! {
-                recv(stopping) -> _ => false,
-                recv(applied_rx) -> result => result.is_ok(),
-            };
-            #[cfg(feature = "bench-instrumentation")]
-            crate::ingest_attribution::bridge_applied_wait(applied_started.elapsed());
-            if !applied {
-                break;
-            }
-            if let Some(trailing) = trailing {
-                if !forward_pool_event(trailing, engine_inbox) {
+                    });
+                    break;
+                };
+                if encoded_bytes.saturating_add(next_bytes) > max_engine_batch_bytes {
+                    pending = Some(PoolEvent::Frame {
+                        handle,
+                        session,
+                        frame,
+                    });
                     break;
                 }
+                encoded_bytes = encoded_bytes.saturating_add(next_bytes);
+                frames.push((handle, session, frame));
+            }
+            if stopped || !send_relay_batch(frames, stopping, engine_inbox) {
+                break;
+            }
+            if input_closed {
+                break;
             }
             continue;
         }
@@ -1753,6 +1805,60 @@ fn pool_bridge_loop(
             break; // engine thread is gone; nothing left to feed.
         }
     }
+}
+
+fn send_relay_batch(
+    frames: Vec<(nmp_transport::RelayHandle, RelaySessionKey, RelayFrame)>,
+    stopping: &cb::Receiver<()>,
+    engine_inbox: &Sender<Cmd>,
+) -> bool {
+    let (applied_tx, applied_rx) = cb::bounded(1);
+    #[cfg(feature = "bench-instrumentation")]
+    {
+        let event_bytes = frames
+            .iter()
+            .filter_map(|(_, _, frame)| encoded_event_upper_bound(frame))
+            .fold(0usize, usize::saturating_add);
+        crate::ingest_attribution::bridge_batch(frames.len(), event_bytes);
+    }
+    #[cfg(feature = "bench-instrumentation")]
+    let send_started = std::time::Instant::now();
+    if engine_inbox
+        .send(Cmd::RelayBatch {
+            frames,
+            applied: applied_tx,
+        })
+        .is_err()
+    {
+        return false;
+    }
+    #[cfg(feature = "bench-instrumentation")]
+    crate::ingest_attribution::bridge_send(send_started.elapsed());
+    #[cfg(feature = "bench-instrumentation")]
+    let applied_started = std::time::Instant::now();
+    let applied = cb::select_biased! {
+        recv(stopping) -> _ => false,
+        recv(applied_rx) -> result => result.is_ok(),
+    };
+    #[cfg(feature = "bench-instrumentation")]
+    crate::ingest_attribution::bridge_applied_wait(applied_started.elapsed());
+    applied
+}
+
+fn encoded_event_upper_bound(frame: &RelayFrame) -> Option<usize> {
+    let event = frame.event()?;
+    let tags = event.tags.iter().fold(0usize, |total, tag| {
+        tag.as_slice()
+            .iter()
+            .fold(total.saturating_add(4), |total, atom| {
+                total.saturating_add(4).saturating_add(atom.len())
+            })
+    });
+    Some(
+        192usize
+            .saturating_add(event.content.len())
+            .saturating_add(tags),
+    )
 }
 
 fn forward_pool_event(event: PoolEvent, engine_inbox: &Sender<Cmd>) -> bool {
@@ -1767,10 +1873,17 @@ fn forward_pool_event(event: PoolEvent, engine_inbox: &Sender<Cmd>) -> bool {
 mod pool_bridge_tests {
     use super::*;
     use nmp_transport::{PoolEventSink, RelayFrame, RelayHandle};
-    use nostr::RelayMessage;
+    use nostr::{EventBuilder, Keys, RelayMessage, SubscriptionId};
 
     fn notice_frame(text: &str) -> RelayFrame {
         RelayFrame::from_message(RelayMessage::notice(text))
+    }
+
+    fn event_frame(text: &str) -> RelayFrame {
+        let event = EventBuilder::text_note(text)
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        RelayFrame::from_message(RelayMessage::event(SubscriptionId::new("sub"), event))
     }
 
     fn test_session() -> RelaySessionKey {
@@ -1815,7 +1928,9 @@ mod pool_bridge_tests {
                 session: session.clone(),
             })
             .unwrap();
-        let bridge = thread::spawn(move || pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 128));
+        let bridge = thread::spawn(move || {
+            pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 128, usize::MAX, Duration::ZERO)
+        });
 
         assert!(matches!(
             cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
@@ -1851,7 +1966,9 @@ mod pool_bridge_tests {
         let (pool_tx, pool_rx) = cb::bounded(8);
         let (stop_tx, stop_rx) = cb::bounded(0);
         let (cmd_tx, cmd_rx) = mpsc::channel();
-        let bridge = thread::spawn(move || pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 128));
+        let bridge = thread::spawn(move || {
+            pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 128, usize::MAX, Duration::ZERO)
+        });
         let handle = RelayHandle {
             slot: 1,
             generation: 2,
@@ -1912,23 +2029,19 @@ mod pool_bridge_tests {
                 .send(PoolEvent::Frame {
                     handle,
                     session: test_session(),
-                    frame: notice_frame(text),
+                    frame: event_frame(text),
                 })
                 .unwrap();
         }
-        let bridge = thread::spawn(move || pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 2));
+        let bridge = thread::spawn(move || {
+            pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 2, usize::MAX, Duration::ZERO)
+        });
 
         let first_ack = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
             Cmd::RelayBatch { frames, applied } => {
                 assert_eq!(frames.len(), 2);
-                assert_eq!(
-                    frames[0].2.clone().into_message(),
-                    RelayMessage::notice("one")
-                );
-                assert_eq!(
-                    frames[1].2.clone().into_message(),
-                    RelayMessage::notice("two")
-                );
+                assert_eq!(frames[0].2.event().unwrap().content, "one");
+                assert_eq!(frames[1].2.event().unwrap().content, "two");
                 applied
             }
             _ => panic!("first command must be a capped relay batch"),
@@ -1937,10 +2050,7 @@ mod pool_bridge_tests {
         let second_ack = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
             Cmd::RelayBatch { frames, applied } => {
                 assert_eq!(frames.len(), 1);
-                assert_eq!(
-                    frames[0].2.clone().into_message(),
-                    RelayMessage::notice("three")
-                );
+                assert_eq!(frames[0].2.event().unwrap().content, "three");
                 applied
             }
             _ => panic!("second command must retain the next ordered frame"),
@@ -1952,11 +2062,229 @@ mod pool_bridge_tests {
     }
 
     #[test]
+    fn control_frame_is_a_commit_barrier_between_event_batches() {
+        let (pool_tx, pool_rx) = cb::bounded(8);
+        let (stop_tx, stop_rx) = cb::bounded(0);
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let handle = RelayHandle {
+            slot: 1,
+            generation: 2,
+        };
+        for frame in [
+            event_frame("before"),
+            notice_frame("barrier"),
+            event_frame("after"),
+        ] {
+            pool_tx
+                .send(PoolEvent::Frame {
+                    handle,
+                    session: test_session(),
+                    frame,
+                })
+                .unwrap();
+        }
+        let bridge = thread::spawn(move || {
+            pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 8, usize::MAX, Duration::ZERO)
+        });
+
+        let before_ack = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            Cmd::RelayBatch { frames, applied } => {
+                assert_eq!(frames.len(), 1);
+                assert_eq!(frames[0].2.event().unwrap().content, "before");
+                applied
+            }
+            _ => panic!("event before barrier must commit first"),
+        };
+        assert!(matches!(cmd_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        before_ack.send(()).unwrap();
+
+        let barrier_ack = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            Cmd::RelayBatch { frames, applied } => {
+                assert_eq!(frames.len(), 1);
+                assert_eq!(
+                    frames[0].2.clone().into_message(),
+                    RelayMessage::notice("barrier")
+                );
+                applied
+            }
+            _ => panic!("control barrier must be applied after prior commit"),
+        };
+        assert!(matches!(cmd_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        barrier_ack.send(()).unwrap();
+
+        let after_ack = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            Cmd::RelayBatch { frames, applied } => {
+                assert_eq!(frames.len(), 1);
+                assert_eq!(frames[0].2.event().unwrap().content, "after");
+                applied
+            }
+            _ => panic!("event after barrier must remain ordered"),
+        };
+        after_ack.send(()).unwrap();
+        drop(pool_tx);
+        drop(stop_tx);
+        bridge.join().unwrap();
+    }
+
+    #[test]
+    fn lifecycle_event_is_a_commit_barrier_between_event_batches() {
+        let (pool_tx, pool_rx) = cb::bounded(8);
+        let (stop_tx, stop_rx) = cb::bounded(0);
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let handle = RelayHandle {
+            slot: 1,
+            generation: 2,
+        };
+        pool_tx
+            .send(PoolEvent::Frame {
+                handle,
+                session: test_session(),
+                frame: event_frame("before"),
+            })
+            .unwrap();
+        pool_tx.send(PoolEvent::WorkerRetired).unwrap();
+        pool_tx
+            .send(PoolEvent::Frame {
+                handle,
+                session: test_session(),
+                frame: event_frame("after"),
+            })
+            .unwrap();
+        let bridge = thread::spawn(move || {
+            pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 8, usize::MAX, Duration::ZERO)
+        });
+
+        let before_ack = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            Cmd::RelayBatch { frames, applied } => {
+                assert_eq!(frames.len(), 1);
+                assert_eq!(frames[0].2.event().unwrap().content, "before");
+                applied
+            }
+            _ => panic!("event before lifecycle barrier must commit first"),
+        };
+        assert!(matches!(cmd_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        before_ack.send(()).unwrap();
+
+        assert!(matches!(
+            cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Cmd::RelayWorkerRetired
+        ));
+        let after_ack = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            Cmd::RelayBatch { frames, applied } => {
+                assert_eq!(frames.len(), 1);
+                assert_eq!(frames[0].2.event().unwrap().content, "after");
+                applied
+            }
+            _ => panic!("event after lifecycle barrier must remain ordered"),
+        };
+        after_ack.send(()).unwrap();
+        drop(pool_tx);
+        drop(stop_tx);
+        bridge.join().unwrap();
+    }
+
+    #[test]
+    fn encoded_byte_bound_splits_consecutive_events_without_loss() {
+        let first = event_frame(&"a".repeat(512));
+        let second = event_frame(&"b".repeat(512));
+        let one_event_bytes = encoded_event_upper_bound(&first).unwrap();
+        let (pool_tx, pool_rx) = cb::bounded(4);
+        let (stop_tx, stop_rx) = cb::bounded(0);
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let handle = RelayHandle {
+            slot: 1,
+            generation: 2,
+        };
+        for frame in [first, second] {
+            pool_tx
+                .send(PoolEvent::Frame {
+                    handle,
+                    session: test_session(),
+                    frame,
+                })
+                .unwrap();
+        }
+        let bridge = thread::spawn(move || {
+            pool_bridge_loop(
+                &pool_rx,
+                &stop_rx,
+                &cmd_tx,
+                8,
+                one_event_bytes + 1,
+                Duration::ZERO,
+            )
+        });
+        for expected in ['a', 'b'] {
+            let ack = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+                Cmd::RelayBatch { frames, applied } => {
+                    assert_eq!(frames.len(), 1);
+                    assert!(frames[0].2.event().unwrap().content.starts_with(expected));
+                    applied
+                }
+                _ => panic!("byte bound must preserve each event"),
+            };
+            ack.send(()).unwrap();
+        }
+        drop(pool_tx);
+        drop(stop_tx);
+        bridge.join().unwrap();
+    }
+
+    #[test]
+    fn bounded_wait_coalesces_a_short_event_burst() {
+        let (pool_tx, pool_rx) = cb::bounded(4);
+        let (stop_tx, stop_rx) = cb::bounded(0);
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let handle = RelayHandle {
+            slot: 1,
+            generation: 2,
+        };
+        let bridge = thread::spawn(move || {
+            pool_bridge_loop(
+                &pool_rx,
+                &stop_rx,
+                &cmd_tx,
+                8,
+                usize::MAX,
+                Duration::from_millis(50),
+            )
+        });
+        pool_tx
+            .send(PoolEvent::Frame {
+                handle,
+                session: test_session(),
+                frame: event_frame("first"),
+            })
+            .unwrap();
+        thread::sleep(Duration::from_millis(5));
+        pool_tx
+            .send(PoolEvent::Frame {
+                handle,
+                session: test_session(),
+                frame: event_frame("second"),
+            })
+            .unwrap();
+        let ack = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            Cmd::RelayBatch { frames, applied } => {
+                assert_eq!(frames.len(), 2);
+                applied
+            }
+            _ => panic!("short burst must coalesce"),
+        };
+        ack.send(()).unwrap();
+        drop(pool_tx);
+        drop(stop_tx);
+        bridge.join().unwrap();
+    }
+
+    #[test]
     fn stop_disconnect_releases_bridge_waiting_for_engine_ack() {
         let (pool_tx, pool_rx) = cb::bounded(1);
         let (stop_tx, stop_rx) = cb::bounded(0);
         let (cmd_tx, cmd_rx) = mpsc::channel();
-        let bridge = thread::spawn(move || pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 1));
+        let bridge = thread::spawn(move || {
+            pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 1, usize::MAX, Duration::ZERO)
+        });
         pool_tx
             .send(PoolEvent::Frame {
                 handle: RelayHandle {
