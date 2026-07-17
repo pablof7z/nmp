@@ -1,0 +1,1808 @@
+{
+  "schema": "nmp-cardinality-query-matrix-v1",
+  "command": "cargo run -p nmp-store --release --features bench-instrumentation --example cardinality_query_bench -- matrix /dev/shm/nmp-627-representative-100k.jsonl benchmarks/nostrdb-compare/results/2026-07-17/issue-627/sampled-cardinality-production-import-matrix.json 1 15",
+  "repetitions": 15,
+  "alternating_order": true,
+  "runs": [
+    {
+      "mode": "exact",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 3722,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 112554296,
+          "p95_ns": 112554296
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 607274,
+          "p95_ns": 607274
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 9015,
+          "p95_ns": 9015
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 601842,
+          "p95_ns": 601842
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 10170,
+          "p95_ns": 10170
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 156985,
+          "p95_ns": 156985
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 362498,
+          "p95_ns": 362498
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 9951,
+          "p95_ns": 9951
+        }
+      ]
+    },
+    {
+      "mode": "sampled",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 2114,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 106862751,
+          "p95_ns": 106862751
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 12846,
+          "p95_ns": 12846
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 7100,
+          "p95_ns": 7100
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 499245,
+          "p95_ns": 499245
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 7502,
+          "p95_ns": 7502
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 119866,
+          "p95_ns": 119866
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 287758,
+          "p95_ns": 287758
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 7917,
+          "p95_ns": 7917
+        }
+      ]
+    },
+    {
+      "mode": "sampled",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 2268,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 105835969,
+          "p95_ns": 105835969
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 14034,
+          "p95_ns": 14034
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 9633,
+          "p95_ns": 9633
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 643890,
+          "p95_ns": 643890
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 10932,
+          "p95_ns": 10932
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 159179,
+          "p95_ns": 159179
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 379632,
+          "p95_ns": 379632
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 10292,
+          "p95_ns": 10292
+        }
+      ]
+    },
+    {
+      "mode": "exact",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 3235,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 127355551,
+          "p95_ns": 127355551
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 353565,
+          "p95_ns": 353565
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 8823,
+          "p95_ns": 8823
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 569193,
+          "p95_ns": 569193
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 9208,
+          "p95_ns": 9208
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 136598,
+          "p95_ns": 136598
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 319737,
+          "p95_ns": 319737
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 9028,
+          "p95_ns": 9028
+        }
+      ]
+    },
+    {
+      "mode": "exact",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 3362,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 117171270,
+          "p95_ns": 117171270
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 13796,
+          "p95_ns": 13796
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 8049,
+          "p95_ns": 8049
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 497261,
+          "p95_ns": 497261
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 9130,
+          "p95_ns": 9130
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 137840,
+          "p95_ns": 137840
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 313694,
+          "p95_ns": 313694
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 8476,
+          "p95_ns": 8476
+        }
+      ]
+    },
+    {
+      "mode": "sampled",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 2469,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 117860642,
+          "p95_ns": 117860642
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 13329,
+          "p95_ns": 13329
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 7817,
+          "p95_ns": 7817
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 500314,
+          "p95_ns": 500314
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 8921,
+          "p95_ns": 8921
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 137172,
+          "p95_ns": 137172
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 316285,
+          "p95_ns": 316285
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 8977,
+          "p95_ns": 8977
+        }
+      ]
+    },
+    {
+      "mode": "sampled",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 2637,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 114788917,
+          "p95_ns": 114788917
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 13491,
+          "p95_ns": 13491
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 8309,
+          "p95_ns": 8309
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 494728,
+          "p95_ns": 494728
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 8850,
+          "p95_ns": 8850
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 130983,
+          "p95_ns": 130983
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 314631,
+          "p95_ns": 314631
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 8468,
+          "p95_ns": 8468
+        }
+      ]
+    },
+    {
+      "mode": "exact",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 3818,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 108897761,
+          "p95_ns": 108897761
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 729840,
+          "p95_ns": 729840
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 12549,
+          "p95_ns": 12549
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 822820,
+          "p95_ns": 822820
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 14909,
+          "p95_ns": 14909
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 205610,
+          "p95_ns": 205610
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 473090,
+          "p95_ns": 473090
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 12308,
+          "p95_ns": 12308
+        }
+      ]
+    },
+    {
+      "mode": "exact",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 4191,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 104281023,
+          "p95_ns": 104281023
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 567412,
+          "p95_ns": 567412
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 7965,
+          "p95_ns": 7965
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 489594,
+          "p95_ns": 489594
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 8367,
+          "p95_ns": 8367
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 124827,
+          "p95_ns": 124827
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 286696,
+          "p95_ns": 286696
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 7740,
+          "p95_ns": 7740
+        }
+      ]
+    },
+    {
+      "mode": "sampled",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 3064,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 116664439,
+          "p95_ns": 116664439
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 17612,
+          "p95_ns": 17612
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 7858,
+          "p95_ns": 7858
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 498968,
+          "p95_ns": 498968
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 8747,
+          "p95_ns": 8747
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 134437,
+          "p95_ns": 134437
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 316495,
+          "p95_ns": 316495
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 8595,
+          "p95_ns": 8595
+        }
+      ]
+    },
+    {
+      "mode": "sampled",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 4072,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 104325224,
+          "p95_ns": 104325224
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 12651,
+          "p95_ns": 12651
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 7310,
+          "p95_ns": 7310
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 555298,
+          "p95_ns": 555298
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 8712,
+          "p95_ns": 8712
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 134733,
+          "p95_ns": 134733
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 310972,
+          "p95_ns": 310972
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 7816,
+          "p95_ns": 7816
+        }
+      ]
+    },
+    {
+      "mode": "exact",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 2596,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 112020759,
+          "p95_ns": 112020759
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 1404294,
+          "p95_ns": 1404294
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 9922,
+          "p95_ns": 9922
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 585420,
+          "p95_ns": 585420
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 11825,
+          "p95_ns": 11825
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 156066,
+          "p95_ns": 156066
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 350732,
+          "p95_ns": 350732
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 9706,
+          "p95_ns": 9706
+        }
+      ]
+    },
+    {
+      "mode": "exact",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 2856,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 133771780,
+          "p95_ns": 133771780
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 14494,
+          "p95_ns": 14494
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 8201,
+          "p95_ns": 8201
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 497310,
+          "p95_ns": 497310
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 9273,
+          "p95_ns": 9273
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 135258,
+          "p95_ns": 135258
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 317415,
+          "p95_ns": 317415
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 8887,
+          "p95_ns": 8887
+        }
+      ]
+    },
+    {
+      "mode": "sampled",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 2225,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 135647955,
+          "p95_ns": 135647955
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 566223,
+          "p95_ns": 566223
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 7887,
+          "p95_ns": 7887
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 483465,
+          "p95_ns": 483465
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 9052,
+          "p95_ns": 9052
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 132309,
+          "p95_ns": 132309
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 316246,
+          "p95_ns": 316246
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 8634,
+          "p95_ns": 8634
+        }
+      ]
+    },
+    {
+      "mode": "sampled",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 2457,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 118325129,
+          "p95_ns": 118325129
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 15924,
+          "p95_ns": 15924
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 8243,
+          "p95_ns": 8243
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 483387,
+          "p95_ns": 483387
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 8901,
+          "p95_ns": 8901
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 134490,
+          "p95_ns": 134490
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 319549,
+          "p95_ns": 319549
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 8548,
+          "p95_ns": 8548
+        }
+      ]
+    },
+    {
+      "mode": "exact",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 4475,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 118410723,
+          "p95_ns": 118410723
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 13438,
+          "p95_ns": 13438
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 8263,
+          "p95_ns": 8263
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 476781,
+          "p95_ns": 476781
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 9466,
+          "p95_ns": 9466
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 136908,
+          "p95_ns": 136908
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 314257,
+          "p95_ns": 314257
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 8904,
+          "p95_ns": 8904
+        }
+      ]
+    },
+    {
+      "mode": "exact",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 5468,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 125513082,
+          "p95_ns": 125513082
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 19283,
+          "p95_ns": 19283
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 8704,
+          "p95_ns": 8704
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 513417,
+          "p95_ns": 513417
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 9260,
+          "p95_ns": 9260
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 136947,
+          "p95_ns": 136947
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 316153,
+          "p95_ns": 316153
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 8616,
+          "p95_ns": 8616
+        }
+      ]
+    },
+    {
+      "mode": "sampled",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 4624,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 102251223,
+          "p95_ns": 102251223
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 17579,
+          "p95_ns": 17579
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 8412,
+          "p95_ns": 8412
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 529210,
+          "p95_ns": 529210
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 8547,
+          "p95_ns": 8547
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 122734,
+          "p95_ns": 122734
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 296956,
+          "p95_ns": 296956
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 7825,
+          "p95_ns": 7825
+        }
+      ]
+    },
+    {
+      "mode": "sampled",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 2543,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 122524513,
+          "p95_ns": 122524513
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 19528,
+          "p95_ns": 19528
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 8983,
+          "p95_ns": 8983
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 610054,
+          "p95_ns": 610054
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 10321,
+          "p95_ns": 10321
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 158206,
+          "p95_ns": 158206
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 399941,
+          "p95_ns": 399941
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 9276,
+          "p95_ns": 9276
+        }
+      ]
+    },
+    {
+      "mode": "exact",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 3731,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 105368316,
+          "p95_ns": 105368316
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 15165,
+          "p95_ns": 15165
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 8758,
+          "p95_ns": 8758
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 523436,
+          "p95_ns": 523436
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 9512,
+          "p95_ns": 9512
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 137828,
+          "p95_ns": 137828
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 321173,
+          "p95_ns": 321173
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 9085,
+          "p95_ns": 9085
+        }
+      ]
+    },
+    {
+      "mode": "exact",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 3738,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 104257007,
+          "p95_ns": 104257007
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 14502,
+          "p95_ns": 14502
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 10088,
+          "p95_ns": 10088
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 598589,
+          "p95_ns": 598589
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 10208,
+          "p95_ns": 10208
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 155109,
+          "p95_ns": 155109
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 334664,
+          "p95_ns": 334664
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 9106,
+          "p95_ns": 9106
+        }
+      ]
+    },
+    {
+      "mode": "sampled",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 3113,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 106092314,
+          "p95_ns": 106092314
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 15486,
+          "p95_ns": 15486
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 10312,
+          "p95_ns": 10312
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 632080,
+          "p95_ns": 632080
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 11072,
+          "p95_ns": 11072
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 157135,
+          "p95_ns": 157135
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 378260,
+          "p95_ns": 378260
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 9825,
+          "p95_ns": 9825
+        }
+      ]
+    },
+    {
+      "mode": "sampled",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 2181,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 105193331,
+          "p95_ns": 105193331
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 13458,
+          "p95_ns": 13458
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 10257,
+          "p95_ns": 10257
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 631500,
+          "p95_ns": 631500
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 10582,
+          "p95_ns": 10582
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 151041,
+          "p95_ns": 151041
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 373509,
+          "p95_ns": 373509
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 9945,
+          "p95_ns": 9945
+        }
+      ]
+    },
+    {
+      "mode": "exact",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 3221,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 143836323,
+          "p95_ns": 143836323
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 14928,
+          "p95_ns": 14928
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 8346,
+          "p95_ns": 8346
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 491391,
+          "p95_ns": 491391
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 9399,
+          "p95_ns": 9399
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 135966,
+          "p95_ns": 135966
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 311677,
+          "p95_ns": 311677
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 8278,
+          "p95_ns": 8278
+        }
+      ]
+    },
+    {
+      "mode": "exact",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 3179,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 103977280,
+          "p95_ns": 103977280
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 12662,
+          "p95_ns": 12662
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 8625,
+          "p95_ns": 8625
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 502620,
+          "p95_ns": 502620
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 8712,
+          "p95_ns": 8712
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 126958,
+          "p95_ns": 126958
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 296957,
+          "p95_ns": 296957
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 7782,
+          "p95_ns": 7782
+        }
+      ]
+    },
+    {
+      "mode": "sampled",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 2605,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 115766354,
+          "p95_ns": 115766354
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 379523,
+          "p95_ns": 379523
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 7959,
+          "p95_ns": 7959
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 484633,
+          "p95_ns": 484633
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 9246,
+          "p95_ns": 9246
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 131885,
+          "p95_ns": 131885
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 311731,
+          "p95_ns": 311731
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 8285,
+          "p95_ns": 8285
+        }
+      ]
+    },
+    {
+      "mode": "sampled",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 3853,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 121953969,
+          "p95_ns": 121953969
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 12328,
+          "p95_ns": 12328
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 7881,
+          "p95_ns": 7881
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 529272,
+          "p95_ns": 529272
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 9412,
+          "p95_ns": 9412
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 136556,
+          "p95_ns": 136556
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 337384,
+          "p95_ns": 337384
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 9157,
+          "p95_ns": 9157
+        }
+      ]
+    },
+    {
+      "mode": "exact",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 5009,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 118427699,
+          "p95_ns": 118427699
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 15303,
+          "p95_ns": 15303
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 8483,
+          "p95_ns": 8483
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 487698,
+          "p95_ns": 487698
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 9473,
+          "p95_ns": 9473
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 135145,
+          "p95_ns": 135145
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 312691,
+          "p95_ns": 312691
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 9199,
+          "p95_ns": 9199
+        }
+      ]
+    },
+    {
+      "mode": "exact",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 6237,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 120376241,
+          "p95_ns": 120376241
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 13231,
+          "p95_ns": 13231
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 8492,
+          "p95_ns": 8492
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 489297,
+          "p95_ns": 489297
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 9077,
+          "p95_ns": 9077
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 136887,
+          "p95_ns": 136887
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 322153,
+          "p95_ns": 322153
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 8589,
+          "p95_ns": 8589
+        }
+      ]
+    },
+    {
+      "mode": "sampled",
+      "nmp_commit": "4c40c9f8b92c53931e2c8b3f1b136590c1eec523",
+      "git_dirty": false,
+      "corpus": "/dev/shm/nmp-627-representative-100k.jsonl",
+      "input_events": 100000,
+      "canonical_events": 100000,
+      "iterations": 1,
+      "import_ms": 5149,
+      "measurements": [
+        {
+          "name": "complete_kind",
+          "expected_rows": 42270,
+          "p50_ns": 107196367,
+          "p95_ns": 107196367
+        },
+        {
+          "name": "complete_author",
+          "expected_rows": 1,
+          "p50_ns": 12370,
+          "p95_ns": 12370
+        },
+        {
+          "name": "complete_author_kind",
+          "expected_rows": 1,
+          "p50_ns": 7387,
+          "p95_ns": 7387
+        },
+        {
+          "name": "complete_tag",
+          "expected_rows": 216,
+          "p50_ns": 542791,
+          "p95_ns": 542791
+        },
+        {
+          "name": "complete_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 8517,
+          "p95_ns": 8517
+        },
+        {
+          "name": "complete_authors_43",
+          "expected_rows": 43,
+          "p50_ns": 118433,
+          "p95_ns": 118433
+        },
+        {
+          "name": "bounded_kind",
+          "expected_rows": 200,
+          "p50_ns": 296468,
+          "p95_ns": 296468
+        },
+        {
+          "name": "bounded_tag_pair",
+          "expected_rows": 1,
+          "p50_ns": 7753,
+          "p95_ns": 7753
+        }
+      ]
+    }
+  ]
+}
