@@ -1,0 +1,19 @@
+[package]
+name = "nmp-nostr-event-corpus"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# This is an evidence harness, not a production dependency.
+[workspace]
+
+[dependencies]
+blake3 = "1"
+nostr = "0.44.4"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tungstenite = { version = "0.29", default-features = false, features = [
+    "handshake",
+    "rustls-tls-webpki-roots",
+] }
