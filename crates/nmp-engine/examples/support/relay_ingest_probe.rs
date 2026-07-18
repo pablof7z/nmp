@@ -23,7 +23,7 @@ use tungstenite::{accept, Message};
 
 pub type ProbeError = Box<dyn Error + Send + Sync>;
 
-const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v7";
+const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v8";
 const CORPUS_SCHEMA: &str = "nmp-relay-ingest-corpus-v1";
 const BASE_CREATED_AT: u64 = 1_700_000_000;
 
@@ -36,6 +36,7 @@ pub struct ProbeConfig {
     pub shape_corpus: Option<PathBuf>,
     pub corpus_output: Option<PathBuf>,
     pub memory_store: bool,
+    pub redb_nondurable_diagnostic: bool,
     pub queue_capacity: usize,
     pub verified_cache_capacity: usize,
     pub verifier_workers: usize,
@@ -61,6 +62,7 @@ impl Default for ProbeConfig {
             shape_corpus: None,
             corpus_output: None,
             memory_store: false,
+            redb_nondurable_diagnostic: false,
             queue_capacity: 1_024,
             verified_cache_capacity: 131_072,
             verifier_workers: 0,
@@ -112,6 +114,11 @@ impl ProbeConfig {
         if self.memory_store && self.store_path.is_some() {
             return Err("memory-store cannot retain a persistent --store path".into());
         }
+        if self.memory_store && self.redb_nondurable_diagnostic {
+            return Err(
+                "memory-store and redb-nondurable-diagnostic are mutually exclusive".into(),
+            );
+        }
         Ok(())
     }
 }
@@ -133,6 +140,7 @@ pub struct ProbeResult {
     pub corpus_mode: &'static str,
     pub shape_source_blake3: Option<String>,
     pub store_backend: &'static str,
+    pub store_durability: &'static str,
     pub queue_capacity: usize,
     pub verified_cache_capacity: usize,
     pub verifier_workers: usize,
@@ -460,8 +468,20 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
         )?
     } else {
+        let store = if config.redb_nondurable_diagnostic {
+            #[cfg(feature = "bench-instrumentation")]
+            {
+                RedbStore::open_benchmark_nondurable(&store_path)?
+            }
+            #[cfg(not(feature = "bench-instrumentation"))]
+            {
+                return Err("redb-nondurable-diagnostic requires bench-instrumentation".into());
+            }
+        } else {
+            RedbStore::open(&store_path)?
+        };
         EngineThread::spawn(
-            RedbStore::open(&store_path)?,
+            store,
             FixtureDirectory::new(),
             config.relays,
             pool_config,
@@ -725,6 +745,13 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         } else {
             "redb"
         },
+        store_durability: if config.memory_store {
+            "not-applicable"
+        } else if config.redb_nondurable_diagnostic {
+            "none-then-immediate-checkpoint-diagnostic"
+        } else {
+            "immediate"
+        },
         queue_capacity,
         verified_cache_capacity,
         verifier_workers,
@@ -827,7 +854,9 @@ fn ingest_attribution_json() -> serde_json::Value {
             "batches": store.batches, "events": store.events, "max_batch_events": store.max_batch_events,
             "transaction_total_ns": store.transaction_total_ns, "begin_write_ns": store.begin_write_ns,
             "open_tables_ns": store.open_tables_ns, "apply_events_ns": store.apply_events_ns,
-            "flush_ns": store.flush_ns, "commit_ns": store.commit_ns, "encode_event_ns": store.encode_event_ns,
+            "flush_ns": store.flush_ns, "postings_flush_ns": store.postings_flush_ns,
+            "commit_ns": store.commit_ns, "durability_checkpoint_ns": store.durability_checkpoint_ns,
+            "encode_event_ns": store.encode_event_ns,
             "encoded_event_bytes": store.encoded_event_bytes, "canonical_insert_ns": store.canonical_insert_ns,
             "index_insert_ns": store.index_insert_ns
         }

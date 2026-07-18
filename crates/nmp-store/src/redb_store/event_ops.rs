@@ -44,7 +44,7 @@ pub(super) fn insert(
     event: Event,
     from: RelayObserved,
 ) -> Result<InsertOutcome, PersistenceError> {
-    let mut write = GovernedWrite::begin(&store.db)?;
+    let mut write = GovernedWrite::begin(store)?;
     let outcome = write.apply(|tables, _write_txn| insert_with_tables(tables, event, from))?;
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::ObservationBeforeCommit);
@@ -65,7 +65,7 @@ pub(super) fn insert_batch(
     crate::ingest_attribution::record_batch(events.len());
     #[cfg(feature = "bench-instrumentation")]
     let begin_started = std::time::Instant::now();
-    let mut write = GovernedWrite::begin(&store.db)?;
+    let mut write = GovernedWrite::begin(store)?;
     #[cfg(feature = "bench-instrumentation")]
     crate::ingest_attribution::begin_write(begin_started.elapsed());
     let mut outcomes = Vec::with_capacity(events.len());
@@ -81,12 +81,9 @@ pub(super) fn insert_batch(
     })?;
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::ObservationBeforeCommit);
-    #[cfg(feature = "bench-instrumentation")]
-    let commit_started = std::time::Instant::now();
     write.commit()?;
     #[cfg(feature = "bench-instrumentation")]
     {
-        crate::ingest_attribution::commit(commit_started.elapsed());
         crate::ingest_attribution::transaction_total(transaction_started.elapsed());
     }
     Ok(outcomes)
@@ -413,7 +410,7 @@ pub(super) fn remove(
     id: EventId,
     _reason: RetractReason,
 ) -> Result<Option<StoredEvent>, PersistenceError> {
-    let mut write = GovernedWrite::begin(&store.db)?;
+    let mut write = GovernedWrite::begin(store)?;
     let removed = write.apply(|txn, _write_txn| remove_row_in_txn(txn, id, |_| true))?;
     write.commit()?;
     Ok(removed)
@@ -423,7 +420,7 @@ pub(super) fn expire_due(
     store: &mut RedbStore,
     now: Timestamp,
 ) -> Result<Vec<StoredEvent>, PersistenceError> {
-    let mut write = GovernedWrite::begin(&store.db)?;
+    let mut write = GovernedWrite::begin(store)?;
     let removed = write.apply(|txn, _write_txn| {
         let upper = expiration_key_upper_bound(now);
         // Collect due ids first, propagating any redb read error out of
@@ -519,7 +516,7 @@ pub(super) fn get_coverage(
 pub(super) fn gc(store: &mut RedbStore, claims: &ClaimSet) -> Result<GcReport, PersistenceError> {
     let mut report = GcReport::default();
 
-    let mut write = GovernedWrite::begin(&store.db)?;
+    let mut write = GovernedWrite::begin(store)?;
     write.apply(|txn, write_txn| {
         let mut coverage = write_txn.open_table(COVERAGE).map_err(persist_err)?;
 

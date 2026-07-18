@@ -138,11 +138,22 @@ events received, and routing explanation.
 
 ### 3.1 `Accepted` is a durable fact
 
-For a durable intent, `Accepted` means one atomic persistence boundary contains:
+For a durable intent, `Accepted` means one crash-consistent logical acceptance
+boundary contains:
 
 - the frozen unsigned event body and expected author;
 - the intent and receipt state;
 - a canonical pending event row visible through ordinary matching queries.
+
+The current Redb backend realizes that boundary with one physical transaction,
+but the guarantee does not require every authority domain to share a database.
+A future split may commit the complete publishing obligation to an authoritative
+control store first, then project the pending row through a deterministic,
+idempotent journal before normal queries or transport resume. The reverse order
+is forbidden. Canonical rows and all event-local indexes, tombstones,
+replacement state, and expiry state remain atomic inside the event store. The
+settled invariant and relay-echo reconciliation rule are recorded in
+`docs/design-record.md`.
 
 NIP-01 event identity does not include the signature, so the pending row has a
 stable id. Its signature state is typed:

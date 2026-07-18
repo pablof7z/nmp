@@ -13,7 +13,9 @@ pub struct Snapshot {
     pub open_tables_ns: u64,
     pub apply_events_ns: u64,
     pub flush_ns: u64,
+    pub postings_flush_ns: u64,
     pub commit_ns: u64,
+    pub durability_checkpoint_ns: u64,
     pub encode_event_ns: u64,
     pub encoded_event_bytes: u64,
     pub canonical_insert_ns: u64,
@@ -33,7 +35,9 @@ counters!(
     OPEN_TABLES_NS,
     APPLY_EVENTS_NS,
     FLUSH_NS,
+    POSTINGS_FLUSH_NS,
     COMMIT_NS,
+    DURABILITY_CHECKPOINT_NS,
     ENCODE_EVENT_NS,
     ENCODED_EVENT_BYTES,
     CANONICAL_INSERT_NS,
@@ -58,7 +62,9 @@ pub fn reset() {
         &OPEN_TABLES_NS,
         &APPLY_EVENTS_NS,
         &FLUSH_NS,
+        &POSTINGS_FLUSH_NS,
         &COMMIT_NS,
+        &DURABILITY_CHECKPOINT_NS,
         &ENCODE_EVENT_NS,
         &ENCODED_EVENT_BYTES,
         &CANONICAL_INSERT_NS,
@@ -79,7 +85,9 @@ pub fn snapshot() -> Snapshot {
         open_tables_ns: load(&OPEN_TABLES_NS),
         apply_events_ns: load(&APPLY_EVENTS_NS),
         flush_ns: load(&FLUSH_NS),
+        postings_flush_ns: load(&POSTINGS_FLUSH_NS),
         commit_ns: load(&COMMIT_NS),
+        durability_checkpoint_ns: load(&DURABILITY_CHECKPOINT_NS),
         encode_event_ns: load(&ENCODE_EVENT_NS),
         encoded_event_bytes: load(&ENCODED_EVENT_BYTES),
         canonical_insert_ns: load(&CANONICAL_INSERT_NS),
@@ -108,8 +116,14 @@ pub(crate) fn apply_events(duration: Duration) {
 pub(crate) fn flush(duration: Duration) {
     add(&FLUSH_NS, duration);
 }
+pub(crate) fn postings_flush(duration: Duration) {
+    add(&POSTINGS_FLUSH_NS, duration);
+}
 pub(crate) fn commit(duration: Duration) {
     add(&COMMIT_NS, duration);
+}
+pub(crate) fn durability_checkpoint(duration: Duration) {
+    add(&DURABILITY_CHECKPOINT_NS, duration);
 }
 pub(crate) fn encode_event(duration: Duration, bytes: usize) {
     add(&ENCODE_EVENT_NS, duration);

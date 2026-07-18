@@ -1,7 +1,7 @@
-//! Fresh-process production-format qualification matrix for issue #655.
+//! Fresh-process production-format qualification matrix for issues #655 and #658.
 //!
 //! Usage:
-//! `cargo run -p nmp-store --release --features bench-instrumentation --example packed_postings -- matrix <events.jsonl> <output.json> [repetitions] [batch_size]`
+//! `cargo run -p nmp-store --release --features bench-instrumentation --example packed_postings -- (matrix|ceiling-matrix) <events.jsonl> <output.json> [repetitions] [batch_size]`
 
 use std::alloc::{GlobalAlloc, Layout as AllocLayout, System};
 use std::env;
@@ -11,12 +11,14 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use nmp_store::{
-    run_packed_postings_bench, run_store_bench_variant, PackedPostingsBackend,
-    PackedPostingsMetrics, StoreBenchMetrics, StoreBenchProcessCounters, StoreBenchVariant,
+    run_lmdb_governed_ingest_bench, run_packed_postings_bench, run_store_bench_variant, EventStore,
+    LmdbGovernedIngestMetrics, PackedPostingsBackend, PackedPostingsMetrics, RedbStore,
+    RelayObserved, StoreBenchMetrics, StoreBenchProcessCounters, StoreBenchVariant,
 };
-use nostr::{Event, JsonUtil};
+use nostr::{Event, Filter, JsonUtil, RelayUrl, Timestamp};
 use serde::{Deserialize, Serialize};
 
 struct CountingAllocator;
@@ -45,7 +47,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator;
 
-const SCHEMA: &str = "nmp-packed-postings-v2";
+const SCHEMA: &str = "nmp-packed-postings-v3";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,6 +55,8 @@ enum Layout {
     RowRedb,
     PackedRedb,
     PackedFjall,
+    GovernedRedb,
+    GovernedLmdb,
 }
 
 impl Layout {
@@ -61,14 +65,22 @@ impl Layout {
             Self::RowRedb => "row_redb",
             Self::PackedRedb => "packed_redb",
             Self::PackedFjall => "packed_fjall",
+            Self::GovernedRedb => "governed_redb",
+            Self::GovernedLmdb => "governed_lmdb",
         }
     }
 
     fn parse(value: &str) -> Result<Self, String> {
-        [Self::RowRedb, Self::PackedRedb, Self::PackedFjall]
-            .into_iter()
-            .find(|layout| layout.name() == value)
-            .ok_or_else(|| format!("unknown packed-postings layout {value}"))
+        [
+            Self::RowRedb,
+            Self::PackedRedb,
+            Self::PackedFjall,
+            Self::GovernedRedb,
+            Self::GovernedLmdb,
+        ]
+        .into_iter()
+        .find(|layout| layout.name() == value)
+        .ok_or_else(|| format!("unknown packed-postings layout {value}"))
     }
 }
 
@@ -85,6 +97,8 @@ struct CorpusIdentity {
 enum Metrics {
     Row(Box<StoreBenchMetrics>),
     Packed(Box<PackedPostingsMetrics>),
+    GovernedRedb(Box<GovernedRedbMetrics>),
+    GovernedLmdb(Box<LmdbGovernedIngestMetrics>),
 }
 
 impl Metrics {
@@ -92,6 +106,8 @@ impl Metrics {
         match self {
             Self::Row(metrics) => metrics.events,
             Self::Packed(metrics) => metrics.events,
+            Self::GovernedRedb(metrics) => metrics.events,
+            Self::GovernedLmdb(metrics) => metrics.events,
         }
     }
 
@@ -99,6 +115,8 @@ impl Metrics {
         match self {
             Self::Row(metrics) => metrics.wall_ns,
             Self::Packed(metrics) => metrics.wall_ns,
+            Self::GovernedRedb(metrics) => metrics.wall_ns,
+            Self::GovernedLmdb(metrics) => metrics.wall_ns,
         }
     }
 
@@ -106,8 +124,34 @@ impl Metrics {
         match self {
             Self::Row(metrics) => metrics.exact_reopen,
             Self::Packed(metrics) => metrics.exact_reopen,
+            Self::GovernedRedb(metrics) => metrics.exact_reopen,
+            Self::GovernedLmdb(metrics) => metrics.exact_reopen,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GovernedRedbMetrics {
+    events: u64,
+    transaction_batch_size: usize,
+    transactions: u64,
+    wall_ns: u64,
+    transaction_total_ns: u64,
+    apply_ns: u64,
+    canonical_flush_ns: u64,
+    postings_flush_ns: u64,
+    commit_ns: u64,
+    reopen_ns: u64,
+    cpu_ns: u64,
+    allocation_ops: u64,
+    allocated_bytes: u64,
+    rss_before_bytes: Option<u64>,
+    peak_rss_bytes: Option<u64>,
+    process_write_bytes: Option<u64>,
+    database_file_bytes: u64,
+    database_allocated_bytes: u64,
+    reopened_rows: u64,
+    exact_reopen: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,6 +301,102 @@ fn load_corpus(path: &Path) -> Result<(Vec<Event>, CorpusIdentity), String> {
     Ok((events, identity))
 }
 
+fn run_governed_redb(
+    path: &Path,
+    events: Vec<Event>,
+    batch_size: usize,
+) -> Result<GovernedRedbMetrics, String> {
+    let relay = RelayUrl::parse("wss://lmdb-ceiling.invalid").map_err(|error| error.to_string())?;
+    let observed_at = events
+        .iter()
+        .map(|event| event.created_at.as_secs())
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let mut store = RedbStore::open(path).map_err(|error| error.to_string())?;
+    nmp_store::ingest_attribution::reset();
+    let process_before = sample_process();
+    let started = Instant::now();
+    for batch in events.chunks(batch_size) {
+        let rows = batch
+            .iter()
+            .cloned()
+            .map(|event| {
+                (
+                    event,
+                    RelayObserved::new(relay.clone(), Timestamp::from(observed_at)),
+                )
+            })
+            .collect();
+        store.insert_batch(rows).map_err(|error| error.0)?;
+    }
+    let wall_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+    let process = process_delta(sample_process(), process_before);
+    let attribution = nmp_store::ingest_attribution::snapshot();
+    let expected_ids = store
+        .query(&Filter::new())
+        .map_err(|error| error.0)?
+        .into_iter()
+        .map(|row| row.event.id)
+        .collect::<std::collections::HashSet<_>>();
+    drop(store);
+
+    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    let database_file_bytes = metadata.len();
+    let database_allocated_bytes = metadata.blocks().saturating_mul(512);
+    let reopen_started = Instant::now();
+    let reopened = RedbStore::open(path).map_err(|error| error.to_string())?;
+    let reopened_ids = reopened
+        .query(&Filter::new())
+        .map_err(|error| error.0)?
+        .into_iter()
+        .map(|row| row.event.id)
+        .collect::<std::collections::HashSet<_>>();
+    let reopen_ns = reopen_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+    let reopened_rows = reopened_ids.len() as u64;
+    drop(reopened);
+
+    Ok(GovernedRedbMetrics {
+        events: events.len() as u64,
+        transaction_batch_size: batch_size,
+        transactions: attribution.batches,
+        wall_ns,
+        transaction_total_ns: attribution.transaction_total_ns,
+        apply_ns: attribution.apply_events_ns,
+        canonical_flush_ns: attribution.flush_ns,
+        postings_flush_ns: attribution.postings_flush_ns,
+        commit_ns: attribution.commit_ns,
+        reopen_ns,
+        cpu_ns: process.cpu_ns,
+        allocation_ops: process.allocation_ops,
+        allocated_bytes: process.allocated_bytes,
+        rss_before_bytes: process.current_rss_bytes,
+        peak_rss_bytes: process.peak_rss_bytes,
+        process_write_bytes: process.process_write_bytes,
+        database_file_bytes,
+        database_allocated_bytes,
+        reopened_rows,
+        exact_reopen: reopened_ids == expected_ids,
+    })
+}
+
+fn process_delta(
+    after: StoreBenchProcessCounters,
+    before: StoreBenchProcessCounters,
+) -> StoreBenchProcessCounters {
+    StoreBenchProcessCounters {
+        cpu_ns: after.cpu_ns.saturating_sub(before.cpu_ns),
+        allocation_ops: after.allocation_ops.saturating_sub(before.allocation_ops),
+        allocated_bytes: after.allocated_bytes.saturating_sub(before.allocated_bytes),
+        current_rss_bytes: before.current_rss_bytes,
+        peak_rss_bytes: after.peak_rss_bytes,
+        process_write_bytes: after
+            .process_write_bytes
+            .zip(before.process_write_bytes)
+            .map(|(after, before)| after.saturating_sub(before)),
+    }
+}
+
 fn run_child(
     corpus_path: &Path,
     layout: Layout,
@@ -267,32 +407,39 @@ fn run_child(
     let (events, corpus) = load_corpus(corpus_path)?;
     let scratch = tempfile::tempdir().map_err(|error| error.to_string())?;
     let database = match layout {
-        Layout::PackedFjall => scratch.path().join("store.fjall"),
+        Layout::PackedFjall | Layout::GovernedLmdb => scratch.path().join("store.native"),
         _ => scratch.path().join("store.redb"),
     };
-    let metrics = match layout {
-        Layout::RowRedb => Metrics::Row(Box::new(run_store_bench_variant(
-            &database,
-            events,
-            batch_size,
-            StoreBenchVariant::AllIndexesSampledCardinality,
-            sample_process,
-        )?)),
-        Layout::PackedRedb => Metrics::Packed(Box::new(run_packed_postings_bench(
-            PackedPostingsBackend::Redb,
-            &database,
-            events,
-            batch_size,
-            sample_process,
-        )?)),
-        Layout::PackedFjall => Metrics::Packed(Box::new(run_packed_postings_bench(
-            PackedPostingsBackend::Fjall,
-            &database,
-            events,
-            batch_size,
-            sample_process,
-        )?)),
-    };
+    let metrics =
+        match layout {
+            Layout::RowRedb => Metrics::Row(Box::new(run_store_bench_variant(
+                &database,
+                events,
+                batch_size,
+                StoreBenchVariant::AllIndexesSampledCardinality,
+                sample_process,
+            )?)),
+            Layout::PackedRedb => Metrics::Packed(Box::new(run_packed_postings_bench(
+                PackedPostingsBackend::Redb,
+                &database,
+                events,
+                batch_size,
+                sample_process,
+            )?)),
+            Layout::PackedFjall => Metrics::Packed(Box::new(run_packed_postings_bench(
+                PackedPostingsBackend::Fjall,
+                &database,
+                events,
+                batch_size,
+                sample_process,
+            )?)),
+            Layout::GovernedRedb => {
+                Metrics::GovernedRedb(Box::new(run_governed_redb(&database, events, batch_size)?))
+            }
+            Layout::GovernedLmdb => Metrics::GovernedLmdb(Box::new(
+                run_lmdb_governed_ingest_bench(&database, events, batch_size, sample_process)?,
+            )),
+        };
     if !metrics.exact_reopen() {
         return Err(format!("{} failed exact reopen", layout.name()));
     }
@@ -333,14 +480,16 @@ fn run_matrix(
     output: &Path,
     repetitions: usize,
     batch_size: usize,
+    selected_layouts: &[Layout],
+    command: &str,
 ) -> Result<(), String> {
-    if repetitions == 0 || batch_size == 0 {
-        return Err("repetitions and batch size must be nonzero".to_owned());
+    if repetitions == 0 || batch_size == 0 || selected_layouts.is_empty() {
+        return Err("repetitions, batch size, and layouts must be nonzero".to_owned());
     }
     let current_exe = env::current_exe().map_err(|error| error.to_string())?;
     let mut runs: Vec<RunRecord> = Vec::new();
     for repetition in 0..repetitions {
-        let mut layouts = [Layout::RowRedb, Layout::PackedRedb, Layout::PackedFjall];
+        let mut layouts = selected_layouts.to_vec();
         if repetition % 2 == 1 {
             layouts.reverse();
         }
@@ -376,7 +525,7 @@ fn run_matrix(
         .ok_or_else(|| "matrix produced no runs".to_owned())?;
     let matrix = MatrixRecord {
         schema: SCHEMA.to_owned(),
-        command: "matrix".to_owned(),
+        command: command.to_owned(),
         nmp_commit: first.nmp_commit.clone(),
         git_dirty: runs.iter().any(|run| run.git_dirty),
         host: first.host.clone(),
@@ -437,10 +586,41 @@ fn main() -> Result<(), String> {
                 .unwrap_or("4096")
                 .parse()
                 .map_err(|error| format!("invalid batch size: {error}"))?;
-            run_matrix(corpus, output, repetitions, batch_size)
+            run_matrix(
+                corpus,
+                output,
+                repetitions,
+                batch_size,
+                &[Layout::RowRedb, Layout::PackedRedb, Layout::PackedFjall],
+                "matrix",
+            )
+        }
+        Some("ceiling-matrix") => {
+            let corpus = Path::new(args.get(2).ok_or("missing corpus")?);
+            let output = Path::new(args.get(3).ok_or("missing output")?);
+            let repetitions = args
+                .get(4)
+                .map(String::as_str)
+                .unwrap_or("10")
+                .parse()
+                .map_err(|error| format!("invalid repetitions: {error}"))?;
+            let batch_size = args
+                .get(5)
+                .map(String::as_str)
+                .unwrap_or("4096")
+                .parse()
+                .map_err(|error| format!("invalid batch size: {error}"))?;
+            run_matrix(
+                corpus,
+                output,
+                repetitions,
+                batch_size,
+                &[Layout::GovernedRedb, Layout::GovernedLmdb],
+                "ceiling-matrix",
+            )
         }
         _ => Err(
-            "usage: packed_postings matrix <events.jsonl> <output.json> [repetitions] [batch_size]"
+            "usage: packed_postings (matrix|ceiling-matrix) <events.jsonl> <output.json> [repetitions] [batch_size]"
                 .to_owned(),
         ),
     }

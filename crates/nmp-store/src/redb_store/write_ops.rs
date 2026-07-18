@@ -57,7 +57,7 @@ pub(super) fn accept_write(
         return Ok(AcceptOutcome::Refused(RefuseReason::AlreadyExpired));
     }
 
-    let mut write = GovernedWrite::begin(&store.db)?;
+    let mut write = GovernedWrite::begin(store)?;
     let outcome = write.apply(|ingest, write_txn| {
         let mut outbox_meta = write_txn.open_table(OUTBOX_META).map_err(persist_err)?;
         let mut outbox_correlations = write_txn
@@ -483,7 +483,7 @@ pub(super) fn promote_signed(
     intent_id: IntentId,
     sig: Signature,
 ) -> Result<PromoteOutcome, PersistenceError> {
-    let mut write = GovernedWrite::begin(&store.db)?;
+    let mut write = GovernedWrite::begin(store)?;
     let outcome = write.apply(|ingest, _write_txn| {
         let key = intent_key(intent_id);
         let intent_json = ingest
@@ -717,7 +717,7 @@ pub(super) fn compensate_write_with_state(
         crate::CompensationReason::Failure => ReceiptState::Compensated,
         crate::CompensationReason::ExplicitCancellation => ReceiptState::Cancelled,
     };
-    let mut write = GovernedWrite::begin(&store.db)?;
+    let mut write = GovernedWrite::begin(store)?;
     let outcome = write.apply(|ingest, _write_txn| {
         let key = intent_key(intent_id);
         let intent_json = ingest

@@ -80,6 +80,10 @@ pub struct RedbStore {
     /// Canonical binary event values dereferenced for borrowed post-filtering.
     #[cfg(any(test, feature = "bench-instrumentation"))]
     pub(super) query_event_values: AtomicU64,
+    /// Benchmark-only ceiling: governed commits skip persistence barriers.
+    /// Ordinary builds cannot construct a store with this set.
+    #[cfg(feature = "bench-instrumentation")]
+    pub(super) benchmark_durability: BenchmarkDurability,
     /// Number of rows yielded by bounded attempt-table ranges. Tests reset
     /// this to prove work follows the target lane count, not total history.
     #[cfg(test)]
@@ -87,6 +91,37 @@ pub struct RedbStore {
     /// Equivalent instrumentation for resolved-route revision ranges.
     #[cfg(test)]
     pub(super) route_revision_range_rows: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BenchmarkDurability {
+    Immediate,
+    #[cfg(feature = "bench-instrumentation")]
+    NoneThenImmediateCheckpoint,
+}
+
+#[cfg(feature = "bench-instrumentation")]
+impl Drop for RedbStore {
+    fn drop(&mut self) {
+        if self.benchmark_durability != BenchmarkDurability::NoneThenImmediateCheckpoint {
+            return;
+        }
+
+        // Redb otherwise performs an implicit Immediate allocator/trim
+        // transaction during Database::drop. Make the required durability
+        // drain explicit and timed so a no-fsync foreground ceiling cannot
+        // hide persistence work after the measurement window.
+        let started = std::time::Instant::now();
+        let checkpoint = self
+            .db
+            .begin_write()
+            .expect("redb benchmark durability checkpoint begin");
+        checkpoint
+            .commit()
+            .expect("redb benchmark durability checkpoint commit");
+        crate::ingest_attribution::durability_checkpoint(started.elapsed());
+        self.benchmark_durability = BenchmarkDurability::Immediate;
+    }
 }
 
 impl RedbStore {
@@ -126,6 +161,26 @@ impl RedbStore {
     /// schema marker proves every table exists, and one exact metadata count
     /// tells us whether crash-abandoned ephemeral receipts need recovery.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, redb::Error> {
+        Self::open_inner(path, BenchmarkDurability::Immediate)
+    }
+
+    /// Open a benchmark-only diagnostic store whose governed write
+    /// transactions use [`redb::Durability::None`].
+    ///
+    /// This is an upper-bound measurement seam, not a usable persistence
+    /// mode: a process or machine crash may roll back every foreground
+    /// commit. Drop performs one separately-timed Immediate checkpoint so
+    /// maintenance-inclusive evidence cannot hide the deferred durability
+    /// work. Schema creation and reopen repair remain immediately durable.
+    #[cfg(feature = "bench-instrumentation")]
+    pub fn open_benchmark_nondurable(path: impl AsRef<Path>) -> Result<Self, redb::Error> {
+        Self::open_inner(path, BenchmarkDurability::NoneThenImmediateCheckpoint)
+    }
+
+    fn open_inner(
+        path: impl AsRef<Path>,
+        _benchmark_durability: BenchmarkDurability,
+    ) -> Result<Self, redb::Error> {
         let registered = open_and_register(path.as_ref(), |path| {
             Database::builder()
                 .set_cache_size(REDB_CACHE_BYTES)
@@ -354,6 +409,8 @@ impl RedbStore {
             query_index_rows: AtomicU64::new(0),
             #[cfg(any(test, feature = "bench-instrumentation"))]
             query_event_values: AtomicU64::new(0),
+            #[cfg(feature = "bench-instrumentation")]
+            benchmark_durability: _benchmark_durability,
             #[cfg(test)]
             attempt_range_rows: AtomicU64::new(0),
             #[cfg(test)]
