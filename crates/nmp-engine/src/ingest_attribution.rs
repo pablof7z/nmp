@@ -13,6 +13,7 @@ pub struct Snapshot {
     pub bridge_send_ns: u64,
     pub bridge_applied_wait_ns: u64,
     pub engine_batch_process_ns: u64,
+    pub projection_event_clones: u64,
 }
 
 macro_rules! counters { ($($name:ident),+ $(,)?) => { $(static $name: AtomicU64 = AtomicU64::new(0);)+ }; }
@@ -24,7 +25,8 @@ counters!(
     MAX_BRIDGE_BATCH_BYTES,
     BRIDGE_SEND_NS,
     BRIDGE_APPLIED_WAIT_NS,
-    ENGINE_BATCH_PROCESS_NS
+    ENGINE_BATCH_PROCESS_NS,
+    PROJECTION_EVENT_CLONES
 );
 fn add(counter: &AtomicU64, duration: Duration) {
     counter.fetch_add(
@@ -42,6 +44,7 @@ pub fn reset() {
         &BRIDGE_SEND_NS,
         &BRIDGE_APPLIED_WAIT_NS,
         &ENGINE_BATCH_PROCESS_NS,
+        &PROJECTION_EVENT_CLONES,
     ] {
         counter.store(0, Ordering::Relaxed);
     }
@@ -60,6 +63,7 @@ pub fn snapshot() -> Snapshot {
         bridge_send_ns: load(&BRIDGE_SEND_NS),
         bridge_applied_wait_ns: load(&BRIDGE_APPLIED_WAIT_NS),
         engine_batch_process_ns: load(&ENGINE_BATCH_PROCESS_NS),
+        projection_event_clones: load(&PROJECTION_EVENT_CLONES),
     }
 }
 pub(crate) fn bridge_batch(frames: usize, event_bytes: usize) {
@@ -77,4 +81,8 @@ pub(crate) fn bridge_applied_wait(duration: Duration) {
 }
 pub(crate) fn engine_batch_process(duration: Duration) {
     add(&ENGINE_BATCH_PROCESS_NS, duration);
+}
+
+pub(crate) fn projection_event_clone() {
+    PROJECTION_EVENT_CLONES.fetch_add(1, Ordering::Relaxed);
 }

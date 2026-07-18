@@ -18,6 +18,12 @@ use nmp_store::{
 use nostr::filter::MatchEventOptions;
 use nostr::RelayUrl;
 
+fn clone_relay_ingest_event(event: &nostr::Event) -> nostr::Event {
+    #[cfg(feature = "bench-instrumentation")]
+    crate::ingest_attribution::event_clone();
+    event.clone()
+}
+
 /// Full result of relay ingest when a verified relay copy also satisfies
 /// locally-pending write owners of the same canonical event. Embeds the
 /// same [`CommittedMutationResult`] every other committed-mutation door
@@ -662,10 +668,13 @@ impl<S: EventStore> Engine<S> {
         for (event, observed) in &events {
             let entry = observed_by_id
                 .entry(event.id)
-                .or_insert_with(|| (event.clone(), BTreeSet::new()));
+                .or_insert_with(|| (clone_relay_ingest_event(event), BTreeSet::new()));
             entry.1.insert(observed.relay.clone());
         }
-        let input_events: Vec<_> = events.iter().map(|(event, _from)| event.clone()).collect();
+        let input_events: Vec<_> = events
+            .iter()
+            .map(|(event, _from)| clone_relay_ingest_event(event))
+            .collect();
         #[cfg(feature = "bench-instrumentation")]
         crate::ingest_attribution::prepare(prepare_started.elapsed());
         #[cfg(feature = "bench-instrumentation")]
@@ -695,12 +704,12 @@ impl<S: EventStore> Engine<S> {
                     satisfied_intents: owners,
                 } => {
                     if grew {
-                        provenance_grew.push(event.clone());
+                        provenance_grew.push(clone_relay_ingest_event(&event));
                     }
                     satisfied_intents.extend(
                         owners
                             .into_iter()
-                            .map(|intent_id| (intent_id, event.clone())),
+                            .map(|intent_id| (intent_id, clone_relay_ingest_event(&event))),
                     );
                 }
                 InsertOutcome::Stale | InsertOutcome::Refused(_) => {}
@@ -719,7 +728,7 @@ impl<S: EventStore> Engine<S> {
                         .get(&event.id)
                         .expect("inserted input event has observed relays");
                     CommittedCurrentRow {
-                        event: event.clone(),
+                        event: clone_relay_ingest_event(event),
                         observed_relays: observed_relays.clone(),
                     }
                 })
@@ -727,7 +736,7 @@ impl<S: EventStore> Engine<S> {
             removed: removed
                 .iter()
                 .filter(|event| !inserted_ids.contains(&event.id))
-                .cloned()
+                .map(clone_relay_ingest_event)
                 .collect(),
             provenance_grew: provenance_grew_ids
                 .into_iter()
@@ -739,7 +748,7 @@ impl<S: EventStore> Engine<S> {
                         .get(&event_id)
                         .expect("duplicate input event has observed relays");
                     CommittedCurrentRow {
-                        event: event.clone(),
+                        event: clone_relay_ingest_event(event),
                         observed_relays: observed_relays.clone(),
                     }
                 })
@@ -749,7 +758,7 @@ impl<S: EventStore> Engine<S> {
             .iter()
             .chain(removed.iter())
             .chain(provenance_grew.iter())
-            .cloned()
+            .map(clone_relay_ingest_event)
             .collect();
         #[cfg(feature = "bench-instrumentation")]
         crate::ingest_attribution::classify(classify_started.elapsed());

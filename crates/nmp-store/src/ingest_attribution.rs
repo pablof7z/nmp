@@ -20,6 +20,7 @@ pub struct Snapshot {
     pub encoded_event_bytes: u64,
     pub canonical_insert_ns: u64,
     pub index_insert_ns: u64,
+    pub event_clones: u64,
 }
 
 macro_rules! counters {
@@ -42,6 +43,7 @@ counters!(
     ENCODED_EVENT_BYTES,
     CANONICAL_INSERT_NS,
     INDEX_INSERT_NS,
+    EVENT_CLONES,
 );
 
 fn ns(duration: Duration) -> u64 {
@@ -69,6 +71,7 @@ pub fn reset() {
         &ENCODED_EVENT_BYTES,
         &CANONICAL_INSERT_NS,
         &INDEX_INSERT_NS,
+        &EVENT_CLONES,
     ] {
         counter.store(0, Ordering::Relaxed);
     }
@@ -92,6 +95,7 @@ pub fn snapshot() -> Snapshot {
         encoded_event_bytes: load(&ENCODED_EVENT_BYTES),
         canonical_insert_ns: load(&CANONICAL_INSERT_NS),
         index_insert_ns: load(&INDEX_INSERT_NS),
+        event_clones: load(&EVENT_CLONES),
     }
 }
 
@@ -134,4 +138,8 @@ pub(crate) fn canonical_insert(duration: Duration) {
 }
 pub(crate) fn index_insert(duration: Duration) {
     add(&INDEX_INSERT_NS, duration);
+}
+
+pub(crate) fn event_clone() {
+    EVENT_CLONES.fetch_add(1, Ordering::Relaxed);
 }

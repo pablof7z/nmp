@@ -1242,7 +1242,11 @@ impl<S: EventStore> EngineCore<S> {
                 added.insert(
                     row.event.id,
                     Row {
-                        event: row.event.clone(),
+                        event: {
+                            #[cfg(feature = "bench-instrumentation")]
+                            crate::ingest_attribution::projection_event_clone();
+                            row.event.clone()
+                        },
                         sources,
                     },
                 );
@@ -1311,7 +1315,11 @@ impl<S: EventStore> EngineCore<S> {
             added.insert(
                 row.event.id,
                 Row {
-                    event: row.event.clone(),
+                    event: {
+                        #[cfg(feature = "bench-instrumentation")]
+                        crate::ingest_attribution::projection_event_clone();
+                        row.event.clone()
+                    },
                     sources,
                 },
             );
