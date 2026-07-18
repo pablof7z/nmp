@@ -4782,7 +4782,13 @@ fn reduce_and_dispatch_relay_frames<S: EventStore>(
     registry: &SignerRegistry,
     runtime: DispatchRuntime<'_>,
 ) {
+    #[cfg(feature = "bench-instrumentation")]
+    let phase_started = std::time::Instant::now();
     let effects = core.handle(EngineMsg::RelayFrames(frames));
+    #[cfg(feature = "bench-instrumentation")]
+    crate::ingest_attribution::relay_core_reduce(phase_started.elapsed());
+    #[cfg(feature = "bench-instrumentation")]
+    let phase_started = std::time::Instant::now();
     dispatch_core_effects(
         core,
         effects,
@@ -4794,6 +4800,8 @@ fn reduce_and_dispatch_relay_frames<S: EventStore>(
         registry,
         runtime,
     );
+    #[cfg(feature = "bench-instrumentation")]
+    crate::ingest_attribution::relay_effect_dispatch(phase_started.elapsed());
 }
 
 /// Release workers no longer owned by the reducer, then execute its effects.
@@ -5158,7 +5166,13 @@ fn dispatch_effect(
         Effect::UpdateCommittedObservations {
             invalidated,
             published,
-        } => pool.update_committed_observations(invalidated, published),
+        } => {
+            #[cfg(feature = "bench-instrumentation")]
+            let phase_started = std::time::Instant::now();
+            pool.update_committed_observations(invalidated, published);
+            #[cfg(feature = "bench-instrumentation")]
+            crate::ingest_attribution::committed_observation_effect(phase_started.elapsed());
+        }
         Effect::Wire(delta) => apply_wire_delta(&delta, pool, preambles),
         Effect::PreflightHistoryRelays(_) => {}
         Effect::Replay(session, reqs) => apply_replay(&session, reqs, pool, preambles),
@@ -5345,6 +5359,8 @@ fn dispatch_effect(
         }
         Effect::HistoryLoadResult(..) => {}
         Effect::EmitDiagnostics(mut snapshot) => {
+            #[cfg(feature = "bench-instrumentation")]
+            let phase_started = std::time::Instant::now();
             // Fold in the transport pool's own relay-cap rejection count
             // (issue #121, worker-exhaustion half). `EngineCore` builds the
             // snapshot with this field `0` because it has no view of the
@@ -5363,6 +5379,8 @@ fn dispatch_effect(
             for tx in diag_channels.values() {
                 tx.send(snapshot.clone());
             }
+            #[cfg(feature = "bench-instrumentation")]
+            crate::ingest_attribution::diagnostics_effect(phase_started.elapsed());
         }
         Effect::EmitReceipt(id, status) => {
             if matches!(status, WriteStatus::Signed(_) | WriteStatus::Cancelled) {

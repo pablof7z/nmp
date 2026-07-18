@@ -13,6 +13,14 @@ pub struct Snapshot {
     pub bridge_send_ns: u64,
     pub bridge_applied_wait_ns: u64,
     pub engine_batch_process_ns: u64,
+    pub relay_core_reduce_ns: u64,
+    pub relay_effect_dispatch_ns: u64,
+    pub relay_ingest_prelude_ns: u64,
+    pub relay_ingest_post_store_ns: u64,
+    pub relay_ingest_apply_committed_ns: u64,
+    pub relay_ingest_effect_build_ns: u64,
+    pub committed_observation_effect_ns: u64,
+    pub diagnostics_effect_ns: u64,
     pub committed_projection_total_ns: u64,
     pub committed_projection_prelude_ns: u64,
     pub committed_projection_recompile_ns: u64,
@@ -47,6 +55,14 @@ counters!(
     BRIDGE_SEND_NS,
     BRIDGE_APPLIED_WAIT_NS,
     ENGINE_BATCH_PROCESS_NS,
+    RELAY_CORE_REDUCE_NS,
+    RELAY_EFFECT_DISPATCH_NS,
+    RELAY_INGEST_PRELUDE_NS,
+    RELAY_INGEST_POST_STORE_NS,
+    RELAY_INGEST_APPLY_COMMITTED_NS,
+    RELAY_INGEST_EFFECT_BUILD_NS,
+    COMMITTED_OBSERVATION_EFFECT_NS,
+    DIAGNOSTICS_EFFECT_NS,
     COMMITTED_PROJECTION_TOTAL_NS,
     COMMITTED_PROJECTION_PRELUDE_NS,
     COMMITTED_PROJECTION_RECOMPILE_NS,
@@ -86,6 +102,14 @@ pub fn reset() {
         &BRIDGE_SEND_NS,
         &BRIDGE_APPLIED_WAIT_NS,
         &ENGINE_BATCH_PROCESS_NS,
+        &RELAY_CORE_REDUCE_NS,
+        &RELAY_EFFECT_DISPATCH_NS,
+        &RELAY_INGEST_PRELUDE_NS,
+        &RELAY_INGEST_POST_STORE_NS,
+        &RELAY_INGEST_APPLY_COMMITTED_NS,
+        &RELAY_INGEST_EFFECT_BUILD_NS,
+        &COMMITTED_OBSERVATION_EFFECT_NS,
+        &DIAGNOSTICS_EFFECT_NS,
         &COMMITTED_PROJECTION_TOTAL_NS,
         &COMMITTED_PROJECTION_PRELUDE_NS,
         &COMMITTED_PROJECTION_RECOMPILE_NS,
@@ -126,6 +150,14 @@ pub fn snapshot() -> Snapshot {
         bridge_send_ns: load(&BRIDGE_SEND_NS),
         bridge_applied_wait_ns: load(&BRIDGE_APPLIED_WAIT_NS),
         engine_batch_process_ns: load(&ENGINE_BATCH_PROCESS_NS),
+        relay_core_reduce_ns: load(&RELAY_CORE_REDUCE_NS),
+        relay_effect_dispatch_ns: load(&RELAY_EFFECT_DISPATCH_NS),
+        relay_ingest_prelude_ns: load(&RELAY_INGEST_PRELUDE_NS),
+        relay_ingest_post_store_ns: load(&RELAY_INGEST_POST_STORE_NS),
+        relay_ingest_apply_committed_ns: load(&RELAY_INGEST_APPLY_COMMITTED_NS),
+        relay_ingest_effect_build_ns: load(&RELAY_INGEST_EFFECT_BUILD_NS),
+        committed_observation_effect_ns: load(&COMMITTED_OBSERVATION_EFFECT_NS),
+        diagnostics_effect_ns: load(&DIAGNOSTICS_EFFECT_NS),
         committed_projection_total_ns: load(&COMMITTED_PROJECTION_TOTAL_NS),
         committed_projection_prelude_ns: load(&COMMITTED_PROJECTION_PRELUDE_NS),
         committed_projection_recompile_ns: load(&COMMITTED_PROJECTION_RECOMPILE_NS),
@@ -165,6 +197,38 @@ pub(crate) fn bridge_applied_wait(duration: Duration) {
 }
 pub(crate) fn engine_batch_process(duration: Duration) {
     add(&ENGINE_BATCH_PROCESS_NS, duration);
+}
+
+pub(crate) fn relay_core_reduce(duration: Duration) {
+    add(&RELAY_CORE_REDUCE_NS, duration);
+}
+
+pub(crate) fn relay_effect_dispatch(duration: Duration) {
+    add(&RELAY_EFFECT_DISPATCH_NS, duration);
+}
+
+pub(crate) fn relay_ingest_prelude(duration: Duration) {
+    add(&RELAY_INGEST_PRELUDE_NS, duration);
+}
+
+pub(crate) fn relay_ingest_post_store(duration: Duration) {
+    add(&RELAY_INGEST_POST_STORE_NS, duration);
+}
+
+pub(crate) fn relay_ingest_apply_committed(duration: Duration) {
+    add(&RELAY_INGEST_APPLY_COMMITTED_NS, duration);
+}
+
+pub(crate) fn relay_ingest_effect_build(duration: Duration) {
+    add(&RELAY_INGEST_EFFECT_BUILD_NS, duration);
+}
+
+pub(crate) fn committed_observation_effect(duration: Duration) {
+    add(&COMMITTED_OBSERVATION_EFFECT_NS, duration);
+}
+
+pub(crate) fn diagnostics_effect(duration: Duration) {
+    add(&DIAGNOSTICS_EFFECT_NS, duration);
 }
 
 pub(crate) fn committed_projection_total(duration: Duration) {
