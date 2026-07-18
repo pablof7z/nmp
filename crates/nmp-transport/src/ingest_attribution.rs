@@ -16,6 +16,7 @@ pub struct Snapshot {
     pub verify_ns: u64,
     pub delivered_events: u64,
     pub delivery_ns: u64,
+    pub event_fallback_clones: u64,
 }
 
 macro_rules! counters { ($($name:ident),+ $(,)?) => { $(static $name: AtomicU64 = AtomicU64::new(0);)+ }; }
@@ -30,7 +31,8 @@ counters!(
     VERIFY_CANDIDATES,
     VERIFY_NS,
     DELIVERED_EVENTS,
-    DELIVERY_NS
+    DELIVERY_NS,
+    EVENT_FALLBACK_CLONES
 );
 
 fn ns(duration: Duration) -> u64 {
@@ -53,6 +55,7 @@ pub fn reset() {
         &VERIFY_NS,
         &DELIVERED_EVENTS,
         &DELIVERY_NS,
+        &EVENT_FALLBACK_CLONES,
     ] {
         counter.store(0, Ordering::Relaxed);
     }
@@ -72,6 +75,7 @@ pub fn snapshot() -> Snapshot {
         verify_ns: load(&VERIFY_NS),
         delivered_events: load(&DELIVERED_EVENTS),
         delivery_ns: load(&DELIVERY_NS),
+        event_fallback_clones: load(&EVENT_FALLBACK_CLONES),
     }
 }
 
@@ -93,4 +97,8 @@ pub(crate) fn verify(duration: Duration, candidates: usize) {
 pub(crate) fn delivery(duration: Duration) {
     DELIVERED_EVENTS.fetch_add(1, Ordering::Relaxed);
     add(&DELIVERY_NS, duration);
+}
+
+pub(crate) fn event_fallback_clone() {
+    EVENT_FALLBACK_CLONES.fetch_add(1, Ordering::Relaxed);
 }

@@ -1182,7 +1182,11 @@ impl EventStore for MemoryStore {
 
         let is_deletion = event.kind == Kind::EventDeletion;
         let stored = StoredEvent {
-            event: event.clone(),
+            event: {
+                #[cfg(feature = "bench-instrumentation")]
+                crate::ingest_attribution::event_clone();
+                event.clone()
+            },
             provenance: Provenance::first_observation(from),
         };
 

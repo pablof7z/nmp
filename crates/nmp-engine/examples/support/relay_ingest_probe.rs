@@ -1,3 +1,4 @@
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::{BTreeSet, HashSet};
 use std::error::Error;
 use std::fs::{self, File};
@@ -26,6 +27,45 @@ pub type ProbeError = Box<dyn Error + Send + Sync>;
 const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v8";
 const CORPUS_SCHEMA: &str = "nmp-relay-ingest-corpus-v1";
 const BASE_CREATED_AT: u64 = 1_700_000_000;
+
+struct CountingAllocator;
+
+static ALLOCATION_OPS: AtomicU64 = AtomicU64::new(0);
+static ALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
+
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        ALLOCATION_OPS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        System.alloc(layout)
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        ALLOCATION_OPS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        System.alloc_zeroed(layout)
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        System.dealloc(ptr, layout);
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        ALLOCATION_OPS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATED_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
+        System.realloc(ptr, layout, new_size)
+    }
+}
+
+#[global_allocator]
+static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator;
+
+fn allocator_snapshot() -> (u64, u64) {
+    (
+        ALLOCATION_OPS.load(Ordering::Relaxed),
+        ALLOCATED_BYTES.load(Ordering::Relaxed),
+    )
+}
 
 #[derive(Debug, Clone)]
 pub struct ProbeConfig {
@@ -177,6 +217,8 @@ pub struct ProbeResult {
     pub peak_ingest_rss_growth_bytes: Option<u64>,
     pub peak_ingest_anonymous_bytes: Option<u64>,
     pub process_write_bytes: Option<u64>,
+    pub allocation_ops: u64,
+    pub allocated_bytes: u64,
     pub rss_after_ingest_bytes: Option<u64>,
     pub anonymous_after_ingest_bytes: Option<u64>,
     pub rss_after_shutdown_bytes: Option<u64>,
@@ -521,6 +563,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         .ok_or("expected frame count overflow")?;
     let expected_last_id = EventId::from_hex(&corpus.last_id)?;
     let process_write_bytes_before = process_write_bytes();
+    let allocations_before = allocator_snapshot();
     let ingest_started = Instant::now();
     let memory_before_ingest = current_memory();
     let memory_sampler = MemorySampler::start(config.trim_allocator_during_ingest);
@@ -593,6 +636,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     let ingest_elapsed = ingest_started.elapsed();
     let memory_after_ingest = current_memory();
     let peak_ingest_memory = memory_sampler.stop();
+    let allocations_after = allocator_snapshot();
 
     diagnostics_handle.cancel();
     diagnostics_join
@@ -795,6 +839,8 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             .map(|(peak, before)| peak.saturating_sub(before)),
         peak_ingest_anonymous_bytes: peak_ingest_memory.anonymous_bytes,
         process_write_bytes,
+        allocation_ops: allocations_after.0.saturating_sub(allocations_before.0),
+        allocated_bytes: allocations_after.1.saturating_sub(allocations_before.1),
         rss_after_ingest_bytes: memory_after_ingest.rss_bytes,
         anonymous_after_ingest_bytes: memory_after_ingest.anonymous_bytes,
         rss_after_shutdown_bytes: memory_after_shutdown.rss_bytes,
@@ -835,7 +881,8 @@ fn ingest_attribution_json() -> serde_json::Value {
             "translator_events": transport.translator_events, "max_translator_burst": transport.max_translator_burst,
             "verify_batches": transport.verify_batches, "verify_candidates": transport.verify_candidates,
             "verify_ns": transport.verify_ns, "delivered_events": transport.delivered_events,
-            "delivery_ns": transport.delivery_ns
+            "delivery_ns": transport.delivery_ns,
+            "event_fallback_clones": transport.event_fallback_clones
         },
         "engine": {
             "bridge_batches": engine.bridge_batches, "bridge_frames": engine.bridge_frames,
@@ -843,12 +890,14 @@ fn ingest_attribution_json() -> serde_json::Value {
             "bridge_event_bytes": engine.bridge_event_bytes,
             "max_bridge_batch_bytes": engine.max_bridge_batch_bytes,
             "bridge_applied_wait_ns": engine.bridge_applied_wait_ns,
-            "engine_batch_process_ns": engine.engine_batch_process_ns
+            "engine_batch_process_ns": engine.engine_batch_process_ns,
+            "projection_event_clones": engine.projection_event_clones
         },
         "resolver": {
             "batches": resolver.batches, "events": resolver.events, "max_batch_events": resolver.max_batch_events,
             "total_ns": resolver.total_ns, "prepare_ns": resolver.prepare_ns, "store_ns": resolver.store_ns,
-            "classify_ns": resolver.classify_ns, "react_and_affected_ns": resolver.react_and_affected_ns
+            "classify_ns": resolver.classify_ns, "react_and_affected_ns": resolver.react_and_affected_ns,
+            "event_clones": resolver.event_clones
         },
         "store": {
             "batches": store.batches, "events": store.events, "max_batch_events": store.max_batch_events,
@@ -858,7 +907,7 @@ fn ingest_attribution_json() -> serde_json::Value {
             "commit_ns": store.commit_ns, "durability_checkpoint_ns": store.durability_checkpoint_ns,
             "encode_event_ns": store.encode_event_ns,
             "encoded_event_bytes": store.encoded_event_bytes, "canonical_insert_ns": store.canonical_insert_ns,
-            "index_insert_ns": store.index_insert_ns
+            "index_insert_ns": store.index_insert_ns, "event_clones": store.event_clones
         }
     })
 }
