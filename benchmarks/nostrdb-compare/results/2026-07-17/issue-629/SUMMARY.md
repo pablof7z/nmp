@@ -1,7 +1,7 @@
 # Issue #629 — bounded Fjall maintenance evidence
 
 This checkpoint asks whether Fjall retains issue #627's foreground throughput
-and host-write advantage after explicit memory and thread constraints expose
+and process-accounted-write advantage after explicit memory and thread constraints expose
 LSM maintenance. It does **not** prove a production `EventStore` migration:
 governance, real queries, outbox state, crash seams, and platform packaging
 remain outside this prepared physical-store harness.
@@ -21,9 +21,11 @@ path must cover canonical insert, tombstone creation, and crash-atomic index
 updates; an insert-only prototype would skip governed behavior carried by 42%
 of this corpus and is not an acceptable migration falsifier.
 
-## Qualified profile
+## Benchmark-only bounded profile
 
-The compared Fjall 3.1.6 profile uses:
+The compared Fjall 3.1.6 profile uses hidden and deprecated integration seams
+that are suitable only for this benchmark. It is not a production-qualified
+`EventStore` profile. The measurement uses:
 
 - 2 maintenance workers;
 - 16 MiB block cache;
@@ -51,13 +53,16 @@ Three clean-tree alternating five-cycle runs (500k logical mutations), commit
 | Commit p50 | 116.0 ms | 106.9 ms | Fjall 8.5% slower |
 | Commit p95 | 184.6 ms | 264.2 ms | Fjall 30.1% lower |
 | Commit p99 | 262.5 ms | 322.0 ms | Fjall 18.5% lower |
-| Median host writes | 1.759 GB | 5.281 GB | Fjall 3.003x fewer |
+| Median process-accounted write bytes | 1.759 GB | 5.281 GB | Fjall 3.003x fewer |
 | Median RSS delta | 60.6 MiB | 60.6 MiB | equal |
 | Stored bytes | 277–284 MB | 101.1 MB | Fjall median 2.79x |
 | Ending write buffer | 23–41 MiB | — | — |
 | Ending L0 tables | 13–16 | — | — |
 
-Every run reopened with exact per-keyspace row counts.
+Every run reopened with the expected per-keyspace row counts. Equal physical
+row counts do not prove exact semantic recovery: wrong winners, provenance,
+tombstones, coverage, ordering, intent state, or receipt state can retain the
+same counts.
 
 One clean-tree paired ten-cycle run (1,000,000 logical mutations) is a longer
 directional check, not a substitute for repetitions:
@@ -68,7 +73,7 @@ directional check, not a substitute for repetitions:
 | Commit p50 | 111.6 ms | 163.4 ms | Fjall 31.7% lower |
 | Commit p95 | 188.5 ms | 299.7 ms | Fjall 37.1% lower |
 | Commit p99 | 276.4 ms | 574.4 ms | Fjall 51.9% lower |
-| Host writes | 3.720 GB | 10.984 GB | Fjall 2.952x fewer |
+| Process-accounted write bytes | 3.720 GB | 10.984 GB | Fjall 2.952x fewer |
 | RSS delta | 60.6 MiB | 60.6 MiB | equal |
 | Stored bytes | 354.7 MB | 101.1 MB | Fjall 3.51x |
 | Ending write buffer | 31.6 MiB | — | — |
@@ -95,15 +100,17 @@ compaction debt is retired.
 - Fjall 3.1.6 declares Rust 1.90 minimum. Filesystem and background-thread use
   mean browser/WASM support is not established by the crate being pure Rust.
 
-## Decision
+## Narrow decision
 
-Keep Fjall as the leading physical-store candidate. Under the qualified
-2-worker profile it shows a repeated 35.6% median sustained throughput gain,
-3.0x fewer host writes, equal measured RSS growth, and better p95/p99 commit
-latency. The cost is 2 maintenance threads, slightly worse median commit
-latency in the repeated run, and roughly 2.8x more live stored bytes.
+The benchmark-only 2-worker profile shows a repeated 35.6% median sustained
+throughput gain, 3.0x fewer process-accounted write bytes, equal measured RSS
+growth, and better p95/p99 commit latency. The cost is 2 maintenance threads,
+slightly worse median commit latency in the repeated run, roughly 2.8x more
+live stored bytes, unfinished compaction accounting, and reliance on hidden
+Fjall APIs. This evidence does not rank or production-qualify a database.
 
-The migration gate is now architectural: implement the governed `EventStore`
-semantics once above a physical transaction seam, then rerun crash, query,
-sustained-latency, RSS, idle-drain, and platform falsifiers on the real path.
-A second Fjall-specific copy of Redb policy is not acceptable evidence.
+Before reevaluation, run Fjall through the backend-independent semantic oracle
+and complete compaction settlement/accounting. LMDB remains open only under a
+packed backend-native Nostr layout, not the Redb-shaped twelve-keyspace test.
+SQLite and browser persistence are a separate portability track. Redb remains
+the production baseline while this evidence is gathered.

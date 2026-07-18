@@ -10,6 +10,11 @@ Transaction batch size: 4096
 Every checked-in JSON records `git_dirty: false`, the harness commit above,
 exact table counts, and `exact_reopen: true`.
 
+`exact_reopen` is the historical harness field name. Here it means only that
+the expected physical row counts were present after reopen; it does not prove
+exact semantic recovery. No winner/provenance/tombstone/coverage/outbox/receipt
+oracle ran in this benchmark.
+
 Build:
 
 ```sh
