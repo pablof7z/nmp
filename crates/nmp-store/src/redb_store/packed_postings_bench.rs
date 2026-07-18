@@ -1741,7 +1741,13 @@ fn add_event_memberships(
         tag_prefixes.insert(tag_index_prefix(letter, value));
     }
     for prefix in tag_prefixes {
-        push_membership(segments, counts, Family::Tag, Prefix::Tag(prefix), posting);
+        push_membership(
+            segments,
+            counts,
+            Family::Tag,
+            Prefix::Tag(prefix.into()),
+            posting,
+        );
     }
 }
 
@@ -1916,7 +1922,7 @@ mod tests {
             .map(|event| Membership {
                 family: Family::Tag,
                 shard: shard_for(Family::Tag, b"prefix"),
-                prefix: Prefix::Tag(b"prefix".to_vec()),
+                prefix: Prefix::Tag(b"prefix".as_slice().into()),
                 event,
             })
             .collect();

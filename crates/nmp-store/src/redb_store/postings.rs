@@ -9,6 +9,7 @@ use std::cmp::Ordering;
 #[cfg(any(test, feature = "bench-instrumentation"))]
 use std::collections::BinaryHeap;
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 const SEGMENT_MAGIC: &[u8; 8] = b"NMPPS\0\x03\0";
 const DICTIONARY_MAGIC: &[u8; 8] = b"NMPID\0\x02\0";
@@ -53,7 +54,7 @@ pub(super) enum Prefix {
     Global,
     Author([u8; 32]),
     Kind([u8; 2]),
-    Tag(Vec<u8>),
+    Tag(Arc<[u8]>),
 }
 
 impl Prefix {
@@ -79,7 +80,7 @@ impl Prefix {
                     .try_into()
                     .map_err(|_| "kind prefix is not 2 bytes".to_owned())?,
             )),
-            Family::Tag => Ok(Self::Tag(value.to_vec())),
+            Family::Tag => Ok(Self::Tag(Arc::from(value))),
             Family::Global => Err("global prefix is not empty".to_owned()),
         }
     }
@@ -510,11 +511,12 @@ impl<'a> SegmentView<'a> {
         let mut memberships = Vec::new();
         for ordinal in 0..self.prefix_count {
             let record = self.record(ordinal)?;
+            let prefix = Prefix::from_bytes(self.family, record.prefix)?;
             for posting in 0..record.list.posting_count {
                 memberships.push(Membership {
                     family: self.family,
                     shard: self.shard,
-                    prefix: Prefix::from_bytes(self.family, record.prefix)?,
+                    prefix: prefix.clone(),
                     event: record.list.event(dictionary, posting)?,
                 });
             }

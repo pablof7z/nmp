@@ -497,7 +497,7 @@ fn memberships_for_events(events: &BTreeMap<EventKey, Event>) -> Vec<Membership>
             push_membership(
                 &mut memberships,
                 Family::Tag,
-                Prefix::Tag(prefix),
+                Prefix::Tag(prefix.into()),
                 run_event,
             );
         }
