@@ -34,8 +34,9 @@ use super::worker::{
     pack_generation, worker_id_of, WorkerCommand, WorkerEvent, WorkerEventKind, WorkerHandle,
 };
 use super::{
-    DisconnectReason, PoolBuildError, PoolConfig, PoolEvent, PoolEventSink, RelayOpenError,
-    RelaySessionKey, ThreadRole, ThreadSpawnError,
+    committed_observations::CommittedObservationCache, DisconnectReason, PoolBuildError,
+    PoolConfig, PoolEvent, PoolEventSink, RelayOpenError, RelaySessionKey, ThreadRole,
+    ThreadSpawnError,
 };
 
 struct RetireRequest {
@@ -79,6 +80,7 @@ struct SlotState {
 }
 
 pub(super) struct PoolInner {
+    pub(super) committed_observations: Arc<CommittedObservationCache>,
     /// Indexed by dense `RelayHandle.slot`. `worker: None` marks a closed
     /// slot; the entry itself stays so the slot id is only ever reused by a
     /// reopen of the SAME session (matching `session_to_slot`).
@@ -152,7 +154,11 @@ impl PoolInner {
             }
         };
         let translator_config = config.clone();
+        let committed_observations = Arc::new(CommittedObservationCache::new(
+            config.committed_observation_cache_capacity,
+        ));
         let inner = Arc::new(Mutex::new(Self {
+            committed_observations,
             slots: Vec::new(),
             session_to_slot: HashMap::new(),
             next_worker_id: 0,
@@ -400,7 +406,7 @@ impl PoolInner {
         super::worker::spawn(
             slot_id,
             worker_id,
-            session.relay.as_str().to_string(),
+            session.relay.clone(),
             session.access != nmp_grammar::AccessContext::Public,
             self.worker_event_tx
                 .as_ref()
@@ -412,6 +418,7 @@ impl PoolInner {
             reconnect_jitter_max,
             command_queue_capacity,
             Arc::clone(&self.config.allowed_local_hosts),
+            Arc::clone(&self.committed_observations),
             self.spawner.as_ref(),
         )
         .map_err(RelayOpenError::ThreadUnavailable)

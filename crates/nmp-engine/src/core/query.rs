@@ -1115,6 +1115,17 @@ impl<S: EventStore> EngineCore<S> {
             affected_handles,
             row_changes,
         } = committed;
+        let invalidated = row_changes
+            .removed
+            .iter()
+            .map(|event| event.id)
+            .collect::<Vec<_>>();
+        if !invalidated.is_empty() {
+            effects.push(Effect::UpdateCommittedObservations {
+                invalidated,
+                published: Vec::new(),
+            });
+        }
         let demand_changed = !delta.is_empty();
         let affected: Vec<_> = affected_handles.into_iter().collect();
         let affected_histories: BTreeSet<_> = affected

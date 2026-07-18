@@ -1030,21 +1030,64 @@ impl<S: EventStore> EngineCore<S> {
         events: Vec<(SignedEvent, RelayObserved)>,
         effects: &mut Vec<Effect>,
     ) {
+        self.ingest_relay_observations(
+            events
+                .into_iter()
+                .map(|(event, observed)| (event, observed, None))
+                .collect(),
+            effects,
+        );
+    }
+
+    fn ingest_relay_observations(
+        &mut self,
+        events: Vec<(
+            SignedEvent,
+            RelayObserved,
+            Option<CommittedObservationCandidate>,
+        )>,
+        effects: &mut Vec<Effect>,
+    ) {
         if events.is_empty() {
             return;
         }
         let relay_list_authors: Vec<_> = events
             .iter()
-            .filter_map(|(event, _)| (event.kind == nostr::Kind::RelayList).then_some(event.pubkey))
+            .filter_map(|(event, _, _)| {
+                (event.kind == nostr::Kind::RelayList).then_some(event.pubkey)
+            })
+            .collect();
+        let publications: Vec<_> = events
+            .iter()
+            .map(|(event, observed, candidate)| {
+                candidate.map(|candidate| {
+                    CommittedObservationPublication::new(
+                        observed.relay.clone(),
+                        candidate,
+                        event.id,
+                        event.kind.as_u16(),
+                    )
+                })
+            })
             .collect();
         // The per-session diagnostics counter (`events_by_session_kind`) is
         // bumped at the frame sites (`on_relay_frame`/`on_relay_frames`),
         // where the exact physical session is still known — a
         // `RelayObserved` carries only the URL, which cannot distinguish
         // access contexts (#8).
-        match self.resolver.ingest_observed_detailed(events) {
+        match self.resolver.ingest_observed_detailed(
+            events
+                .into_iter()
+                .map(|(event, observed, _)| (event, observed))
+                .collect(),
+        ) {
             Err(error) => self.degrade_store(error, effects),
             Ok(ingest) => {
+                let published = publications
+                    .into_iter()
+                    .zip(ingest.current_after_commit.iter().copied())
+                    .filter_map(|(publication, current)| current.then_some(publication).flatten())
+                    .collect::<Vec<_>>();
                 // Recompute this up front from the embedded `committed.delta`
                 // before it moves into `apply_committed_mutation_with` below:
                 // it drives the diagnostics-vs-recompile choice, which is a
@@ -1099,8 +1142,44 @@ impl<S: EventStore> EngineCore<S> {
                     directory_changed || satisfied_pending,
                     effects,
                 );
+                if !published.is_empty() {
+                    effects.push(Effect::UpdateCommittedObservations {
+                        invalidated: Vec::new(),
+                        published,
+                    });
+                }
             }
         }
+    }
+
+    pub(crate) fn committed_observation_conflicts_with_pending(
+        &self,
+        hit: &CommittedObservationHit,
+    ) -> bool {
+        self.pending.values().any(|pending| {
+            pending.event_id == Some(hit.event_id()) || pending.frozen.id == hit.event_id()
+        })
+    }
+
+    /// Reduce a cache batch whose session, epoch, and pending-write barriers
+    /// were already revalidated on this same engine thread. The ordinary
+    /// `RelayFrames` door remains defensive for every unvalidated frame.
+    pub(crate) fn on_revalidated_committed_observations(
+        &mut self,
+        observations: Vec<(RelaySessionKey, u16)>,
+    ) -> Vec<Effect> {
+        if observations.is_empty() {
+            return Vec::new();
+        }
+        for (session, event_kind) in observations {
+            *self
+                .events_by_session_kind
+                .entry(session)
+                .or_default()
+                .entry(event_kind)
+                .or_insert(0) += 1;
+        }
+        vec![Effect::EmitDiagnostics(self.diagnostics_snapshot())]
     }
 
     pub(super) fn on_relay_frames(
@@ -1108,13 +1187,57 @@ impl<S: EventStore> EngineCore<S> {
         frames: Vec<(TransportRelayHandle, RelaySessionKey, RelayFrame)>,
     ) -> Vec<Effect> {
         let mut effects = Vec::new();
-        let mut events = Vec::new();
+        let mut candidates = Vec::new();
+        #[cfg(feature = "bench-instrumentation")]
+        let mut observed_diagnostic_duplicate = false;
         for (handle, reported_session, frame) in frames {
-            match frame.into_event() {
-                Ok(event) => {
+            let frame = match frame {
+                RelayFrame::CommittedObservation(hit) => {
+                    self.ingest_relay_observations(std::mem::take(&mut candidates), &mut effects);
                     let Some((current, session)) = self.slot_to_relay.get(&handle.slot).cloned()
                     else {
-                        self.ingest_relay_events(std::mem::take(&mut events), &mut effects);
+                        continue;
+                    };
+                    if current != handle || session != reported_session {
+                        continue;
+                    }
+                    *self
+                        .events_by_session_kind
+                        .entry(session)
+                        .or_default()
+                        .entry(hit.event_kind())
+                        .or_insert(0) += 1;
+                    continue;
+                }
+                frame => frame,
+            };
+            #[cfg(feature = "bench-instrumentation")]
+            if let Some((event_kind, _)) = frame.diagnostic_duplicate_ceiling() {
+                let Some((current, session)) = self.slot_to_relay.get(&handle.slot).cloned() else {
+                    self.ingest_relay_observations(std::mem::take(&mut candidates), &mut effects);
+                    continue;
+                };
+                if current != handle || session != reported_session {
+                    self.ingest_relay_observations(std::mem::take(&mut candidates), &mut effects);
+                    continue;
+                }
+                *self
+                    .events_by_session_kind
+                    .entry(session)
+                    .or_default()
+                    .entry(event_kind)
+                    .or_insert(0) += 1;
+                observed_diagnostic_duplicate = true;
+                continue;
+            }
+            match frame.into_observed_event() {
+                Ok((event, candidate)) => {
+                    let Some((current, session)) = self.slot_to_relay.get(&handle.slot).cloned()
+                    else {
+                        self.ingest_relay_observations(
+                            std::mem::take(&mut candidates),
+                            &mut effects,
+                        );
                         continue;
                     };
                     // BOTH halves must match (#8): a frame carrying a stale
@@ -1122,7 +1245,10 @@ impl<S: EventStore> EngineCore<S> {
                     // slot is dropped exactly — never re-attributed to the
                     // slot's current occupant.
                     if current != handle || session != reported_session {
-                        self.ingest_relay_events(std::mem::take(&mut events), &mut effects);
+                        self.ingest_relay_observations(
+                            std::mem::take(&mut candidates),
+                            &mut effects,
+                        );
                         continue;
                     }
                     *self
@@ -1131,15 +1257,23 @@ impl<S: EventStore> EngineCore<S> {
                         .or_default()
                         .entry(event.kind.as_u16())
                         .or_insert(0) += 1;
-                    events.push((event, RelayObserved::new(session.relay, self.clock)));
+                    candidates.push((
+                        event,
+                        RelayObserved::new(session.relay, self.clock),
+                        candidate,
+                    ));
                 }
                 Err(frame) => {
-                    self.ingest_relay_events(std::mem::take(&mut events), &mut effects);
+                    self.ingest_relay_observations(std::mem::take(&mut candidates), &mut effects);
                     effects.extend(self.on_relay_frame(handle, reported_session, frame));
                 }
             }
         }
-        self.ingest_relay_events(events, &mut effects);
+        self.ingest_relay_observations(candidates, &mut effects);
+        #[cfg(feature = "bench-instrumentation")]
+        if observed_diagnostic_duplicate {
+            effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+        }
         effects
     }
 
