@@ -575,7 +575,6 @@ pub(super) struct CompactionSegmentSource<'a> {
 pub(super) struct CompactedSegment {
     pub(super) value: Vec<u8>,
     pub(super) postings: u64,
-    pub(super) prefixes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -722,11 +721,7 @@ pub(super) fn compact_segment(
     if emitted_prefixes != prefix_count {
         return Err("compaction prefix count changed during encoding".to_owned());
     }
-    Ok(Some(CompactedSegment {
-        value,
-        postings,
-        prefixes: prefix_count as u64,
-    }))
+    Ok(Some(CompactedSegment { value, postings }))
 }
 
 fn count_live_compaction_prefixes(
@@ -1563,9 +1558,9 @@ mod tests {
         )
         .expect("compact segments")
         .expect("live compacted segment");
-        assert_eq!(compacted.prefixes, 1);
         assert_eq!(compacted.postings, 3);
         let output = SegmentView::parse(&compacted.value).expect("parse compacted segment");
+        assert_eq!(output.prefix_count, 1);
         output
             .validate(output_dictionary)
             .expect("validate compacted segment");

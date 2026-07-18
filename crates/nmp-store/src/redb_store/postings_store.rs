@@ -17,8 +17,8 @@ use redb::ReadableTableMetadata;
 use super::postings::validate_run_metas;
 use super::postings::{
     compact_segment, encode_dictionary, encode_run, merge_dead_blocks, shard_for,
-    CompactionSegmentSource, DeadKeys, DictionaryView, EncodedRun, Family, Membership,
-    PostingCursor, Prefix, RunEvent, RunMeta, SegmentView, MAX_DEATH_BLOCKS,
+    CompactionSegmentSource, DeadKeys, DictionaryView, Family, Membership, PostingCursor, Prefix,
+    RunEvent, RunMeta, SegmentView, MAX_DEATH_BLOCKS,
 };
 use super::query::tag_index_prefix;
 use super::schema::{
@@ -632,6 +632,13 @@ fn insert_run(
             .insert(key.as_slice(), value.as_slice())
             .map_err(persist_err)?;
     }
+    insert_run_catalog(write_txn, meta)
+}
+
+fn insert_run_catalog(
+    write_txn: &redb::WriteTransaction,
+    meta: RunMeta,
+) -> Result<(), PersistenceError> {
     let encoded_meta = meta.encode().map_err(packed_err)?;
     let mut run_meta = write_txn
         .open_table(POSTINGS_RUN_META)
@@ -773,11 +780,11 @@ fn apply_run_deaths(
     rewrite_run_without_dead(write_txn, meta, &all_dead)
 }
 
-fn encode_compaction_cohort(
+fn stream_compaction_cohort(
     write_txn: &redb::WriteTransaction,
     cohort: &[RunMeta],
     dead: &[Option<DeadKeys>],
-) -> Result<Option<(EncodedRun, u64, u64)>, PersistenceError> {
+) -> Result<Option<(u64, u64, u64, u64)>, PersistenceError> {
     if cohort.len() != dead.len() {
         return Err(packed_err("compaction death-map count mismatch"));
     }
@@ -835,13 +842,19 @@ fn encode_compaction_cohort(
         .and_then(DictionaryView::validate)
         .map_err(packed_err)?;
     drop(dictionaries);
+    let run_id = allocate_run_id(write_txn)?;
+    let mut dictionaries = write_txn
+        .open_table(POSTINGS_DICTIONARIES)
+        .map_err(persist_err)?;
+    dictionaries
+        .insert(run_id, dictionary.as_slice())
+        .map_err(persist_err)?;
+    drop(dictionaries);
 
-    let segments = write_txn
+    let mut segments = write_txn
         .open_table(POSTINGS_SEGMENTS)
         .map_err(persist_err)?;
-    let mut encoded_segments = Vec::new();
     let mut postings = 0u64;
-    let mut prefixes = 0u64;
     for family in Family::ALL {
         for shard in 0..=super::postings::SHARD_MASK {
             let mut segment_values = Vec::new();
@@ -873,30 +886,23 @@ fn encode_compaction_cohort(
                 continue;
             };
             postings = postings.saturating_add(compacted.postings);
-            prefixes = prefixes.saturating_add(compacted.prefixes);
-            encoded_segments.push((family, shard, compacted.value));
+            let key = segment_key(family, shard, run_id);
+            segments
+                .insert(key.as_slice(), compacted.value.as_slice())
+                .map_err(persist_err)?;
         }
     }
     drop(segments);
-    if encoded_segments.is_empty() || postings == 0 {
+    if postings == 0 {
         return Err(packed_err(
             "nonempty compaction dictionary produced no live segments",
         ));
     }
     Ok(Some((
-        EncodedRun {
-            dictionary,
-            segments: encoded_segments,
-            dictionary_entries: dictionary_entries.len() as u64,
-            postings,
-            prefixes,
-            posting_bytes: postings.saturating_mul(12),
-            dictionary_build_ns: 0,
-            membership_sort_ns: 0,
-            segment_encode_ns: 0,
-        },
+        run_id,
         min_event_key,
         max_event_key,
+        dictionary_entries.len() as u64,
     )))
 }
 
@@ -965,24 +971,22 @@ fn compact_cohort(
         .iter()
         .map(|meta| load_run_deaths(write_txn, meta.run_id))
         .collect::<Result<_, _>>()?;
-    let encoded = encode_compaction_cohort(write_txn, cohort, &dead)?;
+    let output = stream_compaction_cohort(write_txn, cohort, &dead)?;
     for &meta in cohort {
         delete_run(write_txn, meta)?;
     }
-    let Some((encoded, min_event_key, max_event_key)) = encoded else {
+    let Some((run_id, min_event_key, max_event_key, live_events)) = output else {
         return Ok(());
     };
-    let run_id = allocate_run_id(write_txn)?;
-    insert_run(
+    insert_run_catalog(
         write_txn,
         RunMeta {
             run_id,
             level: output_level,
             min_event_key,
             max_event_key,
-            live_events: encoded.dictionary_entries,
+            live_events,
         },
-        encoded,
     )
 }
 
@@ -991,21 +995,20 @@ fn rewrite_run_without_dead(
     old_meta: RunMeta,
     dead: &DeadKeys,
 ) -> Result<(), PersistenceError> {
-    let encoded = encode_compaction_cohort(write_txn, &[old_meta], &[Some(dead.clone())])?;
+    let output = stream_compaction_cohort(write_txn, &[old_meta], &[Some(dead.clone())])?;
     delete_run(write_txn, old_meta)?;
-    let Some((encoded, min_event_key, max_event_key)) = encoded else {
+    let Some((run_id, min_event_key, max_event_key, live_events)) = output else {
         return Ok(());
     };
-    insert_run(
+    insert_run_catalog(
         write_txn,
         RunMeta {
-            run_id: old_meta.run_id,
+            run_id,
             level: old_meta.level,
             min_event_key,
             max_event_key,
-            live_events: encoded.dictionary_entries,
+            live_events,
         },
-        encoded,
     )
 }
 
