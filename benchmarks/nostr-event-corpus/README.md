@@ -65,3 +65,15 @@ The checked [result summary](results/2026-07-17/SUMMARY.md) records the capture
 bias, complete distribution, alternating 100k matrix, exact one-million run,
 and duplicate replay. [The manifest](results/2026-07-17/MANIFEST.md) binds the
 commands, source hash, configuration, and raw result hashes.
+
+Probe schema v10 separates active completion from its correctness quiet proof.
+`completion_ingest_ms` stops the first time every expected relay frame and the
+required visible projection are observed;
+`completion_relay_frames_per_second` is the governing production-throughput
+metric. `observation_and_quiet_ms` includes the subsequent quiet confirmation
+and final receiver drain. Keep that wider duration for correctness and resource
+accounting, never as the throughput denominator. Runs with more than one pass
+also report `replay_completion_ms` and `replay_frames_per_second`, measured
+from the first offered frame after the initial pass through final observation;
+that is the duplicate-replay gate rather than the aggregate initial-plus-replay
+rate.
