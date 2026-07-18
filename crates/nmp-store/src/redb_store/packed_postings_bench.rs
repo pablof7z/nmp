@@ -906,16 +906,25 @@ fn compact_redb_segments(
         events.len().div_ceil(batch_size),
         |level, output_run, sources| {
             let input = load_redb_compaction_input(db, sources)?;
-            let encoded = encode_segments(input.memberships)?;
             let run_id = compacted_generation(level, output_run);
-            let meta = RunMeta {
-                run_id,
-                level,
-                min_event_key: input.min_event_key,
-                max_event_key: input.max_event_key,
-                live_events: encoded.dictionary_entries,
-            }
-            .encode()?;
+            let encoded = if input.memberships.is_empty() {
+                None
+            } else {
+                Some(encode_segments(input.memberships)?)
+            };
+            let meta = encoded
+                .as_ref()
+                .map(|encoded| {
+                    RunMeta {
+                        run_id,
+                        level,
+                        min_event_key: input.min_event_key,
+                        max_event_key: input.max_event_key,
+                        live_events: encoded.dictionary_entries,
+                    }
+                    .encode()
+                })
+                .transpose()?;
             let write = db.begin_write().map_err(|error| error.to_string())?;
             let mut segments = write
                 .open_table(PACKED_SEGMENTS)
@@ -929,39 +938,26 @@ fn compact_redb_segments(
             let mut dead_key_table = write
                 .open_table(PACKED_DEAD_KEYS)
                 .map_err(|error| error.to_string())?;
-            let mut removed = Vec::new();
-            for entry in segments.iter().map_err(|error| error.to_string())? {
-                let (key, _) = entry.map_err(|error| error.to_string())?;
-                let key: [u8; 10] = key
-                    .value()
-                    .try_into()
-                    .map_err(|_| "invalid Redb segment key width".to_owned())?;
-                if sources.contains(&segment_generation(&key)) {
-                    removed.push(key);
-                }
-            }
-            for key in removed {
-                segments
-                    .remove(key.as_slice())
-                    .map_err(|error| error.to_string())?;
-            }
-            let mut removed_death_blocks = Vec::new();
-            for entry in dead_key_table.iter().map_err(|error| error.to_string())? {
-                let (key, _) = entry.map_err(|error| error.to_string())?;
-                let key: [u8; 16] = key
-                    .value()
-                    .try_into()
-                    .map_err(|_| "invalid Redb dead-block key width".to_owned())?;
-                if sources.contains(&dead_block_run(&key)) {
-                    removed_death_blocks.push(key);
-                }
-            }
-            for key in removed_death_blocks {
-                dead_key_table
-                    .remove(key.as_slice())
-                    .map_err(|error| error.to_string())?;
-            }
             for source in sources {
+                for family in Family::ALL {
+                    let last_shard = if family == Family::Global {
+                        0
+                    } else {
+                        postings::SHARD_MASK
+                    };
+                    for shard in 0..=last_shard {
+                        let key = segment_key(family, shard, *source);
+                        segments
+                            .remove(key.as_slice())
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
+                for sequence in 0..postings::MAX_DEATH_BLOCKS as u64 {
+                    let key = dead_block_key(*source, sequence);
+                    dead_key_table
+                        .remove(key.as_slice())
+                        .map_err(|error| error.to_string())?;
+                }
                 dictionaries
                     .remove(*source)
                     .map_err(|error| error.to_string())?;
@@ -969,23 +965,29 @@ fn compact_redb_segments(
                     .remove(*source)
                     .map_err(|error| error.to_string())?;
             }
-            dictionaries
-                .insert(run_id, encoded.dictionary.as_slice())
-                .map_err(|error| error.to_string())?;
-            run_meta
-                .insert(run_id, meta.as_slice())
-                .map_err(|error| error.to_string())?;
-            for (family, shard, value) in encoded.segments {
-                let key = segment_key(family, shard, run_id);
-                segments
-                    .insert(key.as_slice(), value.as_slice())
+            if let Some(encoded) = encoded {
+                dictionaries
+                    .insert(run_id, encoded.dictionary.as_slice())
                     .map_err(|error| error.to_string())?;
+                run_meta
+                    .insert(
+                        run_id,
+                        meta.as_ref().expect("live run has metadata").as_slice(),
+                    )
+                    .map_err(|error| error.to_string())?;
+                for (family, shard, value) in encoded.segments {
+                    let key = segment_key(family, shard, run_id);
+                    segments
+                        .insert(key.as_slice(), value.as_slice())
+                        .map_err(|error| error.to_string())?;
+                }
             }
             drop(dead_key_table);
             drop(run_meta);
             drop(dictionaries);
             drop(segments);
-            write.commit().map_err(|error| error.to_string())
+            write.commit().map_err(|error| error.to_string())?;
+            Ok(meta.is_some())
         },
     )?;
     let read = db.begin_read().map_err(|error| error.to_string())?;
@@ -1015,36 +1017,52 @@ fn compact_fjall_segments(
         events.len().div_ceil(batch_size),
         |level, output_run, sources| {
             let input = load_fjall_compaction_input(database, keyspaces, sources)?;
-            let encoded = encode_segments(input.memberships)?;
             let run_id = compacted_generation(level, output_run);
-            let meta = RunMeta {
-                run_id,
-                level,
-                min_event_key: input.min_event_key,
-                max_event_key: input.max_event_key,
-                live_events: encoded.dictionary_entries,
-            }
-            .encode()?;
+            let encoded = if input.memberships.is_empty() {
+                None
+            } else {
+                Some(encode_segments(input.memberships)?)
+            };
+            let meta = encoded
+                .as_ref()
+                .map(|encoded| {
+                    RunMeta {
+                        run_id,
+                        level,
+                        min_event_key: input.min_event_key,
+                        max_event_key: input.max_event_key,
+                        live_events: encoded.dictionary_entries,
+                    }
+                    .encode()
+                })
+                .transpose()?;
             let read = database.read_tx();
             let mut removed = Vec::new();
             let mut removed_death_blocks = Vec::new();
-            for entry in read.iter(&keyspaces.segments) {
-                let (key, _) = entry.into_inner().map_err(|error| error.to_string())?;
-                let key: [u8; 10] = key
-                    .as_ref()
-                    .try_into()
-                    .map_err(|_| "invalid Fjall segment key width".to_owned())?;
-                if sources.contains(&segment_generation(&key)) {
-                    removed.push(key);
+            for source in sources {
+                for family in Family::ALL {
+                    let last_shard = if family == Family::Global {
+                        0
+                    } else {
+                        postings::SHARD_MASK
+                    };
+                    for shard in 0..=last_shard {
+                        let key = segment_key(family, shard, *source);
+                        if read
+                            .get(&keyspaces.segments, key)
+                            .map_err(|error| error.to_string())?
+                            .is_some()
+                        {
+                            removed.push(key);
+                        }
+                    }
                 }
-            }
-            for entry in read.iter(&keyspaces.dead_keys) {
-                let (key, _) = entry.into_inner().map_err(|error| error.to_string())?;
-                let key: [u8; 16] = key
-                    .as_ref()
-                    .try_into()
-                    .map_err(|_| "invalid Fjall dead-block key width".to_owned())?;
-                if sources.contains(&dead_block_run(&key)) {
+                for entry in read.prefix(&keyspaces.dead_keys, source.to_be_bytes()) {
+                    let (key, _) = entry.into_inner().map_err(|error| error.to_string())?;
+                    let key: [u8; 16] = key
+                        .as_ref()
+                        .try_into()
+                        .map_err(|_| "invalid Fjall dead-block key width".to_owned())?;
                     removed_death_blocks.push(key);
                 }
             }
@@ -1060,17 +1078,24 @@ fn compact_fjall_segments(
                 write.remove(&keyspaces.dictionaries, source.to_be_bytes());
                 write.remove(&keyspaces.run_meta, source.to_be_bytes());
             }
-            write.insert(
-                &keyspaces.dictionaries,
-                run_id.to_be_bytes(),
-                encoded.dictionary,
-            );
-            write.insert(&keyspaces.run_meta, run_id.to_be_bytes(), meta);
-            for (family, shard, value) in encoded.segments {
-                let key = segment_key(family, shard, run_id);
-                write.insert(&keyspaces.segments, key, value);
+            if let Some(encoded) = encoded {
+                write.insert(
+                    &keyspaces.dictionaries,
+                    run_id.to_be_bytes(),
+                    encoded.dictionary,
+                );
+                write.insert(
+                    &keyspaces.run_meta,
+                    run_id.to_be_bytes(),
+                    meta.as_ref().expect("live run has metadata"),
+                );
+                for (family, shard, value) in encoded.segments {
+                    let key = segment_key(family, shard, run_id);
+                    write.insert(&keyspaces.segments, key, value);
+                }
             }
-            write.commit().map_err(|error| error.to_string())
+            write.commit().map_err(|error| error.to_string())?;
+            Ok(meta.is_some())
         },
     )?;
     let read = database.read_tx();
@@ -1093,32 +1118,27 @@ struct CompactionInput {
 
 fn compact_run_levels(
     total_batches: usize,
-    mut compact: impl FnMut(u8, usize, &BTreeSet<u64>) -> Result<(), String>,
+    mut compact: impl FnMut(u8, usize, &BTreeSet<u64>) -> Result<bool, String>,
 ) -> Result<(), String> {
+    let mut source_runs: Vec<_> = (0..total_batches as u64).collect();
     let mut level = 1u8;
-    let mut run_span = COMPACTION_FAN_IN;
-    while total_batches / run_span > 0 {
-        let output_runs = total_batches / run_span;
-        for output_run in 0..output_runs {
-            let source_generations: BTreeSet<_> = if level == 1 {
-                (0..COMPACTION_FAN_IN)
-                    .map(|offset| (output_run * COMPACTION_FAN_IN + offset) as u64)
-                    .collect()
-            } else {
-                (0..COMPACTION_FAN_IN)
-                    .map(|offset| {
-                        compacted_generation(level - 1, output_run * COMPACTION_FAN_IN + offset)
-                    })
-                    .collect()
-            };
-            compact(level, output_run, &source_generations)?;
+    while source_runs.len() >= COMPACTION_FAN_IN {
+        let mut output_runs = Vec::with_capacity(source_runs.len() / COMPACTION_FAN_IN);
+        for (output_run, source_chunk) in source_runs
+            .as_chunks::<COMPACTION_FAN_IN>()
+            .0
+            .iter()
+            .enumerate()
+        {
+            let source_generations = source_chunk.iter().copied().collect();
+            if compact(level, output_run, &source_generations)? {
+                output_runs.push(compacted_generation(level, output_run));
+            }
         }
+        source_runs = output_runs;
         level = level
             .checked_add(1)
             .ok_or_else(|| "compaction level overflow".to_owned())?;
-        run_span = run_span
-            .checked_mul(COMPACTION_FAN_IN)
-            .ok_or_else(|| "compaction span overflow".to_owned())?;
     }
     Ok(())
 }
@@ -1170,23 +1190,30 @@ fn load_redb_compaction_input(
         .iter()
         .map(|value| DictionaryView::parse(value.value())?.validate())
         .collect::<Result<_, String>>()?;
-    for entry in segments.iter().map_err(|error| error.to_string())? {
-        let (key, value) = entry.map_err(|error| error.to_string())?;
-        let key: [u8; 10] = key
-            .value()
-            .try_into()
-            .map_err(|_| "invalid Redb segment key width".to_owned())?;
-        let run_id = segment_generation(&key);
-        let Some(source_index) = source_ids.iter().position(|source| *source == run_id) else {
-            continue;
-        };
-        let segment = SegmentView::parse(value.value())?;
-        for membership in segment.memberships(dictionaries[source_index])? {
-            if deaths[source_index]
-                .as_ref()
-                .is_none_or(|keys| !keys.contains(membership.event.event_key))
-            {
-                memberships.push(membership);
+    for (source_index, source) in source_ids.iter().enumerate() {
+        for family in Family::ALL {
+            let last_shard = if family == Family::Global {
+                0
+            } else {
+                postings::SHARD_MASK
+            };
+            for shard in 0..=last_shard {
+                let key = segment_key(family, shard, *source);
+                let Some(value) = segments
+                    .get(key.as_slice())
+                    .map_err(|error| error.to_string())?
+                else {
+                    continue;
+                };
+                let segment = SegmentView::parse(value.value())?;
+                for membership in segment.memberships(dictionaries[source_index])? {
+                    if deaths[source_index]
+                        .as_ref()
+                        .is_none_or(|keys| !keys.contains(membership.event.event_key))
+                    {
+                        memberships.push(membership);
+                    }
+                }
             }
         }
     }
@@ -1228,23 +1255,30 @@ fn load_fjall_compaction_input(
         .map(|value| DictionaryView::parse(value)?.validate())
         .collect::<Result<_, String>>()?;
     let mut memberships = Vec::new();
-    for entry in read.iter(&keyspaces.segments) {
-        let (key, value) = entry.into_inner().map_err(|error| error.to_string())?;
-        let key: [u8; 10] = key
-            .as_ref()
-            .try_into()
-            .map_err(|_| "invalid Fjall segment key width".to_owned())?;
-        let run_id = segment_generation(&key);
-        let Some(source_index) = source_ids.iter().position(|source| *source == run_id) else {
-            continue;
-        };
-        let segment = SegmentView::parse(&value)?;
-        for membership in segment.memberships(dictionaries[source_index])? {
-            if deaths[source_index]
-                .as_ref()
-                .is_none_or(|keys| !keys.contains(membership.event.event_key))
-            {
-                memberships.push(membership);
+    for (source_index, source) in source_ids.iter().enumerate() {
+        for family in Family::ALL {
+            let last_shard = if family == Family::Global {
+                0
+            } else {
+                postings::SHARD_MASK
+            };
+            for shard in 0..=last_shard {
+                let key = segment_key(family, shard, *source);
+                let Some(value) = read
+                    .get(&keyspaces.segments, key)
+                    .map_err(|error| error.to_string())?
+                else {
+                    continue;
+                };
+                let segment = SegmentView::parse(&value)?;
+                for membership in segment.memberships(dictionaries[source_index])? {
+                    if deaths[source_index]
+                        .as_ref()
+                        .is_none_or(|keys| !keys.contains(membership.event.event_key))
+                    {
+                        memberships.push(membership);
+                    }
+                }
             }
         }
     }
@@ -1268,9 +1302,6 @@ fn compaction_input(
     memberships: Vec<Membership>,
     metas: &[RunMeta],
 ) -> Result<CompactionInput, String> {
-    if memberships.is_empty() {
-        return Err("compaction removed every source event".to_owned());
-    }
     Ok(CompactionInput {
         memberships,
         min_event_key: metas
@@ -1943,6 +1974,42 @@ mod tests {
         let encoded = encode_dead_keys(&keys).unwrap();
         assert_eq!(decode_dead_keys(&encoded).unwrap(), keys);
         assert!(encoded.len() < 8 + keys.len() * std::mem::size_of::<u64>());
+    }
+
+    #[test]
+    fn fully_dead_compaction_cohort_is_valid_and_emits_no_followup_run() {
+        let input = compaction_input(
+            Vec::new(),
+            &[
+                RunMeta {
+                    run_id: 1,
+                    level: 0,
+                    min_event_key: 1,
+                    max_event_key: 4,
+                    live_events: 4,
+                },
+                RunMeta {
+                    run_id: 2,
+                    level: 0,
+                    min_event_key: 5,
+                    max_event_key: 8,
+                    live_events: 4,
+                },
+            ],
+        )
+        .unwrap();
+        assert!(input.memberships.is_empty());
+        assert_eq!((input.min_event_key, input.max_event_key), (1, 8));
+
+        let mut cohorts = Vec::new();
+        compact_run_levels(COMPACTION_FAN_IN, |level, output, sources| {
+            cohorts.push((level, output, sources.clone()));
+            Ok(false)
+        })
+        .unwrap();
+        assert_eq!(cohorts.len(), 1);
+        assert_eq!(cohorts[0].0, 1);
+        assert_eq!(cohorts[0].2, (0..COMPACTION_FAN_IN as u64).collect());
     }
 
     #[test]
