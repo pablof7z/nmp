@@ -842,6 +842,7 @@ fn encode_compaction_cohort(
     let output_dictionary = DictionaryView::parse(&dictionary)
         .and_then(DictionaryView::validate)
         .map_err(packed_err)?;
+    drop(dictionaries);
 
     let segments = write_txn
         .open_table(POSTINGS_SEGMENTS)
@@ -865,13 +866,6 @@ fn encode_compaction_cohort(
             let mut segment_views = Vec::with_capacity(segment_values.len());
             for (source, value) in &segment_values {
                 let segment = SegmentView::parse(value).map_err(packed_err)?;
-                let source_dictionary = dictionaries
-                    .get(cohort[*source].run_id)
-                    .map_err(persist_err)?
-                    .ok_or_else(|| packed_err("run has no dictionary"))?;
-                let source_dictionary =
-                    DictionaryView::parse(source_dictionary.value()).map_err(packed_err)?;
-                segment.validate(source_dictionary).map_err(packed_err)?;
                 segment_views.push((*source, segment));
             }
             let sources: Vec<_> = segment_views
@@ -892,7 +886,6 @@ fn encode_compaction_cohort(
         }
     }
     drop(segments);
-    drop(dictionaries);
     if encoded_segments.is_empty() || postings == 0 {
         return Err(packed_err(
             "nonempty compaction dictionary produced no live segments",

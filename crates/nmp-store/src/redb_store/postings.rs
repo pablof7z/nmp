@@ -615,6 +615,7 @@ pub(super) fn compact_segment(
         if source.segment.family != family || source.segment.shard != shard {
             return Err("compaction segment is assigned to the wrong family or shard".to_owned());
         }
+        source.segment.validate_prefix_directory()?;
     }
 
     let prefix_count = count_live_compaction_prefixes(sources)?;
@@ -652,10 +653,11 @@ pub(super) fn compact_segment(
                 records[source] += 1;
             }
         }
-        if !matching
-            .iter()
-            .any(|(source, list)| posting_list_has_live(*list, sources[*source].ordinal_map))
-        {
+        let mut has_live = false;
+        for &(source, list) in &matching {
+            has_live |= posting_list_has_live(list, sources[source].ordinal_map)?;
+        }
+        if !has_live {
             continue;
         }
 
@@ -684,6 +686,7 @@ pub(super) fn compact_segment(
         }
         let mut posting_count = 0u32;
         let mut previous_output_ordinal = None;
+        let mut previous_event = None;
         while let Some(entry) = heap.pop() {
             push_next_compaction_posting(
                 &mut heap,
@@ -696,12 +699,18 @@ pub(super) fn compact_segment(
             if previous_output_ordinal == Some(entry.output_ordinal) {
                 continue;
             }
+            if previous_event
+                .is_some_and(|prior| canonical_order(&prior, &entry.event) != Ordering::Less)
+            {
+                return Err("compacted posting list violates canonical order".to_owned());
+            }
             value.extend_from_slice(&entry.event.created_at.to_be_bytes());
             value.extend_from_slice(&entry.output_ordinal.to_be_bytes());
             posting_count = posting_count
                 .checked_add(1)
                 .ok_or_else(|| "posting count exceeds u32".to_owned())?;
             previous_output_ordinal = Some(entry.output_ordinal);
+            previous_event = Some(entry.event);
         }
         if posting_count == 0 {
             return Err("live compaction prefix produced no postings".to_owned());
@@ -733,7 +742,7 @@ fn count_live_compaction_prefixes(
             }
             let record = candidate.segment.record(records[source])?;
             if record.prefix == prefix {
-                live |= posting_list_has_live(record.list, candidate.ordinal_map);
+                live |= posting_list_has_live(record.list, candidate.ordinal_map)?;
                 records[source] += 1;
             }
         }
@@ -761,11 +770,20 @@ fn minimum_compaction_prefix<'a>(
     Ok(minimum)
 }
 
-fn posting_list_has_live(list: PostingListView<'_>, ordinal_map: &[Option<u32>]) -> bool {
-    (0..list.posting_count).any(|posting| {
+fn posting_list_has_live(
+    list: PostingListView<'_>,
+    ordinal_map: &[Option<u32>],
+) -> Result<bool, String> {
+    for posting in 0..list.posting_count {
         let source_ordinal = list.dictionary_ordinal(posting);
-        source_ordinal < ordinal_map.len() && ordinal_map[source_ordinal].is_some()
-    })
+        let output_ordinal = ordinal_map
+            .get(source_ordinal)
+            .ok_or_else(|| "compaction posting dictionary ordinal is out of bounds".to_owned())?;
+        if output_ordinal.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn push_next_compaction_posting(
