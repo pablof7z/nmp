@@ -81,10 +81,136 @@ pub struct CommittedRowChanges {
     pub provenance_grew: Vec<CommittedCurrentRow>,
 }
 
-fn committed_current_row(row: &StoredEvent) -> CommittedCurrentRow {
+/// Resolver-private ownership envelope for one already-committed relay
+/// batch. The verified input events move into exactly one committed role;
+/// only the rare case where one relay echo satisfies several local intent
+/// owners needs additional full event values.
+struct CommittedRelayBatch {
+    row_changes: CommittedRowChanges,
+    satisfied_intents: Vec<(nmp_store::IntentId, nostr::Event)>,
+}
+
+impl CommittedRelayBatch {
+    fn classify(events: Vec<(nostr::Event, RelayObserved)>, outcomes: Vec<InsertOutcome>) -> Self {
+        assert_eq!(
+            events.len(),
+            outcomes.len(),
+            "EventStore::insert_batch_borrowed must return one outcome per input event"
+        );
+        let mut inserted = Vec::new();
+        let mut removed = Vec::new();
+        let mut provenance_grew = BTreeMap::<nostr::EventId, nostr::Event>::new();
+        let mut satisfied_intents = Vec::new();
+        let mut observed_by_id = BTreeMap::<nostr::EventId, BTreeSet<RelayUrl>>::new();
+
+        for ((event, observed), outcome) in events.into_iter().zip(outcomes) {
+            observed_by_id
+                .entry(event.id)
+                .or_default()
+                .insert(observed.relay);
+            match outcome {
+                InsertOutcome::Inserted => inserted.push(event),
+                InsertOutcome::Superseded { replaced } => {
+                    inserted.push(event);
+                    removed.push(replaced.event);
+                }
+                InsertOutcome::Kind5Processed { deleted } => {
+                    inserted.push(event);
+                    removed.extend(deleted.into_iter().map(|row| row.event));
+                }
+                InsertOutcome::Duplicate {
+                    provenance_grew: grew,
+                    satisfied_intents: owners,
+                } => {
+                    if grew {
+                        // The committed provenance row retains the owned
+                        // event. Each satisfied owner genuinely needs its
+                        // own value for the independent signing lifecycle.
+                        satisfied_intents.extend(
+                            owners
+                                .into_iter()
+                                .map(|intent_id| (intent_id, clone_relay_ingest_event(&event))),
+                        );
+                        provenance_grew.entry(event.id).or_insert(event);
+                    } else if !owners.is_empty() {
+                        // Move into the final owner and clone only for
+                        // additional owners; the common single-owner case
+                        // stays clone-free.
+                        let owner_count = owners.len();
+                        let mut event = Some(event);
+                        for (index, intent_id) in owners.into_iter().enumerate() {
+                            let canonical = if index + 1 == owner_count {
+                                event.take().expect("final owner consumes relay event")
+                            } else {
+                                clone_relay_ingest_event(
+                                    event.as_ref().expect("event retained until final owner"),
+                                )
+                            };
+                            satisfied_intents.push((intent_id, canonical));
+                        }
+                    }
+                }
+                InsertOutcome::Stale | InsertOutcome::Refused(_) => {}
+            }
+        }
+
+        let inserted_ids: BTreeSet<_> = inserted.iter().map(|event| event.id).collect();
+        let removed_ids: BTreeSet<_> = removed.iter().map(|event| event.id).collect();
+        let row_changes = CommittedRowChanges {
+            inserted: inserted
+                .into_iter()
+                .filter(|event| !removed_ids.contains(&event.id))
+                .map(|event| {
+                    let observed_relays = observed_by_id
+                        .remove(&event.id)
+                        .expect("inserted input event has observed relays");
+                    CommittedCurrentRow {
+                        event,
+                        observed_relays,
+                    }
+                })
+                .collect(),
+            removed: removed
+                .into_iter()
+                .filter(|event| !inserted_ids.contains(&event.id))
+                .collect(),
+            provenance_grew: provenance_grew
+                .into_iter()
+                .filter(|(event_id, _)| {
+                    !inserted_ids.contains(event_id) && !removed_ids.contains(event_id)
+                })
+                .map(|(event_id, event)| {
+                    let observed_relays = observed_by_id
+                        .remove(&event_id)
+                        .expect("duplicate input event has observed relays");
+                    CommittedCurrentRow {
+                        event,
+                        observed_relays,
+                    }
+                })
+                .collect(),
+        };
+        Self {
+            row_changes,
+            satisfied_intents,
+        }
+    }
+}
+
+fn committed_changed_events(changes: &CommittedRowChanges) -> Vec<&nostr::Event> {
+    changes
+        .inserted
+        .iter()
+        .map(|row| &row.event)
+        .chain(changes.removed.iter())
+        .chain(changes.provenance_grew.iter().map(|row| &row.event))
+        .collect()
+}
+
+fn committed_current_row(row: StoredEvent) -> CommittedCurrentRow {
     CommittedCurrentRow {
-        event: row.event.clone(),
-        observed_relays: row.provenance.seen.keys().cloned().collect(),
+        event: row.event,
+        observed_relays: row.provenance.seen.into_keys().collect(),
     }
 }
 
@@ -98,7 +224,7 @@ fn committed_row_changes(
 ) -> CommittedRowChanges {
     let mut inserted_by_id = BTreeMap::<nostr::EventId, CommittedCurrentRow>::new();
     for row in inserted {
-        let current = committed_current_row(&row);
+        let current = committed_current_row(row);
         inserted_by_id
             .entry(current.event.id)
             .and_modify(|prior| {
@@ -659,107 +785,17 @@ impl<S: EventStore> Engine<S> {
         // exactly which shared roots changed without re-querying every
         // handle's current result set.
         let before_shapes = self.projection_shapes();
-        let mut inserted: Vec<nostr::Event> = Vec::new();
-        let mut removed: Vec<nostr::Event> = Vec::new();
-        let mut provenance_grew: Vec<nostr::Event> = Vec::new();
-        let mut satisfied_intents = Vec::new();
-        let mut observed_by_id =
-            BTreeMap::<nostr::EventId, (nostr::Event, BTreeSet<RelayUrl>)>::new();
-        for (event, observed) in &events {
-            let entry = observed_by_id
-                .entry(event.id)
-                .or_insert_with(|| (clone_relay_ingest_event(event), BTreeSet::new()));
-            entry.1.insert(observed.relay.clone());
-        }
-        let input_events: Vec<_> = events
-            .iter()
-            .map(|(event, _from)| clone_relay_ingest_event(event))
-            .collect();
         #[cfg(feature = "bench-instrumentation")]
         crate::ingest_attribution::prepare(prepare_started.elapsed());
         #[cfg(feature = "bench-instrumentation")]
         let store_started = std::time::Instant::now();
-        let outcomes = self.store.insert_batch(events)?;
+        let outcomes = self.store.insert_batch_borrowed(&events)?;
         #[cfg(feature = "bench-instrumentation")]
         crate::ingest_attribution::store(store_started.elapsed());
         #[cfg(feature = "bench-instrumentation")]
         let classify_started = std::time::Instant::now();
-        for (event, outcome) in input_events.into_iter().zip(outcomes) {
-            match outcome {
-                InsertOutcome::Inserted => inserted.push(event),
-                InsertOutcome::Superseded { replaced } => {
-                    inserted.push(event);
-                    removed.push(replaced.event);
-                }
-                InsertOutcome::Kind5Processed { deleted } => {
-                    inserted.push(event);
-                    removed.extend(deleted.into_iter().map(|se| se.event));
-                }
-                // Never stored -- neither inserted nor removed: a
-                // duplicate/stale event was already reflected in the store,
-                // and a refused event (already-expired, or tombstoned)
-                // never entered it at all.
-                InsertOutcome::Duplicate {
-                    provenance_grew: grew,
-                    satisfied_intents: owners,
-                } => {
-                    if grew {
-                        provenance_grew.push(clone_relay_ingest_event(&event));
-                    }
-                    satisfied_intents.extend(
-                        owners
-                            .into_iter()
-                            .map(|intent_id| (intent_id, clone_relay_ingest_event(&event))),
-                    );
-                }
-                InsertOutcome::Stale | InsertOutcome::Refused(_) => {}
-            }
-        }
-        let inserted_ids: BTreeSet<_> = inserted.iter().map(|event| event.id).collect();
-        let removed_ids: BTreeSet<_> = removed.iter().map(|event| event.id).collect();
-        let provenance_grew_ids: BTreeSet<_> =
-            provenance_grew.iter().map(|event| event.id).collect();
-        let row_changes = CommittedRowChanges {
-            inserted: inserted
-                .iter()
-                .filter(|event| !removed_ids.contains(&event.id))
-                .map(|event| {
-                    let (_, observed_relays) = observed_by_id
-                        .get(&event.id)
-                        .expect("inserted input event has observed relays");
-                    CommittedCurrentRow {
-                        event: clone_relay_ingest_event(event),
-                        observed_relays: observed_relays.clone(),
-                    }
-                })
-                .collect(),
-            removed: removed
-                .iter()
-                .filter(|event| !inserted_ids.contains(&event.id))
-                .map(clone_relay_ingest_event)
-                .collect(),
-            provenance_grew: provenance_grew_ids
-                .into_iter()
-                .filter(|event_id| {
-                    !inserted_ids.contains(event_id) && !removed_ids.contains(event_id)
-                })
-                .map(|event_id| {
-                    let (event, observed_relays) = observed_by_id
-                        .get(&event_id)
-                        .expect("duplicate input event has observed relays");
-                    CommittedCurrentRow {
-                        event: clone_relay_ingest_event(event),
-                        observed_relays: observed_relays.clone(),
-                    }
-                })
-                .collect(),
-        };
-        let changed_events: Vec<_> = inserted
-            .iter()
-            .chain(removed.iter())
-            .chain(provenance_grew.iter())
-            .map(clone_relay_ingest_event)
-            .collect();
+        let batch = CommittedRelayBatch::classify(events, outcomes);
+        let changed_events = committed_changed_events(&batch.row_changes);
         #[cfg(feature = "bench-instrumentation")]
         crate::ingest_attribution::classify(classify_started.elapsed());
         #[cfg(feature = "bench-instrumentation")]
@@ -768,15 +804,17 @@ impl<S: EventStore> Engine<S> {
         // evidence even though its projected VALUE is unchanged. Seed the
         // same generic Derived recompute lane so the old atom is replaced
         // by one carrying the enlarged source-relay set.
-        let mut inserted_or_provenance_changed = inserted;
-        inserted_or_provenance_changed.extend(provenance_grew);
-        let delta = self.react(inserted_or_provenance_changed, removed)?;
+        let delta = self.react(&changed_events)?;
         let affected_handles = self.affected_handles(&before_shapes, &changed_events);
         #[cfg(feature = "bench-instrumentation")]
         {
             crate::ingest_attribution::react(react_started.elapsed());
             crate::ingest_attribution::total(total_started.elapsed());
         }
+        let CommittedRelayBatch {
+            row_changes,
+            satisfied_intents,
+        } = batch;
         Ok(RelayIngestResult {
             committed: CommittedMutationResult {
                 delta,
@@ -816,7 +854,7 @@ impl<S: EventStore> Engine<S> {
     fn affected_handles(
         &self,
         before_shapes: &HashMap<NodeId, ProjectionShape>,
-        changed_events: &[nostr::Event],
+        changed_events: &[&nostr::Event],
     ) -> BTreeSet<HandleId> {
         let after_shapes = self.projection_shapes();
         let affected_roots: BTreeSet<NodeId> = after_shapes
@@ -894,14 +932,9 @@ impl<S: EventStore> Engine<S> {
             | AcceptOutcome::Stale { .. }
             | AcceptOutcome::Refused(_) => {}
         }
-        let inserted_events: Vec<_> = inserted_rows.iter().map(|row| row.event.clone()).collect();
-        let changed_events: Vec<_> = inserted_events
-            .iter()
-            .chain(removed_rows.iter())
-            .cloned()
-            .collect();
-        let row_changes = committed_row_changes(inserted_rows, removed_rows.clone());
-        let delta = self.react(inserted_events, removed_rows)?;
+        let row_changes = committed_row_changes(inserted_rows, removed_rows);
+        let changed_events = committed_changed_events(&row_changes);
+        let delta = self.react(&changed_events)?;
         let affected_handles = self.affected_handles(&before_shapes, &changed_events);
         Ok(LocalAcceptResult {
             outcome,
@@ -932,12 +965,9 @@ impl<S: EventStore> Engine<S> {
                 if let Some(restored) = restored {
                     inserted_rows.push((**restored).clone());
                 }
-                let inserted_events: Vec<_> =
-                    inserted_rows.iter().map(|row| row.event.clone()).collect();
-                let mut changed_events = inserted_events.clone();
-                changed_events.push(removed_pending.clone());
-                let row_changes = committed_row_changes(inserted_rows, [removed_pending.clone()]);
-                let delta = self.react(inserted_events, vec![removed_pending])?;
+                let row_changes = committed_row_changes(inserted_rows, [removed_pending]);
+                let changed_events = committed_changed_events(&row_changes);
+                let delta = self.react(&changed_events)?;
                 let affected_handles = self.affected_handles(&before_shapes, &changed_events);
                 Ok(CommittedMutationResult {
                     delta,
@@ -968,9 +998,9 @@ impl<S: EventStore> Engine<S> {
         removed: Vec<nostr::Event>,
     ) -> Result<CommittedMutationResult, PersistenceError> {
         let before_shapes = self.projection_shapes();
-        let changed_events = removed.clone();
-        let row_changes = committed_row_changes(Vec::<StoredEvent>::new(), removed.clone());
-        let delta = self.react(Vec::new(), removed)?;
+        let row_changes = committed_row_changes(Vec::<StoredEvent>::new(), removed);
+        let changed_events = committed_changed_events(&row_changes);
+        let delta = self.react(&changed_events)?;
         let affected_handles = self.affected_handles(&before_shapes, &changed_events);
         Ok(CommittedMutationResult {
             delta,
@@ -994,13 +1024,9 @@ impl<S: EventStore> Engine<S> {
     /// |symmetric diff|`) holds with zero new bookkeeping.
     /// `ingest_observed`/`retract` are both thin callers of this; the four
     /// §1.4 feeders differ only in who populates `removed`.
-    fn react(
-        &mut self,
-        inserted: Vec<nostr::Event>,
-        removed: Vec<nostr::Event>,
-    ) -> Result<DemandDelta, PersistenceError> {
+    fn react(&mut self, changed_events: &[&nostr::Event]) -> Result<DemandDelta, PersistenceError> {
         let drop_delta = self.drain_pending_drops();
-        if inserted.is_empty() && removed.is_empty() {
+        if changed_events.is_empty() {
             return Ok(drop_delta);
         }
         self.metrics.recompute_passes += 1;
@@ -1017,10 +1043,9 @@ impl<S: EventStore> Engine<S> {
             };
             if let Some(cf) = self.graph.wide_concrete(d.inner) {
                 let nf = cf.to_nostr();
-                if inserted
+                if changed_events
                     .iter()
-                    .chain(removed.iter())
-                    .any(|e| nf.match_event(e, MatchEventOptions::new()))
+                    .any(|event| nf.match_event(event, MatchEventOptions::new()))
                 {
                     seed.insert(derived_id);
                 }

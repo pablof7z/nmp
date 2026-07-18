@@ -1081,6 +1081,28 @@ pub trait EventStore {
             .collect()
     }
 
+    /// Borrow a relay-delivery batch while its owner retains the verified
+    /// event allocations for post-commit classification. This is the
+    /// resolver's internal ingest seam, not an application-facing store
+    /// operation. Persistent backends override it to encode directly from
+    /// the borrowed events; the default preserves the exact ordered
+    /// [`Self::insert`] semantics for simple/custom stores with one defensive
+    /// event clone per input.
+    #[doc(hidden)]
+    fn insert_batch_borrowed(
+        &mut self,
+        events: &[(Event, RelayObserved)],
+    ) -> Result<Vec<InsertOutcome>, PersistenceError> {
+        events
+            .iter()
+            .map(|(event, from)| {
+                #[cfg(feature = "bench-instrumentation")]
+                crate::ingest_attribution::event_clone();
+                self.insert(event.clone(), from.clone())
+            })
+            .collect()
+    }
+
     /// Query current winners only (never a superseded/stale event), matched
     /// via `nostr::Filter::match_event`, each with its provenance attached.
     /// Fallible for the same reason as [`EventStore::insert`] (issue #122):

@@ -1,3 +1,4 @@
+#[cfg(feature = "bench-instrumentation")]
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::{BTreeSet, HashSet};
 use std::error::Error;
@@ -24,15 +25,19 @@ use tungstenite::{accept, Message};
 
 pub type ProbeError = Box<dyn Error + Send + Sync>;
 
-const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v8";
+const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v9";
 const CORPUS_SCHEMA: &str = "nmp-relay-ingest-corpus-v1";
 const BASE_CREATED_AT: u64 = 1_700_000_000;
 
+#[cfg(feature = "bench-instrumentation")]
 struct CountingAllocator;
 
+#[cfg(feature = "bench-instrumentation")]
 static ALLOCATION_OPS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "bench-instrumentation")]
 static ALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(feature = "bench-instrumentation")]
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOCATION_OPS.fetch_add(1, Ordering::Relaxed);
@@ -58,13 +63,20 @@ unsafe impl GlobalAlloc for CountingAllocator {
 }
 
 #[global_allocator]
+#[cfg(feature = "bench-instrumentation")]
 static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator;
 
+#[cfg(feature = "bench-instrumentation")]
 fn allocator_snapshot() -> (u64, u64) {
     (
         ALLOCATION_OPS.load(Ordering::Relaxed),
         ALLOCATED_BYTES.load(Ordering::Relaxed),
     )
+}
+
+#[cfg(not(feature = "bench-instrumentation"))]
+fn allocator_snapshot() -> (u64, u64) {
+    (0, 0)
 }
 
 #[derive(Debug, Clone)]
@@ -891,7 +903,7 @@ fn ingest_attribution_json() -> serde_json::Value {
             "max_bridge_batch_bytes": engine.max_bridge_batch_bytes,
             "bridge_applied_wait_ns": engine.bridge_applied_wait_ns,
             "engine_batch_process_ns": engine.engine_batch_process_ns,
-            "projection_event_clones": engine.projection_event_clones
+            "committed_projection_event_clones": engine.projection_event_clones
         },
         "resolver": {
             "batches": resolver.batches, "events": resolver.events, "max_batch_events": resolver.max_batch_events,
