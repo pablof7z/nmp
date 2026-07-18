@@ -547,12 +547,16 @@ impl MemoryStore {
     /// Add `se` to the expiration index if it carries a NIP-40 `expiration`
     /// tag. Called for every row entering `by_id`.
     fn index_expiration(&mut self, se: &StoredEvent) {
+        #[cfg(feature = "bench-instrumentation")]
+        let started = std::time::Instant::now();
         if let Some(ts) = se.event.tags.expiration().copied() {
             self.expiration_index
                 .entry(ts)
                 .or_default()
                 .insert(se.event.id);
         }
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::memory_expiration_index(started.elapsed());
     }
 
     /// Remove `se` from the expiration index, if it was in it. Called for
@@ -580,6 +584,8 @@ impl MemoryStore {
     /// adoption) never requires re-indexing, only an actual
     /// insert-or-remove from `by_id` does.
     fn index_event(&mut self, se: &StoredEvent) {
+        #[cfg(feature = "bench-instrumentation")]
+        let started = std::time::Instant::now();
         let id = se.event.id;
         let author = se.event.pubkey;
         let kind = se.event.kind.as_u16();
@@ -594,6 +600,8 @@ impl MemoryStore {
                     .insert((letter, value.to_string(), created_at, id));
             }
         }
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::memory_query_index(started.elapsed());
     }
 
     /// Remove `se` from every secondary query index — the exact inverse
@@ -1119,6 +1127,8 @@ impl EventStore for MemoryStore {
         event: Event,
         from: RelayObserved,
     ) -> Result<InsertOutcome, PersistenceError> {
+        #[cfg(feature = "bench-instrumentation")]
+        let insert_started = std::time::Instant::now();
         // Refused at the door FIRST: an already-expired event is never
         // stored, so it never touches dedup or supersession at all.
         if event.is_expired_at(&from.at) {
@@ -1181,6 +1191,8 @@ impl EventStore for MemoryStore {
         }
 
         let is_deletion = event.kind == Kind::EventDeletion;
+        #[cfg(feature = "bench-instrumentation")]
+        let event_build_started = std::time::Instant::now();
         let stored = StoredEvent {
             event: {
                 #[cfg(feature = "bench-instrumentation")]
@@ -1189,13 +1201,19 @@ impl EventStore for MemoryStore {
             },
             provenance: Provenance::first_observation(from),
         };
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::memory_event_build(event_build_started.elapsed());
 
         let outcome = match address_key_for(&event) {
             None => {
                 // Regular event: no competition, always inserted.
                 self.index_expiration(&stored);
                 self.index_event(&stored);
+                #[cfg(feature = "bench-instrumentation")]
+                let canonical_started = std::time::Instant::now();
                 self.by_id.insert(event.id, stored);
+                #[cfg(feature = "bench-instrumentation")]
+                crate::ingest_attribution::memory_canonical_insert(canonical_started.elapsed());
                 InsertOutcome::Inserted
             }
             Some(key) => match self.addr_index.get(&key).copied() {
@@ -1204,7 +1222,11 @@ impl EventStore for MemoryStore {
                     let id = event.id;
                     self.index_expiration(&stored);
                     self.index_event(&stored);
+                    #[cfg(feature = "bench-instrumentation")]
+                    let canonical_started = std::time::Instant::now();
                     self.by_id.insert(id, stored);
+                    #[cfg(feature = "bench-instrumentation")]
+                    crate::ingest_attribution::memory_canonical_insert(canonical_started.elapsed());
                     self.addr_index.insert(key, id);
                     InsertOutcome::Inserted
                 }
@@ -1225,7 +1247,13 @@ impl EventStore for MemoryStore {
                         self.unindex_event(&replaced);
                         self.index_expiration(&stored);
                         self.index_event(&stored);
+                        #[cfg(feature = "bench-instrumentation")]
+                        let canonical_started = std::time::Instant::now();
                         self.by_id.insert(new_id, stored);
+                        #[cfg(feature = "bench-instrumentation")]
+                        crate::ingest_attribution::memory_canonical_insert(
+                            canonical_started.elapsed(),
+                        );
                         self.addr_index.insert(key, new_id);
                         InsertOutcome::Superseded {
                             replaced: Box::new(replaced),
@@ -1245,10 +1273,14 @@ impl EventStore for MemoryStore {
         if is_deletion {
             if let InsertOutcome::Inserted = outcome {
                 let deleted = self.process_kind5_deletions(&event);
+                #[cfg(feature = "bench-instrumentation")]
+                crate::ingest_attribution::memory_insert(insert_started.elapsed());
                 return Ok(InsertOutcome::Kind5Processed { deleted });
             }
         }
 
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::memory_insert(insert_started.elapsed());
         Ok(outcome)
     }
 
