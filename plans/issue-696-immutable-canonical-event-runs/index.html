@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Immutable canonical event runs</title>
+    <link rel="stylesheet" href="../../assets/style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <nav class="topbar">
+        <a href="../../">Planning pages</a>
+        
+      </nav>
+      <section class="hero">
+        <div class="eyebrow">Architecture plan</div>
+        <h1>Immutable canonical event runs</h1>
+        <p class="summary">Test whether packing byte-identical canonical event values into bounded immutable Redb runs removes per-event copy-on-write work without larger engine batches or query/recovery tradeoffs.</p>
+        <div class="meta">
+          <span class="pill ready">Ready to implement</span>
+          <span class="pill">84 percent certainty</span>
+        </div>
+      </section>
+      <div class="grid">
+        <div>
+
+          <section class="section">
+            <h2>Boundaries</h2>
+            <pre class="mermaid">flowchart LR
+  E[Existing portable event bytes] --&gt; C[Bounded canonical run encoder]
+  C --&gt; R[One immutable Redb run value]
+  K[Event key] --&gt; G[Small range catalog]
+  G --&gt; R
+  R --&gt; O[Checked offset lookup]
+  O --&gt; V[Existing borrowed event view]
+  V --&gt; Q[Exact query and materialization]</pre>
+          </section>
+          <section class="section">
+            <h2>Very High Level</h2>
+            <p>Epic #612 remains constrained by durable Redb work. Packed postings removed row-per-index-membership amplification, and larger engine cohorts reduce commit count but exceed the memory gate. The remaining per-event physical mutation is the canonical event value itself: NMP still inserts one Redb `EVENTS` row for every accepted event.
+
+Build a benchmark-only comparator that keeps the current event-ID table, observation rows, relay dictionary, packed postings, transaction size, durability, and event codec unchanged. The candidate concatenates each transaction&#x27;s existing portable event values into one immutable canonical run with a checked offset directory. A tiny range catalog maps an event key to its run, then the offset directory returns the exact borrowed event bytes. No new parser, compression, truncation, or alternate NIP-01 representation is introduced.
+
+Prove exact event-key and ID lookup, borrowed matching, materialization, deletions through the existing death overlay, selective query results, truncation refusal, abrupt-exit atomicity, and exact reopen. Run at least 10 alternating fresh-process pairs against packed Redb and include mandatory compaction.
+
+Stop after the benchmark unless maintenance-inclusive store wall falls at least 20%, projected production improvement reaches 10%, writes do not increase, and RSS, stored bytes, reopen, and query p95 stay within 10%. A passing physical ceiling opens a separate governed-production issue; a failure reverts the adapter and merges only evidence.</p>
+          </section>
+          <section class="section">
+            <h2>Existing Rules Or ADRs</h2>
+            <ul><li>Issue #696 captures the consequence before implementation and links the work to epic #612.</li><li>The experiment preserves the existing portable event codec, exact event IDs, packed ordering, synchronous Redb transaction boundary, and facts-before-claims recovery rule.</li><li>No public noun, FFI/SDK surface, production schema, migration, or destructive API changes in this benchmark-only issue.</li></ul>
+          </section>
+          <section class="section">
+            <h2>Rule Tension And Tightening</h2>
+            <h3>Possible loosening</h3>
+            <ul><li>No correctness or durability rule needs loosening. Dead canonical bytes remaining inside immutable runs count against stored-byte and maintenance gates rather than being hidden.</li></ul>
+            <h3>Possible tightening</h3>
+            <ul><li>Consider requiring future immutable-run formats to publish a checked offset-directory codec plus corruption and range-boundary falsifiers before performance qualification.</li></ul>
+          </section>
+          <section class="section">
+            <h2>Alternatives Considered</h2>
+            <ul><li>Pack event IDs as well: deferred because retaining the exact point-lookup table isolates canonical-value row cost and avoids conflating lookup design.</li><li>Pack mutable relay observations in the first stage: deferred because provenance updates require a separate overlay/compaction policy; event values are immutable and provide the cheaper falsifier.</li><li>Append canonical bytes to a second file: rejected for stage 1 because it introduces a cross-file recovery protocol before proving the row-shape ceiling.</li><li>Increase transaction size again: #694 reduced commit cost but failed throughput and RSS gates.</li></ul>
+          </section>
+        </div>
+        <aside>
+          <section class="card">
+            <h2>TTS Version</h2>
+            <audio controls preload="metadata" src="https://blossom.primal.net/4efe0dbffe5fbb84b6cb2f55caff4b6ab0dbfbf06401acd50380249664910fbc.mp3"></audio>
+            <p>Audio-friendly narration generated from the planning payload.</p>
+          </section>
+          <section class="card">
+            <h2>Certainty</h2>
+            <div class="certainty ">84%</div>
+            <p>Ready to implement.</p>
+          </section>
+          <section class="card links">
+            <h2>Links</h2>
+            
+            <a href="https://blossom.primal.net/4efe0dbffe5fbb84b6cb2f55caff4b6ab0dbfbf06401acd50380249664910fbc.mp3">Open narration</a>
+            <a href="../../docs/plans/issue-696-immutable-canonical-event-runs/plan.md">Detailed plan file</a>
+          </section>
+        </aside>
+      </div>
+    </main>
+
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral" });
+    </script>
+  </body>
+</html>
