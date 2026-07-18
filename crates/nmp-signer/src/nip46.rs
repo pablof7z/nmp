@@ -854,6 +854,10 @@ struct PendingRequest {
     reply: PendingSignerSender<String>,
 }
 
+// Pool events stay owned values across this already-bounded channel. Boxing
+// the largest variant would add a heap allocation to every NIP-46 pool event
+// only to reduce the private enum's stack size.
+#[allow(clippy::large_enum_variant)]
 enum WorkerMsg {
     Pool(PoolEvent),
     Request {

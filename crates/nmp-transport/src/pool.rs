@@ -331,6 +331,9 @@ impl RelayFrame {
     /// The translator drops every temporary verifier reference before sink
     /// delivery, making `Arc::try_unwrap` the production path. The clone is a
     /// defensive fallback for public callers that retained a frame clone.
+    // The error intentionally owns the exact raw websocket text needed for a
+    // fail-closed cache fallback. Boxing it would allocate on every hit.
+    #[allow(clippy::result_large_err)]
     pub fn into_event(self) -> Result<Event, Self> {
         self.into_observed_event().map(|(event, _)| event)
     }
@@ -348,6 +351,9 @@ impl RelayFrame {
     }
 
     /// Move an EVENT and its preparse cache candidate into the engine.
+    // See `into_event`: retaining the allocation-free owned error is a
+    // measured hot-path choice, not an accidentally large error payload.
+    #[allow(clippy::result_large_err)]
     pub fn into_observed_event(
         self,
     ) -> Result<(Event, Option<CommittedObservationCandidate>), Self> {

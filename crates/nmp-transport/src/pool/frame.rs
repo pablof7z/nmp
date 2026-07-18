@@ -158,23 +158,16 @@ pub(super) fn classify_text_with_candidate(
     observation_candidate: Option<CommittedObservationCandidate>,
 ) -> Option<RelayFrame> {
     #[cfg(feature = "bench-instrumentation")]
-    let diagnostic_digest = {
-        diagnostic_duplicate_ceiling::lookup(text).map(|(digest, hit)| {
-            if let Some(hit) = hit {
-                return Err(RelayFrame::diagnostic_duplicate_ceiling_token(
-                    hit.event_kind,
-                    hit.encoded_bytes,
-                ));
-            }
-            Ok(digest)
-        })
+    let diagnostic_digest = match diagnostic_duplicate_ceiling::lookup(text) {
+        Some((_, Some(hit))) => {
+            return Some(RelayFrame::diagnostic_duplicate_ceiling_token(
+                hit.event_kind,
+                hit.encoded_bytes,
+            ));
+        }
+        Some((digest, None)) => Some(digest),
+        None => None,
     };
-    #[cfg(feature = "bench-instrumentation")]
-    if let Some(Err(hit)) = diagnostic_digest {
-        return Some(hit);
-    }
-    #[cfg(feature = "bench-instrumentation")]
-    let diagnostic_digest = diagnostic_digest.and_then(Result::ok);
     #[cfg(feature = "bench-instrumentation")]
     let started = std::time::Instant::now();
     let parsed = RelayMessage::from_json(text).ok();

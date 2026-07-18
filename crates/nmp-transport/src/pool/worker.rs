@@ -1473,6 +1473,10 @@ fn flush_socket(socket: &mut RelaySocket) -> FlushResult {
     }
 }
 
+// These are the worker loop's already-borrowed state owners. Grouping them
+// behind another context object would add indirection without reducing
+// ownership or lifetime complexity at this private boundary.
+#[allow(clippy::too_many_arguments)]
 fn drain_reads(
     slot: u32,
     generation: u64,
