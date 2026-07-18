@@ -4,7 +4,7 @@ use super::outbox::{
     add_addr_claimant_in_txn, add_claimant_in_txn, intent_key, is_suppressed_in_txn, receipt_key,
     AddrClaimant, OutboxIntentRecord, OutboxReceiptRecord, SuppressClaimRecord,
 };
-use super::query::{expiration_key, insert_query_index_rows, AddrTombstoneRecord};
+use super::query::{expiration_key, AddrTombstoneRecord};
 use super::schema::{id_tombstone_key, persist_err};
 use super::{
     address_key_for, address_key_for_coordinate, candidate_wins, BTreeSet, Event, EventId, HashMap,
@@ -68,7 +68,7 @@ pub(super) fn remove_row_in_txn<T: GovernedIngestTxn>(
     }
 
     txn.remove_canonical(event_key, &id)?;
-    txn.remove_indexes(&se.event)?;
+    txn.remove_indexes(&se.event, event_key)?;
 
     if let Some(addr_key) = address_key_for(&se.event) {
         let addr_key_str = addr_key.to_redb_key();
@@ -591,8 +591,7 @@ pub(super) fn reinsert_stashed_in_txn(
     let result = match address_key_for(&se.event) {
         None => {
             let event_key = txn.canonical.insert_new(&se.event, &se.provenance)?;
-            insert_query_index_rows(&mut txn.canonical, &mut txn.indexes, &se.event, event_key)
-                .map_err(persist_err)?;
+            txn.insert_indexes(&se.event, event_key)?;
             if let Some(ts) = se.event.tags.expiration().copied() {
                 let exp_key = expiration_key(ts, &se.event.id);
                 txn.expiration_index
@@ -615,13 +614,7 @@ pub(super) fn reinsert_stashed_in_txn(
                     txn.addr_index
                         .insert(addr_key_str.as_str(), event_key)
                         .map_err(persist_err)?;
-                    insert_query_index_rows(
-                        &mut txn.canonical,
-                        &mut txn.indexes,
-                        &se.event,
-                        event_key,
-                    )
-                    .map_err(persist_err)?;
+                    txn.insert_indexes(&se.event, event_key)?;
                     if let Some(ts) = se.event.tags.expiration().copied() {
                         let exp_key = expiration_key(ts, &se.event.id);
                         txn.expiration_index
@@ -646,13 +639,7 @@ pub(super) fn reinsert_stashed_in_txn(
                         txn.addr_index
                             .insert(addr_key_str.as_str(), event_key)
                             .map_err(persist_err)?;
-                        insert_query_index_rows(
-                            &mut txn.canonical,
-                            &mut txn.indexes,
-                            &se.event,
-                            event_key,
-                        )
-                        .map_err(persist_err)?;
+                        txn.insert_indexes(&se.event, event_key)?;
                         if let Some(ts) = se.event.tags.expiration().copied() {
                             let exp_key = expiration_key(ts, &se.event.id);
                             txn.expiration_index
