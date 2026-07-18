@@ -60,10 +60,16 @@ public struct NMPReferenceObservationFactory: @unchecked Sendable {
         NMPReferenceObservationFactory { demand, receive in
             let query = try engine.observe(demand)
             let task = Task { @MainActor in
-                for await batch in query {
-                    guard !Task.isCancelled else { break }
-                    receive(batch)
-                }
+                // #680: an observation is a throwing `AsyncSequence` (its
+                // `next()` surfaces the single-consumer misuse error). This is
+                // the sole consumer, so a throw here is terminal teardown, not
+                // misuse — end the iteration quietly.
+                do {
+                    for try await batch in query {
+                        guard !Task.isCancelled else { break }
+                        receive(batch)
+                    }
+                } catch {}
             }
             return NMPReferenceObservationHandle(cancellation: {
                 task.cancel()
