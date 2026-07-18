@@ -16,7 +16,8 @@ use redb::ReadableTableMetadata;
 #[cfg(test)]
 use super::postings::validate_run_metas;
 use super::postings::{
-    encode_run, merge_dead_blocks, shard_for, DeadKeys, DictionaryView, Family, Membership,
+    compact_segment, encode_dictionary, encode_run, merge_dead_blocks, shard_for,
+    CompactionSegmentSource, DeadKeys, DictionaryView, EncodedRun, Family, Membership,
     PostingCursor, Prefix, RunEvent, RunMeta, SegmentView, MAX_DEATH_BLOCKS,
 };
 use super::query::tag_index_prefix;
@@ -780,44 +781,139 @@ fn apply_run_deaths(
     rewrite_run_without_dead(write_txn, meta, &all_dead)
 }
 
-fn load_run_memberships(
+fn encode_compaction_cohort(
     write_txn: &redb::WriteTransaction,
-    run_id: u64,
-) -> Result<Vec<Membership>, PersistenceError> {
+    cohort: &[RunMeta],
+    dead: &[Option<DeadKeys>],
+) -> Result<Option<(EncodedRun, u64, u64)>, PersistenceError> {
+    if cohort.len() != dead.len() {
+        return Err(packed_err("compaction death-map count mismatch"));
+    }
     let dictionaries = write_txn
         .open_table(POSTINGS_DICTIONARIES)
         .map_err(persist_err)?;
-    let dictionary_bytes = dictionaries
-        .get(run_id)
-        .map_err(persist_err)?
-        .ok_or_else(|| packed_err("run has no dictionary"))?
-        .value()
-        .to_vec();
-    let dictionary = DictionaryView::parse(&dictionary_bytes)
+    let mut dictionary_entries = Vec::new();
+    let mut ordinal_maps = Vec::with_capacity(cohort.len());
+    for (source, meta) in cohort.iter().enumerate() {
+        let dictionary_bytes = dictionaries
+            .get(meta.run_id)
+            .map_err(persist_err)?
+            .ok_or_else(|| packed_err("run has no dictionary"))?;
+        let dictionary = DictionaryView::parse(dictionary_bytes.value())
+            .and_then(DictionaryView::validate)
+            .map_err(packed_err)?;
+        let mut ordinal_map = Vec::with_capacity(dictionary.len());
+        for ordinal in 0..dictionary.len() {
+            let (event_key, id) = dictionary.entry(ordinal).map_err(packed_err)?;
+            if dead[source]
+                .as_ref()
+                .is_some_and(|keys| keys.contains(event_key))
+            {
+                ordinal_map.push(None);
+                continue;
+            }
+            if dictionary_entries
+                .last()
+                .is_some_and(|(prior, _)| *prior >= event_key)
+            {
+                return Err(packed_err(
+                    "compaction cohort dictionaries are not range ordered",
+                ));
+            }
+            let output_ordinal = u32::try_from(dictionary_entries.len())
+                .map_err(|_| packed_err("compaction dictionary exceeds u32"))?;
+            dictionary_entries.push((event_key, id));
+            ordinal_map.push(Some(output_ordinal));
+        }
+        ordinal_maps.push(ordinal_map);
+    }
+    if dictionary_entries.is_empty() {
+        return Ok(None);
+    }
+    let min_event_key = dictionary_entries
+        .first()
+        .expect("nonempty compaction dictionary")
+        .0;
+    let max_event_key = dictionary_entries
+        .last()
+        .expect("nonempty compaction dictionary")
+        .0;
+    let dictionary = encode_dictionary(&dictionary_entries).map_err(packed_err)?;
+    let output_dictionary = DictionaryView::parse(&dictionary)
         .and_then(DictionaryView::validate)
         .map_err(packed_err)?;
+
     let segments = write_txn
         .open_table(POSTINGS_SEGMENTS)
         .map_err(persist_err)?;
-    let mut memberships = Vec::new();
-    let mut run_events = BTreeMap::new();
+    let mut encoded_segments = Vec::new();
+    let mut postings = 0u64;
+    let mut prefixes = 0u64;
     for family in Family::ALL {
         for shard in 0..=super::postings::SHARD_MASK {
-            let key = segment_key(family, shard, run_id);
-            let Some(value) = segments.get(key.as_slice()).map_err(persist_err)? else {
+            let mut segment_values = Vec::new();
+            for (source, meta) in cohort.iter().enumerate() {
+                let key = segment_key(family, shard, meta.run_id);
+                let Some(value) = segments.get(key.as_slice()).map_err(persist_err)? else {
+                    continue;
+                };
+                segment_values.push((source, value.value().to_vec()));
+            }
+            if segment_values.is_empty() {
+                continue;
+            }
+            let mut segment_views = Vec::with_capacity(segment_values.len());
+            for (source, value) in &segment_values {
+                let segment = SegmentView::parse(value).map_err(packed_err)?;
+                let source_dictionary = dictionaries
+                    .get(cohort[*source].run_id)
+                    .map_err(persist_err)?
+                    .ok_or_else(|| packed_err("run has no dictionary"))?;
+                let source_dictionary = DictionaryView::parse(source_dictionary.value())
+                    .and_then(DictionaryView::validate)
+                    .map_err(packed_err)?;
+                segment.validate(source_dictionary).map_err(packed_err)?;
+                segment_views.push((*source, segment));
+            }
+            let sources: Vec<_> = segment_views
+                .iter()
+                .map(|(source, segment)| CompactionSegmentSource {
+                    segment: *segment,
+                    ordinal_map: &ordinal_maps[*source],
+                })
+                .collect();
+            let Some(compacted) =
+                compact_segment(family, shard, &sources, output_dictionary).map_err(packed_err)?
+            else {
                 continue;
             };
-            let segment_bytes = value.value().to_vec();
-            let segment = SegmentView::parse(&segment_bytes).map_err(packed_err)?;
-            segment.validate(dictionary).map_err(packed_err)?;
-            memberships.extend(
-                segment
-                    .memberships_interned(dictionary, &mut run_events)
-                    .map_err(packed_err)?,
-            );
+            postings = postings.saturating_add(compacted.postings);
+            prefixes = prefixes.saturating_add(compacted.prefixes);
+            encoded_segments.push((family, shard, compacted.value));
         }
     }
-    Ok(memberships)
+    drop(segments);
+    drop(dictionaries);
+    if encoded_segments.is_empty() || postings == 0 {
+        return Err(packed_err(
+            "nonempty compaction dictionary produced no live segments",
+        ));
+    }
+    Ok(Some((
+        EncodedRun {
+            dictionary,
+            segments: encoded_segments,
+            dictionary_entries: dictionary_entries.len() as u64,
+            postings,
+            prefixes,
+            posting_bytes: postings.saturating_mul(12),
+            dictionary_build_ns: 0,
+            membership_sort_ns: 0,
+            segment_encode_ns: 0,
+        },
+        min_event_key,
+        max_event_key,
+    )))
 }
 
 fn load_run_deaths(
@@ -881,32 +977,17 @@ fn compact_cohort(
     let output_level = level
         .checked_add(1)
         .ok_or_else(|| packed_err("packed run level space exhausted"))?;
-    let mut memberships = Vec::new();
-    for meta in cohort {
-        let dead = load_run_deaths(write_txn, meta.run_id)?;
-        let mut run_memberships = load_run_memberships(write_txn, meta.run_id)?;
-        if let Some(dead) = dead {
-            run_memberships.retain(|membership| !dead.contains(membership.event.event_key));
-        }
-        memberships.extend(run_memberships);
-    }
+    let dead: Vec<_> = cohort
+        .iter()
+        .map(|meta| load_run_deaths(write_txn, meta.run_id))
+        .collect::<Result<_, _>>()?;
+    let encoded = encode_compaction_cohort(write_txn, cohort, &dead)?;
     for &meta in cohort {
         delete_run(write_txn, meta)?;
     }
-    if memberships.is_empty() {
+    let Some((encoded, min_event_key, max_event_key)) = encoded else {
         return Ok(());
-    }
-    let min_event_key = memberships
-        .iter()
-        .map(|membership| membership.event.event_key)
-        .min()
-        .expect("nonempty compaction cohort");
-    let max_event_key = memberships
-        .iter()
-        .map(|membership| membership.event.event_key)
-        .max()
-        .expect("nonempty compaction cohort");
-    let encoded = encode_run(memberships).map_err(packed_err)?;
+    };
     let run_id = allocate_run_id(write_txn)?;
     insert_run(
         write_txn,
@@ -926,23 +1007,11 @@ fn rewrite_run_without_dead(
     old_meta: RunMeta,
     dead: &DeadKeys,
 ) -> Result<(), PersistenceError> {
-    let mut memberships = load_run_memberships(write_txn, old_meta.run_id)?;
-    memberships.retain(|membership| !dead.contains(membership.event.event_key));
+    let encoded = encode_compaction_cohort(write_txn, &[old_meta], &[Some(dead.clone())])?;
     delete_run(write_txn, old_meta)?;
-    if memberships.is_empty() {
+    let Some((encoded, min_event_key, max_event_key)) = encoded else {
         return Ok(());
-    }
-    let min_event_key = memberships
-        .iter()
-        .map(|membership| membership.event.event_key)
-        .min()
-        .expect("nonempty rewritten run");
-    let max_event_key = memberships
-        .iter()
-        .map(|membership| membership.event.event_key)
-        .max()
-        .expect("nonempty rewritten run");
-    let encoded = encode_run(memberships).map_err(packed_err)?;
+    };
     insert_run(
         write_txn,
         RunMeta {
