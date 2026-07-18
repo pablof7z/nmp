@@ -134,6 +134,8 @@ impl VerifierPool {
                 return Vec::new();
             }
 
+            #[cfg(feature = "bench-instrumentation")]
+            let dispatch_started = std::time::Instant::now();
             let (results_tx, results_rx) = mpsc::channel();
             let first_worker = self.next_worker;
             self.next_worker = self.next_worker.wrapping_add(events.len());
@@ -162,19 +164,31 @@ impl VerifierPool {
                 }
             }
             drop(results_tx);
+            #[cfg(feature = "bench-instrumentation")]
+            crate::ingest_attribution::verify_dispatch(dispatch_started.elapsed(), events.len());
 
             // Start fail-closed. Successfully completed tasks overwrite their
             // slot; tasks rejected by a dead worker or abandoned by a worker
             // panic remain `Unavailable`. Iteration ends once every task-held
             // result sender has either replied or been dropped.
+            #[cfg(feature = "bench-instrumentation")]
+            let collect_started = std::time::Instant::now();
             let mut ordered = vec![VerificationOutcome::Unavailable; events.len()];
+            #[cfg(feature = "bench-instrumentation")]
+            let mut result_messages = 0usize;
             for (index, valid) in results_rx {
+                #[cfg(feature = "bench-instrumentation")]
+                {
+                    result_messages = result_messages.saturating_add(1);
+                }
                 ordered[index] = if valid {
                     VerificationOutcome::Valid
                 } else {
                     VerificationOutcome::Invalid
                 };
             }
+            #[cfg(feature = "bench-instrumentation")]
+            crate::ingest_attribution::verify_collect(collect_started.elapsed(), result_messages);
             #[cfg(feature = "bench-instrumentation")]
             crate::ingest_attribution::verify(started.elapsed(), events.len());
             ordered
@@ -257,7 +271,11 @@ fn worker_loop(tasks: Receiver<Task>) {
                 event,
                 results,
             } => {
+                #[cfg(feature = "bench-instrumentation")]
+                let verify_started = std::time::Instant::now();
                 let valid = event.verify_signature_with_ctx(&secp);
+                #[cfg(feature = "bench-instrumentation")]
+                crate::ingest_attribution::verify_worker(verify_started.elapsed(), 1);
                 // Completion means every worker-owned reference is gone, so
                 // the engine can structurally unwrap the frame Arc without a
                 // race into the deep-clone fallback.

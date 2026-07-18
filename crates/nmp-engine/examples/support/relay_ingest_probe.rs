@@ -25,7 +25,7 @@ use tungstenite::{accept, Message};
 
 pub type ProbeError = Box<dyn Error + Send + Sync>;
 
-const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v14";
+const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v15";
 const CORPUS_SCHEMA: &str = "nmp-relay-ingest-corpus-v1";
 const BASE_CREATED_AT: u64 = 1_700_000_000;
 // Duplicate replay can advance diagnostics without producing a row delta.
@@ -1068,7 +1068,15 @@ fn ingest_attribution_json() -> serde_json::Value {
             "parse_ns": transport.parse_ns, "translator_bursts": transport.translator_bursts,
             "translator_events": transport.translator_events, "max_translator_burst": transport.max_translator_burst,
             "verify_batches": transport.verify_batches, "verify_candidates": transport.verify_candidates,
-            "verify_ns": transport.verify_ns, "delivered_events": transport.delivered_events,
+            "verify_ns": transport.verify_ns,
+            "verify_dispatch_ns": transport.verify_dispatch_ns,
+            "verify_collect_ns": transport.verify_collect_ns,
+            "verify_worker_ns": transport.verify_worker_ns,
+            "verify_task_submissions": transport.verify_task_submissions,
+            "verify_result_messages": transport.verify_result_messages,
+            "verify_worker_candidates": transport.verify_worker_candidates,
+            "max_verify_lane_candidates": transport.max_verify_lane_candidates,
+            "delivered_events": transport.delivered_events,
             "delivery_ns": transport.delivery_ns,
             "event_fallback_clones": transport.event_fallback_clones
         },
