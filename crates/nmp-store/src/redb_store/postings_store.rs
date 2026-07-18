@@ -869,9 +869,8 @@ fn encode_compaction_cohort(
                     .get(cohort[*source].run_id)
                     .map_err(persist_err)?
                     .ok_or_else(|| packed_err("run has no dictionary"))?;
-                let source_dictionary = DictionaryView::parse(source_dictionary.value())
-                    .and_then(DictionaryView::validate)
-                    .map_err(packed_err)?;
+                let source_dictionary =
+                    DictionaryView::parse(source_dictionary.value()).map_err(packed_err)?;
                 segment.validate(source_dictionary).map_err(packed_err)?;
                 segment_views.push((*source, segment));
             }
