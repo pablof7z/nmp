@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Bounded commit and projection overlap for issue 688</title>
+    <link rel="stylesheet" href="../../assets/style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <nav class="topbar">
+        <a href="../../">Planning pages</a>
+        
+      </nav>
+      <section class="hero">
+        <div class="eyebrow">Architecture plan</div>
+        <h1>Bounded commit and projection overlap for issue 688</h1>
+        <p class="summary">Exploit the measured serial reducer bottleneck by overlapping one safe committed projection with the next event-store batch, without weakening ordering, visibility, or bounded backpressure.</p>
+        <div class="meta">
+          <span class="pill ready">Ready to implement</span>
+          <span class="pill">82 percent certainty</span>
+        </div>
+      </section>
+      <div class="grid">
+        <div>
+
+          <section class="section">
+            <h2>Boundaries</h2>
+            <pre class="mermaid">flowchart LR
+  T[Verified EVENT batches] --&gt; B[Bounded lookahead: max 2]
+  B --&gt; C[Reducer commit stage]
+  C --&gt;|Committed envelope N| P[Deterministic projection worker]
+  C --&gt;|Commit N+1 while N projects| C
+  P --&gt; I[Reducer installs state and dispatches effects]
+  I --&gt; A[Applied acknowledgement N]
+  X[Control, semantic change, oracle fallback, shutdown] --&gt; D[Drain barrier]
+  D --&gt; C</pre>
+          </section>
+          <section class="section">
+            <h2>Very High Level</h2>
+            <p>The exact completion profile in #686 shows the reducer is the active ingest pacer. Resolver/store mutation and committed live/history projection currently run serially, while the pool bridge waits for each batch&#x27;s applied acknowledgement before offering the next batch. The measured slices imply roughly 20–30% throughput upside if one stage can overlap safely.
+
+Implement a depth-2 internal pipeline for consecutive ordinary EVENT batches. Split relay ingest into commit-only work that returns an owned committed envelope and ordered projection work that consumes that envelope. Move complete, stable projection state into one deterministic worker; while it owns batch N&#x27;s projection state, the reducer may commit batch N+1 but may not process unrelated commands or expose N+1. The projection result returns state plus effects to the reducer, which installs and dispatches them before acknowledging N.
+
+Eligibility is fail-closed. Demand/router changes, NIP-65 changes, pending-write adoption, any projection requiring a store oracle, scalar control/lifecycle frames, degradation, and shutdown drain the pipeline and use the existing synchronous path. A typed projection-ownership state replaces any lifecycle boolean. Queue capacity is fixed at one job and one result, so at most one committed batch can wait behind one projecting batch.
+
+Retain only if five alternating pairs show at least 10% MemoryStore and 5% Redb complete-path throughput improvement, with peak RSS within 10% and exact row/provenance/reopen assertions unchanged. Otherwise revert the production candidate and preserve the negative evidence.</p>
+          </section>
+          <section class="section">
+            <h2>Existing Rules Or ADRs</h2>
+            <ul><li>Issue-first discipline is satisfied by #688, linked to epic #612 and the merged #686 profile evidence.</li><li>The VISION live-query contract is preserved: query deltas remain post-commit facts, and applied remains stronger than durable commit.</li><li>The bounded-delivery doctrine is preserved with a fixed one-job projection lane, bounded lookahead, and backpressure on saturation.</li><li>The architecture review gates are preserved: no public noun, no lifecycle bool, no destructive API, and no FFI surface change.</li><li>Event-store-local atomicity, Redb single-writer ordering, provenance, replacement, deletion, expiry, and exact reopen semantics remain unchanged.</li></ul>
+          </section>
+          <section class="section">
+            <h2>Rule Tension And Tightening</h2>
+            <h3>Possible loosening</h3>
+            <ul><li>No product or persistence rule needs loosening.</li><li>The current implementation convention that the pool bridge waits for every applied acknowledgement before offering another event batch is intentionally replaced by a bounded lookahead protocol; the stronger semantic rule that applied follows ordered projection is retained.</li></ul>
+            <h3>Possible tightening</h3>
+            <ul><li>Add an internal rule that every asynchronous commit/projection lane defines a monotonic sequence, a bounded capacity, explicit drain barriers, and the exact point at which applied may fire.</li><li>Represent temporary projection ownership with an enum or Option::take-style transfer so projection-dependent methods are mechanically unreachable while state is in flight.</li></ul>
+          </section>
+          <section class="section">
+            <h2>Alternatives Considered</h2>
+            <ul><li>Move the entire ResolverEngine and store to a dedicated command thread. This gives clean ownership but forces every query, write, coverage, and graph operation through a much larger RPC boundary before the common path proves the benefit.</li><li>Move all live/history projection authority permanently to another thread. This creates a broader synchronization surface for subscribe, unsubscribe, evidence, router recompilation, and store-oracle fallbacks than the one-batch functional worker needs.</li><li>Parallelize only history materialization. The #686 candidate already reduced history work substantially but improved complete MemoryStore throughput only 3.7% and regressed Redb.</li><li>Change Redb, Fjall, or LMDB. The exact active bottleneck also exists with MemoryStore, so a physical database cannot remove this serial dependency.</li><li>Acknowledge at commit and project later. Rejected because it weakens the current applied and query-visibility contract.</li></ul>
+          </section>
+        </div>
+        <aside>
+          <section class="card">
+            <h2>TTS Version</h2>
+            <audio controls preload="metadata" src="https://blossom.primal.net/37336ecb45fafb798780ece161a7b103fb2eea42db512f0126aca515844b5a28.mp3"></audio>
+            <p>Audio-friendly narration generated from the planning payload.</p>
+          </section>
+          <section class="card">
+            <h2>Certainty</h2>
+            <div class="certainty ">82%</div>
+            <p>Ready to implement.</p>
+          </section>
+          <section class="card links">
+            <h2>Links</h2>
+            
+            <a href="https://blossom.primal.net/37336ecb45fafb798780ece161a7b103fb2eea42db512f0126aca515844b5a28.mp3">Open narration</a>
+            <a href="../../docs/plans/issue-688-commit-projection-overlap/plan.md">Detailed plan file</a>
+          </section>
+        </aside>
+      </div>
+    </main>
+
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral" });
+    </script>
+  </body>
+</html>
