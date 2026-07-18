@@ -25,7 +25,7 @@ use tungstenite::{accept, Message};
 
 pub type ProbeError = Box<dyn Error + Send + Sync>;
 
-const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v19";
+const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v21";
 const CORPUS_SCHEMA: &str = "nmp-relay-ingest-corpus-v1";
 const BASE_CREATED_AT: u64 = 1_700_000_000;
 // Duplicate replay can advance diagnostics without producing a row delta.
@@ -1141,12 +1141,17 @@ fn ingest_attribution_json() -> serde_json::Value {
             "relay_core_reduce_cpu_ns": engine.relay_core_reduce_cpu_ns,
             "relay_effect_dispatch_ns": engine.relay_effect_dispatch_ns,
             "relay_ingest_prelude_ns": engine.relay_ingest_prelude_ns,
+            "relay_ingest_prelude_cpu_ns": engine.relay_ingest_prelude_cpu_ns,
             "relay_ingest_post_store_ns": engine.relay_ingest_post_store_ns,
+            "relay_ingest_post_store_cpu_ns": engine.relay_ingest_post_store_cpu_ns,
             "relay_ingest_apply_committed_ns": engine.relay_ingest_apply_committed_ns,
+            "relay_ingest_apply_committed_cpu_ns": engine.relay_ingest_apply_committed_cpu_ns,
             "relay_ingest_effect_build_ns": engine.relay_ingest_effect_build_ns,
+            "relay_ingest_effect_build_cpu_ns": engine.relay_ingest_effect_build_cpu_ns,
             "relay_ingest_observations_call_ns": engine.relay_ingest_observations_call_ns,
             "relay_ingest_observations_call_cpu_ns": engine.relay_ingest_observations_call_cpu_ns,
             "relay_resolver_call_ns": engine.relay_resolver_call_ns,
+            "relay_resolver_call_cpu_ns": engine.relay_resolver_call_cpu_ns,
             "relay_frame_conversion_ns": engine.relay_frame_conversion_ns,
             "relay_frame_session_validation_ns": engine.relay_frame_session_validation_ns,
             "relay_frame_diagnostics_count_ns": engine.relay_frame_diagnostics_count_ns,
@@ -1178,8 +1183,12 @@ fn ingest_attribution_json() -> serde_json::Value {
         },
         "resolver": {
             "batches": resolver.batches, "events": resolver.events, "max_batch_events": resolver.max_batch_events,
-            "total_ns": resolver.total_ns, "prepare_ns": resolver.prepare_ns, "store_ns": resolver.store_ns,
-            "classify_ns": resolver.classify_ns, "react_and_affected_ns": resolver.react_and_affected_ns,
+            "total_ns": resolver.total_ns, "total_cpu_ns": resolver.total_cpu_ns,
+            "prepare_ns": resolver.prepare_ns, "prepare_cpu_ns": resolver.prepare_cpu_ns,
+            "store_ns": resolver.store_ns, "store_cpu_ns": resolver.store_cpu_ns,
+            "classify_ns": resolver.classify_ns, "classify_cpu_ns": resolver.classify_cpu_ns,
+            "react_and_affected_ns": resolver.react_and_affected_ns,
+            "react_and_affected_cpu_ns": resolver.react_and_affected_cpu_ns,
             "event_clones": resolver.event_clones
         },
         "store": {
@@ -1190,7 +1199,13 @@ fn ingest_attribution_json() -> serde_json::Value {
             "commit_ns": store.commit_ns, "durability_checkpoint_ns": store.durability_checkpoint_ns,
             "encode_event_ns": store.encode_event_ns,
             "encoded_event_bytes": store.encoded_event_bytes, "canonical_insert_ns": store.canonical_insert_ns,
-            "index_insert_ns": store.index_insert_ns, "event_clones": store.event_clones
+            "index_insert_ns": store.index_insert_ns,
+            "memory_insert_ns": store.memory_insert_ns,
+            "memory_event_build_ns": store.memory_event_build_ns,
+            "memory_expiration_index_ns": store.memory_expiration_index_ns,
+            "memory_query_index_ns": store.memory_query_index_ns,
+            "memory_canonical_insert_ns": store.memory_canonical_insert_ns,
+            "event_clones": store.event_clones
         }
     })
 }

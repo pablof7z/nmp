@@ -654,11 +654,15 @@ impl<S: EventStore> Engine<S> {
         #[cfg(feature = "bench-instrumentation")]
         let total_started = std::time::Instant::now();
         #[cfg(feature = "bench-instrumentation")]
+        let total_cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
+        #[cfg(feature = "bench-instrumentation")]
         {
             crate::ingest_attribution::batch(events.len());
         }
         #[cfg(feature = "bench-instrumentation")]
         let prepare_started = std::time::Instant::now();
+        #[cfg(feature = "bench-instrumentation")]
+        let prepare_cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
         // Snapshot only graph/filter shapes, never store rows. This is the
         // cheap side of targeted invalidation: after recompute we can tell
         // exactly which shared roots changed without re-querying every
@@ -682,14 +686,28 @@ impl<S: EventStore> Engine<S> {
             .map(|(event, _from)| clone_relay_ingest_event(event))
             .collect();
         #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::prepare(prepare_started.elapsed());
+        {
+            crate::ingest_attribution::prepare(prepare_started.elapsed());
+            crate::ingest_attribution::prepare_cpu(
+                crate::ingest_attribution::thread_cpu_time_ns().saturating_sub(prepare_cpu_started),
+            );
+        }
         #[cfg(feature = "bench-instrumentation")]
         let store_started = std::time::Instant::now();
+        #[cfg(feature = "bench-instrumentation")]
+        let store_cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
         let outcomes = self.store.insert_batch(events)?;
         #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::store(store_started.elapsed());
+        {
+            crate::ingest_attribution::store(store_started.elapsed());
+            crate::ingest_attribution::store_cpu(
+                crate::ingest_attribution::thread_cpu_time_ns().saturating_sub(store_cpu_started),
+            );
+        }
         #[cfg(feature = "bench-instrumentation")]
         let classify_started = std::time::Instant::now();
+        #[cfg(feature = "bench-instrumentation")]
+        let classify_cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
         for (event, outcome) in input_events.into_iter().zip(outcomes) {
             match outcome {
                 InsertOutcome::Inserted => {
@@ -779,9 +797,17 @@ impl<S: EventStore> Engine<S> {
             .map(clone_relay_ingest_event)
             .collect();
         #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::classify(classify_started.elapsed());
+        {
+            crate::ingest_attribution::classify(classify_started.elapsed());
+            crate::ingest_attribution::classify_cpu(
+                crate::ingest_attribution::thread_cpu_time_ns()
+                    .saturating_sub(classify_cpu_started),
+            );
+        }
         #[cfg(feature = "bench-instrumentation")]
         let react_started = std::time::Instant::now();
+        #[cfg(feature = "bench-instrumentation")]
+        let react_cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
         // A duplicate whose provenance grew can change selector routing
         // evidence even though its projected VALUE is unchanged. Seed the
         // same generic Derived recompute lane so the old atom is replaced
@@ -793,7 +819,13 @@ impl<S: EventStore> Engine<S> {
         #[cfg(feature = "bench-instrumentation")]
         {
             crate::ingest_attribution::react(react_started.elapsed());
+            crate::ingest_attribution::react_cpu(
+                crate::ingest_attribution::thread_cpu_time_ns().saturating_sub(react_cpu_started),
+            );
             crate::ingest_attribution::total(total_started.elapsed());
+            crate::ingest_attribution::total_cpu(
+                crate::ingest_attribution::thread_cpu_time_ns().saturating_sub(total_cpu_started),
+            );
         }
         Ok(RelayIngestResult {
             committed: CommittedMutationResult {

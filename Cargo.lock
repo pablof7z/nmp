@@ -2051,6 +2051,7 @@ dependencies = [
 name = "nmp-resolver"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "nmp-grammar",
  "nmp-store",
  "nostr 0.44.4",

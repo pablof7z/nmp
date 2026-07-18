@@ -20,6 +20,11 @@ pub struct Snapshot {
     pub encoded_event_bytes: u64,
     pub canonical_insert_ns: u64,
     pub index_insert_ns: u64,
+    pub memory_insert_ns: u64,
+    pub memory_event_build_ns: u64,
+    pub memory_expiration_index_ns: u64,
+    pub memory_query_index_ns: u64,
+    pub memory_canonical_insert_ns: u64,
     pub event_clones: u64,
 }
 
@@ -43,6 +48,11 @@ counters!(
     ENCODED_EVENT_BYTES,
     CANONICAL_INSERT_NS,
     INDEX_INSERT_NS,
+    MEMORY_INSERT_NS,
+    MEMORY_EVENT_BUILD_NS,
+    MEMORY_EXPIRATION_INDEX_NS,
+    MEMORY_QUERY_INDEX_NS,
+    MEMORY_CANONICAL_INSERT_NS,
     EVENT_CLONES,
 );
 
@@ -71,6 +81,11 @@ pub fn reset() {
         &ENCODED_EVENT_BYTES,
         &CANONICAL_INSERT_NS,
         &INDEX_INSERT_NS,
+        &MEMORY_INSERT_NS,
+        &MEMORY_EVENT_BUILD_NS,
+        &MEMORY_EXPIRATION_INDEX_NS,
+        &MEMORY_QUERY_INDEX_NS,
+        &MEMORY_CANONICAL_INSERT_NS,
         &EVENT_CLONES,
     ] {
         counter.store(0, Ordering::Relaxed);
@@ -95,6 +110,11 @@ pub fn snapshot() -> Snapshot {
         encoded_event_bytes: load(&ENCODED_EVENT_BYTES),
         canonical_insert_ns: load(&CANONICAL_INSERT_NS),
         index_insert_ns: load(&INDEX_INSERT_NS),
+        memory_insert_ns: load(&MEMORY_INSERT_NS),
+        memory_event_build_ns: load(&MEMORY_EVENT_BUILD_NS),
+        memory_expiration_index_ns: load(&MEMORY_EXPIRATION_INDEX_NS),
+        memory_query_index_ns: load(&MEMORY_QUERY_INDEX_NS),
+        memory_canonical_insert_ns: load(&MEMORY_CANONICAL_INSERT_NS),
         event_clones: load(&EVENT_CLONES),
     }
 }
@@ -138,6 +158,22 @@ pub(crate) fn canonical_insert(duration: Duration) {
 }
 pub(crate) fn index_insert(duration: Duration) {
     add(&INDEX_INSERT_NS, duration);
+}
+
+pub(crate) fn memory_insert(duration: Duration) {
+    add(&MEMORY_INSERT_NS, duration);
+}
+pub(crate) fn memory_event_build(duration: Duration) {
+    add(&MEMORY_EVENT_BUILD_NS, duration);
+}
+pub(crate) fn memory_expiration_index(duration: Duration) {
+    add(&MEMORY_EXPIRATION_INDEX_NS, duration);
+}
+pub(crate) fn memory_query_index(duration: Duration) {
+    add(&MEMORY_QUERY_INDEX_NS, duration);
+}
+pub(crate) fn memory_canonical_insert(duration: Duration) {
+    add(&MEMORY_CANONICAL_INSERT_NS, duration);
 }
 
 pub(crate) fn event_clone() {
