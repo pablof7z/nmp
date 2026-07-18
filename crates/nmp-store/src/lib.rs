@@ -24,7 +24,12 @@
 //!
 //! Durable write-outbox (`docs/design/crashsafe-accepted-2-3-plan.md`,
 //! issues #2/#3, Fable checkpoint verdict Q2): this crate is now the event
-//! **and** durable-outbox store — one atomic `redb::Database` boundary. A
+//! **and** durable-outbox store in the current Redb implementation — one
+//! atomic `redb::Database` boundary. This is an implementation shape, not a
+//! requirement that every backend or platform use one physical engine. A
+//! split implementation must keep each authority internally atomic, persist
+//! control intent before event projection, replay deterministically and
+//! idempotently, and reconcile before serving queries or transport. A
 //! locally-authored write intent enters through [`EventStore::accept_write`]
 //! (the same dedup/tombstone/supersession rules `insert` runs, stamping
 //! local provenance + [`SigState::Pending`] instead of a `RelayObserved`),
@@ -63,6 +68,8 @@ mod coverage;
 mod memory_store;
 mod persistent_store_lifetime;
 mod redb_store;
+#[cfg(test)]
+mod semantic_oracle;
 
 #[cfg(feature = "bench-instrumentation")]
 pub mod ingest_attribution;
