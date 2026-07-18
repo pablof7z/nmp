@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Larger crash-atomic ingest cohorts</title>
+    <link rel="stylesheet" href="../../assets/style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <nav class="topbar">
+        <a href="../../">Planning pages</a>
+        
+      </nav>
+      <section class="hero">
+        <div class="eyebrow">Architecture plan</div>
+        <h1>Larger crash-atomic ingest cohorts</h1>
+        <p class="summary">Test whether larger finite EVENT cohorts reduce Redb commit and packed-compaction cost enough to move epic #612 without weakening durability or latency bounds.</p>
+        <div class="meta">
+          <span class="pill ready">Ready to implement</span>
+          <span class="pill">88 percent certainty</span>
+        </div>
+      </section>
+      <div class="grid">
+        <div>
+
+          <section class="section">
+            <h2>Boundaries</h2>
+            <pre class="mermaid">flowchart LR
+  W[Ordered verified EVENT stream] --&gt; B{Control or lifecycle barrier?}
+  B --&gt;|yes| F[Flush current cohort]
+  B --&gt;|no| C[Finite count and byte bounds]
+  C --&gt; T[One governed durable transaction]
+  T --&gt; A[Applied acknowledgement]
+  A --&gt; W
+  T --&gt; M[Measure commit and packed compaction]</pre>
+          </section>
+          <section class="section">
+            <h2>Very High Level</h2>
+            <p>Epic #612 still misses its initial-ingest gate, and the latest production evidence leaves the durable Redb transaction boundary as the largest remaining production owner. NMP currently admits at most 4,096 consecutive EVENT frames into one governed transaction. That limit transformed the original tiny-transaction cliff, but it was never compared with larger finite cohorts.
+
+First, use the existing production probe as a configuration-only falsifier. Compare 4,096, 8,192, and 16,384 event ceilings in fresh alternating processes while keeping the 8 MiB byte ceiling, 200 us coalescing wait, verifier shape, corpus, durability, and bounded queues fixed. Record actual bridge and store batch distributions, Redb commit time, packed publication and compaction, complete throughput, first row, RSS, allocations, writes, and exact reopen. Run both durable Redb and MemoryStore controls so a Redb gain cannot hide a serial-pipeline regression.
+
+Only the strongest passing cohort becomes a production candidate. Control frames and lifecycle events remain structural barriers, applied acknowledgements remain ordered, every cohort commits synchronously, and the existing byte ceiling remains unchanged. Focused bridge tests will prove the higher count bound, byte splitting, barriers, shutdown, and backpressure.
+
+Retain the change only if durable production throughput improves by at least 10%, MemoryStore does not regress more than 5%, RSS and first-row latency remain within 10%, duplicate replay stays above its epic gate, and a one-million run reopens exactly. Otherwise revert the candidate and merge only negative evidence.</p>
+          </section>
+          <section class="section">
+            <h2>Existing Rules Or ADRs</h2>
+            <ul><li>Issue #694 captures the consequence and links the work to epic #612 before implementation.</li><li>The candidate preserves bounded queues, the finite byte ceiling, control/lifecycle barriers, ordered applied acknowledgement, and one crash-atomic transaction per admitted cohort.</li><li>No public noun, FFI projection, persistence schema, destructive API, or migration changes; architecture gates 1 through 4 are unaffected and gates 5 through 6 still run.</li></ul>
+          </section>
+          <section class="section">
+            <h2>Rule Tension And Tightening</h2>
+            <h3>Possible loosening</h3>
+            <ul><li>No rule or durability invariant needs loosening. Non-durable group commit is explicitly excluded even though #658 measured it as favorable.</li></ul>
+            <h3>Possible tightening</h3>
+            <ul><li>Consider requiring future changes to a production batching ceiling to report the observed batch distribution and adjacent-size controls, not only the configured maximum.</li></ul>
+          </section>
+          <section class="section">
+            <h2>Alternatives Considered</h2>
+            <ul><li>Redb non-durable foreground commits plus a checkpoint: faster in #658 but can lose accepted foreground work and is not shippable.</li><li>Overlap commit with projection: #688 proved the mechanism but measured only a 2.3% durable gain and reverted it.</li><li>Migrate to LMDB or Fjall: the exact candidates failed RSS or wall/write/query gates in #658 and #691.</li><li>Increase the byte ceiling together with the count ceiling: rejected because it confounds the experiment and weakens the existing memory bound.</li></ul>
+          </section>
+        </div>
+        <aside>
+          <section class="card">
+            <h2>TTS Version</h2>
+            <audio controls preload="metadata" src="https://blossom.primal.net/d5152218daa64c284558db90e0e5896199ab22b715955e67362c6d06949ffdea.mp3"></audio>
+            <p>Audio-friendly narration generated from the planning payload.</p>
+          </section>
+          <section class="card">
+            <h2>Certainty</h2>
+            <div class="certainty ">88%</div>
+            <p>Ready to implement.</p>
+          </section>
+          <section class="card links">
+            <h2>Links</h2>
+            
+            <a href="https://blossom.primal.net/d5152218daa64c284558db90e0e5896199ab22b715955e67362c6d06949ffdea.mp3">Open narration</a>
+            <a href="../../docs/plans/issue-694-larger-crash-atomic-ingest-cohorts/plan.md">Detailed plan file</a>
+          </section>
+        </aside>
+      </div>
+    </main>
+
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral" });
+    </script>
+  </body>
+</html>
