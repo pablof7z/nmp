@@ -1,3 +1,5 @@
+#[cfg(feature = "bench-instrumentation")]
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::{BTreeSet, HashSet};
 use std::error::Error;
 use std::fs::{self, File};
@@ -6,7 +8,7 @@ use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,17 +17,76 @@ use nmp_engine::runtime::{EngineThread, HistoryReceiver, RowsMsg, RowsReceiver};
 use nmp_grammar::{AccessContext, Binding, Demand, Filter, SourceAuthority};
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
-use nmp_store::{EventStore, RedbStore};
+use nmp_store::{EventStore, MemoryStore, RedbStore};
 use nmp_transport::PoolConfig;
-use nostr::{EventBuilder, EventId, JsonUtil, Keys, Kind, RelayUrl, Timestamp};
-use serde::Serialize;
+use nostr::{EventBuilder, EventId, JsonUtil, Keys, Kind, RelayUrl, Tag, Timestamp};
+use serde::{Deserialize, Serialize};
 use tungstenite::{accept, Message};
 
 pub type ProbeError = Box<dyn Error + Send + Sync>;
 
-const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v4";
+const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v21";
 const CORPUS_SCHEMA: &str = "nmp-relay-ingest-corpus-v1";
 const BASE_CREATED_AT: u64 = 1_700_000_000;
+// Duplicate replay can advance diagnostics without producing a row delta.
+// Keep completion-clock observation comfortably below #663's 200 ms gate;
+// the former 100 ms poll quantized a true fast path into one or two whole
+// polling intervals and could decide the gate on observer latency alone.
+const OBSERVATION_POLL: Duration = Duration::from_millis(1);
+// Attribution counters and the benchmark-only duplicate ceiling cache are
+// process-global by design. Serialize in-process probe invocations so test
+// binaries cannot reset or reconfigure another run midway through evidence.
+static PROBE_RUN_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(feature = "bench-instrumentation")]
+struct CountingAllocator;
+
+#[cfg(feature = "bench-instrumentation")]
+static ALLOCATION_OPS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "bench-instrumentation")]
+static ALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(feature = "bench-instrumentation")]
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        ALLOCATION_OPS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        System.alloc(layout)
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        ALLOCATION_OPS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        System.alloc_zeroed(layout)
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        System.dealloc(ptr, layout);
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        ALLOCATION_OPS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATED_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
+        System.realloc(ptr, layout, new_size)
+    }
+}
+
+#[global_allocator]
+#[cfg(feature = "bench-instrumentation")]
+static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator;
+
+#[cfg(feature = "bench-instrumentation")]
+fn allocator_snapshot() -> (u64, u64) {
+    (
+        ALLOCATION_OPS.load(Ordering::Relaxed),
+        ALLOCATED_BYTES.load(Ordering::Relaxed),
+    )
+}
+
+#[cfg(not(feature = "bench-instrumentation"))]
+fn allocator_snapshot() -> (u64, u64) {
+    (0, 0)
+}
 
 #[derive(Debug, Clone)]
 pub struct ProbeConfig {
@@ -33,14 +94,30 @@ pub struct ProbeConfig {
     pub relays: usize,
     pub passes: usize,
     pub payload_bytes: usize,
+    pub shape_corpus: Option<PathBuf>,
+    pub corpus_output: Option<PathBuf>,
+    pub memory_store: bool,
+    pub redb_nondurable_diagnostic: bool,
     pub queue_capacity: usize,
-    pub batch_size: usize,
+    pub verified_cache_capacity: usize,
+    pub committed_observation_cache_capacity: usize,
+    pub diagnostic_duplicate_ceiling_capacity: usize,
+    pub diagnostic_duplicate_ceiling_event_payload: bool,
+    pub diagnostic_preparsed_ceiling: bool,
+    pub diagnostic_skip_event_id_validation: bool,
+    pub diagnostic_skip_signature_verification: bool,
+    pub verifier_workers: usize,
+    pub verify_batch_size: usize,
+    pub engine_batch_size: usize,
+    pub engine_batch_bytes: usize,
+    pub engine_batch_wait: Duration,
     pub visible_limit: Option<usize>,
     pub trim_allocator_during_ingest: bool,
     pub frame_delay: Duration,
     pub expect_rejection: bool,
     pub timeout: Duration,
     pub store_path: Option<PathBuf>,
+    pub completion_window_output: Option<PathBuf>,
 }
 
 impl Default for ProbeConfig {
@@ -50,14 +127,30 @@ impl Default for ProbeConfig {
             relays: 1,
             passes: 1,
             payload_bytes: 128,
+            shape_corpus: None,
+            corpus_output: None,
+            memory_store: false,
+            redb_nondurable_diagnostic: false,
             queue_capacity: 1_024,
-            batch_size: 128,
+            verified_cache_capacity: 131_072,
+            committed_observation_cache_capacity: 131_072,
+            diagnostic_duplicate_ceiling_capacity: 0,
+            diagnostic_duplicate_ceiling_event_payload: false,
+            diagnostic_preparsed_ceiling: false,
+            diagnostic_skip_event_id_validation: false,
+            diagnostic_skip_signature_verification: false,
+            verifier_workers: 0,
+            verify_batch_size: 128,
+            engine_batch_size: 128,
+            engine_batch_bytes: 8 * 1024 * 1024,
+            engine_batch_wait: Duration::from_micros(200),
             visible_limit: Some(200),
             trim_allocator_during_ingest: false,
             frame_delay: Duration::ZERO,
             expect_rejection: false,
             timeout: Duration::from_secs(120),
             store_path: None,
+            completion_window_output: None,
         }
     }
 }
@@ -76,16 +169,56 @@ impl ProbeConfig {
         if self.queue_capacity == 0 {
             return Err("queue-capacity must be nonzero".into());
         }
-        if self.batch_size == 0 {
-            return Err("batch-size must be nonzero".into());
+        if self.verify_batch_size == 0 {
+            return Err("verify-batch-size must be nonzero".into());
+        }
+        if self.engine_batch_size == 0 {
+            return Err("engine-batch-size must be nonzero".into());
+        }
+        if self.engine_batch_bytes == 0 {
+            return Err("engine-batch-bytes must be nonzero".into());
         }
         if self.visible_limit == Some(0) {
             return Err("visible-limit must be nonzero".into());
+        }
+        if self.diagnostic_duplicate_ceiling_capacity > 0 && (self.relays != 1 || self.passes < 2) {
+            return Err(
+                "diagnostic duplicate ceiling requires exactly one relay and at least two passes"
+                    .into(),
+            );
+        }
+        if self.diagnostic_duplicate_ceiling_event_payload
+            && self.diagnostic_duplicate_ceiling_capacity == 0
+        {
+            return Err(
+                "diagnostic event-payload ceiling requires a nonzero diagnostic cache capacity"
+                    .into(),
+            );
+        }
+        if self.diagnostic_preparsed_ceiling && (self.relays != 1 || self.passes != 1) {
+            return Err(
+                "diagnostic preparsed ceiling requires exactly one relay and one pass".into(),
+            );
         }
         if self.expect_rejection && (self.events != 1 || self.relays != 1 || self.passes != 1) {
             return Err(
                 "expect-rejection requires exactly one event, one relay, and one pass".into(),
             );
+        }
+        if self.memory_store && self.store_path.is_some() {
+            return Err("memory-store cannot retain a persistent --store path".into());
+        }
+        if self.memory_store && self.redb_nondurable_diagnostic {
+            return Err(
+                "memory-store and redb-nondurable-diagnostic are mutually exclusive".into(),
+            );
+        }
+        #[cfg(not(feature = "bench-instrumentation"))]
+        if self.diagnostic_skip_event_id_validation
+            || self.diagnostic_skip_signature_verification
+            || self.diagnostic_preparsed_ceiling
+        {
+            return Err("diagnostic validation ceilings require bench-instrumentation".into());
         }
         Ok(())
     }
@@ -105,8 +238,23 @@ pub struct ProbeResult {
     pub relays: usize,
     pub passes: usize,
     pub payload_bytes: usize,
+    pub corpus_mode: &'static str,
+    pub shape_source_blake3: Option<String>,
+    pub store_backend: &'static str,
+    pub store_durability: &'static str,
     pub queue_capacity: usize,
-    pub batch_size: usize,
+    pub verified_cache_capacity: usize,
+    pub committed_observation_cache_capacity: usize,
+    pub diagnostic_duplicate_ceiling_capacity: usize,
+    pub diagnostic_duplicate_ceiling_event_payload: bool,
+    pub diagnostic_preparsed_ceiling: bool,
+    pub diagnostic_skip_event_id_validation: bool,
+    pub diagnostic_skip_signature_verification: bool,
+    pub verifier_workers: usize,
+    pub verify_batch_size: usize,
+    pub engine_batch_size: usize,
+    pub engine_batch_bytes: usize,
+    pub engine_batch_wait_us: u128,
     pub visible_limit: Option<usize>,
     pub delivery_mode: &'static str,
     pub trim_allocator_during_ingest: bool,
@@ -122,8 +270,11 @@ pub struct ProbeResult {
     pub corpus_bytes: u64,
     pub database_bytes: u64,
     pub generation_ms: f64,
-    pub ingest_ms: f64,
-    pub relay_frames_per_second: f64,
+    pub completion_ingest_ms: f64,
+    pub completion_relay_frames_per_second: f64,
+    pub replay_completion_ms: Option<f64>,
+    pub replay_frames_per_second: Option<f64>,
+    pub observation_and_quiet_ms: f64,
     pub first_row_ms: f64,
     pub last_row_ms: f64,
     pub apply_latency_p50_ms: f64,
@@ -135,6 +286,9 @@ pub struct ProbeResult {
     pub peak_ingest_rss_bytes: Option<u64>,
     pub peak_ingest_rss_growth_bytes: Option<u64>,
     pub peak_ingest_anonymous_bytes: Option<u64>,
+    pub process_write_bytes: Option<u64>,
+    pub allocation_ops: u64,
+    pub allocated_bytes: u64,
     pub rss_after_ingest_bytes: Option<u64>,
     pub anonymous_after_ingest_bytes: Option<u64>,
     pub rss_after_shutdown_bytes: Option<u64>,
@@ -154,12 +308,15 @@ pub struct ProbeResult {
     pub last_event_id: String,
     pub server_send_ms: Vec<f64>,
     pub server_bytes: Vec<u64>,
+    pub ingest_attribution: Option<serde_json::Value>,
 }
 
 struct Corpus {
     path: PathBuf,
     bytes: u64,
-    author: String,
+    selection: Filter,
+    mode: &'static str,
+    shape_source_blake3: Option<String>,
     first_id: String,
     last_id: String,
     generation: Duration,
@@ -177,6 +334,36 @@ struct Server {
     join: thread::JoinHandle<Result<ServerStats, String>>,
 }
 
+#[derive(Default)]
+struct ReplayGate {
+    released: Mutex<bool>,
+    ready: Condvar,
+}
+
+impl ReplayGate {
+    fn release(&self) {
+        if let Ok(mut released) = self.released.lock() {
+            *released = true;
+            self.ready.notify_all();
+        }
+    }
+
+    fn wait(&self, timeout: Duration) -> Result<(), String> {
+        let released = self
+            .released
+            .lock()
+            .map_err(|_| "replay gate lock poisoned".to_string())?;
+        let (released, wait) = self
+            .ready
+            .wait_timeout_while(released, timeout, |released| !*released)
+            .map_err(|_| "replay gate lock poisoned".to_string())?;
+        if !*released && wait.timed_out() {
+            return Err("timed out waiting for first pass to become applied".to_string());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 struct ServerConfig {
     relay_index: usize,
@@ -185,6 +372,8 @@ struct ServerConfig {
     passes: usize,
     frame_delay: Duration,
     expect_rejection: bool,
+    #[cfg(feature = "bench-instrumentation")]
+    diagnostic_preparsed_events: Arc<Mutex<Option<Vec<Arc<nostr::Event>>>>>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -276,7 +465,7 @@ impl ObservationState {
         for delta in deltas {
             match delta {
                 RowDelta::Added(row) => {
-                    let ordinal = parse_ordinal(&row.event.content)?;
+                    let ordinal = parse_ordinal(row.event.created_at)?;
                     if ordinal >= config.events {
                         return Err(format!("out-of-range event ordinal {ordinal}").into());
                     }
@@ -326,24 +515,132 @@ impl ObservationState {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CompletionMetrics {
+    completion: Duration,
+    observation_and_quiet: Duration,
+    frames_per_second: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct CompletionProfileWindow {
+    clock: &'static str,
+    start_ns: u64,
+    end_ns: u64,
+}
+
+#[cfg(feature = "bench-instrumentation")]
+fn monotonic_ns() -> Result<u64, ProbeError> {
+    let mut value = std::mem::MaybeUninit::<libc::timespec>::uninit();
+    // SAFETY: `clock_gettime` initializes the owned timespec on success.
+    let result = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC_RAW, value.as_mut_ptr()) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: the successful call above initialized the complete value.
+    let value = unsafe { value.assume_init() };
+    let seconds =
+        u64::try_from(value.tv_sec).map_err(|_| "negative CLOCK_MONOTONIC_RAW seconds")?;
+    let nanos = u64::try_from(value.tv_nsec).map_err(|_| "negative CLOCK_MONOTONIC_RAW nanos")?;
+    seconds
+        .checked_mul(1_000_000_000)
+        .and_then(|value| value.checked_add(nanos))
+        .ok_or_else(|| "CLOCK_MONOTONIC_RAW nanoseconds overflow".into())
+}
+
+#[cfg(not(feature = "bench-instrumentation"))]
+fn monotonic_ns() -> Result<u64, ProbeError> {
+    Err("completion-window-output requires bench-instrumentation".into())
+}
+
+fn write_completion_profile_window(
+    path: &Path,
+    start_ns: u64,
+    end_ns: u64,
+) -> Result<(), ProbeError> {
+    if end_ns < start_ns {
+        return Err("completion profile window ends before it starts".into());
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let window = CompletionProfileWindow {
+        clock: "CLOCK_MONOTONIC_RAW",
+        start_ns,
+        end_ns,
+    };
+    fs::write(
+        path,
+        format!("{}\n", serde_json::to_string_pretty(&window)?),
+    )?;
+    Ok(())
+}
+
+impl CompletionMetrics {
+    fn new(
+        expected_frames: u64,
+        completion: Duration,
+        observation_and_quiet: Duration,
+    ) -> Result<Self, ProbeError> {
+        if completion.is_zero() {
+            return Err("ingest completion duration must be nonzero".into());
+        }
+        if completion > observation_and_quiet {
+            return Err("ingest completion cannot follow observation and quiet proof".into());
+        }
+        Ok(Self {
+            completion,
+            observation_and_quiet,
+            frames_per_second: expected_frames as f64 / completion.as_secs_f64(),
+        })
+    }
+}
+
 pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
+    let _run_guard = PROBE_RUN_LOCK
+        .lock()
+        .map_err(|_| "relay ingest probe run lock poisoned")?;
     config.validate()?;
     let scratch = tempfile::tempdir()?;
     let corpus = generate_corpus(scratch.path(), &config)?;
+    if let Some(output) = &config.corpus_output {
+        if output.exists() {
+            return Err(
+                format!("refusing to overwrite existing corpus {}", output.display()).into(),
+            );
+        }
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&corpus.path, output)?;
+    }
     let store_path = config
         .store_path
         .clone()
         .unwrap_or_else(|| scratch.path().join("probe.redb"));
-    if store_path.exists() {
+    if !config.memory_store && store_path.exists() {
         return Err(format!(
             "refusing to overwrite existing store {}",
             store_path.display()
         )
         .into());
     }
-    if let Some(parent) = store_path.parent() {
-        fs::create_dir_all(parent)?;
+    if !config.memory_store {
+        if let Some(parent) = store_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
     }
+
+    #[cfg(feature = "bench-instrumentation")]
+    let diagnostic_preparsed_events =
+        Arc::new(Mutex::new(if config.diagnostic_preparsed_ceiling {
+            Some(load_preparsed_events(&corpus.path)?)
+        } else {
+            None
+        }));
 
     let base = Instant::now();
     let sent_at = Arc::new(
@@ -352,6 +649,8 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             .collect::<Vec<_>>(),
     );
     let server_sent_frames = Arc::new(AtomicU64::new(0));
+    let replay_started_at = Arc::new(Mutex::new(None));
+    let replay_gate = Arc::new(ReplayGate::default());
     let mut servers = Vec::with_capacity(config.relays);
     for relay_index in 0..config.relays {
         servers.push(spawn_server(
@@ -362,46 +661,96 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
                 passes: config.passes,
                 frame_delay: config.frame_delay,
                 expect_rejection: config.expect_rejection,
+                #[cfg(feature = "bench-instrumentation")]
+                diagnostic_preparsed_events: Arc::clone(&diagnostic_preparsed_events),
             },
             base,
             Arc::clone(&sent_at),
             Arc::clone(&server_sent_frames),
+            Arc::clone(&replay_started_at),
+            Arc::clone(&replay_gate),
         )?);
     }
     let relay_urls: BTreeSet<_> = servers.iter().map(|server| server.url.clone()).collect();
 
-    let selection = Filter {
-        kinds: Some(BTreeSet::from([Kind::TextNote.as_u16()])),
-        authors: Some(Binding::Literal(BTreeSet::from([corpus.author.clone()]))),
-        limit: None,
-        ..Filter::default()
-    };
+    let selection = corpus.selection.clone();
     let demand = Demand::new(
         selection.clone(),
         SourceAuthority::Pinned(relay_urls.clone()),
         AccessContext::Public,
     )?;
-    let store = RedbStore::open(&store_path)?;
+    #[cfg(feature = "bench-instrumentation")]
+    nmp_engine::ingest_attribution::reset();
+    #[cfg(feature = "bench-instrumentation")]
+    nmp_transport::configure_diagnostic_duplicate_ceiling(
+        config.diagnostic_duplicate_ceiling_capacity,
+        config.diagnostic_duplicate_ceiling_event_payload,
+    );
+    #[cfg(feature = "bench-instrumentation")]
+    nmp_transport::configure_diagnostic_preparsed_ceiling(None, Vec::new());
+    #[cfg(feature = "bench-instrumentation")]
+    nmp_transport::ingest_attribution::configure_validation_ceiling(
+        config.diagnostic_skip_event_id_validation,
+        config.diagnostic_skip_signature_verification,
+    );
+    #[cfg(not(feature = "bench-instrumentation"))]
+    if config.diagnostic_duplicate_ceiling_capacity > 0 {
+        return Err("diagnostic duplicate ceiling requires bench-instrumentation".into());
+    }
     let queue_capacity = config.queue_capacity;
-    let batch_size = config.batch_size;
-    let (engine_thread, handle) = EngineThread::spawn(
-        store,
-        FixtureDirectory::new(),
-        config.relays,
-        PoolConfig {
-            max_relays: config.relays,
-            ingest_queue_capacity: queue_capacity,
-            command_queue_capacity: queue_capacity,
-            event_sink_queue_capacity: queue_capacity,
-            verifier_queue_capacity: queue_capacity,
-            max_verify_batch: batch_size,
-            max_engine_batch: batch_size,
-            reconnect_delay_initial: Some(Duration::from_secs(3600)),
-            reconnect_jitter_max: Some(Duration::ZERO),
-            ..PoolConfig::default()
-        },
-        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
-    )?;
+    let verified_cache_capacity = config.verified_cache_capacity;
+    let committed_observation_cache_capacity = config.committed_observation_cache_capacity;
+    let verifier_workers = config.verifier_workers;
+    let verify_batch_size = config.verify_batch_size;
+    let engine_batch_size = config.engine_batch_size;
+    let engine_batch_bytes = config.engine_batch_bytes;
+    let engine_batch_wait = config.engine_batch_wait;
+    let pool_config = PoolConfig {
+        max_relays: config.relays,
+        ingest_queue_capacity: queue_capacity,
+        command_queue_capacity: queue_capacity,
+        event_sink_queue_capacity: queue_capacity,
+        verifier_queue_capacity: queue_capacity,
+        verified_cache_capacity,
+        committed_observation_cache_capacity,
+        verifier_workers,
+        max_verify_batch: verify_batch_size,
+        max_engine_batch: engine_batch_size,
+        max_engine_batch_bytes: engine_batch_bytes,
+        max_engine_batch_wait: engine_batch_wait,
+        reconnect_delay_initial: Some(Duration::from_secs(3600)),
+        reconnect_jitter_max: Some(Duration::ZERO),
+        ..PoolConfig::default()
+    };
+    let (engine_thread, handle) = if config.memory_store {
+        EngineThread::spawn(
+            MemoryStore::default(),
+            FixtureDirectory::new(),
+            config.relays,
+            pool_config,
+            RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+        )?
+    } else {
+        let store = if config.redb_nondurable_diagnostic {
+            #[cfg(feature = "bench-instrumentation")]
+            {
+                RedbStore::open_benchmark_nondurable(&store_path)?
+            }
+            #[cfg(not(feature = "bench-instrumentation"))]
+            {
+                return Err("redb-nondurable-diagnostic requires bench-instrumentation".into());
+            }
+        } else {
+            RedbStore::open(&store_path)?
+        };
+        EngineThread::spawn(
+            store,
+            FixtureDirectory::new(),
+            config.relays,
+            pool_config,
+            RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+        )?
+    };
     let live_query = LiveQuery(demand);
     let rows = match config.visible_limit {
         Some(limit) => {
@@ -433,6 +782,17 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         .checked_mul(config.relays as u64)
         .and_then(|value| value.checked_mul(config.passes as u64))
         .ok_or("expected frame count overflow")?;
+    let expected_first_pass_frames = (config.events as u64)
+        .checked_mul(config.relays as u64)
+        .ok_or("expected first-pass frame count overflow")?;
+    let expected_last_id = EventId::from_hex(&corpus.last_id)?;
+    let process_write_bytes_before = process_write_bytes();
+    let allocations_before = allocator_snapshot();
+    let completion_window_start_ns = config
+        .completion_window_output
+        .as_ref()
+        .map(|_| monotonic_ns())
+        .transpose()?;
     let ingest_started = Instant::now();
     let memory_before_ingest = current_memory();
     let memory_sampler = MemorySampler::start(config.trim_allocator_during_ingest);
@@ -441,6 +801,8 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     let mut all_sources_reconciled = false;
     let mut rejection_quiet_since = None;
     let mut accepted_quiet_since = None;
+    let mut accepted_completion_elapsed = None;
+    let mut accepted_completion_at = None;
 
     loop {
         let observed_frames = observed_relay_frames.load(Ordering::Acquire);
@@ -456,7 +818,31 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             .visible_limit
             .map_or(config.events, |limit| config.events.min(limit));
         let rows_complete = observations.final_visible_rows(&config) == expected_visible_rows;
-        if observed_frames >= expected_frames && rows_complete {
+        let newest_visible = observations
+            .visible_ids
+            .as_ref()
+            .is_none_or(|ids| ids.contains(&expected_last_id));
+        let accepted_projection_complete =
+            observed_frames >= expected_frames && rows_complete && newest_visible;
+        if config.passes > 1
+            && observed_frames >= expected_first_pass_frames
+            && rows_complete
+            && newest_visible
+        {
+            replay_gate.release();
+        }
+        if accepted_projection_complete {
+            if accepted_completion_at.is_none() {
+                let completed_at = Instant::now();
+                accepted_completion_at = Some(completed_at);
+                accepted_completion_elapsed = Some(completed_at.duration_since(ingest_started));
+                if let (Some(path), Some(start_ns)) = (
+                    config.completion_window_output.as_deref(),
+                    completion_window_start_ns,
+                ) {
+                    write_completion_profile_window(path, start_ns, monotonic_ns()?)?;
+                }
+            }
             accepted_quiet_since.get_or_insert_with(Instant::now);
         } else {
             accepted_quiet_since = None;
@@ -478,7 +864,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             )
             .into());
         }
-        match rows.recv_timeout(remaining.min(Duration::from_millis(100))) {
+        match rows.recv_timeout(remaining.min(OBSERVATION_POLL)) {
             Ok((deltas, evidence)) => {
                 accepted_quiet_since = None;
                 observations.apply(deltas, &config, &sent_at, base, ingest_started)?;
@@ -498,9 +884,46 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     while let Ok((deltas, _)) = rows.recv_timeout(Duration::from_millis(100)) {
         observations.apply(deltas, &config, &sent_at, base, ingest_started)?;
     }
-    let ingest_elapsed = ingest_started.elapsed();
+    let observation_and_quiet_elapsed = ingest_started.elapsed();
+    let completion_ingest_elapsed = if config.expect_rejection {
+        // Proving a rejected frame produced no observable state inherently
+        // requires the quiet interval. Rejection probes are correctness
+        // falsifiers, not accepted-ingest throughput measurements.
+        observation_and_quiet_elapsed
+    } else {
+        accepted_completion_elapsed
+            .ok_or("accepted ingest completed without a captured completion instant")?
+    };
+    let completion_metrics = CompletionMetrics::new(
+        expected_frames,
+        completion_ingest_elapsed,
+        observation_and_quiet_elapsed,
+    )?;
+    let replay_metrics = if config.passes > 1 {
+        let replay_started_at = replay_started_at
+            .lock()
+            .map_err(|_| "replay start clock lock poisoned")?
+            .ok_or("replay passes completed without a captured start instant")?;
+        let replay_completed_at = accepted_completion_at
+            .ok_or("replay passes completed without a captured completion instant")?;
+        let replay_elapsed = replay_completed_at
+            .checked_duration_since(replay_started_at)
+            .ok_or("replay completion preceded its first offered frame")?;
+        let replay_frames = (config.events as u64)
+            .checked_mul(config.relays as u64)
+            .and_then(|value| value.checked_mul((config.passes - 1) as u64))
+            .ok_or("expected replay frame count overflow")?;
+        Some(CompletionMetrics::new(
+            replay_frames,
+            replay_elapsed,
+            replay_elapsed,
+        )?)
+    } else {
+        None
+    };
     let memory_after_ingest = current_memory();
     let peak_ingest_memory = memory_sampler.stop();
+    let allocations_after = allocator_snapshot();
 
     diagnostics_handle.cancel();
     diagnostics_join
@@ -523,6 +946,13 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     handle.shutdown();
     engine_thread.join();
     let shutdown_elapsed = shutdown_started.elapsed();
+    let process_write_bytes = process_write_bytes()
+        .zip(process_write_bytes_before)
+        .map(|(after, before)| after.saturating_sub(before));
+    #[cfg(feature = "bench-instrumentation")]
+    let ingest_attribution = Some(ingest_attribution_json());
+    #[cfg(not(feature = "bench-instrumentation"))]
+    let ingest_attribution = None;
     while let Ok((deltas, _)) = rows.recv_timeout(Duration::ZERO) {
         observations.apply(deltas, &config, &sent_at, base, ingest_started)?;
     }
@@ -592,36 +1022,39 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     let allocator_trim_attempted = trim_allocator();
     let memory_after_allocator_trim = current_memory();
 
-    let verify_started = Instant::now();
-    let reopened = RedbStore::open(&store_path)?;
-    let mut persisted_selection = selection.clone();
-    persisted_selection.limit = None;
-    let stored = reopened.query(&selection_to_nostr(&persisted_selection)?)?;
-    if stored.len() != expected_stored_events {
-        return Err(format!(
-            "reopened cardinality {}, expected {}",
-            stored.len(),
-            expected_stored_events
-        )
-        .into());
-    }
-    if stored
-        .iter()
-        .any(|row| row.provenance.seen.len() != config.relays)
-    {
-        return Err("one or more rows did not retain every relay provenance".into());
-    }
-    let ids: HashSet<_> = stored.iter().map(|row| row.event.id.to_hex()).collect();
-    if !config.expect_rejection
-        && (!ids.contains(&corpus.first_id) || !ids.contains(&corpus.last_id))
-    {
-        return Err("reopened store is missing the corpus boundary ids".into());
-    }
-    drop(stored);
-    drop(reopened);
-    let reopen_and_verify = verify_started.elapsed();
+    let (database_bytes, reopen_and_verify) = if config.memory_store {
+        (0, Duration::ZERO)
+    } else {
+        let verify_started = Instant::now();
+        let reopened = RedbStore::open(&store_path)?;
+        let mut persisted_selection = selection.clone();
+        persisted_selection.limit = None;
+        let stored = reopened.query(&selection_to_nostr(&persisted_selection)?)?;
+        if stored.len() != expected_stored_events {
+            return Err(format!(
+                "reopened cardinality {}, expected {}",
+                stored.len(),
+                expected_stored_events
+            )
+            .into());
+        }
+        if stored
+            .iter()
+            .any(|row| row.provenance.seen.len() != config.relays)
+        {
+            return Err("one or more rows did not retain every relay provenance".into());
+        }
+        let ids: HashSet<_> = stored.iter().map(|row| row.event.id.to_hex()).collect();
+        if !config.expect_rejection
+            && (!ids.contains(&corpus.first_id) || !ids.contains(&corpus.last_id))
+        {
+            return Err("reopened store is missing the corpus boundary ids".into());
+        }
+        drop(stored);
+        drop(reopened);
+        (fs::metadata(&store_path)?.len(), verify_started.elapsed())
+    };
 
-    let ingest_seconds = ingest_elapsed.as_secs_f64();
     Ok(ProbeResult {
         schema: RESULT_SCHEMA,
         git_commit: command_output("git", &["rev-parse", "HEAD"]),
@@ -635,8 +1068,34 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         relays: config.relays,
         passes: config.passes,
         payload_bytes: config.payload_bytes,
+        corpus_mode: corpus.mode,
+        shape_source_blake3: corpus.shape_source_blake3,
+        store_backend: if config.memory_store {
+            "memory"
+        } else {
+            "redb"
+        },
+        store_durability: if config.memory_store {
+            "not-applicable"
+        } else if config.redb_nondurable_diagnostic {
+            "none-then-immediate-checkpoint-diagnostic"
+        } else {
+            "immediate"
+        },
         queue_capacity,
-        batch_size,
+        verified_cache_capacity,
+        committed_observation_cache_capacity,
+        diagnostic_duplicate_ceiling_capacity: config.diagnostic_duplicate_ceiling_capacity,
+        diagnostic_duplicate_ceiling_event_payload: config
+            .diagnostic_duplicate_ceiling_event_payload,
+        diagnostic_preparsed_ceiling: config.diagnostic_preparsed_ceiling,
+        diagnostic_skip_event_id_validation: config.diagnostic_skip_event_id_validation,
+        diagnostic_skip_signature_verification: config.diagnostic_skip_signature_verification,
+        verifier_workers,
+        verify_batch_size,
+        engine_batch_size,
+        engine_batch_bytes,
+        engine_batch_wait_us: engine_batch_wait.as_micros(),
         visible_limit: config.visible_limit,
         delivery_mode: if config.visible_limit.is_some() {
             "bounded-latest-window"
@@ -654,10 +1113,13 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         final_visible_rows,
         all_sources_reconciled,
         corpus_bytes: corpus.bytes,
-        database_bytes: fs::metadata(&store_path)?.len(),
+        database_bytes,
         generation_ms: duration_ms(corpus.generation),
-        ingest_ms: duration_ms(ingest_elapsed),
-        relay_frames_per_second: expected_frames as f64 / ingest_seconds,
+        completion_ingest_ms: duration_ms(completion_metrics.completion),
+        completion_relay_frames_per_second: completion_metrics.frames_per_second,
+        replay_completion_ms: replay_metrics.map(|metrics| duration_ms(metrics.completion)),
+        replay_frames_per_second: replay_metrics.map(|metrics| metrics.frames_per_second),
+        observation_and_quiet_ms: duration_ms(completion_metrics.observation_and_quiet),
         first_row_ms,
         last_row_ms,
         apply_latency_p50_ms,
@@ -672,6 +1134,9 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             .zip(memory_before_ingest.rss_bytes)
             .map(|(peak, before)| peak.saturating_sub(before)),
         peak_ingest_anonymous_bytes: peak_ingest_memory.anonymous_bytes,
+        process_write_bytes,
+        allocation_ops: allocations_after.0.saturating_sub(allocations_before.0),
+        allocated_bytes: allocations_after.1.saturating_sub(allocations_before.1),
         rss_after_ingest_bytes: memory_after_ingest.rss_bytes,
         anonymous_after_ingest_bytes: memory_after_ingest.anonymous_bytes,
         rss_after_shutdown_bytes: memory_after_shutdown.rss_bytes,
@@ -695,10 +1160,147 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             .map(|stats| duration_ms(stats.send_elapsed))
             .collect(),
         server_bytes: server_stats.iter().map(|stats| stats.bytes).collect(),
+        ingest_attribution,
     })
 }
 
+#[cfg(feature = "bench-instrumentation")]
+fn ingest_attribution_json() -> serde_json::Value {
+    let transport = nmp_transport::ingest_attribution::snapshot();
+    let engine = nmp_engine::ingest_attribution::snapshot();
+    let resolver = nmp_resolver::ingest_attribution::snapshot();
+    let store = nmp_store::ingest_attribution::snapshot();
+    serde_json::json!({
+        "transport": {
+            "committed_observation_lookups": transport.committed_observation_lookups,
+            "committed_observation_hits": transport.committed_observation_hits,
+            "committed_observation_publications": transport.committed_observation_publications,
+            "committed_observation_invalidations": transport.committed_observation_invalidations,
+            "diagnostic_duplicate_ceiling_lookups": transport.diagnostic_duplicate_ceiling_lookups,
+            "diagnostic_duplicate_ceiling_hits": transport.diagnostic_duplicate_ceiling_hits,
+            "diagnostic_duplicate_ceiling_inserts": transport.diagnostic_duplicate_ceiling_inserts,
+            "diagnostic_preparsed_ceiling_lookups": transport.diagnostic_preparsed_ceiling_lookups,
+            "diagnostic_preparsed_ceiling_hits": transport.diagnostic_preparsed_ceiling_hits,
+            "parse_attempts": transport.parse_attempts, "parsed_frames": transport.parsed_frames,
+            "parse_ns": transport.parse_ns, "translator_bursts": transport.translator_bursts,
+            "event_id_validation_attempts": transport.event_id_validation_attempts,
+            "event_id_validation_skips": transport.event_id_validation_skips,
+            "event_id_validation_ns": transport.event_id_validation_ns,
+            "translator_events": transport.translator_events, "max_translator_burst": transport.max_translator_burst,
+            "verify_batches": transport.verify_batches, "verify_candidates": transport.verify_candidates,
+            "verify_ns": transport.verify_ns,
+            "verify_dispatch_ns": transport.verify_dispatch_ns,
+            "verify_collect_ns": transport.verify_collect_ns,
+            "verify_worker_ns": transport.verify_worker_ns,
+            "signature_verification_attempts": transport.signature_verification_attempts,
+            "signature_verification_skips": transport.signature_verification_skips,
+            "verify_task_submissions": transport.verify_task_submissions,
+            "verify_result_messages": transport.verify_result_messages,
+            "verify_worker_candidates": transport.verify_worker_candidates,
+            "max_verify_lane_candidates": transport.max_verify_lane_candidates,
+            "delivered_events": transport.delivered_events,
+            "delivery_ns": transport.delivery_ns,
+            "event_fallback_clones": transport.event_fallback_clones
+        },
+        "engine": {
+            "bridge_batches": engine.bridge_batches, "bridge_frames": engine.bridge_frames,
+            "max_bridge_batch": engine.max_bridge_batch, "bridge_send_ns": engine.bridge_send_ns,
+            "bridge_event_bytes": engine.bridge_event_bytes,
+            "max_bridge_batch_bytes": engine.max_bridge_batch_bytes,
+            "bridge_applied_wait_ns": engine.bridge_applied_wait_ns,
+            "engine_batch_process_ns": engine.engine_batch_process_ns,
+            "relay_core_reduce_ns": engine.relay_core_reduce_ns,
+            "relay_core_reduce_cpu_ns": engine.relay_core_reduce_cpu_ns,
+            "relay_effect_dispatch_ns": engine.relay_effect_dispatch_ns,
+            "relay_ingest_prelude_ns": engine.relay_ingest_prelude_ns,
+            "relay_ingest_prelude_cpu_ns": engine.relay_ingest_prelude_cpu_ns,
+            "relay_ingest_post_store_ns": engine.relay_ingest_post_store_ns,
+            "relay_ingest_post_store_cpu_ns": engine.relay_ingest_post_store_cpu_ns,
+            "relay_ingest_apply_committed_ns": engine.relay_ingest_apply_committed_ns,
+            "relay_ingest_apply_committed_cpu_ns": engine.relay_ingest_apply_committed_cpu_ns,
+            "relay_ingest_effect_build_ns": engine.relay_ingest_effect_build_ns,
+            "relay_ingest_effect_build_cpu_ns": engine.relay_ingest_effect_build_cpu_ns,
+            "relay_ingest_observations_call_ns": engine.relay_ingest_observations_call_ns,
+            "relay_ingest_observations_call_cpu_ns": engine.relay_ingest_observations_call_cpu_ns,
+            "relay_resolver_call_ns": engine.relay_resolver_call_ns,
+            "relay_resolver_call_cpu_ns": engine.relay_resolver_call_cpu_ns,
+            "relay_frame_conversion_ns": engine.relay_frame_conversion_ns,
+            "relay_frame_session_validation_ns": engine.relay_frame_session_validation_ns,
+            "relay_frame_diagnostics_count_ns": engine.relay_frame_diagnostics_count_ns,
+            "relay_frame_candidate_build_ns": engine.relay_frame_candidate_build_ns,
+            "committed_observation_effect_ns": engine.committed_observation_effect_ns,
+            "diagnostics_effect_ns": engine.diagnostics_effect_ns,
+            "committed_projection_total_ns": engine.committed_projection_total_ns,
+            "committed_projection_prelude_ns": engine.committed_projection_prelude_ns,
+            "committed_projection_recompile_ns": engine.committed_projection_recompile_ns,
+            "committed_live_projection_ns": engine.committed_live_projection_ns,
+            "committed_history_projection_ns": engine.committed_history_projection_ns,
+            "history_projection_setup_ns": engine.history_projection_setup_ns,
+            "history_projection_apply_ns": engine.history_projection_apply_ns,
+            "history_projection_delta_ns": engine.history_projection_delta_ns,
+            "history_projection_batch_ns": engine.history_projection_batch_ns,
+            "history_sink_delivery_ns": engine.history_sink_delivery_ns,
+            "history_channel_send_ns": engine.history_channel_send_ns,
+            "history_receiver_reconcile_ns": engine.history_receiver_reconcile_ns,
+            "history_batches": engine.history_batches,
+            "history_deltas": engine.history_deltas,
+            "history_rows": engine.history_rows,
+            "row_sink_delivery_ns": engine.row_sink_delivery_ns,
+            "row_sink_batches": engine.row_sink_batches,
+            "row_sink_deltas": engine.row_sink_deltas,
+            "row_channel_send_ns": engine.row_channel_send_ns,
+            "row_channel_batches": engine.row_channel_batches,
+            "row_channel_deltas": engine.row_channel_deltas,
+            "committed_projection_event_clones": engine.projection_event_clones
+        },
+        "resolver": {
+            "batches": resolver.batches, "events": resolver.events, "max_batch_events": resolver.max_batch_events,
+            "total_ns": resolver.total_ns, "total_cpu_ns": resolver.total_cpu_ns,
+            "prepare_ns": resolver.prepare_ns, "prepare_cpu_ns": resolver.prepare_cpu_ns,
+            "store_ns": resolver.store_ns, "store_cpu_ns": resolver.store_cpu_ns,
+            "classify_ns": resolver.classify_ns, "classify_cpu_ns": resolver.classify_cpu_ns,
+            "react_and_affected_ns": resolver.react_and_affected_ns,
+            "react_and_affected_cpu_ns": resolver.react_and_affected_cpu_ns,
+            "event_clones": resolver.event_clones
+        },
+        "store": {
+            "batches": store.batches, "events": store.events, "max_batch_events": store.max_batch_events,
+            "transaction_total_ns": store.transaction_total_ns, "begin_write_ns": store.begin_write_ns,
+            "open_tables_ns": store.open_tables_ns, "apply_events_ns": store.apply_events_ns,
+            "flush_ns": store.flush_ns, "postings_flush_ns": store.postings_flush_ns,
+            "commit_ns": store.commit_ns, "durability_checkpoint_ns": store.durability_checkpoint_ns,
+            "encode_event_ns": store.encode_event_ns,
+            "encoded_event_bytes": store.encoded_event_bytes, "canonical_insert_ns": store.canonical_insert_ns,
+            "index_insert_ns": store.index_insert_ns,
+            "memory_insert_ns": store.memory_insert_ns,
+            "memory_event_build_ns": store.memory_event_build_ns,
+            "memory_expiration_index_ns": store.memory_expiration_index_ns,
+            "memory_query_index_ns": store.memory_query_index_ns,
+            "memory_canonical_insert_ns": store.memory_canonical_insert_ns,
+            "event_clones": store.event_clones
+        }
+    })
+}
+
+#[cfg(feature = "bench-instrumentation")]
+fn load_preparsed_events(path: &Path) -> Result<Vec<Arc<nostr::Event>>, ProbeError> {
+    BufReader::new(File::open(path)?)
+        .lines()
+        .map(|line| {
+            let event = nostr::Event::from_json(line?)?;
+            Ok(Arc::new(event))
+        })
+        .collect()
+}
+
 fn generate_corpus(dir: &Path, config: &ProbeConfig) -> Result<Corpus, ProbeError> {
+    match &config.shape_corpus {
+        Some(path) => generate_shape_corpus(dir, config, path),
+        None => generate_uniform_corpus(dir, config),
+    }
+}
+
+fn generate_uniform_corpus(dir: &Path, config: &ProbeConfig) -> Result<Corpus, ProbeError> {
     let started = Instant::now();
     let path = dir.join("events.jsonl");
     let mut writer = BufWriter::new(File::create(&path)?);
@@ -730,11 +1332,249 @@ fn generate_corpus(dir: &Path, config: &ProbeConfig) -> Result<Corpus, ProbeErro
     Ok(Corpus {
         bytes: fs::metadata(&path)?.len(),
         path,
-        author,
+        selection: Filter {
+            kinds: Some(BTreeSet::from([Kind::TextNote.as_u16()])),
+            authors: Some(Binding::Literal(BTreeSet::from([author]))),
+            limit: None,
+            ..Filter::default()
+        },
+        mode: "uniform-text-note",
+        shape_source_blake3: None,
         first_id: first_id.expect("nonempty corpus"),
         last_id,
         generation: started.elapsed(),
     })
+}
+
+#[derive(Deserialize)]
+struct ShapeCorpusInput {
+    schema: String,
+    source_capture_blake3: String,
+    shapes: Vec<EventShapeInput>,
+}
+
+#[derive(Deserialize)]
+struct EventShapeInput {
+    kind: u16,
+    content: StringShapeInput,
+    tags: Vec<TagShapeInput>,
+}
+
+#[derive(Deserialize)]
+struct StringShapeInput {
+    utf8_bytes: usize,
+    json_bytes: usize,
+    class: StringClassInput,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StringClassInput {
+    Empty,
+    LowerHex64,
+    Url,
+    Plain,
+}
+
+#[derive(Deserialize)]
+struct TagShapeInput {
+    name: TagNameShapeInput,
+    values: Vec<StringShapeInput>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "class", rename_all = "snake_case")]
+enum TagNameShapeInput {
+    PublicProtocol {
+        value: String,
+    },
+    SingleLetter {
+        value: char,
+    },
+    Synthetic {
+        utf8_bytes: usize,
+        json_bytes: usize,
+    },
+}
+
+fn generate_shape_corpus(
+    dir: &Path,
+    config: &ProbeConfig,
+    shape_path: &Path,
+) -> Result<Corpus, ProbeError> {
+    let started = Instant::now();
+    let source = fs::read(shape_path)?;
+    let corpus: ShapeCorpusInput = serde_json::from_slice(&source)?;
+    if corpus.schema != "nmp-private-free-event-shapes-v1" {
+        return Err(format!("unsupported shape corpus schema {}", corpus.schema).into());
+    }
+    if corpus.source_capture_blake3.len() != 64
+        || !corpus
+            .source_capture_blake3
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("shape corpus source_capture_blake3 must be 64 lowercase hex bytes".into());
+    }
+    if corpus.shapes.is_empty() {
+        return Err("shape corpus contains no shapes".into());
+    }
+
+    let path = dir.join("events.jsonl");
+    let mut writer = BufWriter::new(File::create(&path)?);
+    let mut first_id = None;
+    let mut last_id = String::new();
+    let kind_one_shape = corpus
+        .shapes
+        .iter()
+        .position(|shape| shape.kind == Kind::TextNote.as_u16())
+        .unwrap_or(0);
+    for ordinal in 0..config.events {
+        let shape_index = if ordinal == 0 || ordinal + 1 == config.events {
+            kind_one_shape
+        } else {
+            ordinal.wrapping_mul(7_919) % corpus.shapes.len()
+        };
+        let shape = &corpus.shapes[shape_index];
+        let keys = Keys::parse(&format!("{:064x}", ordinal as u128 + 1))?;
+        let content = shaped_string(&shape.content, ordinal as u64)?;
+        let tags = shape
+            .tags
+            .iter()
+            .enumerate()
+            .map(|(tag_index, shape)| shaped_tag(shape, ordinal as u64, tag_index, config.events))
+            .collect::<Result<Vec<_>, ProbeError>>()?;
+        let event = EventBuilder::new(Kind::from(shape.kind), content)
+            .tags(tags)
+            .custom_created_at(Timestamp::from(BASE_CREATED_AT + ordinal as u64))
+            .sign_with_keys(&keys)?;
+        first_id.get_or_insert_with(|| event.id.to_hex());
+        last_id = event.id.to_hex();
+        writeln!(writer, "{}", event.as_json())?;
+    }
+    writer.flush()?;
+
+    Ok(Corpus {
+        bytes: fs::metadata(&path)?.len(),
+        path,
+        selection: Filter {
+            since: Some(BASE_CREATED_AT),
+            until: Some(BASE_CREATED_AT + config.events as u64 - 1),
+            limit: None,
+            ..Filter::default()
+        },
+        mode: "representative-private-free-shapes",
+        shape_source_blake3: Some(corpus.source_capture_blake3),
+        first_id: first_id.expect("nonempty corpus"),
+        last_id,
+        generation: started.elapsed(),
+    })
+}
+
+fn shaped_tag(
+    shape: &TagShapeInput,
+    ordinal: u64,
+    tag_index: usize,
+    events: usize,
+) -> Result<Tag, ProbeError> {
+    let name = match &shape.name {
+        TagNameShapeInput::PublicProtocol { value } => value.clone(),
+        TagNameShapeInput::SingleLetter { value } => value.to_string(),
+        TagNameShapeInput::Synthetic {
+            utf8_bytes,
+            json_bytes,
+        } => shaped_text(*utf8_bytes, *json_bytes, ordinal)?,
+    };
+    let mut atoms = Vec::with_capacity(shape.values.len() + 1);
+    atoms.push(name.clone());
+    for (value_index, value) in shape.values.iter().enumerate() {
+        atoms.push(shaped_tag_value(
+            &name,
+            value,
+            ordinal,
+            tag_index,
+            value_index,
+            events,
+        )?);
+    }
+    Ok(Tag::parse(atoms)?)
+}
+
+fn shaped_tag_value(
+    name: &str,
+    shape: &StringShapeInput,
+    ordinal: u64,
+    tag_index: usize,
+    value_index: usize,
+    events: usize,
+) -> Result<String, ProbeError> {
+    if name == "expiration" && value_index == 0 && shape.utf8_bytes >= 10 {
+        // Keep generated NIP-40 rows alive independently of the wall clock on
+        // the machine reproducing the benchmark. This is outside the timed
+        // path and remains a ten-digit Unix timestamp until 2096.
+        let future = 4_000_000_000_u64.saturating_add(events as u64);
+        let value = future.to_string();
+        if value.len() == shape.utf8_bytes && value.len() + 2 == shape.json_bytes {
+            return Ok(value);
+        }
+    }
+    if matches!(shape.class, StringClassInput::LowerHex64) {
+        let seed = ordinal
+            .wrapping_mul(1_000_003)
+            .wrapping_add((tag_index as u64) << 16)
+            .wrapping_add(value_index as u64);
+        let value = format!("{seed:064x}");
+        if value.len() == shape.utf8_bytes && value.len() + 2 == shape.json_bytes {
+            return Ok(value);
+        }
+    }
+    shaped_string(
+        shape,
+        ordinal ^ ((tag_index as u64) << 32) ^ value_index as u64,
+    )
+}
+
+fn shaped_string(shape: &StringShapeInput, seed: u64) -> Result<String, ProbeError> {
+    match shape.class {
+        StringClassInput::Empty => {
+            if shape.utf8_bytes != 0 || shape.json_bytes != 2 {
+                return Err("empty string shape has inconsistent byte counts".into());
+            }
+            Ok(String::new())
+        }
+        StringClassInput::LowerHex64 if shape.utf8_bytes == 64 && shape.json_bytes == 66 => {
+            Ok(format!("{seed:064x}"))
+        }
+        StringClassInput::Url | StringClassInput::Plain | StringClassInput::LowerHex64 => {
+            shaped_text(shape.utf8_bytes, shape.json_bytes, seed)
+        }
+    }
+}
+
+fn shaped_text(utf8_bytes: usize, json_bytes: usize, seed: u64) -> Result<String, ProbeError> {
+    let base_json_bytes = utf8_bytes.checked_add(2).ok_or("shape byte overflow")?;
+    let overhead = json_bytes
+        .checked_sub(base_json_bytes)
+        .ok_or("JSON string is shorter than its UTF-8 payload plus quotes")?;
+    for controls in (0..=utf8_bytes.min(overhead / 5)).rev() {
+        let quotes = overhead - controls * 5;
+        if controls + quotes > utf8_bytes {
+            continue;
+        }
+        let plain = utf8_bytes - controls - quotes;
+        let mut value = String::with_capacity(utf8_bytes);
+        value.extend(std::iter::repeat_n('\0', controls));
+        value.extend(std::iter::repeat_n('"', quotes));
+        let fill = char::from(b'a' + u8::try_from(seed % 26)?);
+        value.extend(std::iter::repeat_n(fill, plain));
+        if value.len() == utf8_bytes && serde_json::to_string(&value)?.len() == json_bytes {
+            return Ok(value);
+        }
+    }
+    Err(
+        format!("cannot synthesize string with utf8_bytes={utf8_bytes} json_bytes={json_bytes}")
+            .into(),
+    )
 }
 
 fn spawn_server(
@@ -742,6 +1582,8 @@ fn spawn_server(
     base: Instant,
     sent_at: Arc<Vec<AtomicU64>>,
     server_sent_frames: Arc<AtomicU64>,
+    replay_started_at: Arc<Mutex<Option<Instant>>>,
+    replay_gate: Arc<ReplayGate>,
 ) -> Result<Server, ProbeError> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let address = listener.local_addr()?;
@@ -808,6 +1650,8 @@ fn spawn_server(
                         let config = config.clone();
                         let sent_at = Arc::clone(&sent_at);
                         let server_sent_frames = Arc::clone(&server_sent_frames);
+                        let replay_started_at = Arc::clone(&replay_started_at);
+                        let replay_gate = Arc::clone(&replay_gate);
                         connections.push(thread::spawn(move || {
                             let Ok(mut socket) = accept(stream) else {
                                 return;
@@ -822,6 +1666,8 @@ fn spawn_server(
                                 base,
                                 &sent_at,
                                 &server_sent_frames,
+                                &replay_started_at,
+                                &replay_gate,
                             );
                             let _ = stats_tx.send(result);
                         }));
@@ -842,6 +1688,8 @@ fn serve_corpus(
     base: Instant,
     sent_at: &[AtomicU64],
     server_sent_frames: &AtomicU64,
+    replay_started_at: &Mutex<Option<Instant>>,
+    replay_gate: &ReplayGate,
 ) -> Result<ServerStats, String> {
     let subscription = loop {
         let message = socket.read().map_err(|error| error.to_string())?;
@@ -858,15 +1706,36 @@ fn serve_corpus(
         }
     };
     let encoded_subscription = serde_json::to_string(&subscription).map_err(|e| e.to_string())?;
+    #[cfg(feature = "bench-instrumentation")]
+    if let Some(events) = config
+        .diagnostic_preparsed_events
+        .lock()
+        .map_err(|_| "diagnostic preparsed events lock poisoned".to_string())?
+        .take()
+    {
+        nmp_transport::configure_diagnostic_preparsed_ceiling(
+            Some(nostr::SubscriptionId::new(subscription.clone())),
+            events,
+        );
+    }
     let started = Instant::now();
     let mut frames = 0u64;
     let mut bytes = 0u64;
-    'passes: for _ in 0..config.passes {
+    'passes: for pass_index in 0..config.passes {
+        if pass_index == 1 {
+            replay_gate.wait(Duration::from_secs(30))?;
+        }
         let reader = BufReader::new(File::open(&config.corpus_path).map_err(|e| e.to_string())?);
         for (ordinal, line) in reader.lines().enumerate() {
             let line = line.map_err(|e| e.to_string())?;
             if ordinal >= config.events {
                 return Err("corpus contains more rows than declared".to_string());
+            }
+            if pass_index == 1 && ordinal == 0 {
+                replay_started_at
+                    .lock()
+                    .map_err(|_| "replay start clock lock poisoned".to_string())?
+                    .get_or_insert_with(Instant::now);
             }
             let now = elapsed_ns(base).max(1);
             let _ = sent_at[ordinal].compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire);
@@ -928,27 +1797,33 @@ fn serve_corpus(
     })
 }
 
-fn parse_ordinal(content: &str) -> Result<usize, ProbeError> {
-    let marker = "ordinal=";
-    let start = content.find(marker).ok_or("event content has no ordinal")? + marker.len();
-    let end = content[start..]
-        .find(' ')
-        .map(|offset| start + offset)
-        .unwrap_or(content.len());
-    Ok(content[start..end].parse()?)
+fn parse_ordinal(created_at: Timestamp) -> Result<usize, ProbeError> {
+    let ordinal = created_at
+        .as_secs()
+        .checked_sub(BASE_CREATED_AT)
+        .ok_or("event timestamp precedes corpus base")?;
+    Ok(usize::try_from(ordinal)?)
 }
 
 fn selection_to_nostr(selection: &Filter) -> Result<nostr::Filter, ProbeError> {
-    let authors = match &selection.authors {
-        Some(Binding::Literal(authors)) => authors,
-        _ => return Err("probe selection must have literal authors".into()),
-    };
     let mut filter = nostr::Filter::new();
     if let Some(kinds) = &selection.kinds {
         filter = filter.kinds(kinds.iter().copied().map(Kind::from));
     }
-    for author in authors {
-        filter = filter.author(nostr::PublicKey::parse(author)?);
+    match &selection.authors {
+        Some(Binding::Literal(authors)) => {
+            for author in authors {
+                filter = filter.author(nostr::PublicKey::parse(author)?);
+            }
+        }
+        Some(_) => return Err("probe selection authors must be literal".into()),
+        None => {}
+    }
+    if let Some(since) = selection.since {
+        filter = filter.since(Timestamp::from(since));
+    }
+    if let Some(until) = selection.until {
+        filter = filter.until(Timestamp::from(until));
     }
     Ok(filter)
 }
@@ -1026,6 +1901,19 @@ fn memory_field_bytes(rollup: &str, field: &str) -> Option<u64> {
     kib.checked_mul(1_024)
 }
 
+#[cfg(target_os = "linux")]
+fn process_write_bytes() -> Option<u64> {
+    fs::read_to_string("/proc/self/io")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("write_bytes:")?.trim().parse().ok())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_write_bytes() -> Option<u64> {
+    None
+}
+
 #[cfg(not(target_os = "linux"))]
 fn current_memory() -> MemorySample {
     MemorySample::default()
@@ -1041,4 +1929,97 @@ fn trim_allocator() -> bool {
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 fn trim_allocator() -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completion_throughput_excludes_quiet_proof() {
+        let completion = Duration::from_millis(500);
+        let first = CompletionMetrics::new(100_000, completion, Duration::from_secs(1)).unwrap();
+        let extended =
+            CompletionMetrics::new(100_000, completion, Duration::from_secs(10)).unwrap();
+
+        assert_eq!(first.frames_per_second, 200_000.0);
+        assert_eq!(extended.frames_per_second, first.frames_per_second);
+        assert!(first.completion <= first.observation_and_quiet);
+        assert!(extended.completion <= extended.observation_and_quiet);
+    }
+
+    #[test]
+    fn completion_rejects_an_inverted_timeline() {
+        let error =
+            CompletionMetrics::new(1, Duration::from_secs(2), Duration::from_secs(1)).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("completion cannot follow observation"));
+    }
+
+    #[test]
+    fn completion_profile_window_preserves_raw_clock_bounds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nested/window.json");
+
+        write_completion_profile_window(&path, 10, 20).expect("write completion window");
+
+        let window: serde_json::Value =
+            serde_json::from_slice(&fs::read(path).expect("read completion window"))
+                .expect("parse completion window");
+        assert_eq!(window["clock"], "CLOCK_MONOTONIC_RAW");
+        assert_eq!(window["start_ns"], 10);
+        assert_eq!(window["end_ns"], 20);
+    }
+
+    #[test]
+    fn completion_profile_window_rejects_inverted_bounds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let error = write_completion_profile_window(&dir.path().join("window.json"), 20, 10)
+            .expect_err("inverted profile window must fail");
+        assert!(error
+            .to_string()
+            .contains("completion profile window ends before it starts"));
+    }
+
+    fn string_shape(
+        utf8_bytes: usize,
+        json_bytes: usize,
+        class: StringClassInput,
+    ) -> StringShapeInput {
+        StringShapeInput {
+            utf8_bytes,
+            json_bytes,
+            class,
+        }
+    }
+
+    #[test]
+    fn shaped_text_preserves_utf8_and_json_costs() {
+        for (utf8_bytes, json_bytes) in [(0, 2), (5, 7), (3, 7), (3, 12)] {
+            let value = shaped_text(utf8_bytes, json_bytes, 3).unwrap();
+            assert_eq!(value.len(), utf8_bytes);
+            assert_eq!(serde_json::to_string(&value).unwrap().len(), json_bytes);
+        }
+    }
+
+    #[test]
+    fn generated_expiration_stays_live_and_preserves_shape() {
+        let shape = string_shape(10, 12, StringClassInput::Plain);
+        let value = shaped_tag_value("expiration", &shape, 0, 0, 0, 1_000_000).unwrap();
+        assert_eq!(value, "4001000000");
+        assert_eq!(serde_json::to_string(&value).unwrap().len(), 12);
+    }
+
+    #[test]
+    fn lower_hex_values_are_deterministic_and_shape_exact() {
+        let shape = string_shape(64, 66, StringClassInput::LowerHex64);
+        let first = shaped_tag_value("e", &shape, 7, 2, 1, 10).unwrap();
+        let second = shaped_tag_value("e", &shape, 7, 2, 1, 10).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64);
+        assert!(first
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    }
 }

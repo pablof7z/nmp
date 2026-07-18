@@ -30,7 +30,7 @@ pub use catalog::{known_local_signers, LocalSignerApp, LocalSignerProtocol};
 pub use local::LocalKeySigner;
 pub use nip46::{
     Nip46Cancellation, Nip46ClientMetadata, Nip46ConnectionEvent, Nip46Error, Nip46Invitation,
-    Nip46Signer,
+    Nip46Origin, Nip46SessionCheckpoint, Nip46Signer,
 };
 pub use op::{
     pending_signer_cancellation, PendingSignerCancel, PendingSignerCancelled, PendingSignerOp,

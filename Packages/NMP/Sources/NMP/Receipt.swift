@@ -129,6 +129,17 @@ extension NMPEngine {
         return Receipt(handle: handle)
     }
 
+    /// Publish a `CommentIntent` from `commentIntent` (#572). Take-once --
+    /// see `publishComposed(_ intent: GroupSendIntent)`'s own doc; identical
+    /// contract, just for the NIP-22 composed intent, delivered pull-based
+    /// over `Receipt.status` (#680).
+    public func publishComposed(_ intent: CommentIntent) async throws -> Receipt {
+        let handle = try nmpRethrowing {
+            try ffi.publishComposed(intent: intent.ffi)
+        }
+        return Receipt(handle: handle)
+    }
+
     /// Attach a fresh pull stream to retained receipt facts (#680): the
     /// `.attached` result carries a new `NmpReceiptStream` that replays the
     /// durable `WriteStatus` prefix from the store and streams onward. Corrupt
@@ -138,6 +149,26 @@ extension NMPEngine {
             try ffi.reattachReceipt(receiptId: id)
         }
         switch result {
+        case .attached(let stream):
+            return .attached(Receipt(handle: stream))
+        case .notFound:
+            return .notFound
+        case .retainedButUnreadable:
+            return .retainedButUnreadable
+        }
+    }
+
+    /// #591: recover a receipt after a crash that happened BEFORE the app
+    /// could durably persist the receipt id `publish`/`publishComposed`
+    /// returned -- looked up by the caller's own crash-safe correlation
+    /// token instead. Otherwise identical to `reattachReceipt(id:)`.
+    public func reattachReceipt(correlation: String) throws -> ReceiptReattachment {
+        let result = try nmpRethrowing {
+            try ffi.reattachByCorrelation(correlation: correlation)
+        }
+        // The resolved receipt id (#591) rides along on the attached stream
+        // handle itself (`Receipt.id`); a token-only caller learns it there.
+        switch result.outcome {
         case .attached(let stream):
             return .attached(Receipt(handle: stream))
         case .notFound:

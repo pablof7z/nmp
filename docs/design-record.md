@@ -293,6 +293,14 @@ canonical statement is `docs/VISION.md`; detailed ownership lives in:
   stable canonical pending row are persisted atomically. Missing signer becomes
   `AwaitingSigner(pubkey)`, not failure. The row promotes in place after exact
   signature validation.
+- That acceptance guarantee is a logical authority boundary, not a requirement
+  for one physical database transaction. Event rows and their event-local
+  indexes remain atomic inside the event store; a separate control store is
+  allowed when it commits the publishing obligation first and projects it
+  through a durable, deterministic, idempotent journal replayed before normal
+  queries or transport resume. Relay echoes that adopt a real signature onto a
+  pending local row are cross-authority reconciliation, not ordinary remote
+  ingest, and must durably complete the corresponding control transition.
 - Pending rows reach observers only through the canonical store path.
   Cancellation or terminal pre-signature failure retracts/compensates through
   that path; relay rejection after signing affects the receipt only.

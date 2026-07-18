@@ -1,0 +1,54 @@
+# ========
+# captured on    : Sat Jul 18 13:01:46 2026
+# header version : 1
+# data offset    : 408
+# data size      : 204959872
+# feat offset    : 204960280
+# hostname : kind2
+# os release : 6.1.0-42-amd64
+# perf version : 6.1.176
+# arch : x86_64
+# nrcpus online : 20
+# nrcpus avail : 20
+# cpudesc : Intel(R) Core(TM) Ultra 7 265
+# cpuid : GenuineIntel,6,198,2
+# total memory : 65428568 kB
+# cmdline : /usr/bin/perf record -e cycles:u -F 999 -g --call-graph dwarf,16384 -o /tmp/nmp686raw.perf.data -- /home/pablo/Work/nmp-issue-679-resolver-cpu/target/release/examples/relay_ingest_bench --events 100000 --passes 1 --queue-capacity 8192 --verified-cache-capacity 131072 --committed-observation-cache-capacity 131072 --verifier-workers 8 --verify-batch-size 512 --engine-batch-size 4096 --engine-batch-bytes 8388608 --engine-batch-wait-us 200 --timeout-secs 300 --shape-corpus benchmarks/nostr-event-corpus/results/2026-07-17/private-free-shapes.json --memory-store --completion-window-output /tmp/nmp686raw-window.json --output /tmp/nmp686raw-profile.json
+# event : name = cycles:u, , id = { 1595, 1596, 1597, 1598, 1599, 1600, 1601, 1602, 1603, 1604, 1605, 1606, 1607, 1608, 1609, 1610, 1611, 1612, 1613, 1614 }, size = 128, { sample_period, sample_freq } = 999, sample_type = IP|TID|TIME|ADDR|CALLCHAIN|PERIOD|REGS_USER|STACK_USER|DATA_SRC, read_format = ID|LOST, disabled = 1, inherit = 1, exclude_kernel = 1, exclude_hv = 1, mmap = 1, comm = 1, freq = 1, enable_on_exec = 1, task = 1, mmap_data = 1, sample_id_all = 1, exclude_guest = 1, exclude_callchain_user = 1, mmap2 = 1, comm_exec = 1, ksymbol = 1, bpf_event = 1, sample_regs_user = 0xff0fff, sample_stack_user = 16384
+# CPU_TOPOLOGY info available, use -I to display
+# NUMA_TOPOLOGY info available, use -I to display
+# pmu mappings: software = 1, uprobe = 7, intel_bts = 8, cpu = 4, breakpoint = 5, tracepoint = 2, kprobe = 6, msr = 10, intel_pt = 9
+# CACHE info available, use -I to display
+# time of first sample : 8043851.635360
+# time of last sample : 8043857.268419
+# sample duration :   5633.059 ms
+# MEM_TOPOLOGY info available, use -I to display
+# bpf_prog_info 553: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc0341110 size 357
+# bpf_prog_info 919: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc0349d90 size 357
+# bpf_prog_info 922: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc0349f0c size 357
+# bpf_prog_info 94096: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc033c3d4 size 357
+# bpf_prog_info 94100: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc033c708 size 357
+# bpf_prog_info 246781: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc0340b4c size 357
+# bpf_prog_info 247409: bpf_prog_d8c902d14f47ed8d_sd_devices addr 0xffffffffc033ab68 size 269
+# bpf_prog_info 247410: bpf_prog_3650d9673c54ce30_sd_devices addr 0xffffffffc0340f08 size 310
+# bpf_prog_info 247411: bpf_prog_6deef7357e7b4530_sd_fw_egress addr 0xffffffffc033af88 size 55
+# bpf_prog_info 247412: bpf_prog_6deef7357e7b4530_sd_fw_ingress addr 0xffffffffc033b014 size 55
+# bpf_prog_info 247413: bpf_prog_ee0e253c78993a24_sd_devices addr 0xffffffffc03415f8 size 259
+# bpf_prog_info 247414: bpf_prog_d8c902d14f47ed8d_sd_devices addr 0xffffffffc0341ccc size 269
+# bpf_prog_info 247415: bpf_prog_8470ed2b25b99116_sd_devices addr 0xffffffffc0343ecc size 448
+# bpf_prog_info 247416: bpf_prog_6deef7357e7b4530_sd_fw_egress addr 0xffffffffc033c33c size 55
+# bpf_prog_info 247417: bpf_prog_6deef7357e7b4530_sd_fw_ingress addr 0xffffffffc03410ac size 55
+# bpf_prog_info 247418: bpf_prog_6deef7357e7b4530_sd_fw_egress addr 0xffffffffc0341714 size 55
+# bpf_prog_info 247419: bpf_prog_6deef7357e7b4530_sd_fw_ingress addr 0xffffffffc0341e28 size 55
+# bpf_prog_info 247420: bpf_prog_d8c902d14f47ed8d_sd_devices addr 0xffffffffc034432c size 269
+# bpf_prog_info 247421: bpf_prog_d8c902d14f47ed8d_sd_devices addr 0xffffffffc0344458 size 269
+# bpf_prog_info 247422: bpf_prog_d8c902d14f47ed8d_sd_devices addr 0xffffffffc034458c size 269
+# bpf_prog_info 247423: bpf_prog_d8c902d14f47ed8d_sd_devices addr 0xffffffffc03446dc size 269
+# bpf_prog_info 258676: bpf_prog_26dcd5a87c1d07a2_sd_devices addr 0xffffffffc033c568 size 269
+# bpf_prog_info 258677: bpf_prog_a04f5eef06a7f555 addr 0xffffffffc033a810 size 16
+# bpf_prog_info 258679: bpf_prog_ab4bc4523b7fe6b4 addr 0xffffffffc03440d4 size 357
+# cpu pmu capabilities: branches=32, max_precise=0, pmu_name=generic_arch_v5+
+# intel_pt pmu capabilities: topa_multiple_entries=1, psb_cyc=1, single_range_output=1, mtc_periods=249, ip_filtering=1, output_subsys=0, cr3_filtering=1, psb_periods=3f, event_trace=0, cycle_thresholds=3f, power_event_trace=0, mtc=1, payloads_lip=0, ptwrite=1, num_address_ranges=2, max_subleaf=1, topa_output=1, tnt_disable=1
+# missing features: TRACING_DATA BRANCH_STACK GROUP_DESC AUXTRACE STAT CLOCKID DIR_FORMAT COMPRESSED CLOCK_DATA HYBRID_TOPOLOGY
+# ========
+#

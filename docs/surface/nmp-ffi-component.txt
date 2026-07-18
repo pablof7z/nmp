@@ -2167,23 +2167,48 @@ enum Enum {
 }
 
 enum Enum {
-    name: "FfiContentClaimDecision",
+    name: "FfiCommentDecodeError",
     module_path: "nmp_ffi",
     remote: false,
     discr_type: None,
     variants: [
         Variant {
-            name: "Acquire",
+            name: "WrongKind",
+            discr: None,
+            fields: [
+                Field {
+                    name: "got",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "MissingRoot",
             discr: None,
             fields: [],
             docstring: None,
         },
         Variant {
-            name: "Cycle",
+            name: "DuplicateContradictoryRoot",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "MissingRootKind",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "InvalidRootKind",
             discr: None,
             fields: [
                 Field {
-                    name: "target_key",
+                    name: "got",
                     type_: String,
                     default: None,
                     docstring: None,
@@ -2192,12 +2217,24 @@ enum Enum {
             docstring: None,
         },
         Variant {
-            name: "DepthLimit",
+            name: "MalformedRootReference",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "EmptyExternalValue",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "MalformedExternalValue",
             discr: None,
             fields: [
                 Field {
-                    name: "maximum",
-                    type_: UInt8,
+                    name: "got",
+                    type_: String,
                     default: None,
                     docstring: None,
                 },
@@ -2205,12 +2242,100 @@ enum Enum {
             docstring: None,
         },
         Variant {
-            name: "ActiveLimit",
+            name: "MissingParent",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "DuplicateContradictoryParent",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "MissingParentKind",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "InvalidParentKind",
             discr: None,
             fields: [
                 Field {
-                    name: "maximum",
-                    type_: UInt32,
+                    name: "got",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "MalformedParentReference",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "ParentDoesNotMatchRootOrComment",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "MalformedRowEnvelope",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "FFI-boundary-only: the delivered [`FfiRow`]'s OWN `id`/`pubkey`\nenvelope fields were not valid hex -- distinct from\n[`Self::MalformedRootReference`], which describes a root `E`/`A`\nTAG reference, never the row's own envelope (#572 review nit: the\ntwo were conflated, misdirecting a caller debugging a bad row id at\nthe wrong tag).",
+            ),
+        },
+    ],
+    shape: Error {
+        flat: false,
+    },
+    non_exhaustive: false,
+    docstring: Some(
+        "[`decode_comment`]'s typed rejection (`nmp_nip22::CommentDecodeError`\nmirror). Exhaustive; every variant is constructed by a test\n(Reachability Gate).",
+    ),
+}
+
+enum Enum {
+    name: "FfiCommentParent",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Root",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Comment",
+            discr: None,
+            fields: [
+                Field {
+                    name: "event_id",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "author_pubkey",
+                    type_: Optional {
+                        inner_type: String,
+                    },
                     default: None,
                     docstring: None,
                 },
@@ -2220,7 +2345,101 @@ enum Enum {
     ],
     shape: Enum,
     non_exhaustive: false,
-    docstring: None,
+    docstring: Some(
+        "A comment's direct parent (`nmp_nip22::CommentParent` mirror).",
+    ),
+}
+
+enum Enum {
+    name: "FfiCommentRoot",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Event",
+            discr: None,
+            fields: [
+                Field {
+                    name: "event_id",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "kind",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "author_pubkey",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Address",
+            discr: None,
+            fields: [
+                Field {
+                    name: "author_pubkey",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "kind",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "identifier",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "event_id",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: Some(
+                        "The addressable event's own id, when pinned alongside the\ncoordinate (NIP-22: \"when the parent event is replaceable or\naddressable, also include an `e`/`E` tag referencing its id\").\n`None` remains a fully legal root.",
+                    ),
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "External",
+            discr: None,
+            fields: [
+                Field {
+                    name: "target",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiNip73Target",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "The root of a NIP-22 comment thread (`nmp_nip22::CommentRoot` mirror).",
+    ),
 }
 
 enum Enum {
@@ -2264,37 +2483,6 @@ enum Enum {
                         module_path: "nmp_ffi",
                         name: "FfiSourceRange",
                     },
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-    ],
-    shape: Enum,
-    non_exhaustive: false,
-    docstring: None,
-}
-
-enum Enum {
-    name: "FfiContentResolutionDecision",
-    module_path: "nmp_ffi",
-    remote: false,
-    discr_type: None,
-    variants: [
-        Variant {
-            name: "Accept",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-        Variant {
-            name: "ResolvedLimit",
-            discr: None,
-            fields: [
-                Field {
-                    name: "maximum",
-                    type_: UInt32,
                     default: None,
                     docstring: None,
                 },
@@ -2737,6 +2925,42 @@ enum Enum {
             ],
             docstring: Some(
                 "A single relay's in-flight NIP-11 waiter set reached its finite\nadmission bound. The refused caller was not retained.",
+            ),
+        },
+        Variant {
+            name: "InvalidCorrelationToken",
+            discr: None,
+            fields: [
+                Field {
+                    name: "got",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "#591: `FfiWriteIntent.correlation` was `Some` but failed\n`nmp_grammar::CorrelationToken`'s `TryFrom<&str>` bounded/non-empty\nvalidation (empty, or over `CorrelationToken::MAX_LEN` bytes). Synchronous,\nbefore any engine call -- same discipline as `InvalidPublicKey`/\n`InvalidTag` above.",
+            ),
+        },
+        Variant {
+            name: "InvalidNip73Target",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "#572: an `FfiNip73Target` failed `nmp_nip22::Nip73Target`'s\nconstructor validation (an empty `I`/`K` cell).",
             ),
         },
     ],
@@ -3514,11 +3738,104 @@ enum Enum {
                 "`nmp::Engine::add_signer` maps every internal `AddSignerError` to\n`EngineError::SignerMissingPublicKey` (crates/nmp/src/engine.rs). This\nis the signer-side engine-attach failure; the other reachable\n`add_signer` outcome, `EngineError::EngineClosed` (engine shut down\nmid-handshake), is surfaced as `Disconnected` instead so the two are\nnot conflated. It is not a `Nip46Error` variant; it crosses a different\ninternal taxonomy (`nmp::EngineError`) at the same observer seam.",
             ),
         },
+        Variant {
+            name: "RestoredIdentityMismatch",
+            discr: None,
+            fields: [
+                Field {
+                    name: "expected",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "actual",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "A restore/import's live `get_public_key` answer did not match the\ncheckpoint's expected identity (#571). No signer was attached under\nthe wrong pubkey.",
+            ),
+        },
     ],
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
         "`nmp_signer::Nip46Error` mirror (#494) -- every live discriminant a NIP-46\nconnection attempt can fail with, so a native caller can branch on\n\"auth required\" vs. \"timeout\" vs. \"malformed\" instead of parsing English.\n`Nip46Error::InvalidRelay`/`InvalidInvitation`/`SecretMismatch` are not\nmirrored: nothing in the workspace ever constructs them (see that type's\nown doc).",
+    ),
+}
+
+enum Enum {
+    name: "FfiNip46Origin",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "ClientInitiated",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Bunker",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp_signer::Nip46Origin` mirror (#571): distinguishes a session paired\nvia `nostrconnect://` from one dialed via `bunker://`. Restore mechanics\nare identical either way -- kept because \"absence of a reusable client\ncheckpoint is observable rather than guessed from partial metadata\" is a\nhard requirement, not because restore branches on it.",
+    ),
+}
+
+enum Enum {
+    name: "FfiNip73Target",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "PodcastEpisodeGuid",
+            discr: None,
+            fields: [
+                Field {
+                    name: "guid",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "General",
+            discr: None,
+            fields: [
+                Field {
+                    name: "value",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "kind",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "A validated NIP-73 external-content target (`nmp_nip22::Nip73Target`\nmirror).",
     ),
 }
 
@@ -4930,77 +5247,6 @@ record Record {
 }
 
 record Record {
-    name: "FfiArticle",
-    module_path: "nmp_ffi",
-    remote: false,
-    fields: [
-        Field {
-            name: "event_id",
-            type_: String,
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "author",
-            type_: String,
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "created_at",
-            type_: UInt64,
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "identifier",
-            type_: String,
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "title",
-            type_: Optional {
-                inner_type: String,
-            },
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "summary",
-            type_: Optional {
-                inner_type: String,
-            },
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "image",
-            type_: Optional {
-                inner_type: String,
-            },
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "published_at",
-            type_: Optional {
-                inner_type: UInt64,
-            },
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "content",
-            type_: String,
-            default: None,
-            docstring: None,
-        },
-    ],
-    docstring: None,
-}
-
-record Record {
     name: "FfiAuthDiagnostics",
     module_path: "nmp_ffi",
     remote: false,
@@ -5381,30 +5627,31 @@ record Record {
 }
 
 record Record {
-    name: "FfiContentHydrationPolicy",
+    name: "FfiCorrelationReattachment",
     module_path: "nmp_ffi",
     remote: false,
     fields: [
         Field {
-            name: "max_active_references",
-            type_: UInt32,
+            name: "outcome",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiReceiptReattachment",
+            },
             default: None,
             docstring: None,
         },
         Field {
-            name: "max_resolved_references",
-            type_: UInt32,
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "max_depth",
-            type_: UInt8,
+            name: "receipt_id",
+            type_: Optional {
+                inner_type: UInt64,
+            },
             default: None,
             docstring: None,
         },
     ],
-    docstring: None,
+    docstring: Some(
+        "#591: `NmpEngine::reattachByCorrelation`'s result. Reuses\n[`FfiReceiptReattachment`]'s exact three-way outcome vocabulary\nunchanged -- this is not a new outcome enum, only a pairing with the\nresolved receipt id a correlation-token caller cannot otherwise learn\n(the by-id door needs no such pairing: the caller already supplied the\nid). `receipt_id` is `Some` iff `outcome == Attached`, `None` otherwise.",
+    ),
 }
 
 record Record {
@@ -5427,6 +5674,59 @@ record Record {
     ],
     docstring: Some(
         "`nmp::CoverageInterval` mirror -- a proven, retained `[from, through]`\ninterval (`nmp_store::coverage::CoverageInterval`). This is the\nengine-global DIAGNOSTICS watermark, deliberately distinct from the\nscoped, per-query [`FfiAcquisitionEvidence`] surface above (M5 plan §1\nvs. `docs/design/scoped-evidence-49-12-plan.md` §4) -- never reused as a\nquery-level verdict.",
+    ),
+}
+
+record Record {
+    name: "FfiDecodedComment",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "event_id",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "author_pubkey",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "created_at",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "content",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "root",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiCommentRoot",
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "parent",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiCommentParent",
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "A successfully decoded, typed NIP-22 comment (`nmp_nip22::DecodedComment`\nmirror).",
     ),
 }
 
@@ -5969,82 +6269,49 @@ record Record {
 }
 
 record Record {
-    name: "FfiProfileMetadata",
+    name: "FfiNip46SessionCheckpoint",
     module_path: "nmp_ffi",
     remote: false,
     fields: [
         Field {
-            name: "pubkey",
+            name: "client_secret_key",
             type_: String,
             default: None,
             docstring: None,
         },
         Field {
-            name: "name",
-            type_: Optional {
+            name: "user_public_key",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "remote_signer_public_key",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "relays",
+            type_: Sequence {
                 inner_type: String,
             },
             default: None,
             docstring: None,
         },
         Field {
-            name: "display_name",
-            type_: Optional {
-                inner_type: String,
-            },
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "about",
-            type_: Optional {
-                inner_type: String,
-            },
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "picture",
-            type_: Optional {
-                inner_type: String,
-            },
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "banner",
-            type_: Optional {
-                inner_type: String,
-            },
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "nip05",
-            type_: Optional {
-                inner_type: String,
-            },
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "lud06",
-            type_: Optional {
-                inner_type: String,
-            },
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "lud16",
-            type_: Optional {
-                inner_type: String,
+            name: "origin",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiNip46Origin",
             },
             default: None,
             docstring: None,
         },
     ],
-    docstring: None,
+    docstring: Some(
+        "`nmp_signer::Nip46SessionCheckpoint` mirror (#571) -- the minimum secrets\nand descriptor needed to reconnect an already-authorized NIP-46 client\nsession without another pairing handshake. `client_secret_key` crosses\nthis boundary once, matching `add_account`'s existing precedent; native\ncallers must never log, print, serialize to diagnostics, or otherwise\nsurface it outside their own secure checkpoint store.",
+    ),
 }
 
 record Record {
@@ -6075,6 +6342,12 @@ record Record {
                     name: "FfiDemand",
                 },
             },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "discarded_relay_hints",
+            type_: UInt32,
             default: None,
             docstring: None,
         },
@@ -6929,6 +7202,18 @@ record Record {
                 "`nmp::WriteIntent::identity_override` mirror (#47 Unit A): the\nidentity this ONE write is published under, as 64-char hex (the\nmodule-wide `convert::parse_pubkey` rule every other pubkey input\nhere follows) or bech32 `npub` (an identity is the one input an app\nmost plausibly holds in display form). `None` -- the default, and\nwhat every existing caller gets -- means \"the active account at\nacceptance time\", unchanged.\n`Some` must name exactly the payload's own author; misuse fails\nclosed, never silently retargets: a MALFORMED string is a typed\nsynchronous [`crate::convert::FfiError::InvalidPublicKey`] before any\nengine call, while a well-formed-but-MISMATCHED override (not the\ndraft/event author) is rejected at the engine's acceptance boundary\nas `FfiWriteStatus::Failed` on the receipt stream -- no `Accepted`\never precedes it. An override naming a pubkey with no registered\nsigner parks as `FfiWriteStatus::AwaitingCapability` (retained, not\nterminated) until that capability attaches; acceptance PINS the\noverride, so a later `set_active_account` cannot retarget the write.",
             ),
         },
+        Field {
+            name: "correlation",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: Some(
+                None,
+            ),
+            docstring: Some(
+                "`nmp_grammar::WriteIntent::correlation` mirror (#591): a caller-\ngenerated crash-safe correlation/idempotency token. `None` -- the\ndefault -- opts this write out of correlation entirely. `Some`\ncrosses the boundary as a plain string and is validated by\n`nmp_grammar::CorrelationToken`'s `TryFrom<&str>` on the way in\n(non-empty, length-capped): a malformed token is a typed synchronous\n[`crate::convert::FfiError::InvalidCorrelationToken`] before any\nengine call. A token that already resolves to a previously-accepted\nreceipt reattaches that existing obligation instead of enqueuing a\nsecond write -- see that type's doc for the full contract.",
+            ),
+        },
     ],
     docstring: Some(
         "A caller's publish request (`nmp::WriteIntent` mirror).",
@@ -7368,15 +7653,15 @@ function Function {
 }
 
 function Function {
-    name: "content_reference_demand_plan",
+    name: "comment_thread_demand",
     module_path: "nmp_ffi",
     is_async: false,
     arguments: [
         Argument {
-            name: "target",
+            name: "root",
             type_: Enum {
                 module_path: "nmp_ffi",
-                name: "FfiReferenceTarget",
+                name: "FfiCommentRoot",
             },
             by_ref: false,
             optional: false,
@@ -7386,19 +7671,19 @@ function Function {
     return_type: Some(
         Record {
             module_path: "nmp_ffi",
-            name: "FfiReferenceDemandPlan",
+            name: "FfiDemand",
         },
     ),
     ffi_func: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_func_content_reference_demand_plan",
+        name: "uniffi_nmp_ffi_fn_func_comment_thread_demand",
         is_async: false,
         arguments: [
             FfiArgument {
-                name: "target",
+                name: "root",
                 type_: RustBuffer(
                     Some(
                         ExternalFfiMetadata {
-                            name: "FfiReferenceTarget",
+                            name: "FfiCommentRoot",
                             module_path: "nmp_ffi",
                         },
                     ),
@@ -7409,7 +7694,7 @@ function Function {
             RustBuffer(
                 Some(
                     ExternalFfiMetadata {
-                        name: "FfiReferenceDemandPlan",
+                        name: "FfiDemand",
                         module_path: "nmp_ffi",
                     },
                 ),
@@ -7418,16 +7703,23 @@ function Function {
         has_rust_call_status_arg: true,
         is_object_free_function: false,
     },
-    docstring: None,
-    throws: None,
-    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_content_reference_demand_plan",
+    docstring: Some(
+        "The demand for an entire NIP-22 comment thread rooted at `root`:\n`kinds:[1111]`, scoped by the uppercase root reference on `#I`\n(`nmp_nip22::comment_thread_demand` mirror).",
+    ),
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_comment_thread_demand",
     checksum: Some(
-        44542,
+        40171,
     ),
 }
 
 function Function {
-    name: "decode_article_resource",
+    name: "decode_comment",
     module_path: "nmp_ffi",
     is_async: false,
     arguments: [
@@ -7445,11 +7737,11 @@ function Function {
     return_type: Some(
         Record {
             module_path: "nmp_ffi",
-            name: "FfiArticle",
+            name: "FfiDecodedComment",
         },
     ),
     ffi_func: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_func_decode_article_resource",
+        name: "uniffi_nmp_ffi_fn_func_decode_comment",
         is_async: false,
         arguments: [
             FfiArgument {
@@ -7468,7 +7760,7 @@ function Function {
             RustBuffer(
                 Some(
                     ExternalFfiMetadata {
-                        name: "FfiArticle",
+                        name: "FfiDecodedComment",
                         module_path: "nmp_ffi",
                     },
                 ),
@@ -7477,11 +7769,18 @@ function Function {
         has_rust_call_status_arg: true,
         is_object_free_function: false,
     },
-    docstring: None,
-    throws: None,
-    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_decode_article_resource",
+    docstring: Some(
+        "Decode a delivered kind:1111 [`FfiRow`] into a typed\n[`FfiDecodedComment`] (`nmp_nip22::decode_comment` mirror). Fallible:\nmalformed or mismatched tag sets stay raw rows, they never become a\ntyped comment.",
+    ),
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiCommentDecodeError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_decode_comment",
     checksum: Some(
-        8275,
+        13437,
     ),
 }
 
@@ -7540,65 +7839,6 @@ function Function {
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_decode_nostr_entity",
     checksum: Some(
         43591,
-    ),
-}
-
-function Function {
-    name: "decode_profile_resource",
-    module_path: "nmp_ffi",
-    is_async: false,
-    arguments: [
-        Argument {
-            name: "row",
-            type_: Record {
-                module_path: "nmp_ffi",
-                name: "FfiRow",
-            },
-            by_ref: false,
-            optional: false,
-            default: None,
-        },
-    ],
-    return_type: Some(
-        Record {
-            module_path: "nmp_ffi",
-            name: "FfiProfileMetadata",
-        },
-    ),
-    ffi_func: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_func_decode_profile_resource",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "row",
-                type_: RustBuffer(
-                    Some(
-                        ExternalFfiMetadata {
-                            name: "FfiRow",
-                            module_path: "nmp_ffi",
-                        },
-                    ),
-                ),
-            },
-        ],
-        return_type: Some(
-            RustBuffer(
-                Some(
-                    ExternalFfiMetadata {
-                        name: "FfiProfileMetadata",
-                        module_path: "nmp_ffi",
-                    },
-                ),
-            ),
-        ),
-        has_rust_call_status_arg: true,
-        is_object_free_function: false,
-    },
-    docstring: None,
-    throws: None,
-    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_decode_profile_resource",
-    checksum: Some(
-        15024,
     ),
 }
 
@@ -7664,192 +7904,32 @@ function Function {
 }
 
 function Function {
-    name: "evaluate_content_claim",
+    name: "generate_account_secret_key",
     module_path: "nmp_ffi",
     is_async: false,
-    arguments: [
-        Argument {
-            name: "target_key",
-            type_: String,
-            by_ref: false,
-            optional: false,
-            default: None,
-        },
-        Argument {
-            name: "path",
-            type_: Sequence {
-                inner_type: String,
-            },
-            by_ref: false,
-            optional: false,
-            default: None,
-        },
-        Argument {
-            name: "depth",
-            type_: UInt8,
-            by_ref: false,
-            optional: false,
-            default: None,
-        },
-        Argument {
-            name: "active_references",
-            type_: UInt32,
-            by_ref: false,
-            optional: false,
-            default: None,
-        },
-        Argument {
-            name: "policy",
-            type_: Record {
-                module_path: "nmp_ffi",
-                name: "FfiContentHydrationPolicy",
-            },
-            by_ref: false,
-            optional: false,
-            default: None,
-        },
-    ],
+    arguments: [],
     return_type: Some(
-        Enum {
-            module_path: "nmp_ffi",
-            name: "FfiContentClaimDecision",
-        },
+        String,
     ),
     ffi_func: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_func_evaluate_content_claim",
+        name: "uniffi_nmp_ffi_fn_func_generate_account_secret_key",
         is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "target_key",
-                type_: RustBuffer(
-                    None,
-                ),
-            },
-            FfiArgument {
-                name: "path",
-                type_: RustBuffer(
-                    None,
-                ),
-            },
-            FfiArgument {
-                name: "depth",
-                type_: UInt8,
-            },
-            FfiArgument {
-                name: "active_references",
-                type_: UInt32,
-            },
-            FfiArgument {
-                name: "policy",
-                type_: RustBuffer(
-                    Some(
-                        ExternalFfiMetadata {
-                            name: "FfiContentHydrationPolicy",
-                            module_path: "nmp_ffi",
-                        },
-                    ),
-                ),
-            },
-        ],
+        arguments: [],
         return_type: Some(
             RustBuffer(
-                Some(
-                    ExternalFfiMetadata {
-                        name: "FfiContentClaimDecision",
-                        module_path: "nmp_ffi",
-                    },
-                ),
+                None,
             ),
         ),
         has_rust_call_status_arg: true,
         is_object_free_function: false,
     },
-    docstring: None,
-    throws: None,
-    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_evaluate_content_claim",
-    checksum: Some(
-        20168,
+    docstring: Some(
+        "Generate a fresh local-account secret key via OS RNG (hex-encoded,\n`NmpEngine::add_account`-compatible) -- the one keygen-only FFI door #588\nasks for. This function touches no engine state, installs no signer, and\npersists nothing: a native wrapper composes it with the existing\n`add_account` to give a clean-start client its first identity, inheriting\nthat method's save-with-rollback choreography and checkpoint tracking\nwholesale instead of a second, parallel registration pipeline.",
     ),
-}
-
-function Function {
-    name: "evaluate_content_resolution",
-    module_path: "nmp_ffi",
-    is_async: false,
-    arguments: [
-        Argument {
-            name: "target_already_resolved",
-            type_: Boolean,
-            by_ref: false,
-            optional: false,
-            default: None,
-        },
-        Argument {
-            name: "resolved_references",
-            type_: UInt32,
-            by_ref: false,
-            optional: false,
-            default: None,
-        },
-        Argument {
-            name: "policy",
-            type_: Record {
-                module_path: "nmp_ffi",
-                name: "FfiContentHydrationPolicy",
-            },
-            by_ref: false,
-            optional: false,
-            default: None,
-        },
-    ],
-    return_type: Some(
-        Enum {
-            module_path: "nmp_ffi",
-            name: "FfiContentResolutionDecision",
-        },
-    ),
-    ffi_func: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_func_evaluate_content_resolution",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "target_already_resolved",
-                type_: Int8,
-            },
-            FfiArgument {
-                name: "resolved_references",
-                type_: UInt32,
-            },
-            FfiArgument {
-                name: "policy",
-                type_: RustBuffer(
-                    Some(
-                        ExternalFfiMetadata {
-                            name: "FfiContentHydrationPolicy",
-                            module_path: "nmp_ffi",
-                        },
-                    ),
-                ),
-            },
-        ],
-        return_type: Some(
-            RustBuffer(
-                Some(
-                    ExternalFfiMetadata {
-                        name: "FfiContentResolutionDecision",
-                        module_path: "nmp_ffi",
-                    },
-                ),
-            ),
-        ),
-        has_rust_call_status_arg: true,
-        is_object_free_function: false,
-    },
-    docstring: None,
     throws: None,
-    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_evaluate_content_resolution",
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_generate_account_secret_key",
     checksum: Some(
-        55739,
+        6489,
     ),
 }
 
@@ -8084,6 +8164,70 @@ function Function {
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_parse_nostr_content",
     checksum: Some(
         18165,
+    ),
+}
+
+function Function {
+    name: "reference_demand_plan",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "target",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiReferenceTarget",
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiReferenceDemandPlan",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_reference_demand_plan",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "target",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiReferenceTarget",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiReferenceDemandPlan",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: None,
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_reference_demand_plan",
+    checksum: Some(
+        53347,
     ),
 }
 
@@ -9878,6 +10022,58 @@ object Object {
     constructors: [],
     methods: [
         Method {
+            name: "checkpoint",
+            object_name: "Nip46Connection",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiNip46SessionCheckpoint",
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nip46connection_checkpoint",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "Nip46Connection",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        Some(
+                            ExternalFfiMetadata {
+                                name: "FfiNip46SessionCheckpoint",
+                                module_path: "nmp_ffi",
+                            },
+                        ),
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Read out this session's checkpoint (#571): the minimum secrets and\ndescriptor needed to reconnect without another pairing handshake.\nRefused with a typed error before this connection has reached ready\n(its signer attached to this engine) -- checkpointing a session that\nnever authenticated would persist meaningless material.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nip46connection_checkpoint",
+            checksum: Some(
+                39441,
+            ),
+        },
+        Method {
             name: "disconnect",
             object_name: "Nip46Connection",
             object_module_path: "nmp_ffi",
@@ -10398,6 +10594,149 @@ object Object {
             ),
         },
         Method {
+            name: "comment_intent",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "root",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiCommentRoot",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "parent",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiCommentParent",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "author_pubkey",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "created_at",
+                    type_: UInt64,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "content",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "correlation",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "FfiComposedWriteIntent",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_comment_intent",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "root",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiCommentRoot",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                    FfiArgument {
+                        name: "parent",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiCommentParent",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                    FfiArgument {
+                        name: "author_pubkey",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "created_at",
+                        type_: UInt64,
+                    },
+                    FfiArgument {
+                        name: "content",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "correlation",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiComposedWriteIntent",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Compose a durable, author-outbox-routed NIP-22 comment `WriteIntent`\n(#572). Unlike [`Self::group_message_intent`], this needs no engine\nstate at all -- `nmp_nip22::comment_intent` takes author/time as\nexplicit caller parameters -- but lives here for the same \"engine\ndoor\" naming symmetry. `correlation` (#591) passes straight through\nto `WriteIntent.correlation`. Publish the returned take-once value\nthrough [`Self::publish_composed`].",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_comment_intent",
+            checksum: Some(
+                13206,
+            ),
+        },
+        Method {
             name: "connect_nip46_bunker",
             object_name: "NmpEngine",
             object_module_path: "nmp_ffi",
@@ -10848,6 +11187,101 @@ object Object {
             ),
         },
         Method {
+            name: "nip46_session_from_parts",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "parts",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiNip46SessionCheckpoint",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "timeout_millis",
+                    type_: UInt64,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "observer",
+                    type_: CallbackInterface {
+                        module_path: "nmp_ffi",
+                        name: "Nip46ConnectionObserver",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "Nip46Connection",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_nip46_session_from_parts",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "parts",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiNip46SessionCheckpoint",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                    FfiArgument {
+                        name: "timeout_millis",
+                        type_: UInt64,
+                    },
+                    FfiArgument {
+                        name: "observer",
+                        type_: UInt64,
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "Nip46Connection",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Brownfield migration door (#571): import a pre-NMP legacy client\nsession (for example Pod0's Keychain-persisted `nostrconnect://`\nmaterial) directly from its raw parts, without an NMP-owned\ncheckpoint ever having been written. Same reconnect-and-validate\nmechanics as [`Self::restore_nip46_session`] -- a mismatch/corrupt\nimport never attaches under another pubkey and never deletes or\noverwrites the caller's legacy material (this function reads its\ninput by value and touches no external storage itself).",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_nip46_session_from_parts",
+            checksum: Some(
+                54568,
+            ),
+        },
+        Method {
             name: "observe",
             object_name: "NmpEngine",
             object_module_path: "nmp_ffi",
@@ -11270,6 +11704,72 @@ object Object {
             ),
         },
         Method {
+            name: "reattach_by_correlation",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "correlation",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiCorrelationReattachment",
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_reattach_by_correlation",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "correlation",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        Some(
+                            ExternalFfiMetadata {
+                                name: "FfiCorrelationReattachment",
+                                module_path: "nmp_ffi",
+                            },
+                        ),
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "#591: recover a receipt after a crash that happened BEFORE the app\ncould durably persist the receipt id `publish`/`publish_composed`\nreturned -- looked up by the caller's own crash-safe correlation\ntoken instead. Otherwise identical to [`Self::reattach_receipt`],\nexcept the caller cannot already know the receipt id (that is\nexactly what a token recovers) -- `FfiCorrelationReattachment.\nreceipt_id` carries it back, `Some` iff `outcome == Attached`.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_reattach_by_correlation",
+            checksum: Some(
+                11491,
+            ),
+        },
+        Method {
             name: "reattach_receipt",
             object_name: "NmpEngine",
             object_module_path: "nmp_ffi",
@@ -11531,6 +12031,101 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_remove_auth_policy",
             checksum: Some(
                 53111,
+            ),
+        },
+        Method {
+            name: "restore_nip46_session",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "checkpoint",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiNip46SessionCheckpoint",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "timeout_millis",
+                    type_: UInt64,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "observer",
+                    type_: CallbackInterface {
+                        module_path: "nmp_ffi",
+                        name: "Nip46ConnectionObserver",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "Nip46Connection",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_restore_nip46_session",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "checkpoint",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiNip46SessionCheckpoint",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                    FfiArgument {
+                        name: "timeout_millis",
+                        type_: UInt64,
+                    },
+                    FfiArgument {
+                        name: "observer",
+                        type_: UInt64,
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "Nip46Connection",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Restore an already-authorized NIP-46 client session from `checkpoint`\n(#571) -- reconnects the SAME client transport identity to the SAME\nremote signer with NO re-pairing handshake, returning an ordinary\n[`Nip46Connection`] that reuses the existing observer/attachment\nlifecycle: `.ready(user_public_key)` fires only once the checkpoint's\nexpected identity is validated against a live answer and the signer\nis attached to this engine. A corrupt/malformed `checkpoint` is\nrefused synchronously; a live mismatch/unavailable/disconnected\noutcome surfaces asynchronously as a typed `on_failed`, exactly like\n`connect_nip46_bunker`/`connect_nip46_invitation`.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_restore_nip46_session",
+            checksum: Some(
+                49651,
             ),
         },
         Method {

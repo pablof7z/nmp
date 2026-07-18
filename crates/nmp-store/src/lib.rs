@@ -64,10 +64,25 @@ mod memory_store;
 mod persistent_store_lifetime;
 mod redb_store;
 
+#[cfg(feature = "bench-instrumentation")]
+pub mod ingest_attribution;
+
 pub use coverage::{coverage_key, ClaimSet, CoverageInterval, CoverageKey, GcReport};
 pub use memory_store::MemoryStore;
 pub use persistent_store_lifetime::RedbStoreResetError;
 pub use redb_store::RedbStore;
+#[cfg(feature = "bench-instrumentation")]
+pub use redb_store::{
+    prepare_equivalent_store_corpus, run_fjall_governed_ingest_bench,
+    run_lmdb_governed_ingest_bench, run_packed_postings_bench,
+    run_prepared_redb_compact_index_bench, run_prepared_redb_redo_index_bench,
+    run_prepared_redb_store_bench, run_prepared_redb_unified_index_bench, run_store_bench_variant,
+    set_bench_exact_cardinality, FjallGovernedIngestMetrics, LmdbGovernedIngestMetrics,
+    LmdbPackedWork, PackedPostingsBackend, PackedPostingsMetrics, PackedQueryMetrics,
+    RedbRedoIndexMetrics, StoreBenchAttribution, StoreBenchMetrics, StoreBenchPreparedBatch,
+    StoreBenchPreparedCorpus, StoreBenchPreparedMetrics, StoreBenchPreparedRecord,
+    StoreBenchPreparedTable, StoreBenchProcessCounters, StoreBenchVariant,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -464,6 +479,10 @@ pub struct AcceptWrite {
     /// `promote_signed`).
     pub sig_state: IntentSigState,
     pub accepted_at: Timestamp,
+    /// #591 crash-safe correlation token. When `Some`, checked (and, on a
+    /// first sighting, journaled) inside this SAME acceptance transaction
+    /// -- see [`EventStore::accept_write`]'s doc for the exact protocol.
+    pub correlation: Option<nmp_grammar::CorrelationToken>,
 }
 
 /// The result of an [`EventStore::accept_write`] call — mirrors
@@ -1128,6 +1147,24 @@ pub trait EventStore {
         Ok(rows)
     }
 
+    /// Return only the canonical ids from [`EventStore::query_newest`].
+    ///
+    /// Consumers that need selection identity but not event payloads use this
+    /// door so persistent backends can project ids from ordered indexes
+    /// without allocating owned content. The default preserves correctness
+    /// for backends without a projected read path.
+    fn query_newest_ids(
+        &self,
+        filter: &Filter,
+        limit: usize,
+    ) -> Result<Vec<EventId>, PersistenceError> {
+        Ok(self
+            .query_newest(filter, limit)?
+            .into_iter()
+            .map(|row| row.event.id)
+            .collect())
+    }
+
     /// Return the first `limit` canonical newest rows whose canonical relay
     /// provenance intersects `relays`.
     ///
@@ -1527,6 +1564,17 @@ pub trait EventStore {
         &self,
         receipt_id: u64,
     ) -> Result<Option<RecoveredReceipt>, PersistenceError>;
+
+    /// #591: resolve a caller's [`AcceptWrite::correlation`] token to the
+    /// receipt id it was journaled under, if any. `Ok(None)` means the
+    /// token has never been accepted (or this store never received it) --
+    /// distinct from a persistence failure. `accept_write` uses this same
+    /// mapping internally (checked inside its own transaction) to decide
+    /// whether a token is a first sighting; the engine's
+    /// `reattach_by_correlation` lookup door uses it directly to translate
+    /// a token into an ordinary [`Self::reattach_receipt`] call. Retained
+    /// forever, exactly like `OUTBOX_RECEIPTS` -- there is no removal door.
+    fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError>;
 
     /// Append the next canonical resolved-route revision for an open intent.
     /// This must commit before any attempt starts or wire publication for a

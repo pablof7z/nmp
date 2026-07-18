@@ -34,8 +34,9 @@ use super::worker::{
     pack_generation, worker_id_of, WorkerCommand, WorkerEvent, WorkerEventKind, WorkerHandle,
 };
 use super::{
-    DisconnectReason, PoolBuildError, PoolConfig, PoolEvent, PoolEventSink, RelayOpenError,
-    RelaySessionKey, ThreadRole, ThreadSpawnError,
+    committed_observations::CommittedObservationCache, DisconnectReason, PoolBuildError,
+    PoolConfig, PoolEvent, PoolEventSink, RelayOpenError, RelaySessionKey, ThreadRole,
+    ThreadSpawnError,
 };
 
 struct RetireRequest {
@@ -79,6 +80,7 @@ struct SlotState {
 }
 
 pub(super) struct PoolInner {
+    pub(super) committed_observations: Arc<CommittedObservationCache>,
     /// Indexed by dense `RelayHandle.slot`. `worker: None` marks a closed
     /// slot; the entry itself stays so the slot id is only ever reused by a
     /// reopen of the SAME session (matching `session_to_slot`).
@@ -152,7 +154,11 @@ impl PoolInner {
             }
         };
         let translator_config = config.clone();
+        let committed_observations = Arc::new(CommittedObservationCache::new(
+            config.committed_observation_cache_capacity,
+        ));
         let inner = Arc::new(Mutex::new(Self {
+            committed_observations,
             slots: Vec::new(),
             session_to_slot: HashMap::new(),
             next_worker_id: 0,
@@ -400,7 +406,7 @@ impl PoolInner {
         super::worker::spawn(
             slot_id,
             worker_id,
-            session.relay.as_str().to_string(),
+            session.relay.clone(),
             session.access != nmp_grammar::AccessContext::Public,
             self.worker_event_tx
                 .as_ref()
@@ -412,6 +418,7 @@ impl PoolInner {
             reconnect_jitter_max,
             command_queue_capacity,
             Arc::clone(&self.config.allowed_local_hosts),
+            Arc::clone(&self.committed_observations),
             self.spawner.as_ref(),
         )
         .map_err(RelayOpenError::ThreadUnavailable)
@@ -611,6 +618,8 @@ fn translator_loop(
     while let Ok(event) = worker_event_rx.recv() {
         let mut events = vec![event];
         events.extend(worker_event_rx.try_iter().take(max_batch - 1));
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::translator_burst(events.len());
         let Ok(guard) = inner.lock() else { break };
         // Project generation changes in per-worker FIFO order without
         // mutating the real slots (the retirement reaper is a separate
@@ -701,7 +710,11 @@ fn translator_loop(
         // unwrap each frame's Arc<Event> without cloning content or tags.
         drop(candidates);
         for pool_event in pool_events {
+            #[cfg(feature = "bench-instrumentation")]
+            let delivery_started = std::time::Instant::now();
             sink.on_event(pool_event);
+            #[cfg(feature = "bench-instrumentation")]
+            crate::ingest_attribution::delivery(delivery_started.elapsed());
         }
     }
 }
@@ -711,7 +724,7 @@ pub(super) fn configured_verifier_workers(configured: usize) -> usize {
     if configured == 0 {
         super::DEFAULT_VERIFIER_WORKERS
     } else {
-        configured.min(super::DEFAULT_VERIFIER_WORKERS)
+        configured.min(super::MAX_VERIFIER_WORKERS)
     }
 }
 
@@ -734,7 +747,16 @@ fn cached_frame_plan(
     frame: &super::RelayFrame,
 ) -> Option<VerificationPlan> {
     let event = frame.event()?;
-    if !event.verify_id() {
+    #[cfg(feature = "bench-instrumentation")]
+    let id_started = std::time::Instant::now();
+    #[cfg(feature = "bench-instrumentation")]
+    let skip_event_id = crate::ingest_attribution::skip_event_id_validation();
+    #[cfg(not(feature = "bench-instrumentation"))]
+    let skip_event_id = false;
+    let valid_id = skip_event_id || event.verify_id();
+    #[cfg(feature = "bench-instrumentation")]
+    crate::ingest_attribution::event_id_validation(id_started.elapsed(), skip_event_id);
+    if !valid_id {
         return Some(VerificationPlan::InvalidId);
     }
     verified.get(&event.id).map(VerificationPlan::Known)

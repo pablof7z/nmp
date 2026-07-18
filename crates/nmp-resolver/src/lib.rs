@@ -26,6 +26,8 @@ mod graph;
 mod types;
 
 mod engine;
+#[cfg(feature = "bench-instrumentation")]
+pub mod ingest_attribution;
 pub mod testkit;
 
 pub use engine::{

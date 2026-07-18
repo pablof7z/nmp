@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use crate::convert::FfiError;
+use crate::convert::{parse_pubkey, FfiError};
 use crate::facade::NmpEngine;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -44,6 +44,103 @@ pub enum FfiNip46ConnectionEvent {
     RelayAuthentication { relay: String },
     AuthorizationRequired { url: String },
     Connected { user_public_key: String },
+}
+
+/// `nmp_signer::Nip46Origin` mirror (#571): distinguishes a session paired
+/// via `nostrconnect://` from one dialed via `bunker://`. Restore mechanics
+/// are identical either way -- kept because "absence of a reusable client
+/// checkpoint is observable rather than guessed from partial metadata" is a
+/// hard requirement, not because restore branches on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiNip46Origin {
+    ClientInitiated,
+    Bunker,
+}
+
+/// `nmp_signer::Nip46SessionCheckpoint` mirror (#571) -- the minimum secrets
+/// and descriptor needed to reconnect an already-authorized NIP-46 client
+/// session without another pairing handshake. `client_secret_key` crosses
+/// this boundary once, matching `add_account`'s existing precedent; native
+/// callers must never log, print, serialize to diagnostics, or otherwise
+/// surface it outside their own secure checkpoint store.
+#[derive(Clone, uniffi::Record)]
+pub struct FfiNip46SessionCheckpoint {
+    pub client_secret_key: String,
+    pub user_public_key: String,
+    pub remote_signer_public_key: String,
+    pub relays: Vec<String>,
+    pub origin: FfiNip46Origin,
+}
+
+/// Redacted like `Nip46SessionCheckpoint`'s own `Debug` -- never prints
+/// `client_secret_key`.
+impl std::fmt::Debug for FfiNip46SessionCheckpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FfiNip46SessionCheckpoint")
+            .field("client_secret_key", &"[redacted]")
+            .field("user_public_key", &self.user_public_key)
+            .field("remote_signer_public_key", &self.remote_signer_public_key)
+            .field("relays", &self.relays)
+            .field("origin", &self.origin)
+            .finish()
+    }
+}
+
+fn nip46_origin_to_ffi(origin: nmp_signer::Nip46Origin) -> FfiNip46Origin {
+    match origin {
+        nmp_signer::Nip46Origin::ClientInitiated => FfiNip46Origin::ClientInitiated,
+        nmp_signer::Nip46Origin::Bunker => FfiNip46Origin::Bunker,
+    }
+}
+
+fn nip46_origin_from_ffi(origin: FfiNip46Origin) -> nmp_signer::Nip46Origin {
+    match origin {
+        FfiNip46Origin::ClientInitiated => nmp_signer::Nip46Origin::ClientInitiated,
+        FfiNip46Origin::Bunker => nmp_signer::Nip46Origin::Bunker,
+    }
+}
+
+fn checkpoint_to_ffi(checkpoint: nmp_signer::Nip46SessionCheckpoint) -> FfiNip46SessionCheckpoint {
+    FfiNip46SessionCheckpoint {
+        client_secret_key: checkpoint.client_secret_key.to_secret_hex(),
+        user_public_key: checkpoint.user_public_key.to_hex(),
+        remote_signer_public_key: checkpoint.remote_signer_public_key.to_hex(),
+        relays: checkpoint
+            .relays
+            .into_iter()
+            .map(|r| r.to_string())
+            .collect(),
+        origin: nip46_origin_to_ffi(checkpoint.origin),
+    }
+}
+
+/// Parses every field of an [`FfiNip46SessionCheckpoint`] into the typed
+/// Rust shape `Nip46Signer::from_parts` needs. Corrupt/malformed input
+/// (secret key, either public key, or a relay URL) fails closed with a
+/// typed `FfiError` and never partially constructs a checkpoint.
+fn checkpoint_from_ffi(
+    checkpoint: FfiNip46SessionCheckpoint,
+) -> Result<nmp_signer::Nip46SessionCheckpoint, FfiError> {
+    let client_secret_key = nostr::SecretKey::parse(&checkpoint.client_secret_key)
+        .map_err(|_| FfiError::InvalidSecretKey)?;
+    let user_public_key = parse_pubkey(&checkpoint.user_public_key)?;
+    let remote_signer_public_key = parse_pubkey(&checkpoint.remote_signer_public_key)?;
+    let relays = checkpoint
+        .relays
+        .into_iter()
+        .map(|relay| {
+            nmp::RelayUrl::parse(&relay).map_err(|_| FfiError::InvalidSigner {
+                reason: format!("invalid NIP-46 checkpoint relay {relay:?}"),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(nmp_signer::Nip46SessionCheckpoint {
+        client_secret_key,
+        user_public_key,
+        remote_signer_public_key,
+        relays,
+        origin: nip46_origin_from_ffi(checkpoint.origin),
+    })
 }
 
 /// `nmp_signer::BunkerParseError` mirror (#494) -- strict `bunker://` token
@@ -103,6 +200,13 @@ pub enum FfiNip46Failure {
     /// not conflated. It is not a `Nip46Error` variant; it crosses a different
     /// internal taxonomy (`nmp::EngineError`) at the same observer seam.
     SignerMissingPublicKey,
+    /// A restore/import's live `get_public_key` answer did not match the
+    /// checkpoint's expected identity (#571). No signer was attached under
+    /// the wrong pubkey.
+    RestoredIdentityMismatch {
+        expected: String,
+        actual: String,
+    },
 }
 
 #[uniffi::export(callback_interface)]
@@ -164,6 +268,12 @@ fn nip46_failure_to_ffi(error: nmp_signer::Nip46Error) -> FfiNip46Failure {
         }
         nmp_signer::Nip46Error::ThreadUnavailable { component, reason } => {
             FfiNip46Failure::ThreadUnavailable { component, reason }
+        }
+        nmp_signer::Nip46Error::RestoredIdentityMismatch { expected, actual } => {
+            FfiNip46Failure::RestoredIdentityMismatch {
+                expected: expected.to_hex(),
+                actual: actual.to_hex(),
+            }
         }
     }
 }
@@ -450,6 +560,30 @@ impl Nip46Connection {
     pub fn disconnect(&self) {
         self.close_inner();
     }
+
+    /// Read out this session's checkpoint (#571): the minimum secrets and
+    /// descriptor needed to reconnect without another pairing handshake.
+    /// Refused with a typed error before this connection has reached ready
+    /// (its signer attached to this engine) -- checkpointing a session that
+    /// never authenticated would persist meaningless material.
+    pub fn checkpoint(&self) -> Result<FfiNip46SessionCheckpoint, FfiError> {
+        let attachment = self
+            .attachment
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if attachment.registration.is_none() {
+            return Err(FfiError::InvalidSigner {
+                reason: "NIP-46 connection has not reached ready".to_string(),
+            });
+        }
+        let signer = attachment
+            .signer
+            .as_ref()
+            .ok_or_else(|| FfiError::InvalidSigner {
+                reason: "NIP-46 connection has no attached signer".to_string(),
+            })?;
+        Ok(checkpoint_to_ffi(signer.checkpoint()))
+    }
 }
 
 #[uniffi::export]
@@ -595,6 +729,54 @@ impl NmpEngine {
         )?;
         Ok(connection)
     }
+
+    /// Restore an already-authorized NIP-46 client session from `checkpoint`
+    /// (#571) -- reconnects the SAME client transport identity to the SAME
+    /// remote signer with NO re-pairing handshake, returning an ordinary
+    /// [`Nip46Connection`] that reuses the existing observer/attachment
+    /// lifecycle: `.ready(user_public_key)` fires only once the checkpoint's
+    /// expected identity is validated against a live answer and the signer
+    /// is attached to this engine. A corrupt/malformed `checkpoint` is
+    /// refused synchronously; a live mismatch/unavailable/disconnected
+    /// outcome surfaces asynchronously as a typed `on_failed`, exactly like
+    /// `connect_nip46_bunker`/`connect_nip46_invitation`.
+    pub fn restore_nip46_session(
+        &self,
+        checkpoint: FfiNip46SessionCheckpoint,
+        timeout_millis: u64,
+        observer: Box<dyn Nip46ConnectionObserver>,
+    ) -> Result<Arc<Nip46Connection>, FfiError> {
+        let checkpoint = checkpoint_from_ffi(checkpoint)?;
+        let reservation = self.engine.reserve_native_task("NIP-46 session restore")?;
+        let engine = Arc::clone(&self.engine);
+        let observer: Arc<dyn Nip46ConnectionObserver> = Arc::from(observer);
+        let connection = Nip46Connection::new(engine, observer);
+        spawn_from_parts_connection(
+            reservation,
+            Arc::downgrade(&connection),
+            connection.cancellation.clone(),
+            checkpoint,
+            timeout_millis,
+        )?;
+        Ok(connection)
+    }
+
+    /// Brownfield migration door (#571): import a pre-NMP legacy client
+    /// session (for example Pod0's Keychain-persisted `nostrconnect://`
+    /// material) directly from its raw parts, without an NMP-owned
+    /// checkpoint ever having been written. Same reconnect-and-validate
+    /// mechanics as [`Self::restore_nip46_session`] -- a mismatch/corrupt
+    /// import never attaches under another pubkey and never deletes or
+    /// overwrites the caller's legacy material (this function reads its
+    /// input by value and touches no external storage itself).
+    pub fn nip46_session_from_parts(
+        &self,
+        parts: FfiNip46SessionCheckpoint,
+        timeout_millis: u64,
+        observer: Box<dyn Nip46ConnectionObserver>,
+    ) -> Result<Arc<Nip46Connection>, FfiError> {
+        self.restore_nip46_session(parts, timeout_millis, observer)
+    }
 }
 
 fn spawn_bunker_connection(
@@ -670,6 +852,41 @@ fn spawn_invitation_connection(
         )
         .map_err(|error| FfiError::ThreadUnavailable {
             component: "NIP-46 invitation connection".to_string(),
+            reason: error.to_string(),
+        })
+}
+
+fn spawn_from_parts_connection(
+    reservation: nmp::NativeTaskReservation,
+    connection: Weak<Nip46Connection>,
+    cancellation: nmp_signer::Nip46Cancellation,
+    checkpoint: nmp_signer::Nip46SessionCheckpoint,
+    timeout_millis: u64,
+) -> Result<(), FfiError> {
+    let shutdown = cancellation.clone();
+    reservation
+        .spawn_with_cancel(
+            move || shutdown.cancel(),
+            move || {
+                let events = lifecycle_sink(connection.clone());
+                // #680 Part 5: session-owned executor (see spawn_bunker_connection).
+                let result = nmp::Nip46Signer::from_parts_observed_with_cancellation(
+                    checkpoint,
+                    Duration::from_millis(timeout_millis),
+                    events,
+                    &cancellation,
+                );
+                let Some(connection) = connection.upgrade() else {
+                    return;
+                };
+                match result {
+                    Ok(signer) => connection.attach(signer),
+                    Err(error) => connection.fail(nip46_failure_to_ffi(error)),
+                }
+            },
+        )
+        .map_err(|error| FfiError::ThreadUnavailable {
+            component: "NIP-46 session restore".to_string(),
             reason: error.to_string(),
         })
 }
@@ -828,6 +1045,30 @@ mod tests {
         assert_eq!(closed_b.load(Ordering::SeqCst), 1);
         drop(connection_b);
         assert_eq!(closed_b.load(Ordering::SeqCst), 1);
+        engine.shutdown();
+    }
+
+    /// #571: a real `Nip46Connection` that has never attached a signer
+    /// (never reached ready) refuses `checkpoint()` with a typed error --
+    /// distinct from the Swift/Kotlin wrapper's own nil-underlying-
+    /// connection guard, this exercises the actual FFI-level
+    /// `attachment.registration.is_none()` refusal this method's doc
+    /// documents.
+    #[test]
+    fn checkpoint_before_ready_is_refused_at_the_ffi_boundary() {
+        let engine = Arc::new(nmp::Engine::new(nmp::EngineConfig::default()).unwrap());
+        let closed = Arc::new(AtomicUsize::new(0));
+        let connection = Nip46Connection::new(
+            Arc::clone(&engine),
+            Arc::new(CloseCountingObserver { closed }),
+        );
+
+        assert!(matches!(
+            connection.checkpoint(),
+            Err(FfiError::InvalidSigner { .. })
+        ));
+
+        connection.disconnect();
         engine.shutdown();
     }
 

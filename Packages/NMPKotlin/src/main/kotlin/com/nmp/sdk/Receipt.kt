@@ -105,6 +105,12 @@ fun publishReceipt(engine: NmpEngineInterface, intent: WriteIntent): Receipt =
 fun publishComposedReceipt(engine: NmpEngineInterface, intent: GroupSendIntent): Receipt =
     receiptFrom(nmpRethrowing { engine.publishComposed(intent.ffi) })
 
+/** Publish a [CommentIntent] from `commentIntent` (#572). Take-once -- see
+ * [publishComposedReceipt]'s own doc; identical contract, just for the
+ * NIP-22 composed intent, delivered pull-based over [Receipt.status] (#680). */
+fun publishComposedReceipt(engine: NmpEngineInterface, intent: CommentIntent): Receipt =
+    receiptFrom(nmpRethrowing { engine.publishComposed(intent.ffi) })
+
 /** Map the reattachment outcome without collapsing corrupt retained
  * evidence into the same result as an unknown id (#680). Extracted with an
  * injectable `attach` so the [ReceiptReattachment.NotFound] /
@@ -124,3 +130,15 @@ internal fun mapReceiptReattachment(
 /** Attach without collapsing corrupt retained evidence into absence. */
 fun reattachReceipt(engine: NmpEngineInterface, id: ULong): ReceiptReattachment =
     mapReceiptReattachment(nmpRethrowing { engine.reattachReceipt(id) }, ::receiptFrom)
+
+/** #591: recover a receipt after a crash that happened BEFORE the app could
+ * durably persist the receipt id `publish`/`publishComposed` returned --
+ * looked up by the caller's own crash-safe correlation token instead.
+ * Otherwise identical to [reattachReceipt] (the by-id overload). The resolved
+ * receipt id (#591) rides along on the attached stream handle itself
+ * ([Receipt.id]); a token-only caller learns it there. */
+fun reattachReceiptByCorrelation(engine: NmpEngineInterface, correlation: String): ReceiptReattachment =
+    mapReceiptReattachment(
+        nmpRethrowing { engine.reattachByCorrelation(correlation).outcome },
+        ::receiptFrom,
+    )

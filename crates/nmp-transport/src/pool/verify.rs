@@ -126,12 +126,16 @@ impl VerifierPool {
     /// `Arc<Event>` lets the translator hand the exact parsed value to a
     /// worker and later reuse it without cloning its strings or tags.
     pub(super) fn verify_batch(&mut self, events: &[Arc<Event>]) -> Vec<VerificationOutcome> {
+        #[cfg(feature = "bench-instrumentation")]
+        let started = std::time::Instant::now();
         #[cfg(not(target_arch = "wasm32"))]
         {
             if events.is_empty() {
                 return Vec::new();
             }
 
+            #[cfg(feature = "bench-instrumentation")]
+            let dispatch_started = std::time::Instant::now();
             let (results_tx, results_rx) = mpsc::channel();
             let first_worker = self.next_worker;
             self.next_worker = self.next_worker.wrapping_add(events.len());
@@ -160,25 +164,39 @@ impl VerifierPool {
                 }
             }
             drop(results_tx);
+            #[cfg(feature = "bench-instrumentation")]
+            crate::ingest_attribution::verify_dispatch(dispatch_started.elapsed(), events.len());
 
             // Start fail-closed. Successfully completed tasks overwrite their
             // slot; tasks rejected by a dead worker or abandoned by a worker
             // panic remain `Unavailable`. Iteration ends once every task-held
             // result sender has either replied or been dropped.
+            #[cfg(feature = "bench-instrumentation")]
+            let collect_started = std::time::Instant::now();
             let mut ordered = vec![VerificationOutcome::Unavailable; events.len()];
+            #[cfg(feature = "bench-instrumentation")]
+            let mut result_messages = 0usize;
             for (index, valid) in results_rx {
+                #[cfg(feature = "bench-instrumentation")]
+                {
+                    result_messages = result_messages.saturating_add(1);
+                }
                 ordered[index] = if valid {
                     VerificationOutcome::Valid
                 } else {
                     VerificationOutcome::Invalid
                 };
             }
+            #[cfg(feature = "bench-instrumentation")]
+            crate::ingest_attribution::verify_collect(collect_started.elapsed(), result_messages);
+            #[cfg(feature = "bench-instrumentation")]
+            crate::ingest_attribution::verify(started.elapsed(), events.len());
             ordered
         }
 
         #[cfg(target_arch = "wasm32")]
         {
-            events
+            let outcomes = events
                 .iter()
                 .map(|event| {
                     if event.verify_signature_with_ctx(&self.secp) {
@@ -187,7 +205,10 @@ impl VerifierPool {
                         VerificationOutcome::Invalid
                     }
                 })
-                .collect()
+                .collect();
+            #[cfg(feature = "bench-instrumentation")]
+            crate::ingest_attribution::verify(started.elapsed(), events.len());
+            outcomes
         }
     }
 
@@ -250,7 +271,18 @@ fn worker_loop(tasks: Receiver<Task>) {
                 event,
                 results,
             } => {
-                let valid = event.verify_signature_with_ctx(&secp);
+                #[cfg(feature = "bench-instrumentation")]
+                let verify_started = std::time::Instant::now();
+                #[cfg(feature = "bench-instrumentation")]
+                let skip_signature = crate::ingest_attribution::skip_signature_verification();
+                #[cfg(not(feature = "bench-instrumentation"))]
+                let skip_signature = false;
+                let valid = skip_signature || event.verify_signature_with_ctx(&secp);
+                #[cfg(feature = "bench-instrumentation")]
+                {
+                    crate::ingest_attribution::verify_worker(verify_started.elapsed(), 1);
+                    crate::ingest_attribution::signature_verification(skip_signature);
+                }
                 // Completion means every worker-owned reference is gone, so
                 // the engine can structurally unwrap the frame Arc without a
                 // race into the deep-clone fallback.

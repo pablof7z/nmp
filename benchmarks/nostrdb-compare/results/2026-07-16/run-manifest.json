@@ -1,0 +1,61 @@
+{
+  "schema": "nmp-nostrdb-run-manifest-v1",
+  "date_utc": "2026-07-16",
+  "filesystem": "/dev/shm (tmpfs)",
+  "nmp_commit": "7f8153c834776c4e62023b1fa11a1b6702ff7f4f",
+  "nostrdb_commit": "f4591db9524bc4936af76af4750ec425e67700be",
+  "nostrdb_secp256k1_commit": "1ad5185cd42c0636104129fcc9f6a4bf9c67cc40",
+  "host": "Linux kind2 6.1.0-42-amd64 x86_64; Intel Core Ultra 7 265; 20 logical CPUs",
+  "shared_ingest_contract": "event JSON parse + Schnorr signature verification + indexed durable persistence + close/drain",
+  "nostrdb_flags": [
+    "NDB_FLAG_NO_FULLTEXT",
+    "NDB_FLAG_NO_NOTE_BLOCKS",
+    "NDB_FLAG_NO_STATS"
+  ],
+  "nostrdb_signature_verification": true,
+  "nmp_transaction_batch_size": 128,
+  "corpora": [
+    {
+      "name": "100k",
+      "events": 100000,
+      "payload_bytes": 128,
+      "blake3": "597105545b9904afd14a44f60695a3edc90876b68c182d8487c7788f8e06efa2"
+    },
+    {
+      "name": "1m",
+      "events": 1000000,
+      "payload_bytes": 128,
+      "blake3": "f045bf7225fed97a492240e1133d52d99544e7addee73fa723ceab1635ffda72"
+    },
+    {
+      "name": "large-payload",
+      "events": 10000,
+      "payload_bytes": 65536,
+      "blake3": "b046e7c99056115a4b5709e872aad95a05fc06db92b350564121038303abe71a"
+    }
+  ],
+  "commands": {
+    "build": "NOSTRDB_DIR=/home/pablo/Work/nostrdb-nmp-bench cargo build --release --manifest-path benchmarks/nostrdb-compare/Cargo.toml",
+    "generate": "nmp-nostrdb-compare generate <corpus.jsonl> <events> <payload-bytes>",
+    "nmp": "nmp-nostrdb-compare run-nmp <corpus.jsonl> <store.redb> 128 <verify-workers> <query-iterations> <result.json>",
+    "nostrdb": "nmp-nostrdb-compare run-nostrdb <corpus.jsonl> <db-directory> <ingest-workers> <query-iterations> <result.json>",
+    "compare": "nmp-nostrdb-compare compare <nmp-result.json> <nostrdb-result.json> <comparison.json>"
+  },
+  "observed_nostrdb_failure_mechanisms": [
+    {
+      "stage": "producer_to_ingester",
+      "source": "src/nostrdb.c:3335-3348,8331-8362 -> src/threadpool.h:67-77 -> src/protected_queue.h:86-108",
+      "behavior": "the public ingest call returns failure when a selected bounded ingester queue is full"
+    },
+    {
+      "stage": "ingester_to_writer",
+      "source": "src/nostrdb.c:3438-3452,3472-3477 -> src/protected_queue.h:86-108",
+      "behavior": "the writer queue push result is ignored, so saturation silently drops verified notes"
+    },
+    {
+      "stage": "empty_filter_query",
+      "source": "src/nostrdb.c:5477-5502 and its bounded result cursor",
+      "behavior": "the empty-filter plan fills the capacity before sorting, so global top-200 is not the globally newest 200"
+    }
+  ]
+}

@@ -40,6 +40,7 @@ dependencies {
 
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
@@ -49,6 +50,10 @@ kotlin {
 
 tasks.test {
     useJUnitPlatform()
+    systemProperty(
+        "nmp.referenceFixturePath",
+        rootProject.projectDir.resolve("../../fixtures/reference-plans.json").canonicalPath,
+    )
     // Live-relay test only, same discipline as LiveRelayTests.swift -- every
     // wait inside the test itself is already bounded (~30s), this is just a
     // hard backstop so a genuinely hung JVM/network call can't wedge CI.

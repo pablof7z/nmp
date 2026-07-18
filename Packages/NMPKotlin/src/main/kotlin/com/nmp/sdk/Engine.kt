@@ -8,6 +8,7 @@ package com.nmp.sdk
 import kotlinx.coroutines.flow.Flow
 import uniffi.nmp_ffi.NmpEngine
 import uniffi.nmp_ffi.NmpEngineConfig
+import uniffi.nmp_ffi.generateAccountSecretKey as ffiGenerateAccountSecretKey
 import uniffi.nmp_ffi.resetPersistentStore as ffiResetPersistentStore
 
 /** Construction config for `NMPEngine`. The only relay facts this app ever
@@ -81,20 +82,27 @@ class NMPEngine(
 
     /** Guards [checkpointedPubkey] -- the identity currently persisted in
      * [localAccountStore]'s checkpoint file, `null` when no checkpoint is
-     * known to exist. Tracked so [removeAccount] can clear the checkpoint
-     * for exactly the removed identity (#529): without this, a removed
-     * account would silently resurrect from the checkpoint on the next
-     * engine construction. */
+     * known to exist -- and [restoredRegistration], the exact
+     * [NMPAccountRegistration] created on the init-restore path, when the
+     * checkpoint still holds exactly that installation (#589). Tracked so
+     * [removeAccount] can clear the checkpoint for exactly the removed
+     * identity (#529): without this, a removed account would silently
+     * resurrect from the checkpoint on the next engine construction. Also
+     * consulted by [detachPersistedAccount] to recover the exact restored
+     * registration to detach. */
     private val checkpointLock = Any()
     private var checkpointedPubkey: String? = null
+    private var restoredRegistration: NMPAccountRegistration? = null
 
     init {
         try {
             localAccountStore?.loadSecretKey()?.let { secretKey ->
-                val registration = nmpRethrowing { ffi.addAccount(secretKey) }
-                nmpRethrowing { ffi.setActiveAccount(registration.publicKey()) }
+                val ffiRegistration = nmpRethrowing { ffi.addAccount(secretKey) }
+                val registration = NMPAccountRegistration(ffiRegistration)
+                nmpRethrowing { ffi.setActiveAccount(registration.publicKey) }
                 synchronized(checkpointLock) {
-                    checkpointedPubkey = registration.publicKey()
+                    checkpointedPubkey = registration.publicKey
+                    restoredRegistration = registration
                 }
             }
         } catch (error: Throwable) {
@@ -104,6 +112,15 @@ class NMPEngine(
     }
 
     // MARK: - Identity (P3; multi-account)
+
+    /** Generate and register a brand-new local account (#588) -- the
+     * NMP-owned door for a clean-start client that has no existing secret
+     * material to hand in. Composes one keygen-only FFI call with the
+     * existing [addAccount], so it inherits that method's save-with-rollback
+     * choreography and checkpoint tracking wholesale rather than a second,
+     * parallel registration pipeline. Mirrors [addAccount]'s own "does not
+     * activate" semantics -- call [setActiveAccount] for that. */
+    fun generateAccount(): NMPAccountRegistration = addAccount(ffiGenerateAccountSecretKey())
 
     /** Register an account from its secret key (hex or bech32 `nsec`). The
      * key crosses this boundary exactly once and lives engine-side from
@@ -131,6 +148,11 @@ class NMPEngine(
         if (localAccountStore != null) {
             synchronized(checkpointLock) {
                 checkpointedPubkey = ffiRegistration.publicKey()
+                // This account -- not whatever the init-restore path
+                // installed -- now owns the checkpoint; a later
+                // `detachPersistedAccount()` must not fire against a
+                // registration the checkpoint no longer (solely) reflects.
+                restoredRegistration = null
             }
         }
         return NMPAccountRegistration(ffiRegistration)
@@ -150,10 +172,31 @@ class NMPEngine(
                 if (checkpointedPubkey == registration.publicKey) {
                     localAccountStore?.clear()
                     checkpointedPubkey = null
+                    restoredRegistration = null
                 }
             }
         }
         return removed
+    }
+
+    /** Detach exactly the local account this engine restored from its
+     * configured checkpoint at construction (#589). Delegates to
+     * [removeAccount], inheriting its checkpoint-clear behavior verbatim.
+     *
+     * Returns `false` -- and removes nothing -- when there is no exact
+     * restored registration left to detach: no account was restored at
+     * construction, a previous [detachPersistedAccount] or [removeAccount]
+     * call already spent it, a later [addAccount] has since overwritten the
+     * checkpoint with a different installation, or [clearPersistedAccount]
+     * was called directly (it also spends the tracked restored registration
+     * -- after that call the live restored signer can only be removed by
+     * shutting down the engine, never by a later [detachPersistedAccount]
+     * call). */
+    fun detachPersistedAccount(): Boolean {
+        val registration = synchronized(checkpointLock) {
+            restoredRegistration?.takeIf { checkpointedPubkey == it.publicKey }
+        } ?: return false
+        return removeAccount(registration)
     }
 
     /** Install one AUTH policy bound to [publicKey], returning its exact removal proof. */
@@ -186,6 +229,7 @@ class NMPEngine(
         synchronized(checkpointLock) {
             localAccountStore?.clear()
             checkpointedPubkey = null
+            restoredRegistration = null
         }
     }
 
@@ -281,8 +325,36 @@ class NMPEngine(
      * -- see [publishComposedReceipt]'s own doc. */
     fun publishComposed(intent: GroupSendIntent): Receipt = publishComposedReceipt(ffi, intent)
 
+    /** Compose a durable, author-outbox-routed NIP-22 comment `WriteIntent`
+     * (#572). Unlike [groupMessageIntent], this needs no engine state at all
+     * -- author/time are explicit caller parameters -- but lives here for
+     * the same "engine door" naming symmetry. [correlation] (#591) passes
+     * straight through to `WriteIntent.correlation`. Publish the returned
+     * take-once value through [publishComposed]. */
+    fun commentIntent(
+        root: CommentRoot,
+        parent: CommentParent,
+        authorPubkey: String,
+        createdAt: ULong,
+        content: String,
+        correlation: String? = null,
+    ): CommentIntent =
+        composeCommentIntent(ffi, root, parent, authorPubkey, createdAt, content, correlation)
+
+    /** Publish a [CommentIntent] from `commentIntent` (#572). Take-once --
+     * see [publishComposedReceipt]'s own doc. */
+    fun publishComposed(intent: CommentIntent): Receipt = publishComposedReceipt(ffi, intent)
+
     /** Attach to retained facts without conflating corruption with absence. */
     fun reattachReceipt(id: ULong): ReceiptReattachment = reattachReceipt(ffi, id)
+
+    /** #591: recover a receipt after a crash that happened BEFORE the app
+     * could durably persist the receipt id `publish`/`publishComposed`
+     * returned -- looked up by the caller's own crash-safe correlation
+     * token instead. Otherwise identical to [reattachReceipt] (the by-id
+     * overload). */
+    fun reattachReceipt(correlation: String): ReceiptReattachment =
+        reattachReceiptByCorrelation(ffi, correlation)
 
     /** Explicitly cancel an accepted unsigned write by stable receipt id. */
     fun cancel(receiptId: ULong): WriteCancellationOutcome = cancelWrite(ffi, receiptId)

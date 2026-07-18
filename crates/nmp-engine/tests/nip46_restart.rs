@@ -145,6 +145,90 @@ fn spawn_signer_relay(
     (relay, remote, user)
 }
 
+/// #571's checkpoint/restore falsifier needs the mock signer relay to serve
+/// TWO independent sequential client connections against the SAME
+/// `remote`/`user` identity: an initial pairing session, then a later
+/// checkpoint-restored session with no re-pairing. `spawn_signer_relay`
+/// above accepts only once; this variant loops `accept()` and reports each
+/// connection's observed method sequence so the test can prove the restored
+/// connection never re-sends `connect`.
+fn spawn_multi_session_signer_relay(
+    remote: Keys,
+    user: Keys,
+) -> (RelayUrl, mpsc::Receiver<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let relay = RelayUrl::parse(&format!("ws://{}", listener.local_addr().unwrap())).unwrap();
+    let (seen_tx, seen_rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        while let Ok((stream, _)) = listener.accept() {
+            let mut socket = tungstenite::accept(stream).unwrap();
+            let mut subscription_id = None;
+            let mut seen_methods = Vec::new();
+            while let Ok(Message::Text(text)) = socket.read() {
+                let frame: Value = serde_json::from_str(text.as_ref()).unwrap();
+                let parts = frame.as_array().unwrap();
+                match parts.first().and_then(Value::as_str) {
+                    Some("REQ") => {
+                        subscription_id = parts.get(1).and_then(Value::as_str).map(str::to_string);
+                    }
+                    Some("EVENT") => {
+                        let event = Event::from_json(parts[1].to_string()).unwrap();
+                        let plaintext = nip44::decrypt(
+                            remote.secret_key(),
+                            &event.pubkey,
+                            event.content.as_bytes(),
+                        )
+                        .unwrap();
+                        let request: Value = serde_json::from_str(&plaintext).unwrap();
+                        let id = request["id"].as_str().unwrap();
+                        let method = request["method"].as_str().unwrap();
+                        let params = request["params"].as_array().unwrap();
+                        seen_methods.push(method.to_string());
+                        let result = match method {
+                            "connect" => "ack".to_string(),
+                            "get_public_key" => user.public_key().to_hex(),
+                            "switch_relays" => "null".to_string(),
+                            "sign_event" => {
+                                let body: SignBody =
+                                    serde_json::from_str(params[0].as_str().unwrap()).unwrap();
+                                let tags = body
+                                    .tags
+                                    .iter()
+                                    .map(Tag::parse)
+                                    .collect::<Result<Vec<_>, _>>()
+                                    .unwrap();
+                                UnsignedEvent::new(
+                                    user.public_key(),
+                                    Timestamp::from(body.created_at),
+                                    Kind::from_u16(body.kind),
+                                    tags,
+                                    body.content,
+                                )
+                                .sign_with_keys(&user)
+                                .unwrap()
+                                .as_json()
+                            }
+                            other => panic!("unexpected NIP-46 method {other}"),
+                        };
+                        let response = response_event(&remote, event.pubkey, id, result);
+                        let frame = json!([
+                            "EVENT",
+                            subscription_id.as_deref().expect("REQ before EVENT"),
+                            response
+                        ])
+                        .to_string();
+                        socket.send(Message::Text(frame.into())).unwrap();
+                    }
+                    _ => {}
+                }
+            }
+            let _ = seen_tx.send(seen_methods);
+        }
+    });
+    (relay, seen_rx)
+}
+
 fn spawn_write_relay() -> (RelayUrl, mpsc::Receiver<Event>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let relay = RelayUrl::parse(&format!("ws://{}", listener.local_addr().unwrap())).unwrap();
@@ -257,6 +341,7 @@ fn offline_accept_restart_real_bunker_reattach_publish_and_ack() {
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             })
             .unwrap();
         assert_eq!(receipt.statuses.recv().unwrap(), WriteStatus::Accepted);
@@ -289,7 +374,7 @@ fn offline_accept_restart_real_bunker_reattach_publish_and_ack() {
     )
     .expect("test engine thread construction");
     let statuses = match handle.reattach_receipt(receipt_id) {
-        ReceiptReattachment::Attached(statuses) => statuses,
+        ReceiptReattachment::Attached(_id, statuses) => statuses,
         _ => panic!("durable receipt must reattach after restart"),
     };
     assert_eq!(statuses.recv().unwrap(), WriteStatus::Accepted);
@@ -409,6 +494,7 @@ fn mutated_real_bunker_response_retracts_pending_and_restores_replaceable_predec
             durability: Durability::Durable,
             routing: WriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         })
         .unwrap();
     assert_eq!(receipt.statuses.recv().unwrap(), WriteStatus::Accepted);
@@ -441,4 +527,146 @@ fn mutated_real_bunker_response_retracts_pending_and_restores_replaceable_predec
         .unwrap();
     assert_eq!(restored.len(), 1, "the displaced predecessor is restored");
     assert_eq!(restored[0].event, predecessor);
+}
+
+/// #571 acceptance falsifier: pair once, take a checkpoint, accept a
+/// durable write while offline, close/reopen the store in a fresh engine,
+/// restore the signer from the checkpoint alone (NO re-pairing), reach the
+/// identical user pubkey, and resume/sign/publish the parked obligation.
+/// Also proves the checkpoint's client secret never lands in the redb dump.
+#[test]
+fn checkpoint_restore_reattaches_durable_write_without_repairing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("nip46-checkpoint-restart.redb");
+    let remote = Keys::generate();
+    let user = Keys::generate();
+    let (signer_relay, seen) = spawn_multi_session_signer_relay(remote.clone(), user.clone());
+    let (write_relay, published) = spawn_write_relay();
+    let directory =
+        || FixtureDirectory::new().with_write(user.public_key().to_hex(), [write_relay.clone()]);
+    let unsigned = UnsignedEvent::new(
+        user.public_key(),
+        Timestamp::from(1_700_000_060),
+        Kind::TextNote,
+        vec![Tag::hashtag("nip46-checkpoint")],
+        "accepted before the restored signer existed",
+    );
+    let frozen_id = EventId::new(
+        &unsigned.pubkey,
+        &unsigned.created_at,
+        &unsigned.kind,
+        &unsigned.tags,
+        &unsigned.content,
+    );
+
+    // Phase 0: pair once (independent of any engine/store) and take a
+    // checkpoint of that already-authorized session.
+    let bunker_uri = format!(
+        "bunker://{}?relay={}&secret=checkpoint-restart-proof",
+        remote.public_key().to_hex(),
+        url::form_urlencoded::byte_serialize(signer_relay.as_str().as_bytes()).collect::<String>()
+    );
+    let paired = Nip46Signer::connect_bunker(&bunker_uri, Duration::from_secs(5)).unwrap();
+    assert_eq!(paired.user_public_key(), user.public_key());
+    let checkpoint = paired.checkpoint();
+    drop(paired);
+    let pairing_methods = seen.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(pairing_methods.contains(&"connect".to_string()));
+
+    // Phase 1: the durable write is accepted while no signer is attached.
+    let receipt_id = {
+        let (engine, handle) = EngineThread::spawn(
+            RedbStore::open(&path).unwrap(),
+            directory(),
+            10,
+            PoolConfig::default(),
+            RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+        )
+        .expect("test engine thread construction");
+        handle.set_active_account(Some(user.public_key()));
+        let receipt = handle
+            .publish_tracked(WriteIntent {
+                payload: WritePayload::Unsigned(unsigned.clone()),
+                durability: Durability::Durable,
+                routing: WriteRouting::AuthorOutbox,
+                identity_override: None,
+                correlation: None,
+            })
+            .unwrap();
+        assert_eq!(receipt.statuses.recv().unwrap(), WriteStatus::Accepted);
+        assert_eq!(
+            receipt.statuses.recv().unwrap(),
+            WriteStatus::AwaitingCapability {
+                pubkey: user.public_key()
+            }
+        );
+        handle.shutdown();
+        engine.join();
+        receipt.id
+    };
+
+    // Secrecy falsifier: the checkpoint's client secret must never appear
+    // anywhere in the closed redb store's raw bytes.
+    let raw_store_bytes = std::fs::read(&path).unwrap();
+    let secret_hex = checkpoint.client_secret_key.to_secret_hex();
+    let secret_needle = secret_hex.as_bytes();
+    let contains_secret = raw_store_bytes
+        .windows(secret_needle.len())
+        .any(|window| window == secret_needle);
+    assert!(
+        !contains_secret,
+        "the NIP-46 client secret must never appear in the redb store dump"
+    );
+
+    // Phase 2: close/reopen in a fresh engine and reattach the parked
+    // receipt -- still no signer attached.
+    let (engine, handle) = EngineThread::spawn(
+        RedbStore::open(&path).unwrap(),
+        directory(),
+        10,
+        PoolConfig::default(),
+        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+    )
+    .expect("test engine thread construction");
+    let statuses = match handle.reattach_receipt(receipt_id) {
+        ReceiptReattachment::Attached(_id, statuses) => statuses,
+        _ => panic!("durable receipt must reattach after restart"),
+    };
+    assert_eq!(statuses.recv().unwrap(), WriteStatus::Accepted);
+    assert_eq!(
+        statuses.recv().unwrap(),
+        WriteStatus::AwaitingCapability {
+            pubkey: user.public_key()
+        }
+    );
+
+    // Phase 3: restore the signer from the checkpoint ALONE -- no bunker
+    // URI, no `nostrconnect://` invitation, no re-pairing handshake.
+    let restored = Nip46Signer::from_parts(checkpoint, Duration::from_secs(5)).unwrap();
+    assert_eq!(restored.user_public_key(), user.public_key());
+    handle.add_signer(restored).unwrap();
+
+    assert!(matches!(
+        wait_for_status(&statuses, |status| matches!(status, WriteStatus::Signed(_))),
+        WriteStatus::Signed(id) if id == frozen_id
+    ));
+    assert!(matches!(
+        wait_for_status(&statuses, |status| matches!(status, WriteStatus::Acked(_))),
+        WriteStatus::Acked(relay) if relay == write_relay
+    ));
+    let event = published.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(event.id, frozen_id);
+    assert_eq!(event.pubkey, unsigned.pubkey);
+    assert_eq!(event.content, unsigned.content);
+
+    handle.shutdown();
+    engine.join();
+
+    let restore_methods = seen.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(
+        !restore_methods.contains(&"connect".to_string()),
+        "restore must never re-send the pairing `connect` RPC: {restore_methods:?}"
+    );
+    assert!(restore_methods.contains(&"get_public_key".to_string()));
+    assert!(restore_methods.contains(&"sign_event".to_string()));
 }

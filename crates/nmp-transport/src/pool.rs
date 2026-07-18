@@ -13,16 +13,19 @@
 //! thread. See those modules' docs for the generation-safety scheme and the
 //! harvest-vs-rewrite breakdown.
 
+#[cfg(feature = "bench-instrumentation")]
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub use nmp_grammar::RelaySessionKey;
-use nostr::{Event, RelayMessage, RelayUrl, SubscriptionId};
+use nostr::{Event, EventId, JsonUtil, RelayMessage, RelayUrl, SubscriptionId};
 
 use crate::handle::RelayHandle;
 use crate::health::RelayHealth;
 
+mod committed_observations;
 mod connect;
 mod frame;
 mod inner;
@@ -30,7 +33,24 @@ mod spawn;
 mod verify;
 mod worker;
 
+pub use committed_observations::{
+    CommittedObservationCandidate, CommittedObservationHit, CommittedObservationPublication,
+};
 use inner::PoolInner;
+
+#[cfg(feature = "bench-instrumentation")]
+pub fn configure_diagnostic_duplicate_ceiling(capacity: usize, event_payload_only: bool) {
+    frame::configure_diagnostic_duplicate_ceiling(capacity, event_payload_only);
+}
+
+#[cfg(feature = "bench-instrumentation")]
+#[doc(hidden)]
+pub fn configure_diagnostic_preparsed_ceiling(
+    subscription_id: Option<SubscriptionId>,
+    events: Vec<Arc<Event>>,
+) {
+    frame::configure_diagnostic_preparsed_ceiling(subscription_id, events);
+}
 
 /// Safe default for the single engine/transport relay ceiling. Zero is
 /// normalized to this value as well, so legacy/default construction cannot
@@ -41,6 +61,16 @@ pub const DEFAULT_MAX_RELAYS: usize = 10;
 /// CPU-bound and fed through bounded queues; copying host parallelism into
 /// every engine multiplied OS threads without imposing a process budget.
 pub const DEFAULT_VERIFIER_WORKERS: usize = 2;
+
+/// Hard ceiling for an explicitly configured per-engine verifier pool.
+/// The default remains deliberately small; embedders opting into a wider
+/// pool still cannot create an unbounded number of OS threads.
+pub const MAX_VERIFIER_WORKERS: usize = 16;
+
+/// Upper bound for the host-aware verifier width selected by
+/// [`PoolConfig::default`]. Explicit configurations may still request up to
+/// [`MAX_VERIFIER_WORKERS`].
+pub const MAX_DEFAULT_VERIFIER_WORKERS: usize = 8;
 
 /// The finite thread role whose OS spawn was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,9 +244,11 @@ pub enum EphemeralSendStart {
 
 /// One parsed, owned relay message off the wire.
 ///
-/// Text is parsed exactly once at the transport boundary. EVENT payloads move
-/// immediately into an [`Arc`], so signature workers and the engine share the
-/// same parsed allocation instead of deep-cloning content and tags. Keepalive
+/// Ordinary text is parsed exactly once at the transport boundary. EVENT
+/// payloads move immediately into an [`Arc`], so signature workers and the
+/// engine share the same parsed allocation instead of deep-cloning content
+/// and tags. Exact post-commit observations may carry a revalidated preparse
+/// token, retaining their raw text for fail-closed ordinary fallback. Keepalive
 /// `Ping`/`Pong`, binary messages, and the
 /// WebSocket `Close` frame never reach this type — they are consumed by the
 /// worker's keepalive FSM / surfaced instead as [`PoolEvent::Disconnected`].
@@ -225,7 +257,10 @@ pub enum RelayFrame {
     Event {
         subscription_id: SubscriptionId,
         event: Arc<Event>,
+        observation_candidate: Option<CommittedObservationCandidate>,
     },
+    #[doc(hidden)]
+    CommittedObservation(CommittedObservationHit),
     Message(Box<RelayMessage<'static>>),
 }
 
@@ -244,6 +279,7 @@ impl RelayFrame {
             } => Self::Event {
                 subscription_id: subscription_id.into_owned(),
                 event: Arc::new(event.into_owned()),
+                observation_candidate: None,
             },
             message => Self::Message(Box::new(message)),
         }
@@ -254,8 +290,49 @@ impl RelayFrame {
     pub fn event(&self) -> Option<&Arc<Event>> {
         match self {
             Self::Event { event, .. } => Some(event),
-            Self::Message(_) => None,
+            Self::CommittedObservation(_) | Self::Message(_) => None,
         }
+    }
+
+    #[cfg(feature = "bench-instrumentation")]
+    const DIAGNOSTIC_DUPLICATE_CEILING_MARKER: &'static str = "\0nmp-663-ceiling";
+
+    #[cfg(feature = "bench-instrumentation")]
+    pub(crate) fn diagnostic_duplicate_ceiling_token(
+        event_kind: u16,
+        encoded_bytes: usize,
+    ) -> Self {
+        let mut encoded = [0_u8; EventId::LEN];
+        encoded[..2].copy_from_slice(&event_kind.to_be_bytes());
+        encoded[2..10].copy_from_slice(&(encoded_bytes as u64).to_be_bytes());
+        Self::Message(Box::new(RelayMessage::Ok {
+            event_id: EventId::from_byte_array(encoded),
+            status: false,
+            message: Cow::Borrowed(Self::DIAGNOSTIC_DUPLICATE_CEILING_MARKER),
+        }))
+    }
+
+    #[cfg(feature = "bench-instrumentation")]
+    #[must_use]
+    pub fn diagnostic_duplicate_ceiling(&self) -> Option<(u16, usize)> {
+        let Self::Message(message) = self else {
+            return None;
+        };
+        let RelayMessage::Ok {
+            event_id,
+            status: false,
+            message,
+        } = message.as_ref()
+        else {
+            return None;
+        };
+        if message.as_ref() != Self::DIAGNOSTIC_DUPLICATE_CEILING_MARKER {
+            return None;
+        }
+        let encoded = event_id.as_bytes();
+        let event_kind = u16::from_be_bytes(encoded[..2].try_into().ok()?);
+        let encoded_bytes = u64::from_be_bytes(encoded[2..10].try_into().ok()?);
+        Some((event_kind, usize::try_from(encoded_bytes).ok()?))
     }
 
     /// Move an EVENT into the engine, normally without cloning.
@@ -263,12 +340,60 @@ impl RelayFrame {
     /// The translator drops every temporary verifier reference before sink
     /// delivery, making `Arc::try_unwrap` the production path. The clone is a
     /// defensive fallback for public callers that retained a frame clone.
+    // The error intentionally owns the exact raw websocket text needed for a
+    // fail-closed cache fallback. Boxing it would allocate on every hit.
+    #[allow(clippy::result_large_err)]
     pub fn into_event(self) -> Result<Event, Self> {
+        self.into_observed_event().map(|(event, _)| event)
+    }
+
+    pub(crate) fn from_observed_event(
+        subscription_id: SubscriptionId,
+        event: Event,
+        observation_candidate: CommittedObservationCandidate,
+    ) -> Self {
+        Self::Event {
+            subscription_id,
+            event: Arc::new(event),
+            observation_candidate: Some(observation_candidate),
+        }
+    }
+
+    /// Move an EVENT and its preparse cache candidate into the engine.
+    // See `into_event`: retaining the allocation-free owned error is a
+    // measured hot-path choice, not an accidentally large error payload.
+    #[allow(clippy::result_large_err)]
+    pub fn into_observed_event(
+        self,
+    ) -> Result<(Event, Option<CommittedObservationCandidate>), Self> {
         match self {
-            Self::Event { event, .. } => {
-                Ok(Arc::try_unwrap(event).unwrap_or_else(|event| event.as_ref().clone()))
-            }
+            Self::Event {
+                event,
+                observation_candidate,
+                ..
+            } => Ok((
+                Arc::try_unwrap(event).unwrap_or_else(|event| {
+                    #[cfg(feature = "bench-instrumentation")]
+                    crate::ingest_attribution::event_fallback_clone();
+                    event.as_ref().clone()
+                }),
+                observation_candidate,
+            )),
             other => Err(other),
+        }
+    }
+
+    /// Recover the exact ordinary EVENT path after an engine-side lease,
+    /// session, or pending-intent revalidation rejects a preparse hit.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn into_ordinary_fallback(self) -> Option<Self> {
+        match self {
+            Self::CommittedObservation(hit) => {
+                let (raw_text, candidate) = hit.into_raw_and_candidate();
+                frame::classify_text_with_candidate(raw_text.as_str(), Some(candidate))
+            }
+            frame => Some(frame),
         }
     }
 
@@ -280,10 +405,17 @@ impl RelayFrame {
             Self::Event {
                 subscription_id,
                 event,
+                ..
             } => RelayMessage::event(
                 subscription_id,
-                Arc::try_unwrap(event).unwrap_or_else(|event| event.as_ref().clone()),
+                Arc::try_unwrap(event).unwrap_or_else(|event| {
+                    #[cfg(feature = "bench-instrumentation")]
+                    crate::ingest_attribution::event_fallback_clone();
+                    event.as_ref().clone()
+                }),
             ),
+            Self::CommittedObservation(hit) => RelayMessage::from_json(hit.raw_text())
+                .expect("committed observation retains its previously parsed EVENT bytes"),
             Self::Message(message) => *message,
         }
     }
@@ -428,19 +560,33 @@ pub struct PoolConfig {
     /// Maximum translated pool events waiting for the engine bridge.
     pub event_sink_queue_capacity: usize,
     /// Persistent native verification workers. Zero selects the small fixed
-    /// [`DEFAULT_VERIFIER_WORKERS`] set; it never mirrors host parallelism.
+    /// [`DEFAULT_VERIFIER_WORKERS`] set. The production default uses half the
+    /// host parallelism, capped at [`MAX_DEFAULT_VERIFIER_WORKERS`]; explicit
+    /// values are capped at [`MAX_VERIFIER_WORKERS`].
     pub verifier_workers: usize,
     /// Maximum verification tasks queued at each persistent worker.
     pub verifier_queue_capacity: usize,
     /// Maximum verified id/signature entries retained by the translator.
     /// Eviction only causes later re-verification; it never changes policy.
     pub verified_cache_capacity: usize,
+    /// Maximum exact committed EVENT observations eligible for the preparse
+    /// duplicate fast path. Eviction or zero capacity only causes ordinary
+    /// parse/verify/store ingest.
+    pub committed_observation_cache_capacity: usize,
     /// Maximum worker events drained into one ordered verification batch.
     pub max_verify_batch: usize,
     /// Maximum typed relay frames handed to the engine/store in one batch.
     /// This separately caps transaction size even if producers continuously
     /// refill the bounded event queue while the bridge is draining it.
     pub max_engine_batch: usize,
+    /// Maximum conservative encoded bytes admitted to one engine/store batch.
+    /// A single event larger than this bound is still admitted alone; the
+    /// websocket message ceiling remains the absolute per-event bound.
+    pub max_engine_batch_bytes: usize,
+    /// Maximum time the engine bridge may wait for more consecutive EVENT
+    /// frames after receiving the first one. Control frames and lifecycle
+    /// events always end the batch immediately.
+    pub max_engine_batch_wait: Duration,
     /// Override for the keepalive idle threshold; `None` uses the
     /// production default ([`crate::keepalive::KEEPALIVE_IDLE_THRESHOLD`]).
     /// Tests on millisecond budgets pass a small value.
@@ -479,16 +625,27 @@ pub struct PoolConfig {
 
 impl Default for PoolConfig {
     fn default() -> Self {
+        let verifier_workers = std::thread::available_parallelism()
+            .map_or(DEFAULT_VERIFIER_WORKERS, usize::from)
+            .div_ceil(2)
+            .clamp(DEFAULT_VERIFIER_WORKERS, MAX_DEFAULT_VERIFIER_WORKERS);
         Self {
             max_relays: DEFAULT_MAX_RELAYS,
-            ingest_queue_capacity: 1_024,
+            ingest_queue_capacity: 8_192,
             command_queue_capacity: 1_024,
-            event_sink_queue_capacity: 1_024,
-            verifier_workers: 0,
+            event_sink_queue_capacity: 8_192,
+            verifier_workers,
             verifier_queue_capacity: 64,
-            verified_cache_capacity: 65_536,
-            max_verify_batch: 128,
-            max_engine_batch: 128,
+            verified_cache_capacity: 131_072,
+            committed_observation_cache_capacity: 131_072,
+            max_verify_batch: 512,
+            max_engine_batch: 4_096,
+            max_engine_batch_bytes: 8 * 1024 * 1024,
+            // A sub-millisecond wait lets socket/translator bursts form
+            // bounded store transactions without imposing scheduler-scale
+            // latency on an isolated EVENT. Representative ingest and exact
+            // replay both improve at this value; larger waits regress again.
+            max_engine_batch_wait: Duration::from_micros(200),
             keepalive_idle: None,
             keepalive_pong_timeout: None,
             reconnect_delay_initial: None,
@@ -533,6 +690,29 @@ impl Pool {
     /// as a typed error; this API never manufactures an invalid handle.
     pub fn ensure_open(&self, url: &RelayUrl) -> Result<RelayHandle, RelayOpenError> {
         self.ensure_session(&RelaySessionKey::public(url.clone()))
+    }
+
+    #[doc(hidden)]
+    pub fn revalidate_committed_observations<'a>(
+        &self,
+        hits: impl IntoIterator<Item = &'a CommittedObservationHit>,
+    ) -> bool {
+        self.inner
+            .lock()
+            .is_ok_and(|inner| inner.committed_observations.revalidate_all(hits))
+    }
+
+    #[doc(hidden)]
+    pub fn update_committed_observations(
+        &self,
+        invalidated: Vec<EventId>,
+        published: Vec<CommittedObservationPublication>,
+    ) {
+        if let Ok(inner) = self.inner.lock() {
+            inner
+                .committed_observations
+                .apply_update(invalidated, published);
+        }
     }
 
     /// Ensure the exact physical relay session is dialing/connected.
@@ -796,6 +976,7 @@ mod thread_budget_tests {
         let pool = Pool::new_with_spawner(
             PoolConfig {
                 max_relays,
+                verifier_workers: DEFAULT_VERIFIER_WORKERS,
                 ..PoolConfig::default()
             },
             Arc::new(sink),
@@ -866,16 +1047,31 @@ mod thread_budget_tests {
     }
 
     #[test]
-    fn verifier_worker_configuration_saturates_at_fixed_engine_budget() {
+    fn verifier_worker_configuration_honors_an_explicit_bounded_budget() {
         assert_eq!(
             inner::configured_verifier_workers(0),
             DEFAULT_VERIFIER_WORKERS
         );
         assert_eq!(inner::configured_verifier_workers(1), 1);
+        assert_eq!(inner::configured_verifier_workers(4), 4);
         assert_eq!(
             inner::configured_verifier_workers(usize::MAX),
-            DEFAULT_VERIFIER_WORKERS
+            MAX_VERIFIER_WORKERS
         );
+    }
+
+    #[test]
+    fn default_verifier_width_uses_half_the_host_up_to_eight() {
+        let available = std::thread::available_parallelism().map_or(2, usize::from);
+        assert_eq!(
+            PoolConfig::default().verifier_workers,
+            available.div_ceil(2).clamp(2, MAX_DEFAULT_VERIFIER_WORKERS)
+        );
+    }
+
+    #[test]
+    fn default_verification_cache_covers_a_hundred_thousand_event_replay() {
+        assert!(PoolConfig::default().verified_cache_capacity >= 100_000);
     }
 }
 

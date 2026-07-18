@@ -207,6 +207,8 @@ impl HistoryReceiver {
     }
 
     fn reconcile(delivered: &mut BTreeMap<EventId, Row>, mut batch: HistoryBatch) -> HistoryBatch {
+        #[cfg(feature = "bench-instrumentation")]
+        let reconcile_started = std::time::Instant::now();
         let current: BTreeMap<_, _> = batch
             .rows
             .iter()
@@ -235,6 +237,8 @@ impl HistoryReceiver {
         }
         *delivered = current;
         batch.deltas = deltas;
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::history_receiver_reconcile(reconcile_started.elapsed());
         batch
     }
 }
@@ -589,12 +593,16 @@ pub struct ReceiptStream {
     pub statuses: FifoReceiver<WriteStatus>,
 }
 
-/// Result of looking up retained receipt facts by stable id.
+/// Result of looking up retained receipt facts by stable id (or, #591, by a
+/// caller correlation token translated to one).
 pub enum ReceiptReattachment {
     /// The observer is attached and this channel is already primed with all
-    /// readable retained facts.
-    Attached(FifoReceiver<WriteStatus>),
-    /// No retained receipt with this id exists.
+    /// readable retained facts. Carries the resolved [`ReceiptId`] -- for
+    /// [`Handle::reattach_receipt`] this is simply the caller's own input
+    /// echoed back; for [`Handle::reattach_by_correlation`] (#591) it is the
+    /// id the token resolved to, which the caller could not otherwise learn.
+    Attached(ReceiptId, FifoReceiver<WriteStatus>),
+    /// No retained receipt with this id (or token) exists.
     NotFound,
     /// The id is retained, but durable receipt or attempt evidence is corrupt
     /// or unreadable. The obligation remains untouched and nothing publishes.
@@ -718,6 +726,14 @@ enum Cmd {
         id: ReceiptId,
         sink: Box<dyn ReceiptSink>,
         reply: Sender<ReattachOutcome>,
+    },
+    /// #591: reattach by caller correlation token instead of a `ReceiptId`
+    /// -- the door a client uses after a crash that happened before it
+    /// could durably record the id `publish_tracked` returned.
+    ReattachByCorrelation {
+        token: String,
+        sink: Box<dyn ReceiptSink>,
+        reply: Sender<(ReattachOutcome, Option<ReceiptId>)>,
     },
     CancelWrite {
         id: ReceiptId,
@@ -1271,6 +1287,10 @@ impl EngineThread {
         #[cfg(test)]
         let runtime_threads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let max_engine_batch = pool_config.max_engine_batch.max(1);
+        let max_engine_batch_bytes = pool_config.max_engine_batch_bytes.max(1);
+        let max_engine_batch_wait = pool_config
+            .max_engine_batch_wait
+            .min(Duration::from_millis(100));
         let (pool_evt_tx, pool_evt_rx) =
             cb::bounded::<PoolEvent>(pool_config.event_sink_queue_capacity.max(1));
         let (pool_stop_tx, pool_stop_rx) = cb::bounded::<()>(0);
@@ -1299,7 +1319,14 @@ impl EngineThread {
             .spawn(move || {
                 #[cfg(test)]
                 let _thread_count = RuntimeThreadCountGuard::enter(bridge_runtime_threads);
-                pool_bridge_loop(&pool_evt_rx, &pool_stop_rx, &bridge_inbox, max_engine_batch)
+                pool_bridge_loop(
+                    &pool_evt_rx,
+                    &pool_stop_rx,
+                    &bridge_inbox,
+                    max_engine_batch,
+                    max_engine_batch_bytes,
+                    max_engine_batch_wait,
+                )
             }) {
             Ok(join) => {
                 nmp_executor::note_thread_spawn();
@@ -1702,13 +1729,19 @@ fn pool_bridge_loop(
     stopping: &cb::Receiver<()>,
     engine_inbox: &Sender<Cmd>,
     max_engine_batch: usize,
+    max_engine_batch_bytes: usize,
+    max_engine_batch_wait: Duration,
 ) {
+    let mut pending = None;
     loop {
-        let event = cb::select_biased! {
-            recv(stopping) -> _ => break,
-            recv(pool_evt_rx) -> event => match event {
-                Ok(event) => event,
-                Err(_) => break,
+        let event = match pending.take() {
+            Some(event) => event,
+            None => cb::select_biased! {
+                recv(stopping) -> _ => break,
+                recv(pool_evt_rx) -> event => match event {
+                    Ok(event) => event,
+                    Err(_) => break,
+                },
             },
         };
         if let PoolEvent::Frame {
@@ -1717,42 +1750,87 @@ fn pool_bridge_loop(
             frame,
         } = event
         {
-            let mut frames = vec![(handle, session, frame)];
-            let trailing = loop {
-                if frames.len() == max_engine_batch {
-                    break None;
+            let Some(first_bytes) = encoded_event_upper_bound(&frame) else {
+                if !send_relay_batch(vec![(handle, session, frame)], stopping, engine_inbox) {
+                    break;
                 }
-                match pool_evt_rx.try_recv() {
-                    Ok(PoolEvent::Frame {
+                continue;
+            };
+            let mut frames = vec![(handle, session, frame)];
+            let mut encoded_bytes = first_bytes;
+            let deadline = std::time::Instant::now()
+                .checked_add(max_engine_batch_wait)
+                .unwrap_or_else(std::time::Instant::now);
+            let mut input_closed = false;
+            let mut stopped = false;
+            loop {
+                if frames.len() >= max_engine_batch || encoded_bytes >= max_engine_batch_bytes {
+                    break;
+                }
+                let next = match pool_evt_rx.try_recv() {
+                    Ok(event) => Some(event),
+                    Err(cb::TryRecvError::Disconnected) => {
+                        input_closed = true;
+                        None
+                    }
+                    Err(cb::TryRecvError::Empty) => {
+                        let remaining =
+                            deadline.saturating_duration_since(std::time::Instant::now());
+                        if remaining.is_zero() {
+                            None
+                        } else {
+                            let timeout = cb::after(remaining);
+                            cb::select_biased! {
+                                recv(stopping) -> _ => {
+                                    stopped = true;
+                                    None
+                                },
+                                recv(pool_evt_rx) -> event => match event {
+                                    Ok(event) => Some(event),
+                                    Err(_) => {
+                                        input_closed = true;
+                                        None
+                                    },
+                                },
+                                recv(timeout) -> _ => None,
+                            }
+                        }
+                    }
+                };
+                let Some(next) = next else { break };
+                let PoolEvent::Frame {
+                    handle,
+                    session,
+                    frame,
+                } = next
+                else {
+                    pending = Some(next);
+                    break;
+                };
+                let Some(next_bytes) = encoded_event_upper_bound(&frame) else {
+                    pending = Some(PoolEvent::Frame {
                         handle,
                         session,
                         frame,
-                    }) => frames.push((handle, session, frame)),
-                    Ok(other) => break Some(other),
-                    Err(cb::TryRecvError::Empty | cb::TryRecvError::Disconnected) => break None,
-                }
-            };
-            let (applied_tx, applied_rx) = cb::bounded(1);
-            if engine_inbox
-                .send(Cmd::RelayBatch {
-                    frames,
-                    applied: applied_tx,
-                })
-                .is_err()
-            {
-                break;
-            }
-            let applied = cb::select_biased! {
-                recv(stopping) -> _ => false,
-                recv(applied_rx) -> result => result.is_ok(),
-            };
-            if !applied {
-                break;
-            }
-            if let Some(trailing) = trailing {
-                if !forward_pool_event(trailing, engine_inbox) {
+                    });
+                    break;
+                };
+                if encoded_bytes.saturating_add(next_bytes) > max_engine_batch_bytes {
+                    pending = Some(PoolEvent::Frame {
+                        handle,
+                        session,
+                        frame,
+                    });
                     break;
                 }
+                encoded_bytes = encoded_bytes.saturating_add(next_bytes);
+                frames.push((handle, session, frame));
+            }
+            if stopped || !send_relay_batch(frames, stopping, engine_inbox) {
+                break;
+            }
+            if input_closed {
+                break;
             }
             continue;
         }
@@ -1760,6 +1838,67 @@ fn pool_bridge_loop(
             break; // engine thread is gone; nothing left to feed.
         }
     }
+}
+
+fn send_relay_batch(
+    frames: Vec<(nmp_transport::RelayHandle, RelaySessionKey, RelayFrame)>,
+    stopping: &cb::Receiver<()>,
+    engine_inbox: &Sender<Cmd>,
+) -> bool {
+    let (applied_tx, applied_rx) = cb::bounded(1);
+    #[cfg(feature = "bench-instrumentation")]
+    {
+        let event_bytes = frames
+            .iter()
+            .filter_map(|(_, _, frame)| encoded_event_upper_bound(frame))
+            .fold(0usize, usize::saturating_add);
+        crate::ingest_attribution::bridge_batch(frames.len(), event_bytes);
+    }
+    #[cfg(feature = "bench-instrumentation")]
+    let send_started = std::time::Instant::now();
+    if engine_inbox
+        .send(Cmd::RelayBatch {
+            frames,
+            applied: applied_tx,
+        })
+        .is_err()
+    {
+        return false;
+    }
+    #[cfg(feature = "bench-instrumentation")]
+    crate::ingest_attribution::bridge_send(send_started.elapsed());
+    #[cfg(feature = "bench-instrumentation")]
+    let applied_started = std::time::Instant::now();
+    let applied = cb::select_biased! {
+        recv(stopping) -> _ => false,
+        recv(applied_rx) -> result => result.is_ok(),
+    };
+    #[cfg(feature = "bench-instrumentation")]
+    crate::ingest_attribution::bridge_applied_wait(applied_started.elapsed());
+    applied
+}
+
+fn encoded_event_upper_bound(frame: &RelayFrame) -> Option<usize> {
+    if let RelayFrame::CommittedObservation(hit) = frame {
+        return Some(hit.encoded_bytes());
+    }
+    #[cfg(feature = "bench-instrumentation")]
+    if let Some((_, encoded_bytes)) = frame.diagnostic_duplicate_ceiling() {
+        return Some(encoded_bytes);
+    }
+    let event = frame.event()?;
+    let tags = event.tags.iter().fold(0usize, |total, tag| {
+        tag.as_slice()
+            .iter()
+            .fold(total.saturating_add(4), |total, atom| {
+                total.saturating_add(4).saturating_add(atom.len())
+            })
+    });
+    Some(
+        192usize
+            .saturating_add(event.content.len())
+            .saturating_add(tags),
+    )
 }
 
 fn forward_pool_event(event: PoolEvent, engine_inbox: &Sender<Cmd>) -> bool {
@@ -1774,10 +1913,17 @@ fn forward_pool_event(event: PoolEvent, engine_inbox: &Sender<Cmd>) -> bool {
 mod pool_bridge_tests {
     use super::*;
     use nmp_transport::{PoolEventSink, RelayFrame, RelayHandle};
-    use nostr::RelayMessage;
+    use nostr::{EventBuilder, Keys, RelayMessage, SubscriptionId};
 
     fn notice_frame(text: &str) -> RelayFrame {
         RelayFrame::from_message(RelayMessage::notice(text))
+    }
+
+    fn event_frame(text: &str) -> RelayFrame {
+        let event = EventBuilder::text_note(text)
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        RelayFrame::from_message(RelayMessage::event(SubscriptionId::new("sub"), event))
     }
 
     fn test_session() -> RelaySessionKey {
@@ -1822,7 +1968,9 @@ mod pool_bridge_tests {
                 session: session.clone(),
             })
             .unwrap();
-        let bridge = thread::spawn(move || pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 128));
+        let bridge = thread::spawn(move || {
+            pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 128, usize::MAX, Duration::ZERO)
+        });
 
         assert!(matches!(
             cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
@@ -1858,7 +2006,9 @@ mod pool_bridge_tests {
         let (pool_tx, pool_rx) = cb::bounded(8);
         let (stop_tx, stop_rx) = cb::bounded(0);
         let (cmd_tx, cmd_rx) = mpsc::channel();
-        let bridge = thread::spawn(move || pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 128));
+        let bridge = thread::spawn(move || {
+            pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 128, usize::MAX, Duration::ZERO)
+        });
         let handle = RelayHandle {
             slot: 1,
             generation: 2,
@@ -1919,23 +2069,19 @@ mod pool_bridge_tests {
                 .send(PoolEvent::Frame {
                     handle,
                     session: test_session(),
-                    frame: notice_frame(text),
+                    frame: event_frame(text),
                 })
                 .unwrap();
         }
-        let bridge = thread::spawn(move || pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 2));
+        let bridge = thread::spawn(move || {
+            pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 2, usize::MAX, Duration::ZERO)
+        });
 
         let first_ack = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
             Cmd::RelayBatch { frames, applied } => {
                 assert_eq!(frames.len(), 2);
-                assert_eq!(
-                    frames[0].2.clone().into_message(),
-                    RelayMessage::notice("one")
-                );
-                assert_eq!(
-                    frames[1].2.clone().into_message(),
-                    RelayMessage::notice("two")
-                );
+                assert_eq!(frames[0].2.event().unwrap().content, "one");
+                assert_eq!(frames[1].2.event().unwrap().content, "two");
                 applied
             }
             _ => panic!("first command must be a capped relay batch"),
@@ -1944,10 +2090,7 @@ mod pool_bridge_tests {
         let second_ack = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
             Cmd::RelayBatch { frames, applied } => {
                 assert_eq!(frames.len(), 1);
-                assert_eq!(
-                    frames[0].2.clone().into_message(),
-                    RelayMessage::notice("three")
-                );
+                assert_eq!(frames[0].2.event().unwrap().content, "three");
                 applied
             }
             _ => panic!("second command must retain the next ordered frame"),
@@ -1959,11 +2102,229 @@ mod pool_bridge_tests {
     }
 
     #[test]
+    fn control_frame_is_a_commit_barrier_between_event_batches() {
+        let (pool_tx, pool_rx) = cb::bounded(8);
+        let (stop_tx, stop_rx) = cb::bounded(0);
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let handle = RelayHandle {
+            slot: 1,
+            generation: 2,
+        };
+        for frame in [
+            event_frame("before"),
+            notice_frame("barrier"),
+            event_frame("after"),
+        ] {
+            pool_tx
+                .send(PoolEvent::Frame {
+                    handle,
+                    session: test_session(),
+                    frame,
+                })
+                .unwrap();
+        }
+        let bridge = thread::spawn(move || {
+            pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 8, usize::MAX, Duration::ZERO)
+        });
+
+        let before_ack = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            Cmd::RelayBatch { frames, applied } => {
+                assert_eq!(frames.len(), 1);
+                assert_eq!(frames[0].2.event().unwrap().content, "before");
+                applied
+            }
+            _ => panic!("event before barrier must commit first"),
+        };
+        assert!(matches!(cmd_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        before_ack.send(()).unwrap();
+
+        let barrier_ack = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            Cmd::RelayBatch { frames, applied } => {
+                assert_eq!(frames.len(), 1);
+                assert_eq!(
+                    frames[0].2.clone().into_message(),
+                    RelayMessage::notice("barrier")
+                );
+                applied
+            }
+            _ => panic!("control barrier must be applied after prior commit"),
+        };
+        assert!(matches!(cmd_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        barrier_ack.send(()).unwrap();
+
+        let after_ack = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            Cmd::RelayBatch { frames, applied } => {
+                assert_eq!(frames.len(), 1);
+                assert_eq!(frames[0].2.event().unwrap().content, "after");
+                applied
+            }
+            _ => panic!("event after barrier must remain ordered"),
+        };
+        after_ack.send(()).unwrap();
+        drop(pool_tx);
+        drop(stop_tx);
+        bridge.join().unwrap();
+    }
+
+    #[test]
+    fn lifecycle_event_is_a_commit_barrier_between_event_batches() {
+        let (pool_tx, pool_rx) = cb::bounded(8);
+        let (stop_tx, stop_rx) = cb::bounded(0);
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let handle = RelayHandle {
+            slot: 1,
+            generation: 2,
+        };
+        pool_tx
+            .send(PoolEvent::Frame {
+                handle,
+                session: test_session(),
+                frame: event_frame("before"),
+            })
+            .unwrap();
+        pool_tx.send(PoolEvent::WorkerRetired).unwrap();
+        pool_tx
+            .send(PoolEvent::Frame {
+                handle,
+                session: test_session(),
+                frame: event_frame("after"),
+            })
+            .unwrap();
+        let bridge = thread::spawn(move || {
+            pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 8, usize::MAX, Duration::ZERO)
+        });
+
+        let before_ack = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            Cmd::RelayBatch { frames, applied } => {
+                assert_eq!(frames.len(), 1);
+                assert_eq!(frames[0].2.event().unwrap().content, "before");
+                applied
+            }
+            _ => panic!("event before lifecycle barrier must commit first"),
+        };
+        assert!(matches!(cmd_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        before_ack.send(()).unwrap();
+
+        assert!(matches!(
+            cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Cmd::RelayWorkerRetired
+        ));
+        let after_ack = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            Cmd::RelayBatch { frames, applied } => {
+                assert_eq!(frames.len(), 1);
+                assert_eq!(frames[0].2.event().unwrap().content, "after");
+                applied
+            }
+            _ => panic!("event after lifecycle barrier must remain ordered"),
+        };
+        after_ack.send(()).unwrap();
+        drop(pool_tx);
+        drop(stop_tx);
+        bridge.join().unwrap();
+    }
+
+    #[test]
+    fn encoded_byte_bound_splits_consecutive_events_without_loss() {
+        let first = event_frame(&"a".repeat(512));
+        let second = event_frame(&"b".repeat(512));
+        let one_event_bytes = encoded_event_upper_bound(&first).unwrap();
+        let (pool_tx, pool_rx) = cb::bounded(4);
+        let (stop_tx, stop_rx) = cb::bounded(0);
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let handle = RelayHandle {
+            slot: 1,
+            generation: 2,
+        };
+        for frame in [first, second] {
+            pool_tx
+                .send(PoolEvent::Frame {
+                    handle,
+                    session: test_session(),
+                    frame,
+                })
+                .unwrap();
+        }
+        let bridge = thread::spawn(move || {
+            pool_bridge_loop(
+                &pool_rx,
+                &stop_rx,
+                &cmd_tx,
+                8,
+                one_event_bytes + 1,
+                Duration::ZERO,
+            )
+        });
+        for expected in ['a', 'b'] {
+            let ack = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+                Cmd::RelayBatch { frames, applied } => {
+                    assert_eq!(frames.len(), 1);
+                    assert!(frames[0].2.event().unwrap().content.starts_with(expected));
+                    applied
+                }
+                _ => panic!("byte bound must preserve each event"),
+            };
+            ack.send(()).unwrap();
+        }
+        drop(pool_tx);
+        drop(stop_tx);
+        bridge.join().unwrap();
+    }
+
+    #[test]
+    fn bounded_wait_coalesces_a_short_event_burst() {
+        let (pool_tx, pool_rx) = cb::bounded(4);
+        let (stop_tx, stop_rx) = cb::bounded(0);
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let handle = RelayHandle {
+            slot: 1,
+            generation: 2,
+        };
+        let bridge = thread::spawn(move || {
+            pool_bridge_loop(
+                &pool_rx,
+                &stop_rx,
+                &cmd_tx,
+                8,
+                usize::MAX,
+                Duration::from_millis(50),
+            )
+        });
+        pool_tx
+            .send(PoolEvent::Frame {
+                handle,
+                session: test_session(),
+                frame: event_frame("first"),
+            })
+            .unwrap();
+        thread::sleep(Duration::from_millis(5));
+        pool_tx
+            .send(PoolEvent::Frame {
+                handle,
+                session: test_session(),
+                frame: event_frame("second"),
+            })
+            .unwrap();
+        let ack = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            Cmd::RelayBatch { frames, applied } => {
+                assert_eq!(frames.len(), 2);
+                applied
+            }
+            _ => panic!("short burst must coalesce"),
+        };
+        ack.send(()).unwrap();
+        drop(pool_tx);
+        drop(stop_tx);
+        bridge.join().unwrap();
+    }
+
+    #[test]
     fn stop_disconnect_releases_bridge_waiting_for_engine_ack() {
         let (pool_tx, pool_rx) = cb::bounded(1);
         let (stop_tx, stop_rx) = cb::bounded(0);
         let (cmd_tx, cmd_rx) = mpsc::channel();
-        let bridge = thread::spawn(move || pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 1));
+        let bridge = thread::spawn(move || {
+            pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 1, usize::MAX, Duration::ZERO)
+        });
         pool_tx
             .send(PoolEvent::Frame {
                 handle: RelayHandle {
@@ -2623,6 +2984,7 @@ mod relay_worker_reconciliation_tests {
                 durability: Durability::Durable,
                 routing: WriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             },
             Box::new(NullReceiptSink),
         ));
@@ -3401,6 +3763,9 @@ fn engine_loop<S, D>(
                 Cmd::ReattachReceipt { id, sink, reply } => {
                     let _ = reply.send(core.reattach_receipt(id, sink));
                 }
+                Cmd::ReattachByCorrelation { token, sink, reply } => {
+                    let _ = reply.send(core.reattach_by_correlation(token, sink));
+                }
                 Cmd::ObserveDiagnostics { reply } => {
                     let id = next_diag_id;
                     next_diag_id = next_diag_id.saturating_add(1);
@@ -3473,6 +3838,8 @@ fn engine_loop<S, D>(
                 );
             }
             Cmd::RelayBatch { frames, applied } => {
+                #[cfg(feature = "bench-instrumentation")]
+                let batch_started = std::time::Instant::now();
                 if frames.iter().any(|(handle, session, frame)| {
                     relay_frame_needs_wall_clock(frame)
                         && core.is_current_transport_session(*handle, session)
@@ -3490,18 +3857,99 @@ fn engine_loop<S, D>(
                         dispatch_runtime,
                     );
                 }
-                let effects = core.handle(EngineMsg::RelayFrames(frames));
-                dispatch_core_effects(
-                    &mut core,
-                    effects,
-                    &pool,
-                    &mut row_channels,
-                    &mut history_channels,
-                    &mut diag_channels,
-                    &mut preambles,
-                    &registry,
-                    dispatch_runtime,
-                );
+                let mut ordinary = Vec::new();
+                let mut committed = Vec::new();
+                for (handle, session, frame) in frames {
+                    match frame {
+                        RelayFrame::CommittedObservation(hit) => {
+                            if !ordinary.is_empty() {
+                                reduce_and_dispatch_relay_frames(
+                                    &mut core,
+                                    std::mem::take(&mut ordinary),
+                                    &pool,
+                                    &mut row_channels,
+                                    &mut history_channels,
+                                    &mut diag_channels,
+                                    &mut preambles,
+                                    &registry,
+                                    dispatch_runtime,
+                                );
+                            }
+                            let valid = core.is_current_transport_session(handle, &session)
+                                && !core.committed_observation_conflicts_with_pending(&hit);
+                            if valid {
+                                committed.push((
+                                    handle,
+                                    session,
+                                    RelayFrame::CommittedObservation(hit),
+                                ));
+                            } else {
+                                if !committed.is_empty() {
+                                    reduce_and_dispatch_committed_observations(
+                                        &mut core,
+                                        std::mem::take(&mut committed),
+                                        &pool,
+                                        &mut row_channels,
+                                        &mut history_channels,
+                                        &mut diag_channels,
+                                        &mut preambles,
+                                        &registry,
+                                        dispatch_runtime,
+                                    );
+                                }
+                                if let Some(frame) =
+                                    RelayFrame::CommittedObservation(hit).into_ordinary_fallback()
+                                {
+                                    ordinary.push((handle, session, frame));
+                                }
+                            }
+                        }
+                        frame => {
+                            if !committed.is_empty() {
+                                reduce_and_dispatch_committed_observations(
+                                    &mut core,
+                                    std::mem::take(&mut committed),
+                                    &pool,
+                                    &mut row_channels,
+                                    &mut history_channels,
+                                    &mut diag_channels,
+                                    &mut preambles,
+                                    &registry,
+                                    dispatch_runtime,
+                                );
+                            }
+                            ordinary.push((handle, session, frame));
+                        }
+                    }
+                }
+                if !committed.is_empty() {
+                    reduce_and_dispatch_committed_observations(
+                        &mut core,
+                        committed,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &mut preambles,
+                        &registry,
+                        dispatch_runtime,
+                    );
+                }
+                if !ordinary.is_empty() {
+                    reduce_and_dispatch_relay_frames(
+                        &mut core,
+                        ordinary,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &mut preambles,
+                        &registry,
+                        dispatch_runtime,
+                    );
+                }
+                #[cfg(feature = "bench-instrumentation")]
+                crate::ingest_attribution::engine_batch_process(batch_started.elapsed());
                 let _ = applied.send(());
             }
             Cmd::AddSigner { signer, reply } => {
@@ -3824,6 +4272,10 @@ fn engine_loop<S, D>(
             }
             Cmd::ReattachReceipt { id, sink, reply } => {
                 let found = core.reattach_receipt(id, sink);
+                let _ = reply.send(found);
+            }
+            Cmd::ReattachByCorrelation { token, sink, reply } => {
+                let found = core.reattach_by_correlation(token, sink);
                 let _ = reply.send(found);
             }
             Cmd::CancelWrite { id, reply } => {
@@ -4282,6 +4734,110 @@ fn engine_loop<S, D>(
     pool.shutdown();
 }
 
+#[allow(clippy::too_many_arguments)]
+fn reduce_and_dispatch_committed_observations<S: EventStore>(
+    core: &mut EngineCore<S>,
+    frames: Vec<(nmp_transport::RelayHandle, RelaySessionKey, RelayFrame)>,
+    pool: &Pool,
+    row_channels: &mut HashMap<HandleId, RowsSender>,
+    history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
+    diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
+    preambles: &mut Preambles,
+    registry: &SignerRegistry,
+    runtime: DispatchRuntime<'_>,
+) {
+    let all_valid = frames
+        .iter()
+        .all(|(_, _, frame)| matches!(frame, RelayFrame::CommittedObservation(_)))
+        && pool.revalidate_committed_observations(frames.iter().filter_map(|(_, _, frame)| {
+            match frame {
+                RelayFrame::CommittedObservation(hit) => Some(hit),
+                _ => None,
+            }
+        }));
+    if all_valid {
+        let observations = frames
+            .into_iter()
+            .filter_map(|(_, session, frame)| match frame {
+                RelayFrame::CommittedObservation(hit) => Some((session, hit.event_kind())),
+                _ => None,
+            })
+            .collect();
+        let effects = core.on_revalidated_committed_observations(observations);
+        dispatch_core_effects(
+            core,
+            effects,
+            pool,
+            row_channels,
+            history_channels,
+            diag_channels,
+            preambles,
+            registry,
+            runtime,
+        );
+    } else {
+        let frames = frames
+            .into_iter()
+            .filter_map(|(handle, session, frame)| {
+                frame
+                    .into_ordinary_fallback()
+                    .map(|frame| (handle, session, frame))
+            })
+            .collect();
+        reduce_and_dispatch_relay_frames(
+            core,
+            frames,
+            pool,
+            row_channels,
+            history_channels,
+            diag_channels,
+            preambles,
+            registry,
+            runtime,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reduce_and_dispatch_relay_frames<S: EventStore>(
+    core: &mut EngineCore<S>,
+    frames: Vec<(nmp_transport::RelayHandle, RelaySessionKey, RelayFrame)>,
+    pool: &Pool,
+    row_channels: &mut HashMap<HandleId, RowsSender>,
+    history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
+    diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
+    preambles: &mut Preambles,
+    registry: &SignerRegistry,
+    runtime: DispatchRuntime<'_>,
+) {
+    #[cfg(feature = "bench-instrumentation")]
+    let phase_started = std::time::Instant::now();
+    #[cfg(feature = "bench-instrumentation")]
+    let cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
+    let effects = core.handle(EngineMsg::RelayFrames(frames));
+    #[cfg(feature = "bench-instrumentation")]
+    crate::ingest_attribution::relay_core_reduce(phase_started.elapsed());
+    #[cfg(feature = "bench-instrumentation")]
+    crate::ingest_attribution::relay_core_reduce_cpu(
+        crate::ingest_attribution::thread_cpu_time_ns().saturating_sub(cpu_started),
+    );
+    #[cfg(feature = "bench-instrumentation")]
+    let phase_started = std::time::Instant::now();
+    dispatch_core_effects(
+        core,
+        effects,
+        pool,
+        row_channels,
+        history_channels,
+        diag_channels,
+        preambles,
+        registry,
+        runtime,
+    );
+    #[cfg(feature = "bench-instrumentation")]
+    crate::ingest_attribution::relay_effect_dispatch(phase_started.elapsed());
+}
+
 /// Release workers no longer owned by the reducer, then execute its effects.
 /// Release MUST happen first: when a cap-sized plan replaces every relay,
 /// keeping the old workers through `apply_wire_delta` would make every new
@@ -4641,6 +5197,16 @@ fn dispatch_effect(
     runtime: DispatchRuntime<'_>,
 ) {
     match effect {
+        Effect::UpdateCommittedObservations {
+            invalidated,
+            published,
+        } => {
+            #[cfg(feature = "bench-instrumentation")]
+            let phase_started = std::time::Instant::now();
+            pool.update_committed_observations(invalidated, published);
+            #[cfg(feature = "bench-instrumentation")]
+            crate::ingest_attribution::committed_observation_effect(phase_started.elapsed());
+        }
         Effect::Wire(delta) => apply_wire_delta(&delta, pool, preambles),
         Effect::PreflightHistoryRelays(_) => {}
         Effect::Replay(session, reqs) => apply_replay(&session, reqs, pool, preambles),
@@ -4818,11 +5384,17 @@ fn dispatch_effect(
         }
         Effect::EmitHistory(id, batch) => {
             if let Some(tx) = history_channels.get(&id) {
+                #[cfg(feature = "bench-instrumentation")]
+                let send_started = std::time::Instant::now();
                 tx.send(batch);
+                #[cfg(feature = "bench-instrumentation")]
+                crate::ingest_attribution::history_channel_send(send_started.elapsed());
             }
         }
         Effect::HistoryLoadResult(..) => {}
         Effect::EmitDiagnostics(mut snapshot) => {
+            #[cfg(feature = "bench-instrumentation")]
+            let phase_started = std::time::Instant::now();
             // Fold in the transport pool's own relay-cap rejection count
             // (issue #121, worker-exhaustion half). `EngineCore` builds the
             // snapshot with this field `0` because it has no view of the
@@ -4841,6 +5413,8 @@ fn dispatch_effect(
             for tx in diag_channels.values() {
                 tx.send(snapshot.clone());
             }
+            #[cfg(feature = "bench-instrumentation")]
+            crate::ingest_attribution::diagnostics_effect(phase_started.elapsed());
         }
         Effect::EmitReceipt(id, status) => {
             if matches!(status, WriteStatus::Signed(_) | WriteStatus::Cancelled) {
@@ -5541,9 +6115,43 @@ impl Handle {
             .recv()
             .expect("nmp-engine: engine dropped reattach reply")
         {
-            ReattachOutcome::Attached => ReceiptReattachment::Attached(rx),
+            ReattachOutcome::Attached => ReceiptReattachment::Attached(id, rx),
             ReattachOutcome::NotFound => ReceiptReattachment::NotFound,
             ReattachOutcome::RetainedButUnreadable => ReceiptReattachment::RetainedButUnreadable,
+        }
+    }
+
+    /// #591: recover a receipt after a crash that happened BEFORE the app
+    /// could durably record the `ReceiptId` `publish_tracked` returned --
+    /// looked up by the caller's own correlation token instead. Otherwise
+    /// identical to [`Self::reattach_receipt`] (same replay/attach
+    /// behavior, same `ReceiptReattachment` outcome vocabulary) -- the
+    /// resolved id the caller could not otherwise learn rides along on
+    /// `Attached`.
+    pub fn reattach_by_correlation(&self, token: String) -> ReceiptReattachment {
+        let (tx, rx) = fifo_channel();
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::ReattachByCorrelation {
+                token,
+                sink: Box::new(ChannelReceiptSink(tx)),
+                reply: reply_tx,
+            })
+            .expect("nmp-engine: reattach called after shutdown");
+        match reply_rx
+            .recv()
+            .expect("nmp-engine: engine dropped reattach reply")
+        {
+            (ReattachOutcome::Attached, Some(id)) => ReceiptReattachment::Attached(id, rx),
+            (ReattachOutcome::Attached, None) => {
+                unreachable!(
+                    "EngineCore::reattach_by_correlation always resolves an id when Attached"
+                )
+            }
+            (ReattachOutcome::NotFound, _) => ReceiptReattachment::NotFound,
+            (ReattachOutcome::RetainedButUnreadable, _) => {
+                ReceiptReattachment::RetainedButUnreadable
+            }
         }
     }
 

@@ -244,6 +244,7 @@ fn main() {
                     durability: Durability::Durable,
                     routing: WriteRouting::AuthorOutbox,
                     identity_override: None,
+                    correlation: None,
                 })
                 .expect("engine is open just after construction"),
         );

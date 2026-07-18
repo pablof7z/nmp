@@ -1,14 +1,14 @@
 use std::ops::Range;
 use std::sync::OnceLock;
 
-use nmp::decode_nostr_entity;
+use nmp_grammar::{decode_nostr_entity, reference::ReferenceTarget};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use regex::Regex;
 
 use crate::document::{stable_id, ContentDiagnostic};
 use crate::{
     BlockKind, ContentBlock, ContentDocument, ContentSyntax, InlineNode, InlineStyle,
-    ReferenceOccurrence, ReferencePlacement, ReferenceTarget, SourceRange,
+    ReferenceOccurrence, ReferencePlacement, SourceRange,
 };
 
 /// Hard bound for one parse projection crossing a native boundary.

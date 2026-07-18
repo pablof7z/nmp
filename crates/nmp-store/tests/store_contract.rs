@@ -1716,6 +1716,7 @@ fn coverage_is_bit_identical_across_all_retractions_and_only_gc_lowers_it() {
                 routing: "coverage-proof".into(),
                 sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(220u64),
+                correlation: None,
             })
             .expect("accept pending row");
         store

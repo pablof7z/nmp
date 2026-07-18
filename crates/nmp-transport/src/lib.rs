@@ -40,9 +40,15 @@ pub use admission::{
 };
 pub use handle::RelayHandle;
 pub use health::{ConnState, RelayHealth};
+#[cfg(feature = "bench-instrumentation")]
+pub use pool::{configure_diagnostic_duplicate_ceiling, configure_diagnostic_preparsed_ceiling};
 pub use pool::{
-    AttemptCorrelation, DisconnectReason, DurableSendOutcome, EphemeralSendOutcome,
+    AttemptCorrelation, CommittedObservationCandidate, CommittedObservationHit,
+    CommittedObservationPublication, DisconnectReason, DurableSendOutcome, EphemeralSendOutcome,
     EphemeralSendStart, HandoffResult, Pool, PoolBuildError, PoolConfig, PoolEvent, PoolEventSink,
     RelayFrame, RelayOpenError, RelaySessionKey, ThreadRole, ThreadSpawnError, WireFrame,
-    DEFAULT_MAX_RELAYS, DEFAULT_VERIFIER_WORKERS,
+    DEFAULT_MAX_RELAYS, DEFAULT_VERIFIER_WORKERS, MAX_DEFAULT_VERIFIER_WORKERS,
+    MAX_VERIFIER_WORKERS,
 };
+#[cfg(feature = "bench-instrumentation")]
+pub mod ingest_attribution;

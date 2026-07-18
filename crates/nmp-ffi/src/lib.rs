@@ -27,6 +27,8 @@
 //! - [`entity`] -- the bech32 nostr-entity DECODE codec (#116), the one
 //!   exported free function that needs no `NmpEngine` instance at all: no
 //!   engine, no network, no signing.
+//! - [`reference`] -- engine-free normalized targets and safe canonical/helper
+//!   demand plans. Planning returns values and never opens an observation.
 //! - [`nip29`] -- the read-only NIP-29 host-browser projection (#108):
 //!   `nmp-nip51`/`nmp-nip29`'s constructors/codec as top-level free
 //!   functions, same "no `NmpEngine` instance needed" shape as [`entity`].
@@ -34,12 +36,18 @@
 //!   authorization drafts/validation and the blocking BUD-02/04/12 client,
 //!   engine-less like [`entity`]/[`nip29`], with each operation's failure
 //!   taxonomy crossing as its own typed error enum.
+//! - [`nip22`] -- typed NIP-22 comments over NIP-73 external targets
+//!   (#572): root-thread demand and decode as top-level free functions
+//!   (`nmp-nip22` needs no engine dependency at all -- `comment_intent`
+//!   takes its author/time as explicit caller parameters), reusing
+//!   [`nip29::FfiComposedWriteIntent`]'s take-once wrapper unchanged.
 //!
 //! This crate has NO dependency on `nmp-engine` (or any other mechanism
 //! crate) at all -- every engine-side value type it mirrors is sourced
 //! through `nmp`'s own re-exports (#52 Unit B). `nmp-nip51`/`nmp-nip29`
-//! (see [`nip29`]'s own doc) and `nmp-blossom` (#555, see [`blossom`]'s)
-//! are the deliberate opt-in-protocol-crate exceptions.
+//! (see [`nip29`]'s own doc), `nmp-blossom` (#555, see [`blossom`]'s), and
+//! `nmp-nip22` (#572, see [`nip22`]'s own doc) are the deliberate
+//! opt-in-protocol-crate exceptions.
 
 pub mod auth;
 pub mod blossom;
@@ -48,7 +56,9 @@ pub mod convert;
 pub mod entity;
 pub mod facade;
 pub mod nip02;
+pub mod nip22;
 pub mod nip29;
+pub mod reference;
 pub mod signer;
 pub mod types;
 

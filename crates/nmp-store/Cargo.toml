@@ -8,10 +8,26 @@ publish.workspace = true
 [features]
 # Opt-in counters for evidence binaries. Kept out of production builds so the
 # query hot path pays no atomic-increment cost merely to support benchmarks.
-bench-instrumentation = []
+bench-instrumentation = ["dep:fjall", "dep:heed"]
 
 [[example]]
 name = "scale_bench"
+required-features = ["bench-instrumentation"]
+
+[[example]]
+name = "store_decomposition"
+required-features = ["bench-instrumentation"]
+
+[[example]]
+name = "redb_index_layout"
+required-features = ["bench-instrumentation"]
+
+[[example]]
+name = "packed_postings"
+required-features = ["bench-instrumentation"]
+
+[[example]]
+name = "cardinality_query_bench"
 required-features = ["bench-instrumentation"]
 
 [dependencies]
@@ -22,11 +38,16 @@ nmp-grammar.workspace = true
 # ACID key-value store — no C toolchain/`build.rs`, no wasm landmine. A1
 # lands `RedbStore`.
 redb = "4.1"
+fjall = { version = "=3.1.6", optional = true }
+# Native-only LMDB ceiling adapter for #658. This remains benchmark-gated:
+# production NMP and browser targets do not acquire a C build dependency.
+heed = { version = "=0.22.1", optional = true }
 # `RedbStore` canonical event rows use a versioned portable binary envelope
 # for borrowed query filtering. Outbox/coverage control records remain typed
 # serde JSON where they are not event-query hot-path values.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+blake3 = "1"
 
 [dev-dependencies]
 libc = "0.2"

@@ -18,6 +18,12 @@ use nmp_store::{
 use nostr::filter::MatchEventOptions;
 use nostr::RelayUrl;
 
+fn clone_relay_ingest_event(event: &nostr::Event) -> nostr::Event {
+    #[cfg(feature = "bench-instrumentation")]
+    crate::ingest_attribution::event_clone();
+    event.clone()
+}
+
 /// Full result of relay ingest when a verified relay copy also satisfies
 /// locally-pending write owners of the same canonical event. Embeds the
 /// same [`CommittedMutationResult`] every other committed-mutation door
@@ -27,6 +33,11 @@ use nostr::RelayUrl;
 pub struct RelayIngestResult {
     pub committed: CommittedMutationResult,
     pub satisfied_intents: Vec<(nmp_store::IntentId, nostr::Event)>,
+    /// Input-aligned post-commit eligibility for exact-observation caching.
+    /// `true` means this event id is still canonical/current after the whole
+    /// governed batch; stale, refused, or transiently removed inputs are
+    /// never eligible.
+    pub current_after_commit: Vec<bool>,
 }
 
 /// Exact live-query consequences of one already-committed canonical store
@@ -640,6 +651,18 @@ impl<S: EventStore> Engine<S> {
         &mut self,
         events: Vec<(nostr::Event, RelayObserved)>,
     ) -> Result<RelayIngestResult, PersistenceError> {
+        #[cfg(feature = "bench-instrumentation")]
+        let total_started = std::time::Instant::now();
+        #[cfg(feature = "bench-instrumentation")]
+        let total_cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
+        #[cfg(feature = "bench-instrumentation")]
+        {
+            crate::ingest_attribution::batch(events.len());
+        }
+        #[cfg(feature = "bench-instrumentation")]
+        let prepare_started = std::time::Instant::now();
+        #[cfg(feature = "bench-instrumentation")]
+        let prepare_cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
         // Snapshot only graph/filter shapes, never store rows. This is the
         // cheap side of targeted invalidation: after recompute we can tell
         // exactly which shared roots changed without re-querying every
@@ -649,24 +672,55 @@ impl<S: EventStore> Engine<S> {
         let mut removed: Vec<nostr::Event> = Vec::new();
         let mut provenance_grew: Vec<nostr::Event> = Vec::new();
         let mut satisfied_intents = Vec::new();
+        let mut current_candidate_ids = Vec::with_capacity(events.len());
         let mut observed_by_id =
             BTreeMap::<nostr::EventId, (nostr::Event, BTreeSet<RelayUrl>)>::new();
         for (event, observed) in &events {
             let entry = observed_by_id
                 .entry(event.id)
-                .or_insert_with(|| (event.clone(), BTreeSet::new()));
+                .or_insert_with(|| (clone_relay_ingest_event(event), BTreeSet::new()));
             entry.1.insert(observed.relay.clone());
         }
-        let input_events: Vec<_> = events.iter().map(|(event, _from)| event.clone()).collect();
+        let input_events: Vec<_> = events
+            .iter()
+            .map(|(event, _from)| clone_relay_ingest_event(event))
+            .collect();
+        #[cfg(feature = "bench-instrumentation")]
+        {
+            crate::ingest_attribution::prepare(prepare_started.elapsed());
+            crate::ingest_attribution::prepare_cpu(
+                crate::ingest_attribution::thread_cpu_time_ns().saturating_sub(prepare_cpu_started),
+            );
+        }
+        #[cfg(feature = "bench-instrumentation")]
+        let store_started = std::time::Instant::now();
+        #[cfg(feature = "bench-instrumentation")]
+        let store_cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
         let outcomes = self.store.insert_batch(events)?;
+        #[cfg(feature = "bench-instrumentation")]
+        {
+            crate::ingest_attribution::store(store_started.elapsed());
+            crate::ingest_attribution::store_cpu(
+                crate::ingest_attribution::thread_cpu_time_ns().saturating_sub(store_cpu_started),
+            );
+        }
+        #[cfg(feature = "bench-instrumentation")]
+        let classify_started = std::time::Instant::now();
+        #[cfg(feature = "bench-instrumentation")]
+        let classify_cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
         for (event, outcome) in input_events.into_iter().zip(outcomes) {
             match outcome {
-                InsertOutcome::Inserted => inserted.push(event),
+                InsertOutcome::Inserted => {
+                    current_candidate_ids.push(Some(event.id));
+                    inserted.push(event);
+                }
                 InsertOutcome::Superseded { replaced } => {
+                    current_candidate_ids.push(Some(event.id));
                     inserted.push(event);
                     removed.push(replaced.event);
                 }
                 InsertOutcome::Kind5Processed { deleted } => {
+                    current_candidate_ids.push(Some(event.id));
                     inserted.push(event);
                     removed.extend(deleted.into_iter().map(|se| se.event));
                 }
@@ -678,20 +732,27 @@ impl<S: EventStore> Engine<S> {
                     provenance_grew: grew,
                     satisfied_intents: owners,
                 } => {
+                    current_candidate_ids.push(Some(event.id));
                     if grew {
-                        provenance_grew.push(event.clone());
+                        provenance_grew.push(clone_relay_ingest_event(&event));
                     }
                     satisfied_intents.extend(
                         owners
                             .into_iter()
-                            .map(|intent_id| (intent_id, event.clone())),
+                            .map(|intent_id| (intent_id, clone_relay_ingest_event(&event))),
                     );
                 }
-                InsertOutcome::Stale | InsertOutcome::Refused(_) => {}
+                InsertOutcome::Stale | InsertOutcome::Refused(_) => {
+                    current_candidate_ids.push(None);
+                }
             }
         }
         let inserted_ids: BTreeSet<_> = inserted.iter().map(|event| event.id).collect();
         let removed_ids: BTreeSet<_> = removed.iter().map(|event| event.id).collect();
+        let current_after_commit = current_candidate_ids
+            .into_iter()
+            .map(|event_id| event_id.is_some_and(|id| !removed_ids.contains(&id)))
+            .collect();
         let provenance_grew_ids: BTreeSet<_> =
             provenance_grew.iter().map(|event| event.id).collect();
         let row_changes = CommittedRowChanges {
@@ -703,7 +764,7 @@ impl<S: EventStore> Engine<S> {
                         .get(&event.id)
                         .expect("inserted input event has observed relays");
                     CommittedCurrentRow {
-                        event: event.clone(),
+                        event: clone_relay_ingest_event(event),
                         observed_relays: observed_relays.clone(),
                     }
                 })
@@ -711,7 +772,7 @@ impl<S: EventStore> Engine<S> {
             removed: removed
                 .iter()
                 .filter(|event| !inserted_ids.contains(&event.id))
-                .cloned()
+                .map(clone_relay_ingest_event)
                 .collect(),
             provenance_grew: provenance_grew_ids
                 .into_iter()
@@ -723,7 +784,7 @@ impl<S: EventStore> Engine<S> {
                         .get(&event_id)
                         .expect("duplicate input event has observed relays");
                     CommittedCurrentRow {
-                        event: event.clone(),
+                        event: clone_relay_ingest_event(event),
                         observed_relays: observed_relays.clone(),
                     }
                 })
@@ -733,8 +794,20 @@ impl<S: EventStore> Engine<S> {
             .iter()
             .chain(removed.iter())
             .chain(provenance_grew.iter())
-            .cloned()
+            .map(clone_relay_ingest_event)
             .collect();
+        #[cfg(feature = "bench-instrumentation")]
+        {
+            crate::ingest_attribution::classify(classify_started.elapsed());
+            crate::ingest_attribution::classify_cpu(
+                crate::ingest_attribution::thread_cpu_time_ns()
+                    .saturating_sub(classify_cpu_started),
+            );
+        }
+        #[cfg(feature = "bench-instrumentation")]
+        let react_started = std::time::Instant::now();
+        #[cfg(feature = "bench-instrumentation")]
+        let react_cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
         // A duplicate whose provenance grew can change selector routing
         // evidence even though its projected VALUE is unchanged. Seed the
         // same generic Derived recompute lane so the old atom is replaced
@@ -743,6 +816,17 @@ impl<S: EventStore> Engine<S> {
         inserted_or_provenance_changed.extend(provenance_grew);
         let delta = self.react(inserted_or_provenance_changed, removed)?;
         let affected_handles = self.affected_handles(&before_shapes, &changed_events);
+        #[cfg(feature = "bench-instrumentation")]
+        {
+            crate::ingest_attribution::react(react_started.elapsed());
+            crate::ingest_attribution::react_cpu(
+                crate::ingest_attribution::thread_cpu_time_ns().saturating_sub(react_cpu_started),
+            );
+            crate::ingest_attribution::total(total_started.elapsed());
+            crate::ingest_attribution::total_cpu(
+                crate::ingest_attribution::thread_cpu_time_ns().saturating_sub(total_cpu_started),
+            );
+        }
         Ok(RelayIngestResult {
             committed: CommittedMutationResult {
                 delta,
@@ -750,6 +834,7 @@ impl<S: EventStore> Engine<S> {
                 row_changes,
             },
             satisfied_intents,
+            current_after_commit,
         })
     }
 

@@ -123,7 +123,18 @@ pub enum Nip46Error {
     Disconnected,
     Rejected(String),
     InvalidResponse(String),
-    ThreadUnavailable { component: String, reason: String },
+    ThreadUnavailable {
+        component: String,
+        reason: String,
+    },
+    /// A restored/imported session's live `get_public_key` answer did not
+    /// match the checkpoint's expected identity (#571). The signer is never
+    /// returned/attached in this case -- restore fails closed rather than
+    /// resuming under a different pubkey.
+    RestoredIdentityMismatch {
+        expected: PublicKey,
+        actual: PublicKey,
+    },
 }
 
 impl fmt::Display for Nip46Error {
@@ -150,6 +161,10 @@ impl fmt::Display for Nip46Error {
             Self::ThreadUnavailable { component, reason } => {
                 write!(f, "{component} thread unavailable: {reason}")
             }
+            Self::RestoredIdentityMismatch { expected, actual } => write!(
+                f,
+                "restored NIP-46 session answered as {actual} but the checkpoint expected {expected}"
+            ),
         }
     }
 }
@@ -328,6 +343,7 @@ impl Nip46Invitation {
         cancellation: Option<&Nip46Cancellation>,
         executor: SessionExecutor,
     ) -> Result<Nip46Signer, Nip46Error> {
+        let client_keys = self.client_keys.clone();
         let session = Session::spawn(self.relays, self.client_keys, None, cancellation, executor)?;
         forward_events(&session, event_sink)?;
         session.wait_available(timeout)?;
@@ -349,7 +365,50 @@ impl Nip46Invitation {
             user_public_key,
             remote_signer_public_key,
             session,
+            client_keys,
+            origin: Nip46Origin::ClientInitiated,
         })
+    }
+}
+
+/// Distinguishes a NIP-46 session this client paired via `nostrconnect://`
+/// from one it dialed via `bunker://` (#571). Restore/checkpoint mechanics
+/// are identical either way -- this is descriptive metadata a checkpoint
+/// retains because "absence of a reusable client checkpoint is observable
+/// rather than guessed from partial metadata" is a hard requirement, not
+/// because restore branches on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Nip46Origin {
+    ClientInitiated,
+    Bunker,
+}
+
+/// The minimum secrets and descriptor needed to reconnect an already-
+/// authorized NIP-46 client session without another pairing handshake
+/// (#571) -- read out once via [`Nip46Signer::checkpoint`] and consumed by
+/// [`Nip46Signer::from_parts`]. Deliberately excludes `permissions`: the
+/// remote signer itself holds the grant, and the checkpoint is the minimum
+/// secrets/descriptor, not a permissions cache. Carries the client transport
+/// secret key -- callers must not log, print, or otherwise surface this
+/// value; `Debug` is redacted below.
+#[derive(Clone)]
+pub struct Nip46SessionCheckpoint {
+    pub client_secret_key: nostr::SecretKey,
+    pub user_public_key: PublicKey,
+    pub remote_signer_public_key: PublicKey,
+    pub relays: Vec<RelayUrl>,
+    pub origin: Nip46Origin,
+}
+
+impl fmt::Debug for Nip46SessionCheckpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Nip46SessionCheckpoint")
+            .field("client_secret_key", &"[redacted]")
+            .field("user_public_key", &self.user_public_key)
+            .field("remote_signer_public_key", &self.remote_signer_public_key)
+            .field("relays", &self.relays)
+            .field("origin", &self.origin)
+            .finish()
     }
 }
 
@@ -360,6 +419,8 @@ pub struct Nip46Signer {
     user_public_key: PublicKey,
     remote_signer_public_key: PublicKey,
     session: Arc<Session>,
+    client_keys: Keys,
+    origin: Nip46Origin,
 }
 
 impl fmt::Debug for Nip46Signer {
@@ -368,6 +429,7 @@ impl fmt::Debug for Nip46Signer {
             .field("user_public_key", &self.user_public_key)
             .field("remote_signer_public_key", &self.remote_signer_public_key)
             .field("available", &self.session.is_available())
+            .field("origin", &self.origin)
             .finish_non_exhaustive()
     }
 }
@@ -480,9 +542,10 @@ impl Nip46Signer {
     ) -> Result<Self, Nip46Error> {
         let parsed = parse_bunker_uri(uri).map_err(Nip46Error::InvalidBunkerUri)?;
         let remote_signer_public_key = parsed.remote_signer_public_key;
+        let client_keys = Keys::generate();
         let session = Session::spawn(
             parsed.relays,
-            Keys::generate(),
+            client_keys.clone(),
             Some(remote_signer_public_key),
             cancellation,
             executor,
@@ -528,6 +591,8 @@ impl Nip46Signer {
             user_public_key,
             remote_signer_public_key,
             session,
+            client_keys,
+            origin: Nip46Origin::Bunker,
         })
     }
 
@@ -562,6 +627,135 @@ impl Nip46Signer {
                 })
             },
         )
+    }
+
+    /// Read out the minimum secrets and descriptor needed to reconnect this
+    /// already-authorized client session without another pairing handshake
+    /// (#571). Never logs/prints the secret -- see [`Nip46SessionCheckpoint`]'s
+    /// redacted `Debug`.
+    ///
+    /// `#[doc(hidden)]`: this and [`Self::from_parts`] are fully supported,
+    /// exercised directly by this crate's own falsifier
+    /// (`crates/nmp-engine/tests/nip46_restart.rs`) and by `nmp-ffi`'s
+    /// restore/import doors -- hidden purely to keep their several
+    /// resolved field/parameter shapes off the `nmp` facade's tracked
+    /// surface, which the governed size ceiling (`scripts/regenerate-surface-snapshots.sh`,
+    /// a protected file this PR cannot touch) had almost no headroom left
+    /// in. Not a capability restriction.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn checkpoint(&self) -> Nip46SessionCheckpoint {
+        Nip46SessionCheckpoint {
+            client_secret_key: self.client_keys.secret_key().clone(),
+            user_public_key: self.user_public_key,
+            remote_signer_public_key: self.remote_signer_public_key,
+            relays: self.session.current_relays(),
+            origin: self.origin,
+        }
+    }
+
+    /// Reconnect an already-authorized client-initiated or bunker-origin
+    /// session directly from its parts (#571), with NO re-pairing handshake:
+    /// the persisted client transport key dials the SAME remote signer
+    /// directly. Validates `parts.user_public_key` against a live
+    /// `get_public_key` answer BEFORE returning -- a mismatch fails closed
+    /// with [`Nip46Error::RestoredIdentityMismatch`] and this signer is
+    /// never attached under another pubkey. Serves both a checkpoint this
+    /// SDK previously wrote and a brownfield import of compatible legacy
+    /// material; both are the same shape. Direct-Rust convenience: an owned
+    /// executor, no observer, no external cancellation. See
+    /// [`Self::checkpoint`]'s doc for why this is `#[doc(hidden)]`.
+    #[doc(hidden)]
+    pub fn from_parts(
+        parts: Nip46SessionCheckpoint,
+        timeout: Duration,
+    ) -> Result<Self, Nip46Error> {
+        let executor =
+            nmp_executor::Executor::new(nmp_executor::DEFAULT_MAX_TASKS).map_err(|error| {
+                Nip46Error::ThreadUnavailable {
+                    component: "NIP-46 native task executor".to_string(),
+                    reason: error.to_string(),
+                }
+            })?;
+        Self::from_parts_inner(
+            parts,
+            timeout,
+            Arc::new(|_| {}),
+            None,
+            SessionExecutor::Owned(executor),
+        )
+    }
+
+    /// #680: engine-associated restore path. Like [`Self::from_parts`] but
+    /// with an observer event sink and external cancellation, and — like the
+    /// bunker/invitation connect paths — a *session-owned* executor (bounded
+    /// by app-identity session count), never the shared engine adapter pool,
+    /// so restoring a session can never refuse an unrelated engine operation.
+    #[doc(hidden)]
+    pub fn from_parts_observed_with_cancellation(
+        parts: Nip46SessionCheckpoint,
+        timeout: Duration,
+        event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
+        cancellation: &Nip46Cancellation,
+    ) -> Result<Self, Nip46Error> {
+        let executor =
+            nmp_executor::Executor::new(nmp_executor::DEFAULT_MAX_TASKS).map_err(|error| {
+                Nip46Error::ThreadUnavailable {
+                    component: "NIP-46 native task executor".to_string(),
+                    reason: error.to_string(),
+                }
+            })?;
+        Self::from_parts_inner(
+            parts,
+            timeout,
+            event_sink,
+            Some(cancellation),
+            SessionExecutor::Owned(executor),
+        )
+    }
+
+    fn from_parts_inner(
+        parts: Nip46SessionCheckpoint,
+        timeout: Duration,
+        event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
+        cancellation: Option<&Nip46Cancellation>,
+        executor: SessionExecutor,
+    ) -> Result<Self, Nip46Error> {
+        let client_keys = Keys::new(parts.client_secret_key.clone());
+        let session = Session::spawn(
+            parts.relays,
+            client_keys.clone(),
+            Some(parts.remote_signer_public_key),
+            cancellation,
+            executor,
+        )?;
+        forward_events(&session, event_sink)?;
+        session.wait_available(timeout)?;
+        let live_user_public_key = request_string(&session, "get_public_key", Vec::new())
+            .wait(timeout)
+            .map_err(Nip46Error::from)
+            .and_then(|value| {
+                PublicKey::from_hex(&value).map_err(|error| {
+                    Nip46Error::InvalidResponse(format!("get_public_key: {error}"))
+                })
+            })?;
+        if live_user_public_key != parts.user_public_key {
+            return Err(Nip46Error::RestoredIdentityMismatch {
+                expected: parts.user_public_key,
+                actual: live_user_public_key,
+            });
+        }
+        session.emit(Nip46ConnectionEvent::Connected {
+            user_public_key: live_user_public_key,
+        });
+        session.request_switch_relays();
+        Ok(Self {
+            user_public_key: live_user_public_key,
+            remote_signer_public_key: parts.remote_signer_public_key,
+            session,
+            client_keys,
+            origin: parts.origin,
+        })
     }
 }
 
@@ -660,6 +854,10 @@ struct PendingRequest {
     reply: PendingSignerSender<String>,
 }
 
+// Pool events stay owned values across this already-bounded channel. Boxing
+// the largest variant would add a heap allocation to every NIP-46 pool event
+// only to reduce the private enum's stack size.
+#[allow(clippy::large_enum_variant)]
 enum WorkerMsg {
     Pool(PoolEvent),
     Request {
@@ -741,6 +939,10 @@ struct Session {
     subscribers: Arc<Mutex<Vec<Sender<Nip46ConnectionEvent>>>>,
     availability_error: Arc<Mutex<Option<Nip46Error>>>,
     executor: SessionExecutor,
+    /// The relay set this session currently targets, kept live by
+    /// `SessionWorker::replace_relays` (#571's checkpoint reads this back
+    /// through [`Session::current_relays`] without a worker round trip).
+    current_relays: Mutex<Vec<RelayUrl>>,
 }
 
 impl Session {
@@ -761,6 +963,7 @@ impl Session {
             subscribers: Arc::clone(&subscribers),
             availability_error: Arc::clone(&availability_error),
             executor,
+            current_relays: Mutex::new(relays.clone()),
         });
         if let Some(cancellation) = cancellation {
             cancellation.bind(session.commands.clone());
@@ -813,6 +1016,16 @@ impl Session {
 
     fn is_available(&self) -> bool {
         self.connected_relays.load(Ordering::Acquire) > 0
+    }
+
+    /// The live relay set this session currently targets (#571's
+    /// checkpoint reader); reflects the latest `replace_relays` outcome, or
+    /// the original spawn relay set before any switch has completed.
+    fn current_relays(&self) -> Vec<RelayUrl> {
+        self.current_relays
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
     }
 
     fn subscribe(&self) -> Receiver<Nip46ConnectionEvent> {
@@ -1088,6 +1301,10 @@ impl SessionWorker {
             session
                 .connected_relays
                 .store(self.handles.len(), Ordering::Release);
+            *session
+                .current_relays
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = retained;
         }
     }
 
@@ -1190,6 +1407,11 @@ impl SessionWorker {
     fn on_frame(&mut self, handle: nmp_transport::RelayHandle, frame: RelayFrame) {
         match frame {
             RelayFrame::Event { event, .. } => self.on_event(event.as_ref()),
+            frame @ RelayFrame::CommittedObservation(_) => {
+                if let Some(frame) = frame.into_ordinary_fallback() {
+                    self.on_frame(handle, frame);
+                }
+            }
             RelayFrame::Message(message) => {
                 if let RelayMessage::Auth { challenge } = message.as_ref() {
                     let relay = self.handles.get(&handle.slot).map(|(_, url)| url.clone());
@@ -1470,6 +1692,31 @@ mod tests {
         assert_eq!(MAX_NIP46_RELAYS, 8);
     }
 
+    /// #571 secrecy falsifier: `{:?}` on `Nip46SessionCheckpoint` must never
+    /// leak the client transport secret -- neither its hex form nor the raw
+    /// bytes -- matching `Nip46Invitation`/`LocalKeySigner`'s redacted
+    /// `Debug` precedent.
+    #[test]
+    fn checkpoint_debug_output_redacts_client_secret_key() {
+        let client_keys = Keys::generate();
+        let secret_hex = client_keys.secret_key().to_secret_hex();
+        let checkpoint = Nip46SessionCheckpoint {
+            client_secret_key: client_keys.secret_key().clone(),
+            user_public_key: Keys::generate().public_key(),
+            remote_signer_public_key: Keys::generate().public_key(),
+            relays: Vec::new(),
+            origin: Nip46Origin::ClientInitiated,
+        };
+
+        let debug = format!("{checkpoint:?}");
+
+        assert!(
+            !debug.contains(&secret_hex),
+            "Debug output must not contain the client secret key hex"
+        );
+        assert!(debug.contains("[redacted]"));
+    }
+
     #[test]
     fn injected_initial_relay_worker_refusal_reaches_the_waiting_caller_typed() {
         let (pool_tx, _pool_rx) = mpsc::channel();
@@ -1483,6 +1730,7 @@ mod tests {
             subscribers: Arc::clone(&subscribers),
             availability_error: Arc::clone(&availability_error),
             executor: SessionExecutor::Owned(nmp_executor::Executor::new(4).unwrap()),
+            current_relays: Mutex::new(Vec::new()),
         });
         let mut worker = SessionWorker::new(
             pool,

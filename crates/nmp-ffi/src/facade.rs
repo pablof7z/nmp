@@ -37,11 +37,11 @@ use crate::convert::{
 };
 use crate::nip02::{NmpFollowActionStream, NmpFollowStream};
 use crate::types::{
-    FfiCancelWriteError, FfiCancelWriteOutcome, FfiDemand, FfiDiagnosticsSnapshot, FfiFilter,
-    FfiFrame, FfiReceiptReattachment, FfiRelayInformation, FfiRelayInformationCachePolicy,
-    FfiRelayInformationDocument, FfiRelayInformationFreshness, FfiRelayInformationLimitations,
-    FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiWindow, FfiWriteIntent,
-    FfiWriteStatus,
+    FfiCancelWriteError, FfiCancelWriteOutcome, FfiCorrelationReattachment, FfiDemand,
+    FfiDiagnosticsSnapshot, FfiFilter, FfiFrame, FfiReceiptReattachment, FfiRelayInformation,
+    FfiRelayInformationCachePolicy, FfiRelayInformationDocument, FfiRelayInformationFreshness,
+    FfiRelayInformationLimitations, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent,
+    FfiWindow, FfiWriteIntent, FfiWriteStatus,
 };
 use nmp::ReceiptReattachment;
 
@@ -143,6 +143,18 @@ impl Default for NmpEngineConfig {
 pub fn reset_persistent_store(store_path: String) -> Result<(), FfiError> {
     nmp::Engine::reset_persistent_store(store_path)?;
     Ok(())
+}
+
+/// Generate a fresh local-account secret key via OS RNG (hex-encoded,
+/// `NmpEngine::add_account`-compatible) -- the one keygen-only FFI door #588
+/// asks for. This function touches no engine state, installs no signer, and
+/// persists nothing: a native wrapper composes it with the existing
+/// `add_account` to give a clean-start client its first identity, inheriting
+/// that method's save-with-rollback choreography and checkpoint tracking
+/// wholesale instead of a second, parallel registration pipeline.
+#[uniffi::export]
+pub fn generate_account_secret_key() -> String {
+    nostr::Keys::generate().secret_key().to_secret_hex()
 }
 
 // Keep the native-facing literal pinned to the canonical finite default.
@@ -460,6 +472,33 @@ impl NmpEngine {
         )
     }
 
+    /// Compose a durable, author-outbox-routed NIP-22 comment `WriteIntent`
+    /// (#572). Unlike [`Self::group_message_intent`], this needs no engine
+    /// state at all -- `nmp_nip22::comment_intent` takes author/time as
+    /// explicit caller parameters -- but lives here for the same "engine
+    /// door" naming symmetry. `correlation` (#591) passes straight through
+    /// to `WriteIntent.correlation`. Publish the returned take-once value
+    /// through [`Self::publish_composed`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn comment_intent(
+        &self,
+        root: crate::nip22::FfiCommentRoot,
+        parent: crate::nip22::FfiCommentParent,
+        author_pubkey: String,
+        created_at: u64,
+        content: String,
+        correlation: Option<String>,
+    ) -> Result<Arc<crate::nip29::FfiComposedWriteIntent>, FfiError> {
+        crate::nip22::comment_intent(
+            root,
+            parent,
+            author_pubkey,
+            created_at,
+            content,
+            correlation,
+        )
+    }
+
     /// Publish a `nmp_nip29::compose_group_send`-composed intent (#115).
     /// Take-once: `intent` is consumed by this call (`FfiComposedWriteIntent
     /// ::take`) -- a second call on the SAME handle fails closed with
@@ -486,13 +525,44 @@ impl NmpEngine {
     pub fn reattach_receipt(&self, receipt_id: u64) -> Result<FfiReceiptReattachment, FfiError> {
         let result = self.engine.reattach_receipt(nmp::ReceiptId(receipt_id))?;
         Ok(match result {
-            ReceiptReattachment::Attached(statuses) => FfiReceiptReattachment::Attached {
-                stream: NmpReceiptStream::from_statuses(nmp::ReceiptId(receipt_id), statuses),
+            ReceiptReattachment::Attached(id, statuses) => FfiReceiptReattachment::Attached {
+                stream: NmpReceiptStream::from_statuses(id, statuses),
             },
             ReceiptReattachment::NotFound => FfiReceiptReattachment::NotFound,
             ReceiptReattachment::RetainedButUnreadable => {
                 FfiReceiptReattachment::RetainedButUnreadable
             }
+        })
+    }
+
+    /// #591: recover a receipt after a crash that happened BEFORE the app
+    /// could durably persist the receipt id `publish`/`publish_composed`
+    /// returned -- looked up by the caller's own crash-safe correlation
+    /// token instead. Otherwise identical to [`Self::reattach_receipt`],
+    /// except the caller cannot already know the receipt id (that is
+    /// exactly what a token recovers) -- `FfiCorrelationReattachment.
+    /// receipt_id` carries it back, `Some` iff `outcome == Attached`.
+    pub fn reattach_by_correlation(
+        &self,
+        correlation: String,
+    ) -> Result<FfiCorrelationReattachment, FfiError> {
+        let result = self.engine.reattach_by_correlation(correlation)?;
+        let receipt_id = match &result {
+            ReceiptReattachment::Attached(id, _) => Some(id.0),
+            ReceiptReattachment::NotFound | ReceiptReattachment::RetainedButUnreadable => None,
+        };
+        let outcome = match result {
+            ReceiptReattachment::Attached(id, statuses) => FfiReceiptReattachment::Attached {
+                stream: NmpReceiptStream::from_statuses(id, statuses),
+            },
+            ReceiptReattachment::NotFound => FfiReceiptReattachment::NotFound,
+            ReceiptReattachment::RetainedButUnreadable => {
+                FfiReceiptReattachment::RetainedButUnreadable
+            }
+        };
+        Ok(FfiCorrelationReattachment {
+            outcome,
+            receipt_id,
         })
     }
 
@@ -1100,6 +1170,12 @@ mod tests {
     // `ffi_reattach_replays_real_receipt_facts_through_a_fresh_stream`,
     // `ffi_reattach_of_unknown_id_is_not_found`, and
     // `ffi_reattach_of_corrupt_retained_receipt_is_unreadable`.
+    //
+    // #680 also deleted the callback-observer sign-event tests
+    // (`ffi_sign_event_*` on `SignEventObserver`/`max_native_tasks`/
+    // `native_task_census`/`ExecutorSaturated`/`await_native_tasks_idle`);
+    // the async `NmpSignEventHandle::signed()` surface is exercised by the
+    // sign-event handle tests instead.
 
     struct MismatchedFfiSigner {
         reported: nostr::PublicKey,
@@ -1385,6 +1461,7 @@ mod tests {
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         };
 
         let receipt = engine
@@ -1434,6 +1511,7 @@ mod tests {
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::AuthorOutbox,
             identity_override: Some(overridden.public_key().to_hex()),
+            correlation: None,
         };
 
         let receipt = engine
@@ -1485,6 +1563,7 @@ mod tests {
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         };
         let receipt = engine.publish(intent).unwrap();
         let receipt_id = receipt.id();
@@ -1669,6 +1748,7 @@ mod tests {
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         };
 
         let receipt = engine
@@ -1758,6 +1838,7 @@ mod tests {
                 durability: FfiDurability::Durable,
                 routing: FfiWriteRouting::AuthorOutbox,
                 identity_override: None,
+                correlation: None,
             };
             let receipt = engine
                 .publish(intent)
@@ -1898,6 +1979,7 @@ mod tests {
                     durability: nmp::Durability::Durable,
                     routing: nmp::WriteRouting::AuthorOutbox,
                     identity_override: None,
+                    correlation: None,
                 })
                 .expect("local durable acceptance must succeed");
             if index % 2 == 0 {
@@ -1965,6 +2047,7 @@ mod tests {
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         };
 
         let receipt = engine

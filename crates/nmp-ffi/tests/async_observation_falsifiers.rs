@@ -74,6 +74,7 @@ async fn dense_composition_never_refuses_and_delivers_current_state() {
             durability: nmp_ffi::types::FfiDurability::Durable,
             routing: nmp_ffi::types::FfiWriteRouting::AuthorOutbox,
             identity_override: None,
+            correlation: None,
         })
         .expect("publish opens a receipt stream");
 

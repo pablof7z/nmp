@@ -696,7 +696,6 @@ pub(crate) enum IndexedMatch {
     None,
     Author,
     Kind,
-    AuthorKind,
     Tag(SingleLetterTag),
 }
 
@@ -743,6 +742,27 @@ impl<'a> PreparedFilter<'a> {
             filter,
             generic_tags,
         }
+    }
+
+    /// Whether at least one predicate remains unproven by the chosen index
+    /// and therefore requires the borrowed canonical event value.
+    pub(crate) fn needs_event_value_after_index(&self, indexed: IndexedMatch) -> bool {
+        let filter = self.filter;
+        filter.ids.as_ref().is_some_and(|ids| !ids.is_empty())
+            || (!matches!(indexed, IndexedMatch::Author)
+                && filter
+                    .authors
+                    .as_ref()
+                    .is_some_and(|authors| !authors.is_empty()))
+            || (!matches!(indexed, IndexedMatch::Kind)
+                && filter
+                    .kinds
+                    .as_ref()
+                    .is_some_and(|kinds| !kinds.is_empty()))
+            || self.generic_tags.iter().any(|(name, _)| {
+                !matches!(indexed, IndexedMatch::Tag(indexed_name) if indexed_name == *name)
+            })
+            || filter.search.as_ref().is_some_and(|query| !query.is_empty())
     }
 }
 
@@ -915,7 +935,7 @@ impl<'a> StoredEventView<'a> {
         }) {
             return false;
         }
-        if !matches!(indexed, IndexedMatch::Author | IndexedMatch::AuthorKind)
+        if !matches!(indexed, IndexedMatch::Author)
             && filter.authors.as_ref().is_some_and(|authors| {
                 !authors.is_empty()
                     && !authors
@@ -925,7 +945,7 @@ impl<'a> StoredEventView<'a> {
         {
             return false;
         }
-        if !matches!(indexed, IndexedMatch::Kind | IndexedMatch::AuthorKind)
+        if !matches!(indexed, IndexedMatch::Kind)
             && filter.kinds.as_ref().is_some_and(|kinds| {
                 !kinds.is_empty() && !kinds.iter().any(|kind| kind.as_u16() == self.kind_u16())
             })

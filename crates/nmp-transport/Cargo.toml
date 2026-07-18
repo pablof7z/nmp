@@ -5,7 +5,11 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+bench-instrumentation = []
+
 [dependencies]
+blake3.workspace = true
 nostr.workspace = true
 nmp-grammar.workspace = true
 # HARVEST target (M3 plan §4 "Transport pool"): the old repo's `mio`-driven

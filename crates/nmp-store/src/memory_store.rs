@@ -102,6 +102,12 @@ struct CoverageRow {
     interval: CoverageInterval,
 }
 
+#[derive(Debug)]
+struct MemoryAuthorKeyEntry {
+    pubkey: PublicKey,
+    refs: u64,
+}
+
 /// An in-memory `EventStore`. Holds exactly the currently-reachable events:
 /// every "regular" (non-replaceable, non-addressable) event ever inserted,
 /// plus the current winner (only) for every replaceable/addressable
@@ -112,6 +118,14 @@ struct CoverageRow {
 #[derive(Debug, Default)]
 pub struct MemoryStore {
     by_id: HashMap<EventId, StoredEvent>,
+    /// Dense, never-reused internal keys for secondary indexes. Keeping the
+    /// full event id once in each direction lets every repeated ordered-index
+    /// entry carry 8 bytes instead of 32, matching `RedbStore`'s governed
+    /// `EventKey` model without exposing storage identity through the API.
+    event_key_by_id: HashMap<EventId, u64>,
+    event_id_by_key: Vec<Option<EventId>>,
+    author_key_by_pubkey: HashMap<PublicKey, u64>,
+    author_by_key: Vec<Option<MemoryAuthorKeyEntry>>,
     addr_index: HashMap<AddressKey, EventId>,
     coverage: HashMap<(CoverageKey, RelayUrl), CoverageRow>,
     /// Permanent kind:5 tombstones for individual event ids
@@ -160,6 +174,9 @@ pub struct MemoryStore {
     /// `outbox_intents`'s open-work rows (architecture review correction —
     /// see `ReceiptState`'s doc). Never pruned by this unit.
     outbox_receipts: HashMap<u64, RecoveredReceipt>,
+    /// `OUTBOX_CORRELATIONS` mirror (#591): caller correlation token ->
+    /// the receipt id it was journaled under. Never pruned by this unit.
+    outbox_correlations: HashMap<String, u64>,
     /// Typed mirror of `OUTBOX_ATTEMPTS`, keyed by its complete stable key.
     outbox_attempts: BTreeMap<(IntentId, RelayUrl, u64), RecoveredAttempt>,
     outbox_attempt_details: BTreeMap<(IntentId, RelayUrl, u64), RecoveredAttemptDetails>,
@@ -188,25 +205,26 @@ pub struct MemoryStore {
     /// created AFTER every pending deletion targeting this address).
     suppress_by_addr: HashMap<AddressKey, HashMap<IntentId, Timestamp>>,
     /// Ordered secondary index over every row in `by_id`, keyed
-    /// `(created_at, id)` (issue #507 — mirrors `RedbStore`'s
+    /// `(created_at, event_key)` (issue #507 — mirrors `RedbStore`'s
     /// `BY_CREATED_AT`). `query`'s fallback dimension when no
     /// more-selective index applies; also gives `expiration_index`-style
     /// bounded scans over the "unconstrained" query shape.
-    idx_created_at: BTreeSet<(Timestamp, EventId)>,
-    /// `(author, created_at, id)` — mirrors `RedbStore`'s `BY_AUTHOR`.
-    idx_author: BTreeSet<(PublicKey, Timestamp, EventId)>,
-    /// `(kind, created_at, id)` — mirrors `RedbStore`'s `BY_KIND`.
-    idx_kind: BTreeSet<(u16, Timestamp, EventId)>,
-    /// `(author, kind, created_at, id)` — mirrors `RedbStore`'s
+    idx_created_at: BTreeSet<(Timestamp, u64)>,
+    /// `(author_key, created_at, event_key)` — mirrors `RedbStore`'s
+    /// `BY_AUTHOR` while avoiding repeated 32-byte identifiers.
+    idx_author: BTreeSet<(u64, Timestamp, u64)>,
+    /// `(kind, created_at, event_key)` — mirrors `RedbStore`'s `BY_KIND`.
+    idx_kind: BTreeSet<(u16, Timestamp, u64)>,
+    /// `(author_key, kind, created_at, event_key)` — mirrors `RedbStore`'s
     /// `BY_AUTHOR_KIND`.
-    idx_author_kind: BTreeSet<(PublicKey, u16, Timestamp, EventId)>,
-    /// `(tag letter, tag value, created_at, id)` for every single-letter
+    idx_author_kind: BTreeSet<(u64, u16, Timestamp, u64)>,
+    /// `(tag letter, tag value, created_at, event_key)` for every single-letter
     /// NIP-01 tag a stored event carries (`Tag::single_letter_tag`/
     /// `Tag::content`) — mirrors `RedbStore`'s `BY_TAG`, indexing exactly
     /// the same set of tags `insert_tag_index_rows` does in
     /// `redb_store.rs`, so the two backends can never diverge on which
     /// tags are queryable.
-    idx_tag: BTreeSet<(SingleLetterTag, String, Timestamp, EventId)>,
+    idx_tag: BTreeSet<(SingleLetterTag, String, Timestamp, u64)>,
     /// `#[cfg(test)]`-only instrumentation: candidate rows `query` has
     /// visited (post-narrowing, pre-`match_event`) since the last reset —
     /// mirrors `RedbStore::query_event_values`. Exists so the falsifier
@@ -221,6 +239,93 @@ impl MemoryStore {
     /// A new, empty store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn allocate_event_key(&mut self, id: EventId) -> u64 {
+        let key = u64::try_from(self.event_id_by_key.len())
+            .expect("MemoryStore event-key space exhausted");
+        assert!(
+            self.event_key_by_id.insert(id, key).is_none(),
+            "event id already has an internal key"
+        );
+        self.event_id_by_key.push(Some(id));
+        key
+    }
+
+    fn event_key(&self, id: EventId) -> u64 {
+        *self
+            .event_key_by_id
+            .get(&id)
+            .expect("stored event must have an internal key")
+    }
+
+    fn event_id(&self, key: u64) -> EventId {
+        let index = usize::try_from(key).expect("MemoryStore event key does not fit usize");
+        self.event_id_by_key
+            .get(index)
+            .and_then(|id| *id)
+            .expect("secondary index must point at a live event key")
+    }
+
+    fn release_event_key(&mut self, id: EventId, key: u64) {
+        assert_eq!(
+            self.event_key_by_id.remove(&id),
+            Some(key),
+            "event id/internal key mapping diverged"
+        );
+        let index = usize::try_from(key).expect("MemoryStore event key does not fit usize");
+        let slot = self
+            .event_id_by_key
+            .get_mut(index)
+            .expect("stored event key must have a reverse slot");
+        assert_eq!(slot.take(), Some(id), "event key reverse mapping diverged");
+    }
+
+    fn retain_author_key(&mut self, pubkey: PublicKey) -> u64 {
+        if let Some(key) = self.author_key_by_pubkey.get(&pubkey).copied() {
+            let index = usize::try_from(key).expect("MemoryStore author key does not fit usize");
+            let entry = self.author_by_key[index]
+                .as_mut()
+                .expect("live author key must have a reverse entry");
+            entry.refs = entry
+                .refs
+                .checked_add(1)
+                .expect("author refcount exhausted");
+            return key;
+        }
+        let key = u64::try_from(self.author_by_key.len())
+            .expect("MemoryStore author-key space exhausted");
+        assert!(
+            self.author_key_by_pubkey.insert(pubkey, key).is_none(),
+            "author already has an internal key"
+        );
+        self.author_by_key
+            .push(Some(MemoryAuthorKeyEntry { pubkey, refs: 1 }));
+        key
+    }
+
+    fn author_key(&self, pubkey: PublicKey) -> Option<u64> {
+        self.author_key_by_pubkey.get(&pubkey).copied()
+    }
+
+    fn release_author_key(&mut self, pubkey: PublicKey, key: u64) {
+        let index = usize::try_from(key).expect("MemoryStore author key does not fit usize");
+        let entry = self.author_by_key[index]
+            .as_mut()
+            .expect("live author key must have a reverse entry");
+        assert_eq!(entry.pubkey, pubkey, "author key reverse mapping diverged");
+        entry.refs = entry
+            .refs
+            .checked_sub(1)
+            .expect("author refcount underflow");
+        if entry.refs == 0 {
+            assert_eq!(
+                self.author_key_by_pubkey.remove(&pubkey),
+                Some(key),
+                "pubkey/internal author key mapping diverged"
+            );
+            self.author_by_key[index] = None;
+        }
     }
 
     fn get_lane(&self, key: &LaneKey) -> Option<&RecoveredLane> {
@@ -372,6 +477,7 @@ impl MemoryStore {
         intent_id: IntentId,
         frozen_id: EventId,
         expected_pubkey: PublicKey,
+        correlation: &Option<nmp_grammar::CorrelationToken>,
     ) {
         self.outbox_receipts.insert(
             receipt_id,
@@ -383,6 +489,12 @@ impl MemoryStore {
                 state: ReceiptState::Accepted,
             },
         );
+        // #591: journal the caller's correlation token alongside the
+        // receipt id it now names -- same call, same in-memory mutation.
+        if let Some(token) = correlation {
+            self.outbox_correlations
+                .insert(token.as_ref().to_string(), receipt_id);
+        }
     }
 
     /// Re-admit a durably-stashed predecessor `se` through the ordinary
@@ -537,12 +649,16 @@ impl MemoryStore {
     /// Add `se` to the expiration index if it carries a NIP-40 `expiration`
     /// tag. Called for every row entering `by_id`.
     fn index_expiration(&mut self, se: &StoredEvent) {
+        #[cfg(feature = "bench-instrumentation")]
+        let started = std::time::Instant::now();
         if let Some(ts) = se.event.tags.expiration().copied() {
             self.expiration_index
                 .entry(ts)
                 .or_default()
                 .insert(se.event.id);
         }
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::memory_expiration_index(started.elapsed());
     }
 
     /// Remove `se` from the expiration index, if it was in it. Called for
@@ -570,20 +686,27 @@ impl MemoryStore {
     /// adoption) never requires re-indexing, only an actual
     /// insert-or-remove from `by_id` does.
     fn index_event(&mut self, se: &StoredEvent) {
+        #[cfg(feature = "bench-instrumentation")]
+        let started = std::time::Instant::now();
         let id = se.event.id;
+        let event_key = self.allocate_event_key(id);
         let author = se.event.pubkey;
+        let author_key = self.retain_author_key(author);
         let kind = se.event.kind.as_u16();
         let created_at = se.event.created_at;
-        self.idx_created_at.insert((created_at, id));
-        self.idx_author.insert((author, created_at, id));
-        self.idx_kind.insert((kind, created_at, id));
-        self.idx_author_kind.insert((author, kind, created_at, id));
+        self.idx_created_at.insert((created_at, event_key));
+        self.idx_author.insert((author_key, created_at, event_key));
+        self.idx_kind.insert((kind, created_at, event_key));
+        self.idx_author_kind
+            .insert((author_key, kind, created_at, event_key));
         for tag in se.event.tags.iter() {
             if let (Some(letter), Some(value)) = (tag.single_letter_tag(), tag.content()) {
                 self.idx_tag
-                    .insert((letter, value.to_string(), created_at, id));
+                    .insert((letter, value.to_string(), created_at, event_key));
             }
         }
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::memory_query_index(started.elapsed());
     }
 
     /// Remove `se` from every secondary query index — the exact inverse
@@ -596,19 +719,26 @@ impl MemoryStore {
     /// the tuples removed here byte-for-byte match what was inserted.
     fn unindex_event(&mut self, se: &StoredEvent) {
         let id = se.event.id;
+        let event_key = self.event_key(id);
         let author = se.event.pubkey;
+        let author_key = self
+            .author_key(author)
+            .expect("stored event author must have an internal key");
         let kind = se.event.kind.as_u16();
         let created_at = se.event.created_at;
-        self.idx_created_at.remove(&(created_at, id));
-        self.idx_author.remove(&(author, created_at, id));
-        self.idx_kind.remove(&(kind, created_at, id));
-        self.idx_author_kind.remove(&(author, kind, created_at, id));
+        self.idx_created_at.remove(&(created_at, event_key));
+        self.idx_author.remove(&(author_key, created_at, event_key));
+        self.idx_kind.remove(&(kind, created_at, event_key));
+        self.idx_author_kind
+            .remove(&(author_key, kind, created_at, event_key));
         for tag in se.event.tags.iter() {
             if let (Some(letter), Some(value)) = (tag.single_letter_tag(), tag.content()) {
                 self.idx_tag
-                    .remove(&(letter, value.to_string(), created_at, id));
+                    .remove(&(letter, value.to_string(), created_at, event_key));
             }
         }
+        self.release_event_key(id, event_key);
+        self.release_author_key(author, author_key);
     }
 
     /// The narrowed candidate id set `query` visits, chosen by the
@@ -648,22 +778,25 @@ impl MemoryStore {
 
         let since = filter.since.unwrap_or(Timestamp::from(0u64));
         let until = filter.until.unwrap_or(Timestamp::from(u64::MAX));
-        let min_id = EventId::all_zeros();
-        let max_id = EventId::from_byte_array([0xffu8; 32]);
+        let min_event_key = u64::MIN;
+        let max_event_key = u64::MAX;
 
         // 2. authors AND kinds: `idx_author_kind` ranges per (author,
         // kind) pair.
         if let (Some(authors), Some(kinds)) = (authors, kinds) {
             let mut out = BTreeSet::new();
             for author in authors {
+                let Some(author_key) = self.author_key(*author) else {
+                    continue;
+                };
                 for kind in kinds {
                     let k = kind.as_u16();
-                    let lower = (*author, k, since, min_id);
-                    let upper = (*author, k, until, max_id);
+                    let lower = (author_key, k, since, min_event_key);
+                    let upper = (author_key, k, until, max_event_key);
                     out.extend(
                         self.idx_author_kind
                             .range(lower..=upper)
-                            .map(|(_, _, _, id)| *id),
+                            .map(|(_, _, _, key)| self.event_id(*key)),
                     );
                 }
             }
@@ -674,9 +807,16 @@ impl MemoryStore {
         if let Some(authors) = authors {
             let mut out = BTreeSet::new();
             for author in authors {
-                let lower = (*author, since, min_id);
-                let upper = (*author, until, max_id);
-                out.extend(self.idx_author.range(lower..=upper).map(|(_, _, id)| *id));
+                let Some(author_key) = self.author_key(*author) else {
+                    continue;
+                };
+                let lower = (author_key, since, min_event_key);
+                let upper = (author_key, until, max_event_key);
+                out.extend(
+                    self.idx_author
+                        .range(lower..=upper)
+                        .map(|(_, _, key)| self.event_id(*key)),
+                );
             }
             return out;
         }
@@ -686,9 +826,13 @@ impl MemoryStore {
             let mut out = BTreeSet::new();
             for kind in kinds {
                 let k = kind.as_u16();
-                let lower = (k, since, min_id);
-                let upper = (k, until, max_id);
-                out.extend(self.idx_kind.range(lower..=upper).map(|(_, _, id)| *id));
+                let lower = (k, since, min_event_key);
+                let upper = (k, until, max_event_key);
+                out.extend(
+                    self.idx_kind
+                        .range(lower..=upper)
+                        .map(|(_, _, key)| self.event_id(*key)),
+                );
             }
             return out;
         }
@@ -699,9 +843,13 @@ impl MemoryStore {
         if let Some((tag, values)) = filter.generic_tags.iter().next() {
             let mut out = BTreeSet::new();
             for value in values {
-                let lower = (*tag, value.clone(), since, min_id);
-                let upper = (*tag, value.clone(), until, max_id);
-                out.extend(self.idx_tag.range(lower..=upper).map(|(_, _, _, id)| *id));
+                let lower = (*tag, value.clone(), since, min_event_key);
+                let upper = (*tag, value.clone(), until, max_event_key);
+                out.extend(
+                    self.idx_tag
+                        .range(lower..=upper)
+                        .map(|(_, _, _, key)| self.event_id(*key)),
+                );
             }
             return out;
         }
@@ -709,11 +857,11 @@ impl MemoryStore {
         // 6. otherwise: `idx_created_at`, bounded by since/until when
         // present — degrades to a full ordered scan only for a genuinely
         // unconstrained filter.
-        let lower = (since, min_id);
-        let upper = (until, max_id);
+        let lower = (since, min_event_key);
+        let upper = (until, max_event_key);
         self.idx_created_at
             .range(lower..=upper)
-            .map(|(_, id)| *id)
+            .map(|(_, key)| self.event_id(*key))
             .collect()
     }
 
@@ -1055,20 +1203,59 @@ impl MemoryStore {
         let mut expected_kind = BTreeSet::new();
         let mut expected_author_kind = BTreeSet::new();
         let mut expected_tag = BTreeSet::new();
+        let mut expected_author_refs = HashMap::<PublicKey, u64>::new();
         for se in self.by_id.values() {
             let id = se.event.id;
+            let event_key = self.event_key(id);
+            assert_eq!(
+                self.event_id(event_key),
+                id,
+                "event key reverse mapping diverged"
+            );
             let author = se.event.pubkey;
+            let author_key = self
+                .author_key(author)
+                .expect("stored event author must have an internal key");
+            *expected_author_refs.entry(author).or_default() += 1;
             let kind = se.event.kind.as_u16();
             let created_at = se.event.created_at;
-            expected_created_at.insert((created_at, id));
-            expected_author.insert((author, created_at, id));
-            expected_kind.insert((kind, created_at, id));
-            expected_author_kind.insert((author, kind, created_at, id));
+            expected_created_at.insert((created_at, event_key));
+            expected_author.insert((author_key, created_at, event_key));
+            expected_kind.insert((kind, created_at, event_key));
+            expected_author_kind.insert((author_key, kind, created_at, event_key));
             for tag in se.event.tags.iter() {
                 if let (Some(letter), Some(value)) = (tag.single_letter_tag(), tag.content()) {
-                    expected_tag.insert((letter, value.to_string(), created_at, id));
+                    expected_tag.insert((letter, value.to_string(), created_at, event_key));
                 }
             }
+        }
+        assert_eq!(
+            self.event_key_by_id.len(),
+            self.by_id.len(),
+            "event id/internal key cardinality diverged"
+        );
+        assert_eq!(
+            self.event_id_by_key.iter().flatten().count(),
+            self.by_id.len(),
+            "live reverse-key cardinality diverged"
+        );
+        assert_eq!(
+            self.author_key_by_pubkey.len(),
+            expected_author_refs.len(),
+            "pubkey/internal author key cardinality diverged"
+        );
+        assert_eq!(
+            self.author_by_key.iter().flatten().count(),
+            expected_author_refs.len(),
+            "live reverse-author-key cardinality diverged"
+        );
+        for (pubkey, refs) in expected_author_refs {
+            let key = self.author_key(pubkey).expect("expected author key");
+            let entry = self.author_by_key[usize::try_from(key).expect("author key fits usize")]
+                .as_ref()
+                .expect("expected reverse author key");
+            assert_eq!(entry.pubkey, pubkey, "author key reverse mapping diverged");
+            assert_eq!(entry.refs, refs, "author key refcount diverged");
         }
         assert_eq!(
             self.idx_created_at, expected_created_at,
@@ -1109,6 +1296,8 @@ impl EventStore for MemoryStore {
         event: Event,
         from: RelayObserved,
     ) -> Result<InsertOutcome, PersistenceError> {
+        #[cfg(feature = "bench-instrumentation")]
+        let insert_started = std::time::Instant::now();
         // Refused at the door FIRST: an already-expired event is never
         // stored, so it never touches dedup or supersession at all.
         if event.is_expired_at(&from.at) {
@@ -1171,17 +1360,29 @@ impl EventStore for MemoryStore {
         }
 
         let is_deletion = event.kind == Kind::EventDeletion;
+        #[cfg(feature = "bench-instrumentation")]
+        let event_build_started = std::time::Instant::now();
         let stored = StoredEvent {
-            event: event.clone(),
+            event: {
+                #[cfg(feature = "bench-instrumentation")]
+                crate::ingest_attribution::event_clone();
+                event.clone()
+            },
             provenance: Provenance::first_observation(from),
         };
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::memory_event_build(event_build_started.elapsed());
 
         let outcome = match address_key_for(&event) {
             None => {
                 // Regular event: no competition, always inserted.
                 self.index_expiration(&stored);
                 self.index_event(&stored);
+                #[cfg(feature = "bench-instrumentation")]
+                let canonical_started = std::time::Instant::now();
                 self.by_id.insert(event.id, stored);
+                #[cfg(feature = "bench-instrumentation")]
+                crate::ingest_attribution::memory_canonical_insert(canonical_started.elapsed());
                 InsertOutcome::Inserted
             }
             Some(key) => match self.addr_index.get(&key).copied() {
@@ -1190,7 +1391,11 @@ impl EventStore for MemoryStore {
                     let id = event.id;
                     self.index_expiration(&stored);
                     self.index_event(&stored);
+                    #[cfg(feature = "bench-instrumentation")]
+                    let canonical_started = std::time::Instant::now();
                     self.by_id.insert(id, stored);
+                    #[cfg(feature = "bench-instrumentation")]
+                    crate::ingest_attribution::memory_canonical_insert(canonical_started.elapsed());
                     self.addr_index.insert(key, id);
                     InsertOutcome::Inserted
                 }
@@ -1211,7 +1416,13 @@ impl EventStore for MemoryStore {
                         self.unindex_event(&replaced);
                         self.index_expiration(&stored);
                         self.index_event(&stored);
+                        #[cfg(feature = "bench-instrumentation")]
+                        let canonical_started = std::time::Instant::now();
                         self.by_id.insert(new_id, stored);
+                        #[cfg(feature = "bench-instrumentation")]
+                        crate::ingest_attribution::memory_canonical_insert(
+                            canonical_started.elapsed(),
+                        );
                         self.addr_index.insert(key, new_id);
                         InsertOutcome::Superseded {
                             replaced: Box::new(replaced),
@@ -1231,10 +1442,14 @@ impl EventStore for MemoryStore {
         if is_deletion {
             if let InsertOutcome::Inserted = outcome {
                 let deleted = self.process_kind5_deletions(&event);
+                #[cfg(feature = "bench-instrumentation")]
+                crate::ingest_attribution::memory_insert(insert_started.elapsed());
                 return Ok(InsertOutcome::Kind5Processed { deleted });
             }
         }
 
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::memory_insert(insert_started.elapsed());
         Ok(outcome)
     }
 
@@ -1448,6 +1663,7 @@ impl EventStore for MemoryStore {
             routing,
             sig_state,
             accepted_at,
+            correlation,
         } = accept;
 
         // Refused at the door FIRST, same as `insert`: never journaled,
@@ -1625,7 +1841,13 @@ impl EventStore for MemoryStore {
                 accepted_at,
                 None,
             );
-            self.journal_receipt(receipt_id, intent_id, frozen_id, expected_pubkey);
+            self.journal_receipt(
+                receipt_id,
+                intent_id,
+                frozen_id,
+                expected_pubkey,
+                &correlation,
+            );
             if already_signed {
                 if let Some(receipt) = self.outbox_receipts.get_mut(&receipt_id) {
                     receipt.state = ReceiptState::Signed;
@@ -1754,7 +1976,13 @@ impl EventStore for MemoryStore {
             accepted_at,
             displaced,
         );
-        self.journal_receipt(receipt_id, intent_id, frozen_id, expected_pubkey);
+        self.journal_receipt(
+            receipt_id,
+            intent_id,
+            frozen_id,
+            expected_pubkey,
+            &correlation,
+        );
 
         Ok(outcome)
     }
@@ -2135,6 +2363,10 @@ impl EventStore for MemoryStore {
         // the contract here, and `MemoryStore` retains faithfully for the
         // life of the process — see `EventStore::reattach_receipt`'s doc.
         Ok(self.outbox_receipts.get(&receipt_id).cloned())
+    }
+
+    fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
+        Ok(self.outbox_correlations.get(token).copied())
     }
 
     fn record_route_revision(
@@ -2803,6 +3035,7 @@ mod lane_atomicity_tests {
                 routing: "atomic".into(),
                 sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(900u64),
+                correlation: None,
             })
             .unwrap();
         let intent = accepted.journaled_intent_id().unwrap();

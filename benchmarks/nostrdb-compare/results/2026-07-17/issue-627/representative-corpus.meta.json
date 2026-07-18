@@ -1,0 +1,10 @@
+{
+  "schema": "nmp-nostrdb-corpus-v1",
+  "events": 100000,
+  "payload_bytes": 0,
+  "bytes": 66245857,
+  "blake3": "5eb48a3d4e4d051619c9f6656eed697dd1c1bf8eb210de5f9211ec7c0178ad36",
+  "author0": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+  "first_id": "e239597c5dc3d3d1c1f5ec87cf1a084a998da0c5f848b2ecc5586bc14fe82cd0",
+  "last_id": "2e974169361a9663d7fd56482f89f645591c4fc1c9f893bd22f855b6840441bc"
+}

@@ -1,0 +1,33 @@
+{
+  "schema": "nmp-nostrdb-direct-v1",
+  "nmp_commit": "7f8153c834776c4e62023b1fa11a1b6702ff7f4f",
+  "nostrdb_commit": "f4591db9524bc4936af76af4750ec425e67700be",
+  "corpus_blake3": "b046e7c99056115a4b5709e872aad95a05fc06db92b350564121038303abe71a",
+  "events": 10000,
+  "queries_equal": false,
+  "equivalent_queries": [
+    "kind9_top_200",
+    "hot_tag_top_200",
+    "author0_top_200",
+    "author0_kind9_top_200",
+    "exact_first_id"
+  ],
+  "mismatched_queries": [
+    {
+      "name": "global_top_200",
+      "nmp_rows": 200,
+      "nostrdb_rows": 200,
+      "nmp_first_id": "cce26597728873446d54c21e06080811c63ac1cb93aee661182f4008524cd895",
+      "nostrdb_first_id": "fed23e841cc0924f544497bc35446eec66cef84f9cae3794e6102e979815da4a"
+    }
+  ],
+  "nmp_ingest_events_per_second": 6293.747310453626,
+  "nostrdb_ingest_events_per_second": 4807.061743679168,
+  "nostrdb_to_nmp_ingest_throughput_ratio": 0.7637837216144441,
+  "nmp_duplicate_events_per_second": 15689.381327247043,
+  "nostrdb_duplicate_events_per_second": 182037.3879309576,
+  "nostrdb_to_nmp_duplicate_throughput_ratio": 11.602585477020783,
+  "nmp_database_logical_bytes": 2155876352,
+  "nostrdb_database_logical_bytes": 1223168000,
+  "nmp_to_nostrdb_logical_size_ratio": 1.762534951862704
+}
