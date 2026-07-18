@@ -948,25 +948,6 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
 
-        // A bounded window can contain at most `target_rows` events from one
-        // committed batch. Rank borrowed candidates first so rows that cannot
-        // survive the window never clone their event/provenance payload into
-        // transient projection state. The retained prefix is exact: an event
-        // below the batch's own top N already has N newer witnesses before it
-        // is merged with the prior window.
-        let mut inserted_candidates: Vec<_> = changes
-            .inserted
-            .iter()
-            .filter(|row| matches(&row.event) && eligible(&row.observed_relays))
-            .collect();
-        inserted_candidates.sort_unstable_by(|a, b| {
-            nip01_newest_first(
-                (a.event.created_at.as_secs(), &a.event.id),
-                (b.event.created_at.as_secs(), &b.event.id),
-            )
-        });
-        inserted_candidates.truncate(target_rows);
-
         #[cfg(feature = "bench-instrumentation")]
         crate::ingest_attribution::history_projection_setup(phase_started.elapsed());
         #[cfg(feature = "bench-instrumentation")]
@@ -998,7 +979,10 @@ impl<S: EventStore> EngineCore<S> {
                     visible_removals = visible_removals.saturating_add(1);
                 }
             }
-            for row in inserted_candidates {
+            for row in &changes.inserted {
+                if !matches(&row.event) || !eligible(&row.observed_relays) {
+                    continue;
+                }
                 let event_id = row.event.id;
                 remember(event_id, state, &mut before);
                 if let Some(previous) = state.last_rows.remove(&event_id) {
