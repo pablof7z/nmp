@@ -840,9 +840,6 @@ fn stream_compaction_cohort(
     let live_events = dictionary_entries.len() as u64;
     let dictionary = encode_dictionary(&dictionary_entries).map_err(packed_err)?;
     drop(dictionary_entries);
-    let output_dictionary = DictionaryView::parse(&dictionary)
-        .and_then(DictionaryView::validate)
-        .map_err(packed_err)?;
     drop(dictionaries);
     let run_id = allocate_run_id(write_txn)?;
     let mut dictionaries = write_txn
@@ -851,7 +848,14 @@ fn stream_compaction_cohort(
     dictionaries
         .insert(run_id, dictionary.as_slice())
         .map_err(persist_err)?;
-    drop(dictionaries);
+    drop(dictionary);
+    let output_dictionary_guard = dictionaries
+        .get(run_id)
+        .map_err(persist_err)?
+        .ok_or_else(|| packed_err("new compacted run has no dictionary"))?;
+    let output_dictionary = DictionaryView::parse(output_dictionary_guard.value())
+        .and_then(DictionaryView::validate)
+        .map_err(packed_err)?;
 
     let mut segments = write_txn
         .open_table(POSTINGS_SEGMENTS)
@@ -895,6 +899,8 @@ fn stream_compaction_cohort(
         }
     }
     drop(segments);
+    drop(output_dictionary_guard);
+    drop(dictionaries);
     if postings == 0 {
         return Err(packed_err(
             "nonempty compaction dictionary produced no live segments",
