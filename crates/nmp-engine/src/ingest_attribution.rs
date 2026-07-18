@@ -17,12 +17,17 @@ pub struct Snapshot {
     pub relay_core_reduce_cpu_ns: u64,
     pub relay_effect_dispatch_ns: u64,
     pub relay_ingest_prelude_ns: u64,
+    pub relay_ingest_prelude_cpu_ns: u64,
     pub relay_ingest_post_store_ns: u64,
+    pub relay_ingest_post_store_cpu_ns: u64,
     pub relay_ingest_apply_committed_ns: u64,
+    pub relay_ingest_apply_committed_cpu_ns: u64,
     pub relay_ingest_effect_build_ns: u64,
+    pub relay_ingest_effect_build_cpu_ns: u64,
     pub relay_ingest_observations_call_ns: u64,
     pub relay_ingest_observations_call_cpu_ns: u64,
     pub relay_resolver_call_ns: u64,
+    pub relay_resolver_call_cpu_ns: u64,
     pub relay_frame_conversion_ns: u64,
     pub relay_frame_session_validation_ns: u64,
     pub relay_frame_diagnostics_count_ns: u64,
@@ -67,12 +72,17 @@ counters!(
     RELAY_CORE_REDUCE_CPU_NS,
     RELAY_EFFECT_DISPATCH_NS,
     RELAY_INGEST_PRELUDE_NS,
+    RELAY_INGEST_PRELUDE_CPU_NS,
     RELAY_INGEST_POST_STORE_NS,
+    RELAY_INGEST_POST_STORE_CPU_NS,
     RELAY_INGEST_APPLY_COMMITTED_NS,
+    RELAY_INGEST_APPLY_COMMITTED_CPU_NS,
     RELAY_INGEST_EFFECT_BUILD_NS,
+    RELAY_INGEST_EFFECT_BUILD_CPU_NS,
     RELAY_INGEST_OBSERVATIONS_CALL_NS,
     RELAY_INGEST_OBSERVATIONS_CALL_CPU_NS,
     RELAY_RESOLVER_CALL_NS,
+    RELAY_RESOLVER_CALL_CPU_NS,
     RELAY_FRAME_CONVERSION_NS,
     RELAY_FRAME_SESSION_VALIDATION_NS,
     RELAY_FRAME_DIAGNOSTICS_COUNT_NS,
@@ -122,12 +132,17 @@ pub fn reset() {
         &RELAY_CORE_REDUCE_CPU_NS,
         &RELAY_EFFECT_DISPATCH_NS,
         &RELAY_INGEST_PRELUDE_NS,
+        &RELAY_INGEST_PRELUDE_CPU_NS,
         &RELAY_INGEST_POST_STORE_NS,
+        &RELAY_INGEST_POST_STORE_CPU_NS,
         &RELAY_INGEST_APPLY_COMMITTED_NS,
+        &RELAY_INGEST_APPLY_COMMITTED_CPU_NS,
         &RELAY_INGEST_EFFECT_BUILD_NS,
+        &RELAY_INGEST_EFFECT_BUILD_CPU_NS,
         &RELAY_INGEST_OBSERVATIONS_CALL_NS,
         &RELAY_INGEST_OBSERVATIONS_CALL_CPU_NS,
         &RELAY_RESOLVER_CALL_NS,
+        &RELAY_RESOLVER_CALL_CPU_NS,
         &RELAY_FRAME_CONVERSION_NS,
         &RELAY_FRAME_SESSION_VALIDATION_NS,
         &RELAY_FRAME_DIAGNOSTICS_COUNT_NS,
@@ -178,12 +193,17 @@ pub fn snapshot() -> Snapshot {
         relay_core_reduce_cpu_ns: load(&RELAY_CORE_REDUCE_CPU_NS),
         relay_effect_dispatch_ns: load(&RELAY_EFFECT_DISPATCH_NS),
         relay_ingest_prelude_ns: load(&RELAY_INGEST_PRELUDE_NS),
+        relay_ingest_prelude_cpu_ns: load(&RELAY_INGEST_PRELUDE_CPU_NS),
         relay_ingest_post_store_ns: load(&RELAY_INGEST_POST_STORE_NS),
+        relay_ingest_post_store_cpu_ns: load(&RELAY_INGEST_POST_STORE_CPU_NS),
         relay_ingest_apply_committed_ns: load(&RELAY_INGEST_APPLY_COMMITTED_NS),
+        relay_ingest_apply_committed_cpu_ns: load(&RELAY_INGEST_APPLY_COMMITTED_CPU_NS),
         relay_ingest_effect_build_ns: load(&RELAY_INGEST_EFFECT_BUILD_NS),
+        relay_ingest_effect_build_cpu_ns: load(&RELAY_INGEST_EFFECT_BUILD_CPU_NS),
         relay_ingest_observations_call_ns: load(&RELAY_INGEST_OBSERVATIONS_CALL_NS),
         relay_ingest_observations_call_cpu_ns: load(&RELAY_INGEST_OBSERVATIONS_CALL_CPU_NS),
         relay_resolver_call_ns: load(&RELAY_RESOLVER_CALL_NS),
+        relay_resolver_call_cpu_ns: load(&RELAY_RESOLVER_CALL_CPU_NS),
         relay_frame_conversion_ns: load(&RELAY_FRAME_CONVERSION_NS),
         relay_frame_session_validation_ns: load(&RELAY_FRAME_SESSION_VALIDATION_NS),
         relay_frame_diagnostics_count_ns: load(&RELAY_FRAME_DIAGNOSTICS_COUNT_NS),
@@ -267,17 +287,29 @@ pub(crate) fn relay_effect_dispatch(duration: Duration) {
 pub(crate) fn relay_ingest_prelude(duration: Duration) {
     add(&RELAY_INGEST_PRELUDE_NS, duration);
 }
+pub(crate) fn relay_ingest_prelude_cpu(nanos: u64) {
+    RELAY_INGEST_PRELUDE_CPU_NS.fetch_add(nanos, Ordering::Relaxed);
+}
 
 pub(crate) fn relay_ingest_post_store(duration: Duration) {
     add(&RELAY_INGEST_POST_STORE_NS, duration);
+}
+pub(crate) fn relay_ingest_post_store_cpu(nanos: u64) {
+    RELAY_INGEST_POST_STORE_CPU_NS.fetch_add(nanos, Ordering::Relaxed);
 }
 
 pub(crate) fn relay_ingest_apply_committed(duration: Duration) {
     add(&RELAY_INGEST_APPLY_COMMITTED_NS, duration);
 }
+pub(crate) fn relay_ingest_apply_committed_cpu(nanos: u64) {
+    RELAY_INGEST_APPLY_COMMITTED_CPU_NS.fetch_add(nanos, Ordering::Relaxed);
+}
 
 pub(crate) fn relay_ingest_effect_build(duration: Duration) {
     add(&RELAY_INGEST_EFFECT_BUILD_NS, duration);
+}
+pub(crate) fn relay_ingest_effect_build_cpu(nanos: u64) {
+    RELAY_INGEST_EFFECT_BUILD_CPU_NS.fetch_add(nanos, Ordering::Relaxed);
 }
 
 pub(crate) fn relay_ingest_observations_call(duration: Duration) {
@@ -290,6 +322,9 @@ pub(crate) fn relay_ingest_observations_call_cpu(nanos: u64) {
 
 pub(crate) fn relay_resolver_call(duration: Duration) {
     add(&RELAY_RESOLVER_CALL_NS, duration);
+}
+pub(crate) fn relay_resolver_call_cpu(nanos: u64) {
+    RELAY_RESOLVER_CALL_CPU_NS.fetch_add(nanos, Ordering::Relaxed);
 }
 
 pub(crate) fn relay_frame_conversion(duration: Duration) {
