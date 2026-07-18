@@ -150,14 +150,12 @@ pub(super) fn encode_run(mut memberships: Vec<Membership>) -> Result<EncodedRun,
             Some(_) => {}
         }
     }
-    let mut ordinals = BTreeMap::new();
     let mut dictionary_entries = Vec::with_capacity(ids.len());
     for (event_key, id) in ids_by_key {
-        let ordinal = u32::try_from(dictionary_entries.len())
-            .map_err(|_| "run dictionary exceeds u32".to_owned())?;
-        ordinals.insert(event_key, ordinal);
         dictionary_entries.push((event_key, id));
     }
+    u32::try_from(dictionary_entries.len()).map_err(|_| "run dictionary exceeds u32".to_owned())?;
+    drop(ids);
     let dictionary_build_ns = elapsed_ns(dictionary_started);
 
     let sort_started = std::time::Instant::now();
@@ -199,7 +197,7 @@ pub(super) fn encode_run(mut memberships: Vec<Membership>) -> Result<EncodedRun,
         segments.push((
             family,
             shard,
-            encode_segment(family, shard, segment_memberships, &ordinals)?,
+            encode_segment(family, shard, segment_memberships, &dictionary_entries)?,
         ));
         start = end;
     }
@@ -247,7 +245,7 @@ fn encode_segment(
     family: Family,
     shard: u8,
     memberships: &[Membership],
-    ordinals: &BTreeMap<u64, u32>,
+    dictionary: &[(u64, [u8; 32])],
 ) -> Result<Vec<u8>, String> {
     let prefix_count = 1 + memberships
         .windows(2)
@@ -286,7 +284,7 @@ fn encode_segment(
             u32::try_from(value.len()).map_err(|_| "segment offset exceeds u32".to_owned())?;
         let offset_start = offsets_start + prefix_ordinal * 4;
         value[offset_start..offset_start + 4].copy_from_slice(&offset.to_be_bytes());
-        encode_prefix_record(&mut value, prefix, &memberships[start..end], ordinals)?;
+        encode_prefix_record(&mut value, prefix, &memberships[start..end], dictionary)?;
         prefix_ordinal += 1;
         start = end;
     }
@@ -297,7 +295,7 @@ fn encode_prefix_record(
     value: &mut Vec<u8>,
     prefix: &[u8],
     postings: &[Membership],
-    ordinals: &BTreeMap<u64, u32>,
+    dictionary: &[(u64, [u8; 32])],
 ) -> Result<(), String> {
     let prefix_len = u32::try_from(prefix.len()).map_err(|_| "prefix exceeds u32".to_owned())?;
     let posting_count =
@@ -307,9 +305,11 @@ fn encode_prefix_record(
     value.extend_from_slice(&posting_count.to_be_bytes());
     for membership in postings {
         value.extend_from_slice(&membership.event.created_at.to_be_bytes());
-        let ordinal = *ordinals
-            .get(&membership.event.event_key)
-            .ok_or_else(|| "posting event is absent from run dictionary".to_owned())?;
+        let ordinal = dictionary
+            .binary_search_by_key(&membership.event.event_key, |(event_key, _)| *event_key)
+            .map_err(|_| "posting event is absent from run dictionary".to_owned())?;
+        let ordinal =
+            u32::try_from(ordinal).map_err(|_| "run dictionary exceeds u32".to_owned())?;
         value.extend_from_slice(&ordinal.to_be_bytes());
     }
     Ok(())
