@@ -25,4 +25,3 @@ CARGO_TARGET_DIR=/home/pablo/Work/nmp-plan-issue-688-commit-projection-pipeline/
 The benchmark adapter was committed before the matrix so every child could
 record an exact clean source commit. It is reverted in the final evidence-only
 PR because the candidate missed the selection gate.
-

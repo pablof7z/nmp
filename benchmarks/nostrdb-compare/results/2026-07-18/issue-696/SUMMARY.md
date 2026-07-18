@@ -80,4 +80,3 @@ are grouped by run. It is not the massive remaining constraint. Removing
 materially remove the Redb commit owner. A production format, retained-death
 GC, migration, mutable provenance, and recovery machinery are not justified by
 a 5% representative-ingest gain.
-
