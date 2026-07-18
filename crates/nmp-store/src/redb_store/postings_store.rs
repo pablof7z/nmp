@@ -837,7 +837,9 @@ fn stream_compaction_cohort(
         .last()
         .expect("nonempty compaction dictionary")
         .0;
+    let live_events = dictionary_entries.len() as u64;
     let dictionary = encode_dictionary(&dictionary_entries).map_err(packed_err)?;
+    drop(dictionary_entries);
     let output_dictionary = DictionaryView::parse(&dictionary)
         .and_then(DictionaryView::validate)
         .map_err(packed_err)?;
@@ -898,12 +900,7 @@ fn stream_compaction_cohort(
             "nonempty compaction dictionary produced no live segments",
         ));
     }
-    Ok(Some((
-        run_id,
-        min_event_key,
-        max_event_key,
-        dictionary_entries.len() as u64,
-    )))
+    Ok(Some((run_id, min_event_key, max_event_key, live_events)))
 }
 
 fn load_run_deaths(
