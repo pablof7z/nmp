@@ -91,9 +91,12 @@ final class AsyncObservationHandlesTests: XCTestCase {
 
         // Every task must finish -- race the join against a hard timeout so a
         // regression (a bricked handle) fails loudly instead of hanging.
+        // Capture an immutable copy: a `var` captured in the concurrent task
+        // closure is a data-race error under strict concurrency checking.
+        let joinTasks = tasks
         let joined = await withTaskGroup(of: Bool.self) { group in
             group.addTask {
-                for task in tasks { await task.value }
+                for task in joinTasks { await task.value }
                 return true
             }
             group.addTask {

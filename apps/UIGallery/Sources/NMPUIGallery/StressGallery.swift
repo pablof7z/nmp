@@ -68,9 +68,12 @@ struct StressGallery: View {
 
     private func observeDiagnostics() async {
         guard let stream = try? model.engine.observeDiagnostics() else { return }
-        for await snapshot in stream {
-            diagnostics = snapshot
-        }
+        // #680: observations are throwing AsyncSequences; a throw is terminal.
+        do {
+            for try await snapshot in stream {
+                diagnostics = snapshot
+            }
+        } catch {}
     }
 }
 

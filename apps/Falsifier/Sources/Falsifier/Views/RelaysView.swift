@@ -46,14 +46,18 @@ struct RelaysView: View {
 
     private func observe() async {
         guard let query = try? model.engine.observe(FeedFilters.followsRelayLists()) else { return }
-        for await batch in query {
-            var tally: [String: Int] = [:]
-            for row in batch.rows {
-                for tag in row.tags where tag.count > 1 && tag[0] == "r" {
-                    tally[tag[1], default: 0] += 1
+        // #680: an observation is a throwing AsyncSequence; a throw here is
+        // terminal teardown, so end the loop quietly.
+        do {
+            for try await batch in query {
+                var tally: [String: Int] = [:]
+                for row in batch.rows {
+                    for tag in row.tags where tag.count > 1 && tag[0] == "r" {
+                        tally[tag[1], default: 0] += 1
+                    }
                 }
+                counts = tally
             }
-            counts = tally
-        }
+        } catch {}
     }
 }

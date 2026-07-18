@@ -75,10 +75,14 @@ struct FeedView: View {
         guard let query = try? model.engine.observe(FeedFilters.follows(kinds: model.kinds)) else {
             return
         }
-        for await batch in query {
-            rows = batch.rows.sorted { $0.createdAt > $1.createdAt }
-            evidence = batch.evidence
-        }
+        // #680: an observation is a throwing AsyncSequence; a throw here is
+        // terminal teardown, so end the loop quietly.
+        do {
+            for try await batch in query {
+                rows = batch.rows.sorted { $0.createdAt > $1.createdAt }
+                evidence = batch.evidence
+            }
+        } catch {}
     }
 
     private func shortHex(_ hex: String) -> String {
