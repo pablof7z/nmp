@@ -42,6 +42,12 @@ fn main() -> Result<(), ProbeError> {
             "--diagnostic-duplicate-ceiling-event-payload" => {
                 config.diagnostic_duplicate_ceiling_event_payload = true
             }
+            "--diagnostic-skip-event-id-validation" => {
+                config.diagnostic_skip_event_id_validation = true
+            }
+            "--diagnostic-skip-signature-verification" => {
+                config.diagnostic_skip_signature_verification = true
+            }
             "--verifier-workers" => {
                 config.verifier_workers = value(&mut args, "--verifier-workers")?
             }
@@ -133,6 +139,10 @@ fn print_help() {
                              unsafe benchmark-only precommit exact-frame cache (default 0)\n\
          --diagnostic-duplicate-ceiling-event-payload\n\
                              fingerprint only the raw EVENT object, independent of subscription id\n\
+         --diagnostic-skip-event-id-validation\n\
+                             unsafe benchmark-only favorable ceiling; trust relay event IDs\n\
+         --diagnostic-skip-signature-verification\n\
+                             unsafe benchmark-only favorable ceiling; trust relay signatures\n\
          --verifier-workers N  native signature workers; 0 uses default 2 (maximum 16)\n\
          --verify-batch-size N  signature verification batch ceiling (default 128)\n\
          --engine-batch-size N  store transaction batch ceiling (default 128)\n\

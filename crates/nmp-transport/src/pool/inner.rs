@@ -747,7 +747,16 @@ fn cached_frame_plan(
     frame: &super::RelayFrame,
 ) -> Option<VerificationPlan> {
     let event = frame.event()?;
-    if !event.verify_id() {
+    #[cfg(feature = "bench-instrumentation")]
+    let id_started = std::time::Instant::now();
+    #[cfg(feature = "bench-instrumentation")]
+    let skip_event_id = crate::ingest_attribution::skip_event_id_validation();
+    #[cfg(not(feature = "bench-instrumentation"))]
+    let skip_event_id = false;
+    let valid_id = skip_event_id || event.verify_id();
+    #[cfg(feature = "bench-instrumentation")]
+    crate::ingest_attribution::event_id_validation(id_started.elapsed(), skip_event_id);
+    if !valid_id {
         return Some(VerificationPlan::InvalidId);
     }
     verified.get(&event.id).map(VerificationPlan::Known)
