@@ -48,7 +48,6 @@ mod write_tests;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
-use std::sync::Arc;
 
 #[cfg(test)]
 use std::cell::Cell;
@@ -483,7 +482,7 @@ pub enum EngineMsg {
     /// session forever.
     RelayOpenFailed(RelaySessionKey, String),
     RelayFrame(TransportRelayHandle, RelaySessionKey, RelayFrame),
-    RelayFrames(Vec<(TransportRelayHandle, Arc<RelaySessionKey>, RelayFrame)>),
+    RelayFrames(Vec<(TransportRelayHandle, RelaySessionKey, RelayFrame)>),
     SignerCompleted(ReceiptId, u64, Result<SignedEvent, SignerError>),
     /// The runtime has no signer attached for this accepted author. This is
     /// non-terminal: the canonical pending row and durable obligation stay

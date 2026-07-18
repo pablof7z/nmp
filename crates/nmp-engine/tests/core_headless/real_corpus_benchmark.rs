@@ -50,7 +50,7 @@ fn real_corpus_typed_batch_to_redb_matrix() {
                 .map(|event| {
                     (
                         handle,
-                        std::sync::Arc::new(session.clone()),
+                        session.clone(),
                         RelayFrame::from(RelayMessage::event(
                             SubscriptionId::new("nmp-bench"),
                             event,

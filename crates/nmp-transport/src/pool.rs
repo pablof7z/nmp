@@ -482,7 +482,7 @@ pub enum PoolEvent {
     },
     Frame {
         handle: RelayHandle,
-        session: Arc<RelaySessionKey>,
+        session: RelaySessionKey,
         frame: RelayFrame,
     },
     Health {
