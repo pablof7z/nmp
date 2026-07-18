@@ -117,6 +117,7 @@ pub struct ProbeConfig {
     pub expect_rejection: bool,
     pub timeout: Duration,
     pub store_path: Option<PathBuf>,
+    pub completion_window_output: Option<PathBuf>,
 }
 
 impl Default for ProbeConfig {
@@ -149,6 +150,7 @@ impl Default for ProbeConfig {
             expect_rejection: false,
             timeout: Duration::from_secs(120),
             store_path: None,
+            completion_window_output: None,
         }
     }
 }
@@ -520,6 +522,63 @@ struct CompletionMetrics {
     frames_per_second: f64,
 }
 
+#[derive(Debug, Serialize)]
+struct CompletionProfileWindow {
+    clock: &'static str,
+    start_ns: u64,
+    end_ns: u64,
+}
+
+#[cfg(feature = "bench-instrumentation")]
+fn monotonic_ns() -> Result<u64, ProbeError> {
+    let mut value = std::mem::MaybeUninit::<libc::timespec>::uninit();
+    // SAFETY: `clock_gettime` initializes the owned timespec on success.
+    let result = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC_RAW, value.as_mut_ptr()) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: the successful call above initialized the complete value.
+    let value = unsafe { value.assume_init() };
+    let seconds =
+        u64::try_from(value.tv_sec).map_err(|_| "negative CLOCK_MONOTONIC_RAW seconds")?;
+    let nanos = u64::try_from(value.tv_nsec).map_err(|_| "negative CLOCK_MONOTONIC_RAW nanos")?;
+    seconds
+        .checked_mul(1_000_000_000)
+        .and_then(|value| value.checked_add(nanos))
+        .ok_or_else(|| "CLOCK_MONOTONIC_RAW nanoseconds overflow".into())
+}
+
+#[cfg(not(feature = "bench-instrumentation"))]
+fn monotonic_ns() -> Result<u64, ProbeError> {
+    Err("completion-window-output requires bench-instrumentation".into())
+}
+
+fn write_completion_profile_window(
+    path: &Path,
+    start_ns: u64,
+    end_ns: u64,
+) -> Result<(), ProbeError> {
+    if end_ns < start_ns {
+        return Err("completion profile window ends before it starts".into());
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let window = CompletionProfileWindow {
+        clock: "CLOCK_MONOTONIC_RAW",
+        start_ns,
+        end_ns,
+    };
+    fs::write(
+        path,
+        format!("{}\n", serde_json::to_string_pretty(&window)?),
+    )?;
+    Ok(())
+}
+
 impl CompletionMetrics {
     fn new(
         expected_frames: u64,
@@ -729,6 +788,11 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     let expected_last_id = EventId::from_hex(&corpus.last_id)?;
     let process_write_bytes_before = process_write_bytes();
     let allocations_before = allocator_snapshot();
+    let completion_window_start_ns = config
+        .completion_window_output
+        .as_ref()
+        .map(|_| monotonic_ns())
+        .transpose()?;
     let ingest_started = Instant::now();
     let memory_before_ingest = current_memory();
     let memory_sampler = MemorySampler::start(config.trim_allocator_during_ingest);
@@ -768,9 +832,17 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             replay_gate.release();
         }
         if accepted_projection_complete {
-            let completed_at = *accepted_completion_at.get_or_insert_with(Instant::now);
-            accepted_completion_elapsed
-                .get_or_insert_with(|| completed_at.duration_since(ingest_started));
+            if accepted_completion_at.is_none() {
+                let completed_at = Instant::now();
+                accepted_completion_at = Some(completed_at);
+                accepted_completion_elapsed = Some(completed_at.duration_since(ingest_started));
+                if let (Some(path), Some(start_ns)) = (
+                    config.completion_window_output.as_deref(),
+                    completion_window_start_ns,
+                ) {
+                    write_completion_profile_window(path, start_ns, monotonic_ns()?)?;
+                }
+            }
             accepted_quiet_since.get_or_insert_with(Instant::now);
         } else {
             accepted_quiet_since = None;
@@ -1883,6 +1955,31 @@ mod tests {
         assert!(error
             .to_string()
             .contains("completion cannot follow observation"));
+    }
+
+    #[test]
+    fn completion_profile_window_preserves_raw_clock_bounds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nested/window.json");
+
+        write_completion_profile_window(&path, 10, 20).expect("write completion window");
+
+        let window: serde_json::Value =
+            serde_json::from_slice(&fs::read(path).expect("read completion window"))
+                .expect("parse completion window");
+        assert_eq!(window["clock"], "CLOCK_MONOTONIC_RAW");
+        assert_eq!(window["start_ns"], 10);
+        assert_eq!(window["end_ns"], 20);
+    }
+
+    #[test]
+    fn completion_profile_window_rejects_inverted_bounds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let error = write_completion_profile_window(&dir.path().join("window.json"), 20, 10)
+            .expect_err("inverted profile window must fail");
+        assert!(error
+            .to_string()
+            .contains("completion profile window ends before it starts"));
     }
 
     fn string_shape(

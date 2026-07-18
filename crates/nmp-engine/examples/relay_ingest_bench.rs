@@ -78,6 +78,10 @@ fn main() -> Result<(), ProbeError> {
                 config.timeout = Duration::from_secs(value(&mut args, "--timeout-secs")?)
             }
             "--store" => config.store_path = Some(path_value(&mut args, "--store")?),
+            "--completion-window-output" => {
+                config.completion_window_output =
+                    Some(path_value(&mut args, "--completion-window-output")?)
+            }
             "--output" => output = Some(path_value(&mut args, "--output")?),
             "--help" | "-h" => {
                 print_help();
@@ -161,6 +165,8 @@ fn print_help() {
          --expect-rejection  assert one oversize frame is rejected\n\
          --timeout-secs N    completion deadline (default 120)\n\
          --store PATH        retain the resulting redb store\n\
+         --completion-window-output PATH\n\
+                             write CLOCK_MONOTONIC_RAW bounds for active completion profiling\n\
          --output PATH       write the JSON result in addition to stdout"
     );
 }
