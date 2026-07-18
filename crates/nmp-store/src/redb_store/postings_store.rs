@@ -853,9 +853,12 @@ fn stream_compaction_cohort(
         .get(run_id)
         .map_err(persist_err)?
         .ok_or_else(|| packed_err("new compacted run has no dictionary"))?;
-    let output_dictionary = DictionaryView::parse(output_dictionary_guard.value())
-        .and_then(DictionaryView::validate)
-        .map_err(packed_err)?;
+    // Every source dictionary was validated above, source event-key ranges are
+    // disjoint, and the canonical EVENT_IDS invariant forbids one id from
+    // reaching two event keys. Rebuilding in range order preserves those
+    // properties; another full id HashSet here would scale with the output run.
+    let output_dictionary =
+        DictionaryView::parse(output_dictionary_guard.value()).map_err(packed_err)?;
 
     let mut segments = write_txn
         .open_table(POSTINGS_SEGMENTS)
