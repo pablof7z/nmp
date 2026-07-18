@@ -2,7 +2,7 @@ use super::canonical::{
     decode_stored_event_record, encode_stored_event, encode_stored_event_record,
     record_to_stored_event, stored_event_to_record, try_decode_stored_event,
 };
-use super::ingest_txn::RedbIngestTxn;
+use super::ingest_txn::{GovernedIngestTxn, GovernedWrite};
 use super::mutation::{
     fan_out_signed_in_txn, find_any_displaced_key_by_event_id_in_txn,
     find_displaced_key_by_event_id_in_txn, process_kind5_deletions_provisional_in_txn,
@@ -14,7 +14,7 @@ use super::outbox::{
     remove_claimant_in_txn, update_outbox_receipt, OutboxIntentRecord, OutboxReceiptRecord,
     SuppressClaimRecord,
 };
-use super::query::{expiration_key, insert_query_index_rows};
+use super::query::expiration_key;
 use super::schema::{persist_err, EventKey, OUTBOX_CORRELATIONS, OUTBOX_META, OUTBOX_RECEIPTS};
 #[cfg(test)]
 use super::store::RedbCrashPoint;
@@ -57,9 +57,8 @@ pub(super) fn accept_write(
         return Ok(AcceptOutcome::Refused(RefuseReason::AlreadyExpired));
     }
 
-    let write_txn = store.db.begin_write().map_err(persist_err)?;
-    let outcome = {
-        let mut ingest = RedbIngestTxn::open(&write_txn)?;
+    let mut write = GovernedWrite::begin(&store.db)?;
+    let outcome = write.apply(|ingest, write_txn| {
         let mut outbox_meta = write_txn.open_table(OUTBOX_META).map_err(persist_err)?;
         let mut outbox_correlations = write_txn
             .open_table(OUTBOX_CORRELATIONS)
@@ -199,7 +198,7 @@ pub(super) fn accept_write(
             // permanent, nothing provisional left to claim.
             if frozen.kind == Kind::EventDeletion && !already_signed {
                 let (_hidden, claims) =
-                    process_kind5_deletions_provisional_in_txn(&mut ingest, intent_id, &frozen)?;
+                    process_kind5_deletions_provisional_in_txn(ingest, intent_id, &frozen)?;
                 let encoded_claims = serde_json::to_string(&claims).expect("redb: encode claims");
                 ingest
                     .outbox_kind5_claims
@@ -232,7 +231,7 @@ pub(super) fn accept_write(
                 },
                 None,
             )
-        } else if tombstone_refuses(&ingest, &frozen)? {
+        } else if tombstone_refuses(ingest, &frozen)? {
             (AcceptOutcome::Refused(RefuseReason::Tombstoned), None)
         } else {
             let intent_id = alloc_intent_id_in_txn(&mut outbox_meta)?;
@@ -253,13 +252,7 @@ pub(super) fn accept_write(
                     let event_key = ingest
                         .canonical
                         .insert_new(&stored.event, &stored.provenance)?;
-                    insert_query_index_rows(
-                        &mut ingest.canonical,
-                        &mut ingest.indexes,
-                        &frozen,
-                        event_key,
-                    )
-                    .map_err(persist_err)?;
+                    ingest.insert_indexes(&frozen, event_key)?;
                     if let Some(ts) = frozen.tags.expiration().copied() {
                         let exp_key = expiration_key(ts, &frozen.id);
                         ingest
@@ -285,11 +278,8 @@ pub(super) fn accept_write(
                     // `compensate_write` keep working on exactly
                     // the row they always did.
                     if is_deletion {
-                        let (hidden, claims) = process_kind5_deletions_provisional_in_txn(
-                            &mut ingest,
-                            intent_id,
-                            &frozen,
-                        )?;
+                        let (hidden, claims) =
+                            process_kind5_deletions_provisional_in_txn(ingest, intent_id, &frozen)?;
                         let encoded_claims =
                             serde_json::to_string(&claims).expect("redb: encode claims");
                         ingest
@@ -333,13 +323,7 @@ pub(super) fn accept_write(
                                 .addr_index
                                 .insert(addr_key_str.as_str(), event_key)
                                 .map_err(persist_err)?;
-                            insert_query_index_rows(
-                                &mut ingest.canonical,
-                                &mut ingest.indexes,
-                                &frozen,
-                                event_key,
-                            )
-                            .map_err(persist_err)?;
+                            ingest.insert_indexes(&frozen, event_key)?;
                             if let Some(ts) = frozen.tags.expiration().copied() {
                                 let exp_key = expiration_key(ts, &frozen.id);
                                 ingest
@@ -365,7 +349,7 @@ pub(super) fn accept_write(
 
                             if candidate_wins(&frozen, current_event) {
                                 let replaced =
-                                    remove_row_in_txn(&mut ingest, current_event.id, |_| true)?
+                                    remove_row_in_txn(ingest, current_event.id, |_| true)?
                                         .expect("addr_index must always point at a stored event");
 
                                 let event_key = ingest
@@ -375,13 +359,7 @@ pub(super) fn accept_write(
                                     .addr_index
                                     .insert(addr_key_str.as_str(), event_key)
                                     .map_err(persist_err)?;
-                                insert_query_index_rows(
-                                    &mut ingest.canonical,
-                                    &mut ingest.indexes,
-                                    &frozen,
-                                    event_key,
-                                )
-                                .map_err(persist_err)?;
+                                ingest.insert_indexes(&frozen, event_key)?;
                                 if let Some(ts) = frozen.tags.expiration().copied() {
                                     let exp_key = expiration_key(ts, &frozen.id);
                                     ingest
@@ -483,12 +461,20 @@ pub(super) fn accept_write(
             }
         }
 
-        ingest.canonical.flush_pending()?;
-        result
-    };
+        Ok(result)
+    })?;
+    if matches!(
+        outcome,
+        AcceptOutcome::Refused(
+            RefuseReason::ReplaceableBaseOnRegularEvent
+                | RefuseReason::ReplaceableBaseChanged { .. }
+        )
+    ) {
+        return Ok(outcome);
+    }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::AcceptBeforeCommit);
-    write_txn.commit().map_err(persist_err)?;
+    write.commit()?;
     Ok(outcome)
 }
 
@@ -497,10 +483,8 @@ pub(super) fn promote_signed(
     intent_id: IntentId,
     sig: Signature,
 ) -> Result<PromoteOutcome, PersistenceError> {
-    let write_txn = store.db.begin_write().map_err(persist_err)?;
-    let outcome = {
-        let mut ingest = RedbIngestTxn::open(&write_txn)?;
-
+    let mut write = GovernedWrite::begin(&store.db)?;
+    let outcome = write.apply(|ingest, _write_txn| {
         let key = intent_key(intent_id);
         let intent_json = ingest
             .outbox_intents
@@ -702,11 +686,10 @@ pub(super) fn promote_signed(
                 // that's already validly signed. Shared with
                 // `reinsert_stashed_in_txn`'s dedup collision and
                 // `insert`'s relay-dedup-onto-pending path.
-                let co_signed: Vec<IntentId> =
-                    fan_out_signed_in_txn(&mut ingest, &owners, &row.event)?
-                        .into_iter()
-                        .filter(|owner_id| *owner_id != intent_id)
-                        .collect();
+                let co_signed: Vec<IntentId> = fan_out_signed_in_txn(ingest, &owners, &row.event)?
+                    .into_iter()
+                    .filter(|owner_id| *owner_id != intent_id)
+                    .collect();
 
                 PromoteOutcome::Promoted {
                     row: Box::new(row),
@@ -714,12 +697,14 @@ pub(super) fn promote_signed(
                 }
             }
         };
-        ingest.canonical.flush_pending()?;
-        outcome
-    };
+        Ok(outcome)
+    })?;
+    if matches!(outcome, PromoteOutcome::NotFound) {
+        return Ok(outcome);
+    }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::PromoteBeforeCommit);
-    write_txn.commit().map_err(persist_err)?;
+    write.commit()?;
     Ok(outcome)
 }
 
@@ -732,10 +717,8 @@ pub(super) fn compensate_write_with_state(
         crate::CompensationReason::Failure => ReceiptState::Compensated,
         crate::CompensationReason::ExplicitCancellation => ReceiptState::Cancelled,
     };
-    let write_txn = store.db.begin_write().map_err(persist_err)?;
-    let outcome = {
-        let mut ingest = RedbIngestTxn::open(&write_txn)?;
-
+    let mut write = GovernedWrite::begin(&store.db)?;
+    let outcome = write.apply(|ingest, _write_txn| {
         let key = intent_key(intent_id);
         let intent_json = ingest
             .outbox_intents
@@ -794,7 +777,7 @@ pub(super) fn compensate_write_with_state(
                             && local.sig_state == SigState::Pending
                             && record.provenance.is_empty();
                         if should_retract {
-                            remove_row_in_txn(&mut ingest, frozen_id, |_| true)?;
+                            remove_row_in_txn(ingest, frozen_id, |_| true)?;
                         } else {
                             record.local = Some(local);
                             ingest.canonical.replace_local(*event_key, record.local)?;
@@ -865,7 +848,7 @@ pub(super) fn compensate_write_with_state(
                         .map(|guard| guard.value().to_vec());
                     let restored = match displaced_bytes {
                         Some(bytes) => {
-                            reinsert_stashed_in_txn(&mut ingest, try_decode_stored_event(&bytes)?)?
+                            reinsert_stashed_in_txn(ingest, try_decode_stored_event(&bytes)?)?
                                 .map(Box::new)
                         }
                         None => None,
@@ -1004,12 +987,11 @@ pub(super) fn compensate_write_with_state(
                 }
             }
         };
-        ingest.canonical.flush_pending()?;
-        outcome
-    };
+        Ok(outcome)
+    })?;
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::CompensateBeforeCommit);
-    write_txn.commit().map_err(persist_err)?;
+    write.commit()?;
     Ok(outcome)
 }
 

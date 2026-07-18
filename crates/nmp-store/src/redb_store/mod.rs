@@ -18,7 +18,7 @@
 //! is corrupt, not a reachable, recoverable condition this crate's callers
 //! could usefully branch on today.
 
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 #[cfg(test)]
 use std::sync::atomic::AtomicU8;
@@ -58,8 +58,8 @@ mod compact_index_bench;
 mod fjall_ingest_bench;
 #[cfg(feature = "bench-instrumentation")]
 mod packed_postings_bench;
-#[cfg(any(test, feature = "bench-instrumentation"))]
 mod postings;
+mod postings_store;
 #[cfg(feature = "bench-instrumentation")]
 mod redo_index_bench;
 #[cfg(feature = "bench-instrumentation")]

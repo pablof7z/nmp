@@ -4,7 +4,7 @@ use super::outbox::{
     add_addr_claimant_in_txn, add_claimant_in_txn, intent_key, is_suppressed_in_txn, receipt_key,
     AddrClaimant, OutboxIntentRecord, OutboxReceiptRecord, SuppressClaimRecord,
 };
-use super::query::{expiration_key, insert_query_index_rows, AddrTombstoneRecord};
+use super::query::{expiration_key, AddrTombstoneRecord};
 use super::schema::{id_tombstone_key, persist_err};
 use super::{
     address_key_for, address_key_for_coordinate, candidate_wins, BTreeSet, Event, EventId, HashMap,
@@ -50,7 +50,7 @@ pub(super) fn tombstone_refuses<T: GovernedIngestTxn>(
 /// Remove `id`'s row within an already-open write transaction, iff
 /// `predicate` accepts the decoded row — clearing the address index (if it
 /// still points at `id`), the expiration index (if the row carried a
-/// NIP-40 `expiration`), and the [`BY_AUTHOR`]/[`BY_KIND`]/[`BY_TAG`] query indexes in
+/// NIP-40 `expiration`), and the packed ordered-postings query indexes in
 /// the same pass. Shared by the trait's own `remove` (`predicate` always
 /// `true`) and kind:5 processing (`predicate` is the NIP-09 author-only
 /// check).
@@ -68,7 +68,7 @@ pub(super) fn remove_row_in_txn<T: GovernedIngestTxn>(
     }
 
     txn.remove_canonical(event_key, &id)?;
-    txn.remove_indexes(&se.event)?;
+    txn.remove_indexes(&se.event, event_key)?;
 
     if let Some(addr_key) = address_key_for(&se.event) {
         let addr_key_str = addr_key.to_redb_key();
@@ -327,7 +327,7 @@ pub(super) fn fan_out_signed_in_txn<T: GovernedIngestTxn>(
 /// — and the exact claims staged (for `OUTBOX_KIND5_CLAIMS`). Mirrors
 /// `MemoryStore::process_kind5_deletions_provisional` exactly.
 pub(super) fn process_kind5_deletions_provisional_in_txn(
-    txn: &mut RedbIngestTxn<'_>,
+    txn: &mut RedbIngestTxn<'_, '_>,
     intent_id: IntentId,
     deleting: &Event,
 ) -> Result<(Vec<StoredEvent>, Vec<SuppressClaimRecord>), PersistenceError> {
@@ -508,7 +508,7 @@ pub(super) fn find_any_displaced_key_by_event_id_in_txn(
 /// deduped away, or loses the address race (`Stale` — the correct, silent
 /// §3.4 outcome for a re-offered grand-predecessor: nothing churns).
 pub(super) fn reinsert_stashed_in_txn(
-    txn: &mut RedbIngestTxn<'_>,
+    txn: &mut RedbIngestTxn<'_, '_>,
     se: StoredEvent,
 ) -> Result<Option<StoredEvent>, PersistenceError> {
     if let Some((event_key, existing)) = txn.canonical.load_by_id(&se.event.id)? {
@@ -591,8 +591,7 @@ pub(super) fn reinsert_stashed_in_txn(
     let result = match address_key_for(&se.event) {
         None => {
             let event_key = txn.canonical.insert_new(&se.event, &se.provenance)?;
-            insert_query_index_rows(&mut txn.canonical, &mut txn.indexes, &se.event, event_key)
-                .map_err(persist_err)?;
+            txn.insert_indexes(&se.event, event_key)?;
             if let Some(ts) = se.event.tags.expiration().copied() {
                 let exp_key = expiration_key(ts, &se.event.id);
                 txn.expiration_index
@@ -615,13 +614,7 @@ pub(super) fn reinsert_stashed_in_txn(
                     txn.addr_index
                         .insert(addr_key_str.as_str(), event_key)
                         .map_err(persist_err)?;
-                    insert_query_index_rows(
-                        &mut txn.canonical,
-                        &mut txn.indexes,
-                        &se.event,
-                        event_key,
-                    )
-                    .map_err(persist_err)?;
+                    txn.insert_indexes(&se.event, event_key)?;
                     if let Some(ts) = se.event.tags.expiration().copied() {
                         let exp_key = expiration_key(ts, &se.event.id);
                         txn.expiration_index
@@ -646,13 +639,7 @@ pub(super) fn reinsert_stashed_in_txn(
                         txn.addr_index
                             .insert(addr_key_str.as_str(), event_key)
                             .map_err(persist_err)?;
-                        insert_query_index_rows(
-                            &mut txn.canonical,
-                            &mut txn.indexes,
-                            &se.event,
-                            event_key,
-                        )
-                        .map_err(persist_err)?;
+                        txn.insert_indexes(&se.event, event_key)?;
                         if let Some(ts) = se.event.tags.expiration().copied() {
                             let exp_key = expiration_key(ts, &se.event.id);
                             txn.expiration_index

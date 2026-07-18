@@ -46,6 +46,13 @@ fn event_pair() -> (Event, Event) {
     pair(Kind::TextNote, "u5-crash-proof", 1_000)
 }
 
+fn packed_event(index: u64) -> Event {
+    EventBuilder::new(Kind::TextNote, format!("packed-crash-{index}"))
+        .custom_created_at(Timestamp::from(2_000 + index))
+        .sign_with_keys(&keys())
+        .expect("sign packed crash event")
+}
+
 fn retention_atom() -> ContextualAtom {
     ContextualAtom {
         filter: ConcreteFilter {
@@ -127,7 +134,7 @@ fn assert_path_canonical_integrity(path: &Path) {
     assert_canonical_integrity(&db);
 }
 
-fn crash(path: &Path, point: &str) {
+fn crash_worker(path: &Path, point: &str, audit_v8: bool) {
     let stdout = tempfile::NamedTempFile::new().expect("worker stdout file");
     let stderr = tempfile::NamedTempFile::new().expect("worker stderr file");
     let mut child = Command::new(std::env::current_exe().expect("current test executable"))
@@ -158,7 +165,48 @@ fn crash(path: &Path, point: &str) {
         Some(libc::SIGABRT),
         "worker must abort at {point}; status={status:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    assert_path_canonical_integrity(path);
+    if audit_v8 {
+        assert_path_canonical_integrity(path);
+    }
+}
+
+fn crash(path: &Path, point: &str) {
+    crash_worker(path, point, true);
+}
+
+fn crash_before_v8(path: &Path, point: &str) {
+    crash_worker(path, point, false);
+}
+
+fn downgrade_to_v7_without_postings(path: &Path) {
+    let db = Database::create(path).expect("open database for v7 downgrade");
+    let write_txn = db.begin_write().expect("begin v7 downgrade");
+    write_txn
+        .delete_table(POSTINGS_SEGMENTS)
+        .expect("remove packed segments");
+    write_txn
+        .delete_table(POSTINGS_DICTIONARIES)
+        .expect("remove packed dictionaries");
+    write_txn
+        .delete_table(POSTINGS_RUN_META)
+        .expect("remove packed run metadata");
+    write_txn
+        .delete_table(POSTINGS_RUN_BY_MIN)
+        .expect("remove packed run ranges");
+    write_txn
+        .delete_table(POSTINGS_DEAD_KEYS)
+        .expect("remove packed death blocks");
+    write_txn
+        .delete_table(POSTINGS_META)
+        .expect("remove packed readiness");
+    let mut schema = write_txn
+        .open_table(SCHEMA_META)
+        .expect("open schema marker");
+    schema
+        .insert(SCHEMA_VERSION_KEY, PREVIOUS_SCHEMA_VERSION)
+        .expect("restore v7 schema marker");
+    drop(schema);
+    write_txn.commit().expect("commit v7 downgrade");
 }
 
 #[test]
@@ -233,6 +281,37 @@ fn redb_crash_worker() {
             let mut store = RedbStore::open_with_crash_point(path, RedbCrashPoint::GcBeforeCommit)
                 .expect("open worker store");
             let _ = store.gc(&ClaimSet::new(Vec::new()));
+        }
+        "gc-after-commit" => {
+            let mut store = RedbStore::open_with_crash_point(path, RedbCrashPoint::GcAfterCommit)
+                .expect("open worker store");
+            let _ = store.gc(&ClaimSet::new(Vec::new()));
+        }
+        "postings-before-segments"
+        | "postings-after-segments"
+        | "postings-before-catalog"
+        | "postings-after-catalog"
+        | "postings-before-commit"
+        | "postings-after-commit" => {
+            let mut store = RedbStore::open(path).expect("open packed ingest worker store");
+            let event = packed_event(0);
+            let _ = store.insert(event, RelayObserved::new(relay, Timestamp::from(3_000u64)));
+        }
+        "postings-before-death" | "postings-after-death" => {
+            let mut store = RedbStore::open(path).expect("open packed death worker store");
+            let _ = store.remove(packed_event(0).id, RetractReason::Deleted);
+        }
+        "postings-before-compaction-output" | "postings-after-compaction-output" => {
+            let mut store = RedbStore::open(path).expect("open packed compaction worker store");
+            let _ = store.insert(
+                packed_event(7),
+                RelayObserved::new(relay, Timestamp::from(3_007u64)),
+            );
+        }
+        "postings-before-migration-ready"
+        | "postings-after-migration-ready"
+        | "postings-after-migration-commit" => {
+            let _ = RedbStore::open(path);
         }
         "route-revision-before-commit" => {
             let mut store =
@@ -366,6 +445,195 @@ fn accept_is_all_or_nothing_at_both_internal_transaction_boundaries() {
     }
 }
 
+#[test]
+fn packed_segments_catalog_and_ingest_commit_are_atomic_across_process_death() {
+    for point in [
+        "postings-before-segments",
+        "postings-after-segments",
+        "postings-before-catalog",
+        "postings-after-catalog",
+        "postings-before-commit",
+    ] {
+        let (_dir, path) = fixture();
+        RedbStore::open(&path).expect("initialize packed ingest fixture");
+        crash(&path, point);
+
+        let store = RedbStore::open(&path).expect("reopen rolled-back packed ingest");
+        assert!(
+            store
+                .query(&Filter::new().id(packed_event(0).id))
+                .expect("query packed ingest rollback")
+                .is_empty(),
+            "canonical row and every packed artifact must roll back at {point}"
+        );
+    }
+
+    let (_dir, path) = fixture();
+    RedbStore::open(&path).expect("initialize committed packed ingest fixture");
+    crash(&path, "postings-after-commit");
+    let store = RedbStore::open(&path).expect("reopen committed packed ingest");
+    assert_eq!(
+        store
+            .query(&Filter::new().id(packed_event(0).id))
+            .expect("query committed packed ingest")
+            .len(),
+        1,
+        "a process death after commit must retain the canonical row and packed publication"
+    );
+}
+
+#[test]
+fn packed_death_publication_is_atomic_across_process_death() {
+    for point in ["postings-before-death", "postings-after-death"] {
+        let (_dir, path) = fixture();
+        let relay = RelayUrl::parse(RELAY).expect("relay");
+        {
+            let mut store = RedbStore::open(&path).expect("initialize packed death fixture");
+            store
+                .insert_batch(
+                    [packed_event(0), packed_event(1)]
+                        .into_iter()
+                        .map(|event| {
+                            (
+                                event,
+                                RelayObserved::new(relay.clone(), Timestamp::from(3_000u64)),
+                            )
+                        })
+                        .collect(),
+                )
+                .expect("seed one multi-event packed run");
+        }
+
+        crash(&path, point);
+        let store = RedbStore::open(&path).expect("reopen rolled-back packed death");
+        assert_eq!(
+            store
+                .query(&Filter::new().ids([packed_event(0).id, packed_event(1).id]))
+                .expect("query packed death rollback")
+                .len(),
+            2,
+            "canonical removal and the packed death block must roll back together at {point}"
+        );
+    }
+}
+
+#[test]
+fn packed_compaction_output_is_never_partially_published() {
+    for point in [
+        "postings-before-compaction-output",
+        "postings-after-compaction-output",
+    ] {
+        let (_dir, path) = fixture();
+        let relay = RelayUrl::parse(RELAY).expect("relay");
+        {
+            let mut store = RedbStore::open(&path).expect("initialize compaction fixture");
+            for index in 0..7 {
+                store
+                    .insert(
+                        packed_event(index),
+                        RelayObserved::new(relay.clone(), Timestamp::from(3_000u64 + index)),
+                    )
+                    .expect("seed one packed run");
+            }
+        }
+
+        crash(&path, point);
+        let store = RedbStore::open(&path).expect("reopen rolled-back compaction");
+        assert_eq!(
+            store
+                .query(&Filter::new())
+                .expect("query compaction rollback")
+                .len(),
+            7,
+            "the triggering event and every staged compaction artifact must roll back at {point}"
+        );
+        assert!(store
+            .query(&Filter::new().id(packed_event(7).id))
+            .expect("query compaction trigger")
+            .is_empty());
+    }
+}
+
+#[test]
+fn packed_schema_migration_is_atomic_across_process_death() {
+    for point in [
+        "postings-before-migration-ready",
+        "postings-after-migration-ready",
+    ] {
+        let (_dir, path) = fixture();
+        let event = packed_event(0);
+        {
+            let mut store = RedbStore::open(&path).expect("initialize migration fixture");
+            store
+                .insert(
+                    event.clone(),
+                    RelayObserved::new(
+                        RelayUrl::parse(RELAY).expect("relay"),
+                        Timestamp::from(3_000u64),
+                    ),
+                )
+                .expect("seed migration event");
+        }
+        downgrade_to_v7_without_postings(&path);
+
+        crash_before_v8(&path, point);
+        let db = Database::open(&path).expect("open rolled-back v7 database");
+        let read_txn = db.begin_read().expect("read rolled-back v7 database");
+        let schema = read_txn
+            .open_table(SCHEMA_META)
+            .expect("read schema marker");
+        assert_eq!(
+            schema
+                .get(SCHEMA_VERSION_KEY)
+                .expect("read schema version")
+                .expect("schema version exists")
+                .value(),
+            PREVIOUS_SCHEMA_VERSION,
+            "migration marker must roll back at {point}"
+        );
+        drop(schema);
+        drop(read_txn);
+        drop(db);
+
+        let store = RedbStore::open(&path).expect("retry migration after process death");
+        assert_eq!(
+            store
+                .query(&Filter::new().id(event.id))
+                .expect("query migrated event")
+                .len(),
+            1
+        );
+        drop(store);
+        assert_path_canonical_integrity(&path);
+    }
+
+    let (_dir, path) = fixture();
+    let event = packed_event(0);
+    {
+        let mut store = RedbStore::open(&path).expect("initialize committed migration fixture");
+        store
+            .insert(
+                event.clone(),
+                RelayObserved::new(
+                    RelayUrl::parse(RELAY).expect("relay"),
+                    Timestamp::from(3_000u64),
+                ),
+            )
+            .expect("seed committed migration event");
+    }
+    downgrade_to_v7_without_postings(&path);
+    crash(&path, "postings-after-migration-commit");
+    let store = RedbStore::open(&path).expect("reopen committed migration");
+    assert_eq!(store.open_write_transactions(), 0);
+    assert_eq!(
+        store
+            .query(&Filter::new().id(event.id))
+            .expect("query after committed migration crash")
+            .len(),
+        1
+    );
+}
+
 /// #591: `OUTBOX_CORRELATIONS`' row is written in the SAME transaction as
 /// the receipt it names -- a real SIGABRT immediately before commit leaves
 /// NEITHER row behind (never an orphan correlation mapping pointing at a
@@ -471,6 +739,47 @@ fn explicit_retention_eviction_and_coverage_lowering_are_atomic_across_process_d
             Timestamp::from(1_100u64),
         )),
         "successful explicit policy must lower evidence with row deletion"
+    );
+}
+
+#[test]
+fn committed_retention_eviction_and_coverage_lowering_survive_process_death() {
+    let (_dir, path) = fixture();
+    let relay = RelayUrl::parse(RELAY).expect("relay");
+    let atom = retention_atom();
+    let key = compute_coverage_key(&atom);
+    let before = CoverageInterval::new(Timestamp::from(900u64), Timestamp::from(1_100u64));
+    let (_, signed) = event_pair();
+
+    {
+        let mut store = RedbStore::open(&path).expect("initialize committed retention fixture");
+        store
+            .insert(
+                signed.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(2_000u64)),
+            )
+            .expect("insert durable row");
+        store
+            .record_coverage(&atom, &relay, before)
+            .expect("record covering evidence");
+    }
+
+    crash(&path, "gc-after-commit");
+    let store = RedbStore::open(&path).expect("reopen committed retention fixture");
+    assert!(
+        store
+            .query(&Filter::new().id(signed.id))
+            .expect("query after committed GC crash")
+            .is_empty(),
+        "event removal must survive a process death after commit"
+    );
+    assert_eq!(
+        store.get_coverage(key, &relay),
+        Some(CoverageInterval::new(
+            Timestamp::from(1_001u64),
+            Timestamp::from(1_100u64),
+        )),
+        "coverage lowering must survive the same committed boundary"
     );
 }
 

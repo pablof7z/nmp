@@ -50,15 +50,19 @@ pub(super) const LEGACY_EVENT_TABLES: [&str; 9] = [
 ];
 pub(super) const SCHEMA_META: TableDefinition<&str, u64> = TableDefinition::new("schema_meta_v6");
 pub(super) const SCHEMA_VERSION_KEY: &str = "version";
-pub(super) const PREVIOUS_SCHEMA_VERSION: u64 = 6;
-pub(super) const SCHEMA_VERSION: u64 = 7;
+pub(super) const LEGACY_SCHEMA_VERSION: u64 = 6;
+pub(super) const PREVIOUS_SCHEMA_VERSION: u64 = 7;
+pub(super) const SCHEMA_VERSION: u64 = 8;
 /// Bound redb's process-private page cache for mobile/desktop clients.
 ///
 /// redb 4.1 defaults this cache to 1 GiB. A million-event sequential ingest
 /// fills most of that default even when NMP's transport queues and live query
 /// projections remain bounded, so the database alone can consume more memory
 /// than the rest of the process by an order of magnitude.
-pub(super) const REDB_CACHE_BYTES: usize = 64 * 1024 * 1024;
+// Packed runs are large immutable values and the operating system already
+// caches their pages. A larger Redb cache retains duplicate hot pages and
+// makes the one-million-event working set scale with query traffic.
+pub(super) const REDB_CACHE_BYTES: usize = 12 * 1024 * 1024;
 pub(super) const ADDR_INDEX: TableDefinition<&str, EventKey> =
     TableDefinition::new("addr_index_v6");
 pub(super) const COVERAGE: TableDefinition<&str, &str> = TableDefinition::new("coverage");
@@ -112,6 +116,23 @@ pub(super) const LEGACY_BY_AUTHOR_KIND: TableDefinition<&[u8; 74], EventKey> =
 /// Values are compact event keys, so a hit dereferences the immutable note
 /// directly without rebuilding or hex-encoding its NIP-01 id.
 pub(super) const BY_TAG: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_tag_v6");
+/// Immutable packed ordered-postings artifacts. These tables are dual-written
+/// while the v7 row indexes remain query-authoritative; the v8 migration flips
+/// authority only after exact differential validation.
+pub(super) const POSTINGS_SEGMENTS: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("postings_segments_v8");
+pub(super) const POSTINGS_DICTIONARIES: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("postings_dictionaries_v8");
+pub(super) const POSTINGS_RUN_META: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("postings_run_meta_v8");
+pub(super) const POSTINGS_RUN_BY_MIN: TableDefinition<u64, u64> =
+    TableDefinition::new("postings_run_by_min_v8");
+pub(super) const POSTINGS_DEAD_KEYS: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("postings_dead_keys_v8");
+pub(super) const POSTINGS_META: TableDefinition<&str, u64> =
+    TableDefinition::new("postings_meta_v8");
+pub(super) const POSTINGS_NEXT_RUN_ID: &str = "next_run_id";
+pub(super) const POSTINGS_READY: &str = "query_ready";
 /// Uniform sampled live-row counts for every ordered-index prefix. Keys are
 /// namespaced binary prefixes (global, author, kind, or tag/value); values
 /// count sampled physical rows in that bucket. Sampling is

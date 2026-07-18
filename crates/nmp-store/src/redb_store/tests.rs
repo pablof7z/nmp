@@ -69,7 +69,7 @@ fn v5_displaced_epoch_is_rejected_before_any_v6_table_is_created() {
 }
 
 #[test]
-fn healthy_v7_reopen_starts_no_application_write_transaction() {
+fn healthy_v8_reopen_starts_no_application_write_transaction() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("healthy-reopen.redb");
 
@@ -100,6 +100,73 @@ fn healthy_v7_reopen_starts_no_application_write_transaction() {
 }
 
 #[test]
+fn v7_rows_migrate_atomically_to_query_ready_packed_postings() {
+    use nostr::EventBuilder;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v7-packed-migration.redb");
+    let keys = nostr::Keys::generate();
+    let event = EventBuilder::new(Kind::TextNote, "migrate packed")
+        .custom_created_at(Timestamp::from(42u64))
+        .sign_with_keys(&keys)
+        .unwrap();
+    let mut store = RedbStore::open(&path).unwrap();
+    store
+        .insert(
+            event.clone(),
+            RelayObserved::new(
+                RelayUrl::parse("wss://migration.example").unwrap(),
+                Timestamp::from(42u64),
+            ),
+        )
+        .unwrap();
+    drop(store);
+
+    let db = Database::create(&path).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    write_txn.delete_table(POSTINGS_SEGMENTS).unwrap();
+    write_txn.delete_table(POSTINGS_DICTIONARIES).unwrap();
+    write_txn.delete_table(POSTINGS_RUN_META).unwrap();
+    write_txn.delete_table(POSTINGS_RUN_BY_MIN).unwrap();
+    write_txn.delete_table(POSTINGS_DEAD_KEYS).unwrap();
+    write_txn.delete_table(POSTINGS_META).unwrap();
+    let mut schema = write_txn.open_table(SCHEMA_META).unwrap();
+    schema
+        .insert(SCHEMA_VERSION_KEY, PREVIOUS_SCHEMA_VERSION)
+        .unwrap();
+    drop(schema);
+    write_txn.commit().unwrap();
+    drop(db);
+
+    let migrated = RedbStore::open(&path).unwrap();
+    assert_eq!(migrated.open_write_transactions(), 1);
+    assert_eq!(
+        migrated
+            .query_newest(&Filter::new().kind(Kind::TextNote), 10)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.event.id)
+            .collect::<Vec<_>>(),
+        vec![event.id]
+    );
+    let read_txn = migrated.db.begin_read().unwrap();
+    let schema = read_txn.open_table(SCHEMA_META).unwrap();
+    assert_eq!(
+        schema.get(SCHEMA_VERSION_KEY).unwrap().unwrap().value(),
+        SCHEMA_VERSION
+    );
+    let packed = read_txn.open_table(POSTINGS_META).unwrap();
+    assert_eq!(packed.get(POSTINGS_READY).unwrap().unwrap().value(), 1);
+    drop(packed);
+    drop(schema);
+    drop(read_txn);
+    drop(migrated);
+
+    let reopened = RedbStore::open(&path).unwrap();
+    assert_eq!(reopened.open_write_transactions(), 0);
+}
+
+#[test]
 fn v6_author_kind_index_is_removed_and_cardinality_rebuilt_atomically() {
     use nostr::EventBuilder;
 
@@ -127,7 +194,7 @@ fn v6_author_kind_index_is_removed_and_cardinality_rebuilt_atomically() {
     {
         let mut schema_meta = write_txn.open_table(SCHEMA_META).unwrap();
         schema_meta
-            .insert(SCHEMA_VERSION_KEY, PREVIOUS_SCHEMA_VERSION)
+            .insert(SCHEMA_VERSION_KEY, LEGACY_SCHEMA_VERSION)
             .unwrap();
         let mut cardinality_meta = write_txn.open_table(INDEX_CARDINALITY_META).unwrap();
         cardinality_meta
@@ -1260,10 +1327,15 @@ fn query_newest_ids_projects_covered_filters_without_event_values() {
     let projected = store.query_newest_ids(&filter, 25).unwrap();
 
     assert_eq!(projected, expected);
+    let (index_rows, event_values, materialized) = store.query_work();
     assert_eq!(
-        store.query_work(),
-        (25, 0, 0),
+        (event_values, materialized),
+        (0, 0),
         "an index-covered ID projection must not read or own 64 KiB event values"
+    );
+    assert!(
+        index_rows <= 32,
+        "packed merge may decode only the bounded active-run heads plus the requested rows"
     );
 }
 
@@ -1463,12 +1535,13 @@ fn query_newest_before_starts_after_exact_same_second_key_in_page_work() {
         rows.iter().map(|row| row.event.id).collect::<Vec<_>>(),
         expected[120..130]
     );
-    assert_eq!(
-        store.query_work(),
-        (10, 10, 10),
+    let (index_rows, event_values, materialized) = store.query_work();
+    assert_eq!((event_values, materialized), (10, 10));
+    assert!(
+        index_rows <= 20,
         concat!(
-            "the redb range must begin strictly after the exact cursor key; ",
-            "none of the 120 newer/equal-before rows may be scanned or skipped"
+            "each packed run must seek directly after the exact cursor; only bounded ",
+            "active-run heads may be decoded in addition to the requested rows"
         )
     );
 }
@@ -1526,11 +1599,12 @@ fn union_replacement_page_work_is_bounded_per_root_and_deduplicated_globally() {
         newest_a[..3],
         "overlapping roots must merge into one canonical de-duplicated page"
     );
-    assert_eq!(
-        store.query_work(),
-        (9, 9, 9),
+    let (index_rows, event_values, materialized) = store.query_work();
+    assert_eq!((event_values, materialized), (9, 9));
+    assert!(
+        index_rows <= 24,
         concat!(
-            "three roots at limit three must consume and materialize exactly nine rows; ",
+            "three packed roots may decode bounded active-run heads plus nine rows; ",
             "the 384-row store cannot turn union replacement into a full scan"
         )
     );
@@ -1591,7 +1665,7 @@ fn strict_ordered_scan_stops_after_requested_eligible_rows() {
 }
 
 #[test]
-fn fixed_ordered_indexes_use_inclusive_equal_time_ranges_and_id_ascending_ties() {
+fn packed_postings_use_inclusive_equal_time_ranges_and_id_ascending_ties() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("fixed-index-tie-break.redb");
     let mut store = RedbStore::open(&path).expect("open redb store");
@@ -1816,7 +1890,7 @@ fn empty_filter_sets_and_reversed_windows_match_nostr_semantics() {
 }
 
 #[test]
-fn missing_cardinality_epoch_rebuilds_atomically_from_fixed_ordered_indexes() {
+fn missing_cardinality_epoch_rebuilds_atomically_from_canonical_events() {
     use nostr::EventBuilder;
 
     let dir = tempfile::tempdir().unwrap();

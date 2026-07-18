@@ -377,7 +377,7 @@ mod tests {
 
         assert!(matches!(
             crate::RedbStore::open(&path),
-            Err(redb::Error::UpgradeRequired(7))
+            Err(redb::Error::UpgradeRequired(8))
         ));
         reset_store(&path)
             .expect("post-create schema refusal must release database then registration");
