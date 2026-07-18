@@ -59,7 +59,10 @@ pub(super) const SCHEMA_VERSION: u64 = 8;
 /// fills most of that default even when NMP's transport queues and live query
 /// projections remain bounded, so the database alone can consume more memory
 /// than the rest of the process by an order of magnitude.
-pub(super) const REDB_CACHE_BYTES: usize = 64 * 1024 * 1024;
+// Packed runs are large immutable values and the operating system already
+// caches their pages. A larger Redb cache retains duplicate hot pages and
+// makes the one-million-event working set scale with query traffic.
+pub(super) const REDB_CACHE_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const ADDR_INDEX: TableDefinition<&str, EventKey> =
     TableDefinition::new("addr_index_v6");
 pub(super) const COVERAGE: TableDefinition<&str, &str> = TableDefinition::new("coverage");
