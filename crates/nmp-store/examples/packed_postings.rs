@@ -1,4 +1,4 @@
-//! Fresh-process Redb/Fjall packed-postings ceiling matrix for issue #648.
+//! Fresh-process production-format qualification matrix for issue #655.
 //!
 //! Usage:
 //! `cargo run -p nmp-store --release --features bench-instrumentation --example packed_postings -- matrix <events.jsonl> <output.json> [repetitions] [batch_size]`
@@ -45,7 +45,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator;
 
-const SCHEMA: &str = "nmp-packed-postings-v1";
+const SCHEMA: &str = "nmp-packed-postings-v2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -83,8 +83,8 @@ struct CorpusIdentity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum Metrics {
-    Row(StoreBenchMetrics),
-    Packed(PackedPostingsMetrics),
+    Row(Box<StoreBenchMetrics>),
+    Packed(Box<PackedPostingsMetrics>),
 }
 
 impl Metrics {
@@ -271,27 +271,27 @@ fn run_child(
         _ => scratch.path().join("store.redb"),
     };
     let metrics = match layout {
-        Layout::RowRedb => Metrics::Row(run_store_bench_variant(
+        Layout::RowRedb => Metrics::Row(Box::new(run_store_bench_variant(
             &database,
             events,
             batch_size,
             StoreBenchVariant::AllIndexesSampledCardinality,
             sample_process,
-        )?),
-        Layout::PackedRedb => Metrics::Packed(run_packed_postings_bench(
+        )?)),
+        Layout::PackedRedb => Metrics::Packed(Box::new(run_packed_postings_bench(
             PackedPostingsBackend::Redb,
             &database,
             events,
             batch_size,
             sample_process,
-        )?),
-        Layout::PackedFjall => Metrics::Packed(run_packed_postings_bench(
+        )?)),
+        Layout::PackedFjall => Metrics::Packed(Box::new(run_packed_postings_bench(
             PackedPostingsBackend::Fjall,
             &database,
             events,
             batch_size,
             sample_process,
-        )?),
+        )?)),
     };
     if !metrics.exact_reopen() {
         return Err(format!("{} failed exact reopen", layout.name()));
