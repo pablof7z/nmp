@@ -7,6 +7,8 @@
 
 use super::canonical::CanonicalWriteTables;
 use super::outbox::{OUTBOX_KIND5_CLAIMS, OUTBOX_SUPPRESS_BY_ADDR, OUTBOX_SUPPRESS_BY_ID};
+#[cfg(test)]
+use super::postings_store::crash_if_postings;
 use super::postings_store::PostingsBatch;
 use super::query::{insert_query_cardinalities, remove_query_cardinalities};
 use super::schema::{
@@ -60,7 +62,12 @@ impl GovernedWrite {
 
     pub(super) fn commit(mut self) -> Result<(), PersistenceError> {
         self.postings.flush(&self.write_txn)?;
-        self.write_txn.commit().map_err(persist_err)
+        #[cfg(test)]
+        crash_if_postings("postings-before-commit");
+        self.write_txn.commit().map_err(persist_err)?;
+        #[cfg(test)]
+        crash_if_postings("postings-after-commit");
+        Ok(())
     }
 }
 

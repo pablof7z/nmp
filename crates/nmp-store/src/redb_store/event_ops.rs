@@ -658,6 +658,8 @@ pub(super) fn gc(store: &mut RedbStore, claims: &ClaimSet) -> Result<GcReport, P
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::GcBeforeCommit);
     write.commit()?;
+    #[cfg(test)]
+    store.crash_if(RedbCrashPoint::GcAfterCommit);
 
     Ok(report)
 }

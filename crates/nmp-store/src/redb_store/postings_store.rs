@@ -32,6 +32,16 @@ const BASE_RUN_FAN_IN: usize = 8;
 const LARGE_RUN_FAN_IN: usize = 6;
 const MIGRATION_RUN_EVENTS: usize = 8_192;
 
+/// Process-death seams for the packed publication protocol. The environment
+/// variable is set only in the dedicated child-process crash harness, so
+/// ordinary parallel unit tests cannot arm a shared in-process failpoint.
+#[cfg(test)]
+pub(super) fn crash_if_postings(point: &str) {
+    if std::env::var("NMP_U5_CRASH_POINT").as_deref() == Ok(point) {
+        std::process::abort();
+    }
+}
+
 #[cfg(test)]
 pub(super) fn assert_packed_integrity(
     read_txn: &redb::ReadTransaction,
@@ -285,8 +295,12 @@ pub(super) fn rebuild_from_canonical(
     if !batch.is_empty() {
         publish_events(write_txn, &batch)?;
     }
+    #[cfg(test)]
+    crash_if_postings("postings-before-migration-ready");
     let mut meta = write_txn.open_table(POSTINGS_META).map_err(persist_err)?;
     meta.insert(POSTINGS_READY, 1).map_err(persist_err)?;
+    #[cfg(test)]
+    crash_if_postings("postings-after-migration-ready");
     Ok(())
 }
 
@@ -618,6 +632,8 @@ fn insert_run(
     meta: RunMeta,
     encoded: super::postings::EncodedRun,
 ) -> Result<(), PersistenceError> {
+    #[cfg(test)]
+    crash_if_postings("postings-before-segments");
     let mut dictionaries = write_txn
         .open_table(POSTINGS_DICTIONARIES)
         .map_err(persist_err)?;
@@ -633,6 +649,8 @@ fn insert_run(
             .insert(key.as_slice(), value.as_slice())
             .map_err(persist_err)?;
     }
+    #[cfg(test)]
+    crash_if_postings("postings-after-segments");
     insert_run_catalog(write_txn, meta)
 }
 
@@ -640,6 +658,8 @@ fn insert_run_catalog(
     write_txn: &redb::WriteTransaction,
     meta: RunMeta,
 ) -> Result<(), PersistenceError> {
+    #[cfg(test)]
+    crash_if_postings("postings-before-catalog");
     let encoded_meta = meta.encode().map_err(packed_err)?;
     let mut run_meta = write_txn
         .open_table(POSTINGS_RUN_META)
@@ -653,6 +673,8 @@ fn insert_run_catalog(
     by_min
         .insert(meta.min_event_key, meta.run_id)
         .map_err(persist_err)?;
+    #[cfg(test)]
+    crash_if_postings("postings-after-catalog");
     Ok(())
 }
 
@@ -760,6 +782,8 @@ fn apply_run_deaths(
                 .map_err(packed_err)?
                 .expect("two nonempty death blocks");
         } else {
+            #[cfg(test)]
+            crash_if_postings("postings-before-death");
             let encoded = carry.encode().map_err(packed_err)?;
             death_table
                 .insert(key.as_slice(), encoded.as_slice())
@@ -768,6 +792,8 @@ fn apply_run_deaths(
             run_meta
                 .insert(run_id, encoded_meta.as_slice())
                 .map_err(persist_err)?;
+            #[cfg(test)]
+            crash_if_postings("postings-after-death");
             return Ok(());
         }
     }
@@ -843,6 +869,8 @@ fn stream_compaction_cohort(
     drop(dictionary_entries);
     drop(dictionaries);
     let run_id = allocate_run_id(write_txn)?;
+    #[cfg(test)]
+    crash_if_postings("postings-before-compaction-output");
     let mut dictionaries = write_txn
         .open_table(POSTINGS_DICTIONARIES)
         .map_err(persist_err)?;
@@ -910,6 +938,8 @@ fn stream_compaction_cohort(
             "nonempty compaction dictionary produced no live segments",
         ));
     }
+    #[cfg(test)]
+    crash_if_postings("postings-after-compaction-output");
     Ok(Some((run_id, min_event_key, max_event_key, live_events)))
 }
 

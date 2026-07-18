@@ -71,6 +71,7 @@ impl Prefix {
         &self.0
     }
 
+    #[cfg(any(test, feature = "bench-instrumentation"))]
     fn from_bytes(family: Family, value: &[u8]) -> Result<Self, String> {
         match family {
             Family::Global if value.is_empty() => Ok(Self::global()),
@@ -493,6 +494,7 @@ impl<'a> SegmentView<'a> {
         Ok(None)
     }
 
+    #[cfg(any(test, feature = "bench-instrumentation"))]
     pub(super) fn validate(self, dictionary: DictionaryView<'_>) -> Result<u64, String> {
         self.validate_prefix_directory()?;
         let mut postings = 0u64;
@@ -511,6 +513,7 @@ impl<'a> SegmentView<'a> {
         Ok(postings)
     }
 
+    #[cfg(any(test, feature = "bench-instrumentation"))]
     pub(super) fn memberships(
         self,
         dictionary: DictionaryView<'a>,
@@ -519,6 +522,7 @@ impl<'a> SegmentView<'a> {
         self.memberships_interned(dictionary, &mut events)
     }
 
+    #[cfg(any(test, feature = "bench-instrumentation"))]
     pub(super) fn memberships_interned(
         self,
         dictionary: DictionaryView<'a>,

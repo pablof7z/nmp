@@ -4,6 +4,8 @@ use super::outbox::{
     OUTBOX_KIND5_CLAIMS, OUTBOX_SUPPRESS_BY_ADDR, OUTBOX_SUPPRESS_BY_ID,
 };
 use super::postings::Family;
+#[cfg(test)]
+use super::postings_store::crash_if_postings;
 use super::postings_store::{rebuild_from_canonical, scan_packed, PackedScan};
 use super::query::{rebuild_index_cardinality_from_events, OrderedIndex, OrderedPlan};
 use super::schema::{
@@ -54,6 +56,7 @@ pub(super) enum RedbCrashPoint {
     LaneCloseBeforeCommit,
     ObservationBeforeCommit,
     GcBeforeCommit,
+    GcAfterCommit,
 }
 
 pub struct RedbStore {
@@ -269,6 +272,10 @@ impl RedbStore {
                     }
                 }
                 write_txn.commit()?;
+                #[cfg(test)]
+                if needs_schema_migration {
+                    crash_if_postings("postings-after-migration-commit");
+                }
                 _open_write_transactions += 1;
             }
         } else {
