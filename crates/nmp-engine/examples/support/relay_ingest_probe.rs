@@ -25,7 +25,7 @@ use tungstenite::{accept, Message};
 
 pub type ProbeError = Box<dyn Error + Send + Sync>;
 
-const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v15";
+const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v17";
 const CORPUS_SCHEMA: &str = "nmp-relay-ingest-corpus-v1";
 const BASE_CREATED_AT: u64 = 1_700_000_000;
 // Duplicate replay can advance diagnostics without producing a row delta.
@@ -103,6 +103,9 @@ pub struct ProbeConfig {
     pub committed_observation_cache_capacity: usize,
     pub diagnostic_duplicate_ceiling_capacity: usize,
     pub diagnostic_duplicate_ceiling_event_payload: bool,
+    pub diagnostic_preparsed_ceiling: bool,
+    pub diagnostic_skip_event_id_validation: bool,
+    pub diagnostic_skip_signature_verification: bool,
     pub verifier_workers: usize,
     pub verify_batch_size: usize,
     pub engine_batch_size: usize,
@@ -132,6 +135,9 @@ impl Default for ProbeConfig {
             committed_observation_cache_capacity: 131_072,
             diagnostic_duplicate_ceiling_capacity: 0,
             diagnostic_duplicate_ceiling_event_payload: false,
+            diagnostic_preparsed_ceiling: false,
+            diagnostic_skip_event_id_validation: false,
+            diagnostic_skip_signature_verification: false,
             verifier_workers: 0,
             verify_batch_size: 128,
             engine_batch_size: 128,
@@ -187,6 +193,11 @@ impl ProbeConfig {
                     .into(),
             );
         }
+        if self.diagnostic_preparsed_ceiling && (self.relays != 1 || self.passes != 1) {
+            return Err(
+                "diagnostic preparsed ceiling requires exactly one relay and one pass".into(),
+            );
+        }
         if self.expect_rejection && (self.events != 1 || self.relays != 1 || self.passes != 1) {
             return Err(
                 "expect-rejection requires exactly one event, one relay, and one pass".into(),
@@ -199,6 +210,13 @@ impl ProbeConfig {
             return Err(
                 "memory-store and redb-nondurable-diagnostic are mutually exclusive".into(),
             );
+        }
+        #[cfg(not(feature = "bench-instrumentation"))]
+        if self.diagnostic_skip_event_id_validation
+            || self.diagnostic_skip_signature_verification
+            || self.diagnostic_preparsed_ceiling
+        {
+            return Err("diagnostic validation ceilings require bench-instrumentation".into());
         }
         Ok(())
     }
@@ -227,6 +245,9 @@ pub struct ProbeResult {
     pub committed_observation_cache_capacity: usize,
     pub diagnostic_duplicate_ceiling_capacity: usize,
     pub diagnostic_duplicate_ceiling_event_payload: bool,
+    pub diagnostic_preparsed_ceiling: bool,
+    pub diagnostic_skip_event_id_validation: bool,
+    pub diagnostic_skip_signature_verification: bool,
     pub verifier_workers: usize,
     pub verify_batch_size: usize,
     pub engine_batch_size: usize,
@@ -349,6 +370,8 @@ struct ServerConfig {
     passes: usize,
     frame_delay: Duration,
     expect_rejection: bool,
+    #[cfg(feature = "bench-instrumentation")]
+    diagnostic_preparsed_events: Arc<Mutex<Option<Vec<Arc<nostr::Event>>>>>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -552,6 +575,14 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         }
     }
 
+    #[cfg(feature = "bench-instrumentation")]
+    let diagnostic_preparsed_events =
+        Arc::new(Mutex::new(if config.diagnostic_preparsed_ceiling {
+            Some(load_preparsed_events(&corpus.path)?)
+        } else {
+            None
+        }));
+
     let base = Instant::now();
     let sent_at = Arc::new(
         (0..config.events)
@@ -571,6 +602,8 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
                 passes: config.passes,
                 frame_delay: config.frame_delay,
                 expect_rejection: config.expect_rejection,
+                #[cfg(feature = "bench-instrumentation")]
+                diagnostic_preparsed_events: Arc::clone(&diagnostic_preparsed_events),
             },
             base,
             Arc::clone(&sent_at),
@@ -593,6 +626,13 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     nmp_transport::configure_diagnostic_duplicate_ceiling(
         config.diagnostic_duplicate_ceiling_capacity,
         config.diagnostic_duplicate_ceiling_event_payload,
+    );
+    #[cfg(feature = "bench-instrumentation")]
+    nmp_transport::configure_diagnostic_preparsed_ceiling(None, Vec::new());
+    #[cfg(feature = "bench-instrumentation")]
+    nmp_transport::ingest_attribution::configure_validation_ceiling(
+        config.diagnostic_skip_event_id_validation,
+        config.diagnostic_skip_signature_verification,
     );
     #[cfg(not(feature = "bench-instrumentation"))]
     if config.diagnostic_duplicate_ceiling_capacity > 0 {
@@ -976,6 +1016,9 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         diagnostic_duplicate_ceiling_capacity: config.diagnostic_duplicate_ceiling_capacity,
         diagnostic_duplicate_ceiling_event_payload: config
             .diagnostic_duplicate_ceiling_event_payload,
+        diagnostic_preparsed_ceiling: config.diagnostic_preparsed_ceiling,
+        diagnostic_skip_event_id_validation: config.diagnostic_skip_event_id_validation,
+        diagnostic_skip_signature_verification: config.diagnostic_skip_signature_verification,
         verifier_workers,
         verify_batch_size,
         engine_batch_size,
@@ -1064,14 +1107,21 @@ fn ingest_attribution_json() -> serde_json::Value {
             "diagnostic_duplicate_ceiling_lookups": transport.diagnostic_duplicate_ceiling_lookups,
             "diagnostic_duplicate_ceiling_hits": transport.diagnostic_duplicate_ceiling_hits,
             "diagnostic_duplicate_ceiling_inserts": transport.diagnostic_duplicate_ceiling_inserts,
+            "diagnostic_preparsed_ceiling_lookups": transport.diagnostic_preparsed_ceiling_lookups,
+            "diagnostic_preparsed_ceiling_hits": transport.diagnostic_preparsed_ceiling_hits,
             "parse_attempts": transport.parse_attempts, "parsed_frames": transport.parsed_frames,
             "parse_ns": transport.parse_ns, "translator_bursts": transport.translator_bursts,
+            "event_id_validation_attempts": transport.event_id_validation_attempts,
+            "event_id_validation_skips": transport.event_id_validation_skips,
+            "event_id_validation_ns": transport.event_id_validation_ns,
             "translator_events": transport.translator_events, "max_translator_burst": transport.max_translator_burst,
             "verify_batches": transport.verify_batches, "verify_candidates": transport.verify_candidates,
             "verify_ns": transport.verify_ns,
             "verify_dispatch_ns": transport.verify_dispatch_ns,
             "verify_collect_ns": transport.verify_collect_ns,
             "verify_worker_ns": transport.verify_worker_ns,
+            "signature_verification_attempts": transport.signature_verification_attempts,
+            "signature_verification_skips": transport.signature_verification_skips,
             "verify_task_submissions": transport.verify_task_submissions,
             "verify_result_messages": transport.verify_result_messages,
             "verify_worker_candidates": transport.verify_worker_candidates,
@@ -1127,6 +1177,17 @@ fn ingest_attribution_json() -> serde_json::Value {
             "index_insert_ns": store.index_insert_ns, "event_clones": store.event_clones
         }
     })
+}
+
+#[cfg(feature = "bench-instrumentation")]
+fn load_preparsed_events(path: &Path) -> Result<Vec<Arc<nostr::Event>>, ProbeError> {
+    BufReader::new(File::open(path)?)
+        .lines()
+        .map(|line| {
+            let event = nostr::Event::from_json(line?)?;
+            Ok(Arc::new(event))
+        })
+        .collect()
 }
 
 fn generate_corpus(dir: &Path, config: &ProbeConfig) -> Result<Corpus, ProbeError> {
@@ -1542,6 +1603,18 @@ fn serve_corpus(
         }
     };
     let encoded_subscription = serde_json::to_string(&subscription).map_err(|e| e.to_string())?;
+    #[cfg(feature = "bench-instrumentation")]
+    if let Some(events) = config
+        .diagnostic_preparsed_events
+        .lock()
+        .map_err(|_| "diagnostic preparsed events lock poisoned".to_string())?
+        .take()
+    {
+        nmp_transport::configure_diagnostic_preparsed_ceiling(
+            Some(nostr::SubscriptionId::new(subscription.clone())),
+            events,
+        );
+    }
     let started = Instant::now();
     let mut frames = 0u64;
     let mut bytes = 0u64;

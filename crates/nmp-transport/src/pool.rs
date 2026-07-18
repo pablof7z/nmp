@@ -43,6 +43,15 @@ pub fn configure_diagnostic_duplicate_ceiling(capacity: usize, event_payload_onl
     frame::configure_diagnostic_duplicate_ceiling(capacity, event_payload_only);
 }
 
+#[cfg(feature = "bench-instrumentation")]
+#[doc(hidden)]
+pub fn configure_diagnostic_preparsed_ceiling(
+    subscription_id: Option<SubscriptionId>,
+    events: Vec<Arc<Event>>,
+) {
+    frame::configure_diagnostic_preparsed_ceiling(subscription_id, events);
+}
+
 /// Safe default for the single engine/transport relay ceiling. Zero is
 /// normalized to this value as well, so legacy/default construction cannot
 /// silently re-enable unbounded worker growth.

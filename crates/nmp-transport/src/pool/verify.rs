@@ -273,9 +273,16 @@ fn worker_loop(tasks: Receiver<Task>) {
             } => {
                 #[cfg(feature = "bench-instrumentation")]
                 let verify_started = std::time::Instant::now();
-                let valid = event.verify_signature_with_ctx(&secp);
                 #[cfg(feature = "bench-instrumentation")]
-                crate::ingest_attribution::verify_worker(verify_started.elapsed(), 1);
+                let skip_signature = crate::ingest_attribution::skip_signature_verification();
+                #[cfg(not(feature = "bench-instrumentation"))]
+                let skip_signature = false;
+                let valid = skip_signature || event.verify_signature_with_ctx(&secp);
+                #[cfg(feature = "bench-instrumentation")]
+                {
+                    crate::ingest_attribution::verify_worker(verify_started.elapsed(), 1);
+                    crate::ingest_attribution::signature_verification(skip_signature);
+                }
                 // Completion means every worker-owned reference is gone, so
                 // the engine can structurally unwrap the frame Arc without a
                 // race into the deep-clone fallback.
