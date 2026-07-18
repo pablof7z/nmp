@@ -1075,6 +1075,8 @@ impl<S: EventStore> EngineCore<S> {
         }
         #[cfg(feature = "bench-instrumentation")]
         let phase_started = std::time::Instant::now();
+        #[cfg(feature = "bench-instrumentation")]
+        let phase_cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
         let relay_list_authors: Vec<_> = events
             .iter()
             .filter_map(|(event, _, _)| {
@@ -1099,7 +1101,12 @@ impl<S: EventStore> EngineCore<S> {
             .map(|(event, observed, _)| (event, observed))
             .collect();
         #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::relay_ingest_prelude(phase_started.elapsed());
+        {
+            crate::ingest_attribution::relay_ingest_prelude(phase_started.elapsed());
+            crate::ingest_attribution::relay_ingest_prelude_cpu(
+                crate::ingest_attribution::thread_cpu_time_ns().saturating_sub(phase_cpu_started),
+            );
+        }
         // The per-session diagnostics counter (`events_by_session_kind`) is
         // bumped at the frame sites (`on_relay_frame`/`on_relay_frames`),
         // where the exact physical session is still known — a
@@ -1107,14 +1114,22 @@ impl<S: EventStore> EngineCore<S> {
         // access contexts (#8).
         #[cfg(feature = "bench-instrumentation")]
         let resolver_started = std::time::Instant::now();
+        #[cfg(feature = "bench-instrumentation")]
+        let resolver_cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
         let resolver_result = self.resolver.ingest_observed_detailed(observed_events);
         #[cfg(feature = "bench-instrumentation")]
         crate::ingest_attribution::relay_resolver_call(resolver_started.elapsed());
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::relay_resolver_call_cpu(
+            crate::ingest_attribution::thread_cpu_time_ns().saturating_sub(resolver_cpu_started),
+        );
         match resolver_result {
             Err(error) => self.degrade_store(error, effects),
             Ok(ingest) => {
                 #[cfg(feature = "bench-instrumentation")]
                 let phase_started = std::time::Instant::now();
+                #[cfg(feature = "bench-instrumentation")]
+                let phase_cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
                 let published = publications
                     .into_iter()
                     .zip(ingest.current_after_commit.iter().copied())
@@ -1159,9 +1174,17 @@ impl<S: EventStore> EngineCore<S> {
                 }
 
                 #[cfg(feature = "bench-instrumentation")]
-                crate::ingest_attribution::relay_ingest_post_store(phase_started.elapsed());
+                {
+                    crate::ingest_attribution::relay_ingest_post_store(phase_started.elapsed());
+                    crate::ingest_attribution::relay_ingest_post_store_cpu(
+                        crate::ingest_attribution::thread_cpu_time_ns()
+                            .saturating_sub(phase_cpu_started),
+                    );
+                }
                 #[cfg(feature = "bench-instrumentation")]
                 let phase_started = std::time::Instant::now();
+                #[cfg(feature = "bench-instrumentation")]
+                let phase_cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
 
                 // A demand/directory change may alter the capped source plan
                 // and therefore evidence for otherwise-unrelated handles;
@@ -1180,9 +1203,19 @@ impl<S: EventStore> EngineCore<S> {
                     effects,
                 );
                 #[cfg(feature = "bench-instrumentation")]
-                crate::ingest_attribution::relay_ingest_apply_committed(phase_started.elapsed());
+                {
+                    crate::ingest_attribution::relay_ingest_apply_committed(
+                        phase_started.elapsed(),
+                    );
+                    crate::ingest_attribution::relay_ingest_apply_committed_cpu(
+                        crate::ingest_attribution::thread_cpu_time_ns()
+                            .saturating_sub(phase_cpu_started),
+                    );
+                }
                 #[cfg(feature = "bench-instrumentation")]
                 let phase_started = std::time::Instant::now();
+                #[cfg(feature = "bench-instrumentation")]
+                let phase_cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
                 if !published.is_empty() {
                     effects.push(Effect::UpdateCommittedObservations {
                         invalidated: Vec::new(),
@@ -1190,7 +1223,13 @@ impl<S: EventStore> EngineCore<S> {
                     });
                 }
                 #[cfg(feature = "bench-instrumentation")]
-                crate::ingest_attribution::relay_ingest_effect_build(phase_started.elapsed());
+                {
+                    crate::ingest_attribution::relay_ingest_effect_build(phase_started.elapsed());
+                    crate::ingest_attribution::relay_ingest_effect_build_cpu(
+                        crate::ingest_attribution::thread_cpu_time_ns()
+                            .saturating_sub(phase_cpu_started),
+                    );
+                }
             }
         }
     }
