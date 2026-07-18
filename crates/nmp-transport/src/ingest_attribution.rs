@@ -21,6 +21,13 @@ pub struct Snapshot {
     pub verify_batches: u64,
     pub verify_candidates: u64,
     pub verify_ns: u64,
+    pub verify_dispatch_ns: u64,
+    pub verify_collect_ns: u64,
+    pub verify_worker_ns: u64,
+    pub verify_task_submissions: u64,
+    pub verify_result_messages: u64,
+    pub verify_worker_candidates: u64,
+    pub max_verify_lane_candidates: u64,
     pub delivered_events: u64,
     pub delivery_ns: u64,
     pub event_fallback_clones: u64,
@@ -44,6 +51,13 @@ counters!(
     VERIFY_BATCHES,
     VERIFY_CANDIDATES,
     VERIFY_NS,
+    VERIFY_DISPATCH_NS,
+    VERIFY_COLLECT_NS,
+    VERIFY_WORKER_NS,
+    VERIFY_TASK_SUBMISSIONS,
+    VERIFY_RESULT_MESSAGES,
+    VERIFY_WORKER_CANDIDATES,
+    MAX_VERIFY_LANE_CANDIDATES,
     DELIVERED_EVENTS,
     DELIVERY_NS,
     EVENT_FALLBACK_CLONES
@@ -74,6 +88,13 @@ pub fn reset() {
         &VERIFY_BATCHES,
         &VERIFY_CANDIDATES,
         &VERIFY_NS,
+        &VERIFY_DISPATCH_NS,
+        &VERIFY_COLLECT_NS,
+        &VERIFY_WORKER_NS,
+        &VERIFY_TASK_SUBMISSIONS,
+        &VERIFY_RESULT_MESSAGES,
+        &VERIFY_WORKER_CANDIDATES,
+        &MAX_VERIFY_LANE_CANDIDATES,
         &DELIVERED_EVENTS,
         &DELIVERY_NS,
         &EVENT_FALLBACK_CLONES,
@@ -101,6 +122,13 @@ pub fn snapshot() -> Snapshot {
         verify_batches: load(&VERIFY_BATCHES),
         verify_candidates: load(&VERIFY_CANDIDATES),
         verify_ns: load(&VERIFY_NS),
+        verify_dispatch_ns: load(&VERIFY_DISPATCH_NS),
+        verify_collect_ns: load(&VERIFY_COLLECT_NS),
+        verify_worker_ns: load(&VERIFY_WORKER_NS),
+        verify_task_submissions: load(&VERIFY_TASK_SUBMISSIONS),
+        verify_result_messages: load(&VERIFY_RESULT_MESSAGES),
+        verify_worker_candidates: load(&VERIFY_WORKER_CANDIDATES),
+        max_verify_lane_candidates: load(&MAX_VERIFY_LANE_CANDIDATES),
         delivered_events: load(&DELIVERED_EVENTS),
         delivery_ns: load(&DELIVERY_NS),
         event_fallback_clones: load(&EVENT_FALLBACK_CLONES),
@@ -140,6 +168,19 @@ pub(crate) fn verify(duration: Duration, candidates: usize) {
     VERIFY_BATCHES.fetch_add(1, Ordering::Relaxed);
     VERIFY_CANDIDATES.fetch_add(candidates as u64, Ordering::Relaxed);
     add(&VERIFY_NS, duration);
+}
+pub(crate) fn verify_dispatch(duration: Duration, tasks: usize) {
+    add(&VERIFY_DISPATCH_NS, duration);
+    VERIFY_TASK_SUBMISSIONS.fetch_add(tasks as u64, Ordering::Relaxed);
+}
+pub(crate) fn verify_collect(duration: Duration, messages: usize) {
+    add(&VERIFY_COLLECT_NS, duration);
+    VERIFY_RESULT_MESSAGES.fetch_add(messages as u64, Ordering::Relaxed);
+}
+pub(crate) fn verify_worker(duration: Duration, candidates: usize) {
+    add(&VERIFY_WORKER_NS, duration);
+    VERIFY_WORKER_CANDIDATES.fetch_add(candidates as u64, Ordering::Relaxed);
+    MAX_VERIFY_LANE_CANDIDATES.fetch_max(candidates as u64, Ordering::Relaxed);
 }
 pub(crate) fn delivery(duration: Duration) {
     DELIVERED_EVENTS.fetch_add(1, Ordering::Relaxed);
