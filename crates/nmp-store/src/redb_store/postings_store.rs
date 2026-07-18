@@ -328,12 +328,6 @@ fn publish_pending(
     compact_overfull_levels(write_txn)
 }
 
-struct LoadedRun {
-    dictionary: Vec<u8>,
-    segments: Vec<Vec<u8>>,
-    dead: Option<DeadKeys>,
-}
-
 struct ScanSource<'a> {
     cursor: PostingCursor<'a>,
     dead: Option<&'a DeadKeys>,
@@ -383,15 +377,73 @@ pub(super) fn scan_packed<T>(
     if scan.limit == Some(0) {
         return Ok(Vec::new());
     }
-    let loaded = load_query_runs(read_txn, scan.family, scan.prefixes)?;
+    let run_meta = read_txn
+        .open_table(POSTINGS_RUN_META)
+        .map_err(persist_err)?;
+    let dictionaries = read_txn
+        .open_table(POSTINGS_DICTIONARIES)
+        .map_err(persist_err)?;
+    let segments = read_txn
+        .open_table(POSTINGS_SEGMENTS)
+        .map_err(persist_err)?;
+    let deaths = read_txn
+        .open_table(POSTINGS_DEAD_KEYS)
+        .map_err(persist_err)?;
+    let shards: BTreeSet<_> = scan
+        .prefixes
+        .iter()
+        .map(|prefix| shard_for(scan.family, prefix))
+        .collect();
+    let mut loaded = Vec::new();
+    for row in run_meta.iter().map_err(persist_err)? {
+        let (run_id, value) = row.map_err(persist_err)?;
+        let meta = RunMeta::decode(value.value()).map_err(packed_err)?;
+        if meta.run_id != run_id.value() {
+            return Err(packed_err("run metadata key disagrees with its value"));
+        }
+        let mut run_segments = Vec::new();
+        for &shard in &shards {
+            let key = segment_key(scan.family, shard, meta.run_id);
+            let Some(value) = segments.get(key.as_slice()).map_err(persist_err)? else {
+                continue;
+            };
+            let segment = SegmentView::parse(value.value()).map_err(packed_err)?;
+            let mut matches = false;
+            for prefix in scan.prefixes {
+                matches |= segment.prefix(prefix).map_err(packed_err)?.is_some();
+            }
+            if matches {
+                run_segments.push(value);
+            }
+        }
+        if run_segments.is_empty() {
+            continue;
+        }
+        let dictionary = dictionaries
+            .get(meta.run_id)
+            .map_err(persist_err)?
+            .ok_or_else(|| packed_err("run has no dictionary"))?;
+        let mut blocks = Vec::new();
+        for level in 0..MAX_DEATH_BLOCKS {
+            let key = death_key(meta.run_id, level);
+            if let Some(value) = deaths.get(key.as_slice()).map_err(persist_err)? {
+                blocks.push(DeadKeys::decode(value.value()).map_err(packed_err)?);
+            }
+        }
+        loaded.push((
+            dictionary,
+            run_segments,
+            merge_dead_blocks(&blocks).map_err(packed_err)?,
+        ));
+    }
     let before = scan
         .before
         .map(|cursor| (cursor.created_at.as_secs(), *cursor.event_id.as_bytes()));
     let mut sources = Vec::new();
-    for run in &loaded {
-        let dictionary = DictionaryView::parse(&run.dictionary).map_err(packed_err)?;
-        for bytes in &run.segments {
-            let segment = SegmentView::parse(bytes).map_err(packed_err)?;
+    for (dictionary, segments, dead) in &loaded {
+        let dictionary = DictionaryView::parse(dictionary.value()).map_err(packed_err)?;
+        for bytes in segments {
+            let segment = SegmentView::parse(bytes.value()).map_err(packed_err)?;
             for prefix in scan.prefixes {
                 let Some(list) = segment.prefix(prefix).map_err(packed_err)? else {
                     continue;
@@ -400,7 +452,7 @@ pub(super) fn scan_packed<T>(
                     cursor: list
                         .cursor(dictionary, before, scan.since, scan.until)
                         .map_err(packed_err)?,
-                    dead: run.dead.as_ref(),
+                    dead: dead.as_ref(),
                 });
             }
         }
@@ -435,66 +487,6 @@ pub(super) fn scan_packed<T>(
         }
     }
     Ok(output)
-}
-
-fn load_query_runs(
-    read_txn: &redb::ReadTransaction,
-    family: Family,
-    prefixes: &[Vec<u8>],
-) -> Result<Vec<LoadedRun>, PersistenceError> {
-    let run_meta = read_txn
-        .open_table(POSTINGS_RUN_META)
-        .map_err(persist_err)?;
-    let dictionaries = read_txn
-        .open_table(POSTINGS_DICTIONARIES)
-        .map_err(persist_err)?;
-    let segments = read_txn
-        .open_table(POSTINGS_SEGMENTS)
-        .map_err(persist_err)?;
-    let deaths = read_txn
-        .open_table(POSTINGS_DEAD_KEYS)
-        .map_err(persist_err)?;
-    let shards: BTreeSet<_> = prefixes
-        .iter()
-        .map(|prefix| shard_for(family, prefix))
-        .collect();
-    let mut loaded = Vec::new();
-    for row in run_meta.iter().map_err(persist_err)? {
-        let (run_id, value) = row.map_err(persist_err)?;
-        let meta = RunMeta::decode(value.value()).map_err(packed_err)?;
-        if meta.run_id != run_id.value() {
-            return Err(packed_err("run metadata key disagrees with its value"));
-        }
-        let mut run_segments = Vec::new();
-        for &shard in &shards {
-            let key = segment_key(family, shard, meta.run_id);
-            if let Some(value) = segments.get(key.as_slice()).map_err(persist_err)? {
-                run_segments.push(value.value().to_vec());
-            }
-        }
-        if run_segments.is_empty() {
-            continue;
-        }
-        let dictionary = dictionaries
-            .get(meta.run_id)
-            .map_err(persist_err)?
-            .ok_or_else(|| packed_err("run has no dictionary"))?
-            .value()
-            .to_vec();
-        let mut blocks = Vec::new();
-        for level in 0..MAX_DEATH_BLOCKS {
-            let key = death_key(meta.run_id, level);
-            if let Some(value) = deaths.get(key.as_slice()).map_err(persist_err)? {
-                blocks.push(DeadKeys::decode(value.value()).map_err(packed_err)?);
-            }
-        }
-        loaded.push(LoadedRun {
-            dictionary,
-            segments: run_segments,
-            dead: merge_dead_blocks(&blocks).map_err(packed_err)?,
-        });
-    }
-    Ok(loaded)
 }
 
 fn packed_err(error: impl std::fmt::Display) -> PersistenceError {
