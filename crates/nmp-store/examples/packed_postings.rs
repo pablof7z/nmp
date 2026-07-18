@@ -1,7 +1,7 @@
-//! Fresh-process production-format qualification matrix for issues #655, #658, and #696.
+//! Fresh-process production-format qualification matrix for issues #655 and #658.
 //!
 //! Usage:
-//! `cargo run -p nmp-store --release --features bench-instrumentation --example packed_postings -- (matrix|ceiling-matrix|canonical-runs-matrix) <events.jsonl> <output.json> [repetitions] [batch_size]`
+//! `cargo run -p nmp-store --release --features bench-instrumentation --example packed_postings -- (matrix|ceiling-matrix) <events.jsonl> <output.json> [repetitions] [batch_size]`
 
 use std::alloc::{GlobalAlloc, Layout as AllocLayout, System};
 use std::env;
@@ -47,14 +47,13 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator;
 
-const SCHEMA: &str = "nmp-packed-postings-v4";
+const SCHEMA: &str = "nmp-packed-postings-v3";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Layout {
     RowRedb,
     PackedRedb,
-    PackedRedbCanonicalRuns,
     PackedFjall,
     GovernedRedb,
     GovernedLmdb,
@@ -65,7 +64,6 @@ impl Layout {
         match self {
             Self::RowRedb => "row_redb",
             Self::PackedRedb => "packed_redb",
-            Self::PackedRedbCanonicalRuns => "packed_redb_canonical_runs",
             Self::PackedFjall => "packed_fjall",
             Self::GovernedRedb => "governed_redb",
             Self::GovernedLmdb => "governed_lmdb",
@@ -76,7 +74,6 @@ impl Layout {
         [
             Self::RowRedb,
             Self::PackedRedb,
-            Self::PackedRedbCanonicalRuns,
             Self::PackedFjall,
             Self::GovernedRedb,
             Self::GovernedLmdb,
@@ -413,45 +410,36 @@ fn run_child(
         Layout::PackedFjall | Layout::GovernedLmdb => scratch.path().join("store.native"),
         _ => scratch.path().join("store.redb"),
     };
-    let metrics = match layout {
-        Layout::RowRedb => Metrics::Row(Box::new(run_store_bench_variant(
-            &database,
-            events,
-            batch_size,
-            StoreBenchVariant::AllIndexesSampledCardinality,
-            sample_process,
-        )?)),
-        Layout::PackedRedb => Metrics::Packed(Box::new(run_packed_postings_bench(
-            PackedPostingsBackend::Redb,
-            &database,
-            events,
-            batch_size,
-            sample_process,
-        )?)),
-        Layout::PackedRedbCanonicalRuns => Metrics::Packed(Box::new(run_packed_postings_bench(
-            PackedPostingsBackend::RedbCanonicalRuns,
-            &database,
-            events,
-            batch_size,
-            sample_process,
-        )?)),
-        Layout::PackedFjall => Metrics::Packed(Box::new(run_packed_postings_bench(
-            PackedPostingsBackend::Fjall,
-            &database,
-            events,
-            batch_size,
-            sample_process,
-        )?)),
-        Layout::GovernedRedb => {
-            Metrics::GovernedRedb(Box::new(run_governed_redb(&database, events, batch_size)?))
-        }
-        Layout::GovernedLmdb => Metrics::GovernedLmdb(Box::new(run_lmdb_governed_ingest_bench(
-            &database,
-            events,
-            batch_size,
-            sample_process,
-        )?)),
-    };
+    let metrics =
+        match layout {
+            Layout::RowRedb => Metrics::Row(Box::new(run_store_bench_variant(
+                &database,
+                events,
+                batch_size,
+                StoreBenchVariant::AllIndexesSampledCardinality,
+                sample_process,
+            )?)),
+            Layout::PackedRedb => Metrics::Packed(Box::new(run_packed_postings_bench(
+                PackedPostingsBackend::Redb,
+                &database,
+                events,
+                batch_size,
+                sample_process,
+            )?)),
+            Layout::PackedFjall => Metrics::Packed(Box::new(run_packed_postings_bench(
+                PackedPostingsBackend::Fjall,
+                &database,
+                events,
+                batch_size,
+                sample_process,
+            )?)),
+            Layout::GovernedRedb => {
+                Metrics::GovernedRedb(Box::new(run_governed_redb(&database, events, batch_size)?))
+            }
+            Layout::GovernedLmdb => Metrics::GovernedLmdb(Box::new(
+                run_lmdb_governed_ingest_bench(&database, events, batch_size, sample_process)?,
+            )),
+        };
     if !metrics.exact_reopen() {
         return Err(format!("{} failed exact reopen", layout.name()));
     }
@@ -631,32 +619,8 @@ fn main() -> Result<(), String> {
                 "ceiling-matrix",
             )
         }
-        Some("canonical-runs-matrix") => {
-            let corpus = Path::new(args.get(2).ok_or("missing corpus")?);
-            let output = Path::new(args.get(3).ok_or("missing output")?);
-            let repetitions = args
-                .get(4)
-                .map(String::as_str)
-                .unwrap_or("10")
-                .parse()
-                .map_err(|error| format!("invalid repetitions: {error}"))?;
-            let batch_size = args
-                .get(5)
-                .map(String::as_str)
-                .unwrap_or("4096")
-                .parse()
-                .map_err(|error| format!("invalid batch size: {error}"))?;
-            run_matrix(
-                corpus,
-                output,
-                repetitions,
-                batch_size,
-                &[Layout::PackedRedb, Layout::PackedRedbCanonicalRuns],
-                "canonical-runs-matrix",
-            )
-        }
         _ => Err(
-            "usage: packed_postings (matrix|ceiling-matrix|canonical-runs-matrix) <events.jsonl> <output.json> [repetitions] [batch_size]"
+            "usage: packed_postings (matrix|ceiling-matrix) <events.jsonl> <output.json> [repetitions] [batch_size]"
                 .to_owned(),
         ),
     }

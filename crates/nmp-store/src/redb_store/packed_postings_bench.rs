@@ -21,7 +21,6 @@ use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, Tab
 use serde::{Deserialize, Serialize};
 
 use super::canonical::observation_key;
-use super::canonical_run_bench::{self as canonical_run, View as CanonicalRunView};
 use super::postings::{
     self, merge_dead_blocks, merge_posting_cursors, shard_for, validate_run_metas, DeadKeys,
     DictionaryView, EncodedRun, Family, Membership, MergeSource, Prefix, RunEvent, RunMeta,
@@ -42,10 +41,6 @@ const PACKED_RUN_META: TableDefinition<u64, &[u8]> =
     TableDefinition::new("packed_postings_run_meta_v1");
 const PACKED_DEAD_KEYS: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("packed_postings_dead_keys_v2");
-const CANONICAL_RUNS: TableDefinition<u64, &[u8]> =
-    TableDefinition::new("benchmark_canonical_event_runs_v1");
-const CANONICAL_RUN_BY_MIN: TableDefinition<u64, u64> =
-    TableDefinition::new("benchmark_canonical_event_run_by_min_v1");
 const FAMILY_COUNT: usize = 4;
 const PACKED_REDB_CACHE_BYTES: usize = 16 * 1_024 * 1_024;
 const FJALL_CACHE_BYTES: u64 = 16 * 1_024 * 1_024;
@@ -57,7 +52,6 @@ const FJALL_WORKERS: usize = 2;
 #[serde(rename_all = "snake_case")]
 pub enum PackedPostingsBackend {
     Redb,
-    RedbCanonicalRuns,
     Fjall,
 }
 
@@ -68,7 +62,6 @@ pub struct PackedPostingsMetrics {
     pub transaction_batch_size: usize,
     pub transactions: u64,
     pub wall_ns: u64,
-    pub reopen_ns: u64,
     pub segment_build_ns: u64,
     pub packed_encode_ns: u64,
     pub packed_dictionary_build_ns: u64,
@@ -92,12 +85,6 @@ pub struct PackedPostingsMetrics {
     pub peak_rss_bytes: Option<u64>,
     pub process_write_bytes: Option<u64>,
     pub encoded_event_bytes: u64,
-    pub canonical_rows: u64,
-    pub canonical_bytes: u64,
-    pub canonical_build_ns: u64,
-    pub canonical_insert_ns: u64,
-    pub active_canonical_rows: u64,
-    pub active_canonical_bytes: u64,
     pub segment_rows: u64,
     pub segment_bytes: u64,
     pub dictionary_rows: u64,
@@ -136,12 +123,6 @@ pub struct PackedQueryMetrics {
 
 type BatchSegments = Vec<Membership>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RedbCanonicalLayout {
-    Rows,
-    Runs,
-}
-
 pub fn run_packed_postings_bench(
     backend: PackedPostingsBackend,
     path: &Path,
@@ -156,35 +137,23 @@ pub fn run_packed_postings_bench(
         return Err("transaction batch size must be nonzero".to_owned());
     }
     match backend {
-        PackedPostingsBackend::Redb | PackedPostingsBackend::RedbCanonicalRuns => {
-            run_redb(backend, path, events, batch_size, sample_process)
-        }
+        PackedPostingsBackend::Redb => run_redb(path, events, batch_size, sample_process),
         PackedPostingsBackend::Fjall => run_fjall(path, events, batch_size, sample_process),
     }
 }
 
 fn run_redb(
-    backend: PackedPostingsBackend,
     path: &Path,
     events: Vec<Event>,
     batch_size: usize,
     sample_process: fn() -> StoreBenchProcessCounters,
 ) -> Result<PackedPostingsMetrics, String> {
-    let canonical_layout = match backend {
-        PackedPostingsBackend::Redb => RedbCanonicalLayout::Rows,
-        PackedPostingsBackend::RedbCanonicalRuns => RedbCanonicalLayout::Runs,
-        PackedPostingsBackend::Fjall => return Err("Fjall cannot use the Redb runner".to_owned()),
-    };
     let db = Database::builder()
         .set_cache_size(PACKED_REDB_CACHE_BYTES.min(REDB_CACHE_BYTES))
         .create(path)
         .map_err(|error| error.to_string())?;
     let init = db.begin_write().map_err(|error| error.to_string())?;
     init.open_table(EVENTS).map_err(|error| error.to_string())?;
-    init.open_table(CANONICAL_RUNS)
-        .map_err(|error| error.to_string())?;
-    init.open_table(CANONICAL_RUN_BY_MIN)
-        .map_err(|error| error.to_string())?;
     init.open_table(EVENT_IDS)
         .map_err(|error| error.to_string())?;
     init.open_table(EVENT_OBSERVATIONS)
@@ -217,12 +186,6 @@ fn run_redb(
         let write = db.begin_write().map_err(|error| error.to_string())?;
         let mut event_rows = write
             .open_table(EVENTS)
-            .map_err(|error| error.to_string())?;
-        let mut canonical_runs = write
-            .open_table(CANONICAL_RUNS)
-            .map_err(|error| error.to_string())?;
-        let mut canonical_run_by_min = write
-            .open_table(CANONICAL_RUN_BY_MIN)
             .map_err(|error| error.to_string())?;
         let mut event_ids = write
             .open_table(EVENT_IDS)
@@ -261,7 +224,6 @@ fn run_redb(
         let first_key = first_event_key(batch_index, batch_size)?;
         let build_started = Instant::now();
         let mut grouped = BatchSegments::with_capacity(batch.len().saturating_mul(5));
-        let mut encoded_events = Vec::with_capacity(batch.len());
         for (offset, event) in batch.iter().enumerate() {
             let event_key = first_key + offset as u64;
             let encoded = binary_event::encode_event(event)
@@ -269,7 +231,9 @@ fn run_redb(
             totals.encoded_event_bytes = totals
                 .encoded_event_bytes
                 .saturating_add(encoded.len() as u64);
-            encoded_events.push(encoded);
+            event_rows
+                .insert(event_key, encoded.as_slice())
+                .map_err(|error| error.to_string())?;
             event_ids
                 .insert(event.id.as_bytes(), event_key)
                 .map_err(|error| error.to_string())?;
@@ -278,45 +242,6 @@ fn run_redb(
                 .map_err(|error| error.to_string())?;
             add_event_memberships(&mut grouped, &mut totals.memberships, event, event_key);
         }
-        let canonical_build_started = Instant::now();
-        let encoded_canonical_run = if canonical_layout == RedbCanonicalLayout::Runs {
-            Some(canonical_run::encode(
-                batch_index as u64,
-                first_key,
-                &encoded_events,
-            )?)
-        } else {
-            None
-        };
-        totals.canonical_build_ns = totals
-            .canonical_build_ns
-            .saturating_add(duration_ns(canonical_build_started));
-        let canonical_insert_started = Instant::now();
-        match encoded_canonical_run.as_deref() {
-            Some(run) => {
-                canonical_runs
-                    .insert(batch_index as u64, run)
-                    .map_err(|error| error.to_string())?;
-                canonical_run_by_min
-                    .insert(first_key, batch_index as u64)
-                    .map_err(|error| error.to_string())?;
-                totals.canonical_rows = totals.canonical_rows.saturating_add(1);
-                totals.canonical_bytes = totals.canonical_bytes.saturating_add(run.len() as u64);
-            }
-            None => {
-                for (offset, encoded) in encoded_events.iter().enumerate() {
-                    event_rows
-                        .insert(first_key + offset as u64, encoded.as_slice())
-                        .map_err(|error| error.to_string())?;
-                    totals.canonical_rows = totals.canonical_rows.saturating_add(1);
-                    totals.canonical_bytes =
-                        totals.canonical_bytes.saturating_add(encoded.len() as u64);
-                }
-            }
-        }
-        totals.canonical_insert_ns = totals
-            .canonical_insert_ns
-            .saturating_add(duration_ns(canonical_insert_started));
         let encode_started = Instant::now();
         let encoded_run = encode_segments(grouped)?;
         totals.packed_encode_ns = totals
@@ -381,8 +306,6 @@ fn run_redb(
         drop(relays);
         drop(observations);
         drop(event_ids);
-        drop(canonical_run_by_min);
-        drop(canonical_runs);
         drop(event_rows);
         let commit_started = Instant::now();
         write.commit().map_err(|error| error.to_string())?;
@@ -394,7 +317,7 @@ fn run_redb(
     let wall_ns = duration_ns(started);
     let process_after_ingest = sample_process();
     let process = process_after_ingest.delta(process_before);
-    let mut deletion = apply_redb_deletion_overlay(&db, &events, batch_size, canonical_layout)?;
+    let mut deletion = apply_redb_deletion_overlay(&db, &events, batch_size)?;
     let process_after_deletion = sample_process();
     deletion.process_write_bytes = process_after_deletion
         .delta(process_after_ingest)
@@ -417,96 +340,13 @@ fn run_redb(
     drop(stats);
     drop(db);
 
-    let reopen_started = Instant::now();
     let reopened = Database::open(path).map_err(|error| error.to_string())?;
     let read = reopened.begin_read().map_err(|error| error.to_string())?;
-    let event_table = read.open_table(EVENTS).map_err(|error| error.to_string())?;
-    let event_id_table = read
-        .open_table(EVENT_IDS)
+    let reopened_rows = read
+        .open_table(EVENTS)
+        .map_err(|error| error.to_string())?
+        .len()
         .map_err(|error| error.to_string())?;
-    let canonical_run_table = read
-        .open_table(CANONICAL_RUNS)
-        .map_err(|error| error.to_string())?;
-    let canonical_run_catalog = read
-        .open_table(CANONICAL_RUN_BY_MIN)
-        .map_err(|error| error.to_string())?;
-    let reopened_rows = event_id_table.len().map_err(|error| error.to_string())?;
-    let (active_canonical_rows, active_canonical_bytes) = match canonical_layout {
-        RedbCanonicalLayout::Rows => {
-            let mut bytes = 0u64;
-            for entry in event_table.iter().map_err(|error| error.to_string())? {
-                let (_, value) = entry.map_err(|error| error.to_string())?;
-                binary_event::StoredEventView::parse(value.value())
-                    .map_err(|error| format!("invalid canonical event row: {error}"))?;
-                bytes = bytes.saturating_add(value.value().len() as u64);
-            }
-            (event_table.len().map_err(|error| error.to_string())?, bytes)
-        }
-        RedbCanonicalLayout::Runs => {
-            let mut rows = 0u64;
-            let mut bytes = 0u64;
-            let mut event_slots = 0u64;
-            let mut previous_max_event_key = None;
-            for entry in canonical_run_table
-                .iter()
-                .map_err(|error| error.to_string())?
-            {
-                let (run_id, value) = entry.map_err(|error| error.to_string())?;
-                let view = CanonicalRunView::parse(value.value())?;
-                if view.run_id() != run_id.value() {
-                    return Err("canonical run key/value id mismatch".to_owned());
-                }
-                let catalog_run_id = canonical_run_catalog
-                    .get(view.min_event_key())
-                    .map_err(|error| error.to_string())?
-                    .ok_or_else(|| "canonical run is absent from range catalog".to_owned())?;
-                if catalog_run_id.value() != view.run_id() {
-                    return Err("canonical run catalog points to the wrong run".to_owned());
-                }
-                if previous_max_event_key
-                    .and_then(|key: u64| key.checked_add(1))
-                    .is_some_and(|expected| expected != view.min_event_key())
-                {
-                    return Err("canonical run ranges are not contiguous".to_owned());
-                }
-                previous_max_event_key = Some(view.max_event_key());
-                event_slots = event_slots.saturating_add(view.len() as u64);
-                rows = rows.saturating_add(1);
-                bytes = bytes.saturating_add(value.value().len() as u64);
-            }
-            if canonical_run_catalog
-                .len()
-                .map_err(|error| error.to_string())?
-                != rows
-            {
-                return Err("canonical run catalog cardinality mismatch".to_owned());
-            }
-            if event_slots != event_count {
-                return Err("canonical run event-slot cardinality mismatch".to_owned());
-            }
-            (rows, bytes)
-        }
-    };
-    for entry in event_id_table.iter().map_err(|error| error.to_string())? {
-        let (event_id, event_key) = entry.map_err(|error| error.to_string())?;
-        let event_key = event_key.value();
-        let bytes = match canonical_layout {
-            RedbCanonicalLayout::Rows => event_table
-                .get(event_key)
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| format!("missing canonical event row {event_key}"))?
-                .value()
-                .to_vec(),
-            RedbCanonicalLayout::Runs => {
-                canonical_run_event_bytes(&canonical_run_table, &canonical_run_catalog, event_key)?
-            }
-        };
-        let view = binary_event::StoredEventView::parse(&bytes)
-            .map_err(|error| format!("invalid reopened canonical event: {error}"))?;
-        if view.id_bytes().as_slice() != event_id.value() {
-            return Err("event-id lookup disagrees with canonical event".to_owned());
-        }
-    }
     let segment_table = read
         .open_table(PACKED_SEGMENTS)
         .map_err(|error| error.to_string())?;
@@ -566,47 +406,22 @@ fn run_redb(
         active_segment_bytes = active_segment_bytes.saturating_add(value.value().len() as u64);
     }
     let _active_dead_keys = decode_redb_dead_keys(&dead_key_table)?;
-    let canonical_catalog_cache = if canonical_layout == RedbCanonicalLayout::Runs {
-        canonical_run_catalog
-            .iter()
-            .map_err(|error| error.to_string())?
-            .map(|entry| {
-                let (min_event_key, run_id) = entry.map_err(|error| error.to_string())?;
-                Ok((min_event_key.value(), run_id.value()))
-            })
-            .collect::<Result<Vec<_>, String>>()?
-    } else {
-        Vec::new()
-    };
-    let reopen_ns = duration_ns(reopen_started);
     let queries = run_query_benchmarks(&events, &deletion.event_keys, |family, prefix, limit| {
-        query_redb_with_canonical(
-            &read,
-            canonical_layout,
-            &canonical_catalog_cache,
-            family,
-            prefix,
-            limit,
-        )
+        query_redb(&read, family, prefix, limit)
     })?;
     drop(dead_key_table);
     drop(run_meta_table);
     drop(dictionary_table);
     drop(segment_table);
-    drop(canonical_run_catalog);
-    drop(canonical_run_table);
-    drop(event_id_table);
-    drop(event_table);
     drop(read);
     drop(reopened);
 
     finish_metrics(
-        backend,
+        PackedPostingsBackend::Redb,
         path,
         event_count,
         batch_size,
         wall_ns,
-        reopen_ns,
         totals,
         &commit_latencies,
         process,
@@ -619,8 +434,6 @@ fn run_redb(
         active_dictionary_bytes,
         active_run_meta_rows,
         active_run_meta_bytes,
-        active_canonical_rows,
-        active_canonical_bytes,
         deletion,
         maintenance,
         queries,
@@ -707,8 +520,6 @@ fn run_fjall(
             totals.encoded_event_bytes = totals
                 .encoded_event_bytes
                 .saturating_add(encoded.len() as u64);
-            totals.canonical_rows = totals.canonical_rows.saturating_add(1);
-            totals.canonical_bytes = totals.canonical_bytes.saturating_add(encoded.len() as u64);
             write.insert(&keyspaces.events, event_key.to_be_bytes(), encoded);
             write.insert(
                 &keyspaces.event_ids,
@@ -809,7 +620,6 @@ fn run_fjall(
     drop(database);
     let logical_bytes = directory_bytes(path).map_err(|error| error.to_string())?;
 
-    let reopen_started = Instant::now();
     let reopened = SingleWriterTxDatabase::builder(path)
         .worker_threads(FJALL_WORKERS)
         .cache_size(FJALL_CACHE_BYTES)
@@ -821,14 +631,6 @@ fn run_fjall(
     let reopened_rows = read
         .len(&reopened_keyspaces.events)
         .map_err(|error| error.to_string())? as u64;
-    let active_canonical_rows = reopened_rows;
-    let mut active_canonical_bytes = 0u64;
-    for entry in read.iter(&reopened_keyspaces.events) {
-        let (_, value) = entry.into_inner().map_err(|error| error.to_string())?;
-        binary_event::StoredEventView::parse(&value)
-            .map_err(|error| format!("invalid Fjall canonical event: {error}"))?;
-        active_canonical_bytes = active_canonical_bytes.saturating_add(value.len() as u64);
-    }
     let mut reopened_memberships = [0u64; FAMILY_COUNT];
     let mut reopened_segment_rows = 0u64;
     let mut active_segment_bytes = 0u64;
@@ -882,7 +684,6 @@ fn run_fjall(
         active_segment_bytes = active_segment_bytes.saturating_add(value.len() as u64);
     }
     let _active_dead_keys = decode_fjall_dead_keys(&read, &reopened_keyspaces)?;
-    let reopen_ns = duration_ns(reopen_started);
     let queries = run_query_benchmarks(&events, &deletion.event_keys, |family, prefix, limit| {
         query_fjall(&read, &reopened_keyspaces, family, prefix, limit)
     })?;
@@ -896,7 +697,6 @@ fn run_fjall(
         event_count,
         batch_size,
         wall_ns,
-        reopen_ns,
         totals,
         &commit_latencies,
         process,
@@ -909,8 +709,6 @@ fn run_fjall(
         active_dictionary_bytes,
         active_run_meta_rows,
         active_run_meta_bytes,
-        active_canonical_rows,
-        active_canonical_bytes,
         deletion,
         maintenance,
         queries,
@@ -929,10 +727,6 @@ struct RunTotals {
     packed_segment_encode_ns: u64,
     commit_ns: u64,
     encoded_event_bytes: u64,
-    canonical_rows: u64,
-    canonical_bytes: u64,
-    canonical_build_ns: u64,
-    canonical_insert_ns: u64,
     segment_rows: u64,
     segment_bytes: u64,
     dictionary_rows: u64,
@@ -992,7 +786,6 @@ fn apply_redb_deletion_overlay(
     db: &Database,
     events: &[Event],
     batch_size: usize,
-    canonical_layout: RedbCanonicalLayout,
 ) -> Result<DeletionMetrics, String> {
     let started = Instant::now();
     let event_keys = deletion_event_keys(events);
@@ -1014,11 +807,9 @@ fn apply_redb_deletion_overlay(
         .map_err(|error| error.to_string())?;
     for &event_key in &event_keys {
         let event = &events[event_key as usize - 1];
-        if canonical_layout == RedbCanonicalLayout::Rows {
-            event_rows
-                .remove(event_key)
-                .map_err(|error| error.to_string())?;
-        }
+        event_rows
+            .remove(event_key)
+            .map_err(|error| error.to_string())?;
         event_ids
             .remove(event.id.as_bytes())
             .map_err(|error| error.to_string())?;
@@ -1542,7 +1333,6 @@ fn finish_metrics(
     event_count: u64,
     batch_size: usize,
     wall_ns: u64,
-    reopen_ns: u64,
     totals: RunTotals,
     commit_latencies: &[u64],
     process: StoreBenchProcessCounters,
@@ -1555,8 +1345,6 @@ fn finish_metrics(
     active_dictionary_bytes: u64,
     active_run_meta_rows: u64,
     active_run_meta_bytes: u64,
-    active_canonical_rows: u64,
-    active_canonical_bytes: u64,
     deletion: DeletionMetrics,
     maintenance: MaintenanceMetrics,
     queries: Vec<PackedQueryMetrics>,
@@ -1571,7 +1359,6 @@ fn finish_metrics(
         transaction_batch_size: batch_size,
         transactions: totals.transactions,
         wall_ns,
-        reopen_ns,
         segment_build_ns: totals.segment_build_ns,
         packed_encode_ns: totals.packed_encode_ns,
         packed_dictionary_build_ns: totals.packed_dictionary_build_ns,
@@ -1595,12 +1382,6 @@ fn finish_metrics(
         peak_rss_bytes: process.peak_rss_bytes,
         process_write_bytes: process.process_write_bytes,
         encoded_event_bytes: totals.encoded_event_bytes,
-        canonical_rows: totals.canonical_rows,
-        canonical_bytes: totals.canonical_bytes,
-        canonical_build_ns: totals.canonical_build_ns,
-        canonical_insert_ns: totals.canonical_insert_ns,
-        active_canonical_rows,
-        active_canonical_bytes,
         segment_rows: totals.segment_rows,
         segment_bytes: totals.segment_bytes,
         dictionary_rows: totals.dictionary_rows,
@@ -1797,119 +1578,6 @@ fn decode_fjall_dead_keys(
         dead_keys.extend(decode_dead_keys(&value)?);
     }
     Ok(dead_keys)
-}
-
-fn canonical_run_event_bytes(
-    runs: &impl ReadableTable<u64, &'static [u8]>,
-    catalog: &impl ReadableTable<u64, u64>,
-    event_key: u64,
-) -> Result<Vec<u8>, String> {
-    let catalog_entry = catalog
-        .range(..=event_key)
-        .map_err(|error| error.to_string())?
-        .next_back()
-        .ok_or_else(|| format!("no canonical run covers event key {event_key}"))?
-        .map_err(|error| error.to_string())?;
-    let (min_event_key, run_id) = catalog_entry;
-    let run_id = run_id.value();
-    let run = runs
-        .get(run_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("missing canonical run {run_id}"))?;
-    let view = CanonicalRunView::from_trusted(run.value())?;
-    if view.run_id() != run_id || view.min_event_key() != min_event_key.value() {
-        return Err("canonical run catalog disagrees with run header".to_owned());
-    }
-    Ok(view
-        .event_bytes(event_key)?
-        .ok_or_else(|| format!("canonical run does not cover event key {event_key}"))?
-        .to_vec())
-}
-
-fn query_redb_with_canonical(
-    read: &redb::ReadTransaction,
-    canonical_layout: RedbCanonicalLayout,
-    canonical_catalog: &[(u64, u64)],
-    family: Family,
-    prefix: &[u8],
-    limit: usize,
-) -> Result<Vec<u64>, String> {
-    let event_keys = query_redb(read, family, prefix, limit)?;
-    match canonical_layout {
-        RedbCanonicalLayout::Rows => {
-            let event_rows = read.open_table(EVENTS).map_err(|error| error.to_string())?;
-            for &event_key in &event_keys {
-                let value = event_rows
-                    .get(event_key)
-                    .map_err(|error| error.to_string())?
-                    .ok_or_else(|| format!("missing canonical event row {event_key}"))?;
-                binary_event::StoredEventView::from_trusted(value.value())
-                    .map_err(|error| format!("invalid queried canonical event: {error}"))?
-                    .materialize_event()
-                    .map_err(|error| format!("materialize queried canonical event: {error}"))?;
-            }
-        }
-        RedbCanonicalLayout::Runs => {
-            let canonical_runs = read
-                .open_table(CANONICAL_RUNS)
-                .map_err(|error| error.to_string())?;
-            if event_keys.len() <= 8 {
-                for &event_key in &event_keys {
-                    let position = canonical_catalog.partition_point(|(min, _)| *min <= event_key);
-                    let run_id = canonical_catalog
-                        .get(position.saturating_sub(1))
-                        .filter(|_| position != 0)
-                        .map(|(_, run_id)| *run_id)
-                        .ok_or_else(|| format!("no canonical run covers event key {event_key}"))?;
-                    let run = canonical_runs
-                        .get(run_id)
-                        .map_err(|error| error.to_string())?
-                        .ok_or_else(|| format!("missing canonical run {run_id}"))?;
-                    let view = CanonicalRunView::from_trusted(run.value())?;
-                    let bytes = view.event_bytes(event_key)?.ok_or_else(|| {
-                        format!("canonical run does not cover event key {event_key}")
-                    })?;
-                    binary_event::StoredEventView::from_trusted(bytes)
-                        .map_err(|error| format!("invalid queried canonical event: {error}"))?
-                        .materialize_event()
-                        .map_err(|error| format!("materialize queried canonical event: {error}"))?;
-                }
-                return Ok(event_keys);
-            }
-            let mut keys_by_catalog: Vec<Vec<u64>> =
-                (0..canonical_catalog.len()).map(|_| Vec::new()).collect();
-            for &event_key in &event_keys {
-                let position = canonical_catalog.partition_point(|(min, _)| *min <= event_key);
-                let index = position
-                    .checked_sub(1)
-                    .ok_or_else(|| format!("no canonical run covers event key {event_key}"))?;
-                keys_by_catalog[index].push(event_key);
-            }
-            for ((_, run_id), keys) in canonical_catalog.iter().copied().zip(keys_by_catalog) {
-                if keys.is_empty() {
-                    continue;
-                }
-                let run = canonical_runs
-                    .get(run_id)
-                    .map_err(|error| error.to_string())?
-                    .ok_or_else(|| format!("missing canonical run {run_id}"))?;
-                let view = CanonicalRunView::from_trusted(run.value())?;
-                if view.run_id() != run_id {
-                    return Err("canonical run key/value id mismatch".to_owned());
-                }
-                for event_key in keys {
-                    let bytes = view.event_bytes(event_key)?.ok_or_else(|| {
-                        format!("canonical run does not cover event key {event_key}")
-                    })?;
-                    binary_event::StoredEventView::from_trusted(bytes)
-                        .map_err(|error| format!("invalid queried canonical event: {error}"))?
-                        .materialize_event()
-                        .map_err(|error| format!("materialize queried canonical event: {error}"))?;
-                }
-            }
-        }
-    }
-    Ok(event_keys)
 }
 
 fn query_redb(
@@ -2360,28 +2028,8 @@ mod tests {
         let db = Database::create(path).unwrap();
         let init = db.begin_write().unwrap();
         init.open_table(EVENTS).unwrap();
-        init.open_table(EVENT_IDS).unwrap();
-        init.open_table(CANONICAL_RUNS).unwrap();
-        init.open_table(CANONICAL_RUN_BY_MIN).unwrap();
         init.open_table(PACKED_SEGMENTS).unwrap();
         init.commit().unwrap();
-
-        let keys = Keys::generate();
-        let committed_event = EventBuilder::new(Kind::TextNote, "committed")
-            .sign_with_keys(&keys)
-            .unwrap();
-        let staged_event = EventBuilder::new(Kind::TextNote, "staged")
-            .sign_with_keys(&keys)
-            .unwrap();
-        let committed_run = canonical_run::encode(
-            0,
-            1,
-            &[binary_event::encode_event(&committed_event).unwrap()],
-        )
-        .unwrap();
-        let staged_run =
-            canonical_run::encode(1, 2, &[binary_event::encode_event(&staged_event).unwrap()])
-                .unwrap();
 
         let committed = db.begin_write().unwrap();
         committed
@@ -2393,21 +2041,6 @@ mod tests {
             .open_table(PACKED_SEGMENTS)
             .unwrap()
             .insert(&[0, 0, 0][..], &[1][..])
-            .unwrap();
-        committed
-            .open_table(EVENT_IDS)
-            .unwrap()
-            .insert(committed_event.id.as_bytes(), 1)
-            .unwrap();
-        committed
-            .open_table(CANONICAL_RUNS)
-            .unwrap()
-            .insert(0, committed_run.as_slice())
-            .unwrap();
-        committed
-            .open_table(CANONICAL_RUN_BY_MIN)
-            .unwrap()
-            .insert(1, 0)
             .unwrap();
         committed.commit().unwrap();
 
@@ -2421,21 +2054,6 @@ mod tests {
             .open_table(PACKED_SEGMENTS)
             .unwrap()
             .insert(&[0, 0, 1][..], &[2][..])
-            .unwrap();
-        staged
-            .open_table(EVENT_IDS)
-            .unwrap()
-            .insert(staged_event.id.as_bytes(), 2)
-            .unwrap();
-        staged
-            .open_table(CANONICAL_RUNS)
-            .unwrap()
-            .insert(1, staged_run.as_slice())
-            .unwrap();
-        staged
-            .open_table(CANONICAL_RUN_BY_MIN)
-            .unwrap()
-            .insert(2, 1)
             .unwrap();
         unsafe { libc::_exit(73) }
     }
@@ -2456,9 +2074,6 @@ mod tests {
         let reopened = Database::open(path).unwrap();
         let read = reopened.begin_read().unwrap();
         let events = read.open_table(EVENTS).unwrap();
-        let event_ids = read.open_table(EVENT_IDS).unwrap();
-        let canonical_runs = read.open_table(CANONICAL_RUNS).unwrap();
-        let canonical_catalog = read.open_table(CANONICAL_RUN_BY_MIN).unwrap();
         let segments = read.open_table(PACKED_SEGMENTS).unwrap();
         assert_eq!(events.len().unwrap(), 1);
         assert_eq!(segments.len().unwrap(), 1);
@@ -2466,18 +2081,5 @@ mod tests {
         assert!(events.get(2).unwrap().is_none());
         assert!(segments.get(&[0, 0, 0][..]).unwrap().is_some());
         assert!(segments.get(&[0, 0, 1][..]).unwrap().is_none());
-        assert_eq!(event_ids.len().unwrap(), 1);
-        assert_eq!(canonical_runs.len().unwrap(), 1);
-        assert_eq!(canonical_catalog.len().unwrap(), 1);
-        let committed_run = canonical_runs.get(0).unwrap().unwrap();
-        assert_eq!(
-            CanonicalRunView::parse(committed_run.value())
-                .unwrap()
-                .len(),
-            1
-        );
-        assert!(canonical_runs.get(1).unwrap().is_none());
-        assert!(canonical_catalog.get(1).unwrap().is_some());
-        assert!(canonical_catalog.get(2).unwrap().is_none());
     }
 }

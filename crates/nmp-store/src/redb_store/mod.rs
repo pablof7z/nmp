@@ -53,8 +53,6 @@ use crate::{
 };
 
 #[cfg(feature = "bench-instrumentation")]
-mod canonical_run_bench;
-#[cfg(feature = "bench-instrumentation")]
 mod compact_index_bench;
 #[cfg(feature = "bench-instrumentation")]
 mod fjall_ingest_bench;
