@@ -12,6 +12,8 @@ pub struct Snapshot {
     pub diagnostic_duplicate_ceiling_lookups: u64,
     pub diagnostic_duplicate_ceiling_hits: u64,
     pub diagnostic_duplicate_ceiling_inserts: u64,
+    pub diagnostic_preparsed_ceiling_lookups: u64,
+    pub diagnostic_preparsed_ceiling_hits: u64,
     pub parse_attempts: u64,
     pub parsed_frames: u64,
     pub parse_ns: u64,
@@ -47,6 +49,8 @@ counters!(
     DIAGNOSTIC_DUPLICATE_CEILING_LOOKUPS,
     DIAGNOSTIC_DUPLICATE_CEILING_HITS,
     DIAGNOSTIC_DUPLICATE_CEILING_INSERTS,
+    DIAGNOSTIC_PREPARSED_CEILING_LOOKUPS,
+    DIAGNOSTIC_PREPARSED_CEILING_HITS,
     PARSE_ATTEMPTS,
     PARSED_FRAMES,
     PARSE_NS,
@@ -92,6 +96,8 @@ pub fn reset() {
         &DIAGNOSTIC_DUPLICATE_CEILING_LOOKUPS,
         &DIAGNOSTIC_DUPLICATE_CEILING_HITS,
         &DIAGNOSTIC_DUPLICATE_CEILING_INSERTS,
+        &DIAGNOSTIC_PREPARSED_CEILING_LOOKUPS,
+        &DIAGNOSTIC_PREPARSED_CEILING_HITS,
         &PARSE_ATTEMPTS,
         &PARSED_FRAMES,
         &PARSE_NS,
@@ -131,6 +137,8 @@ pub fn snapshot() -> Snapshot {
         diagnostic_duplicate_ceiling_lookups: load(&DIAGNOSTIC_DUPLICATE_CEILING_LOOKUPS),
         diagnostic_duplicate_ceiling_hits: load(&DIAGNOSTIC_DUPLICATE_CEILING_HITS),
         diagnostic_duplicate_ceiling_inserts: load(&DIAGNOSTIC_DUPLICATE_CEILING_INSERTS),
+        diagnostic_preparsed_ceiling_lookups: load(&DIAGNOSTIC_PREPARSED_CEILING_LOOKUPS),
+        diagnostic_preparsed_ceiling_hits: load(&DIAGNOSTIC_PREPARSED_CEILING_HITS),
         parse_attempts: load(&PARSE_ATTEMPTS),
         parsed_frames: load(&PARSED_FRAMES),
         parse_ns: load(&PARSE_NS),
@@ -192,6 +200,11 @@ pub(crate) fn diagnostic_duplicate_ceiling_lookup(hit: bool) {
 
 pub(crate) fn diagnostic_duplicate_ceiling_insert() {
     DIAGNOSTIC_DUPLICATE_CEILING_INSERTS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn diagnostic_preparsed_ceiling_lookup(hit: bool) {
+    DIAGNOSTIC_PREPARSED_CEILING_LOOKUPS.fetch_add(1, Ordering::Relaxed);
+    DIAGNOSTIC_PREPARSED_CEILING_HITS.fetch_add(hit as u64, Ordering::Relaxed);
 }
 
 pub(crate) fn parse(duration: Duration, parsed: bool) {

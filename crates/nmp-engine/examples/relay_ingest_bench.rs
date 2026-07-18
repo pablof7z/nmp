@@ -42,6 +42,7 @@ fn main() -> Result<(), ProbeError> {
             "--diagnostic-duplicate-ceiling-event-payload" => {
                 config.diagnostic_duplicate_ceiling_event_payload = true
             }
+            "--diagnostic-preparsed-ceiling" => config.diagnostic_preparsed_ceiling = true,
             "--diagnostic-skip-event-id-validation" => {
                 config.diagnostic_skip_event_id_validation = true
             }
@@ -139,6 +140,8 @@ fn print_help() {
                              unsafe benchmark-only precommit exact-frame cache (default 0)\n\
          --diagnostic-duplicate-ceiling-event-payload\n\
                              fingerprint only the raw EVENT object, independent of subscription id\n\
+         --diagnostic-preparsed-ceiling\n\
+                             unsafe benchmark-only favorable ceiling; preload parsed frames\n\
          --diagnostic-skip-event-id-validation\n\
                              unsafe benchmark-only favorable ceiling; trust relay event IDs\n\
          --diagnostic-skip-signature-verification\n\
