@@ -69,7 +69,7 @@ impl ShutdownHandles {
 }
 
 struct SlotState {
-    session: RelaySessionKey,
+    session: Arc<RelaySessionKey>,
     /// `None` once explicitly closed (via `Pool::close`) or after
     /// `Pool::shutdown` — a slot in this state accepts no further worker
     /// events (see [`apply_worker_event`]) and is only revivable by a fresh
@@ -338,7 +338,7 @@ impl PoolInner {
         let generation = pack_generation(worker_id, 0);
         let worker = self.spawn_worker(slot_id, worker_id, &session)?;
         self.slots.push(SlotState {
-            session: session.clone(),
+            session: Arc::new(session.clone()),
             worker: Some(worker),
             generation,
             health: RelayHealth {
@@ -366,7 +366,7 @@ impl PoolInner {
         let generation = pack_generation(worker_id, 0);
         let worker = self.spawn_worker(slot_id, worker_id, &session)?;
         self.slots[slot_id as usize] = SlotState {
-            session,
+            session: Arc::new(session),
             worker: Some(worker),
             generation,
             health: RelayHealth {
@@ -443,7 +443,7 @@ impl PoolInner {
         h: RelayHandle,
     ) -> Option<&WorkerHandle> {
         let state = self.slots.get(h.slot as usize)?;
-        if state.session != *session
+        if state.session.as_ref() != session
             || state.generation != h.generation
             || state.health.state != ConnState::Connected
         {
@@ -486,7 +486,7 @@ impl PoolInner {
         }
         let worker = state.worker.take()?;
         let generation = state.generation;
-        let session = state.session.clone();
+        let session = state.session.as_ref().clone();
         state.health.state = ConnState::Disconnected;
         self.retire_worker(h.slot, generation, worker);
         Some(PoolEvent::Disconnected {
@@ -508,7 +508,9 @@ impl PoolInner {
             .slots
             .iter()
             .enumerate()
-            .filter(|(_, state)| state.worker.is_some() && !required.contains(&state.session))
+            .filter(|(_, state)| {
+                state.worker.is_some() && !required.contains(state.session.as_ref())
+            })
             .map(|(slot, state)| RelayHandle {
                 slot: u32::try_from(slot).expect("pool slot id already fit u32 at allocation"),
                 generation: state.generation,
@@ -964,7 +966,7 @@ fn apply_worker_event_with_verdict(
                     slot: event.slot,
                     generation: event.generation,
                 },
-                session: state.session.clone(),
+                session: state.session.as_ref().clone(),
             })
         }
         WorkerEventKind::Failed {
@@ -1009,7 +1011,7 @@ fn apply_worker_event_with_verdict(
                 // worker left behind for the caller to keep observing.
                 let taken = state.worker.take();
                 let generation = state.generation;
-                let session = state.session.clone();
+                let session = state.session.as_ref().clone();
                 // `state`'s mutable borrow of `inner.slots` ends here (its
                 // last use); `retire_worker` below takes `&mut inner` for
                 // the whole `PoolInner`, which NLL only allows once `state`
@@ -1026,13 +1028,13 @@ fn apply_worker_event_with_verdict(
             if was_connected {
                 Some(PoolEvent::Disconnected {
                     handle,
-                    session: state.session.clone(),
+                    session: state.session.as_ref().clone(),
                     reason: DisconnectReason::Error,
                 })
             } else {
                 Some(PoolEvent::Health {
                     handle,
-                    session: state.session.clone(),
+                    session: state.session.as_ref().clone(),
                     health: state.health.clone(),
                 })
             }
@@ -1054,7 +1056,7 @@ fn apply_worker_event_with_verdict(
                         slot: event.slot,
                         generation: event.generation,
                     },
-                    session: state.session.clone(),
+                    session: Arc::clone(&state.session),
                     frame,
                 }),
                 FrameVerdict::RejectMisbehavior => {
@@ -1064,7 +1066,7 @@ fn apply_worker_event_with_verdict(
                             slot: event.slot,
                             generation: event.generation,
                         },
-                        session: state.session.clone(),
+                        session: state.session.as_ref().clone(),
                         health: state.health.clone(),
                     })
                 }
@@ -1075,7 +1077,7 @@ fn apply_worker_event_with_verdict(
                             slot: event.slot,
                             generation: event.generation,
                         },
-                        session: state.session.clone(),
+                        session: state.session.as_ref().clone(),
                         health: state.health.clone(),
                     })
                 }
@@ -1090,7 +1092,7 @@ fn apply_worker_event_with_verdict(
                     slot: event.slot,
                     generation: event.generation,
                 },
-                session: state.session.clone(),
+                session: state.session.as_ref().clone(),
             })
         }
         WorkerEventKind::EventHandoff { .. } => {

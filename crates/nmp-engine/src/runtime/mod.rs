@@ -653,7 +653,7 @@ enum Cmd {
     RelayBatch {
         frames: Vec<(
             nmp_transport::RelayHandle,
-            RelaySessionKey,
+            Arc<RelaySessionKey>,
             nmp_transport::RelayFrame,
         )>,
         applied: cb::Sender<()>,
@@ -1812,7 +1812,7 @@ fn pool_bridge_loop(
 }
 
 fn send_relay_batch(
-    frames: Vec<(nmp_transport::RelayHandle, RelaySessionKey, RelayFrame)>,
+    frames: Vec<(nmp_transport::RelayHandle, Arc<RelaySessionKey>, RelayFrame)>,
     stopping: &cb::Receiver<()>,
     engine_inbox: &Sender<Cmd>,
 ) -> bool {
@@ -1927,7 +1927,7 @@ mod pool_bridge_tests {
         pool_tx
             .send(PoolEvent::Frame {
                 handle,
-                session: session.clone(),
+                session: Arc::new(session.clone()),
                 frame: RelayFrame::from_message(RelayMessage::Auth {
                     challenge: "bridge-ordered".into(),
                 }),
@@ -1988,7 +1988,7 @@ mod pool_bridge_tests {
         pool_tx
             .send(PoolEvent::Frame {
                 handle,
-                session: test_session(),
+                session: Arc::new(test_session()),
                 frame: notice_frame("first"),
             })
             .unwrap();
@@ -2003,7 +2003,7 @@ mod pool_bridge_tests {
         pool_tx
             .send(PoolEvent::Frame {
                 handle,
-                session: test_session(),
+                session: Arc::new(test_session()),
                 frame: notice_frame("second"),
             })
             .unwrap();
@@ -2039,7 +2039,7 @@ mod pool_bridge_tests {
             pool_tx
                 .send(PoolEvent::Frame {
                     handle,
-                    session: test_session(),
+                    session: Arc::new(test_session()),
                     frame: event_frame(text),
                 })
                 .unwrap();
@@ -2089,7 +2089,7 @@ mod pool_bridge_tests {
             pool_tx
                 .send(PoolEvent::Frame {
                     handle,
-                    session: test_session(),
+                    session: Arc::new(test_session()),
                     frame,
                 })
                 .unwrap();
@@ -2149,7 +2149,7 @@ mod pool_bridge_tests {
         pool_tx
             .send(PoolEvent::Frame {
                 handle,
-                session: test_session(),
+                session: Arc::new(test_session()),
                 frame: event_frame("before"),
             })
             .unwrap();
@@ -2157,7 +2157,7 @@ mod pool_bridge_tests {
         pool_tx
             .send(PoolEvent::Frame {
                 handle,
-                session: test_session(),
+                session: Arc::new(test_session()),
                 frame: event_frame("after"),
             })
             .unwrap();
@@ -2210,7 +2210,7 @@ mod pool_bridge_tests {
             pool_tx
                 .send(PoolEvent::Frame {
                     handle,
-                    session: test_session(),
+                    session: Arc::new(test_session()),
                     frame,
                 })
                 .unwrap();
@@ -2263,7 +2263,7 @@ mod pool_bridge_tests {
         pool_tx
             .send(PoolEvent::Frame {
                 handle,
-                session: test_session(),
+                session: Arc::new(test_session()),
                 frame: event_frame("first"),
             })
             .unwrap();
@@ -2271,7 +2271,7 @@ mod pool_bridge_tests {
         pool_tx
             .send(PoolEvent::Frame {
                 handle,
-                session: test_session(),
+                session: Arc::new(test_session()),
                 frame: event_frame("second"),
             })
             .unwrap();
@@ -2302,7 +2302,7 @@ mod pool_bridge_tests {
                     slot: 1,
                     generation: 2,
                 },
-                session: test_session(),
+                session: Arc::new(test_session()),
                 frame: notice_frame("pending"),
             })
             .unwrap();
@@ -3389,7 +3389,11 @@ fn translate_pool_event(event: PoolEvent) -> Option<EngineMsg> {
             handle,
             session,
             frame,
-        } => Some(EngineMsg::RelayFrame(handle, session, frame)),
+        } => Some(EngineMsg::RelayFrame(
+            handle,
+            session.as_ref().clone(),
+            frame,
+        )),
         PoolEvent::Health {
             handle,
             session,
@@ -4709,7 +4713,7 @@ fn engine_loop<S, D>(
 #[allow(clippy::too_many_arguments)]
 fn reduce_and_dispatch_committed_observations<S: EventStore>(
     core: &mut EngineCore<S>,
-    frames: Vec<(nmp_transport::RelayHandle, RelaySessionKey, RelayFrame)>,
+    frames: Vec<(nmp_transport::RelayHandle, Arc<RelaySessionKey>, RelayFrame)>,
     pool: &Pool,
     row_channels: &mut HashMap<HandleId, RowsSender>,
     history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
@@ -4773,7 +4777,7 @@ fn reduce_and_dispatch_committed_observations<S: EventStore>(
 #[allow(clippy::too_many_arguments)]
 fn reduce_and_dispatch_relay_frames<S: EventStore>(
     core: &mut EngineCore<S>,
-    frames: Vec<(nmp_transport::RelayHandle, RelaySessionKey, RelayFrame)>,
+    frames: Vec<(nmp_transport::RelayHandle, Arc<RelaySessionKey>, RelayFrame)>,
     pool: &Pool,
     row_channels: &mut HashMap<HandleId, RowsSender>,
     history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,

@@ -1203,42 +1203,72 @@ impl<S: EventStore> EngineCore<S> {
     /// `RelayFrames` door remains defensive for every unvalidated frame.
     pub(crate) fn on_revalidated_committed_observations(
         &mut self,
-        observations: Vec<(RelaySessionKey, u16)>,
+        observations: Vec<(Arc<RelaySessionKey>, u16)>,
     ) -> Vec<Effect> {
         if observations.is_empty() {
             return Vec::new();
         }
+        let mut counts: HashMap<Arc<RelaySessionKey>, BTreeMap<u16, u64>> = HashMap::new();
         for (session, event_kind) in observations {
-            *self
-                .events_by_session_kind
+            *counts
                 .entry(session)
                 .or_default()
                 .entry(event_kind)
                 .or_insert(0) += 1;
         }
+        self.merge_relay_event_counts(counts);
         vec![Effect::EmitDiagnostics(self.diagnostics_snapshot())]
+    }
+
+    fn merge_relay_event_counts(
+        &mut self,
+        counts: HashMap<Arc<RelaySessionKey>, BTreeMap<u16, u64>>,
+    ) {
+        for (session, kinds) in counts {
+            let totals = self
+                .events_by_session_kind
+                .entry(session.as_ref().clone())
+                .or_default();
+            for (kind, count) in kinds {
+                *totals.entry(kind).or_insert(0) += count;
+            }
+        }
+    }
+
+    fn flush_relay_observations(
+        &mut self,
+        candidates: &mut Vec<(
+            SignedEvent,
+            RelayObserved,
+            Option<CommittedObservationCandidate>,
+        )>,
+        counts: &mut HashMap<Arc<RelaySessionKey>, BTreeMap<u16, u64>>,
+        effects: &mut Vec<Effect>,
+    ) {
+        self.merge_relay_event_counts(std::mem::take(counts));
+        self.ingest_relay_observations(std::mem::take(candidates), effects);
     }
 
     pub(super) fn on_relay_frames(
         &mut self,
-        frames: Vec<(TransportRelayHandle, RelaySessionKey, RelayFrame)>,
+        frames: Vec<(TransportRelayHandle, Arc<RelaySessionKey>, RelayFrame)>,
     ) -> Vec<Effect> {
         let mut effects = Vec::new();
         let mut candidates = Vec::new();
+        let mut event_counts = HashMap::new();
         #[cfg(feature = "bench-instrumentation")]
         let mut observed_diagnostic_duplicate = false;
         for (handle, reported_session, frame) in frames {
             let frame = match frame {
                 RelayFrame::CommittedObservation(hit) => {
-                    self.ingest_relay_observations(std::mem::take(&mut candidates), &mut effects);
+                    self.flush_relay_observations(&mut candidates, &mut event_counts, &mut effects);
                     let Some((current, session)) = self.slot_to_relay.get(&handle.slot) else {
                         continue;
                     };
-                    if *current != handle || session != &reported_session {
+                    if *current != handle || session != reported_session.as_ref() {
                         continue;
                     }
-                    *self
-                        .events_by_session_kind
+                    *event_counts
                         .entry(reported_session)
                         .or_default()
                         .entry(hit.event_kind())
@@ -1250,15 +1280,14 @@ impl<S: EventStore> EngineCore<S> {
             #[cfg(feature = "bench-instrumentation")]
             if let Some((event_kind, _)) = frame.diagnostic_duplicate_ceiling() {
                 let Some((current, session)) = self.slot_to_relay.get(&handle.slot) else {
-                    self.ingest_relay_observations(std::mem::take(&mut candidates), &mut effects);
+                    self.flush_relay_observations(&mut candidates, &mut event_counts, &mut effects);
                     continue;
                 };
-                if *current != handle || session != &reported_session {
-                    self.ingest_relay_observations(std::mem::take(&mut candidates), &mut effects);
+                if *current != handle || session != reported_session.as_ref() {
+                    self.flush_relay_observations(&mut candidates, &mut event_counts, &mut effects);
                     continue;
                 }
-                *self
-                    .events_by_session_kind
+                *event_counts
                     .entry(reported_session)
                     .or_default()
                     .entry(event_kind)
@@ -1276,8 +1305,9 @@ impl<S: EventStore> EngineCore<S> {
                     #[cfg(feature = "bench-instrumentation")]
                     let phase_started = std::time::Instant::now();
                     let Some((current, session)) = self.slot_to_relay.get(&handle.slot) else {
-                        self.ingest_relay_observations(
-                            std::mem::take(&mut candidates),
+                        self.flush_relay_observations(
+                            &mut candidates,
+                            &mut event_counts,
                             &mut effects,
                         );
                         continue;
@@ -1286,9 +1316,10 @@ impl<S: EventStore> EngineCore<S> {
                     // generation OR a session that no longer occupies this
                     // slot is dropped exactly — never re-attributed to the
                     // slot's current occupant.
-                    if *current != handle || session != &reported_session {
-                        self.ingest_relay_observations(
-                            std::mem::take(&mut candidates),
+                    if *current != handle || session != reported_session.as_ref() {
+                        self.flush_relay_observations(
+                            &mut candidates,
+                            &mut event_counts,
                             &mut effects,
                         );
                         continue;
@@ -1300,8 +1331,7 @@ impl<S: EventStore> EngineCore<S> {
                     #[cfg(feature = "bench-instrumentation")]
                     let phase_started = std::time::Instant::now();
                     let observed_relay = reported_session.relay.clone();
-                    *self
-                        .events_by_session_kind
+                    *event_counts
                         .entry(reported_session)
                         .or_default()
                         .entry(event.kind.as_u16())
@@ -1321,12 +1351,16 @@ impl<S: EventStore> EngineCore<S> {
                     crate::ingest_attribution::relay_frame_candidate_build(phase_started.elapsed());
                 }
                 Err(frame) => {
-                    self.ingest_relay_observations(std::mem::take(&mut candidates), &mut effects);
-                    effects.extend(self.on_relay_frame(handle, reported_session, frame));
+                    self.flush_relay_observations(&mut candidates, &mut event_counts, &mut effects);
+                    effects.extend(self.on_relay_frame(
+                        handle,
+                        reported_session.as_ref().clone(),
+                        frame,
+                    ));
                 }
             }
         }
-        self.ingest_relay_observations(candidates, &mut effects);
+        self.flush_relay_observations(&mut candidates, &mut event_counts, &mut effects);
         #[cfg(feature = "bench-instrumentation")]
         if observed_diagnostic_duplicate {
             effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
