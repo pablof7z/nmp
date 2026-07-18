@@ -19,6 +19,12 @@ pub struct Snapshot {
     pub relay_ingest_post_store_ns: u64,
     pub relay_ingest_apply_committed_ns: u64,
     pub relay_ingest_effect_build_ns: u64,
+    pub relay_ingest_observations_call_ns: u64,
+    pub relay_resolver_call_ns: u64,
+    pub relay_frame_conversion_ns: u64,
+    pub relay_frame_session_validation_ns: u64,
+    pub relay_frame_diagnostics_count_ns: u64,
+    pub relay_frame_candidate_build_ns: u64,
     pub committed_observation_effect_ns: u64,
     pub diagnostics_effect_ns: u64,
     pub committed_projection_total_ns: u64,
@@ -61,6 +67,12 @@ counters!(
     RELAY_INGEST_POST_STORE_NS,
     RELAY_INGEST_APPLY_COMMITTED_NS,
     RELAY_INGEST_EFFECT_BUILD_NS,
+    RELAY_INGEST_OBSERVATIONS_CALL_NS,
+    RELAY_RESOLVER_CALL_NS,
+    RELAY_FRAME_CONVERSION_NS,
+    RELAY_FRAME_SESSION_VALIDATION_NS,
+    RELAY_FRAME_DIAGNOSTICS_COUNT_NS,
+    RELAY_FRAME_CANDIDATE_BUILD_NS,
     COMMITTED_OBSERVATION_EFFECT_NS,
     DIAGNOSTICS_EFFECT_NS,
     COMMITTED_PROJECTION_TOTAL_NS,
@@ -108,6 +120,12 @@ pub fn reset() {
         &RELAY_INGEST_POST_STORE_NS,
         &RELAY_INGEST_APPLY_COMMITTED_NS,
         &RELAY_INGEST_EFFECT_BUILD_NS,
+        &RELAY_INGEST_OBSERVATIONS_CALL_NS,
+        &RELAY_RESOLVER_CALL_NS,
+        &RELAY_FRAME_CONVERSION_NS,
+        &RELAY_FRAME_SESSION_VALIDATION_NS,
+        &RELAY_FRAME_DIAGNOSTICS_COUNT_NS,
+        &RELAY_FRAME_CANDIDATE_BUILD_NS,
         &COMMITTED_OBSERVATION_EFFECT_NS,
         &DIAGNOSTICS_EFFECT_NS,
         &COMMITTED_PROJECTION_TOTAL_NS,
@@ -156,6 +174,12 @@ pub fn snapshot() -> Snapshot {
         relay_ingest_post_store_ns: load(&RELAY_INGEST_POST_STORE_NS),
         relay_ingest_apply_committed_ns: load(&RELAY_INGEST_APPLY_COMMITTED_NS),
         relay_ingest_effect_build_ns: load(&RELAY_INGEST_EFFECT_BUILD_NS),
+        relay_ingest_observations_call_ns: load(&RELAY_INGEST_OBSERVATIONS_CALL_NS),
+        relay_resolver_call_ns: load(&RELAY_RESOLVER_CALL_NS),
+        relay_frame_conversion_ns: load(&RELAY_FRAME_CONVERSION_NS),
+        relay_frame_session_validation_ns: load(&RELAY_FRAME_SESSION_VALIDATION_NS),
+        relay_frame_diagnostics_count_ns: load(&RELAY_FRAME_DIAGNOSTICS_COUNT_NS),
+        relay_frame_candidate_build_ns: load(&RELAY_FRAME_CANDIDATE_BUILD_NS),
         committed_observation_effect_ns: load(&COMMITTED_OBSERVATION_EFFECT_NS),
         diagnostics_effect_ns: load(&DIAGNOSTICS_EFFECT_NS),
         committed_projection_total_ns: load(&COMMITTED_PROJECTION_TOTAL_NS),
@@ -221,6 +245,30 @@ pub(crate) fn relay_ingest_apply_committed(duration: Duration) {
 
 pub(crate) fn relay_ingest_effect_build(duration: Duration) {
     add(&RELAY_INGEST_EFFECT_BUILD_NS, duration);
+}
+
+pub(crate) fn relay_ingest_observations_call(duration: Duration) {
+    add(&RELAY_INGEST_OBSERVATIONS_CALL_NS, duration);
+}
+
+pub(crate) fn relay_resolver_call(duration: Duration) {
+    add(&RELAY_RESOLVER_CALL_NS, duration);
+}
+
+pub(crate) fn relay_frame_conversion(duration: Duration) {
+    add(&RELAY_FRAME_CONVERSION_NS, duration);
+}
+
+pub(crate) fn relay_frame_session_validation(duration: Duration) {
+    add(&RELAY_FRAME_SESSION_VALIDATION_NS, duration);
+}
+
+pub(crate) fn relay_frame_diagnostics_count(duration: Duration) {
+    add(&RELAY_FRAME_DIAGNOSTICS_COUNT_NS, duration);
+}
+
+pub(crate) fn relay_frame_candidate_build(duration: Duration) {
+    add(&RELAY_FRAME_CANDIDATE_BUILD_NS, duration);
 }
 
 pub(crate) fn committed_observation_effect(duration: Duration) {
