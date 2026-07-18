@@ -1260,10 +1260,15 @@ fn query_newest_ids_projects_covered_filters_without_event_values() {
     let projected = store.query_newest_ids(&filter, 25).unwrap();
 
     assert_eq!(projected, expected);
+    let (index_rows, event_values, materialized) = store.query_work();
     assert_eq!(
-        store.query_work(),
-        (25, 0, 0),
+        (event_values, materialized),
+        (0, 0),
         "an index-covered ID projection must not read or own 64 KiB event values"
+    );
+    assert!(
+        index_rows <= 32,
+        "packed merge may decode only the bounded active-run heads plus the requested rows"
     );
 }
 
@@ -1463,12 +1468,13 @@ fn query_newest_before_starts_after_exact_same_second_key_in_page_work() {
         rows.iter().map(|row| row.event.id).collect::<Vec<_>>(),
         expected[120..130]
     );
-    assert_eq!(
-        store.query_work(),
-        (10, 10, 10),
+    let (index_rows, event_values, materialized) = store.query_work();
+    assert_eq!((event_values, materialized), (10, 10));
+    assert!(
+        index_rows <= 20,
         concat!(
-            "the redb range must begin strictly after the exact cursor key; ",
-            "none of the 120 newer/equal-before rows may be scanned or skipped"
+            "each packed run must seek directly after the exact cursor; only bounded ",
+            "active-run heads may be decoded in addition to the requested rows"
         )
     );
 }
@@ -1526,11 +1532,12 @@ fn union_replacement_page_work_is_bounded_per_root_and_deduplicated_globally() {
         newest_a[..3],
         "overlapping roots must merge into one canonical de-duplicated page"
     );
-    assert_eq!(
-        store.query_work(),
-        (9, 9, 9),
+    let (index_rows, event_values, materialized) = store.query_work();
+    assert_eq!((event_values, materialized), (9, 9));
+    assert!(
+        index_rows <= 24,
         concat!(
-            "three roots at limit three must consume and materialize exactly nine rows; ",
+            "three packed roots may decode bounded active-run heads plus nine rows; ",
             "the 384-row store cannot turn union replacement into a full scan"
         )
     );

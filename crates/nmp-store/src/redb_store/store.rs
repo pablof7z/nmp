@@ -3,6 +3,8 @@ use super::outbox::{
     is_suppressed_in_txn, reconcile_ephemeral_receipts_in_txn, replace_lane_in_txn,
     OUTBOX_KIND5_CLAIMS, OUTBOX_SUPPRESS_BY_ADDR, OUTBOX_SUPPRESS_BY_ID,
 };
+use super::postings::Family;
+use super::postings_store::{scan_packed, PackedScan};
 use super::query::{
     ordered_fixed_page_range, ordered_index_event_id, ordered_vec_page_range,
     rebuild_index_cardinality, FixedOrderedCursor, OrderedIndex, OrderedPlan, OrderedWindow,
@@ -16,9 +18,10 @@ use super::schema::{
     INDEX_CARDINALITY_VERSION_KEY, LEGACY_BY_AUTHOR_KIND, LEGACY_EVENT_TABLES, OUTBOX_ATTEMPTS,
     OUTBOX_ATTEMPT_DETAILS, OUTBOX_CORRELATIONS, OUTBOX_DEADLINES, OUTBOX_DEADLINES_BY_INTENT,
     OUTBOX_DISPLACED, OUTBOX_INTENTS, OUTBOX_LANES, OUTBOX_META, OUTBOX_RECEIPTS,
-    OUTBOX_ROUTE_REVISIONS, PENDING_EPHEMERAL_RECEIPTS_KEY, PREVIOUS_SCHEMA_VERSION,
-    REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_META, RELAY_REFS, SCHEMA_META, SCHEMA_VERSION,
-    SCHEMA_VERSION_KEY, TOMBSTONES,
+    OUTBOX_ROUTE_REVISIONS, PENDING_EPHEMERAL_RECEIPTS_KEY, POSTINGS_DEAD_KEYS,
+    POSTINGS_DICTIONARIES, POSTINGS_META, POSTINGS_READY, POSTINGS_RUN_BY_MIN, POSTINGS_RUN_META,
+    POSTINGS_SEGMENTS, PREVIOUS_SCHEMA_VERSION, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_META,
+    RELAY_REFS, SCHEMA_META, SCHEMA_VERSION, SCHEMA_VERSION_KEY, TOMBSTONES,
 };
 #[cfg(any(test, feature = "bench-instrumentation"))]
 use super::AtomicU64;
@@ -284,6 +287,13 @@ impl RedbStore {
                 write_txn.open_table(BY_AUTHOR)?;
                 write_txn.open_table(BY_KIND)?;
                 write_txn.open_table(BY_TAG)?;
+                write_txn.open_table(POSTINGS_SEGMENTS)?;
+                write_txn.open_table(POSTINGS_DICTIONARIES)?;
+                write_txn.open_table(POSTINGS_RUN_META)?;
+                write_txn.open_table(POSTINGS_RUN_BY_MIN)?;
+                write_txn.open_table(POSTINGS_DEAD_KEYS)?;
+                let mut postings_meta = write_txn.open_table(POSTINGS_META)?;
+                postings_meta.insert(POSTINGS_READY, 1)?;
                 write_txn.open_table(INDEX_CARDINALITY)?;
                 let mut cardinality_meta = write_txn.open_table(INDEX_CARDINALITY_META)?;
                 cardinality_meta
@@ -729,6 +739,25 @@ impl RedbStore {
             Ok(Some(event_id))
         };
 
+        if packed_query_ready(read_txn)? {
+            return scan_packed(
+                read_txn,
+                PackedScan {
+                    family: packed_family(plan.index),
+                    prefixes: &plan.prefixes,
+                    since: window.since,
+                    until: window.until,
+                    before: window.before,
+                    limit: Some(limit),
+                },
+                || {
+                    #[cfg(any(test, feature = "bench-instrumentation"))]
+                    self.query_index_rows.fetch_add(1, Ordering::Relaxed);
+                },
+                &mut project_if_visible,
+            );
+        }
+
         match plan.index {
             OrderedIndex::Global => {
                 let index = read_txn.open_table(BY_CREATED_AT).map_err(persist_err)?;
@@ -862,6 +891,25 @@ impl RedbStore {
             Ok(Some(stored))
         };
 
+        if packed_query_ready(read_txn)? {
+            return scan_packed(
+                read_txn,
+                PackedScan {
+                    family: packed_family(plan.index),
+                    prefixes: &plan.prefixes,
+                    since: window.since,
+                    until: window.until,
+                    before: window.before,
+                    limit,
+                },
+                || {
+                    #[cfg(any(test, feature = "bench-instrumentation"))]
+                    self.query_index_rows.fetch_add(1, Ordering::Relaxed);
+                },
+                &mut materialize_if_visible,
+            );
+        }
+
         match plan.index {
             OrderedIndex::Global => {
                 let index = read_txn.open_table(BY_CREATED_AT).map_err(persist_err)?;
@@ -905,4 +953,25 @@ impl RedbStore {
             }
         }
     }
+}
+
+fn packed_family(index: OrderedIndex) -> Family {
+    match index {
+        OrderedIndex::Global => Family::Global,
+        OrderedIndex::Author => Family::Author,
+        OrderedIndex::Kind => Family::Kind,
+        OrderedIndex::Tag(_) => Family::Tag,
+    }
+}
+
+fn packed_query_ready(read_txn: &redb::ReadTransaction) -> Result<bool, PersistenceError> {
+    let meta = match read_txn.open_table(POSTINGS_META) {
+        Ok(meta) => meta,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(false),
+        Err(error) => return Err(persist_err(error)),
+    };
+    Ok(meta
+        .get(POSTINGS_READY)
+        .map_err(persist_err)?
+        .is_some_and(|value| value.value() == 1))
 }

@@ -401,7 +401,7 @@ impl GovernedIngestTxn for FjallIngestTxn<'_, '_> {
         self.mutate_index_rows(event, key, true)
     }
 
-    fn remove_indexes(&mut self, event: &Event) -> Result<(), PersistenceError> {
+    fn remove_indexes(&mut self, event: &Event, _key: EventKey) -> Result<(), PersistenceError> {
         self.mutate_index_rows(event, 0, false)
     }
 

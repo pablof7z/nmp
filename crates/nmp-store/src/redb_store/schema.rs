@@ -112,6 +112,23 @@ pub(super) const LEGACY_BY_AUTHOR_KIND: TableDefinition<&[u8; 74], EventKey> =
 /// Values are compact event keys, so a hit dereferences the immutable note
 /// directly without rebuilding or hex-encoding its NIP-01 id.
 pub(super) const BY_TAG: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_tag_v6");
+/// Immutable packed ordered-postings artifacts. These tables are dual-written
+/// while the v7 row indexes remain query-authoritative; the v8 migration flips
+/// authority only after exact differential validation.
+pub(super) const POSTINGS_SEGMENTS: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("postings_segments_v8");
+pub(super) const POSTINGS_DICTIONARIES: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("postings_dictionaries_v8");
+pub(super) const POSTINGS_RUN_META: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("postings_run_meta_v8");
+pub(super) const POSTINGS_RUN_BY_MIN: TableDefinition<u64, u64> =
+    TableDefinition::new("postings_run_by_min_v8");
+pub(super) const POSTINGS_DEAD_KEYS: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("postings_dead_keys_v8");
+pub(super) const POSTINGS_META: TableDefinition<&str, u64> =
+    TableDefinition::new("postings_meta_v8");
+pub(super) const POSTINGS_NEXT_RUN_ID: &str = "next_run_id";
+pub(super) const POSTINGS_READY: &str = "query_ready";
 /// Uniform sampled live-row counts for every ordered-index prefix. Keys are
 /// namespaced binary prefixes (global, author, kind, or tag/value); values
 /// count sampled physical rows in that bucket. Sampling is

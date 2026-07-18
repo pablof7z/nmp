@@ -327,7 +327,7 @@ pub(super) fn fan_out_signed_in_txn<T: GovernedIngestTxn>(
 /// — and the exact claims staged (for `OUTBOX_KIND5_CLAIMS`). Mirrors
 /// `MemoryStore::process_kind5_deletions_provisional` exactly.
 pub(super) fn process_kind5_deletions_provisional_in_txn(
-    txn: &mut RedbIngestTxn<'_>,
+    txn: &mut RedbIngestTxn<'_, '_>,
     intent_id: IntentId,
     deleting: &Event,
 ) -> Result<(Vec<StoredEvent>, Vec<SuppressClaimRecord>), PersistenceError> {
@@ -508,7 +508,7 @@ pub(super) fn find_any_displaced_key_by_event_id_in_txn(
 /// deduped away, or loses the address race (`Stale` — the correct, silent
 /// §3.4 outcome for a re-offered grand-predecessor: nothing churns).
 pub(super) fn reinsert_stashed_in_txn(
-    txn: &mut RedbIngestTxn<'_>,
+    txn: &mut RedbIngestTxn<'_, '_>,
     se: StoredEvent,
 ) -> Result<Option<StoredEvent>, PersistenceError> {
     if let Some((event_key, existing)) = txn.canonical.load_by_id(&se.event.id)? {

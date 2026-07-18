@@ -6,7 +6,7 @@
 //! for cursors and time bounds without repeating ids or decoding earlier rows.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::{BTreeMap, BinaryHeap, HashSet};
 
 const SEGMENT_MAGIC: &[u8; 8] = b"NMPPS\0\x03\0";
 const DICTIONARY_MAGIC: &[u8; 8] = b"NMPID\0\x02\0";
@@ -96,8 +96,11 @@ pub(super) struct EncodedRun {
     pub(super) dictionary: Vec<u8>,
     pub(super) segments: Vec<(Family, u8, Vec<u8>)>,
     pub(super) dictionary_entries: u64,
+    #[allow(dead_code)]
     pub(super) postings: u64,
+    #[allow(dead_code)]
     pub(super) prefixes: u64,
+    #[allow(dead_code)]
     pub(super) posting_bytes: u64,
     #[cfg_attr(not(feature = "bench-instrumentation"), allow(dead_code))]
     pub(super) dictionary_build_ns: u64,
@@ -122,38 +125,18 @@ pub(super) fn encode_run(mut memberships: Vec<Membership>) -> Result<EncodedRun,
         return Err("cannot encode an empty postings run".to_owned());
     }
     let dictionary_started = std::time::Instant::now();
-    let min_event_key = memberships
-        .iter()
-        .map(|membership| membership.event.event_key)
-        .min()
-        .expect("nonempty memberships");
-    let max_event_key = memberships
-        .iter()
-        .map(|membership| membership.event.event_key)
-        .max()
-        .expect("nonempty memberships");
-    let key_span = max_event_key
-        .checked_sub(min_event_key)
-        .and_then(|span| span.checked_add(1))
-        .and_then(|span| usize::try_from(span).ok())
-        .ok_or_else(|| "run event-key span exceeds usize".to_owned())?;
-    if key_span > memberships.len().saturating_mul(8) {
-        return Err("run event-key span is too sparse for bounded encoding".to_owned());
-    }
-    let mut ids_by_key = vec![None; key_span];
-    let mut ids = HashSet::with_capacity(key_span.min(memberships.len()));
+    let mut ids_by_key = BTreeMap::new();
+    let mut ids = HashSet::with_capacity(memberships.len());
     for membership in &memberships {
         if membership.shard != shard_for(membership.family, membership.prefix.as_bytes()) {
             return Err("membership is assigned to the wrong shard".to_owned());
         }
-        let offset = usize::try_from(membership.event.event_key - min_event_key)
-            .map_err(|_| "event-key offset exceeds usize".to_owned())?;
-        match &mut ids_by_key[offset] {
-            slot @ None => {
+        match ids_by_key.get(&membership.event.event_key) {
+            None => {
                 if !ids.insert(membership.event.id) {
                     return Err("one event id maps to multiple event keys".to_owned());
                 }
-                *slot = Some(membership.event.id);
+                ids_by_key.insert(membership.event.event_key, membership.event.id);
             }
             Some(id) if id != &membership.event.id => {
                 return Err(format!(
@@ -164,14 +147,13 @@ pub(super) fn encode_run(mut memberships: Vec<Membership>) -> Result<EncodedRun,
             Some(_) => {}
         }
     }
-    let mut ordinals = vec![u32::MAX; key_span];
+    let mut ordinals = BTreeMap::new();
     let mut dictionary_entries = Vec::with_capacity(ids.len());
-    for (offset, id) in ids_by_key.into_iter().enumerate() {
-        let Some(id) = id else { continue };
+    for (event_key, id) in ids_by_key {
         let ordinal = u32::try_from(dictionary_entries.len())
             .map_err(|_| "run dictionary exceeds u32".to_owned())?;
-        ordinals[offset] = ordinal;
-        dictionary_entries.push((min_event_key + offset as u64, id));
+        ordinals.insert(event_key, ordinal);
+        dictionary_entries.push((event_key, id));
     }
     let dictionary_build_ns = elapsed_ns(dictionary_started);
 
@@ -214,7 +196,7 @@ pub(super) fn encode_run(mut memberships: Vec<Membership>) -> Result<EncodedRun,
         segments.push((
             family,
             shard,
-            encode_segment(family, shard, segment_memberships, min_event_key, &ordinals)?,
+            encode_segment(family, shard, segment_memberships, &ordinals)?,
         ));
         start = end;
     }
@@ -262,8 +244,7 @@ fn encode_segment(
     family: Family,
     shard: u8,
     memberships: &[Membership],
-    min_event_key: u64,
-    ordinals: &[u32],
+    ordinals: &BTreeMap<u64, u32>,
 ) -> Result<Vec<u8>, String> {
     let prefix_count = 1 + memberships
         .windows(2)
@@ -302,13 +283,7 @@ fn encode_segment(
             u32::try_from(value.len()).map_err(|_| "segment offset exceeds u32".to_owned())?;
         let offset_start = offsets_start + prefix_ordinal * 4;
         value[offset_start..offset_start + 4].copy_from_slice(&offset.to_be_bytes());
-        encode_prefix_record(
-            &mut value,
-            prefix,
-            &memberships[start..end],
-            min_event_key,
-            ordinals,
-        )?;
+        encode_prefix_record(&mut value, prefix, &memberships[start..end], ordinals)?;
         prefix_ordinal += 1;
         start = end;
     }
@@ -319,8 +294,7 @@ fn encode_prefix_record(
     value: &mut Vec<u8>,
     prefix: &[u8],
     postings: &[Membership],
-    min_event_key: u64,
-    ordinals: &[u32],
+    ordinals: &BTreeMap<u64, u32>,
 ) -> Result<(), String> {
     let prefix_len = u32::try_from(prefix.len()).map_err(|_| "prefix exceeds u32".to_owned())?;
     let posting_count =
@@ -330,11 +304,8 @@ fn encode_prefix_record(
     value.extend_from_slice(&posting_count.to_be_bytes());
     for membership in postings {
         value.extend_from_slice(&membership.event.created_at.to_be_bytes());
-        let offset = usize::try_from(membership.event.event_key - min_event_key)
-            .map_err(|_| "event-key offset exceeds usize".to_owned())?;
         let ordinal = *ordinals
-            .get(offset)
-            .filter(|ordinal| **ordinal != u32::MAX)
+            .get(&membership.event.event_key)
             .ok_or_else(|| "posting event is absent from run dictionary".to_owned())?;
         value.extend_from_slice(&ordinal.to_be_bytes());
     }
@@ -700,7 +671,10 @@ impl PostingCursor<'_> {
         self.visited
     }
 
-    fn next_live(&mut self, dead: Option<&DeadKeys>) -> Result<Option<RunEvent>, String> {
+    pub(super) fn next_live(
+        &mut self,
+        dead: Option<&DeadKeys>,
+    ) -> Result<Option<RunEvent>, String> {
         while let Some(event) = self.next()? {
             if dead.is_none_or(|keys| !keys.contains(event.event_key)) {
                 return Ok(Some(event));
@@ -904,6 +878,7 @@ impl RunMeta {
     }
 }
 
+#[allow(dead_code)]
 pub(super) fn validate_run_metas(metas: &[RunMeta]) -> Result<(), String> {
     let mut ordered = metas.to_vec();
     ordered.sort_unstable_by_key(|meta| (meta.min_event_key, meta.max_event_key, meta.run_id));

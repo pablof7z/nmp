@@ -1,0 +1,700 @@
+//! Transactional persistence for immutable packed ordered-postings runs.
+//!
+//! The row indexes remain query-authoritative during the differential phase,
+//! but every governed event mutation records its packed addition or death in
+//! the same Redb transaction. Publication is owned by `GovernedWrite`, so a
+//! canonical commit cannot bypass it.
+
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet};
+
+use redb::ReadableTable;
+
+use super::postings::{
+    encode_run, merge_dead_blocks, shard_for, DeadKeys, DictionaryView, Family, Membership,
+    PostingCursor, Prefix, RunEvent, RunMeta, SegmentView, MAX_DEATH_BLOCKS,
+};
+use super::query::tag_index_prefix;
+use super::schema::{
+    persist_err, EventKey, POSTINGS_DEAD_KEYS, POSTINGS_DICTIONARIES, POSTINGS_META,
+    POSTINGS_NEXT_RUN_ID, POSTINGS_RUN_BY_MIN, POSTINGS_RUN_META, POSTINGS_SEGMENTS,
+};
+use super::{Event, EventCursor, EventId, PersistenceError};
+
+const RUN_FAN_IN: usize = 8;
+
+#[derive(Default)]
+pub(super) struct PostingsBatch {
+    additions: BTreeMap<EventKey, Event>,
+    deaths: BTreeSet<EventKey>,
+}
+
+impl PostingsBatch {
+    pub(super) fn insert(&mut self, event: &Event, event_key: EventKey) {
+        self.deaths.remove(&event_key);
+        self.additions.insert(event_key, event.clone());
+    }
+
+    pub(super) fn remove(&mut self, event_key: EventKey) {
+        if self.additions.remove(&event_key).is_none() {
+            self.deaths.insert(event_key);
+        }
+    }
+
+    pub(super) fn flush(
+        &mut self,
+        write_txn: &redb::WriteTransaction,
+    ) -> Result<(), PersistenceError> {
+        if !self.deaths.is_empty() {
+            apply_deaths(write_txn, &self.deaths)?;
+        }
+        if !self.additions.is_empty() {
+            let run_id = allocate_run_id(write_txn)?;
+            let memberships = memberships_for_events(&self.additions);
+            let encoded = encode_run(memberships).map_err(packed_err)?;
+            let min_event_key = *self
+                .additions
+                .first_key_value()
+                .expect("nonempty additions")
+                .0;
+            let max_event_key = *self
+                .additions
+                .last_key_value()
+                .expect("nonempty additions")
+                .0;
+            let meta = RunMeta {
+                run_id,
+                level: 0,
+                min_event_key,
+                max_event_key,
+                live_events: encoded.dictionary_entries,
+            };
+            insert_run(write_txn, meta, encoded)?;
+            compact_overfull_levels(write_txn)?;
+        }
+        self.additions.clear();
+        self.deaths.clear();
+        Ok(())
+    }
+}
+
+struct LoadedRun {
+    dictionary: Vec<u8>,
+    segments: Vec<Vec<u8>>,
+    dead: Option<DeadKeys>,
+}
+
+struct ScanSource<'a> {
+    cursor: PostingCursor<'a>,
+    dead: Option<&'a DeadKeys>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct ScanHead {
+    event: RunEvent,
+    source: usize,
+}
+
+impl Ord for ScanHead {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.event
+            .created_at
+            .cmp(&other.event.created_at)
+            .then_with(|| other.event.id.cmp(&self.event.id))
+            .then_with(|| other.event.event_key.cmp(&self.event.event_key))
+            .then_with(|| other.source.cmp(&self.source))
+    }
+}
+
+impl PartialOrd for ScanHead {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Merge the selected packed prefix lists and project only canonical-visible
+/// rows. Post-filter refusals continue the merge, so `limit` counts visible
+/// results rather than raw postings.
+pub(super) struct PackedScan<'a> {
+    pub(super) family: Family,
+    pub(super) prefixes: &'a [Vec<u8>],
+    pub(super) since: u64,
+    pub(super) until: u64,
+    pub(super) before: Option<EventCursor>,
+    pub(super) limit: Option<usize>,
+}
+
+pub(super) fn scan_packed<T>(
+    read_txn: &redb::ReadTransaction,
+    scan: PackedScan<'_>,
+    mut visited: impl FnMut(),
+    mut project: impl FnMut(EventKey, EventId) -> Result<Option<T>, PersistenceError>,
+) -> Result<Vec<T>, PersistenceError> {
+    if scan.limit == Some(0) {
+        return Ok(Vec::new());
+    }
+    let loaded = load_query_runs(read_txn, scan.family, scan.prefixes)?;
+    let before = scan
+        .before
+        .map(|cursor| (cursor.created_at.as_secs(), *cursor.event_id.as_bytes()));
+    let mut sources = Vec::new();
+    for run in &loaded {
+        let dictionary = DictionaryView::parse(&run.dictionary).map_err(packed_err)?;
+        for bytes in &run.segments {
+            let segment = SegmentView::parse(bytes).map_err(packed_err)?;
+            for prefix in scan.prefixes {
+                let Some(list) = segment.prefix(prefix).map_err(packed_err)? else {
+                    continue;
+                };
+                sources.push(ScanSource {
+                    cursor: list
+                        .cursor(dictionary, before, scan.since, scan.until)
+                        .map_err(packed_err)?,
+                    dead: run.dead.as_ref(),
+                });
+            }
+        }
+    }
+
+    let mut heap = BinaryHeap::with_capacity(sources.len());
+    for (source, run) in sources.iter_mut().enumerate() {
+        if let Some(event) = run.cursor.next_live(run.dead).map_err(packed_err)? {
+            visited();
+            heap.push(ScanHead { event, source });
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut output = scan.limit.map_or_else(Vec::new, Vec::with_capacity);
+    while let Some(head) = heap.pop() {
+        let source = &mut sources[head.source];
+        if let Some(event) = source.cursor.next_live(source.dead).map_err(packed_err)? {
+            visited();
+            heap.push(ScanHead {
+                event,
+                source: head.source,
+            });
+        }
+        if seen.insert(head.event.event_key) {
+            let id = EventId::from_byte_array(head.event.id);
+            if let Some(projected) = project(head.event.event_key, id)? {
+                output.push(projected);
+                if scan.limit.is_some_and(|limit| output.len() == limit) {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn load_query_runs(
+    read_txn: &redb::ReadTransaction,
+    family: Family,
+    prefixes: &[Vec<u8>],
+) -> Result<Vec<LoadedRun>, PersistenceError> {
+    let run_meta = read_txn
+        .open_table(POSTINGS_RUN_META)
+        .map_err(persist_err)?;
+    let dictionaries = read_txn
+        .open_table(POSTINGS_DICTIONARIES)
+        .map_err(persist_err)?;
+    let segments = read_txn
+        .open_table(POSTINGS_SEGMENTS)
+        .map_err(persist_err)?;
+    let deaths = read_txn
+        .open_table(POSTINGS_DEAD_KEYS)
+        .map_err(persist_err)?;
+    let shards: BTreeSet<_> = prefixes
+        .iter()
+        .map(|prefix| shard_for(family, prefix))
+        .collect();
+    let mut loaded = Vec::new();
+    for row in run_meta.iter().map_err(persist_err)? {
+        let (run_id, value) = row.map_err(persist_err)?;
+        let meta = RunMeta::decode(value.value()).map_err(packed_err)?;
+        if meta.run_id != run_id.value() {
+            return Err(packed_err("run metadata key disagrees with its value"));
+        }
+        let mut run_segments = Vec::new();
+        for &shard in &shards {
+            let key = segment_key(family, shard, meta.run_id);
+            if let Some(value) = segments.get(key.as_slice()).map_err(persist_err)? {
+                run_segments.push(value.value().to_vec());
+            }
+        }
+        if run_segments.is_empty() {
+            continue;
+        }
+        let dictionary = dictionaries
+            .get(meta.run_id)
+            .map_err(persist_err)?
+            .ok_or_else(|| packed_err("run has no dictionary"))?
+            .value()
+            .to_vec();
+        let mut blocks = Vec::new();
+        for level in 0..MAX_DEATH_BLOCKS {
+            let key = death_key(meta.run_id, level);
+            if let Some(value) = deaths.get(key.as_slice()).map_err(persist_err)? {
+                blocks.push(DeadKeys::decode(value.value()).map_err(packed_err)?);
+            }
+        }
+        loaded.push(LoadedRun {
+            dictionary,
+            segments: run_segments,
+            dead: merge_dead_blocks(&blocks).map_err(packed_err)?,
+        });
+    }
+    Ok(loaded)
+}
+
+fn packed_err(error: impl std::fmt::Display) -> PersistenceError {
+    PersistenceError(format!("packed postings: {error}"))
+}
+
+fn allocate_run_id(write_txn: &redb::WriteTransaction) -> Result<u64, PersistenceError> {
+    let mut meta = write_txn.open_table(POSTINGS_META).map_err(persist_err)?;
+    let run_id = meta
+        .get(POSTINGS_NEXT_RUN_ID)
+        .map_err(persist_err)?
+        .map(|guard| guard.value())
+        .unwrap_or(1);
+    let next = run_id
+        .checked_add(1)
+        .ok_or_else(|| packed_err("run id space exhausted"))?;
+    meta.insert(POSTINGS_NEXT_RUN_ID, next)
+        .map_err(persist_err)?;
+    Ok(run_id)
+}
+
+fn memberships_for_events(events: &BTreeMap<EventKey, Event>) -> Vec<Membership> {
+    let mut memberships = Vec::new();
+    for (&event_key, event) in events {
+        let run_event = RunEvent {
+            created_at: event.created_at.as_secs(),
+            id: *event.id.as_bytes(),
+            event_key,
+        };
+        push_membership(&mut memberships, Family::Global, Prefix::Global, run_event);
+        push_membership(
+            &mut memberships,
+            Family::Author,
+            Prefix::Author(*event.pubkey.as_bytes()),
+            run_event,
+        );
+        push_membership(
+            &mut memberships,
+            Family::Kind,
+            Prefix::Kind(event.kind.as_u16().to_be_bytes()),
+            run_event,
+        );
+        let mut tags = BTreeSet::new();
+        for tag in event.tags.iter() {
+            let (Some(name), Some(value)) = (tag.single_letter_tag(), tag.content()) else {
+                continue;
+            };
+            tags.insert(tag_index_prefix(name, value));
+        }
+        for prefix in tags {
+            push_membership(
+                &mut memberships,
+                Family::Tag,
+                Prefix::Tag(prefix),
+                run_event,
+            );
+        }
+    }
+    memberships
+}
+
+fn push_membership(
+    memberships: &mut Vec<Membership>,
+    family: Family,
+    prefix: Prefix,
+    event: RunEvent,
+) {
+    memberships.push(Membership {
+        family,
+        shard: shard_for(family, prefix.as_bytes()),
+        prefix,
+        event,
+    });
+}
+
+fn segment_key(family: Family, shard: u8, run_id: u64) -> [u8; 10] {
+    let mut key = [0u8; 10];
+    key[0] = family as u8;
+    key[1] = shard;
+    key[2..].copy_from_slice(&run_id.to_be_bytes());
+    key
+}
+
+fn death_key(run_id: u64, level: usize) -> [u8; 9] {
+    let mut key = [0u8; 9];
+    key[..8].copy_from_slice(&run_id.to_be_bytes());
+    key[8] = level as u8;
+    key
+}
+
+fn insert_run(
+    write_txn: &redb::WriteTransaction,
+    meta: RunMeta,
+    encoded: super::postings::EncodedRun,
+) -> Result<(), PersistenceError> {
+    let mut dictionaries = write_txn
+        .open_table(POSTINGS_DICTIONARIES)
+        .map_err(persist_err)?;
+    dictionaries
+        .insert(meta.run_id, encoded.dictionary.as_slice())
+        .map_err(persist_err)?;
+    let mut segments = write_txn
+        .open_table(POSTINGS_SEGMENTS)
+        .map_err(persist_err)?;
+    for (family, shard, value) in encoded.segments {
+        let key = segment_key(family, shard, meta.run_id);
+        segments
+            .insert(key.as_slice(), value.as_slice())
+            .map_err(persist_err)?;
+    }
+    let encoded_meta = meta.encode().map_err(packed_err)?;
+    let mut run_meta = write_txn
+        .open_table(POSTINGS_RUN_META)
+        .map_err(persist_err)?;
+    run_meta
+        .insert(meta.run_id, encoded_meta.as_slice())
+        .map_err(persist_err)?;
+    let mut by_min = write_txn
+        .open_table(POSTINGS_RUN_BY_MIN)
+        .map_err(persist_err)?;
+    by_min
+        .insert(meta.min_event_key, meta.run_id)
+        .map_err(persist_err)?;
+    Ok(())
+}
+
+fn apply_deaths(
+    write_txn: &redb::WriteTransaction,
+    deaths: &BTreeSet<EventKey>,
+) -> Result<(), PersistenceError> {
+    let mut by_run: BTreeMap<u64, Vec<EventKey>> = BTreeMap::new();
+    {
+        let by_min = write_txn
+            .open_table(POSTINGS_RUN_BY_MIN)
+            .map_err(persist_err)?;
+        let run_meta = write_txn
+            .open_table(POSTINGS_RUN_META)
+            .map_err(persist_err)?;
+        for &event_key in deaths {
+            let Some(candidate) = by_min
+                .range(..=event_key)
+                .map_err(persist_err)?
+                .next_back()
+                .transpose()
+                .map_err(persist_err)?
+            else {
+                // A pre-v8 row is rebuilt by the schema migration; packed
+                // artifacts are not query-authoritative before that flip.
+                continue;
+            };
+            let run_id = candidate.1.value();
+            let Some(value) = run_meta.get(run_id).map_err(persist_err)? else {
+                return Err(packed_err("run-range entry has no metadata"));
+            };
+            let meta = RunMeta::decode(value.value()).map_err(packed_err)?;
+            if event_key <= meta.max_event_key {
+                by_run.entry(run_id).or_default().push(event_key);
+            }
+        }
+    }
+    for (run_id, keys) in by_run {
+        apply_run_deaths(write_txn, run_id, keys)?;
+    }
+    Ok(())
+}
+
+fn apply_run_deaths(
+    write_txn: &redb::WriteTransaction,
+    run_id: u64,
+    keys: Vec<EventKey>,
+) -> Result<(), PersistenceError> {
+    let mut run_meta = write_txn
+        .open_table(POSTINGS_RUN_META)
+        .map_err(persist_err)?;
+    let value = run_meta
+        .get(run_id)
+        .map_err(persist_err)?
+        .ok_or_else(|| packed_err("death target has no run metadata"))?;
+    let mut meta = RunMeta::decode(value.value()).map_err(packed_err)?;
+    drop(value);
+
+    let mut death_table = write_txn
+        .open_table(POSTINGS_DEAD_KEYS)
+        .map_err(persist_err)?;
+    let mut existing = Vec::new();
+    for level in 0..MAX_DEATH_BLOCKS {
+        let key = death_key(run_id, level);
+        if let Some(value) = death_table.get(key.as_slice()).map_err(persist_err)? {
+            existing.push(DeadKeys::decode(value.value()).map_err(packed_err)?);
+        }
+    }
+    let existing_union = merge_dead_blocks(&existing).map_err(packed_err)?;
+    let mut fresh: Vec<_> = keys
+        .into_iter()
+        .filter(|key| {
+            existing_union
+                .as_ref()
+                .is_none_or(|dead| !dead.contains(*key))
+        })
+        .collect();
+    fresh.sort_unstable();
+    fresh.dedup();
+    if fresh.is_empty() {
+        return Ok(());
+    }
+    let fresh_count = fresh.len() as u64;
+    if fresh_count > meta.live_events {
+        return Err(packed_err("death count exceeds run live count"));
+    }
+    meta.live_events -= fresh_count;
+    if meta.live_events == 0 {
+        drop(death_table);
+        drop(run_meta);
+        return delete_run(write_txn, meta);
+    }
+
+    let mut carry = DeadKeys::new(fresh).map_err(packed_err)?;
+    for level in 0..MAX_DEATH_BLOCKS {
+        let key = death_key(run_id, level);
+        let prior = death_table
+            .get(key.as_slice())
+            .map_err(persist_err)?
+            .map(|value| DeadKeys::decode(value.value()).map_err(packed_err))
+            .transpose()?;
+        if let Some(prior) = prior {
+            death_table.remove(key.as_slice()).map_err(persist_err)?;
+            carry = merge_dead_blocks(&[prior, carry])
+                .map_err(packed_err)?
+                .expect("two nonempty death blocks");
+        } else {
+            let encoded = carry.encode().map_err(packed_err)?;
+            death_table
+                .insert(key.as_slice(), encoded.as_slice())
+                .map_err(persist_err)?;
+            let encoded_meta = meta.encode().map_err(packed_err)?;
+            run_meta
+                .insert(run_id, encoded_meta.as_slice())
+                .map_err(persist_err)?;
+            return Ok(());
+        }
+    }
+
+    existing.push(carry);
+    let all_dead = merge_dead_blocks(&existing)
+        .map_err(packed_err)?
+        .expect("fresh deaths are nonempty");
+    drop(death_table);
+    drop(run_meta);
+    rewrite_run_without_dead(write_txn, meta, &all_dead)
+}
+
+fn load_run_memberships(
+    write_txn: &redb::WriteTransaction,
+    run_id: u64,
+) -> Result<Vec<Membership>, PersistenceError> {
+    let dictionaries = write_txn
+        .open_table(POSTINGS_DICTIONARIES)
+        .map_err(persist_err)?;
+    let dictionary_bytes = dictionaries
+        .get(run_id)
+        .map_err(persist_err)?
+        .ok_or_else(|| packed_err("run has no dictionary"))?
+        .value()
+        .to_vec();
+    let dictionary = DictionaryView::parse(&dictionary_bytes)
+        .and_then(DictionaryView::validate)
+        .map_err(packed_err)?;
+    let segments = write_txn
+        .open_table(POSTINGS_SEGMENTS)
+        .map_err(persist_err)?;
+    let mut memberships = Vec::new();
+    for family in Family::ALL {
+        for shard in 0..=super::postings::SHARD_MASK {
+            let key = segment_key(family, shard, run_id);
+            let Some(value) = segments.get(key.as_slice()).map_err(persist_err)? else {
+                continue;
+            };
+            let segment_bytes = value.value().to_vec();
+            let segment = SegmentView::parse(&segment_bytes).map_err(packed_err)?;
+            segment.validate(dictionary).map_err(packed_err)?;
+            memberships.extend(segment.memberships(dictionary).map_err(packed_err)?);
+        }
+    }
+    Ok(memberships)
+}
+
+fn load_run_deaths(
+    write_txn: &redb::WriteTransaction,
+    run_id: u64,
+) -> Result<Option<DeadKeys>, PersistenceError> {
+    let deaths = write_txn
+        .open_table(POSTINGS_DEAD_KEYS)
+        .map_err(persist_err)?;
+    let mut blocks = Vec::new();
+    for level in 0..MAX_DEATH_BLOCKS {
+        let key = death_key(run_id, level);
+        if let Some(value) = deaths.get(key.as_slice()).map_err(persist_err)? {
+            blocks.push(DeadKeys::decode(value.value()).map_err(packed_err)?);
+        }
+    }
+    merge_dead_blocks(&blocks).map_err(packed_err)
+}
+
+fn compact_overfull_levels(write_txn: &redb::WriteTransaction) -> Result<(), PersistenceError> {
+    let mut level = 0u8;
+    loop {
+        loop {
+            let run_meta = write_txn
+                .open_table(POSTINGS_RUN_META)
+                .map_err(persist_err)?;
+            let mut cohort = Vec::new();
+            let mut has_higher_level = false;
+            for row in run_meta.iter().map_err(persist_err)? {
+                let (_run_id, value) = row.map_err(persist_err)?;
+                let meta = RunMeta::decode(value.value()).map_err(packed_err)?;
+                if meta.level == level {
+                    cohort.push(meta);
+                } else if meta.level > level {
+                    has_higher_level = true;
+                }
+            }
+            drop(run_meta);
+            if cohort.len() < RUN_FAN_IN {
+                if has_higher_level {
+                    level = level
+                        .checked_add(1)
+                        .ok_or_else(|| packed_err("packed run level space exhausted"))?;
+                } else {
+                    return Ok(());
+                }
+                break;
+            }
+            cohort.sort_unstable_by_key(|meta| meta.min_event_key);
+            cohort.truncate(RUN_FAN_IN);
+            compact_cohort(write_txn, level, &cohort)?;
+        }
+    }
+}
+
+fn compact_cohort(
+    write_txn: &redb::WriteTransaction,
+    level: u8,
+    cohort: &[RunMeta],
+) -> Result<(), PersistenceError> {
+    let output_level = level
+        .checked_add(1)
+        .ok_or_else(|| packed_err("packed run level space exhausted"))?;
+    let mut memberships = Vec::new();
+    for meta in cohort {
+        let dead = load_run_deaths(write_txn, meta.run_id)?;
+        let mut run_memberships = load_run_memberships(write_txn, meta.run_id)?;
+        if let Some(dead) = dead {
+            run_memberships.retain(|membership| !dead.contains(membership.event.event_key));
+        }
+        memberships.extend(run_memberships);
+    }
+    for &meta in cohort {
+        delete_run(write_txn, meta)?;
+    }
+    if memberships.is_empty() {
+        return Ok(());
+    }
+    let min_event_key = memberships
+        .iter()
+        .map(|membership| membership.event.event_key)
+        .min()
+        .expect("nonempty compaction cohort");
+    let max_event_key = memberships
+        .iter()
+        .map(|membership| membership.event.event_key)
+        .max()
+        .expect("nonempty compaction cohort");
+    let encoded = encode_run(memberships).map_err(packed_err)?;
+    let run_id = allocate_run_id(write_txn)?;
+    insert_run(
+        write_txn,
+        RunMeta {
+            run_id,
+            level: output_level,
+            min_event_key,
+            max_event_key,
+            live_events: encoded.dictionary_entries,
+        },
+        encoded,
+    )
+}
+
+fn rewrite_run_without_dead(
+    write_txn: &redb::WriteTransaction,
+    old_meta: RunMeta,
+    dead: &DeadKeys,
+) -> Result<(), PersistenceError> {
+    let mut memberships = load_run_memberships(write_txn, old_meta.run_id)?;
+    memberships.retain(|membership| !dead.contains(membership.event.event_key));
+    delete_run(write_txn, old_meta)?;
+    if memberships.is_empty() {
+        return Ok(());
+    }
+    let min_event_key = memberships
+        .iter()
+        .map(|membership| membership.event.event_key)
+        .min()
+        .expect("nonempty rewritten run");
+    let max_event_key = memberships
+        .iter()
+        .map(|membership| membership.event.event_key)
+        .max()
+        .expect("nonempty rewritten run");
+    let encoded = encode_run(memberships).map_err(packed_err)?;
+    insert_run(
+        write_txn,
+        RunMeta {
+            run_id: old_meta.run_id,
+            level: old_meta.level,
+            min_event_key,
+            max_event_key,
+            live_events: encoded.dictionary_entries,
+        },
+        encoded,
+    )
+}
+
+fn delete_run(write_txn: &redb::WriteTransaction, meta: RunMeta) -> Result<(), PersistenceError> {
+    let mut segments = write_txn
+        .open_table(POSTINGS_SEGMENTS)
+        .map_err(persist_err)?;
+    for family in Family::ALL {
+        for shard in 0..=super::postings::SHARD_MASK {
+            let key = segment_key(family, shard, meta.run_id);
+            segments.remove(key.as_slice()).map_err(persist_err)?;
+        }
+    }
+    let mut dictionaries = write_txn
+        .open_table(POSTINGS_DICTIONARIES)
+        .map_err(persist_err)?;
+    dictionaries.remove(meta.run_id).map_err(persist_err)?;
+    let mut run_meta = write_txn
+        .open_table(POSTINGS_RUN_META)
+        .map_err(persist_err)?;
+    run_meta.remove(meta.run_id).map_err(persist_err)?;
+    let mut by_min = write_txn
+        .open_table(POSTINGS_RUN_BY_MIN)
+        .map_err(persist_err)?;
+    by_min.remove(meta.min_event_key).map_err(persist_err)?;
+    let mut deaths = write_txn
+        .open_table(POSTINGS_DEAD_KEYS)
+        .map_err(persist_err)?;
+    for level in 0..MAX_DEATH_BLOCKS {
+        let key = death_key(meta.run_id, level);
+        deaths.remove(key.as_slice()).map_err(persist_err)?;
+    }
+    Ok(())
+}

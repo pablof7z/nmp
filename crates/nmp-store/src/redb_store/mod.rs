@@ -58,8 +58,8 @@ mod compact_index_bench;
 mod fjall_ingest_bench;
 #[cfg(feature = "bench-instrumentation")]
 mod packed_postings_bench;
-#[cfg(any(test, feature = "bench-instrumentation"))]
 mod postings;
+mod postings_store;
 #[cfg(feature = "bench-instrumentation")]
 mod redo_index_bench;
 #[cfg(feature = "bench-instrumentation")]
