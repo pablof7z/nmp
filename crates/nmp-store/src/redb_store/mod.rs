@@ -130,13 +130,6 @@ impl EventStore for RedbStore {
         &mut self,
         events: Vec<(Event, RelayObserved)>,
     ) -> Result<Vec<InsertOutcome>, PersistenceError> {
-        event_ops::insert_batch(self, &events)
-    }
-
-    fn insert_batch_borrowed(
-        &mut self,
-        events: &[(Event, RelayObserved)],
-    ) -> Result<Vec<InsertOutcome>, PersistenceError> {
         event_ops::insert_batch(self, events)
     }
 

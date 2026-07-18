@@ -1181,58 +1181,61 @@ impl EventStore for MemoryStore {
         }
 
         let is_deletion = event.kind == Kind::EventDeletion;
-        let address = address_key_for(&event);
-        let current_id = address
-            .as_ref()
-            .and_then(|key| self.addr_index.get(key).copied());
-        if let Some(current_id) = current_id {
-            let current_event = &self
-                .by_id
-                .get(&current_id)
-                .expect("addr_index must always point at a stored event")
-                .event;
-            if !candidate_wins(&event, current_event) {
-                return Ok(InsertOutcome::Stale);
-            }
-        }
-
-        let event_id = event.id;
         let stored = StoredEvent {
-            event,
+            event: {
+                #[cfg(feature = "bench-instrumentation")]
+                crate::ingest_attribution::event_clone();
+                event.clone()
+            },
             provenance: Provenance::first_observation(from),
         };
 
-        let outcome = match (address, current_id) {
-            (None, _) => {
+        let outcome = match address_key_for(&event) {
+            None => {
                 // Regular event: no competition, always inserted.
                 self.index_expiration(&stored);
                 self.index_event(&stored);
-                self.by_id.insert(event_id, stored);
+                self.by_id.insert(event.id, stored);
                 InsertOutcome::Inserted
             }
-            (Some(key), None) => {
-                // First event ever seen at this address.
-                self.index_expiration(&stored);
-                self.index_event(&stored);
-                self.by_id.insert(event_id, stored);
-                self.addr_index.insert(key, event_id);
-                InsertOutcome::Inserted
-            }
-            (Some(key), Some(current_id)) => {
-                let replaced = self
-                    .by_id
-                    .remove(&current_id)
-                    .expect("addr_index must always point at a stored event");
-                self.unindex_expiration(&replaced);
-                self.unindex_event(&replaced);
-                self.index_expiration(&stored);
-                self.index_event(&stored);
-                self.by_id.insert(event_id, stored);
-                self.addr_index.insert(key, event_id);
-                InsertOutcome::Superseded {
-                    replaced: Box::new(replaced),
+            Some(key) => match self.addr_index.get(&key).copied() {
+                None => {
+                    // First event ever seen at this address.
+                    let id = event.id;
+                    self.index_expiration(&stored);
+                    self.index_event(&stored);
+                    self.by_id.insert(id, stored);
+                    self.addr_index.insert(key, id);
+                    InsertOutcome::Inserted
                 }
-            }
+                Some(current_id) => {
+                    let current_event = &self
+                        .by_id
+                        .get(&current_id)
+                        .expect("addr_index must always point at a stored event")
+                        .event;
+
+                    if candidate_wins(&event, current_event) {
+                        let new_id = event.id;
+                        let replaced = self
+                            .by_id
+                            .remove(&current_id)
+                            .expect("addr_index must always point at a stored event");
+                        self.unindex_expiration(&replaced);
+                        self.unindex_event(&replaced);
+                        self.index_expiration(&stored);
+                        self.index_event(&stored);
+                        self.by_id.insert(new_id, stored);
+                        self.addr_index.insert(key, new_id);
+                        InsertOutcome::Superseded {
+                            replaced: Box::new(replaced),
+                        }
+                    } else {
+                        // Older-for-existing-address: rejected, dropped.
+                        InsertOutcome::Stale
+                    }
+                }
+            },
         };
 
         // Kind:5 has no replaceable/addressable address (M1's set excludes
@@ -1241,15 +1244,7 @@ impl EventStore for MemoryStore {
         // is durably stored (re-servable, per §2).
         if is_deletion {
             if let InsertOutcome::Inserted = outcome {
-                #[cfg(feature = "bench-instrumentation")]
-                crate::ingest_attribution::event_clone();
-                let deletion = self
-                    .by_id
-                    .get(&event_id)
-                    .expect("new deletion event was just inserted")
-                    .event
-                    .clone();
-                let deleted = self.process_kind5_deletions(&deletion);
+                let deleted = self.process_kind5_deletions(&event);
                 return Ok(InsertOutcome::Kind5Processed { deleted });
             }
         }

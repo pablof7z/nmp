@@ -537,8 +537,8 @@ pub fn run_fjall_governed_ingest_bench(
             for event in batch {
                 let outcome = insert_with_tables(
                     &mut adapter,
-                    event,
-                    &RelayObserved::new(relay.clone(), observed_at),
+                    event.clone(),
+                    RelayObserved::new(relay.clone(), observed_at),
                 )
                 .map_err(|error| error.to_string())?;
                 if !matches!(outcome, InsertOutcome::Inserted) {
@@ -711,8 +711,8 @@ mod tests {
         let first_outcome = with_tx(&database, &keyspaces, |txn| {
             insert_with_tables(
                 txn,
-                &first,
-                &RelayObserved::new(relay_a.clone(), Timestamp::from(20)),
+                first.clone(),
+                RelayObserved::new(relay_a.clone(), Timestamp::from(20)),
             )
             .unwrap()
         });
@@ -721,8 +721,8 @@ mod tests {
         let duplicate = with_tx(&database, &keyspaces, |txn| {
             insert_with_tables(
                 txn,
-                &first,
-                &RelayObserved::new(relay_b.clone(), Timestamp::from(21)),
+                first.clone(),
+                RelayObserved::new(relay_b.clone(), Timestamp::from(21)),
             )
             .unwrap()
         });
@@ -737,8 +737,8 @@ mod tests {
         let superseded = with_tx(&database, &keyspaces, |txn| {
             insert_with_tables(
                 txn,
-                &newer,
-                &RelayObserved::new(relay_a.clone(), Timestamp::from(22)),
+                newer.clone(),
+                RelayObserved::new(relay_a.clone(), Timestamp::from(22)),
             )
             .unwrap()
         });
@@ -753,8 +753,8 @@ mod tests {
         let deleted = with_tx(&database, &keyspaces, |txn| {
             insert_with_tables(
                 txn,
-                &deletion,
-                &RelayObserved::new(relay_a, Timestamp::from(23)),
+                deletion,
+                RelayObserved::new(relay_a, Timestamp::from(23)),
             )
             .unwrap()
         });
@@ -809,8 +809,7 @@ mod tests {
             ],
         );
         with_tx(&database, &keyspaces, |txn| {
-            insert_with_tables(txn, &event, &RelayObserved::new(relay, Timestamp::from(35)))
-                .unwrap()
+            insert_with_tables(txn, event, RelayObserved::new(relay, Timestamp::from(35))).unwrap()
         });
         let read = database.read_tx();
         assert_eq!(read.len(&keyspaces.expiration).unwrap(), 1);
@@ -832,8 +831,8 @@ mod tests {
         with_tx(&database, &keyspaces, |txn| {
             insert_with_tables(
                 txn,
-                &committed,
-                &RelayObserved::new(relay.clone(), Timestamp::from(60)),
+                committed,
+                RelayObserved::new(relay.clone(), Timestamp::from(60)),
             )
             .unwrap()
         });
@@ -842,8 +841,8 @@ mod tests {
         let mut adapter = FjallIngestTxn::open(&mut write, &keyspaces).unwrap();
         insert_with_tables(
             &mut adapter,
-            &uncommitted,
-            &RelayObserved::new(relay, Timestamp::from(61)),
+            uncommitted,
+            RelayObserved::new(relay, Timestamp::from(61)),
         )
         .unwrap();
         adapter.flush_pending().unwrap();

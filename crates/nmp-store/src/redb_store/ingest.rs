@@ -10,8 +10,8 @@ use super::{
 #[allow(clippy::too_many_lines)]
 pub(super) fn insert_with_tables<T: GovernedIngestTxn>(
     tables: &mut T,
-    event: &Event,
-    from: &RelayObserved,
+    event: Event,
+    from: RelayObserved,
 ) -> Result<InsertOutcome, PersistenceError> {
     // Refused at the door FIRST: an already-expired event is never
     // stored, so it never touches dedup or supersession at all.
@@ -53,11 +53,11 @@ pub(super) fn insert_with_tables<T: GovernedIngestTxn>(
             // retraction doc §4.1) — `provenance.local` is otherwise
             // unchanged, written straight back.
             if fan_out_owners.is_some() {
-                tables.replace_event(event_key, event)?;
+                tables.replace_event(event_key, &event)?;
                 tables.replace_local(event_key, local)?;
             }
             let satisfied_intents = if let Some(owners) = &fan_out_owners {
-                fan_out_signed_in_txn(tables, owners, event)?
+                fan_out_signed_in_txn(tables, owners, &event)?
             } else {
                 Vec::new()
             };
@@ -65,7 +65,7 @@ pub(super) fn insert_with_tables<T: GovernedIngestTxn>(
                 provenance_grew: grew,
                 satisfied_intents,
             }
-        } else if tombstone_refuses(tables, event)? {
+        } else if tombstone_refuses(tables, &event)? {
             // Tombstone check, AFTER dedup-by-id, BEFORE storage
             // (retraction-and-negative-deltas.md §2).
             InsertOutcome::Refused(RefuseReason::Tombstoned)
@@ -76,10 +76,10 @@ pub(super) fn insert_with_tables<T: GovernedIngestTxn>(
                 local: None,
             };
 
-            let outcome = match address_key_for(event) {
+            let outcome = match address_key_for(&event) {
                 None => {
-                    let event_key = tables.insert_new(event, &provenance)?;
-                    tables.insert_indexes(event, event_key)?;
+                    let event_key = tables.insert_new(&event, &provenance)?;
+                    tables.insert_indexes(&event, event_key)?;
                     if let Some(ts) = event.tags.expiration().copied() {
                         let exp_key = expiration_key(ts, &event.id);
                         tables.expiration_put(&exp_key, event_key)?;
@@ -92,9 +92,9 @@ pub(super) fn insert_with_tables<T: GovernedIngestTxn>(
 
                     match current_key {
                         None => {
-                            let event_key = tables.insert_new(event, &provenance)?;
+                            let event_key = tables.insert_new(&event, &provenance)?;
                             tables.address_put(addr_key_str.as_str(), event_key)?;
-                            tables.insert_indexes(event, event_key)?;
+                            tables.insert_indexes(&event, event_key)?;
                             if let Some(ts) = event.tags.expiration().copied() {
                                 let exp_key = expiration_key(ts, &event.id);
                                 tables.expiration_put(&exp_key, event_key)?;
@@ -107,12 +107,12 @@ pub(super) fn insert_with_tables<T: GovernedIngestTxn>(
                                 .expect("addr_index must always point at a stored event");
                             let current_event = &replaced.event;
 
-                            if candidate_wins(event, current_event) {
+                            if candidate_wins(&event, current_event) {
                                 remove_row_in_txn(tables, current_event.id, |_| true)?
                                     .expect("addr_index must always point at a stored event");
-                                let event_key = tables.insert_new(event, &provenance)?;
+                                let event_key = tables.insert_new(&event, &provenance)?;
                                 tables.address_put(addr_key_str.as_str(), event_key)?;
-                                tables.insert_indexes(event, event_key)?;
+                                tables.insert_indexes(&event, event_key)?;
                                 if let Some(ts) = event.tags.expiration().copied() {
                                     let exp_key = expiration_key(ts, &event.id);
                                     tables.expiration_put(&exp_key, event_key)?;
@@ -134,7 +134,7 @@ pub(super) fn insert_with_tables<T: GovernedIngestTxn>(
             // the event itself is durably stored (re-servable, §2).
             if is_deletion {
                 if let InsertOutcome::Inserted = outcome {
-                    let deleted = process_kind5_deletions(tables, event)?;
+                    let deleted = process_kind5_deletions(tables, &event)?;
                     InsertOutcome::Kind5Processed { deleted }
                 } else {
                     outcome

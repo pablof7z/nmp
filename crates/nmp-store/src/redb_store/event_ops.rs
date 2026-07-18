@@ -45,7 +45,7 @@ pub(super) fn insert(
     from: RelayObserved,
 ) -> Result<InsertOutcome, PersistenceError> {
     let mut write = GovernedWrite::begin(store)?;
-    let outcome = write.apply(|tables, _write_txn| insert_with_tables(tables, &event, &from))?;
+    let outcome = write.apply(|tables, _write_txn| insert_with_tables(tables, event, from))?;
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::ObservationBeforeCommit);
     write.commit()?;
@@ -54,7 +54,7 @@ pub(super) fn insert(
 
 pub(super) fn insert_batch(
     store: &mut RedbStore,
-    events: &[(Event, RelayObserved)],
+    events: Vec<(Event, RelayObserved)>,
 ) -> Result<Vec<InsertOutcome>, PersistenceError> {
     if events.is_empty() {
         return Ok(Vec::new());

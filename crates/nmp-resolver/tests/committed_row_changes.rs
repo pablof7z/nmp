@@ -265,21 +265,3 @@ fn local_duplicate_stale_and_refused_outcomes_carry_no_phantom_row_changes() {
     assert!(refused.committed.row_changes.removed.is_empty());
     assert!(refused.committed.row_changes.provenance_grew.is_empty());
 }
-
-#[cfg(feature = "bench-instrumentation")]
-#[test]
-fn ordinary_borrowed_ingest_has_no_resolver_event_clone() {
-    nmp_resolver::ingest_attribution::reset();
-    let keys = Keys::generate();
-    let event = event(&keys, Kind::TextNote, "owned-once", 10);
-    let mut engine = Engine::new(MemoryStore::new());
-
-    let changes = engine
-        .ingest_observed_detailed(vec![(event, observed(relay("clone-proof"), 11))])
-        .unwrap()
-        .committed
-        .row_changes;
-
-    assert_eq!(changes.inserted.len(), 1);
-    assert_eq!(nmp_resolver::ingest_attribution::snapshot().event_clones, 0);
-}

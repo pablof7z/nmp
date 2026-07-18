@@ -152,41 +152,6 @@ fn insert_batch_preserves_input_order_and_governed_supersession() {
 }
 
 #[test]
-fn borrowed_insert_batch_preserves_owned_batch_outcomes_and_source_growth() {
-    for_each_backend(|store| {
-        let author = keys();
-        let old = kind3_event(&author, 100);
-        let newer = kind3_event(&author, 200);
-        let events = vec![
-            (old.clone(), observed("wss://r1", 101)),
-            (newer.clone(), observed("wss://r1", 201)),
-            (newer.clone(), observed("wss://r2", 202)),
-        ];
-        let outcomes = store.insert_batch_borrowed(&events).unwrap();
-
-        assert_eq!(events[0].0.id, old.id, "caller retains the verified batch");
-        assert_eq!(events[1].0.id, newer.id);
-        assert_eq!(outcomes.len(), events.len());
-        assert!(matches!(outcomes[0], InsertOutcome::Inserted));
-        assert!(matches!(
-            &outcomes[1],
-            InsertOutcome::Superseded { replaced } if replaced.event.id == old.id
-        ));
-        assert!(matches!(
-            outcomes[2],
-            InsertOutcome::Duplicate {
-                provenance_grew: true,
-                ..
-            }
-        ));
-        let rows = store.query(&Filter::new().id(newer.id)).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].provenance.seen.len(), 2);
-        assert!(store.query(&Filter::new().id(old.id)).unwrap().is_empty());
-    });
-}
-
-#[test]
 fn newest_created_at_wins_replaceable() {
     for_each_backend(|store| {
         let k = keys();

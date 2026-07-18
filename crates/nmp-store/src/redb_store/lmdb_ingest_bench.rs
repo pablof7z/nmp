@@ -204,8 +204,8 @@ pub fn run_lmdb_governed_ingest_bench(
         for event in batch {
             insert_with_tables(
                 &mut canonical,
-                event,
-                &RelayObserved::new(relay.clone(), Timestamp::from(observed_at)),
+                event.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(observed_at)),
             )
             .map_err(|error| error.0)?;
         }
