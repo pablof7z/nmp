@@ -107,6 +107,6 @@ ready
 
 ## Hosted Artifacts
 
-- Plan page: Generated after publishing.
+- Plan page: https://pablof7z.github.io/nmp/plans/issue-691-one-keyspace-fjall-packed-ceiling/
 
 - TTS audio: https://blossom.primal.net/228f9d9528f83105526377fc4f461c3e07abd883ed4ca23e03b14f5f31bd71d4.mp3
