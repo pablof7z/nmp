@@ -640,8 +640,11 @@ pub(super) fn compact_segment(
     let mut records = vec![0usize; sources.len()];
     let mut emitted_prefixes = 0usize;
     let mut postings = 0u64;
+    let mut matching = Vec::with_capacity(sources.len());
+    let mut next_postings = Vec::with_capacity(sources.len());
+    let mut heap = BinaryHeap::with_capacity(sources.len());
     while let Some(prefix) = minimum_compaction_prefix(sources, &records)? {
-        let mut matching = Vec::with_capacity(sources.len());
+        matching.clear();
         for (source, candidate) in sources.iter().enumerate() {
             if records[source] >= candidate.segment.prefix_count {
                 continue;
@@ -671,8 +674,9 @@ pub(super) fn compact_segment(
         let count_offset = value.len();
         value.extend_from_slice(&0u32.to_be_bytes());
 
-        let mut next_postings = vec![0usize; matching.len()];
-        let mut heap = BinaryHeap::with_capacity(matching.len());
+        next_postings.clear();
+        next_postings.resize(matching.len(), 0);
+        heap.clear();
         for list in 0..matching.len() {
             push_next_compaction_posting(
                 &mut heap,
