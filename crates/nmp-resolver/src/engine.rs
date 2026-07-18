@@ -33,6 +33,11 @@ fn clone_relay_ingest_event(event: &nostr::Event) -> nostr::Event {
 pub struct RelayIngestResult {
     pub committed: CommittedMutationResult,
     pub satisfied_intents: Vec<(nmp_store::IntentId, nostr::Event)>,
+    /// Input-aligned post-commit eligibility for exact-observation caching.
+    /// `true` means this event id is still canonical/current after the whole
+    /// governed batch; stale, refused, or transiently removed inputs are
+    /// never eligible.
+    pub current_after_commit: Vec<bool>,
 }
 
 /// Exact live-query consequences of one already-committed canonical store
@@ -663,6 +668,7 @@ impl<S: EventStore> Engine<S> {
         let mut removed: Vec<nostr::Event> = Vec::new();
         let mut provenance_grew: Vec<nostr::Event> = Vec::new();
         let mut satisfied_intents = Vec::new();
+        let mut current_candidate_ids = Vec::with_capacity(events.len());
         let mut observed_by_id =
             BTreeMap::<nostr::EventId, (nostr::Event, BTreeSet<RelayUrl>)>::new();
         for (event, observed) in &events {
@@ -686,12 +692,17 @@ impl<S: EventStore> Engine<S> {
         let classify_started = std::time::Instant::now();
         for (event, outcome) in input_events.into_iter().zip(outcomes) {
             match outcome {
-                InsertOutcome::Inserted => inserted.push(event),
+                InsertOutcome::Inserted => {
+                    current_candidate_ids.push(Some(event.id));
+                    inserted.push(event);
+                }
                 InsertOutcome::Superseded { replaced } => {
+                    current_candidate_ids.push(Some(event.id));
                     inserted.push(event);
                     removed.push(replaced.event);
                 }
                 InsertOutcome::Kind5Processed { deleted } => {
+                    current_candidate_ids.push(Some(event.id));
                     inserted.push(event);
                     removed.extend(deleted.into_iter().map(|se| se.event));
                 }
@@ -703,6 +714,7 @@ impl<S: EventStore> Engine<S> {
                     provenance_grew: grew,
                     satisfied_intents: owners,
                 } => {
+                    current_candidate_ids.push(Some(event.id));
                     if grew {
                         provenance_grew.push(clone_relay_ingest_event(&event));
                     }
@@ -712,11 +724,17 @@ impl<S: EventStore> Engine<S> {
                             .map(|intent_id| (intent_id, clone_relay_ingest_event(&event))),
                     );
                 }
-                InsertOutcome::Stale | InsertOutcome::Refused(_) => {}
+                InsertOutcome::Stale | InsertOutcome::Refused(_) => {
+                    current_candidate_ids.push(None);
+                }
             }
         }
         let inserted_ids: BTreeSet<_> = inserted.iter().map(|event| event.id).collect();
         let removed_ids: BTreeSet<_> = removed.iter().map(|event| event.id).collect();
+        let current_after_commit = current_candidate_ids
+            .into_iter()
+            .map(|event_id| event_id.is_some_and(|id| !removed_ids.contains(&id)))
+            .collect();
         let provenance_grew_ids: BTreeSet<_> =
             provenance_grew.iter().map(|event| event.id).collect();
         let row_changes = CommittedRowChanges {
@@ -784,6 +802,7 @@ impl<S: EventStore> Engine<S> {
                 row_changes,
             },
             satisfied_intents,
+            current_after_commit,
         })
     }
 

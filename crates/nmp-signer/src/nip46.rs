@@ -1403,6 +1403,11 @@ impl SessionWorker {
     fn on_frame(&mut self, handle: nmp_transport::RelayHandle, frame: RelayFrame) {
         match frame {
             RelayFrame::Event { event, .. } => self.on_event(event.as_ref()),
+            frame @ RelayFrame::CommittedObservation(_) => {
+                if let Some(frame) = frame.into_ordinary_fallback() {
+                    self.on_frame(handle, frame);
+                }
+            }
             RelayFrame::Message(message) => {
                 if let RelayMessage::Auth { challenge } = message.as_ref() {
                     let relay = self.handles.get(&handle.slot).map(|(_, url)| url.clone());

@@ -31,6 +31,10 @@ fn main() -> Result<(), ProbeError> {
             "--verified-cache-capacity" => {
                 config.verified_cache_capacity = value(&mut args, "--verified-cache-capacity")?
             }
+            "--committed-observation-cache-capacity" => {
+                config.committed_observation_cache_capacity =
+                    value(&mut args, "--committed-observation-cache-capacity")?
+            }
             "--diagnostic-duplicate-ceiling-capacity" => {
                 config.diagnostic_duplicate_ceiling_capacity =
                     value(&mut args, "--diagnostic-duplicate-ceiling-capacity")?
@@ -123,6 +127,8 @@ fn print_help() {
                              benchmark nondurable foreground commits plus a timed final checkpoint\n\
          --queue-capacity N  every bounded runtime queue (default 1024)\n\
          --verified-cache-capacity N  verified ID/signature entries (default 131072)\n\
+         --committed-observation-cache-capacity N\n\
+                             durable exact-observation fast-path entries (default 131072)\n\
          --diagnostic-duplicate-ceiling-capacity N\n\
                              unsafe benchmark-only precommit exact-frame cache (default 0)\n\
          --diagnostic-duplicate-ceiling-event-payload\n\
@@ -131,7 +137,7 @@ fn print_help() {
          --verify-batch-size N  signature verification batch ceiling (default 128)\n\
          --engine-batch-size N  store transaction batch ceiling (default 128)\n\
          --engine-batch-bytes N  conservative encoded-byte ceiling (default 8388608)\n\
-         --engine-batch-wait-us N  maximum EVENT coalescing wait (default 0)\n\
+         --engine-batch-wait-us N  maximum EVENT coalescing wait (default 200)\n\
          --visible-limit N   live query window (default 200)\n\
          --unlimited         retain every matching row in the live query\n\
          --trim-allocator-during-ingest\n\

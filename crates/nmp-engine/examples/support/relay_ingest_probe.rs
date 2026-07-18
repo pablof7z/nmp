@@ -25,7 +25,7 @@ use tungstenite::{accept, Message};
 
 pub type ProbeError = Box<dyn Error + Send + Sync>;
 
-const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v11";
+const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v12";
 const CORPUS_SCHEMA: &str = "nmp-relay-ingest-corpus-v1";
 const BASE_CREATED_AT: u64 = 1_700_000_000;
 // Duplicate replay can advance diagnostics without producing a row delta.
@@ -100,6 +100,7 @@ pub struct ProbeConfig {
     pub redb_nondurable_diagnostic: bool,
     pub queue_capacity: usize,
     pub verified_cache_capacity: usize,
+    pub committed_observation_cache_capacity: usize,
     pub diagnostic_duplicate_ceiling_capacity: usize,
     pub diagnostic_duplicate_ceiling_event_payload: bool,
     pub verifier_workers: usize,
@@ -128,13 +129,14 @@ impl Default for ProbeConfig {
             redb_nondurable_diagnostic: false,
             queue_capacity: 1_024,
             verified_cache_capacity: 131_072,
+            committed_observation_cache_capacity: 131_072,
             diagnostic_duplicate_ceiling_capacity: 0,
             diagnostic_duplicate_ceiling_event_payload: false,
             verifier_workers: 0,
             verify_batch_size: 128,
             engine_batch_size: 128,
             engine_batch_bytes: 8 * 1024 * 1024,
-            engine_batch_wait: Duration::ZERO,
+            engine_batch_wait: Duration::from_micros(200),
             visible_limit: Some(200),
             trim_allocator_during_ingest: false,
             frame_delay: Duration::ZERO,
@@ -222,6 +224,7 @@ pub struct ProbeResult {
     pub store_durability: &'static str,
     pub queue_capacity: usize,
     pub verified_cache_capacity: usize,
+    pub committed_observation_cache_capacity: usize,
     pub diagnostic_duplicate_ceiling_capacity: usize,
     pub diagnostic_duplicate_ceiling_event_payload: bool,
     pub verifier_workers: usize,
@@ -597,6 +600,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     }
     let queue_capacity = config.queue_capacity;
     let verified_cache_capacity = config.verified_cache_capacity;
+    let committed_observation_cache_capacity = config.committed_observation_cache_capacity;
     let verifier_workers = config.verifier_workers;
     let verify_batch_size = config.verify_batch_size;
     let engine_batch_size = config.engine_batch_size;
@@ -609,6 +613,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         event_sink_queue_capacity: queue_capacity,
         verifier_queue_capacity: queue_capacity,
         verified_cache_capacity,
+        committed_observation_cache_capacity,
         verifier_workers,
         max_verify_batch: verify_batch_size,
         max_engine_batch: engine_batch_size,
@@ -967,6 +972,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         },
         queue_capacity,
         verified_cache_capacity,
+        committed_observation_cache_capacity,
         diagnostic_duplicate_ceiling_capacity: config.diagnostic_duplicate_ceiling_capacity,
         diagnostic_duplicate_ceiling_event_payload: config
             .diagnostic_duplicate_ceiling_event_payload,
@@ -1051,6 +1057,10 @@ fn ingest_attribution_json() -> serde_json::Value {
     let store = nmp_store::ingest_attribution::snapshot();
     serde_json::json!({
         "transport": {
+            "committed_observation_lookups": transport.committed_observation_lookups,
+            "committed_observation_hits": transport.committed_observation_hits,
+            "committed_observation_publications": transport.committed_observation_publications,
+            "committed_observation_invalidations": transport.committed_observation_invalidations,
             "diagnostic_duplicate_ceiling_lookups": transport.diagnostic_duplicate_ceiling_lookups,
             "diagnostic_duplicate_ceiling_hits": transport.diagnostic_duplicate_ceiling_hits,
             "diagnostic_duplicate_ceiling_inserts": transport.diagnostic_duplicate_ceiling_inserts,

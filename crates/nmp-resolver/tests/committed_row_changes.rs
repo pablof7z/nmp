@@ -77,14 +77,14 @@ fn same_batch_insert_then_delete_reports_only_the_durable_deletion_row() {
     let source = relay("delete");
     let mut engine = Engine::new(MemoryStore::new());
 
-    let changes = engine
+    let ingest = engine
         .ingest_observed_detailed(vec![
             (target, observed(source.clone(), 11)),
             (deletion.clone(), observed(source.clone(), 21)),
         ])
-        .unwrap()
-        .committed
-        .row_changes;
+        .unwrap();
+    assert_eq!(ingest.current_after_commit, vec![false, true]);
+    let changes = ingest.committed.row_changes;
 
     assert_eq!(changes.inserted.len(), 1);
     assert_eq!(changes.inserted[0].event.id, deletion.id);
@@ -108,14 +108,14 @@ fn same_batch_supersession_chain_collapses_to_old_removed_and_final_winner_inser
         .ingest_observed_detailed(vec![(old.clone(), observed(source.clone(), 11))])
         .unwrap();
 
-    let changes = engine
+    let ingest = engine
         .ingest_observed_detailed(vec![
             (middle, observed(source.clone(), 21)),
             (winner.clone(), observed(source.clone(), 31)),
         ])
-        .unwrap()
-        .committed
-        .row_changes;
+        .unwrap();
+    assert_eq!(ingest.current_after_commit, vec![false, true]);
+    let changes = ingest.committed.row_changes;
 
     assert_eq!(changes.inserted.len(), 1);
     assert_eq!(changes.inserted[0].event.id, winner.id);

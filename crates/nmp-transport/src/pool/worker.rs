@@ -34,6 +34,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
+use nostr::RelayUrl;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::Message;
 
@@ -312,7 +313,7 @@ impl WorkerHandle {
 pub(super) fn spawn(
     slot: u32,
     worker_id: u32,
-    url: String,
+    url: RelayUrl,
     initial_gate_required: bool,
     event_tx: SyncSender<WorkerEvent>,
     keepalive_idle: Duration,
@@ -321,6 +322,7 @@ pub(super) fn spawn(
     reconnect_jitter_max: Duration,
     command_queue_capacity: usize,
     allowed_local_hosts: Arc<BTreeSet<String>>,
+    committed_observations: Arc<super::committed_observations::CommittedObservationCache>,
     spawner: &dyn ThreadSpawner,
 ) -> Result<WorkerHandle, ThreadSpawnError> {
     // Bounded (issue #506's HIGH finding): this was the one unbounded queue
@@ -355,6 +357,7 @@ pub(super) fn spawn(
                     reconnect_delay_initial,
                     reconnect_jitter_max,
                     &allowed_local_hosts,
+                    &committed_observations,
                 );
             }),
         )
@@ -390,7 +393,7 @@ enum ConnectedOutcome {
 fn run_worker(
     slot: u32,
     worker_id: u32,
-    url: String,
+    url: RelayUrl,
     initial_gate_required: bool,
     event_tx: SyncSender<WorkerEvent>,
     command_rx: Receiver<WorkerCommand>,
@@ -401,7 +404,9 @@ fn run_worker(
     reconnect_delay_initial: Duration,
     reconnect_jitter_max: Duration,
     allowed_local_hosts: &BTreeSet<String>,
+    committed_observations: &super::committed_observations::CommittedObservationCache,
 ) {
+    let relay_scope = super::committed_observations::RelayScope::new(&url);
     let mut pending: VecDeque<String> = VecDeque::new();
     let mut preamble: Vec<String> = Vec::new();
     // Durable EVENT tracking (issue #93): entirely separate from `pending`
@@ -437,7 +442,7 @@ fn run_worker(
             return;
         }
         let generation = pack_generation(worker_id, attempt);
-        match open_relay_socket(&url, allowed_local_hosts) {
+        match open_relay_socket(url.as_str(), allowed_local_hosts) {
             Ok(mut socket) => {
                 let connected_at = Instant::now();
                 // REQ-before-EVENT: inject the registered preamble at the
@@ -499,6 +504,8 @@ fn run_worker(
                     &mut ephemeral,
                     &mut ephemeral_write_accepted,
                     initial_gate_required,
+                    relay_scope,
+                    committed_observations,
                 );
                 match outcome {
                     ConnectedOutcome::Shutdown => return,
@@ -526,7 +533,7 @@ fn run_worker(
                             return;
                         }
                         let base = retry_in.expect("retry_in set above for non-permanent");
-                        let delay = backoff::jittered(base, &url, reconnect_jitter_max);
+                        let delay = backoff::jittered(base, url.as_str(), reconnect_jitter_max);
                         attempt = attempt.wrapping_add(1);
                         if !wait_before_reconnect(
                             &command_rx,
@@ -571,7 +578,7 @@ fn run_worker(
                     return;
                 }
                 let base = retry_in.expect("retry_in set above for non-permanent");
-                let delay = backoff::jittered(base, &url, reconnect_jitter_max);
+                let delay = backoff::jittered(base, url.as_str(), reconnect_jitter_max);
                 attempt = attempt.wrapping_add(1);
                 if !wait_before_reconnect(
                     &command_rx,
@@ -855,6 +862,8 @@ fn run_connected(
     ephemeral: &mut VecDeque<EphemeralFrame>,
     ephemeral_write_accepted: &mut Vec<EphemeralCompletion>,
     initial_gate_required: bool,
+    relay: super::committed_observations::RelayScope,
+    committed_observations: &super::committed_observations::CommittedObservationCache,
 ) -> ConnectedOutcome {
     let mut outbound_released = !initial_gate_required;
     let outcome = run_connected_inner(
@@ -875,6 +884,8 @@ fn run_connected(
         ephemeral_write_accepted,
         &mut outbound_released,
         initial_gate_required,
+        relay,
+        committed_observations,
     );
     resolve_generation_end(
         event_tx,
@@ -907,6 +918,8 @@ fn run_connected_inner(
     ephemeral_write_accepted: &mut Vec<EphemeralCompletion>,
     outbound_released: &mut bool,
     initial_gate_required: bool,
+    relay: super::committed_observations::RelayScope,
+    committed_observations: &super::committed_observations::CommittedObservationCache,
 ) -> ConnectedOutcome {
     let mut poller = match RelayPoller::new(socket, waker_slot) {
         Ok(poller) => poller,
@@ -959,9 +972,15 @@ fn run_connected_inner(
             }
             match poller.wait(remaining) {
                 Ok(true) => {
-                    if let Some(outcome) =
-                        complete_initial_read(slot, generation, event_tx, socket, keepalive)
-                    {
+                    if let Some(outcome) = complete_initial_read(
+                        slot,
+                        generation,
+                        event_tx,
+                        socket,
+                        keepalive,
+                        relay,
+                        committed_observations,
+                    ) {
                         return outcome;
                     }
                     break;
@@ -979,8 +998,15 @@ fn run_connected_inner(
                 }
             }
         }
-        if let Some(outcome) = complete_initial_read(slot, generation, event_tx, socket, keepalive)
-        {
+        if let Some(outcome) = complete_initial_read(
+            slot,
+            generation,
+            event_tx,
+            socket,
+            keepalive,
+            relay,
+            committed_observations,
+        ) {
             return outcome;
         }
     }
@@ -1137,6 +1163,8 @@ fn run_connected_inner(
             socket,
             keepalive,
             Some(&mut pending_gap),
+            relay,
+            committed_observations,
         ) {
             return outcome;
         }
@@ -1149,8 +1177,19 @@ fn complete_initial_read(
     event_tx: &SyncSender<WorkerEvent>,
     socket: &mut RelaySocket,
     keepalive: &mut KeepaliveState,
+    relay: super::committed_observations::RelayScope,
+    committed_observations: &super::committed_observations::CommittedObservationCache,
 ) -> Option<ConnectedOutcome> {
-    if let Some(outcome) = drain_reads(slot, generation, event_tx, socket, keepalive, None) {
+    if let Some(outcome) = drain_reads(
+        slot,
+        generation,
+        event_tx,
+        socket,
+        keepalive,
+        None,
+        relay,
+        committed_observations,
+    ) {
         return Some(outcome);
     }
     event_tx
@@ -1441,6 +1480,8 @@ fn drain_reads(
     socket: &mut RelaySocket,
     keepalive: &mut KeepaliveState,
     mut pending_gap: Option<&mut bool>,
+    relay: super::committed_observations::RelayScope,
+    committed_observations: &super::committed_observations::CommittedObservationCache,
 ) -> Option<ConnectedOutcome> {
     loop {
         match socket.read() {
@@ -1462,7 +1503,7 @@ fn drain_reads(
                         permanent: false,
                     });
                 }
-                if let Some(frame) = classify_message(&message) {
+                if let Some(frame) = classify_message(message, relay, committed_observations) {
                     if event_tx
                         .send(WorkerEvent {
                             slot,
@@ -1738,6 +1779,11 @@ mod tests {
 
     #[test]
     fn initial_read_orders_buffered_auth_before_completion_and_completes_empty_once() {
+        let relay = super::super::committed_observations::RelayScope::new(
+            &RelayUrl::parse("wss://relay.example").unwrap(),
+        );
+        let committed_observations =
+            super::super::committed_observations::CommittedObservationCache::new(0);
         let (mut socket, mut peer) = real_websocket_pair();
         peer.send(Message::Text(
             "[\"AUTH\",\"worker-ordered\"]".to_string().into(),
@@ -1755,7 +1801,16 @@ mod tests {
         assert!(poller.wait(Duration::from_secs(1)).unwrap());
         drop(poller);
 
-        assert!(complete_initial_read(3, 9, &event_tx, &mut socket, &mut keepalive).is_none());
+        assert!(complete_initial_read(
+            3,
+            9,
+            &event_tx,
+            &mut socket,
+            &mut keepalive,
+            relay,
+            &committed_observations,
+        )
+        .is_none());
         let events = event_rx.try_iter().collect::<Vec<_>>();
         assert_eq!(events.len(), 2);
         assert!(matches!(
@@ -1775,10 +1830,16 @@ mod tests {
             Duration::from_secs(60),
             Duration::from_secs(10),
         );
-        assert!(
-            complete_initial_read(4, 10, &empty_tx, &mut empty_socket, &mut empty_keepalive,)
-                .is_none()
-        );
+        assert!(complete_initial_read(
+            4,
+            10,
+            &empty_tx,
+            &mut empty_socket,
+            &mut empty_keepalive,
+            relay,
+            &committed_observations,
+        )
+        .is_none());
         let empty_events = empty_rx.try_iter().collect::<Vec<_>>();
         assert_eq!(empty_events.len(), 1);
         assert!(matches!(
@@ -1822,6 +1883,8 @@ mod tests {
                 &closing_tx,
                 &mut closing_socket,
                 &mut closing_keepalive,
+                relay,
+                &committed_observations,
             ),
             Some(ConnectedOutcome::Reconnect { .. })
         ));
@@ -1858,6 +1921,11 @@ mod tests {
             let mut ephemeral_write_accepted = Vec::new();
             let mut outbound_released = true;
             let shutdown = AtomicBool::new(false);
+            let relay = super::super::committed_observations::RelayScope::new(
+                &RelayUrl::parse("wss://relay.example").unwrap(),
+            );
+            let committed_observations =
+                super::super::committed_observations::CommittedObservationCache::new(0);
             run_connected_inner(
                 3,
                 12,
@@ -1876,6 +1944,8 @@ mod tests {
                 &mut ephemeral_write_accepted,
                 &mut outbound_released,
                 false,
+                relay,
+                &committed_observations,
             )
         });
 
@@ -1926,6 +1996,11 @@ mod tests {
             let mut ephemeral_write_accepted = Vec::new();
             let mut outbound_released = true;
             let shutdown = AtomicBool::new(false);
+            let relay = super::super::committed_observations::RelayScope::new(
+                &RelayUrl::parse("wss://relay.example").unwrap(),
+            );
+            let committed_observations =
+                super::super::committed_observations::CommittedObservationCache::new(0);
             run_connected_inner(
                 3,
                 12,
@@ -1944,6 +2019,8 @@ mod tests {
                 &mut ephemeral_write_accepted,
                 &mut outbound_released,
                 false,
+                relay,
+                &committed_observations,
             )
         });
 
@@ -2023,6 +2100,11 @@ mod tests {
             let mut ephemeral_write_accepted = Vec::new();
             let mut outbound_released = true;
             let shutdown = AtomicBool::new(false);
+            let relay = super::super::committed_observations::RelayScope::new(
+                &RelayUrl::parse("wss://relay.example").unwrap(),
+            );
+            let committed_observations =
+                super::super::committed_observations::CommittedObservationCache::new(0);
             run_connected_inner(
                 3,
                 12,
@@ -2041,6 +2123,8 @@ mod tests {
                 &mut ephemeral_write_accepted,
                 &mut outbound_released,
                 false,
+                relay,
+                &committed_observations,
             )
         });
 

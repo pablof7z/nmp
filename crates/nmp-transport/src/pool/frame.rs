@@ -3,17 +3,22 @@
 //! HARVEST source: the old repo's `crates/nmp-network/src/pool/frame.rs`
 //! (the `tungstenite::Message -> RelayFrame` direction) and
 //! `relay_worker/socket_io.rs` (the nonblocking-IO classifier). Unlike the
-//! harvested opaque-text handoff, this boundary parses every relay text once
-//! into an owned `nostr::RelayMessage`; verification and the engine consume
-//! that same value.
+//! harvested opaque-text handoff, this boundary parses every ordinary relay
+//! text once into an owned `nostr::RelayMessage`; exact observations that the
+//! engine published after commit can instead take the fail-closed preparse
+//! path below. Verification and the engine consume the same owned value on a
+//! miss or rejected lease.
 //!
 //! `Ping`/`Pong`/`Close`/`Binary` remain transport-internal signals the
 //! keepalive FSM and the translator's `Disconnected` event already cover;
 //! surfacing them as relay messages would duplicate that vocabulary.
 
 use nostr::{JsonUtil, RelayMessage};
-use tungstenite::Message;
+use tungstenite::{Message, Utf8Bytes};
 
+use super::committed_observations::{
+    CommittedObservationCache, CommittedObservationCandidate, RelayScope,
+};
 use super::RelayFrame;
 
 #[cfg(feature = "bench-instrumentation")]
@@ -77,123 +82,7 @@ mod diagnostic_duplicate_ceiling {
     }
 
     pub(super) fn event_payload(text: &str) -> Option<&str> {
-        let bytes = text.as_bytes();
-        let mut cursor = skip_ws(bytes, 0);
-        cursor = expect(bytes, cursor, b'[')?;
-        cursor = skip_ws(bytes, cursor);
-        if !bytes.get(cursor..)?.starts_with(b"\"EVENT\"") {
-            return None;
-        }
-        cursor += b"\"EVENT\"".len();
-        cursor = skip_ws(bytes, cursor);
-        cursor = expect(bytes, cursor, b',')?;
-        cursor = skip_json_value(bytes, skip_ws(bytes, cursor))?;
-        cursor = skip_ws(bytes, cursor);
-        cursor = expect(bytes, cursor, b',')?;
-        let payload_start = skip_ws(bytes, cursor);
-        if bytes.get(payload_start) != Some(&b'{') {
-            return None;
-        }
-        let payload_end = skip_json_value(bytes, payload_start)?;
-        cursor = skip_ws(bytes, payload_end);
-        cursor = expect(bytes, cursor, b']')?;
-        if skip_ws(bytes, cursor) != bytes.len() {
-            return None;
-        }
-        text.get(payload_start..payload_end)
-    }
-
-    fn skip_ws(bytes: &[u8], mut cursor: usize) -> usize {
-        while bytes
-            .get(cursor)
-            .is_some_and(|byte| byte.is_ascii_whitespace())
-        {
-            cursor += 1;
-        }
-        cursor
-    }
-
-    fn expect(bytes: &[u8], cursor: usize, expected: u8) -> Option<usize> {
-        (bytes.get(cursor) == Some(&expected)).then_some(cursor + 1)
-    }
-
-    fn skip_json_value(bytes: &[u8], cursor: usize) -> Option<usize> {
-        match *bytes.get(cursor)? {
-            b'\"' => skip_string(bytes, cursor),
-            b'{' | b'[' => skip_composite(bytes, cursor),
-            b',' | b']' | b'}' => None,
-            _ => {
-                let mut end = cursor;
-                while bytes.get(end).is_some_and(|byte| {
-                    !byte.is_ascii_whitespace() && !matches!(*byte, b',' | b']' | b'}')
-                }) {
-                    end += 1;
-                }
-                (end > cursor).then_some(end)
-            }
-        }
-    }
-
-    fn skip_string(bytes: &[u8], cursor: usize) -> Option<usize> {
-        let mut cursor = cursor + 1;
-        while let Some(byte) = bytes.get(cursor) {
-            match *byte {
-                b'\\' => {
-                    cursor = cursor.checked_add(2)?;
-                    if cursor > bytes.len() {
-                        return None;
-                    }
-                }
-                b'\"' => return Some(cursor + 1),
-                0x00..=0x1f => return None,
-                _ => cursor += 1,
-            }
-        }
-        None
-    }
-
-    fn skip_composite(bytes: &[u8], cursor: usize) -> Option<usize> {
-        let mut stack = [0_u8; 64];
-        stack[0] = match *bytes.get(cursor)? {
-            b'{' => b'}',
-            b'[' => b']',
-            _ => return None,
-        };
-        let mut depth = 1_usize;
-        let mut cursor = cursor + 1;
-        while let Some(byte) = bytes.get(cursor) {
-            match *byte {
-                b'\"' => cursor = skip_string(bytes, cursor)?,
-                b'{' => {
-                    if depth == stack.len() {
-                        return None;
-                    }
-                    stack[depth] = b'}';
-                    depth += 1;
-                    cursor += 1;
-                }
-                b'[' => {
-                    if depth == stack.len() {
-                        return None;
-                    }
-                    stack[depth] = b']';
-                    depth += 1;
-                    cursor += 1;
-                }
-                b'}' | b']' => {
-                    if depth == 0 || stack[depth - 1] != *byte {
-                        return None;
-                    }
-                    depth -= 1;
-                    cursor += 1;
-                    if depth == 0 {
-                        return Some(cursor);
-                    }
-                }
-                _ => cursor += 1,
-            }
-        }
-        None
+        super::event_payload(text)
     }
 
     pub(super) fn insert(digest: [u8; 32], entry: Entry) {
@@ -227,18 +116,47 @@ pub(crate) fn configure_diagnostic_duplicate_ceiling(capacity: usize, event_payl
 /// [`crate::keepalive::KeepaliveState`]), `Close` (surfaced instead as a
 /// [`super::PoolEvent::Disconnected`]), and the raw `Frame` variant tungstenite
 /// itself never yields to a reader.
-pub(super) fn classify_message(message: &Message) -> Option<RelayFrame> {
+pub(super) fn classify_message(
+    message: Message,
+    relay: RelayScope,
+    committed_observations: &CommittedObservationCache,
+) -> Option<RelayFrame> {
     match message {
-        Message::Text(text) => classify_text(text.as_str()),
+        Message::Text(text) => classify_owned_text(text, relay, committed_observations),
         Message::Binary(_) | Message::Ping(_) | Message::Pong(_) | Message::Close(_) => None,
         Message::Frame(_) => None,
     }
 }
 
+fn classify_owned_text(
+    text: Utf8Bytes,
+    relay: RelayScope,
+    committed_observations: &CommittedObservationCache,
+) -> Option<RelayFrame> {
+    let candidate = event_payload(text.as_str()).map(|payload| {
+        CommittedObservationCandidate::new(*blake3::hash(payload.as_bytes()).as_bytes())
+    });
+    if let Some(candidate) = candidate {
+        match committed_observations.lookup(relay, candidate.digest(), text) {
+            Ok(hit) => return Some(RelayFrame::CommittedObservation(hit)),
+            Err(text) => return classify_text_with_candidate(text.as_str(), Some(candidate)),
+        }
+    }
+    classify_text_with_candidate(text.as_str(), None)
+}
+
 /// Parse one websocket text into the owned value carried through verification
 /// and engine ingest. Malformed or unsupported relay messages fail closed at
 /// this boundary and never become a pool event.
+#[cfg(test)]
 pub(super) fn classify_text(text: &str) -> Option<RelayFrame> {
+    classify_text_with_candidate(text, None)
+}
+
+pub(super) fn classify_text_with_candidate(
+    text: &str,
+    observation_candidate: Option<CommittedObservationCandidate>,
+) -> Option<RelayFrame> {
     #[cfg(feature = "bench-instrumentation")]
     let diagnostic_digest = {
         diagnostic_duplicate_ceiling::lookup(text).map(|(digest, hit)| {
@@ -278,12 +196,176 @@ pub(super) fn classify_text(text: &str) -> Option<RelayFrame> {
             },
         );
     }
-    Some(RelayFrame::from_message(message))
+    match message {
+        RelayMessage::Event {
+            subscription_id,
+            event,
+        } if observation_candidate.is_some() => Some(RelayFrame::from_observed_event(
+            subscription_id.into_owned(),
+            event.into_owned(),
+            observation_candidate.expect("guarded above"),
+        )),
+        message => Some(RelayFrame::from_message(message)),
+    }
+}
+
+fn event_payload(text: &str) -> Option<&str> {
+    let bytes = text.as_bytes();
+    let mut cursor = skip_ws(bytes, 0);
+    cursor = expect(bytes, cursor, b'[')?;
+    cursor = skip_ws(bytes, cursor);
+    if !bytes.get(cursor..)?.starts_with(b"\"EVENT\"") {
+        return None;
+    }
+    cursor += b"\"EVENT\"".len();
+    cursor = skip_ws(bytes, cursor);
+    cursor = expect(bytes, cursor, b',')?;
+    cursor = skip_ws(bytes, cursor);
+    if bytes.get(cursor) != Some(&b'\"') {
+        return None;
+    }
+    cursor = skip_string(bytes, cursor)?;
+    cursor = skip_ws(bytes, cursor);
+    cursor = expect(bytes, cursor, b',')?;
+    let payload_start = skip_ws(bytes, cursor);
+    if bytes.get(payload_start) != Some(&b'{') {
+        return None;
+    }
+    let payload_end = skip_json_value(bytes, payload_start)?;
+    cursor = skip_ws(bytes, payload_end);
+    cursor = expect(bytes, cursor, b']')?;
+    if skip_ws(bytes, cursor) != bytes.len() {
+        return None;
+    }
+    text.get(payload_start..payload_end)
+}
+
+fn skip_ws(bytes: &[u8], mut cursor: usize) -> usize {
+    while bytes
+        .get(cursor)
+        .is_some_and(|byte| byte.is_ascii_whitespace())
+    {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn expect(bytes: &[u8], cursor: usize, expected: u8) -> Option<usize> {
+    (bytes.get(cursor) == Some(&expected)).then_some(cursor + 1)
+}
+
+fn skip_json_value(bytes: &[u8], cursor: usize) -> Option<usize> {
+    match *bytes.get(cursor)? {
+        b'\"' => skip_string(bytes, cursor),
+        b'{' | b'[' => skip_composite(bytes, cursor),
+        b',' | b']' | b'}' => None,
+        _ => {
+            let mut end = cursor;
+            while bytes.get(end).is_some_and(|byte| {
+                !byte.is_ascii_whitespace() && !matches!(*byte, b',' | b']' | b'}')
+            }) {
+                end += 1;
+            }
+            (end > cursor).then_some(end)
+        }
+    }
+}
+
+fn skip_string(bytes: &[u8], cursor: usize) -> Option<usize> {
+    let mut cursor = cursor + 1;
+    while let Some(byte) = bytes.get(cursor) {
+        match *byte {
+            b'\\' => match *bytes.get(cursor + 1)? {
+                b'\"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => {
+                    cursor += 2;
+                }
+                b'u' => {
+                    let codepoint = json_hex_quad(bytes, cursor + 2)?;
+                    cursor += 6;
+                    if (0xD800..=0xDBFF).contains(&codepoint) {
+                        if bytes.get(cursor..cursor + 2) != Some(b"\\u") {
+                            return None;
+                        }
+                        let low = json_hex_quad(bytes, cursor + 2)?;
+                        if !(0xDC00..=0xDFFF).contains(&low) {
+                            return None;
+                        }
+                        cursor += 6;
+                    } else if (0xDC00..=0xDFFF).contains(&codepoint) {
+                        return None;
+                    }
+                }
+                _ => return None,
+            },
+            b'\"' => return Some(cursor + 1),
+            0x00..=0x1f => return None,
+            _ => cursor += 1,
+        }
+    }
+    None
+}
+
+fn json_hex_quad(bytes: &[u8], cursor: usize) -> Option<u16> {
+    let digits = bytes.get(cursor..cursor + 4)?;
+    digits.iter().try_fold(0_u16, |value, digit| {
+        let digit = match *digit {
+            b'0'..=b'9' => u16::from(*digit - b'0'),
+            b'a'..=b'f' => u16::from(*digit - b'a') + 10,
+            b'A'..=b'F' => u16::from(*digit - b'A') + 10,
+            _ => return None,
+        };
+        Some((value << 4) | digit)
+    })
+}
+
+fn skip_composite(bytes: &[u8], cursor: usize) -> Option<usize> {
+    let mut stack = [0_u8; 64];
+    stack[0] = match *bytes.get(cursor)? {
+        b'{' => b'}',
+        b'[' => b']',
+        _ => return None,
+    };
+    let mut depth = 1_usize;
+    let mut cursor = cursor + 1;
+    while let Some(byte) = bytes.get(cursor) {
+        match *byte {
+            b'\"' => cursor = skip_string(bytes, cursor)?,
+            b'{' => {
+                if depth == stack.len() {
+                    return None;
+                }
+                stack[depth] = b'}';
+                depth += 1;
+                cursor += 1;
+            }
+            b'[' => {
+                if depth == stack.len() {
+                    return None;
+                }
+                stack[depth] = b']';
+                depth += 1;
+                cursor += 1;
+            }
+            b'}' | b']' => {
+                if depth == 0 || stack[depth - 1] != *byte {
+                    return None;
+                }
+                depth -= 1;
+                cursor += 1;
+                if depth == 0 {
+                    return Some(cursor);
+                }
+            }
+            _ => cursor += 1,
+        }
+    }
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nostr::RelayUrl;
 
     #[cfg(feature = "bench-instrumentation")]
     #[test]
@@ -334,6 +416,56 @@ mod tests {
     }
 
     #[test]
+    fn committed_observation_ignores_subscription_id_and_retains_exact_fallback() {
+        let relay = RelayUrl::parse("wss://relay.example").unwrap();
+        let relay_scope = RelayScope::new(&relay);
+        let cache = CommittedObservationCache::new(8);
+        let event = nostr::EventBuilder::text_note("committed")
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("signed event");
+        let first_raw =
+            RelayMessage::event(nostr::SubscriptionId::new("first"), event.clone()).as_json();
+        let first = classify_message(Message::Text(first_raw.into()), relay_scope, &cache)
+            .expect("first EVENT");
+        let (parsed, candidate) = first.into_observed_event().expect("ordinary EVENT");
+        let candidate = candidate.expect("raw EVENT locator candidate");
+        assert_eq!(parsed, event);
+        cache.apply_update(
+            [],
+            [super::super::CommittedObservationPublication::new(
+                relay.clone(),
+                candidate,
+                event.id,
+                event.kind.as_u16(),
+            )],
+        );
+
+        let second_raw =
+            RelayMessage::event(nostr::SubscriptionId::new("second"), event.clone()).as_json();
+        let invalid_subscription = second_raw.replacen("\"second\"", "42", 1);
+        assert!(classify_message(
+            Message::Text(invalid_subscription.into()),
+            relay_scope,
+            &cache,
+        )
+        .is_none());
+        let invalid_escape = second_raw.replacen("\"second\"", r#""bad\x""#, 1);
+        assert!(
+            classify_message(Message::Text(invalid_escape.into()), relay_scope, &cache).is_none()
+        );
+        let hit = classify_message(Message::Text(second_raw.into()), relay_scope, &cache)
+            .expect("cached EVENT");
+        assert!(matches!(hit, RelayFrame::CommittedObservation(_)));
+        let (fallback, fallback_candidate) = hit
+            .into_ordinary_fallback()
+            .expect("valid fallback frame")
+            .into_observed_event()
+            .expect("exact fallback EVENT");
+        assert_eq!(fallback, event);
+        assert_eq!(fallback_candidate, Some(candidate));
+    }
+
+    #[test]
     fn classify_malformed_event_fails_closed() {
         assert!(classify_text(r#"["EVENT","sub",{"id":"abc"}]"#).is_none());
     }
@@ -350,8 +482,11 @@ mod tests {
 
     #[test]
     fn non_text_messages_yield_none() {
-        assert!(classify_message(&Message::Binary(vec![1, 2, 3].into())).is_none());
-        assert!(classify_message(&Message::Ping(Vec::new().into())).is_none());
-        assert!(classify_message(&Message::Pong(Vec::new().into())).is_none());
+        let relay = RelayUrl::parse("wss://relay.example").unwrap();
+        let relay = RelayScope::new(&relay);
+        let cache = CommittedObservationCache::new(0);
+        assert!(classify_message(Message::Binary(vec![1, 2, 3].into()), relay, &cache).is_none());
+        assert!(classify_message(Message::Ping(Vec::new().into()), relay, &cache).is_none());
+        assert!(classify_message(Message::Pong(Vec::new().into()), relay, &cache).is_none());
     }
 }

@@ -1846,6 +1846,9 @@ fn send_relay_batch(
 }
 
 fn encoded_event_upper_bound(frame: &RelayFrame) -> Option<usize> {
+    if let RelayFrame::CommittedObservation(hit) = frame {
+        return Some(hit.encoded_bytes());
+    }
     #[cfg(feature = "bench-instrumentation")]
     if let Some((_, encoded_bytes)) = frame.diagnostic_duplicate_ceiling() {
         return Some(encoded_bytes);
@@ -3822,18 +3825,97 @@ fn engine_loop<S, D>(
                         dispatch_runtime,
                     );
                 }
-                let effects = core.handle(EngineMsg::RelayFrames(frames));
-                dispatch_core_effects(
-                    &mut core,
-                    effects,
-                    &pool,
-                    &mut row_channels,
-                    &mut history_channels,
-                    &mut diag_channels,
-                    &mut preambles,
-                    &registry,
-                    dispatch_runtime,
-                );
+                let mut ordinary = Vec::new();
+                let mut committed = Vec::new();
+                for (handle, session, frame) in frames {
+                    match frame {
+                        RelayFrame::CommittedObservation(hit) => {
+                            if !ordinary.is_empty() {
+                                reduce_and_dispatch_relay_frames(
+                                    &mut core,
+                                    std::mem::take(&mut ordinary),
+                                    &pool,
+                                    &mut row_channels,
+                                    &mut history_channels,
+                                    &mut diag_channels,
+                                    &mut preambles,
+                                    &registry,
+                                    dispatch_runtime,
+                                );
+                            }
+                            let valid = core.is_current_transport_session(handle, &session)
+                                && !core.committed_observation_conflicts_with_pending(&hit);
+                            if valid {
+                                committed.push((
+                                    handle,
+                                    session,
+                                    RelayFrame::CommittedObservation(hit),
+                                ));
+                            } else {
+                                if !committed.is_empty() {
+                                    reduce_and_dispatch_committed_observations(
+                                        &mut core,
+                                        std::mem::take(&mut committed),
+                                        &pool,
+                                        &mut row_channels,
+                                        &mut history_channels,
+                                        &mut diag_channels,
+                                        &mut preambles,
+                                        &registry,
+                                        dispatch_runtime,
+                                    );
+                                }
+                                if let Some(frame) =
+                                    RelayFrame::CommittedObservation(hit).into_ordinary_fallback()
+                                {
+                                    ordinary.push((handle, session, frame));
+                                }
+                            }
+                        }
+                        frame => {
+                            if !committed.is_empty() {
+                                reduce_and_dispatch_committed_observations(
+                                    &mut core,
+                                    std::mem::take(&mut committed),
+                                    &pool,
+                                    &mut row_channels,
+                                    &mut history_channels,
+                                    &mut diag_channels,
+                                    &mut preambles,
+                                    &registry,
+                                    dispatch_runtime,
+                                );
+                            }
+                            ordinary.push((handle, session, frame));
+                        }
+                    }
+                }
+                if !committed.is_empty() {
+                    reduce_and_dispatch_committed_observations(
+                        &mut core,
+                        committed,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &mut preambles,
+                        &registry,
+                        dispatch_runtime,
+                    );
+                }
+                if !ordinary.is_empty() {
+                    reduce_and_dispatch_relay_frames(
+                        &mut core,
+                        ordinary,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &mut preambles,
+                        &registry,
+                        dispatch_runtime,
+                    );
+                }
                 #[cfg(feature = "bench-instrumentation")]
                 crate::ingest_attribution::engine_batch_process(batch_started.elapsed());
                 let _ = applied.send(());
@@ -4620,6 +4702,96 @@ fn engine_loop<S, D>(
     pool.shutdown();
 }
 
+#[allow(clippy::too_many_arguments)]
+fn reduce_and_dispatch_committed_observations<S: EventStore>(
+    core: &mut EngineCore<S>,
+    frames: Vec<(nmp_transport::RelayHandle, RelaySessionKey, RelayFrame)>,
+    pool: &Pool,
+    row_channels: &mut HashMap<HandleId, RowsSender>,
+    history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
+    diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
+    preambles: &mut Preambles,
+    registry: &SignerRegistry,
+    runtime: DispatchRuntime<'_>,
+) {
+    let all_valid = frames
+        .iter()
+        .all(|(_, _, frame)| matches!(frame, RelayFrame::CommittedObservation(_)))
+        && pool.revalidate_committed_observations(frames.iter().filter_map(|(_, _, frame)| {
+            match frame {
+                RelayFrame::CommittedObservation(hit) => Some(hit),
+                _ => None,
+            }
+        }));
+    if all_valid {
+        let observations = frames
+            .into_iter()
+            .filter_map(|(_, session, frame)| match frame {
+                RelayFrame::CommittedObservation(hit) => Some((session, hit.event_kind())),
+                _ => None,
+            })
+            .collect();
+        let effects = core.on_revalidated_committed_observations(observations);
+        dispatch_core_effects(
+            core,
+            effects,
+            pool,
+            row_channels,
+            history_channels,
+            diag_channels,
+            preambles,
+            registry,
+            runtime,
+        );
+    } else {
+        let frames = frames
+            .into_iter()
+            .filter_map(|(handle, session, frame)| {
+                frame
+                    .into_ordinary_fallback()
+                    .map(|frame| (handle, session, frame))
+            })
+            .collect();
+        reduce_and_dispatch_relay_frames(
+            core,
+            frames,
+            pool,
+            row_channels,
+            history_channels,
+            diag_channels,
+            preambles,
+            registry,
+            runtime,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reduce_and_dispatch_relay_frames<S: EventStore>(
+    core: &mut EngineCore<S>,
+    frames: Vec<(nmp_transport::RelayHandle, RelaySessionKey, RelayFrame)>,
+    pool: &Pool,
+    row_channels: &mut HashMap<HandleId, RowsSender>,
+    history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
+    diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
+    preambles: &mut Preambles,
+    registry: &SignerRegistry,
+    runtime: DispatchRuntime<'_>,
+) {
+    let effects = core.handle(EngineMsg::RelayFrames(frames));
+    dispatch_core_effects(
+        core,
+        effects,
+        pool,
+        row_channels,
+        history_channels,
+        diag_channels,
+        preambles,
+        registry,
+        runtime,
+    );
+}
+
 /// Release workers no longer owned by the reducer, then execute its effects.
 /// Release MUST happen first: when a cap-sized plan replaces every relay,
 /// keeping the old workers through `apply_wire_delta` would make every new
@@ -4979,6 +5151,10 @@ fn dispatch_effect(
     runtime: DispatchRuntime<'_>,
 ) {
     match effect {
+        Effect::UpdateCommittedObservations {
+            invalidated,
+            published,
+        } => pool.update_committed_observations(invalidated, published),
         Effect::Wire(delta) => apply_wire_delta(&delta, pool, preambles),
         Effect::PreflightHistoryRelays(_) => {}
         Effect::Replay(session, reqs) => apply_replay(&session, reqs, pool, preambles),
