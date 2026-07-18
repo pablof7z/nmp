@@ -1,5 +1,5 @@
 use super::ingest::insert_with_tables;
-use super::ingest_txn::RedbIngestTxn;
+use super::ingest_txn::GovernedWrite;
 use super::mutation::remove_row_in_txn;
 use super::outbox::{is_suppressed_in_txn, OUTBOX_SUPPRESS_BY_ADDR, OUTBOX_SUPPRESS_BY_ID};
 use super::query::{expiration_key_upper_bound, plan_ordered_query};
@@ -44,16 +44,11 @@ pub(super) fn insert(
     event: Event,
     from: RelayObserved,
 ) -> Result<InsertOutcome, PersistenceError> {
-    let write_txn = store.db.begin_write().map_err(persist_err)?;
-    let outcome = {
-        let mut tables = RedbIngestTxn::open(&write_txn)?;
-        let outcome = insert_with_tables(&mut tables, event, from)?;
-        tables.canonical.flush_pending()?;
-        outcome
-    };
+    let mut write = GovernedWrite::begin(&store.db)?;
+    let outcome = write.apply(|tables, _write_txn| insert_with_tables(tables, event, from))?;
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::ObservationBeforeCommit);
-    write_txn.commit().map_err(persist_err)?;
+    write.commit()?;
     Ok(outcome)
 }
 
@@ -70,34 +65,25 @@ pub(super) fn insert_batch(
     crate::ingest_attribution::record_batch(events.len());
     #[cfg(feature = "bench-instrumentation")]
     let begin_started = std::time::Instant::now();
-    let write_txn = store.db.begin_write().map_err(persist_err)?;
+    let mut write = GovernedWrite::begin(&store.db)?;
     #[cfg(feature = "bench-instrumentation")]
     crate::ingest_attribution::begin_write(begin_started.elapsed());
     let mut outcomes = Vec::with_capacity(events.len());
-    {
-        #[cfg(feature = "bench-instrumentation")]
-        let open_started = std::time::Instant::now();
-        let mut tables = RedbIngestTxn::open(&write_txn)?;
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::open_tables(open_started.elapsed());
+    write.apply(|tables, _write_txn| {
         #[cfg(feature = "bench-instrumentation")]
         let apply_started = std::time::Instant::now();
         for (event, from) in events {
-            outcomes.push(insert_with_tables(&mut tables, event, from)?);
+            outcomes.push(insert_with_tables(tables, event, from)?);
         }
         #[cfg(feature = "bench-instrumentation")]
         crate::ingest_attribution::apply_events(apply_started.elapsed());
-        #[cfg(feature = "bench-instrumentation")]
-        let flush_started = std::time::Instant::now();
-        tables.canonical.flush_pending()?;
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::flush(flush_started.elapsed());
-    }
+        Ok(())
+    })?;
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::ObservationBeforeCommit);
     #[cfg(feature = "bench-instrumentation")]
     let commit_started = std::time::Instant::now();
-    write_txn.commit().map_err(persist_err)?;
+    write.commit()?;
     #[cfg(feature = "bench-instrumentation")]
     {
         crate::ingest_attribution::commit(commit_started.elapsed());
@@ -427,14 +413,9 @@ pub(super) fn remove(
     id: EventId,
     _reason: RetractReason,
 ) -> Result<Option<StoredEvent>, PersistenceError> {
-    let write_txn = store.db.begin_write().map_err(persist_err)?;
-    let removed = {
-        let mut txn = RedbIngestTxn::open(&write_txn)?;
-        let removed = remove_row_in_txn(&mut txn, id, |_| true)?;
-        txn.canonical.flush_pending()?;
-        removed
-    };
-    write_txn.commit().map_err(persist_err)?;
+    let mut write = GovernedWrite::begin(&store.db)?;
+    let removed = write.apply(|txn, _write_txn| remove_row_in_txn(txn, id, |_| true))?;
+    write.commit()?;
     Ok(removed)
 }
 
@@ -442,10 +423,8 @@ pub(super) fn expire_due(
     store: &mut RedbStore,
     now: Timestamp,
 ) -> Result<Vec<StoredEvent>, PersistenceError> {
-    let write_txn = store.db.begin_write().map_err(persist_err)?;
-    let removed = {
-        let mut txn = RedbIngestTxn::open(&write_txn)?;
-
+    let mut write = GovernedWrite::begin(&store.db)?;
+    let removed = write.apply(|txn, _write_txn| {
         let upper = expiration_key_upper_bound(now);
         // Collect due ids first, propagating any redb read error out of
         // the iterator (a plain `for` accumulate rather than a `.map()`
@@ -465,14 +444,13 @@ pub(super) fn expire_due(
             let Some(stored) = txn.canonical.load_by_key(event_key)? else {
                 continue;
             };
-            if let Some(row) = remove_row_in_txn(&mut txn, stored.event.id, |_| true)? {
+            if let Some(row) = remove_row_in_txn(txn, stored.event.id, |_| true)? {
                 removed.push(row);
             }
         }
-        txn.canonical.flush_pending()?;
-        removed
-    };
-    write_txn.commit().map_err(persist_err)?;
+        Ok(removed)
+    })?;
+    write.commit()?;
     Ok(removed)
 }
 
@@ -541,9 +519,8 @@ pub(super) fn get_coverage(
 pub(super) fn gc(store: &mut RedbStore, claims: &ClaimSet) -> Result<GcReport, PersistenceError> {
     let mut report = GcReport::default();
 
-    let write_txn = store.db.begin_write().map_err(persist_err)?;
-    {
-        let mut txn = RedbIngestTxn::open(&write_txn)?;
+    let mut write = GovernedWrite::begin(&store.db)?;
+    write.apply(|txn, write_txn| {
         let mut coverage = write_txn.open_table(COVERAGE).map_err(persist_err)?;
 
         // Pass 1: find victims (regular events matched by no claim, and
@@ -591,7 +568,7 @@ pub(super) fn gc(store: &mut RedbStore, claims: &ClaimSet) -> Result<GcReport, P
         }
 
         for event in &victims {
-            remove_row_in_txn(&mut txn, event.id, |_| true)?
+            remove_row_in_txn(txn, event.id, |_| true)?
                 .expect("gc victim must remain present until removal");
             report.events_evicted += 1;
         }
@@ -676,11 +653,13 @@ pub(super) fn gc(store: &mut RedbStore, claims: &ClaimSet) -> Result<GcReport, P
             coverage.remove(row_key.as_str()).map_err(persist_err)?;
             report.legacy_coverage_rows_purged += 1;
         }
-        txn.canonical.flush_pending()?;
-    }
+        Ok(())
+    })?;
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::GcBeforeCommit);
-    write_txn.commit().map_err(persist_err)?;
+    write.commit()?;
+    #[cfg(test)]
+    store.crash_if(RedbCrashPoint::GcAfterCommit);
 
     Ok(report)
 }

@@ -7,7 +7,10 @@
 
 use super::canonical::CanonicalWriteTables;
 use super::outbox::{OUTBOX_KIND5_CLAIMS, OUTBOX_SUPPRESS_BY_ADDR, OUTBOX_SUPPRESS_BY_ID};
-use super::query::{insert_query_index_rows, remove_query_index_rows, QueryIndexWriteTables};
+#[cfg(test)]
+use super::postings_store::crash_if_postings;
+use super::postings_store::PostingsBatch;
+use super::query::{insert_query_cardinalities, remove_query_cardinalities};
 use super::schema::{
     persist_err, EventKey, ADDR_INDEX, ADDR_TOMBSTONES, EXPIRATION_INDEX, OUTBOX_DISPLACED,
     OUTBOX_INTENTS, OUTBOX_RECEIPTS, TOMBSTONES,
@@ -15,7 +18,58 @@ use super::schema::{
 use super::{
     Event, EventId, LocalOrigin, PersistenceError, Provenance, RelayUrl, StoredEvent, Timestamp,
 };
-use redb::ReadableTable;
+use redb::{Database, ReadableTable};
+
+/// The only commit door for a transaction that mutates canonical event state.
+///
+/// [`apply`](Self::apply) constructs the complete governed table bundle and
+/// always flushes its transaction-local allocators after the mutation closure
+/// succeeds. Later packed-postings publication attaches to this same door, so
+/// callers cannot commit canonical rows while forgetting derived index work.
+pub(super) struct GovernedWrite {
+    write_txn: redb::WriteTransaction,
+    postings: PostingsBatch,
+}
+
+impl GovernedWrite {
+    pub(super) fn begin(db: &Database) -> Result<Self, PersistenceError> {
+        Ok(Self {
+            write_txn: db.begin_write().map_err(persist_err)?,
+            postings: PostingsBatch::default(),
+        })
+    }
+
+    pub(super) fn apply<T>(
+        &mut self,
+        mutate: impl FnOnce(
+            &mut RedbIngestTxn<'_, '_>,
+            &redb::WriteTransaction,
+        ) -> Result<T, PersistenceError>,
+    ) -> Result<T, PersistenceError> {
+        #[cfg(feature = "bench-instrumentation")]
+        let open_started = std::time::Instant::now();
+        let mut ingest = RedbIngestTxn::open(&self.write_txn, &mut self.postings)?;
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::open_tables(open_started.elapsed());
+        let result = mutate(&mut ingest, &self.write_txn)?;
+        #[cfg(feature = "bench-instrumentation")]
+        let flush_started = std::time::Instant::now();
+        ingest.canonical.flush_pending()?;
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::flush(flush_started.elapsed());
+        Ok(result)
+    }
+
+    pub(super) fn commit(mut self) -> Result<(), PersistenceError> {
+        self.postings.flush(&self.write_txn)?;
+        #[cfg(test)]
+        crash_if_postings("postings-before-commit");
+        self.write_txn.commit().map_err(persist_err)?;
+        #[cfg(test)]
+        crash_if_postings("postings-after-commit");
+        Ok(())
+    }
+}
 
 /// String-valued governed keyspaces reachable from relay ingest.
 ///
@@ -60,7 +114,7 @@ pub(super) trait GovernedIngestTxn {
     ) -> Result<EventKey, PersistenceError>;
     fn remove_canonical(&mut self, key: EventKey, id: &EventId) -> Result<(), PersistenceError>;
     fn insert_indexes(&mut self, event: &Event, key: EventKey) -> Result<(), PersistenceError>;
-    fn remove_indexes(&mut self, event: &Event) -> Result<(), PersistenceError>;
+    fn remove_indexes(&mut self, event: &Event, key: EventKey) -> Result<(), PersistenceError>;
 
     fn address_get(&self, key: &str) -> Result<Option<EventKey>, PersistenceError>;
     fn address_put(&mut self, key: &str, value: EventKey) -> Result<(), PersistenceError>;
@@ -87,23 +141,26 @@ pub(super) trait GovernedIngestTxn {
     fn displaced_remove(&mut self, key: &str) -> Result<Option<Vec<u8>>, PersistenceError>;
 }
 
-pub(super) struct RedbIngestTxn<'txn> {
+pub(super) struct RedbIngestTxn<'txn, 'batch> {
     pub(super) canonical: CanonicalWriteTables<'txn>,
     pub(super) addr_index: redb::Table<'txn, &'static str, EventKey>,
     pub(super) tombstones: redb::Table<'txn, &'static str, &'static str>,
     pub(super) addr_tombstones: redb::Table<'txn, &'static str, &'static str>,
     pub(super) expiration_index: redb::Table<'txn, &'static [u8; 40], EventKey>,
-    pub(super) indexes: QueryIndexWriteTables<'txn>,
     pub(super) outbox_intents: redb::Table<'txn, &'static str, &'static str>,
     pub(super) outbox_receipts: redb::Table<'txn, &'static str, &'static str>,
     pub(super) outbox_displaced: redb::Table<'txn, &'static str, &'static [u8]>,
     pub(super) outbox_kind5_claims: redb::Table<'txn, &'static str, &'static str>,
     pub(super) outbox_suppress_by_id: redb::Table<'txn, &'static str, &'static str>,
     pub(super) outbox_suppress_by_addr: redb::Table<'txn, &'static str, &'static str>,
+    postings: &'batch mut PostingsBatch,
 }
 
-impl<'txn> RedbIngestTxn<'txn> {
-    pub(super) fn open(write_txn: &'txn redb::WriteTransaction) -> Result<Self, PersistenceError> {
+impl<'txn, 'batch> RedbIngestTxn<'txn, 'batch> {
+    pub(super) fn open(
+        write_txn: &'txn redb::WriteTransaction,
+        postings: &'batch mut PostingsBatch,
+    ) -> Result<Self, PersistenceError> {
         Ok(Self {
             canonical: CanonicalWriteTables::open(write_txn)?,
             addr_index: write_txn.open_table(ADDR_INDEX).map_err(persist_err)?,
@@ -112,7 +169,6 @@ impl<'txn> RedbIngestTxn<'txn> {
             expiration_index: write_txn
                 .open_table(EXPIRATION_INDEX)
                 .map_err(persist_err)?,
-            indexes: QueryIndexWriteTables::open(write_txn)?,
             outbox_intents: write_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?,
             outbox_receipts: write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?,
             outbox_displaced: write_txn
@@ -127,11 +183,12 @@ impl<'txn> RedbIngestTxn<'txn> {
             outbox_suppress_by_addr: write_txn
                 .open_table(OUTBOX_SUPPRESS_BY_ADDR)
                 .map_err(persist_err)?,
+            postings,
         })
     }
 }
 
-impl GovernedIngestTxn for RedbIngestTxn<'_> {
+impl GovernedIngestTxn for RedbIngestTxn<'_, '_> {
     fn key_for_id(&self, id: &EventId) -> Result<Option<EventKey>, PersistenceError> {
         self.canonical.key_for_id(id)
     }
@@ -185,11 +242,15 @@ impl GovernedIngestTxn for RedbIngestTxn<'_> {
     }
 
     fn insert_indexes(&mut self, event: &Event, key: EventKey) -> Result<(), PersistenceError> {
-        insert_query_index_rows(&mut self.canonical, &mut self.indexes, event, key)
+        insert_query_cardinalities(&mut self.canonical, event)?;
+        self.postings.insert(event, key);
+        Ok(())
     }
 
-    fn remove_indexes(&mut self, event: &Event) -> Result<(), PersistenceError> {
-        remove_query_index_rows(&mut self.canonical, &mut self.indexes, event)
+    fn remove_indexes(&mut self, event: &Event, key: EventKey) -> Result<(), PersistenceError> {
+        remove_query_cardinalities(&mut self.canonical, event)?;
+        self.postings.remove(key);
+        Ok(())
     }
 
     fn address_get(&self, key: &str) -> Result<Option<EventKey>, PersistenceError> {

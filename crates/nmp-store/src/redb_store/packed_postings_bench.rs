@@ -10,6 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
 use fjall::{
@@ -1713,25 +1714,25 @@ fn add_event_memberships(
     event: &Event,
     event_key: u64,
 ) {
-    let posting = RunEvent {
+    let posting = Arc::new(RunEvent {
         created_at: event.created_at.as_secs(),
         id: *event.id.as_bytes(),
         event_key,
-    };
-    push_membership(segments, counts, Family::Global, Prefix::Global, posting);
+    });
+    push_membership(segments, counts, Family::Global, Prefix::global(), &posting);
     push_membership(
         segments,
         counts,
         Family::Author,
-        Prefix::Author(*event.pubkey.as_bytes()),
-        posting,
+        Prefix::author(*event.pubkey.as_bytes()),
+        &posting,
     );
     push_membership(
         segments,
         counts,
         Family::Kind,
-        Prefix::Kind(event.kind.as_u16().to_be_bytes()),
-        posting,
+        Prefix::kind(event.kind.as_u16().to_be_bytes()),
+        &posting,
     );
     let mut tag_prefixes = BTreeSet::new();
     for tag in event.tags.iter() {
@@ -1741,7 +1742,13 @@ fn add_event_memberships(
         tag_prefixes.insert(tag_index_prefix(letter, value));
     }
     for prefix in tag_prefixes {
-        push_membership(segments, counts, Family::Tag, Prefix::Tag(prefix), posting);
+        push_membership(
+            segments,
+            counts,
+            Family::Tag,
+            Prefix::tag(prefix.into()),
+            &posting,
+        );
     }
 }
 
@@ -1750,14 +1757,14 @@ fn push_membership(
     counts: &mut [u64; FAMILY_COUNT],
     family: Family,
     prefix: Prefix,
-    event: RunEvent,
+    event: &Arc<RunEvent>,
 ) {
     let shard = shard_for(family, prefix.as_bytes());
     segments.push(Membership {
         family,
         shard,
         prefix,
-        event,
+        event: event.clone(),
     });
     counts[family as usize] = counts[family as usize].saturating_add(1);
 }
@@ -1916,8 +1923,8 @@ mod tests {
             .map(|event| Membership {
                 family: Family::Tag,
                 shard: shard_for(Family::Tag, b"prefix"),
-                prefix: Prefix::Tag(b"prefix".to_vec()),
-                event,
+                prefix: Prefix::tag(b"prefix".as_slice().into()),
+                event: event.into(),
             })
             .collect();
         memberships.sort_unstable_by(|left, right| posting_order(&left.event, &right.event));
@@ -1952,12 +1959,13 @@ mod tests {
         let membership = Membership {
             family: Family::Global,
             shard: 0,
-            prefix: Prefix::Global,
+            prefix: Prefix::global(),
             event: RunEvent {
                 created_at: 1,
                 id: [0; 32],
                 event_key: 1,
-            },
+            }
+            .into(),
         };
         let encoded = encode_segments(vec![membership]).unwrap();
         let dictionary = DictionaryView::parse(&encoded.dictionary).unwrap();

@@ -6,7 +6,8 @@
 //! for cursors and time bounds without repeating ids or decoding earlier rows.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
+use std::sync::Arc;
 
 const SEGMENT_MAGIC: &[u8; 8] = b"NMPPS\0\x03\0";
 const DICTIONARY_MAGIC: &[u8; 8] = b"NMPID\0\x02\0";
@@ -47,37 +48,38 @@ pub(super) struct RunEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum Prefix {
-    Global,
-    Author([u8; 32]),
-    Kind([u8; 2]),
-    Tag(Vec<u8>),
-}
+pub(super) struct Prefix(Arc<[u8]>);
 
 impl Prefix {
-    pub(super) fn as_bytes(&self) -> &[u8] {
-        match self {
-            Self::Global => &[],
-            Self::Author(value) => value,
-            Self::Kind(value) => value,
-            Self::Tag(value) => value,
-        }
+    pub(super) fn global() -> Self {
+        Self(Arc::from([]))
     }
 
+    pub(super) fn author(value: [u8; 32]) -> Self {
+        Self(Arc::from(value))
+    }
+
+    pub(super) fn kind(value: [u8; 2]) -> Self {
+        Self(Arc::from(value))
+    }
+
+    pub(super) fn tag(value: Arc<[u8]>) -> Self {
+        Self(value)
+    }
+
+    pub(super) fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    #[cfg(any(test, feature = "bench-instrumentation"))]
     fn from_bytes(family: Family, value: &[u8]) -> Result<Self, String> {
         match family {
-            Family::Global if value.is_empty() => Ok(Self::Global),
-            Family::Author => Ok(Self::Author(
-                value
-                    .try_into()
-                    .map_err(|_| "author prefix is not 32 bytes".to_owned())?,
-            )),
-            Family::Kind => Ok(Self::Kind(
-                value
-                    .try_into()
-                    .map_err(|_| "kind prefix is not 2 bytes".to_owned())?,
-            )),
-            Family::Tag => Ok(Self::Tag(value.to_vec())),
+            Family::Global if value.is_empty() => Ok(Self::global()),
+            Family::Author if value.len() == 32 => Ok(Self(Arc::from(value))),
+            Family::Author => Err("author prefix is not 32 bytes".to_owned()),
+            Family::Kind if value.len() == 2 => Ok(Self(Arc::from(value))),
+            Family::Kind => Err("kind prefix is not 2 bytes".to_owned()),
+            Family::Tag => Ok(Self(Arc::from(value))),
             Family::Global => Err("global prefix is not empty".to_owned()),
         }
     }
@@ -88,7 +90,7 @@ pub(super) struct Membership {
     pub(super) family: Family,
     pub(super) shard: u8,
     pub(super) prefix: Prefix,
-    pub(super) event: RunEvent,
+    pub(super) event: Arc<RunEvent>,
 }
 
 #[derive(Debug)]
@@ -96,8 +98,11 @@ pub(super) struct EncodedRun {
     pub(super) dictionary: Vec<u8>,
     pub(super) segments: Vec<(Family, u8, Vec<u8>)>,
     pub(super) dictionary_entries: u64,
+    #[allow(dead_code)]
     pub(super) postings: u64,
+    #[allow(dead_code)]
     pub(super) prefixes: u64,
+    #[allow(dead_code)]
     pub(super) posting_bytes: u64,
     #[cfg_attr(not(feature = "bench-instrumentation"), allow(dead_code))]
     pub(super) dictionary_build_ns: u64,
@@ -122,38 +127,18 @@ pub(super) fn encode_run(mut memberships: Vec<Membership>) -> Result<EncodedRun,
         return Err("cannot encode an empty postings run".to_owned());
     }
     let dictionary_started = std::time::Instant::now();
-    let min_event_key = memberships
-        .iter()
-        .map(|membership| membership.event.event_key)
-        .min()
-        .expect("nonempty memberships");
-    let max_event_key = memberships
-        .iter()
-        .map(|membership| membership.event.event_key)
-        .max()
-        .expect("nonempty memberships");
-    let key_span = max_event_key
-        .checked_sub(min_event_key)
-        .and_then(|span| span.checked_add(1))
-        .and_then(|span| usize::try_from(span).ok())
-        .ok_or_else(|| "run event-key span exceeds usize".to_owned())?;
-    if key_span > memberships.len().saturating_mul(8) {
-        return Err("run event-key span is too sparse for bounded encoding".to_owned());
-    }
-    let mut ids_by_key = vec![None; key_span];
-    let mut ids = HashSet::with_capacity(key_span.min(memberships.len()));
+    let mut ids_by_key = BTreeMap::new();
+    let mut ids = HashSet::with_capacity(memberships.len());
     for membership in &memberships {
         if membership.shard != shard_for(membership.family, membership.prefix.as_bytes()) {
             return Err("membership is assigned to the wrong shard".to_owned());
         }
-        let offset = usize::try_from(membership.event.event_key - min_event_key)
-            .map_err(|_| "event-key offset exceeds usize".to_owned())?;
-        match &mut ids_by_key[offset] {
-            slot @ None => {
+        match ids_by_key.get(&membership.event.event_key) {
+            None => {
                 if !ids.insert(membership.event.id) {
                     return Err("one event id maps to multiple event keys".to_owned());
                 }
-                *slot = Some(membership.event.id);
+                ids_by_key.insert(membership.event.event_key, membership.event.id);
             }
             Some(id) if id != &membership.event.id => {
                 return Err(format!(
@@ -164,15 +149,17 @@ pub(super) fn encode_run(mut memberships: Vec<Membership>) -> Result<EncodedRun,
             Some(_) => {}
         }
     }
-    let mut ordinals = vec![u32::MAX; key_span];
     let mut dictionary_entries = Vec::with_capacity(ids.len());
-    for (offset, id) in ids_by_key.into_iter().enumerate() {
-        let Some(id) = id else { continue };
-        let ordinal = u32::try_from(dictionary_entries.len())
-            .map_err(|_| "run dictionary exceeds u32".to_owned())?;
-        ordinals[offset] = ordinal;
-        dictionary_entries.push((min_event_key + offset as u64, id));
+    for (event_key, id) in ids_by_key {
+        dictionary_entries.push((event_key, id));
     }
+    u32::try_from(dictionary_entries.len()).map_err(|_| "run dictionary exceeds u32".to_owned())?;
+    drop(ids);
+    let ordinals: HashMap<_, _> = dictionary_entries
+        .iter()
+        .enumerate()
+        .map(|(ordinal, (event_key, _))| (*event_key, ordinal as u32))
+        .collect();
     let dictionary_build_ns = elapsed_ns(dictionary_started);
 
     let sort_started = std::time::Instant::now();
@@ -214,7 +201,7 @@ pub(super) fn encode_run(mut memberships: Vec<Membership>) -> Result<EncodedRun,
         segments.push((
             family,
             shard,
-            encode_segment(family, shard, segment_memberships, min_event_key, &ordinals)?,
+            encode_segment(family, shard, segment_memberships, &ordinals)?,
         ));
         start = end;
     }
@@ -246,7 +233,7 @@ fn canonical_order(left: &RunEvent, right: &RunEvent) -> Ordering {
         .then_with(|| left.event_key.cmp(&right.event_key))
 }
 
-fn encode_dictionary(entries: &[(u64, [u8; 32])]) -> Result<Vec<u8>, String> {
+pub(super) fn encode_dictionary(entries: &[(u64, [u8; 32])]) -> Result<Vec<u8>, String> {
     let count = u32::try_from(entries.len()).map_err(|_| "dictionary exceeds u32".to_owned())?;
     let mut value = Vec::with_capacity(12 + entries.len().saturating_mul(DICTIONARY_ENTRY_LEN));
     value.extend_from_slice(DICTIONARY_MAGIC);
@@ -262,8 +249,7 @@ fn encode_segment(
     family: Family,
     shard: u8,
     memberships: &[Membership],
-    min_event_key: u64,
-    ordinals: &[u32],
+    ordinals: &HashMap<u64, u32>,
 ) -> Result<Vec<u8>, String> {
     let prefix_count = 1 + memberships
         .windows(2)
@@ -302,13 +288,7 @@ fn encode_segment(
             u32::try_from(value.len()).map_err(|_| "segment offset exceeds u32".to_owned())?;
         let offset_start = offsets_start + prefix_ordinal * 4;
         value[offset_start..offset_start + 4].copy_from_slice(&offset.to_be_bytes());
-        encode_prefix_record(
-            &mut value,
-            prefix,
-            &memberships[start..end],
-            min_event_key,
-            ordinals,
-        )?;
+        encode_prefix_record(&mut value, prefix, &memberships[start..end], ordinals)?;
         prefix_ordinal += 1;
         start = end;
     }
@@ -319,8 +299,7 @@ fn encode_prefix_record(
     value: &mut Vec<u8>,
     prefix: &[u8],
     postings: &[Membership],
-    min_event_key: u64,
-    ordinals: &[u32],
+    ordinals: &HashMap<u64, u32>,
 ) -> Result<(), String> {
     let prefix_len = u32::try_from(prefix.len()).map_err(|_| "prefix exceeds u32".to_owned())?;
     let posting_count =
@@ -330,11 +309,8 @@ fn encode_prefix_record(
     value.extend_from_slice(&posting_count.to_be_bytes());
     for membership in postings {
         value.extend_from_slice(&membership.event.created_at.to_be_bytes());
-        let offset = usize::try_from(membership.event.event_key - min_event_key)
-            .map_err(|_| "event-key offset exceeds usize".to_owned())?;
-        let ordinal = *ordinals
-            .get(offset)
-            .filter(|ordinal| **ordinal != u32::MAX)
+        let ordinal = ordinals
+            .get(&membership.event.event_key)
             .ok_or_else(|| "posting event is absent from run dictionary".to_owned())?;
         value.extend_from_slice(&ordinal.to_be_bytes());
     }
@@ -404,7 +380,13 @@ impl<'a> DictionaryView<'a> {
         })
     }
 
-    #[cfg(test)]
+    pub(super) fn entry(self, ordinal: usize) -> Result<(u64, [u8; 32]), String> {
+        if ordinal >= self.count {
+            return Err("dictionary ordinal out of bounds".to_owned());
+        }
+        Ok(dictionary_entry(self.entries, ordinal))
+    }
+
     pub(super) fn len(self) -> usize {
         self.count
     }
@@ -512,6 +494,7 @@ impl<'a> SegmentView<'a> {
         Ok(None)
     }
 
+    #[cfg(any(test, feature = "bench-instrumentation"))]
     pub(super) fn validate(self, dictionary: DictionaryView<'_>) -> Result<u64, String> {
         self.validate_prefix_directory()?;
         let mut postings = 0u64;
@@ -530,19 +513,36 @@ impl<'a> SegmentView<'a> {
         Ok(postings)
     }
 
+    #[cfg(any(test, feature = "bench-instrumentation"))]
     pub(super) fn memberships(
         self,
         dictionary: DictionaryView<'a>,
     ) -> Result<Vec<Membership>, String> {
+        let mut events = BTreeMap::new();
+        self.memberships_interned(dictionary, &mut events)
+    }
+
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub(super) fn memberships_interned(
+        self,
+        dictionary: DictionaryView<'a>,
+        events: &mut BTreeMap<u64, Arc<RunEvent>>,
+    ) -> Result<Vec<Membership>, String> {
         let mut memberships = Vec::new();
         for ordinal in 0..self.prefix_count {
             let record = self.record(ordinal)?;
+            let prefix = Prefix::from_bytes(self.family, record.prefix)?;
             for posting in 0..record.list.posting_count {
+                let event = record.list.event(dictionary, posting)?;
+                let event = events
+                    .entry(event.event_key)
+                    .or_insert_with(|| Arc::new(event))
+                    .clone();
                 memberships.push(Membership {
                     family: self.family,
                     shard: self.shard,
-                    prefix: Prefix::from_bytes(self.family, record.prefix)?,
-                    event: record.list.event(dictionary, posting)?,
+                    prefix: prefix.clone(),
+                    event,
                 });
             }
         }
@@ -569,6 +569,256 @@ impl<'a> SegmentView<'a> {
         }
         parse_prefix_record(&self.value[start..end])
     }
+}
+
+pub(super) struct CompactionSegmentSource<'a> {
+    pub(super) segment: SegmentView<'a>,
+    pub(super) ordinal_map: &'a [Option<u32>],
+}
+
+pub(super) struct CompactedSegment {
+    pub(super) value: Vec<u8>,
+    pub(super) postings: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompactionHeapEntry {
+    event: RunEvent,
+    output_ordinal: u32,
+    list: usize,
+}
+
+impl Ord for CompactionHeapEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.event
+            .created_at
+            .cmp(&other.event.created_at)
+            .then_with(|| other.event.id.cmp(&self.event.id))
+            .then_with(|| other.event.event_key.cmp(&self.event.event_key))
+            .then_with(|| other.list.cmp(&self.list))
+    }
+}
+
+impl PartialOrd for CompactionHeapEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+pub(super) fn compact_segment(
+    family: Family,
+    shard: u8,
+    sources: &[CompactionSegmentSource<'_>],
+    output_dictionary: DictionaryView<'_>,
+) -> Result<Option<CompactedSegment>, String> {
+    if sources.is_empty() {
+        return Ok(None);
+    }
+    for source in sources {
+        if source.segment.family != family || source.segment.shard != shard {
+            return Err("compaction segment is assigned to the wrong family or shard".to_owned());
+        }
+        source.segment.validate_prefix_directory()?;
+    }
+
+    let prefix_count = count_live_compaction_prefixes(sources)?;
+    if prefix_count == 0 {
+        return Ok(None);
+    }
+    let prefix_count_u32 =
+        u32::try_from(prefix_count).map_err(|_| "segment prefix count exceeds u32".to_owned())?;
+    let records_start = SEGMENT_HEADER_LEN
+        .checked_add(
+            prefix_count
+                .checked_mul(4)
+                .ok_or_else(|| "segment offset table overflow".to_owned())?,
+        )
+        .ok_or_else(|| "segment header overflow".to_owned())?;
+    let mut value = Vec::with_capacity(records_start);
+    value.extend_from_slice(SEGMENT_MAGIC);
+    value.push(family as u8);
+    value.push(shard);
+    value.extend_from_slice(&prefix_count_u32.to_be_bytes());
+    value.resize(records_start, 0);
+
+    let mut records = vec![0usize; sources.len()];
+    let mut emitted_prefixes = 0usize;
+    let mut postings = 0u64;
+    let mut matching = Vec::with_capacity(sources.len());
+    let mut next_postings = Vec::with_capacity(sources.len());
+    let mut heap = BinaryHeap::with_capacity(sources.len());
+    while let Some(prefix) = minimum_compaction_prefix(sources, &records)? {
+        matching.clear();
+        for (source, candidate) in sources.iter().enumerate() {
+            if records[source] >= candidate.segment.prefix_count {
+                continue;
+            }
+            let record = candidate.segment.record(records[source])?;
+            if record.prefix == prefix {
+                matching.push((source, record.list));
+                records[source] += 1;
+            }
+        }
+        let mut has_live = false;
+        for &(source, list) in &matching {
+            has_live |= posting_list_has_live(list, sources[source].ordinal_map)?;
+        }
+        if !has_live {
+            continue;
+        }
+
+        let offset =
+            u32::try_from(value.len()).map_err(|_| "segment offset exceeds u32".to_owned())?;
+        let offset_start = SEGMENT_HEADER_LEN + emitted_prefixes * 4;
+        value[offset_start..offset_start + 4].copy_from_slice(&offset.to_be_bytes());
+        let prefix_len =
+            u32::try_from(prefix.len()).map_err(|_| "prefix exceeds u32".to_owned())?;
+        value.extend_from_slice(&prefix_len.to_be_bytes());
+        value.extend_from_slice(prefix);
+        let count_offset = value.len();
+        value.extend_from_slice(&0u32.to_be_bytes());
+
+        next_postings.clear();
+        next_postings.resize(matching.len(), 0);
+        heap.clear();
+        for list in 0..matching.len() {
+            push_next_compaction_posting(
+                &mut heap,
+                list,
+                &matching,
+                &mut next_postings,
+                sources,
+                output_dictionary,
+            )?;
+        }
+        let mut posting_count = 0u32;
+        let mut previous_output_ordinal = None;
+        let mut previous_event = None;
+        while let Some(entry) = heap.pop() {
+            push_next_compaction_posting(
+                &mut heap,
+                entry.list,
+                &matching,
+                &mut next_postings,
+                sources,
+                output_dictionary,
+            )?;
+            if previous_output_ordinal == Some(entry.output_ordinal) {
+                continue;
+            }
+            if previous_event
+                .is_some_and(|prior| canonical_order(&prior, &entry.event) != Ordering::Less)
+            {
+                return Err("compacted posting list violates canonical order".to_owned());
+            }
+            value.extend_from_slice(&entry.event.created_at.to_be_bytes());
+            value.extend_from_slice(&entry.output_ordinal.to_be_bytes());
+            posting_count = posting_count
+                .checked_add(1)
+                .ok_or_else(|| "posting count exceeds u32".to_owned())?;
+            previous_output_ordinal = Some(entry.output_ordinal);
+            previous_event = Some(entry.event);
+        }
+        if posting_count == 0 {
+            return Err("live compaction prefix produced no postings".to_owned());
+        }
+        value[count_offset..count_offset + 4].copy_from_slice(&posting_count.to_be_bytes());
+        postings = postings.saturating_add(u64::from(posting_count));
+        emitted_prefixes += 1;
+    }
+    if emitted_prefixes != prefix_count {
+        return Err("compaction prefix count changed during encoding".to_owned());
+    }
+    Ok(Some(CompactedSegment { value, postings }))
+}
+
+fn count_live_compaction_prefixes(
+    sources: &[CompactionSegmentSource<'_>],
+) -> Result<usize, String> {
+    let mut records = vec![0usize; sources.len()];
+    let mut count = 0usize;
+    while let Some(prefix) = minimum_compaction_prefix(sources, &records)? {
+        let mut live = false;
+        for (source, candidate) in sources.iter().enumerate() {
+            if records[source] >= candidate.segment.prefix_count {
+                continue;
+            }
+            let record = candidate.segment.record(records[source])?;
+            if record.prefix == prefix {
+                live |= posting_list_has_live(record.list, candidate.ordinal_map)?;
+                records[source] += 1;
+            }
+        }
+        count = count
+            .checked_add(usize::from(live))
+            .ok_or_else(|| "compaction prefix count overflow".to_owned())?;
+    }
+    Ok(count)
+}
+
+fn minimum_compaction_prefix<'a>(
+    sources: &'a [CompactionSegmentSource<'a>],
+    records: &[usize],
+) -> Result<Option<&'a [u8]>, String> {
+    let mut minimum = None;
+    for (source, candidate) in sources.iter().enumerate() {
+        if records[source] >= candidate.segment.prefix_count {
+            continue;
+        }
+        let prefix = candidate.segment.record(records[source])?.prefix;
+        if minimum.is_none_or(|current| prefix < current) {
+            minimum = Some(prefix);
+        }
+    }
+    Ok(minimum)
+}
+
+fn posting_list_has_live(
+    list: PostingListView<'_>,
+    ordinal_map: &[Option<u32>],
+) -> Result<bool, String> {
+    for posting in 0..list.posting_count {
+        let source_ordinal = list.dictionary_ordinal(posting);
+        let output_ordinal = ordinal_map
+            .get(source_ordinal)
+            .ok_or_else(|| "compaction posting dictionary ordinal is out of bounds".to_owned())?;
+        if output_ordinal.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn push_next_compaction_posting(
+    heap: &mut BinaryHeap<CompactionHeapEntry>,
+    list: usize,
+    matching: &[(usize, PostingListView<'_>)],
+    next_postings: &mut [usize],
+    sources: &[CompactionSegmentSource<'_>],
+    output_dictionary: DictionaryView<'_>,
+) -> Result<(), String> {
+    let (source, postings) = matching[list];
+    while next_postings[list] < postings.posting_count {
+        let posting = next_postings[list];
+        next_postings[list] += 1;
+        let created_at = postings.created_at(posting);
+        let source_ordinal = postings.dictionary_ordinal(posting);
+        let output_ordinal = *sources[source]
+            .ordinal_map
+            .get(source_ordinal)
+            .ok_or_else(|| "compaction posting dictionary ordinal is out of bounds".to_owned())?;
+        let Some(output_ordinal) = output_ordinal else {
+            continue;
+        };
+        let event = output_dictionary.event(output_ordinal as usize, created_at)?;
+        heap.push(CompactionHeapEntry {
+            event,
+            output_ordinal,
+            list,
+        });
+        break;
+    }
+    Ok(())
 }
 
 struct PrefixRecord<'a> {
@@ -607,14 +857,22 @@ fn parse_prefix_record(value: &[u8]) -> Result<PrefixRecord<'_>, String> {
 }
 
 impl<'a> PostingListView<'a> {
+    fn created_at(self, ordinal: usize) -> u64 {
+        let start = ordinal * POSTING_ENTRY_LEN;
+        u64::from_be_bytes(self.postings[start..start + 8].try_into().unwrap())
+    }
+
+    fn dictionary_ordinal(self, ordinal: usize) -> usize {
+        let start = ordinal * POSTING_ENTRY_LEN;
+        u32::from_be_bytes(self.postings[start + 8..start + 12].try_into().unwrap()) as usize
+    }
+
     fn event(self, dictionary: DictionaryView<'_>, ordinal: usize) -> Result<RunEvent, String> {
         if ordinal >= self.posting_count {
             return Err("posting ordinal out of bounds".to_owned());
         }
-        let start = ordinal * POSTING_ENTRY_LEN;
-        let created_at = u64::from_be_bytes(self.postings[start..start + 8].try_into().unwrap());
-        let dictionary_ordinal =
-            u32::from_be_bytes(self.postings[start + 8..start + 12].try_into().unwrap()) as usize;
+        let created_at = self.created_at(ordinal);
+        let dictionary_ordinal = self.dictionary_ordinal(ordinal);
         dictionary.event(dictionary_ordinal, created_at)
     }
 
@@ -700,7 +958,10 @@ impl PostingCursor<'_> {
         self.visited
     }
 
-    fn next_live(&mut self, dead: Option<&DeadKeys>) -> Result<Option<RunEvent>, String> {
+    pub(super) fn next_live(
+        &mut self,
+        dead: Option<&DeadKeys>,
+    ) -> Result<Option<RunEvent>, String> {
         while let Some(event) = self.next()? {
             if dead.is_none_or(|keys| !keys.contains(event.event_key)) {
                 return Ok(Some(event));
@@ -710,17 +971,20 @@ impl PostingCursor<'_> {
     }
 }
 
+#[cfg(any(test, feature = "bench-instrumentation"))]
 pub(super) struct MergeSource<'a> {
     pub(super) cursor: PostingCursor<'a>,
     pub(super) dead: Option<&'a DeadKeys>,
 }
 
+#[cfg(any(test, feature = "bench-instrumentation"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HeapEntry {
     event: RunEvent,
     source: usize,
 }
 
+#[cfg(any(test, feature = "bench-instrumentation"))]
 impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         self.event
@@ -732,12 +996,14 @@ impl Ord for HeapEntry {
     }
 }
 
+#[cfg(any(test, feature = "bench-instrumentation"))]
 impl PartialOrd for HeapEntry {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
+#[cfg(any(test, feature = "bench-instrumentation"))]
 pub(super) fn merge_posting_cursors(
     mut sources: Vec<MergeSource<'_>>,
     limit: usize,
@@ -904,6 +1170,7 @@ impl RunMeta {
     }
 }
 
+#[allow(dead_code)]
 pub(super) fn validate_run_metas(metas: &[RunMeta]) -> Result<(), String> {
     let mut ordered = metas.to_vec();
     ordered.sort_unstable_by_key(|meta| (meta.min_event_key, meta.max_event_key, meta.run_id));
@@ -977,12 +1244,13 @@ mod tests {
             .map(|ordinal| Membership {
                 family: Family::Global,
                 shard: 0,
-                prefix: Prefix::Global,
+                prefix: Prefix::global(),
                 event: RunEvent {
                     created_at,
                     id: id(ordinal as u64),
                     event_key: (count - ordinal) as u64,
-                },
+                }
+                .into(),
             })
             .collect()
     }
@@ -1026,12 +1294,13 @@ mod tests {
             .map(|ordinal| Membership {
                 family: Family::Global,
                 shard: 0,
-                prefix: Prefix::Global,
+                prefix: Prefix::global(),
                 event: RunEvent {
                     created_at: 1_000 - ordinal as u64,
                     id: id(ordinal as u64),
                     event_key: ordinal as u64 + 1,
-                },
+                }
+                .into(),
             })
             .collect();
         let encoded = encode_run(memberships).unwrap();
@@ -1053,12 +1322,13 @@ mod tests {
             .map(|ordinal| Membership {
                 family: Family::Author,
                 shard: shard_for(Family::Author, &id(ordinal as u64)),
-                prefix: Prefix::Author(id(ordinal as u64)),
+                prefix: Prefix::author(id(ordinal as u64)),
                 event: RunEvent {
                     created_at: ordinal as u64,
                     id: id(ordinal as u64),
                     event_key: ordinal as u64 + 1,
-                },
+                }
+                .into(),
             })
             .collect();
         let encoded = encode_run(events).unwrap();
@@ -1199,14 +1469,14 @@ mod tests {
                         Membership {
                             family: Family::Global,
                             shard: 0,
-                            prefix: Prefix::Global,
-                            event: *event,
+                            prefix: Prefix::global(),
+                            event: (*event).into(),
                         },
                         Membership {
                             family: Family::Author,
                             shard: shard_for(Family::Author, &author),
-                            prefix: Prefix::Author(author),
-                            event: *event,
+                            prefix: Prefix::author(author),
+                            event: (*event).into(),
                         },
                     ]
                 })
@@ -1251,5 +1521,63 @@ mod tests {
         );
         assert_eq!(dead_one.iter().collect::<Vec<_>>(), vec![2]);
         assert_eq!(dead_one.len(), 1);
+    }
+
+    #[test]
+    fn compaction_streams_live_postings_into_one_exact_segment() {
+        let first = encode_run(global_memberships(2, 50)).expect("encode first run");
+        let second_memberships = (2..4)
+            .map(|ordinal| Membership {
+                family: Family::Global,
+                shard: 0,
+                prefix: Prefix::global(),
+                event: Arc::new(RunEvent {
+                    created_at: 50,
+                    id: id(ordinal),
+                    event_key: ordinal + 1,
+                }),
+            })
+            .collect();
+        let second = encode_run(second_memberships).expect("encode second run");
+        let first_segment = SegmentView::parse(&first.segments[0].2).expect("parse first segment");
+        let second_segment =
+            SegmentView::parse(&second.segments[0].2).expect("parse second segment");
+        let output_entries = vec![(1, id(0)), (3, id(2)), (4, id(3))];
+        let output_bytes = encode_dictionary(&output_entries).expect("encode output dictionary");
+        let output_dictionary = DictionaryView::parse(&output_bytes)
+            .and_then(DictionaryView::validate)
+            .expect("validate output dictionary");
+        let first_map = [Some(0), None];
+        let second_map = [Some(1), Some(2)];
+        let compacted = compact_segment(
+            Family::Global,
+            0,
+            &[
+                CompactionSegmentSource {
+                    segment: first_segment,
+                    ordinal_map: &first_map,
+                },
+                CompactionSegmentSource {
+                    segment: second_segment,
+                    ordinal_map: &second_map,
+                },
+            ],
+            output_dictionary,
+        )
+        .expect("compact segments")
+        .expect("live compacted segment");
+        assert_eq!(compacted.postings, 3);
+        let output = SegmentView::parse(&compacted.value).expect("parse compacted segment");
+        assert_eq!(output.prefix_count, 1);
+        output
+            .validate(output_dictionary)
+            .expect("validate compacted segment");
+        let keys: Vec<_> = output
+            .memberships(output_dictionary)
+            .expect("decode compacted memberships")
+            .into_iter()
+            .map(|membership| membership.event.event_key)
+            .collect();
+        assert_eq!(keys, vec![1, 3, 4]);
     }
 }
