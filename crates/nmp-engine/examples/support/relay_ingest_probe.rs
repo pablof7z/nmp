@@ -25,7 +25,7 @@ use tungstenite::{accept, Message};
 
 pub type ProbeError = Box<dyn Error + Send + Sync>;
 
-const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v20";
+const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v21";
 const CORPUS_SCHEMA: &str = "nmp-relay-ingest-corpus-v1";
 const BASE_CREATED_AT: u64 = 1_700_000_000;
 // Duplicate replay can advance diagnostics without producing a row delta.
@@ -1199,7 +1199,13 @@ fn ingest_attribution_json() -> serde_json::Value {
             "commit_ns": store.commit_ns, "durability_checkpoint_ns": store.durability_checkpoint_ns,
             "encode_event_ns": store.encode_event_ns,
             "encoded_event_bytes": store.encoded_event_bytes, "canonical_insert_ns": store.canonical_insert_ns,
-            "index_insert_ns": store.index_insert_ns, "event_clones": store.event_clones
+            "index_insert_ns": store.index_insert_ns,
+            "memory_insert_ns": store.memory_insert_ns,
+            "memory_event_build_ns": store.memory_event_build_ns,
+            "memory_expiration_index_ns": store.memory_expiration_index_ns,
+            "memory_query_index_ns": store.memory_query_index_ns,
+            "memory_canonical_insert_ns": store.memory_canonical_insert_ns,
+            "event_clones": store.event_clones
         }
     })
 }
