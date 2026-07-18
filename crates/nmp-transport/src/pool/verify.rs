@@ -71,9 +71,10 @@ struct Worker {
 
 #[cfg(not(target_arch = "wasm32"))]
 enum Task {
-    VerifyLane {
-        candidates: Vec<(usize, Arc<Event>)>,
-        results: mpsc::Sender<Vec<(usize, bool)>>,
+    Verify {
+        index: usize,
+        event: Arc<Event>,
+        results: mpsc::Sender<(usize, bool)>,
     },
     Shutdown,
 }
@@ -138,22 +139,11 @@ impl VerifierPool {
             let (results_tx, results_rx) = mpsc::channel();
             let first_worker = self.next_worker;
             self.next_worker = self.next_worker.wrapping_add(events.len());
-            let lane_capacity = events.len().div_ceil(self.workers.len());
-            let mut candidates_by_worker: Vec<_> = (0..self.workers.len())
-                .map(|_| Vec::with_capacity(lane_capacity))
-                .collect();
             for (offset, event) in events.iter().enumerate() {
                 let worker = first_worker.wrapping_add(offset) % self.workers.len();
-                candidates_by_worker[worker].push((offset, Arc::clone(event)));
-            }
-            let mut task_submissions = 0usize;
-            for (worker, candidates) in candidates_by_worker.into_iter().enumerate() {
-                if candidates.is_empty() {
-                    continue;
-                }
-                task_submissions = task_submissions.saturating_add(1);
-                let task = Task::VerifyLane {
-                    candidates,
+                let task = Task::Verify {
+                    index: offset,
+                    event: Arc::clone(event),
                     results: results_tx.clone(),
                 };
                 let Some(lane) = self.workers[worker].as_ref() else {
@@ -175,10 +165,7 @@ impl VerifierPool {
             }
             drop(results_tx);
             #[cfg(feature = "bench-instrumentation")]
-            crate::ingest_attribution::verify_dispatch(
-                dispatch_started.elapsed(),
-                task_submissions,
-            );
+            crate::ingest_attribution::verify_dispatch(dispatch_started.elapsed(), events.len());
 
             // Start fail-closed. Successfully completed tasks overwrite their
             // slot; tasks rejected by a dead worker or abandoned by a worker
@@ -189,18 +176,16 @@ impl VerifierPool {
             let mut ordered = vec![VerificationOutcome::Unavailable; events.len()];
             #[cfg(feature = "bench-instrumentation")]
             let mut result_messages = 0usize;
-            for lane_results in results_rx {
+            for (index, valid) in results_rx {
                 #[cfg(feature = "bench-instrumentation")]
                 {
                     result_messages = result_messages.saturating_add(1);
                 }
-                for (index, valid) in lane_results {
-                    ordered[index] = if valid {
-                        VerificationOutcome::Valid
-                    } else {
-                        VerificationOutcome::Invalid
-                    };
-                }
+                ordered[index] = if valid {
+                    VerificationOutcome::Valid
+                } else {
+                    VerificationOutcome::Invalid
+                };
             }
             #[cfg(feature = "bench-instrumentation")]
             crate::ingest_attribution::verify_collect(collect_started.elapsed(), result_messages);
@@ -281,27 +266,23 @@ fn worker_loop(tasks: Receiver<Task>) {
     let secp = nostr::secp256k1::Secp256k1::verification_only();
     while let Ok(task) = tasks.recv() {
         match task {
-            Task::VerifyLane {
-                candidates,
+            Task::Verify {
+                index,
+                event,
                 results,
             } => {
-                let candidate_count = candidates.len();
                 #[cfg(feature = "bench-instrumentation")]
                 let verify_started = std::time::Instant::now();
-                let mut outcomes = Vec::with_capacity(candidate_count);
-                for (index, event) in candidates {
-                    let valid = event.verify_signature_with_ctx(&secp);
-                    // Completion means every worker-owned reference is gone,
-                    // so the engine can structurally unwrap the frame Arc
-                    // without a race into the deep-clone fallback.
-                    drop(event);
-                    outcomes.push((index, valid));
-                }
+                let valid = event.verify_signature_with_ctx(&secp);
                 #[cfg(feature = "bench-instrumentation")]
-                crate::ingest_attribution::verify_worker(verify_started.elapsed(), candidate_count);
+                crate::ingest_attribution::verify_worker(verify_started.elapsed(), 1);
+                // Completion means every worker-owned reference is gone, so
+                // the engine can structurally unwrap the frame Arc without a
+                // race into the deep-clone fallback.
+                drop(event);
                 // A caller may abandon a batch while the pool is shutting
                 // down; that must not kill an otherwise healthy worker.
-                let _ = results.send(outcomes);
+                let _ = results.send((index, valid));
             }
             Task::Shutdown => break,
         }
