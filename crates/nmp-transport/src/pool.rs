@@ -275,9 +275,11 @@ impl RelayFrame {
     /// defensive fallback for public callers that retained a frame clone.
     pub fn into_event(self) -> Result<Event, Self> {
         match self {
-            Self::Event { event, .. } => {
-                Ok(Arc::try_unwrap(event).unwrap_or_else(|event| event.as_ref().clone()))
-            }
+            Self::Event { event, .. } => Ok(Arc::try_unwrap(event).unwrap_or_else(|event| {
+                #[cfg(feature = "bench-instrumentation")]
+                crate::ingest_attribution::event_fallback_clone();
+                event.as_ref().clone()
+            })),
             other => Err(other),
         }
     }
@@ -292,7 +294,11 @@ impl RelayFrame {
                 event,
             } => RelayMessage::event(
                 subscription_id,
-                Arc::try_unwrap(event).unwrap_or_else(|event| event.as_ref().clone()),
+                Arc::try_unwrap(event).unwrap_or_else(|event| {
+                    #[cfg(feature = "bench-instrumentation")]
+                    crate::ingest_attribution::event_fallback_clone();
+                    event.as_ref().clone()
+                }),
             ),
             Self::Message(message) => *message,
         }

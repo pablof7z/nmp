@@ -13,6 +13,7 @@ pub struct Snapshot {
     pub store_ns: u64,
     pub classify_ns: u64,
     pub react_and_affected_ns: u64,
+    pub event_clones: u64,
 }
 
 macro_rules! counters { ($($name:ident),+ $(,)?) => { $(static $name: AtomicU64 = AtomicU64::new(0);)+ }; }
@@ -24,7 +25,8 @@ counters!(
     PREPARE_NS,
     STORE_NS,
     CLASSIFY_NS,
-    REACT_NS
+    REACT_NS,
+    EVENT_CLONES
 );
 
 fn add(counter: &AtomicU64, duration: Duration) {
@@ -43,6 +45,7 @@ pub fn reset() {
         &STORE_NS,
         &CLASSIFY_NS,
         &REACT_NS,
+        &EVENT_CLONES,
     ] {
         counter.store(0, Ordering::Relaxed);
     }
@@ -58,6 +61,7 @@ pub fn snapshot() -> Snapshot {
         store_ns: load(&STORE_NS),
         classify_ns: load(&CLASSIFY_NS),
         react_and_affected_ns: load(&REACT_NS),
+        event_clones: load(&EVENT_CLONES),
     }
 }
 pub(crate) fn batch(events: usize) {
@@ -79,4 +83,8 @@ pub(crate) fn classify(duration: Duration) {
 }
 pub(crate) fn react(duration: Duration) {
     add(&REACT_NS, duration);
+}
+
+pub(crate) fn event_clone() {
+    EVENT_CLONES.fetch_add(1, Ordering::Relaxed);
 }

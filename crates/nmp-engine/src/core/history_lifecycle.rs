@@ -935,7 +935,11 @@ impl<S: EventStore> EngineCore<S> {
                 strict_promotions.insert(
                     changed.event.id,
                     current.unwrap_or_else(|| Row {
-                        event: changed.event.clone(),
+                        event: {
+                            #[cfg(feature = "bench-instrumentation")]
+                            crate::ingest_attribution::projection_event_clone();
+                            changed.event.clone()
+                        },
                         sources: changed.observed_relays.clone(),
                     }),
                 );
@@ -980,7 +984,11 @@ impl<S: EventStore> EngineCore<S> {
                         .remove(&(Reverse(previous.event.created_at.as_secs()), event_id));
                 }
                 let remembered = Row {
-                    event: row.event.clone(),
+                    event: {
+                        #[cfg(feature = "bench-instrumentation")]
+                        crate::ingest_attribution::projection_event_clone();
+                        row.event.clone()
+                    },
                     sources: row.observed_relays.clone(),
                 };
                 state
