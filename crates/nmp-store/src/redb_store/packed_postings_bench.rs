@@ -1719,19 +1719,19 @@ fn add_event_memberships(
         id: *event.id.as_bytes(),
         event_key,
     });
-    push_membership(segments, counts, Family::Global, Prefix::Global, &posting);
+    push_membership(segments, counts, Family::Global, Prefix::global(), &posting);
     push_membership(
         segments,
         counts,
         Family::Author,
-        Prefix::Author(Arc::new(*event.pubkey.as_bytes())),
+        Prefix::author(*event.pubkey.as_bytes()),
         &posting,
     );
     push_membership(
         segments,
         counts,
         Family::Kind,
-        Prefix::Kind(event.kind.as_u16().to_be_bytes()),
+        Prefix::kind(event.kind.as_u16().to_be_bytes()),
         &posting,
     );
     let mut tag_prefixes = BTreeSet::new();
@@ -1746,7 +1746,7 @@ fn add_event_memberships(
             segments,
             counts,
             Family::Tag,
-            Prefix::Tag(prefix.into()),
+            Prefix::tag(prefix.into()),
             &posting,
         );
     }
@@ -1923,7 +1923,7 @@ mod tests {
             .map(|event| Membership {
                 family: Family::Tag,
                 shard: shard_for(Family::Tag, b"prefix"),
-                prefix: Prefix::Tag(b"prefix".as_slice().into()),
+                prefix: Prefix::tag(b"prefix".as_slice().into()),
                 event: event.into(),
             })
             .collect();
@@ -1959,7 +1959,7 @@ mod tests {
         let membership = Membership {
             family: Family::Global,
             shard: 0,
-            prefix: Prefix::Global,
+            prefix: Prefix::global(),
             event: RunEvent {
                 created_at: 1,
                 id: [0; 32],

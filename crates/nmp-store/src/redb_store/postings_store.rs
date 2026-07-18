@@ -517,23 +517,24 @@ fn allocate_run_id(write_txn: &redb::WriteTransaction) -> Result<u64, Persistenc
 
 fn memberships_for_events(events: &BTreeMap<EventKey, Event>) -> Vec<Membership> {
     let mut memberships = Vec::new();
+    let global = Prefix::global();
     for (&event_key, event) in events {
         let run_event = Arc::new(RunEvent {
             created_at: event.created_at.as_secs(),
             id: *event.id.as_bytes(),
             event_key,
         });
-        push_membership(&mut memberships, Family::Global, Prefix::Global, &run_event);
+        push_membership(&mut memberships, Family::Global, global.clone(), &run_event);
         push_membership(
             &mut memberships,
             Family::Author,
-            Prefix::Author(Arc::new(*event.pubkey.as_bytes())),
+            Prefix::author(*event.pubkey.as_bytes()),
             &run_event,
         );
         push_membership(
             &mut memberships,
             Family::Kind,
-            Prefix::Kind(event.kind.as_u16().to_be_bytes()),
+            Prefix::kind(event.kind.as_u16().to_be_bytes()),
             &run_event,
         );
         let mut tags = BTreeSet::new();
@@ -547,7 +548,7 @@ fn memberships_for_events(events: &BTreeMap<EventKey, Event>) -> Vec<Membership>
             push_membership(
                 &mut memberships,
                 Family::Tag,
-                Prefix::Tag(prefix.into()),
+                Prefix::tag(prefix.into()),
                 &run_event,
             );
         }
@@ -557,30 +558,31 @@ fn memberships_for_events(events: &BTreeMap<EventKey, Event>) -> Vec<Membership>
 
 fn memberships_for_pending(events: &BTreeMap<EventKey, PendingEvent>) -> Vec<Membership> {
     let mut memberships = Vec::new();
+    let global = Prefix::global();
     for event in events.values() {
         push_membership(
             &mut memberships,
             Family::Global,
-            Prefix::Global,
+            global.clone(),
             &event.event,
         );
         push_membership(
             &mut memberships,
             Family::Author,
-            Prefix::Author(Arc::new(event.author)),
+            Prefix::author(event.author),
             &event.event,
         );
         push_membership(
             &mut memberships,
             Family::Kind,
-            Prefix::Kind(event.kind),
+            Prefix::kind(event.kind),
             &event.event,
         );
         for prefix in &event.tags {
             push_membership(
                 &mut memberships,
                 Family::Tag,
-                Prefix::Tag(prefix.clone()),
+                Prefix::tag(prefix.clone()),
                 &event.event,
             );
         }

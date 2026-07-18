@@ -50,37 +50,37 @@ pub(super) struct RunEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum Prefix {
-    Global,
-    Author(Arc<[u8; 32]>),
-    Kind([u8; 2]),
-    Tag(Arc<[u8]>),
-}
+pub(super) struct Prefix(Arc<[u8]>);
 
 impl Prefix {
+    pub(super) fn global() -> Self {
+        Self(Arc::from([]))
+    }
+
+    pub(super) fn author(value: [u8; 32]) -> Self {
+        Self(Arc::from(value))
+    }
+
+    pub(super) fn kind(value: [u8; 2]) -> Self {
+        Self(Arc::from(value))
+    }
+
+    pub(super) fn tag(value: Arc<[u8]>) -> Self {
+        Self(value)
+    }
+
     pub(super) fn as_bytes(&self) -> &[u8] {
-        match self {
-            Self::Global => &[],
-            Self::Author(value) => value.as_ref(),
-            Self::Kind(value) => value,
-            Self::Tag(value) => value,
-        }
+        &self.0
     }
 
     fn from_bytes(family: Family, value: &[u8]) -> Result<Self, String> {
         match family {
-            Family::Global if value.is_empty() => Ok(Self::Global),
-            Family::Author => {
-                Ok(Self::Author(Arc::new(value.try_into().map_err(|_| {
-                    "author prefix is not 32 bytes".to_owned()
-                })?)))
-            }
-            Family::Kind => Ok(Self::Kind(
-                value
-                    .try_into()
-                    .map_err(|_| "kind prefix is not 2 bytes".to_owned())?,
-            )),
-            Family::Tag => Ok(Self::Tag(Arc::from(value))),
+            Family::Global if value.is_empty() => Ok(Self::global()),
+            Family::Author if value.len() == 32 => Ok(Self(Arc::from(value))),
+            Family::Author => Err("author prefix is not 32 bytes".to_owned()),
+            Family::Kind if value.len() == 2 => Ok(Self(Arc::from(value))),
+            Family::Kind => Err("kind prefix is not 2 bytes".to_owned()),
+            Family::Tag => Ok(Self(Arc::from(value))),
             Family::Global => Err("global prefix is not empty".to_owned()),
         }
     }
@@ -975,7 +975,7 @@ mod tests {
             .map(|ordinal| Membership {
                 family: Family::Global,
                 shard: 0,
-                prefix: Prefix::Global,
+                prefix: Prefix::global(),
                 event: RunEvent {
                     created_at,
                     id: id(ordinal as u64),
@@ -1025,7 +1025,7 @@ mod tests {
             .map(|ordinal| Membership {
                 family: Family::Global,
                 shard: 0,
-                prefix: Prefix::Global,
+                prefix: Prefix::global(),
                 event: RunEvent {
                     created_at: 1_000 - ordinal as u64,
                     id: id(ordinal as u64),
@@ -1053,7 +1053,7 @@ mod tests {
             .map(|ordinal| Membership {
                 family: Family::Author,
                 shard: shard_for(Family::Author, &id(ordinal as u64)),
-                prefix: Prefix::Author(Arc::new(id(ordinal as u64))),
+                prefix: Prefix::author(id(ordinal as u64)),
                 event: RunEvent {
                     created_at: ordinal as u64,
                     id: id(ordinal as u64),
@@ -1200,13 +1200,13 @@ mod tests {
                         Membership {
                             family: Family::Global,
                             shard: 0,
-                            prefix: Prefix::Global,
+                            prefix: Prefix::global(),
                             event: (*event).into(),
                         },
                         Membership {
                             family: Family::Author,
                             shard: shard_for(Family::Author, &author),
-                            prefix: Prefix::Author(Arc::new(author)),
+                            prefix: Prefix::author(author),
                             event: (*event).into(),
                         },
                     ]
