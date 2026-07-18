@@ -89,13 +89,15 @@ Retain the existing forced-full-refresh and MemoryStore/Redb oracle suites as se
 
 Freeze a fresh schema-v21 baseline on the merged parent. Run a small diagnostic first and require nonzero overlap with sequence/order assertions. Then run five alternating fresh-process pairs for MemoryStore and durable Redb on the representative 100,000-event corpus.
 
-Retain only with median paired complete throughput at least 10% better for MemoryStore and 5% better for Redb, peak RSS no more than 10% worse, exact expected frames/rows/provenance, and exact Redb reopen. Record reducer CPU, projection CPU, overlap time, queue wait, allocation bytes, process writes, first-row latency, and barrier distribution.
+The original gate required median paired complete throughput at least 10% better for MemoryStore and 5% better for Redb. An exploratory five-pair build initially appeared to improve durable Redb by 11.0%, so the possible production-only retention amendment was recorded publicly before finalization.
+
+The instrumented final build did not reproduce that gain. Five new alternating pairs measured MemoryStore at +1.1% and durable Redb at +2.3% median paired throughput. Redb peak RSS rose 2.8%, allocations fell 10.4%, writes fell 0.3%, and exact rows/reopen remained correct. The worker overlapped 26–27 of 28–29 Redb batches with a depth-two bridge window and no worker failures, so the mechanism worked; the complete-path gain was simply too small. All production pipeline code was reverted and only this reusable negative evidence is retained.
 
 Profile the retained candidate's exact completion window to confirm the reducer's serial samples and bridge applied wait shrink. If the gate fails, revert all production pipeline code and merge only evidence that makes the negative reusable.
 
 ## Rollout and rollback
 
-This is an internal runtime replacement with no migration or FFI surface. Land behind no permanent feature flag: the candidate either passes and replaces the old ordinary-batch scheduler, or is reverted. Keep the synchronous barrier path as the correctness oracle and operational fallback.
+This was an internal runtime candidate with no migration or FFI surface. It failed the performance gate and was reverted. The synchronous reducer remains unchanged.
 
 Rollback is a normal code revert because store format and durable facts do not change. A store written by the candidate must reopen unchanged on the parent implementation.
 
@@ -117,12 +119,12 @@ Rollback is a normal code revert because store format and durable facts do not c
 ## Possible Rule Or ADR Loosening
 
 - No product or persistence rule needs loosening.
-- The current implementation convention that the pool bridge waits for every applied acknowledgement before offering another event batch is intentionally replaced by a bounded lookahead protocol; the stronger semantic rule that applied follows ordered projection is retained.
+- The rejected candidate temporarily replaced the bridge's one-batch convention with bounded lookahead while retaining the stronger applied-after-projection rule. The final branch changes neither convention.
 
 ## Possible Rule Tightening
 
-- Add an internal rule that every asynchronous commit/projection lane defines a monotonic sequence, a bounded capacity, explicit drain barriers, and the exact point at which applied may fire.
-- Represent temporary projection ownership with an enum or Option::take-style transfer so projection-dependent methods are mechanically unreachable while state is in flight.
+- If an asynchronous commit/projection lane is reconsidered, require a monotonic sequence, bounded capacity, explicit drain barriers, and an exact applied point.
+- Any future temporary projection ownership should use an enum or `Option::take`-style transfer so projection-dependent methods are mechanically unreachable while state is in flight.
 
 ## Alternatives Considered
 
@@ -134,11 +136,11 @@ Rollback is a normal code revert because store format and durable facts do not c
 
 ## Certainty
 
-82 percent.
+95 percent.
 
 ## Decision
 
-ready
+rejected after measurement
 
 ## Hosted Artifacts
 
