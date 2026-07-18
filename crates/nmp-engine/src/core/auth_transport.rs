@@ -1444,10 +1444,12 @@ impl<S: EventStore> EngineCore<S> {
                 }
                 // A watermark advancing can flip a handle's
                 // AcquisitionEvidence (a source's `reconciled_through`) even
-                // with no new rows at all — refresh so that becomes
-                // observable via EmitRows, same as an ingest.
-                self.refresh_all_handles(&mut effects);
-                self.refresh_all_histories(&mut effects);
+                // with no new rows at all. Coverage cannot mutate canonical
+                // rows, so retain every complete projection and refresh only
+                // its evidence; an incomplete projection falls back to the
+                // full row oracle inside these helpers.
+                self.refresh_all_handle_evidence(&mut effects);
+                self.refresh_all_history_evidence(&mut effects);
                 // Same watermark advance can also flip the diagnostic
                 // surface's own per-(filter, relay) coverage even though
                 // this arm never calls `recompile()` (M5 plan §1.2 step 3:
