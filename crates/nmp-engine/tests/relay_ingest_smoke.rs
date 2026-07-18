@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 #[path = "../examples/support/relay_ingest_probe.rs"]
 mod relay_ingest_probe;
 

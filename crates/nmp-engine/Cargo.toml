@@ -7,6 +7,7 @@ publish.workspace = true
 
 [features]
 bench-instrumentation = [
+    "dep:libc",
     "nmp-store/bench-instrumentation",
     "nmp-resolver/bench-instrumentation",
     "nmp-transport/bench-instrumentation",
@@ -50,6 +51,7 @@ serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
 tokio = { version = "1", features = ["rt", "time", "net", "sync"] }
+libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
 nmp-test-support.workspace = true
