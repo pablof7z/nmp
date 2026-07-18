@@ -96,6 +96,6 @@ ready
 
 ## Hosted Artifacts
 
-- Plan page: Generated after publishing.
+- Plan page: https://pablof7z.github.io/nmp/plans/issue-696-immutable-canonical-event-runs/
 
 - TTS audio: https://blossom.primal.net/4efe0dbffe5fbb84b6cb2f55caff4b6ab0dbfbf06401acd50380249664910fbc.mp3
