@@ -1,14 +1,14 @@
-//! Benchmark-only packed ordered-postings prototype for issue #648.
+//! Benchmark-only production-format qualification for issue #655.
 //!
 //! The production store writes one database row per event/index membership.
-//! This prototype keeps canonical events, raw-id lookup, and provenance in
+//! This comparator keeps canonical events, raw-id lookup, and provenance in
 //! their existing physical shape, but publishes the four query indexes as
-//! immutable transaction-generation segments. Each exact prefix is stored
-//! once per shard/transaction and its postings retain exact
-//! `created_at DESC, event_id ASC` order. Redb and Fjall consume byte-identical
-//! segment values; this module is evidence, not a production backend.
+//! immutable transaction-generation segments with run-local ID dictionaries,
+//! random-access postings, bounded immutable death blocks, and persisted-data
+//! compaction. Redb and Fjall consume byte-identical values; this module is
+//! qualification evidence, not the production backend.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Instant;
 
@@ -20,6 +20,11 @@ use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, Tab
 use serde::{Deserialize, Serialize};
 
 use super::canonical::observation_key;
+use super::postings::{
+    self, merge_dead_blocks, merge_posting_cursors, shard_for, validate_run_metas, DeadKeys,
+    DictionaryView, EncodedRun, Family, Membership, MergeSource, Prefix, RunEvent, RunMeta,
+    SegmentView,
+};
 use super::query::tag_index_prefix;
 use super::schema::{
     EVENTS, EVENT_IDS, EVENT_OBSERVATIONS, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_REFS,
@@ -28,13 +33,13 @@ use super::store_bench::{duration_ns, nearest_rank};
 use super::{binary_event, StoreBenchProcessCounters};
 
 const PACKED_SEGMENTS: TableDefinition<&[u8], &[u8]> =
-    TableDefinition::new("packed_postings_segments_v1");
-const PACKED_DEAD_KEYS: TableDefinition<u64, &[u8]> =
-    TableDefinition::new("packed_postings_dead_keys_v1");
-const SEGMENT_MAGIC: &[u8; 8] = b"NMPPS\0\x01\0";
-const DEAD_KEYS_MAGIC: &[u8; 8] = b"NMPPD\0\x01\0";
-const SHARD_KEY: [u8; 32] = [0x91; 32];
-const SHARD_MASK: u8 = 0x3f;
+    TableDefinition::new("packed_postings_segments_v2");
+const PACKED_DICTIONARIES: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("packed_postings_dictionaries_v1");
+const PACKED_RUN_META: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("packed_postings_run_meta_v1");
+const PACKED_DEAD_KEYS: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("packed_postings_dead_keys_v2");
 const FAMILY_COUNT: usize = 4;
 const PACKED_REDB_CACHE_BYTES: usize = 16 * 1_024 * 1_024;
 const FJALL_CACHE_BYTES: u64 = 16 * 1_024 * 1_024;
@@ -57,6 +62,10 @@ pub struct PackedPostingsMetrics {
     pub transactions: u64,
     pub wall_ns: u64,
     pub segment_build_ns: u64,
+    pub packed_encode_ns: u64,
+    pub packed_dictionary_build_ns: u64,
+    pub packed_membership_sort_ns: u64,
+    pub packed_segment_encode_ns: u64,
     pub commit_ns: u64,
     pub commit_p50_ns: u64,
     pub commit_p95_ns: u64,
@@ -77,8 +86,20 @@ pub struct PackedPostingsMetrics {
     pub encoded_event_bytes: u64,
     pub segment_rows: u64,
     pub segment_bytes: u64,
+    pub dictionary_rows: u64,
+    pub dictionary_bytes: u64,
+    pub run_meta_rows: u64,
+    pub run_meta_bytes: u64,
+    pub prefix_records: u64,
+    pub packed_postings: u64,
+    pub posting_bytes: u64,
+    pub seek_directory_bytes: u64,
     pub active_segment_rows: u64,
     pub active_segment_bytes: u64,
+    pub active_dictionary_rows: u64,
+    pub active_dictionary_bytes: u64,
+    pub active_run_meta_rows: u64,
+    pub active_run_meta_bytes: u64,
     pub memberships: [u64; FAMILY_COUNT],
     pub database_logical_bytes: u64,
     pub database_stored_bytes: u64,
@@ -97,60 +118,6 @@ pub struct PackedQueryMetrics {
     pub p95_ns: u64,
     pub p99_ns: u64,
     pub exact: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[repr(u8)]
-enum Family {
-    Global = 0,
-    Author = 1,
-    Kind = 2,
-    Tag = 3,
-}
-
-impl Family {
-    const ALL: [Self; FAMILY_COUNT] = [Self::Global, Self::Author, Self::Kind, Self::Tag];
-
-    fn from_u8(value: u8) -> Result<Self, String> {
-        Self::ALL
-            .into_iter()
-            .find(|family| *family as u8 == value)
-            .ok_or_else(|| format!("unknown packed-postings family {value}"))
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Posting {
-    created_at: u64,
-    id: [u8; 32],
-    event_key: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Prefix {
-    Global,
-    Author([u8; 32]),
-    Kind([u8; 2]),
-    Tag(Vec<u8>),
-}
-
-impl Prefix {
-    fn as_bytes(&self) -> &[u8] {
-        match self {
-            Self::Global => &[],
-            Self::Author(value) => value,
-            Self::Kind(value) => value,
-            Self::Tag(value) => value,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Membership {
-    family: Family,
-    shard: u8,
-    prefix: Prefix,
-    posting: Posting,
 }
 
 type BatchSegments = Vec<Membership>;
@@ -197,6 +164,10 @@ fn run_redb(
         .map_err(|error| error.to_string())?;
     init.open_table(PACKED_SEGMENTS)
         .map_err(|error| error.to_string())?;
+    init.open_table(PACKED_DICTIONARIES)
+        .map_err(|error| error.to_string())?;
+    init.open_table(PACKED_RUN_META)
+        .map_err(|error| error.to_string())?;
     init.open_table(PACKED_DEAD_KEYS)
         .map_err(|error| error.to_string())?;
     init.commit().map_err(|error| error.to_string())?;
@@ -233,6 +204,12 @@ fn run_redb(
         let mut segments = write
             .open_table(PACKED_SEGMENTS)
             .map_err(|error| error.to_string())?;
+        let mut dictionaries = write
+            .open_table(PACKED_DICTIONARIES)
+            .map_err(|error| error.to_string())?;
+        let mut run_meta = write
+            .open_table(PACKED_RUN_META)
+            .map_err(|error| error.to_string())?;
 
         if batch_index == 0 {
             relays
@@ -264,12 +241,51 @@ fn run_redb(
                 .map_err(|error| error.to_string())?;
             add_event_memberships(&mut grouped, &mut totals.memberships, event, event_key);
         }
-        let encoded_segments = encode_segments(grouped)?;
+        let encode_started = Instant::now();
+        let encoded_run = encode_segments(grouped)?;
+        totals.packed_encode_ns = totals
+            .packed_encode_ns
+            .saturating_add(duration_ns(encode_started));
+        totals.packed_dictionary_build_ns = totals
+            .packed_dictionary_build_ns
+            .saturating_add(encoded_run.dictionary_build_ns);
+        totals.packed_membership_sort_ns = totals
+            .packed_membership_sort_ns
+            .saturating_add(encoded_run.membership_sort_ns);
+        totals.packed_segment_encode_ns = totals
+            .packed_segment_encode_ns
+            .saturating_add(encoded_run.segment_encode_ns);
         totals.segment_build_ns = totals
             .segment_build_ns
             .saturating_add(duration_ns(build_started));
-        for (family, shard, value) in encoded_segments {
-            let key = segment_key(family, shard, batch_index as u64);
+        let run_id = batch_index as u64;
+        totals.dictionary_rows += 1;
+        totals.dictionary_bytes = totals
+            .dictionary_bytes
+            .saturating_add(encoded_run.dictionary.len() as u64);
+        totals.prefix_records = totals.prefix_records.saturating_add(encoded_run.prefixes);
+        totals.packed_postings = totals.packed_postings.saturating_add(encoded_run.postings);
+        totals.posting_bytes = totals
+            .posting_bytes
+            .saturating_add(encoded_run.posting_bytes);
+        dictionaries
+            .insert(run_id, encoded_run.dictionary.as_slice())
+            .map_err(|error| error.to_string())?;
+        let meta = RunMeta {
+            run_id,
+            level: 0,
+            min_event_key: first_key,
+            max_event_key: first_key + batch.len() as u64 - 1,
+            live_events: batch.len() as u64,
+        }
+        .encode()?;
+        totals.run_meta_rows += 1;
+        totals.run_meta_bytes = totals.run_meta_bytes.saturating_add(meta.len() as u64);
+        run_meta
+            .insert(run_id, meta.as_slice())
+            .map_err(|error| error.to_string())?;
+        for (family, shard, value) in encoded_run.segments {
+            let key = segment_key(family, shard, run_id);
             totals.segment_rows += 1;
             totals.segment_bytes = totals.segment_bytes.saturating_add(value.len() as u64);
             totals.segment_keys.push(key);
@@ -281,6 +297,8 @@ fn run_redb(
             .insert(1, first_key + batch.len() as u64 - 1)
             .map_err(|error| error.to_string())?;
 
+        drop(run_meta);
+        drop(dictionaries);
         drop(segments);
         drop(relay_refs);
         drop(relay_keys);
@@ -331,29 +349,68 @@ fn run_redb(
     let segment_table = read
         .open_table(PACKED_SEGMENTS)
         .map_err(|error| error.to_string())?;
+    let dictionary_table = read
+        .open_table(PACKED_DICTIONARIES)
+        .map_err(|error| error.to_string())?;
+    let run_meta_table = read
+        .open_table(PACKED_RUN_META)
+        .map_err(|error| error.to_string())?;
     let dead_key_table = read
         .open_table(PACKED_DEAD_KEYS)
         .map_err(|error| error.to_string())?;
     let mut reopened_memberships = [0u64; FAMILY_COUNT];
     let mut reopened_segment_rows = 0u64;
     let mut active_segment_bytes = 0u64;
+    let active_dictionary_rows = dictionary_table.len().map_err(|error| error.to_string())?;
+    let mut active_dictionary_bytes = 0u64;
+    for entry in dictionary_table.iter().map_err(|error| error.to_string())? {
+        let (_, value) = entry.map_err(|error| error.to_string())?;
+        active_dictionary_bytes =
+            active_dictionary_bytes.saturating_add(value.value().len() as u64);
+    }
+    let mut metas = Vec::new();
+    let mut active_run_meta_bytes = 0u64;
+    for entry in run_meta_table.iter().map_err(|error| error.to_string())? {
+        let (key, value) = entry.map_err(|error| error.to_string())?;
+        active_run_meta_bytes = active_run_meta_bytes.saturating_add(value.value().len() as u64);
+        let meta = RunMeta::decode(value.value())?;
+        if meta.run_id != key.value() {
+            return Err("run metadata key/value id mismatch".to_owned());
+        }
+        metas.push(meta);
+    }
+    validate_run_metas(&metas)?;
+    let active_run_meta_rows = metas.len() as u64;
     for entry in segment_table.iter().map_err(|error| error.to_string())? {
         let (key, value) = entry.map_err(|error| error.to_string())?;
-        let family = Family::from_u8(key.value()[0])?;
-        let decoded = decode_segment(value.value())?;
-        if decoded.family != family {
-            return Err("segment key/value family mismatch".to_owned());
+        let key: [u8; 10] = key
+            .value()
+            .try_into()
+            .map_err(|_| "invalid Redb segment key width".to_owned())?;
+        let run_id = segment_generation(&key);
+        let dictionary = dictionary_table
+            .get(run_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("missing run dictionary {run_id}"))?;
+        let dictionary = DictionaryView::parse(dictionary.value())?.validate()?;
+        let segment = SegmentView::parse(value.value())?;
+        if segment.family as u8 != key[0] || segment.shard != key[1] {
+            return Err("segment key/value family or shard mismatch".to_owned());
         }
+        let postings = segment.validate(dictionary)?;
+        let family = segment.family;
         reopened_memberships[family as usize] =
-            reopened_memberships[family as usize].saturating_add(decoded.postings);
+            reopened_memberships[family as usize].saturating_add(postings);
         reopened_segment_rows += 1;
         active_segment_bytes = active_segment_bytes.saturating_add(value.value().len() as u64);
     }
-    let active_dead_keys = decode_redb_dead_keys(&dead_key_table)?;
+    let _active_dead_keys = decode_redb_dead_keys(&dead_key_table)?;
     let queries = run_query_benchmarks(&events, &deletion.event_keys, |family, prefix, limit| {
-        query_redb(&read, &active_dead_keys, family, prefix, limit)
+        query_redb(&read, family, prefix, limit)
     })?;
     drop(dead_key_table);
+    drop(run_meta_table);
+    drop(dictionary_table);
     drop(segment_table);
     drop(read);
     drop(reopened);
@@ -372,6 +429,10 @@ fn run_redb(
         reopened_segment_rows,
         reopened_memberships,
         active_segment_bytes,
+        active_dictionary_rows,
+        active_dictionary_bytes,
+        active_run_meta_rows,
+        active_run_meta_bytes,
         deletion,
         maintenance,
         queries,
@@ -386,6 +447,8 @@ struct FjallKeyspaces {
     relay_keys: SingleWriterTxKeyspace,
     relay_refs: SingleWriterTxKeyspace,
     segments: SingleWriterTxKeyspace,
+    dictionaries: SingleWriterTxKeyspace,
+    run_meta: SingleWriterTxKeyspace,
     dead_keys: SingleWriterTxKeyspace,
 }
 
@@ -405,8 +468,10 @@ impl FjallKeyspaces {
             relays: open("packed_relays")?,
             relay_keys: open("packed_relay_keys")?,
             relay_refs: open("packed_relay_refs")?,
-            segments: open("packed_segments")?,
-            dead_keys: open("packed_dead_keys")?,
+            segments: open("packed_segments_v2")?,
+            dictionaries: open("packed_dictionaries_v1")?,
+            run_meta: open("packed_run_meta_v1")?,
+            dead_keys: open("packed_dead_keys_v2")?,
         })
     }
 }
@@ -467,12 +532,51 @@ fn run_fjall(
             );
             add_event_memberships(&mut grouped, &mut totals.memberships, event, event_key);
         }
-        let encoded_segments = encode_segments(grouped)?;
+        let encode_started = Instant::now();
+        let encoded_run = encode_segments(grouped)?;
+        totals.packed_encode_ns = totals
+            .packed_encode_ns
+            .saturating_add(duration_ns(encode_started));
+        totals.packed_dictionary_build_ns = totals
+            .packed_dictionary_build_ns
+            .saturating_add(encoded_run.dictionary_build_ns);
+        totals.packed_membership_sort_ns = totals
+            .packed_membership_sort_ns
+            .saturating_add(encoded_run.membership_sort_ns);
+        totals.packed_segment_encode_ns = totals
+            .packed_segment_encode_ns
+            .saturating_add(encoded_run.segment_encode_ns);
         totals.segment_build_ns = totals
             .segment_build_ns
             .saturating_add(duration_ns(build_started));
-        for (family, shard, value) in encoded_segments {
-            let key = segment_key(family, shard, batch_index as u64);
+        let run_id = batch_index as u64;
+        totals.dictionary_rows += 1;
+        totals.dictionary_bytes = totals
+            .dictionary_bytes
+            .saturating_add(encoded_run.dictionary.len() as u64);
+        totals.prefix_records = totals.prefix_records.saturating_add(encoded_run.prefixes);
+        totals.packed_postings = totals.packed_postings.saturating_add(encoded_run.postings);
+        totals.posting_bytes = totals
+            .posting_bytes
+            .saturating_add(encoded_run.posting_bytes);
+        write.insert(
+            &keyspaces.dictionaries,
+            run_id.to_be_bytes(),
+            encoded_run.dictionary,
+        );
+        let meta = RunMeta {
+            run_id,
+            level: 0,
+            min_event_key: first_key,
+            max_event_key: first_key + batch.len() as u64 - 1,
+            live_events: batch.len() as u64,
+        }
+        .encode()?;
+        totals.run_meta_rows += 1;
+        totals.run_meta_bytes = totals.run_meta_bytes.saturating_add(meta.len() as u64);
+        write.insert(&keyspaces.run_meta, run_id.to_be_bytes(), meta);
+        for (family, shard, value) in encoded_run.segments {
+            let key = segment_key(family, shard, run_id);
             totals.segment_rows += 1;
             totals.segment_bytes = totals.segment_bytes.saturating_add(value.len() as u64);
             totals.segment_keys.push(key);
@@ -529,31 +633,58 @@ fn run_fjall(
     let mut reopened_memberships = [0u64; FAMILY_COUNT];
     let mut reopened_segment_rows = 0u64;
     let mut active_segment_bytes = 0u64;
+    let active_dictionary_rows = read
+        .len(&reopened_keyspaces.dictionaries)
+        .map_err(|error| error.to_string())? as u64;
+    let mut active_dictionary_bytes = 0u64;
+    for entry in read.iter(&reopened_keyspaces.dictionaries) {
+        let (_, value) = entry.into_inner().map_err(|error| error.to_string())?;
+        active_dictionary_bytes = active_dictionary_bytes.saturating_add(value.len() as u64);
+    }
+    let mut metas = Vec::new();
+    let mut active_run_meta_bytes = 0u64;
+    for entry in read.iter(&reopened_keyspaces.run_meta) {
+        let (key, value) = entry.into_inner().map_err(|error| error.to_string())?;
+        active_run_meta_bytes = active_run_meta_bytes.saturating_add(value.len() as u64);
+        let key = u64::from_be_bytes(
+            key.as_ref()
+                .try_into()
+                .map_err(|_| "invalid Fjall run metadata key width".to_owned())?,
+        );
+        let meta = RunMeta::decode(&value)?;
+        if meta.run_id != key {
+            return Err("run metadata key/value id mismatch".to_owned());
+        }
+        metas.push(meta);
+    }
+    validate_run_metas(&metas)?;
+    let active_run_meta_rows = metas.len() as u64;
     for entry in read.iter(&reopened_keyspaces.segments) {
         let (key, value) = entry.into_inner().map_err(|error| error.to_string())?;
-        let family = Family::from_u8(
-            *key.first()
-                .ok_or_else(|| "empty Fjall segment key".to_owned())?,
-        )?;
-        let decoded = decode_segment(&value)?;
-        if decoded.family != family {
-            return Err("segment key/value family mismatch".to_owned());
+        let key: [u8; 10] = key
+            .as_ref()
+            .try_into()
+            .map_err(|_| "invalid Fjall segment key width".to_owned())?;
+        let run_id = segment_generation(&key);
+        let dictionary = read
+            .get(&reopened_keyspaces.dictionaries, run_id.to_be_bytes())
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("missing run dictionary {run_id}"))?;
+        let dictionary = DictionaryView::parse(&dictionary)?.validate()?;
+        let segment = SegmentView::parse(&value)?;
+        if segment.family as u8 != key[0] || segment.shard != key[1] {
+            return Err("segment key/value family or shard mismatch".to_owned());
         }
+        let postings = segment.validate(dictionary)?;
+        let family = segment.family;
         reopened_memberships[family as usize] =
-            reopened_memberships[family as usize].saturating_add(decoded.postings);
+            reopened_memberships[family as usize].saturating_add(postings);
         reopened_segment_rows += 1;
         active_segment_bytes = active_segment_bytes.saturating_add(value.len() as u64);
     }
-    let active_dead_keys = decode_fjall_dead_keys(&read, &reopened_keyspaces)?;
+    let _active_dead_keys = decode_fjall_dead_keys(&read, &reopened_keyspaces)?;
     let queries = run_query_benchmarks(&events, &deletion.event_keys, |family, prefix, limit| {
-        query_fjall(
-            &read,
-            &reopened_keyspaces,
-            &active_dead_keys,
-            family,
-            prefix,
-            limit,
-        )
+        query_fjall(&read, &reopened_keyspaces, family, prefix, limit)
     })?;
     drop(read);
     drop(reopened_keyspaces);
@@ -573,6 +704,10 @@ fn run_fjall(
         reopened_segment_rows,
         reopened_memberships,
         active_segment_bytes,
+        active_dictionary_rows,
+        active_dictionary_bytes,
+        active_run_meta_rows,
+        active_run_meta_bytes,
         deletion,
         maintenance,
         queries,
@@ -585,10 +720,21 @@ fn run_fjall(
 struct RunTotals {
     transactions: u64,
     segment_build_ns: u64,
+    packed_encode_ns: u64,
+    packed_dictionary_build_ns: u64,
+    packed_membership_sort_ns: u64,
+    packed_segment_encode_ns: u64,
     commit_ns: u64,
     encoded_event_bytes: u64,
     segment_rows: u64,
     segment_bytes: u64,
+    dictionary_rows: u64,
+    dictionary_bytes: u64,
+    run_meta_rows: u64,
+    run_meta_bytes: u64,
+    prefix_records: u64,
+    packed_postings: u64,
+    posting_bytes: u64,
     memberships: [u64; FAMILY_COUNT],
     segment_keys: Vec<[u8; 10]>,
 }
@@ -623,7 +769,7 @@ fn deletion_event_keys(events: &[Event]) -> BTreeSet<u64> {
 fn deletion_blocks(
     event_keys: &BTreeSet<u64>,
     batch_size: usize,
-) -> Result<Vec<(u64, Vec<u8>)>, String> {
+) -> Result<Vec<(u64, u64, Vec<u8>)>, String> {
     let mut grouped = BTreeMap::<u64, Vec<u64>>::new();
     for &event_key in event_keys {
         let generation = (event_key - 1) / batch_size as u64;
@@ -631,7 +777,7 @@ fn deletion_blocks(
     }
     grouped
         .into_iter()
-        .map(|(generation, keys)| Ok((generation, encode_dead_keys(&keys)?)))
+        .map(|(generation, keys)| Ok((generation, 0, encode_dead_keys(&keys)?)))
         .collect()
 }
 
@@ -644,7 +790,7 @@ fn apply_redb_deletion_overlay(
     let event_keys = deletion_event_keys(events);
     let blocks = deletion_blocks(&event_keys, batch_size)?;
     let overlay_rows = blocks.len() as u64;
-    let overlay_bytes = blocks.iter().map(|(_, value)| value.len() as u64).sum();
+    let overlay_bytes = blocks.iter().map(|(_, _, value)| value.len() as u64).sum();
     let write = db.begin_write().map_err(|error| error.to_string())?;
     let mut event_rows = write
         .open_table(EVENTS)
@@ -670,9 +816,10 @@ fn apply_redb_deletion_overlay(
             .remove(&observation_key(event_key, 1))
             .map_err(|error| error.to_string())?;
     }
-    for (generation, value) in blocks {
+    for (generation, sequence, value) in blocks {
+        let key = dead_block_key(generation, sequence);
         dead_key_table
-            .insert(generation, value.as_slice())
+            .insert(key.as_slice(), value.as_slice())
             .map_err(|error| error.to_string())?;
     }
     drop(dead_key_table);
@@ -699,7 +846,7 @@ fn apply_fjall_deletion_overlay(
     let event_keys = deletion_event_keys(events);
     let blocks = deletion_blocks(&event_keys, batch_size)?;
     let overlay_rows = blocks.len() as u64;
-    let overlay_bytes = blocks.iter().map(|(_, value)| value.len() as u64).sum();
+    let overlay_bytes = blocks.iter().map(|(_, _, value)| value.len() as u64).sum();
     let mut write = database.write_tx().durability(Some(PersistMode::SyncAll));
     for &event_key in &event_keys {
         let event = &events[event_key as usize - 1];
@@ -707,8 +854,12 @@ fn apply_fjall_deletion_overlay(
         write.remove(&keyspaces.event_ids, event.id.as_bytes());
         write.remove(&keyspaces.observations, observation_key(event_key, 1));
     }
-    for (generation, value) in blocks {
-        write.insert(&keyspaces.dead_keys, generation.to_be_bytes(), value);
+    for (generation, sequence, value) in blocks {
+        write.insert(
+            &keyspaces.dead_keys,
+            dead_block_key(generation, sequence),
+            value,
+        );
     }
     write.commit().map_err(|error| error.to_string())?;
     Ok(DeletionMetrics {
@@ -747,49 +898,106 @@ fn compact_redb_segments(
     db: &Database,
     events: &[Event],
     batch_size: usize,
-    initial_keys: &[[u8; 10]],
+    _initial_keys: &[[u8; 10]],
     dead_keys: &BTreeSet<u64>,
 ) -> Result<MaintenanceMetrics, String> {
     let started = Instant::now();
-    let mut active_keys = initial_keys.to_vec();
-    compact_segment_levels(
-        events,
-        batch_size,
-        dead_keys,
-        &mut active_keys,
-        |removed, added| {
+    compact_run_levels(
+        events.len().div_ceil(batch_size),
+        |level, output_run, sources| {
+            let input = load_redb_compaction_input(db, sources)?;
+            let encoded = encode_segments(input.memberships)?;
+            let run_id = compacted_generation(level, output_run);
+            let meta = RunMeta {
+                run_id,
+                level,
+                min_event_key: input.min_event_key,
+                max_event_key: input.max_event_key,
+                live_events: encoded.dictionary_entries,
+            }
+            .encode()?;
             let write = db.begin_write().map_err(|error| error.to_string())?;
             let mut segments = write
                 .open_table(PACKED_SEGMENTS)
                 .map_err(|error| error.to_string())?;
+            let mut dictionaries = write
+                .open_table(PACKED_DICTIONARIES)
+                .map_err(|error| error.to_string())?;
+            let mut run_meta = write
+                .open_table(PACKED_RUN_META)
+                .map_err(|error| error.to_string())?;
             let mut dead_key_table = write
                 .open_table(PACKED_DEAD_KEYS)
                 .map_err(|error| error.to_string())?;
-            let removed_generations: BTreeSet<_> = removed.iter().map(segment_generation).collect();
+            let mut removed = Vec::new();
+            for entry in segments.iter().map_err(|error| error.to_string())? {
+                let (key, _) = entry.map_err(|error| error.to_string())?;
+                let key: [u8; 10] = key
+                    .value()
+                    .try_into()
+                    .map_err(|_| "invalid Redb segment key width".to_owned())?;
+                if sources.contains(&segment_generation(&key)) {
+                    removed.push(key);
+                }
+            }
             for key in removed {
                 segments
                     .remove(key.as_slice())
                     .map_err(|error| error.to_string())?;
             }
-            for (key, value) in added {
+            let mut removed_death_blocks = Vec::new();
+            for entry in dead_key_table.iter().map_err(|error| error.to_string())? {
+                let (key, _) = entry.map_err(|error| error.to_string())?;
+                let key: [u8; 16] = key
+                    .value()
+                    .try_into()
+                    .map_err(|_| "invalid Redb dead-block key width".to_owned())?;
+                if sources.contains(&dead_block_run(&key)) {
+                    removed_death_blocks.push(key);
+                }
+            }
+            for key in removed_death_blocks {
+                dead_key_table
+                    .remove(key.as_slice())
+                    .map_err(|error| error.to_string())?;
+            }
+            for source in sources {
+                dictionaries
+                    .remove(*source)
+                    .map_err(|error| error.to_string())?;
+                run_meta
+                    .remove(*source)
+                    .map_err(|error| error.to_string())?;
+            }
+            dictionaries
+                .insert(run_id, encoded.dictionary.as_slice())
+                .map_err(|error| error.to_string())?;
+            run_meta
+                .insert(run_id, meta.as_slice())
+                .map_err(|error| error.to_string())?;
+            for (family, shard, value) in encoded.segments {
+                let key = segment_key(family, shard, run_id);
                 segments
                     .insert(key.as_slice(), value.as_slice())
                     .map_err(|error| error.to_string())?;
             }
-            for generation in removed_generations {
-                dead_key_table
-                    .remove(generation)
-                    .map_err(|error| error.to_string())?;
-            }
             drop(dead_key_table);
+            drop(run_meta);
+            drop(dictionaries);
             drop(segments);
             write.commit().map_err(|error| error.to_string())
         },
     )?;
+    let read = db.begin_read().map_err(|error| error.to_string())?;
+    let active_segment_rows = read
+        .open_table(PACKED_SEGMENTS)
+        .map_err(|error| error.to_string())?
+        .len()
+        .map_err(|error| error.to_string())?;
     Ok(MaintenanceMetrics {
         wall_ns: duration_ns(started),
         process_write_bytes: None,
-        active_segment_rows: active_keys.len() as u64,
+        active_segment_rows,
         active_memberships: expected_active_memberships(events, batch_size, dead_keys),
     })
 }
@@ -799,47 +1007,94 @@ fn compact_fjall_segments(
     keyspaces: &FjallKeyspaces,
     events: &[Event],
     batch_size: usize,
-    initial_keys: &[[u8; 10]],
+    _initial_keys: &[[u8; 10]],
     dead_keys: &BTreeSet<u64>,
 ) -> Result<MaintenanceMetrics, String> {
     let started = Instant::now();
-    let mut active_keys = initial_keys.to_vec();
-    compact_segment_levels(
-        events,
-        batch_size,
-        dead_keys,
-        &mut active_keys,
-        |removed, added| {
+    compact_run_levels(
+        events.len().div_ceil(batch_size),
+        |level, output_run, sources| {
+            let input = load_fjall_compaction_input(database, keyspaces, sources)?;
+            let encoded = encode_segments(input.memberships)?;
+            let run_id = compacted_generation(level, output_run);
+            let meta = RunMeta {
+                run_id,
+                level,
+                min_event_key: input.min_event_key,
+                max_event_key: input.max_event_key,
+                live_events: encoded.dictionary_entries,
+            }
+            .encode()?;
+            let read = database.read_tx();
+            let mut removed = Vec::new();
+            let mut removed_death_blocks = Vec::new();
+            for entry in read.iter(&keyspaces.segments) {
+                let (key, _) = entry.into_inner().map_err(|error| error.to_string())?;
+                let key: [u8; 10] = key
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| "invalid Fjall segment key width".to_owned())?;
+                if sources.contains(&segment_generation(&key)) {
+                    removed.push(key);
+                }
+            }
+            for entry in read.iter(&keyspaces.dead_keys) {
+                let (key, _) = entry.into_inner().map_err(|error| error.to_string())?;
+                let key: [u8; 16] = key
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| "invalid Fjall dead-block key width".to_owned())?;
+                if sources.contains(&dead_block_run(&key)) {
+                    removed_death_blocks.push(key);
+                }
+            }
+            drop(read);
             let mut write = database.write_tx().durability(Some(PersistMode::SyncAll));
-            let removed_generations: BTreeSet<_> = removed.iter().map(segment_generation).collect();
             for key in removed {
                 write.remove(&keyspaces.segments, key);
             }
-            for generation in removed_generations {
-                write.remove(&keyspaces.dead_keys, generation.to_be_bytes());
+            for key in removed_death_blocks {
+                write.remove(&keyspaces.dead_keys, key);
             }
-            for (key, value) in added {
+            for source in sources {
+                write.remove(&keyspaces.dictionaries, source.to_be_bytes());
+                write.remove(&keyspaces.run_meta, source.to_be_bytes());
+            }
+            write.insert(
+                &keyspaces.dictionaries,
+                run_id.to_be_bytes(),
+                encoded.dictionary,
+            );
+            write.insert(&keyspaces.run_meta, run_id.to_be_bytes(), meta);
+            for (family, shard, value) in encoded.segments {
+                let key = segment_key(family, shard, run_id);
                 write.insert(&keyspaces.segments, key, value);
             }
             write.commit().map_err(|error| error.to_string())
         },
     )?;
+    let read = database.read_tx();
+    let active_segment_rows = read
+        .len(&keyspaces.segments)
+        .map_err(|error| error.to_string())? as u64;
     Ok(MaintenanceMetrics {
         wall_ns: duration_ns(started),
         process_write_bytes: None,
-        active_segment_rows: active_keys.len() as u64,
+        active_segment_rows,
         active_memberships: expected_active_memberships(events, batch_size, dead_keys),
     })
 }
 
-fn compact_segment_levels(
-    events: &[Event],
-    batch_size: usize,
-    dead_keys: &BTreeSet<u64>,
-    active_keys: &mut Vec<[u8; 10]>,
-    mut apply: impl FnMut(Vec<[u8; 10]>, Vec<([u8; 10], Vec<u8>)>) -> Result<(), String>,
+struct CompactionInput {
+    memberships: Vec<Membership>,
+    min_event_key: u64,
+    max_event_key: u64,
+}
+
+fn compact_run_levels(
+    total_batches: usize,
+    mut compact: impl FnMut(u8, usize, &BTreeSet<u64>) -> Result<(), String>,
 ) -> Result<(), String> {
-    let total_batches = events.len().div_ceil(batch_size);
     let mut level = 1u8;
     let mut run_span = COMPACTION_FAN_IN;
     while total_batches / run_span > 0 {
@@ -856,40 +1111,7 @@ fn compact_segment_levels(
                     })
                     .collect()
             };
-            let removed: Vec<_> = active_keys
-                .iter()
-                .copied()
-                .filter(|key| source_generations.contains(&segment_generation(key)))
-                .collect();
-            if removed.is_empty() {
-                return Err(format!(
-                    "compaction level {level} run {output_run} has no source segments"
-                ));
-            }
-            let start_batch = output_run * run_span;
-            let end_batch = start_batch + run_span;
-            let start_event = start_batch * batch_size;
-            let end_event = (end_batch * batch_size).min(events.len());
-            let mut grouped =
-                BatchSegments::with_capacity((end_event - start_event).saturating_mul(5));
-            let mut ignored_counts = [0u64; FAMILY_COUNT];
-            for (offset, event) in events[start_event..end_event].iter().enumerate() {
-                let event_key = start_event as u64 + offset as u64 + 1;
-                if dead_keys.contains(&event_key) {
-                    continue;
-                }
-                add_event_memberships(&mut grouped, &mut ignored_counts, event, event_key);
-            }
-            let generation = compacted_generation(level, output_run);
-            let added: Vec<_> = encode_segments(grouped)?
-                .into_iter()
-                .map(|(family, shard, value)| (segment_key(family, shard, generation), value))
-                .collect();
-            let added_keys: Vec<_> = added.iter().map(|(key, _)| *key).collect();
-            apply(removed.clone(), added)?;
-            let removed_set: BTreeSet<_> = removed.into_iter().collect();
-            active_keys.retain(|key| !removed_set.contains(key));
-            active_keys.extend(added_keys);
+            compact(level, output_run, &source_generations)?;
         }
         level = level
             .checked_add(1)
@@ -899,6 +1121,169 @@ fn compact_segment_levels(
             .ok_or_else(|| "compaction span overflow".to_owned())?;
     }
     Ok(())
+}
+
+fn load_redb_compaction_input(
+    db: &Database,
+    sources: &BTreeSet<u64>,
+) -> Result<CompactionInput, String> {
+    let read = db.begin_read().map_err(|error| error.to_string())?;
+    let segments = read
+        .open_table(PACKED_SEGMENTS)
+        .map_err(|error| error.to_string())?;
+    let dictionaries = read
+        .open_table(PACKED_DICTIONARIES)
+        .map_err(|error| error.to_string())?;
+    let run_meta = read
+        .open_table(PACKED_RUN_META)
+        .map_err(|error| error.to_string())?;
+    let dead_keys = read
+        .open_table(PACKED_DEAD_KEYS)
+        .map_err(|error| error.to_string())?;
+    let mut memberships = Vec::new();
+    let mut metas = Vec::new();
+    for source in sources {
+        let meta = run_meta
+            .get(*source)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("missing source run metadata {source}"))?;
+        let meta = RunMeta::decode(meta.value())?;
+        if meta.run_id != *source {
+            return Err("source run metadata id mismatch".to_owned());
+        }
+        metas.push(meta);
+    }
+    validate_contiguous_sources(&metas)?;
+    let source_ids: Vec<_> = sources.iter().copied().collect();
+    let mut dictionary_values = Vec::with_capacity(source_ids.len());
+    let mut deaths = Vec::with_capacity(source_ids.len());
+    for source in &source_ids {
+        dictionary_values.push(
+            dictionaries
+                .get(*source)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("missing source run dictionary {source}"))?,
+        );
+        deaths.push(load_redb_run_deaths(&dead_keys, *source)?);
+    }
+    let dictionaries: Vec<_> = dictionary_values
+        .iter()
+        .map(|value| DictionaryView::parse(value.value())?.validate())
+        .collect::<Result<_, String>>()?;
+    for entry in segments.iter().map_err(|error| error.to_string())? {
+        let (key, value) = entry.map_err(|error| error.to_string())?;
+        let key: [u8; 10] = key
+            .value()
+            .try_into()
+            .map_err(|_| "invalid Redb segment key width".to_owned())?;
+        let run_id = segment_generation(&key);
+        let Some(source_index) = source_ids.iter().position(|source| *source == run_id) else {
+            continue;
+        };
+        let segment = SegmentView::parse(value.value())?;
+        for membership in segment.memberships(dictionaries[source_index])? {
+            if deaths[source_index]
+                .as_ref()
+                .is_none_or(|keys| !keys.contains(membership.event.event_key))
+            {
+                memberships.push(membership);
+            }
+        }
+    }
+    compaction_input(memberships, &metas)
+}
+
+fn load_fjall_compaction_input(
+    database: &SingleWriterTxDatabase,
+    keyspaces: &FjallKeyspaces,
+    sources: &BTreeSet<u64>,
+) -> Result<CompactionInput, String> {
+    let read = database.read_tx();
+    let mut metas = Vec::new();
+    for source in sources {
+        let value = read
+            .get(&keyspaces.run_meta, source.to_be_bytes())
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("missing source run metadata {source}"))?;
+        let meta = RunMeta::decode(&value)?;
+        if meta.run_id != *source {
+            return Err("source run metadata id mismatch".to_owned());
+        }
+        metas.push(meta);
+    }
+    validate_contiguous_sources(&metas)?;
+    let source_ids: Vec<_> = sources.iter().copied().collect();
+    let mut dictionary_values = Vec::with_capacity(source_ids.len());
+    let mut deaths = Vec::with_capacity(source_ids.len());
+    for source in &source_ids {
+        dictionary_values.push(
+            read.get(&keyspaces.dictionaries, source.to_be_bytes())
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("missing source run dictionary {source}"))?,
+        );
+        deaths.push(load_fjall_run_deaths(&read, keyspaces, *source)?);
+    }
+    let dictionaries: Vec<_> = dictionary_values
+        .iter()
+        .map(|value| DictionaryView::parse(value)?.validate())
+        .collect::<Result<_, String>>()?;
+    let mut memberships = Vec::new();
+    for entry in read.iter(&keyspaces.segments) {
+        let (key, value) = entry.into_inner().map_err(|error| error.to_string())?;
+        let key: [u8; 10] = key
+            .as_ref()
+            .try_into()
+            .map_err(|_| "invalid Fjall segment key width".to_owned())?;
+        let run_id = segment_generation(&key);
+        let Some(source_index) = source_ids.iter().position(|source| *source == run_id) else {
+            continue;
+        };
+        let segment = SegmentView::parse(&value)?;
+        for membership in segment.memberships(dictionaries[source_index])? {
+            if deaths[source_index]
+                .as_ref()
+                .is_none_or(|keys| !keys.contains(membership.event.event_key))
+            {
+                memberships.push(membership);
+            }
+        }
+    }
+    compaction_input(memberships, &metas)
+}
+
+fn validate_contiguous_sources(metas: &[RunMeta]) -> Result<(), String> {
+    validate_run_metas(metas)?;
+    let mut ordered = metas.to_vec();
+    ordered.sort_unstable_by_key(|meta| meta.min_event_key);
+    if ordered
+        .windows(2)
+        .any(|pair| pair[0].max_event_key.checked_add(1) != Some(pair[1].min_event_key))
+    {
+        return Err("compaction source run ranges are not contiguous".to_owned());
+    }
+    Ok(())
+}
+
+fn compaction_input(
+    memberships: Vec<Membership>,
+    metas: &[RunMeta],
+) -> Result<CompactionInput, String> {
+    if memberships.is_empty() {
+        return Err("compaction removed every source event".to_owned());
+    }
+    Ok(CompactionInput {
+        memberships,
+        min_event_key: metas
+            .iter()
+            .map(|meta| meta.min_event_key)
+            .min()
+            .ok_or_else(|| "compaction has no source metadata".to_owned())?,
+        max_event_key: metas
+            .iter()
+            .map(|meta| meta.max_event_key)
+            .max()
+            .ok_or_else(|| "compaction has no source metadata".to_owned())?,
+    })
 }
 
 fn compacted_generation(level: u8, run: usize) -> u64 {
@@ -924,6 +1309,10 @@ fn finish_metrics(
     reopened_segment_rows: u64,
     reopened_memberships: [u64; FAMILY_COUNT],
     active_segment_bytes: u64,
+    active_dictionary_rows: u64,
+    active_dictionary_bytes: u64,
+    active_run_meta_rows: u64,
+    active_run_meta_bytes: u64,
     deletion: DeletionMetrics,
     maintenance: MaintenanceMetrics,
     queries: Vec<PackedQueryMetrics>,
@@ -939,6 +1328,10 @@ fn finish_metrics(
         transactions: totals.transactions,
         wall_ns,
         segment_build_ns: totals.segment_build_ns,
+        packed_encode_ns: totals.packed_encode_ns,
+        packed_dictionary_build_ns: totals.packed_dictionary_build_ns,
+        packed_membership_sort_ns: totals.packed_membership_sort_ns,
+        packed_segment_encode_ns: totals.packed_segment_encode_ns,
         commit_ns: totals.commit_ns,
         commit_p50_ns: nearest_rank(commit_latencies, 50).unwrap_or(0),
         commit_p95_ns: nearest_rank(commit_latencies, 95).unwrap_or(0),
@@ -959,8 +1352,20 @@ fn finish_metrics(
         encoded_event_bytes: totals.encoded_event_bytes,
         segment_rows: totals.segment_rows,
         segment_bytes: totals.segment_bytes,
+        dictionary_rows: totals.dictionary_rows,
+        dictionary_bytes: totals.dictionary_bytes,
+        run_meta_rows: totals.run_meta_rows,
+        run_meta_bytes: totals.run_meta_bytes,
+        prefix_records: totals.prefix_records,
+        packed_postings: totals.packed_postings,
+        posting_bytes: totals.posting_bytes,
+        seek_directory_bytes: 0,
         active_segment_rows: maintenance.active_segment_rows,
         active_segment_bytes,
+        active_dictionary_rows,
+        active_dictionary_bytes,
+        active_run_meta_rows,
+        active_run_meta_bytes,
         memberships: totals.memberships,
         database_logical_bytes: path_size(path).map_err(|error| error.to_string())?,
         database_stored_bytes: stored_bytes,
@@ -1095,7 +1500,7 @@ fn expected_query_keys(
         .enumerate()
         .filter(|(index, _)| !dead_keys.contains(&(*index as u64 + 1)))
         .filter(|(_, event)| event_matches_prefix(event, family, prefix))
-        .map(|(index, event)| Posting {
+        .map(|(index, event)| RunEvent {
             created_at: event.created_at.as_secs(),
             id: *event.id.as_bytes(),
             event_key: index as u64 + 1,
@@ -1121,11 +1526,11 @@ fn event_matches_prefix(event: &Event, family: Family, prefix: &[u8]) -> bool {
 }
 
 fn decode_redb_dead_keys(
-    table: &impl ReadableTable<u64, &'static [u8]>,
+    table: &impl ReadableTable<&'static [u8], &'static [u8]>,
 ) -> Result<BTreeSet<u64>, String> {
     let mut dead_keys = BTreeSet::new();
     for entry in table.iter().map_err(|error| error.to_string())? {
-        let (_generation, value) = entry.map_err(|error| error.to_string())?;
+        let (_block_key, value) = entry.map_err(|error| error.to_string())?;
         dead_keys.extend(decode_dead_keys(value.value())?);
     }
     Ok(dead_keys)
@@ -1137,7 +1542,7 @@ fn decode_fjall_dead_keys(
 ) -> Result<BTreeSet<u64>, String> {
     let mut dead_keys = BTreeSet::new();
     for entry in read.iter(&keyspaces.dead_keys) {
-        let (_generation, value) = entry.into_inner().map_err(|error| error.to_string())?;
+        let (_block_key, value) = entry.into_inner().map_err(|error| error.to_string())?;
         dead_keys.extend(decode_dead_keys(&value)?);
     }
     Ok(dead_keys)
@@ -1145,7 +1550,6 @@ fn decode_fjall_dead_keys(
 
 fn query_redb(
     read: &redb::ReadTransaction,
-    dead_keys: &BTreeSet<u64>,
     family: Family,
     prefix: &[u8],
     limit: usize,
@@ -1156,33 +1560,61 @@ fn query_redb(
     let segments = read
         .open_table(PACKED_SEGMENTS)
         .map_err(|error| error.to_string())?;
-    let mut runs = Vec::new();
+    let dictionaries = read
+        .open_table(PACKED_DICTIONARIES)
+        .map_err(|error| error.to_string())?;
+    let dead_keys = read
+        .open_table(PACKED_DEAD_KEYS)
+        .map_err(|error| error.to_string())?;
+    let mut run_ids = Vec::new();
+    let mut segment_values = Vec::new();
     for entry in segments
         .range(lower.as_slice()..=upper.as_slice())
         .map_err(|error| error.to_string())?
     {
-        let (_key, value) = entry.map_err(|error| error.to_string())?;
-        let postings = decode_prefix_postings(value.value(), family, prefix, limit, dead_keys)?;
-        if !postings.is_empty() {
-            runs.push(postings);
+        let (key, value) = entry.map_err(|error| error.to_string())?;
+        let run_id = segment_generation(
+            key.value()
+                .try_into()
+                .map_err(|_| "invalid Redb segment key width".to_owned())?,
+        );
+        run_ids.push(run_id);
+        segment_values.push(value);
+    }
+    let mut dictionary_values = Vec::with_capacity(run_ids.len());
+    let mut decoded_dead_keys = Vec::with_capacity(run_ids.len());
+    for run_id in &run_ids {
+        dictionary_values.push(
+            dictionaries
+                .get(*run_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("missing run dictionary {run_id}"))?,
+        );
+        decoded_dead_keys.push(load_redb_run_deaths(&dead_keys, *run_id)?);
+    }
+    let mut sources = Vec::new();
+    for index in 0..run_ids.len() {
+        let dictionary = DictionaryView::parse(dictionary_values[index].value())?;
+        let segment = SegmentView::parse(segment_values[index].value())?;
+        if segment.family != family || segment.shard != shard {
+            return Err("packed query opened the wrong family or shard".to_owned());
+        }
+        if let Some(list) = segment.prefix(prefix)? {
+            sources.push(MergeSource {
+                cursor: list.cursor(dictionary, None, 0, u64::MAX)?,
+                dead: decoded_dead_keys[index].as_ref(),
+            });
         }
     }
-    let events = read.open_table(EVENTS).map_err(|error| error.to_string())?;
-    merge_query_runs(runs, limit, |event_key| {
-        let value = events
-            .get(event_key)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("missing canonical event {event_key}"))?;
-        let view = binary_event::StoredEventView::from_trusted(value.value())
-            .map_err(|error| error.to_string())?;
-        Ok(*view.id_bytes())
-    })
+    Ok(merge_posting_cursors(sources, limit)?
+        .into_iter()
+        .map(|event| event.event_key)
+        .collect())
 }
 
 fn query_fjall(
     read: &fjall::Snapshot,
     keyspaces: &FjallKeyspaces,
-    dead_keys: &BTreeSet<u64>,
     family: Family,
     prefix: &[u8],
     limit: usize,
@@ -1191,166 +1623,57 @@ fn query_fjall(
     let key_prefix = [family as u8, shard];
     let mut runs = Vec::new();
     for entry in read.prefix(&keyspaces.segments, key_prefix) {
-        let (_key, value) = entry.into_inner().map_err(|error| error.to_string())?;
-        let postings = decode_prefix_postings(&value, family, prefix, limit, dead_keys)?;
-        if !postings.is_empty() {
-            runs.push(postings);
-        }
-    }
-    merge_query_runs(runs, limit, |event_key| {
-        let value = read
-            .get(&keyspaces.events, event_key.to_be_bytes())
+        let (key, value) = entry.into_inner().map_err(|error| error.to_string())?;
+        let key: [u8; 10] = key
+            .as_ref()
+            .try_into()
+            .map_err(|_| "invalid Fjall segment key width".to_owned())?;
+        let run_id = segment_generation(&key);
+        let dictionary = read
+            .get(&keyspaces.dictionaries, run_id.to_be_bytes())
             .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("missing canonical event {event_key}"))?;
-        let view = binary_event::StoredEventView::from_trusted(&value)
-            .map_err(|error| error.to_string())?;
-        Ok(*view.id_bytes())
-    })
+            .ok_or_else(|| format!("missing run dictionary {run_id}"))?;
+        let dead = load_fjall_run_deaths(read, keyspaces, run_id)?;
+        runs.push(OwnedQueryRun {
+            dictionary: dictionary.to_vec(),
+            segment: value.to_vec(),
+            dead,
+        });
+    }
+    query_owned_runs(&runs, family, shard, prefix, limit)
 }
 
-fn merge_query_runs(
-    runs: Vec<Vec<(u64, u64)>>,
+struct OwnedQueryRun {
+    dictionary: Vec<u8>,
+    segment: Vec<u8>,
+    dead: Option<DeadKeys>,
+}
+
+fn query_owned_runs(
+    runs: &[OwnedQueryRun],
+    family: Family,
+    shard: u8,
+    prefix: &[u8],
     limit: usize,
-    mut load_id: impl FnMut(u64) -> Result<[u8; 32], String>,
 ) -> Result<Vec<u64>, String> {
-    let mut positions = vec![0usize; runs.len()];
-    let mut ids = HashMap::<u64, [u8; 32]>::new();
-    let mut output = Vec::with_capacity(limit);
-    while output.len() < limit {
-        let newest = runs
-            .iter()
-            .enumerate()
-            .filter_map(|(run, postings)| postings.get(positions[run]).map(|row| row.0))
-            .max();
-        let Some(newest) = newest else {
-            break;
-        };
-        let tied: Vec<_> = runs
-            .iter()
-            .enumerate()
-            .filter_map(|(run, postings)| {
-                let &(created_at, event_key) = postings.get(positions[run])?;
-                (created_at == newest).then_some((run, event_key))
-            })
-            .collect();
-        let selected_run = if tied.len() == 1 {
-            tied[0].0
-        } else {
-            let mut selected: Option<(usize, [u8; 32])> = None;
-            for (run, event_key) in tied {
-                let id = match ids.get(&event_key) {
-                    Some(id) => *id,
-                    None => {
-                        let id = load_id(event_key)?;
-                        ids.insert(event_key, id);
-                        id
-                    }
-                };
-                if selected.is_none_or(|(_, selected_id)| id < selected_id) {
-                    selected = Some((run, id));
-                }
-            }
-            selected.expect("nonempty tie set").0
-        };
-        let event_key = runs[selected_run][positions[selected_run]].1;
-        if let std::collections::hash_map::Entry::Vacant(entry) = ids.entry(event_key) {
-            entry.insert(load_id(event_key)?);
+    let mut sources = Vec::new();
+    for run in runs {
+        let dictionary = DictionaryView::parse(&run.dictionary)?;
+        let segment = SegmentView::parse(&run.segment)?;
+        if segment.family != family || segment.shard != shard {
+            return Err("packed query opened the wrong family or shard".to_owned());
         }
-        output.push(event_key);
-        positions[selected_run] += 1;
-    }
-    Ok(output)
-}
-
-fn decode_prefix_postings(
-    value: &[u8],
-    expected_family: Family,
-    wanted_prefix: &[u8],
-    limit: usize,
-    dead_keys: &BTreeSet<u64>,
-) -> Result<Vec<(u64, u64)>, String> {
-    let mut cursor = 0usize;
-    if take(value, &mut cursor, SEGMENT_MAGIC.len())? != SEGMENT_MAGIC {
-        return Err("invalid packed-postings magic".to_owned());
-    }
-    let family = Family::from_u8(*take(value, &mut cursor, 1)?.first().unwrap())?;
-    if family != expected_family {
-        return Err("packed query opened the wrong index family".to_owned());
-    }
-    let prefix_count = read_varint(value, &mut cursor)?;
-    for _ in 0..prefix_count {
-        let prefix_len = usize::try_from(read_varint(value, &mut cursor)?)
-            .map_err(|_| "prefix length does not fit usize".to_owned())?;
-        let prefix = take(value, &mut cursor, prefix_len)?;
-        let posting_count = read_varint(value, &mut cursor)?;
-        let stream_len = u32::from_be_bytes(
-            take(value, &mut cursor, 4)?
-                .try_into()
-                .expect("fixed posting-stream length width"),
-        ) as usize;
-        let stream = take(value, &mut cursor, stream_len)?;
-        match prefix.cmp(wanted_prefix) {
-            std::cmp::Ordering::Less => continue,
-            std::cmp::Ordering::Greater => return Ok(Vec::new()),
-            std::cmp::Ordering::Equal => {
-                return decode_posting_stream(stream, posting_count, limit, dead_keys);
-            }
+        if let Some(list) = segment.prefix(prefix)? {
+            sources.push(MergeSource {
+                cursor: list.cursor(dictionary, None, 0, u64::MAX)?,
+                dead: run.dead.as_ref(),
+            });
         }
     }
-    Ok(Vec::new())
-}
-
-fn decode_posting_stream(
-    stream: &[u8],
-    posting_count: u64,
-    limit: usize,
-    dead_keys: &BTreeSet<u64>,
-) -> Result<Vec<(u64, u64)>, String> {
-    let mut cursor = 0usize;
-    let wanted = posting_count.min(limit as u64);
-    let mut rows = Vec::with_capacity(wanted.min(usize::MAX as u64) as usize);
-    let mut previous_created_at: Option<u64> = None;
-    let mut previous_event_key: Option<u64> = None;
-    let mut decoded = 0u64;
-    for ordinal in 0..posting_count {
-        let created_at = if ordinal == 0 {
-            u64::from_be_bytes(
-                take(stream, &mut cursor, 8)?
-                    .try_into()
-                    .expect("fixed timestamp width"),
-            )
-        } else {
-            previous_created_at
-                .expect("non-first posting has predecessor")
-                .checked_sub(read_varint(stream, &mut cursor)?)
-                .ok_or_else(|| "timestamp delta underflow".to_owned())?
-        };
-        let encoded_event_key = read_varint(stream, &mut cursor)?;
-        let event_key = match previous_event_key {
-            None => encoded_event_key,
-            Some(previous) => {
-                let delta = i128::from(zigzag_decode(encoded_event_key));
-                u64::try_from(i128::from(previous) + delta)
-                    .map_err(|_| "event-key delta overflow".to_owned())?
-            }
-        };
-        if previous_created_at.is_some_and(|previous| previous < created_at) {
-            return Err("posting list violates newest-first order".to_owned());
-        }
-        if !dead_keys.contains(&event_key) {
-            rows.push((created_at, event_key));
-        }
-        previous_created_at = Some(created_at);
-        previous_event_key = Some(event_key);
-        decoded += 1;
-        if rows.len() == limit {
-            break;
-        }
-    }
-    if decoded == posting_count && cursor != stream.len() {
-        return Err("posting-stream length mismatch".to_owned());
-    }
-    Ok(rows)
+    Ok(merge_posting_cursors(sources, limit)?
+        .into_iter()
+        .map(|event| event.event_key)
+        .collect())
 }
 
 fn add_event_memberships(
@@ -1359,7 +1682,7 @@ fn add_event_memberships(
     event: &Event,
     event_key: u64,
 ) {
-    let posting = Posting {
+    let posting = RunEvent {
         created_at: event.created_at.as_secs(),
         id: *event.id.as_bytes(),
         event_key,
@@ -1396,59 +1719,19 @@ fn push_membership(
     counts: &mut [u64; FAMILY_COUNT],
     family: Family,
     prefix: Prefix,
-    posting: Posting,
+    event: RunEvent,
 ) {
     let shard = shard_for(family, prefix.as_bytes());
     segments.push(Membership {
         family,
         shard,
         prefix,
-        posting,
+        event,
     });
     counts[family as usize] = counts[family as usize].saturating_add(1);
 }
 
-fn shard_for(family: Family, prefix: &[u8]) -> u8 {
-    if family == Family::Global {
-        return 0;
-    }
-    let mut hasher = blake3::Hasher::new_keyed(&SHARD_KEY);
-    hasher.update(&[family as u8]);
-    hasher.update(prefix);
-    hasher.finalize().as_bytes()[0] & SHARD_MASK
-}
-
-fn encode_segments(mut memberships: BatchSegments) -> Result<Vec<(Family, u8, Vec<u8>)>, String> {
-    memberships.sort_unstable_by(|left, right| {
-        left.family
-            .cmp(&right.family)
-            .then_with(|| left.shard.cmp(&right.shard))
-            .then_with(|| left.prefix.as_bytes().cmp(right.prefix.as_bytes()))
-            .then_with(|| posting_order(&left.posting, &right.posting))
-    });
-    let mut encoded = Vec::new();
-    let mut segment_start = 0usize;
-    while segment_start < memberships.len() {
-        let family = memberships[segment_start].family;
-        let shard = memberships[segment_start].shard;
-        let mut segment_end = segment_start + 1;
-        while segment_end < memberships.len()
-            && memberships[segment_end].family == family
-            && memberships[segment_end].shard == shard
-        {
-            segment_end += 1;
-        }
-        encoded.push((
-            family,
-            shard,
-            encode_segment(family, &memberships[segment_start..segment_end])?,
-        ));
-        segment_start = segment_end;
-    }
-    Ok(encoded)
-}
-
-fn posting_order(left: &Posting, right: &Posting) -> std::cmp::Ordering {
+fn posting_order(left: &RunEvent, right: &RunEvent) -> std::cmp::Ordering {
     right
         .created_at
         .cmp(&left.created_at)
@@ -1456,202 +1739,16 @@ fn posting_order(left: &Posting, right: &Posting) -> std::cmp::Ordering {
         .then_with(|| left.event_key.cmp(&right.event_key))
 }
 
-fn encode_segment(family: Family, memberships: &[Membership]) -> Result<Vec<u8>, String> {
-    if memberships.is_empty() {
-        return Err("cannot encode an empty segment".to_owned());
-    }
-    let prefix_count = 1 + memberships
-        .windows(2)
-        .filter(|pair| pair[0].prefix.as_bytes() != pair[1].prefix.as_bytes())
-        .count();
-    let mut value = Vec::new();
-    value.extend_from_slice(SEGMENT_MAGIC);
-    value.push(family as u8);
-    put_varint(&mut value, prefix_count as u64);
-    let mut prefix_start = 0usize;
-    while prefix_start < memberships.len() {
-        let prefix = memberships[prefix_start].prefix.as_bytes();
-        let mut prefix_end = prefix_start + 1;
-        while prefix_end < memberships.len() && memberships[prefix_end].prefix.as_bytes() == prefix
-        {
-            prefix_end += 1;
-        }
-        let postings = &memberships[prefix_start..prefix_end];
-        put_varint(&mut value, prefix.len() as u64);
-        value.extend_from_slice(prefix);
-        put_varint(&mut value, postings.len() as u64);
-        let stream_len_offset = value.len();
-        value.extend_from_slice(&0u32.to_be_bytes());
-        let stream_start = value.len();
-        let mut previous_created_at: Option<u64> = None;
-        let mut previous_event_key: Option<u64> = None;
-        for membership in postings {
-            let posting = membership.posting;
-            match previous_created_at {
-                None => value.extend_from_slice(&posting.created_at.to_be_bytes()),
-                Some(previous) => put_varint(
-                    &mut value,
-                    previous
-                        .checked_sub(posting.created_at)
-                        .ok_or_else(|| "postings are not newest-first".to_owned())?,
-                ),
-            }
-            match previous_event_key {
-                None => put_varint(&mut value, posting.event_key),
-                Some(previous) => put_varint(
-                    &mut value,
-                    zigzag_encode(
-                        i64::try_from(i128::from(posting.event_key) - i128::from(previous))
-                            .map_err(|_| "event-key delta does not fit i64".to_owned())?,
-                    ),
-                ),
-            }
-            previous_created_at = Some(posting.created_at);
-            previous_event_key = Some(posting.event_key);
-        }
-        let stream_len = u32::try_from(value.len() - stream_start)
-            .map_err(|_| "posting stream exceeds u32".to_owned())?;
-        value[stream_len_offset..stream_len_offset + 4].copy_from_slice(&stream_len.to_be_bytes());
-        prefix_start = prefix_end;
-    }
-    Ok(value)
+fn encode_segments(memberships: BatchSegments) -> Result<EncodedRun, String> {
+    postings::encode_run(memberships)
 }
 
 fn encode_dead_keys(event_keys: &[u64]) -> Result<Vec<u8>, String> {
-    if event_keys.is_empty() {
-        return Err("cannot encode an empty dead-key block".to_owned());
-    }
-    let mut value = Vec::new();
-    value.extend_from_slice(DEAD_KEYS_MAGIC);
-    put_varint(&mut value, event_keys.len() as u64);
-    let mut previous = 0u64;
-    for (index, &event_key) in event_keys.iter().enumerate() {
-        if index > 0 && event_key <= previous {
-            return Err("dead keys are not strictly ordered".to_owned());
-        }
-        put_varint(
-            &mut value,
-            if index == 0 {
-                event_key
-            } else {
-                event_key - previous
-            },
-        );
-        previous = event_key;
-    }
-    Ok(value)
+    DeadKeys::new(event_keys.to_vec())?.encode()
 }
 
 fn decode_dead_keys(value: &[u8]) -> Result<Vec<u64>, String> {
-    let mut cursor = 0usize;
-    if take(value, &mut cursor, DEAD_KEYS_MAGIC.len())? != DEAD_KEYS_MAGIC {
-        return Err("invalid dead-key block magic".to_owned());
-    }
-    let count = read_varint(value, &mut cursor)?;
-    if count == 0 {
-        return Err("empty dead-key block".to_owned());
-    }
-    let mut keys = Vec::with_capacity(count.min(usize::MAX as u64) as usize);
-    let mut previous = 0u64;
-    for index in 0..count {
-        let encoded = read_varint(value, &mut cursor)?;
-        let event_key = if index == 0 {
-            encoded
-        } else {
-            previous
-                .checked_add(encoded)
-                .ok_or_else(|| "dead-key delta overflow".to_owned())?
-        };
-        if index > 0 && event_key <= previous {
-            return Err("dead keys are not strictly ordered".to_owned());
-        }
-        keys.push(event_key);
-        previous = event_key;
-    }
-    if cursor != value.len() {
-        return Err("trailing bytes in dead-key block".to_owned());
-    }
-    Ok(keys)
-}
-
-struct DecodedSegment {
-    family: Family,
-    postings: u64,
-}
-
-fn decode_segment(value: &[u8]) -> Result<DecodedSegment, String> {
-    let mut cursor = 0usize;
-    if take(value, &mut cursor, SEGMENT_MAGIC.len())? != SEGMENT_MAGIC {
-        return Err("invalid packed-postings magic".to_owned());
-    }
-    let family = Family::from_u8(*take(value, &mut cursor, 1)?.first().unwrap())?;
-    let prefix_count = read_varint(value, &mut cursor)?;
-    let mut previous_prefix: Option<Vec<u8>> = None;
-    let mut total = 0u64;
-    for _ in 0..prefix_count {
-        let prefix_len = usize::try_from(read_varint(value, &mut cursor)?)
-            .map_err(|_| "prefix length does not fit usize".to_owned())?;
-        let prefix = take(value, &mut cursor, prefix_len)?.to_vec();
-        if previous_prefix
-            .as_ref()
-            .is_some_and(|prior| prior >= &prefix)
-        {
-            return Err("segment prefixes are not strictly ordered".to_owned());
-        }
-        previous_prefix = Some(prefix);
-        let posting_count = read_varint(value, &mut cursor)?;
-        if posting_count == 0 {
-            return Err("empty posting list".to_owned());
-        }
-        let stream_len = u32::from_be_bytes(
-            take(value, &mut cursor, 4)?
-                .try_into()
-                .expect("fixed posting-stream length width"),
-        ) as usize;
-        let stream = take(value, &mut cursor, stream_len)?;
-        let mut stream_cursor = 0usize;
-        let mut previous_created_at: Option<u64> = None;
-        let mut previous_event_key: Option<u64> = None;
-        for ordinal in 0..posting_count {
-            let created_at = if ordinal == 0 {
-                u64::from_be_bytes(
-                    take(stream, &mut stream_cursor, 8)?
-                        .try_into()
-                        .expect("fixed timestamp width"),
-                )
-            } else {
-                previous_created_at
-                    .expect("non-first posting has predecessor")
-                    .checked_sub(read_varint(stream, &mut stream_cursor)?)
-                    .ok_or_else(|| "timestamp delta underflow".to_owned())?
-            };
-            let encoded_event_key = read_varint(stream, &mut stream_cursor)?;
-            let event_key = match previous_event_key {
-                None => encoded_event_key,
-                Some(previous) => {
-                    let delta = i128::from(zigzag_decode(encoded_event_key));
-                    u64::try_from(i128::from(previous) + delta)
-                        .map_err(|_| "event-key delta overflow".to_owned())?
-                }
-            };
-            if previous_created_at.is_some_and(|previous| previous < created_at) {
-                return Err("posting list violates newest-first order".to_owned());
-            }
-            previous_created_at = Some(created_at);
-            previous_event_key = Some(event_key);
-            total = total.saturating_add(1);
-        }
-        if stream_cursor != stream.len() {
-            return Err("posting-stream length mismatch".to_owned());
-        }
-    }
-    if cursor != value.len() {
-        return Err("trailing bytes in packed-postings segment".to_owned());
-    }
-    Ok(DecodedSegment {
-        family,
-        postings: total,
-    })
+    Ok(DeadKeys::decode(value)?.iter().collect())
 }
 
 fn segment_key(family: Family, shard: u8, generation: u64) -> [u8; 10] {
@@ -1662,46 +1759,59 @@ fn segment_key(family: Family, shard: u8, generation: u64) -> [u8; 10] {
     key
 }
 
-fn put_varint(target: &mut Vec<u8>, mut value: u64) {
-    while value >= 0x80 {
-        target.push((value as u8 & 0x7f) | 0x80);
-        value >>= 7;
-    }
-    target.push(value as u8);
+fn dead_block_key(run_id: u64, sequence: u64) -> [u8; 16] {
+    let mut key = [0u8; 16];
+    key[..8].copy_from_slice(&run_id.to_be_bytes());
+    key[8..].copy_from_slice(&sequence.to_be_bytes());
+    key
 }
 
-fn zigzag_encode(value: i64) -> u64 {
-    ((value << 1) ^ (value >> 63)) as u64
+fn dead_block_run(key: &[u8; 16]) -> u64 {
+    u64::from_be_bytes(key[..8].try_into().expect("dead-block run width"))
 }
 
-fn zigzag_decode(value: u64) -> i64 {
-    ((value >> 1) as i64) ^ -((value & 1) as i64)
-}
-
-fn read_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64, String> {
-    let mut value = 0u64;
-    for shift in (0..=63).step_by(7) {
-        let byte = *take(bytes, cursor, 1)?.first().unwrap();
-        if shift == 63 && byte > 1 {
-            return Err("varint overflow".to_owned());
+fn load_redb_run_deaths(
+    table: &impl ReadableTable<&'static [u8], &'static [u8]>,
+    run_id: u64,
+) -> Result<Option<DeadKeys>, String> {
+    let lower = dead_block_key(run_id, 0);
+    let upper = dead_block_key(run_id, u64::MAX);
+    let mut blocks = Vec::new();
+    for entry in table
+        .range(lower.as_slice()..=upper.as_slice())
+        .map_err(|error| error.to_string())?
+    {
+        let (key, value) = entry.map_err(|error| error.to_string())?;
+        let key: [u8; 16] = key
+            .value()
+            .try_into()
+            .map_err(|_| "invalid Redb dead-block key width".to_owned())?;
+        if dead_block_run(&key) != run_id {
+            return Err("Redb dead-block range crossed run boundary".to_owned());
         }
-        value |= u64::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 {
-            return Ok(value);
-        }
+        blocks.push(DeadKeys::decode(value.value())?);
     }
-    Err("unterminated varint".to_owned())
+    merge_dead_blocks(&blocks)
 }
 
-fn take<'a>(bytes: &'a [u8], cursor: &mut usize, len: usize) -> Result<&'a [u8], String> {
-    let end = cursor
-        .checked_add(len)
-        .ok_or_else(|| "segment cursor overflow".to_owned())?;
-    let value = bytes
-        .get(*cursor..end)
-        .ok_or_else(|| "truncated packed-postings segment".to_owned())?;
-    *cursor = end;
-    Ok(value)
+fn load_fjall_run_deaths(
+    read: &fjall::Snapshot,
+    keyspaces: &FjallKeyspaces,
+    run_id: u64,
+) -> Result<Option<DeadKeys>, String> {
+    let mut blocks = Vec::new();
+    for entry in read.prefix(&keyspaces.dead_keys, run_id.to_be_bytes()) {
+        let (key, value) = entry.into_inner().map_err(|error| error.to_string())?;
+        let key: [u8; 16] = key
+            .as_ref()
+            .try_into()
+            .map_err(|_| "invalid Fjall dead-block key width".to_owned())?;
+        if dead_block_run(&key) != run_id {
+            return Err("Fjall dead-block prefix crossed run boundary".to_owned());
+        }
+        blocks.push(DeadKeys::decode(&value)?);
+    }
+    merge_dead_blocks(&blocks)
 }
 
 fn observed_at(events: &[Event]) -> u64 {
@@ -1754,17 +1864,17 @@ mod tests {
     #[test]
     fn segment_roundtrip_preserves_equal_timestamp_order_and_counts() {
         let postings = [
-            Posting {
+            RunEvent {
                 created_at: 10,
                 id: [3; 32],
                 event_key: 3,
             },
-            Posting {
+            RunEvent {
                 created_at: 11,
                 id: [9; 32],
                 event_key: 1,
             },
-            Posting {
+            RunEvent {
                 created_at: 10,
                 id: [1; 32],
                 event_key: 2,
@@ -1772,18 +1882,24 @@ mod tests {
         ];
         let mut memberships: Vec<_> = postings
             .into_iter()
-            .map(|posting| Membership {
+            .map(|event| Membership {
                 family: Family::Tag,
-                shard: 0,
+                shard: shard_for(Family::Tag, b"prefix"),
                 prefix: Prefix::Tag(b"prefix".to_vec()),
-                posting,
+                event,
             })
             .collect();
-        memberships.sort_unstable_by(|left, right| posting_order(&left.posting, &right.posting));
-        let encoded = encode_segment(Family::Tag, &memberships).unwrap();
-        let decoded = decode_segment(&encoded).unwrap();
-        assert_eq!(decoded.family, Family::Tag);
-        assert_eq!(decoded.postings, 3);
+        memberships.sort_unstable_by(|left, right| posting_order(&left.event, &right.event));
+        let encoded = encode_segments(memberships).unwrap();
+        let dictionary = DictionaryView::parse(&encoded.dictionary).unwrap();
+        let (_, _, segment) = &encoded.segments[0];
+        assert_eq!(
+            SegmentView::parse(segment)
+                .unwrap()
+                .validate(dictionary)
+                .unwrap(),
+            3
+        );
     }
 
     #[test]
@@ -1806,15 +1922,19 @@ mod tests {
             family: Family::Global,
             shard: 0,
             prefix: Prefix::Global,
-            posting: Posting {
+            event: RunEvent {
                 created_at: 1,
                 id: [0; 32],
                 event_key: 1,
             },
         };
-        let mut encoded = encode_segment(Family::Global, &[membership]).unwrap();
-        encoded.push(0);
-        assert!(decode_segment(&encoded).is_err());
+        let encoded = encode_segments(vec![membership]).unwrap();
+        let dictionary = DictionaryView::parse(&encoded.dictionary).unwrap();
+        let mut segment = encoded.segments[0].2.clone();
+        segment.push(0);
+        assert!(SegmentView::parse(&segment)
+            .and_then(|view| view.validate(dictionary))
+            .is_err());
     }
 
     #[test]
@@ -1822,15 +1942,7 @@ mod tests {
         let keys = [8, 16, 24, 4_096];
         let encoded = encode_dead_keys(&keys).unwrap();
         assert_eq!(decode_dead_keys(&encoded).unwrap(), keys);
-        assert!(encoded.len() < DEAD_KEYS_MAGIC.len() + keys.len() * size_of::<u64>());
-    }
-
-    #[test]
-    fn cross_run_equal_timestamp_merge_uses_full_canonical_id() {
-        let runs = vec![vec![(10, 1), (9, 3)], vec![(10, 2)]];
-        let ids = BTreeMap::from([(1, [2; 32]), (2, [1; 32]), (3, [0; 32])]);
-        let merged = merge_query_runs(runs, 3, |event_key| Ok(ids[&event_key])).unwrap();
-        assert_eq!(merged, vec![2, 1, 3]);
+        assert!(encoded.len() < 8 + keys.len() * std::mem::size_of::<u64>());
     }
 
     #[test]
