@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>One-keyspace Fjall packed ceiling</title>
+    <link rel="stylesheet" href="../../assets/style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <nav class="topbar">
+        <a href="../../">Planning pages</a>
+        
+      </nav>
+      <section class="hero">
+        <div class="eyebrow">Architecture plan</div>
+        <h1>One-keyspace Fjall packed ceiling</h1>
+        <p class="summary">Test whether one prefixed Fjall partition preserves the measured write reduction without the wall, memory, and disk costs of the rejected multi-keyspace layout.</p>
+        <div class="meta">
+          <span class="pill ready">Ready to implement</span>
+          <span class="pill">91 percent certainty</span>
+        </div>
+      </section>
+      <div class="grid">
+        <div>
+
+          <section class="section">
+            <h2>Boundaries</h2>
+            <pre class="mermaid">flowchart LR
+  C[Exact representative corpus] --&gt; O[Shared packed operations]
+  O --&gt; R[Packed Redb oracle]
+  O --&gt; M[Existing multi-keyspace Fjall]
+  O --&gt; S[One prefixed Fjall keyspace]
+  R --&gt; V[Exact reopen and query comparison]
+  M --&gt; V
+  S --&gt; V
+  V --&gt; G{Wall, RSS, disk, writes gates}
+  G --&gt;|fail| N[Close Fjall negative]
+  G --&gt;|pass| P[Open governed crash-proof issue]</pre>
+          </section>
+          <section class="section">
+            <h2>Very High Level</h2>
+            <p>Issue #691 tests the only materially new Fjall hypothesis left by the existing evidence. The prior byte-identical packed matrix proved that Fjall can reduce process writes, but its many-partition layout was slower, used more memory, and stored far more bytes than Redb. Fjall owns LSM state per partition, so one transactional partition with collision-free logical-table prefixes may avoid enough duplicated memtable, SST, and maintenance overhead to change that result.
+
+Start with the cheapest falsifier: add a benchmark-only one-partition backend to the existing packed-postings matrix. Reuse the exact dictionaries, segments, catalogs, death blocks, codecs, transaction batches, compaction fan-in, query probes, synchronous durability, and reopen oracle. A typed prefix codec maps each logical table into a disjoint byte range and is tested against cross-table range leakage. Run the existing multi-keyspace Fjall and Redb modes beside it so the result cannot be attributed to corpus or host drift.
+
+Measure foreground time, time to fully quiescent maintenance, process writes, stored bytes, peak RSS, open/reopen, query latency, background threads, and compaction debt over balanced fresh-process repetitions. If the packed-only candidate cannot clear the full store gate, stop and close Fjall negative without building another governed adapter. Only a passing packed result may advance to the mutation-rich governed trace and forced-exit crash work under a separate issue.
+
+No production backend, migration, public setting, FFI surface, or persistence format changes in this issue.</p>
+          </section>
+          <section class="section">
+            <h2>Existing Rules Or ADRs</h2>
+            <ul><li>Issue-first discipline is satisfied by #691, linked to epic #612 and the prior Fjall evidence in #629, #635, and #655.</li><li>The experiment is benchmark-only and preserves the existing event-store atomicity, exact reopen, packed ordering, bounded maintenance, and durability requirements.</li><li>No public noun, FFI concept, lifecycle boolean, destructive API, or application architecture boundary changes.</li></ul>
+          </section>
+          <section class="section">
+            <h2>Rule Tension And Tightening</h2>
+            <h3>Possible loosening</h3>
+            <ul><li>No product or persistence rule needs loosening.</li><li>A result that wins only by leaving background compaction debt, weakening SyncAll durability, or relaxing exact reopen is a failure rather than a rule exception.</li></ul>
+            <h3>Possible tightening</h3>
+            <ul><li>Require future LSM backend comparisons to report per-partition physical overhead and fully quiescent maintenance, not only foreground writes.</li><li>Require logical-table prefix codecs to expose typed range bounds and a cross-table leakage falsifier before they can own persisted data.</li></ul>
+          </section>
+          <section class="section">
+            <h2>Alternatives Considered</h2>
+            <ul><li>Repeat the existing multi-keyspace Fjall matrix: rejected because its wall, RSS, and disk costs are already measured and the hypothesis is unchanged.</li><li>Build a full one-keyspace Fjall EventStore immediately: rejected because the packed-only matrix can kill the physical-layout hypothesis much more cheaply.</li><li>Migrate to LMDB: the exact packed ceiling already projected a useful gain but failed the RSS gate by a wide margin.</li><li>Keep Redb without testing: safe, but it would discard the measured Fjall write-endurance signal without testing the one materially different layout that could address its known overhead.</li></ul>
+          </section>
+        </div>
+        <aside>
+          <section class="card">
+            <h2>TTS Version</h2>
+            <audio controls preload="metadata" src="https://blossom.primal.net/228f9d9528f83105526377fc4f461c3e07abd883ed4ca23e03b14f5f31bd71d4.mp3"></audio>
+            <p>Audio-friendly narration generated from the planning payload.</p>
+          </section>
+          <section class="card">
+            <h2>Certainty</h2>
+            <div class="certainty ">91%</div>
+            <p>Ready to implement.</p>
+          </section>
+          <section class="card links">
+            <h2>Links</h2>
+            
+            <a href="https://blossom.primal.net/228f9d9528f83105526377fc4f461c3e07abd883ed4ca23e03b14f5f31bd71d4.mp3">Open narration</a>
+            <a href="../../docs/plans/issue-691-one-keyspace-fjall-packed-ceiling/plan.md">Detailed plan file</a>
+          </section>
+        </aside>
+      </div>
+    </main>
+
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral" });
+    </script>
+  </body>
+</html>
