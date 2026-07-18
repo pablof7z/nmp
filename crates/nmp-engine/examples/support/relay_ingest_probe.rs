@@ -25,7 +25,7 @@ use tungstenite::{accept, Message};
 
 pub type ProbeError = Box<dyn Error + Send + Sync>;
 
-const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v17";
+const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v18";
 const CORPUS_SCHEMA: &str = "nmp-relay-ingest-corpus-v1";
 const BASE_CREATED_AT: u64 = 1_700_000_000;
 // Duplicate replay can advance diagnostics without producing a row delta.
@@ -1137,6 +1137,14 @@ fn ingest_attribution_json() -> serde_json::Value {
             "max_bridge_batch_bytes": engine.max_bridge_batch_bytes,
             "bridge_applied_wait_ns": engine.bridge_applied_wait_ns,
             "engine_batch_process_ns": engine.engine_batch_process_ns,
+            "relay_core_reduce_ns": engine.relay_core_reduce_ns,
+            "relay_effect_dispatch_ns": engine.relay_effect_dispatch_ns,
+            "relay_ingest_prelude_ns": engine.relay_ingest_prelude_ns,
+            "relay_ingest_post_store_ns": engine.relay_ingest_post_store_ns,
+            "relay_ingest_apply_committed_ns": engine.relay_ingest_apply_committed_ns,
+            "relay_ingest_effect_build_ns": engine.relay_ingest_effect_build_ns,
+            "committed_observation_effect_ns": engine.committed_observation_effect_ns,
+            "diagnostics_effect_ns": engine.diagnostics_effect_ns,
             "committed_projection_total_ns": engine.committed_projection_total_ns,
             "committed_projection_prelude_ns": engine.committed_projection_prelude_ns,
             "committed_projection_recompile_ns": engine.committed_projection_recompile_ns,
