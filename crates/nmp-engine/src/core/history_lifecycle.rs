@@ -851,6 +851,8 @@ impl<S: EventStore> EngineCore<S> {
         changes: &CommittedRowChanges,
         effects: &mut Vec<Effect>,
     ) -> bool {
+        #[cfg(feature = "bench-instrumentation")]
+        let phase_started = std::time::Instant::now();
         let Some(state) = self.histories.get(&id) else {
             return true;
         };
@@ -945,6 +947,11 @@ impl<S: EventStore> EngineCore<S> {
                 );
             }
         }
+
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::history_projection_setup(phase_started.elapsed());
+        #[cfg(feature = "bench-instrumentation")]
+        let phase_started = std::time::Instant::now();
 
         {
             let state = self
@@ -1135,6 +1142,11 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
 
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::history_projection_apply(phase_started.elapsed());
+        #[cfg(feature = "bench-instrumentation")]
+        let phase_started = std::time::Instant::now();
+
         let state = self
             .histories
             .get(&id)
@@ -1153,12 +1165,28 @@ impl<S: EventStore> EngineCore<S> {
                 (None, None) | (Some(_), Some(_)) => {}
             }
         }
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::history_projection_delta(phase_started.elapsed());
         if deltas.is_empty() {
             return true;
         }
+        #[cfg(feature = "bench-instrumentation")]
+        let batch_started = std::time::Instant::now();
+        #[cfg(feature = "bench-instrumentation")]
+        let delta_count = deltas.len();
         let batch = self.history_batch(id, deltas, WindowLoad::Idle);
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::history_projection_batch(
+            batch_started.elapsed(),
+            delta_count,
+            batch.rows.len(),
+        );
         if let Some(state) = self.histories.get(&id) {
+            #[cfg(feature = "bench-instrumentation")]
+            let sink_started = std::time::Instant::now();
             state.sink.on_history(batch.clone());
+            #[cfg(feature = "bench-instrumentation")]
+            crate::ingest_attribution::history_sink_delivery(sink_started.elapsed());
         }
         effects.push(Effect::EmitHistory(id, batch));
         true

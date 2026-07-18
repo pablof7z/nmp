@@ -1110,6 +1110,10 @@ impl<S: EventStore> EngineCore<S> {
         force_broad_refresh: bool,
         effects: &mut Vec<Effect>,
     ) {
+        #[cfg(feature = "bench-instrumentation")]
+        let total_started = std::time::Instant::now();
+        #[cfg(feature = "bench-instrumentation")]
+        let phase_started = std::time::Instant::now();
         let CommittedMutationResult {
             delta,
             affected_handles,
@@ -1132,19 +1136,42 @@ impl<S: EventStore> EngineCore<S> {
             .iter()
             .filter_map(|handle| self.history_by_handle.get(handle).copied())
             .collect();
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::committed_projection_prelude(phase_started.elapsed());
+
+        #[cfg(feature = "bench-instrumentation")]
+        let phase_started = std::time::Instant::now();
         if demand_changed || force_recompile {
             self.recompile(effects);
         }
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::committed_projection_recompile(phase_started.elapsed());
+
+        #[cfg(feature = "bench-instrumentation")]
+        let phase_started = std::time::Instant::now();
         if demand_changed || force_broad_refresh {
             self.refresh_all_handles(effects);
-            self.refresh_all_histories(effects);
         } else {
             self.apply_committed_row_changes(affected.iter().copied(), &row_changes, effects);
+        }
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::committed_live_projection(phase_started.elapsed());
+
+        #[cfg(feature = "bench-instrumentation")]
+        let phase_started = std::time::Instant::now();
+        if demand_changed || force_broad_refresh {
+            self.refresh_all_histories(effects);
+        } else {
             for id in affected_histories {
                 if !self.try_apply_committed_history_row_changes(id, &row_changes, effects) {
                     self.refresh_history(id, WindowLoad::Idle, effects);
                 }
             }
+        }
+        #[cfg(feature = "bench-instrumentation")]
+        {
+            crate::ingest_attribution::committed_history_projection(phase_started.elapsed());
+            crate::ingest_attribution::committed_projection_total(total_started.elapsed());
         }
     }
 
@@ -1294,7 +1321,13 @@ impl<S: EventStore> EngineCore<S> {
             if delta.is_empty() {
                 return true;
             }
+            #[cfg(feature = "bench-instrumentation")]
+            let sink_started = std::time::Instant::now();
+            #[cfg(feature = "bench-instrumentation")]
+            let sink_delta_count = delta.len();
             state.sink.on_rows(delta.clone());
+            #[cfg(feature = "bench-instrumentation")]
+            crate::ingest_attribution::row_sink_delivery(sink_started.elapsed(), sink_delta_count);
             effects.push(Effect::EmitRows(id, delta, evidence));
             return true;
         }
@@ -1396,7 +1429,13 @@ impl<S: EventStore> EngineCore<S> {
             .get_mut(&id)
             .expect("handle remained live during synchronous projection");
         state.last_rows = current;
+        #[cfg(feature = "bench-instrumentation")]
+        let sink_started = std::time::Instant::now();
+        #[cfg(feature = "bench-instrumentation")]
+        let sink_delta_count = delta.len();
         state.sink.on_rows(delta.clone());
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::row_sink_delivery(sink_started.elapsed(), sink_delta_count);
         effects.push(Effect::EmitRows(id, delta, evidence));
         true
     }
@@ -1471,7 +1510,13 @@ impl<S: EventStore> EngineCore<S> {
         }
         state.last_rows = current_rows;
         state.last_evidence = Some(evidence.clone());
+        #[cfg(feature = "bench-instrumentation")]
+        let sink_started = std::time::Instant::now();
+        #[cfg(feature = "bench-instrumentation")]
+        let sink_delta_count = delta.len();
         state.sink.on_rows(delta.clone());
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::row_sink_delivery(sink_started.elapsed(), sink_delta_count);
         effects.push(Effect::EmitRows(id, delta, evidence));
     }
 
