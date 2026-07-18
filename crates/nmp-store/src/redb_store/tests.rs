@@ -69,7 +69,7 @@ fn v5_displaced_epoch_is_rejected_before_any_v6_table_is_created() {
 }
 
 #[test]
-fn healthy_v7_reopen_starts_no_application_write_transaction() {
+fn healthy_v8_reopen_starts_no_application_write_transaction() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("healthy-reopen.redb");
 
@@ -100,6 +100,73 @@ fn healthy_v7_reopen_starts_no_application_write_transaction() {
 }
 
 #[test]
+fn v7_rows_migrate_atomically_to_query_ready_packed_postings() {
+    use nostr::EventBuilder;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v7-packed-migration.redb");
+    let keys = nostr::Keys::generate();
+    let event = EventBuilder::new(Kind::TextNote, "migrate packed")
+        .custom_created_at(Timestamp::from(42u64))
+        .sign_with_keys(&keys)
+        .unwrap();
+    let mut store = RedbStore::open(&path).unwrap();
+    store
+        .insert(
+            event.clone(),
+            RelayObserved::new(
+                RelayUrl::parse("wss://migration.example").unwrap(),
+                Timestamp::from(42u64),
+            ),
+        )
+        .unwrap();
+    drop(store);
+
+    let db = Database::create(&path).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    write_txn.delete_table(POSTINGS_SEGMENTS).unwrap();
+    write_txn.delete_table(POSTINGS_DICTIONARIES).unwrap();
+    write_txn.delete_table(POSTINGS_RUN_META).unwrap();
+    write_txn.delete_table(POSTINGS_RUN_BY_MIN).unwrap();
+    write_txn.delete_table(POSTINGS_DEAD_KEYS).unwrap();
+    write_txn.delete_table(POSTINGS_META).unwrap();
+    let mut schema = write_txn.open_table(SCHEMA_META).unwrap();
+    schema
+        .insert(SCHEMA_VERSION_KEY, PREVIOUS_SCHEMA_VERSION)
+        .unwrap();
+    drop(schema);
+    write_txn.commit().unwrap();
+    drop(db);
+
+    let migrated = RedbStore::open(&path).unwrap();
+    assert_eq!(migrated.open_write_transactions(), 1);
+    assert_eq!(
+        migrated
+            .query_newest(&Filter::new().kind(Kind::TextNote), 10)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.event.id)
+            .collect::<Vec<_>>(),
+        vec![event.id]
+    );
+    let read_txn = migrated.db.begin_read().unwrap();
+    let schema = read_txn.open_table(SCHEMA_META).unwrap();
+    assert_eq!(
+        schema.get(SCHEMA_VERSION_KEY).unwrap().unwrap().value(),
+        SCHEMA_VERSION
+    );
+    let packed = read_txn.open_table(POSTINGS_META).unwrap();
+    assert_eq!(packed.get(POSTINGS_READY).unwrap().unwrap().value(), 1);
+    drop(packed);
+    drop(schema);
+    drop(read_txn);
+    drop(migrated);
+
+    let reopened = RedbStore::open(&path).unwrap();
+    assert_eq!(reopened.open_write_transactions(), 0);
+}
+
+#[test]
 fn v6_author_kind_index_is_removed_and_cardinality_rebuilt_atomically() {
     use nostr::EventBuilder;
 
@@ -127,7 +194,7 @@ fn v6_author_kind_index_is_removed_and_cardinality_rebuilt_atomically() {
     {
         let mut schema_meta = write_txn.open_table(SCHEMA_META).unwrap();
         schema_meta
-            .insert(SCHEMA_VERSION_KEY, PREVIOUS_SCHEMA_VERSION)
+            .insert(SCHEMA_VERSION_KEY, LEGACY_SCHEMA_VERSION)
             .unwrap();
         let mut cardinality_meta = write_txn.open_table(INDEX_CARDINALITY_META).unwrap();
         cardinality_meta

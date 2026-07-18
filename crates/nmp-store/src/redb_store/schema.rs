@@ -50,8 +50,9 @@ pub(super) const LEGACY_EVENT_TABLES: [&str; 9] = [
 ];
 pub(super) const SCHEMA_META: TableDefinition<&str, u64> = TableDefinition::new("schema_meta_v6");
 pub(super) const SCHEMA_VERSION_KEY: &str = "version";
-pub(super) const PREVIOUS_SCHEMA_VERSION: u64 = 6;
-pub(super) const SCHEMA_VERSION: u64 = 7;
+pub(super) const LEGACY_SCHEMA_VERSION: u64 = 6;
+pub(super) const PREVIOUS_SCHEMA_VERSION: u64 = 7;
+pub(super) const SCHEMA_VERSION: u64 = 8;
 /// Bound redb's process-private page cache for mobile/desktop clients.
 ///
 /// redb 4.1 defaults this cache to 1 GiB. A million-event sequential ingest

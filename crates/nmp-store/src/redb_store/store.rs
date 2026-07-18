@@ -4,7 +4,7 @@ use super::outbox::{
     OUTBOX_KIND5_CLAIMS, OUTBOX_SUPPRESS_BY_ADDR, OUTBOX_SUPPRESS_BY_ID,
 };
 use super::postings::Family;
-use super::postings_store::{scan_packed, PackedScan};
+use super::postings_store::{rebuild_from_canonical, scan_packed, PackedScan};
 use super::query::{
     ordered_fixed_page_range, ordered_index_event_id, ordered_vec_page_range,
     rebuild_index_cardinality, FixedOrderedCursor, OrderedIndex, OrderedPlan, OrderedWindow,
@@ -15,13 +15,14 @@ use super::schema::{
     BY_KIND, BY_TAG, COVERAGE, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS,
     EVENT_STORE_META, EXPIRATION_INDEX, INDEX_CARDINALITY, INDEX_CARDINALITY_META,
     INDEX_CARDINALITY_SAMPLE_KEY, INDEX_CARDINALITY_SAMPLE_META, INDEX_CARDINALITY_VERSION,
-    INDEX_CARDINALITY_VERSION_KEY, LEGACY_BY_AUTHOR_KIND, LEGACY_EVENT_TABLES, OUTBOX_ATTEMPTS,
-    OUTBOX_ATTEMPT_DETAILS, OUTBOX_CORRELATIONS, OUTBOX_DEADLINES, OUTBOX_DEADLINES_BY_INTENT,
-    OUTBOX_DISPLACED, OUTBOX_INTENTS, OUTBOX_LANES, OUTBOX_META, OUTBOX_RECEIPTS,
-    OUTBOX_ROUTE_REVISIONS, PENDING_EPHEMERAL_RECEIPTS_KEY, POSTINGS_DEAD_KEYS,
-    POSTINGS_DICTIONARIES, POSTINGS_META, POSTINGS_READY, POSTINGS_RUN_BY_MIN, POSTINGS_RUN_META,
-    POSTINGS_SEGMENTS, PREVIOUS_SCHEMA_VERSION, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_META,
-    RELAY_REFS, SCHEMA_META, SCHEMA_VERSION, SCHEMA_VERSION_KEY, TOMBSTONES,
+    INDEX_CARDINALITY_VERSION_KEY, LEGACY_BY_AUTHOR_KIND, LEGACY_EVENT_TABLES,
+    LEGACY_SCHEMA_VERSION, OUTBOX_ATTEMPTS, OUTBOX_ATTEMPT_DETAILS, OUTBOX_CORRELATIONS,
+    OUTBOX_DEADLINES, OUTBOX_DEADLINES_BY_INTENT, OUTBOX_DISPLACED, OUTBOX_INTENTS, OUTBOX_LANES,
+    OUTBOX_META, OUTBOX_RECEIPTS, OUTBOX_ROUTE_REVISIONS, PENDING_EPHEMERAL_RECEIPTS_KEY,
+    POSTINGS_DEAD_KEYS, POSTINGS_DICTIONARIES, POSTINGS_META, POSTINGS_READY, POSTINGS_RUN_BY_MIN,
+    POSTINGS_RUN_META, POSTINGS_SEGMENTS, PREVIOUS_SCHEMA_VERSION, REDB_CACHE_BYTES, RELAYS,
+    RELAY_KEYS, RELAY_META, RELAY_REFS, SCHEMA_META, SCHEMA_VERSION, SCHEMA_VERSION_KEY,
+    TOMBSTONES,
 };
 #[cfg(any(test, feature = "bench-instrumentation"))]
 use super::AtomicU64;
@@ -157,16 +158,25 @@ impl RedbStore {
 
         let mut _open_write_transactions = 0;
         if has_schema_marker {
-            let (needs_schema_migration, needs_cardinality_rebuild, pending_ephemeral) = {
+            let (
+                needs_schema_migration,
+                needs_legacy_index_removal,
+                needs_cardinality_rebuild,
+                pending_ephemeral,
+            ) = {
                 let read_txn = db.begin_read()?;
                 let schema_meta = read_txn.open_table(SCHEMA_META)?;
                 let version = schema_meta
                     .get(SCHEMA_VERSION_KEY)?
                     .map(|guard| guard.value());
-                if version != Some(SCHEMA_VERSION) && version != Some(PREVIOUS_SCHEMA_VERSION) {
+                if !matches!(
+                    version,
+                    Some(SCHEMA_VERSION | PREVIOUS_SCHEMA_VERSION | LEGACY_SCHEMA_VERSION)
+                ) {
                     return Err(redb::Error::UpgradeRequired(SCHEMA_VERSION as u8));
                 }
-                let needs_schema_migration = version == Some(PREVIOUS_SCHEMA_VERSION);
+                let needs_schema_migration = version != Some(SCHEMA_VERSION);
+                let needs_legacy_index_removal = version == Some(LEGACY_SCHEMA_VERSION);
                 let cardinality_meta = read_txn.open_table(INDEX_CARDINALITY_META)?;
                 let cardinality_version = cardinality_meta
                     .get(INDEX_CARDINALITY_VERSION_KEY)?
@@ -193,7 +203,8 @@ impl RedbStore {
                     .unwrap_or(0);
                 (
                     needs_schema_migration,
-                    needs_schema_migration
+                    needs_legacy_index_removal,
+                    needs_legacy_index_removal
                         || cardinality_version != Some(INDEX_CARDINALITY_VERSION)
                         || cardinality_sample_key_len.is_none(),
                     pending_ephemeral,
@@ -203,7 +214,11 @@ impl RedbStore {
                 let write_txn = db.begin_write()?;
                 {
                     if needs_schema_migration {
-                        write_txn.delete_table(LEGACY_BY_AUTHOR_KIND)?;
+                        if needs_legacy_index_removal {
+                            write_txn.delete_table(LEGACY_BY_AUTHOR_KIND)?;
+                        }
+                        rebuild_from_canonical(&write_txn)
+                            .map_err(|error| redb::Error::Corrupted(error.0))?;
                         let mut schema_meta = write_txn.open_table(SCHEMA_META)?;
                         schema_meta.insert(SCHEMA_VERSION_KEY, SCHEMA_VERSION)?;
                     }

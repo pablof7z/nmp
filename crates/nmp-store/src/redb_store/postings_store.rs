@@ -1,9 +1,9 @@
 //! Transactional persistence for immutable packed ordered-postings runs.
 //!
-//! The row indexes remain query-authoritative during the differential phase,
-//! but every governed event mutation records its packed addition or death in
-//! the same Redb transaction. Publication is owned by `GovernedWrite`, so a
-//! canonical commit cannot bypass it.
+//! Packed postings are query-authoritative in schema v8. Every governed event
+//! mutation records its packed addition or death in the same Redb transaction.
+//! Publication is owned by `GovernedWrite`, so a canonical commit cannot
+//! bypass it.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet};
@@ -16,12 +16,14 @@ use super::postings::{
 };
 use super::query::tag_index_prefix;
 use super::schema::{
-    persist_err, EventKey, POSTINGS_DEAD_KEYS, POSTINGS_DICTIONARIES, POSTINGS_META,
-    POSTINGS_NEXT_RUN_ID, POSTINGS_RUN_BY_MIN, POSTINGS_RUN_META, POSTINGS_SEGMENTS,
+    persist_err, EventKey, EVENTS, POSTINGS_DEAD_KEYS, POSTINGS_DICTIONARIES, POSTINGS_META,
+    POSTINGS_NEXT_RUN_ID, POSTINGS_READY, POSTINGS_RUN_BY_MIN, POSTINGS_RUN_META,
+    POSTINGS_SEGMENTS,
 };
-use super::{Event, EventCursor, EventId, PersistenceError};
+use super::{Event, EventCursor, EventId, PersistenceError, StoredEventView};
 
 const RUN_FAN_IN: usize = 8;
+const MIGRATION_RUN_EVENTS: usize = 8_192;
 
 #[derive(Default)]
 pub(super) struct PostingsBatch {
@@ -49,33 +51,92 @@ impl PostingsBatch {
             apply_deaths(write_txn, &self.deaths)?;
         }
         if !self.additions.is_empty() {
-            let run_id = allocate_run_id(write_txn)?;
-            let memberships = memberships_for_events(&self.additions);
-            let encoded = encode_run(memberships).map_err(packed_err)?;
-            let min_event_key = *self
-                .additions
-                .first_key_value()
-                .expect("nonempty additions")
-                .0;
-            let max_event_key = *self
-                .additions
-                .last_key_value()
-                .expect("nonempty additions")
-                .0;
-            let meta = RunMeta {
-                run_id,
-                level: 0,
-                min_event_key,
-                max_event_key,
-                live_events: encoded.dictionary_entries,
-            };
-            insert_run(write_txn, meta, encoded)?;
-            compact_overfull_levels(write_txn)?;
+            publish_events(write_txn, &self.additions)?;
         }
         self.additions.clear();
         self.deaths.clear();
         Ok(())
     }
+}
+
+pub(super) fn rebuild_from_canonical(
+    write_txn: &redb::WriteTransaction,
+) -> Result<(), PersistenceError> {
+    write_txn
+        .delete_table(POSTINGS_SEGMENTS)
+        .map_err(persist_err)?;
+    write_txn
+        .delete_table(POSTINGS_DICTIONARIES)
+        .map_err(persist_err)?;
+    write_txn
+        .delete_table(POSTINGS_RUN_META)
+        .map_err(persist_err)?;
+    write_txn
+        .delete_table(POSTINGS_RUN_BY_MIN)
+        .map_err(persist_err)?;
+    write_txn
+        .delete_table(POSTINGS_DEAD_KEYS)
+        .map_err(persist_err)?;
+    write_txn.delete_table(POSTINGS_META).map_err(persist_err)?;
+
+    write_txn
+        .open_table(POSTINGS_SEGMENTS)
+        .map_err(persist_err)?;
+    write_txn
+        .open_table(POSTINGS_DICTIONARIES)
+        .map_err(persist_err)?;
+    write_txn
+        .open_table(POSTINGS_RUN_META)
+        .map_err(persist_err)?;
+    write_txn
+        .open_table(POSTINGS_RUN_BY_MIN)
+        .map_err(persist_err)?;
+    write_txn
+        .open_table(POSTINGS_DEAD_KEYS)
+        .map_err(persist_err)?;
+    write_txn.open_table(POSTINGS_META).map_err(persist_err)?;
+
+    let events = write_txn.open_table(EVENTS).map_err(persist_err)?;
+    let mut batch = BTreeMap::new();
+    for row in events.iter().map_err(persist_err)? {
+        let (event_key, value) = row.map_err(persist_err)?;
+        let event = StoredEventView::from_trusted(value.value())
+            .map_err(|error| packed_err(format!("decode migration event: {error:?}")))?
+            .materialize_event()
+            .map_err(|error| packed_err(format!("materialize migration event: {error:?}")))?;
+        batch.insert(event_key.value(), event);
+        if batch.len() == MIGRATION_RUN_EVENTS {
+            publish_events(write_txn, &batch)?;
+            batch.clear();
+        }
+    }
+    drop(events);
+    if !batch.is_empty() {
+        publish_events(write_txn, &batch)?;
+    }
+    let mut meta = write_txn.open_table(POSTINGS_META).map_err(persist_err)?;
+    meta.insert(POSTINGS_READY, 1).map_err(persist_err)?;
+    Ok(())
+}
+
+fn publish_events(
+    write_txn: &redb::WriteTransaction,
+    events: &BTreeMap<EventKey, Event>,
+) -> Result<(), PersistenceError> {
+    let run_id = allocate_run_id(write_txn)?;
+    let memberships = memberships_for_events(events);
+    let encoded = encode_run(memberships).map_err(packed_err)?;
+    let min_event_key = *events.first_key_value().expect("nonempty additions").0;
+    let max_event_key = *events.last_key_value().expect("nonempty additions").0;
+    let meta = RunMeta {
+        run_id,
+        level: 0,
+        min_event_key,
+        max_event_key,
+        live_events: encoded.dictionary_entries,
+    };
+    insert_run(write_txn, meta, encoded)?;
+    compact_overfull_levels(write_txn)
 }
 
 struct LoadedRun {
