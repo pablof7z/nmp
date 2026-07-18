@@ -28,7 +28,8 @@ use super::schema::{
 };
 use super::{Event, EventCursor, EventId, PersistenceError, StoredEventView};
 
-const RUN_FAN_IN: usize = 8;
+const BASE_RUN_FAN_IN: usize = 8;
+const LARGE_RUN_FAN_IN: usize = 6;
 const MIGRATION_RUN_EVENTS: usize = 8_192;
 
 #[cfg(test)]
@@ -933,6 +934,11 @@ fn compact_overfull_levels(write_txn: &redb::WriteTransaction) -> Result<(), Per
     let mut level = 0u8;
     loop {
         loop {
+            let fan_in = if level == 0 {
+                BASE_RUN_FAN_IN
+            } else {
+                LARGE_RUN_FAN_IN
+            };
             let run_meta = write_txn
                 .open_table(POSTINGS_RUN_META)
                 .map_err(persist_err)?;
@@ -948,7 +954,7 @@ fn compact_overfull_levels(write_txn: &redb::WriteTransaction) -> Result<(), Per
                 }
             }
             drop(run_meta);
-            if cohort.len() < RUN_FAN_IN {
+            if cohort.len() < fan_in {
                 if has_higher_level {
                     level = level
                         .checked_add(1)
@@ -959,7 +965,7 @@ fn compact_overfull_levels(write_txn: &redb::WriteTransaction) -> Result<(), Per
                 break;
             }
             cohort.sort_unstable_by_key(|meta| meta.min_event_key);
-            cohort.truncate(RUN_FAN_IN);
+            cohort.truncate(fan_in);
             compact_cohort(write_txn, level, &cohort)?;
         }
     }
