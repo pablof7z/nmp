@@ -15,6 +15,7 @@ use std::time::Instant;
 
 use fjall::{
     KeyspaceCreateOptions, PersistMode, Readable, SingleWriterTxDatabase, SingleWriterTxKeyspace,
+    SingleWriterWriteTx, UserValue,
 };
 use nostr::{Event, RelayUrl};
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
@@ -53,6 +54,7 @@ const FJALL_WORKERS: usize = 2;
 pub enum PackedPostingsBackend {
     Redb,
     Fjall,
+    FjallOneKeyspace,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,7 +140,20 @@ pub fn run_packed_postings_bench(
     }
     match backend {
         PackedPostingsBackend::Redb => run_redb(path, events, batch_size, sample_process),
-        PackedPostingsBackend::Fjall => run_fjall(path, events, batch_size, sample_process),
+        PackedPostingsBackend::Fjall => run_fjall(
+            path,
+            events,
+            batch_size,
+            sample_process,
+            FjallPhysicalLayout::MultipleKeyspaces,
+        ),
+        PackedPostingsBackend::FjallOneKeyspace => run_fjall(
+            path,
+            events,
+            batch_size,
+            sample_process,
+            FjallPhysicalLayout::OneKeyspace,
+        ),
     }
 }
 
@@ -440,21 +455,148 @@ fn run_redb(
     )
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FjallPhysicalLayout {
+    MultipleKeyspaces,
+    OneKeyspace,
+}
+
+#[derive(Clone, Copy)]
+#[repr(u8)]
+enum FjallTablePrefix {
+    Events = 1,
+    EventIds = 2,
+    Observations = 3,
+    Relays = 4,
+    RelayKeys = 5,
+    RelayRefs = 6,
+    Segments = 7,
+    Dictionaries = 8,
+    RunMeta = 9,
+    DeadKeys = 10,
+}
+
+#[derive(Clone)]
+struct FjallTable {
+    keyspace: SingleWriterTxKeyspace,
+    prefix: Option<FjallTablePrefix>,
+}
+
+impl FjallTable {
+    fn separate(keyspace: SingleWriterTxKeyspace) -> Self {
+        Self {
+            keyspace,
+            prefix: None,
+        }
+    }
+
+    fn prefixed(keyspace: SingleWriterTxKeyspace, prefix: FjallTablePrefix) -> Self {
+        Self {
+            keyspace,
+            prefix: Some(prefix),
+        }
+    }
+
+    fn physical_key(&self, logical: impl AsRef<[u8]>) -> Vec<u8> {
+        let logical = logical.as_ref();
+        let mut key = Vec::with_capacity(logical.len() + usize::from(self.prefix.is_some()));
+        if let Some(prefix) = self.prefix {
+            key.push(prefix as u8);
+        }
+        key.extend_from_slice(logical);
+        key
+    }
+
+    fn logical_key<'a>(&self, physical: &'a [u8]) -> Result<&'a [u8], String> {
+        match self.prefix {
+            None => Ok(physical),
+            Some(prefix) => physical
+                .strip_prefix(&[prefix as u8])
+                .ok_or_else(|| "Fjall logical-table range crossed its prefix".to_owned()),
+        }
+    }
+
+    fn insert(
+        &self,
+        write: &mut SingleWriterWriteTx<'_>,
+        key: impl AsRef<[u8]>,
+        value: impl AsRef<[u8]>,
+    ) {
+        write.insert(&self.keyspace, self.physical_key(key), value.as_ref());
+    }
+
+    fn remove(&self, write: &mut SingleWriterWriteTx<'_>, key: impl AsRef<[u8]>) {
+        write.remove(&self.keyspace, self.physical_key(key));
+    }
+
+    fn get(
+        &self,
+        read: &fjall::Snapshot,
+        key: impl AsRef<[u8]>,
+    ) -> Result<Option<UserValue>, String> {
+        read.get(&self.keyspace, self.physical_key(key))
+            .map_err(|error| error.to_string())
+    }
+
+    fn entries(&self, read: &fjall::Snapshot) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
+        let mut rows = Vec::new();
+        if let Some(prefix) = self.prefix {
+            for entry in read.prefix(&self.keyspace, [prefix as u8]) {
+                let (key, value) = entry.into_inner().map_err(|error| error.to_string())?;
+                rows.push((self.logical_key(&key)?.to_vec(), value.to_vec()));
+            }
+        } else {
+            for entry in read.iter(&self.keyspace) {
+                let (key, value) = entry.into_inner().map_err(|error| error.to_string())?;
+                rows.push((key.to_vec(), value.to_vec()));
+            }
+        }
+        Ok(rows)
+    }
+
+    fn prefix_entries(
+        &self,
+        read: &fjall::Snapshot,
+        logical_prefix: impl AsRef<[u8]>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
+        let physical_prefix = self.physical_key(logical_prefix);
+        let mut rows = Vec::new();
+        for entry in read.prefix(&self.keyspace, physical_prefix) {
+            let (key, value) = entry.into_inner().map_err(|error| error.to_string())?;
+            rows.push((self.logical_key(&key)?.to_vec(), value.to_vec()));
+        }
+        Ok(rows)
+    }
+
+    fn len(&self, read: &fjall::Snapshot) -> Result<u64, String> {
+        if self.prefix.is_none() {
+            return read
+                .len(&self.keyspace)
+                .map(|value| value as u64)
+                .map_err(|error| error.to_string());
+        }
+        Ok(self.entries(read)?.len() as u64)
+    }
+}
+
 struct FjallKeyspaces {
-    events: SingleWriterTxKeyspace,
-    event_ids: SingleWriterTxKeyspace,
-    observations: SingleWriterTxKeyspace,
-    relays: SingleWriterTxKeyspace,
-    relay_keys: SingleWriterTxKeyspace,
-    relay_refs: SingleWriterTxKeyspace,
-    segments: SingleWriterTxKeyspace,
-    dictionaries: SingleWriterTxKeyspace,
-    run_meta: SingleWriterTxKeyspace,
-    dead_keys: SingleWriterTxKeyspace,
+    events: FjallTable,
+    event_ids: FjallTable,
+    observations: FjallTable,
+    relays: FjallTable,
+    relay_keys: FjallTable,
+    relay_refs: FjallTable,
+    segments: FjallTable,
+    dictionaries: FjallTable,
+    run_meta: FjallTable,
+    dead_keys: FjallTable,
 }
 
 impl FjallKeyspaces {
-    fn open(database: &SingleWriterTxDatabase) -> Result<Self, String> {
+    fn open(
+        database: &SingleWriterTxDatabase,
+        layout: FjallPhysicalLayout,
+    ) -> Result<Self, String> {
         let open = |name: &str| {
             database
                 .keyspace(name, || {
@@ -462,17 +604,32 @@ impl FjallKeyspaces {
                 })
                 .map_err(|error| error.to_string())
         };
+        if layout == FjallPhysicalLayout::OneKeyspace {
+            let shared = open("packed_one_keyspace_v1")?;
+            return Ok(Self {
+                events: FjallTable::prefixed(shared.clone(), FjallTablePrefix::Events),
+                event_ids: FjallTable::prefixed(shared.clone(), FjallTablePrefix::EventIds),
+                observations: FjallTable::prefixed(shared.clone(), FjallTablePrefix::Observations),
+                relays: FjallTable::prefixed(shared.clone(), FjallTablePrefix::Relays),
+                relay_keys: FjallTable::prefixed(shared.clone(), FjallTablePrefix::RelayKeys),
+                relay_refs: FjallTable::prefixed(shared.clone(), FjallTablePrefix::RelayRefs),
+                segments: FjallTable::prefixed(shared.clone(), FjallTablePrefix::Segments),
+                dictionaries: FjallTable::prefixed(shared.clone(), FjallTablePrefix::Dictionaries),
+                run_meta: FjallTable::prefixed(shared.clone(), FjallTablePrefix::RunMeta),
+                dead_keys: FjallTable::prefixed(shared, FjallTablePrefix::DeadKeys),
+            });
+        }
         Ok(Self {
-            events: open("packed_events")?,
-            event_ids: open("packed_event_ids")?,
-            observations: open("packed_observations")?,
-            relays: open("packed_relays")?,
-            relay_keys: open("packed_relay_keys")?,
-            relay_refs: open("packed_relay_refs")?,
-            segments: open("packed_segments_v2")?,
-            dictionaries: open("packed_dictionaries_v1")?,
-            run_meta: open("packed_run_meta_v1")?,
-            dead_keys: open("packed_dead_keys_v2")?,
+            events: FjallTable::separate(open("packed_events")?),
+            event_ids: FjallTable::separate(open("packed_event_ids")?),
+            observations: FjallTable::separate(open("packed_observations")?),
+            relays: FjallTable::separate(open("packed_relays")?),
+            relay_keys: FjallTable::separate(open("packed_relay_keys")?),
+            relay_refs: FjallTable::separate(open("packed_relay_refs")?),
+            segments: FjallTable::separate(open("packed_segments_v2")?),
+            dictionaries: FjallTable::separate(open("packed_dictionaries_v1")?),
+            run_meta: FjallTable::separate(open("packed_run_meta_v1")?),
+            dead_keys: FjallTable::separate(open("packed_dead_keys_v2")?),
         })
     }
 }
@@ -483,6 +640,7 @@ fn run_fjall(
     events: Vec<Event>,
     batch_size: usize,
     sample_process: fn() -> StoreBenchProcessCounters,
+    layout: FjallPhysicalLayout,
 ) -> Result<PackedPostingsMetrics, String> {
     let database = SingleWriterTxDatabase::builder(path)
         .worker_threads(FJALL_WORKERS)
@@ -490,7 +648,7 @@ fn run_fjall(
         .max_write_buffer_size(Some(FJALL_WRITE_BUFFER_BYTES))
         .open()
         .map_err(|error| error.to_string())?;
-    let keyspaces = FjallKeyspaces::open(&database)?;
+    let keyspaces = FjallKeyspaces::open(&database, layout)?;
     database
         .persist(PersistMode::SyncAll)
         .map_err(|error| error.to_string())?;
@@ -507,8 +665,12 @@ fn run_fjall(
     for (batch_index, batch) in events.chunks(batch_size).enumerate() {
         let mut write = database.write_tx().durability(Some(PersistMode::SyncAll));
         if batch_index == 0 {
-            write.insert(&keyspaces.relays, 1u32.to_be_bytes(), relay.as_str());
-            write.insert(&keyspaces.relay_keys, relay.as_str(), 1u32.to_be_bytes());
+            keyspaces
+                .relays
+                .insert(&mut write, 1u32.to_be_bytes(), relay.as_str());
+            keyspaces
+                .relay_keys
+                .insert(&mut write, relay.as_str(), 1u32.to_be_bytes());
         }
         let first_key = first_event_key(batch_index, batch_size)?;
         let build_started = Instant::now();
@@ -520,14 +682,14 @@ fn run_fjall(
             totals.encoded_event_bytes = totals
                 .encoded_event_bytes
                 .saturating_add(encoded.len() as u64);
-            write.insert(&keyspaces.events, event_key.to_be_bytes(), encoded);
-            write.insert(
-                &keyspaces.event_ids,
-                event.id.as_bytes(),
-                event_key.to_be_bytes(),
-            );
-            write.insert(
-                &keyspaces.observations,
+            keyspaces
+                .events
+                .insert(&mut write, event_key.to_be_bytes(), encoded);
+            keyspaces
+                .event_ids
+                .insert(&mut write, event.id.as_bytes(), event_key.to_be_bytes());
+            keyspaces.observations.insert(
+                &mut write,
                 observation_key(event_key, 1),
                 observed_at.to_be_bytes(),
             );
@@ -560,11 +722,9 @@ fn run_fjall(
         totals.posting_bytes = totals
             .posting_bytes
             .saturating_add(encoded_run.posting_bytes);
-        write.insert(
-            &keyspaces.dictionaries,
-            run_id.to_be_bytes(),
-            encoded_run.dictionary,
-        );
+        keyspaces
+            .dictionaries
+            .insert(&mut write, run_id.to_be_bytes(), encoded_run.dictionary);
         let meta = RunMeta {
             run_id,
             level: 0,
@@ -575,16 +735,18 @@ fn run_fjall(
         .encode()?;
         totals.run_meta_rows += 1;
         totals.run_meta_bytes = totals.run_meta_bytes.saturating_add(meta.len() as u64);
-        write.insert(&keyspaces.run_meta, run_id.to_be_bytes(), meta);
+        keyspaces
+            .run_meta
+            .insert(&mut write, run_id.to_be_bytes(), meta);
         for (family, shard, value) in encoded_run.segments {
             let key = segment_key(family, shard, run_id);
             totals.segment_rows += 1;
             totals.segment_bytes = totals.segment_bytes.saturating_add(value.len() as u64);
             totals.segment_keys.push(key);
-            write.insert(&keyspaces.segments, key, value);
+            keyspaces.segments.insert(&mut write, key, value);
         }
-        write.insert(
-            &keyspaces.relay_refs,
+        keyspaces.relay_refs.insert(
+            &mut write,
             1u32.to_be_bytes(),
             (first_key + batch.len() as u64 - 1).to_be_bytes(),
         );
@@ -626,29 +788,23 @@ fn run_fjall(
         .max_write_buffer_size(Some(FJALL_WRITE_BUFFER_BYTES))
         .open()
         .map_err(|error| error.to_string())?;
-    let reopened_keyspaces = FjallKeyspaces::open(&reopened)?;
+    let reopened_keyspaces = FjallKeyspaces::open(&reopened, layout)?;
     let read = reopened.read_tx();
-    let reopened_rows = read
-        .len(&reopened_keyspaces.events)
-        .map_err(|error| error.to_string())? as u64;
+    let reopened_rows = reopened_keyspaces.events.len(&read)?;
     let mut reopened_memberships = [0u64; FAMILY_COUNT];
     let mut reopened_segment_rows = 0u64;
     let mut active_segment_bytes = 0u64;
-    let active_dictionary_rows = read
-        .len(&reopened_keyspaces.dictionaries)
-        .map_err(|error| error.to_string())? as u64;
+    let active_dictionary_rows = reopened_keyspaces.dictionaries.len(&read)?;
     let mut active_dictionary_bytes = 0u64;
-    for entry in read.iter(&reopened_keyspaces.dictionaries) {
-        let (_, value) = entry.into_inner().map_err(|error| error.to_string())?;
+    for (_, value) in reopened_keyspaces.dictionaries.entries(&read)? {
         active_dictionary_bytes = active_dictionary_bytes.saturating_add(value.len() as u64);
     }
     let mut metas = Vec::new();
     let mut active_run_meta_bytes = 0u64;
-    for entry in read.iter(&reopened_keyspaces.run_meta) {
-        let (key, value) = entry.into_inner().map_err(|error| error.to_string())?;
+    for (key, value) in reopened_keyspaces.run_meta.entries(&read)? {
         active_run_meta_bytes = active_run_meta_bytes.saturating_add(value.len() as u64);
         let key = u64::from_be_bytes(
-            key.as_ref()
+            key.as_slice()
                 .try_into()
                 .map_err(|_| "invalid Fjall run metadata key width".to_owned())?,
         );
@@ -660,16 +816,15 @@ fn run_fjall(
     }
     validate_run_metas(&metas)?;
     let active_run_meta_rows = metas.len() as u64;
-    for entry in read.iter(&reopened_keyspaces.segments) {
-        let (key, value) = entry.into_inner().map_err(|error| error.to_string())?;
+    for (key, value) in reopened_keyspaces.segments.entries(&read)? {
         let key: [u8; 10] = key
-            .as_ref()
+            .as_slice()
             .try_into()
             .map_err(|_| "invalid Fjall segment key width".to_owned())?;
         let run_id = segment_generation(&key);
-        let dictionary = read
-            .get(&reopened_keyspaces.dictionaries, run_id.to_be_bytes())
-            .map_err(|error| error.to_string())?
+        let dictionary = reopened_keyspaces
+            .dictionaries
+            .get(&read, run_id.to_be_bytes())?
             .ok_or_else(|| format!("missing run dictionary {run_id}"))?;
         let dictionary = DictionaryView::parse(&dictionary)?.validate()?;
         let segment = SegmentView::parse(&value)?;
@@ -692,7 +847,10 @@ fn run_fjall(
     drop(reopened);
 
     let mut metrics = finish_metrics(
-        PackedPostingsBackend::Fjall,
+        match layout {
+            FjallPhysicalLayout::MultipleKeyspaces => PackedPostingsBackend::Fjall,
+            FjallPhysicalLayout::OneKeyspace => PackedPostingsBackend::FjallOneKeyspace,
+        },
         path,
         event_count,
         batch_size,
@@ -851,16 +1009,16 @@ fn apply_fjall_deletion_overlay(
     let mut write = database.write_tx().durability(Some(PersistMode::SyncAll));
     for &event_key in &event_keys {
         let event = &events[event_key as usize - 1];
-        write.remove(&keyspaces.events, event_key.to_be_bytes());
-        write.remove(&keyspaces.event_ids, event.id.as_bytes());
-        write.remove(&keyspaces.observations, observation_key(event_key, 1));
+        keyspaces.events.remove(&mut write, event_key.to_be_bytes());
+        keyspaces.event_ids.remove(&mut write, event.id.as_bytes());
+        keyspaces
+            .observations
+            .remove(&mut write, observation_key(event_key, 1));
     }
     for (generation, sequence, value) in blocks {
-        write.insert(
-            &keyspaces.dead_keys,
-            dead_block_key(generation, sequence),
-            value,
-        );
+        keyspaces
+            .dead_keys
+            .insert(&mut write, dead_block_key(generation, sequence), value);
     }
     write.commit().map_err(|error| error.to_string())?;
     Ok(DeletionMetrics {
@@ -1049,19 +1207,17 @@ fn compact_fjall_segments(
                     };
                     for shard in 0..=last_shard {
                         let key = segment_key(family, shard, *source);
-                        if read
-                            .get(&keyspaces.segments, key)
-                            .map_err(|error| error.to_string())?
-                            .is_some()
-                        {
+                        if keyspaces.segments.get(&read, key)?.is_some() {
                             removed.push(key);
                         }
                     }
                 }
-                for entry in read.prefix(&keyspaces.dead_keys, source.to_be_bytes()) {
-                    let (key, _) = entry.into_inner().map_err(|error| error.to_string())?;
+                for (key, _) in keyspaces
+                    .dead_keys
+                    .prefix_entries(&read, source.to_be_bytes())?
+                {
                     let key: [u8; 16] = key
-                        .as_ref()
+                        .as_slice()
                         .try_into()
                         .map_err(|_| "invalid Fjall dead-block key width".to_owned())?;
                     removed_death_blocks.push(key);
@@ -1070,29 +1226,29 @@ fn compact_fjall_segments(
             drop(read);
             let mut write = database.write_tx().durability(Some(PersistMode::SyncAll));
             for key in removed {
-                write.remove(&keyspaces.segments, key);
+                keyspaces.segments.remove(&mut write, key);
             }
             for key in removed_death_blocks {
-                write.remove(&keyspaces.dead_keys, key);
+                keyspaces.dead_keys.remove(&mut write, key);
             }
             for source in sources {
-                write.remove(&keyspaces.dictionaries, source.to_be_bytes());
-                write.remove(&keyspaces.run_meta, source.to_be_bytes());
+                keyspaces
+                    .dictionaries
+                    .remove(&mut write, source.to_be_bytes());
+                keyspaces.run_meta.remove(&mut write, source.to_be_bytes());
             }
             if let Some(encoded) = encoded {
-                write.insert(
-                    &keyspaces.dictionaries,
-                    run_id.to_be_bytes(),
-                    encoded.dictionary,
-                );
-                write.insert(
-                    &keyspaces.run_meta,
+                keyspaces
+                    .dictionaries
+                    .insert(&mut write, run_id.to_be_bytes(), encoded.dictionary);
+                keyspaces.run_meta.insert(
+                    &mut write,
                     run_id.to_be_bytes(),
                     meta.as_ref().expect("live run has metadata"),
                 );
                 for (family, shard, value) in encoded.segments {
                     let key = segment_key(family, shard, run_id);
-                    write.insert(&keyspaces.segments, key, value);
+                    keyspaces.segments.insert(&mut write, key, value);
                 }
             }
             write.commit().map_err(|error| error.to_string())?;
@@ -1100,9 +1256,7 @@ fn compact_fjall_segments(
         },
     )?;
     let read = database.read_tx();
-    let active_segment_rows = read
-        .len(&keyspaces.segments)
-        .map_err(|error| error.to_string())? as u64;
+    let active_segment_rows = keyspaces.segments.len(&read)?;
     Ok(MaintenanceMetrics {
         wall_ns: duration_ns(started),
         process_write_bytes: None,
@@ -1229,9 +1383,9 @@ fn load_fjall_compaction_input(
     let read = database.read_tx();
     let mut metas = Vec::new();
     for source in sources {
-        let value = read
-            .get(&keyspaces.run_meta, source.to_be_bytes())
-            .map_err(|error| error.to_string())?
+        let value = keyspaces
+            .run_meta
+            .get(&read, source.to_be_bytes())?
             .ok_or_else(|| format!("missing source run metadata {source}"))?;
         let meta = RunMeta::decode(&value)?;
         if meta.run_id != *source {
@@ -1245,8 +1399,9 @@ fn load_fjall_compaction_input(
     let mut deaths = Vec::with_capacity(source_ids.len());
     for source in &source_ids {
         dictionary_values.push(
-            read.get(&keyspaces.dictionaries, source.to_be_bytes())
-                .map_err(|error| error.to_string())?
+            keyspaces
+                .dictionaries
+                .get(&read, source.to_be_bytes())?
                 .ok_or_else(|| format!("missing source run dictionary {source}"))?,
         );
         deaths.push(load_fjall_run_deaths(&read, keyspaces, *source)?);
@@ -1265,10 +1420,7 @@ fn load_fjall_compaction_input(
             };
             for shard in 0..=last_shard {
                 let key = segment_key(family, shard, *source);
-                let Some(value) = read
-                    .get(&keyspaces.segments, key)
-                    .map_err(|error| error.to_string())?
-                else {
+                let Some(value) = keyspaces.segments.get(&read, key)? else {
                     continue;
                 };
                 let segment = SegmentView::parse(&value)?;
@@ -1573,8 +1725,7 @@ fn decode_fjall_dead_keys(
     keyspaces: &FjallKeyspaces,
 ) -> Result<BTreeSet<u64>, String> {
     let mut dead_keys = BTreeSet::new();
-    for entry in read.iter(&keyspaces.dead_keys) {
-        let (_block_key, value) = entry.into_inner().map_err(|error| error.to_string())?;
+    for (_block_key, value) in keyspaces.dead_keys.entries(read)? {
         dead_keys.extend(decode_dead_keys(&value)?);
     }
     Ok(dead_keys)
@@ -1654,21 +1805,20 @@ fn query_fjall(
     let shard = shard_for(family, prefix);
     let key_prefix = [family as u8, shard];
     let mut runs = Vec::new();
-    for entry in read.prefix(&keyspaces.segments, key_prefix) {
-        let (key, value) = entry.into_inner().map_err(|error| error.to_string())?;
+    for (key, value) in keyspaces.segments.prefix_entries(read, key_prefix)? {
         let key: [u8; 10] = key
-            .as_ref()
+            .as_slice()
             .try_into()
             .map_err(|_| "invalid Fjall segment key width".to_owned())?;
         let run_id = segment_generation(&key);
-        let dictionary = read
-            .get(&keyspaces.dictionaries, run_id.to_be_bytes())
-            .map_err(|error| error.to_string())?
+        let dictionary = keyspaces
+            .dictionaries
+            .get(read, run_id.to_be_bytes())?
             .ok_or_else(|| format!("missing run dictionary {run_id}"))?;
         let dead = load_fjall_run_deaths(read, keyspaces, run_id)?;
         runs.push(OwnedQueryRun {
             dictionary: dictionary.to_vec(),
-            segment: value.to_vec(),
+            segment: value,
             dead,
         });
     }
@@ -1838,10 +1988,12 @@ fn load_fjall_run_deaths(
     run_id: u64,
 ) -> Result<Option<DeadKeys>, String> {
     let mut blocks = Vec::new();
-    for entry in read.prefix(&keyspaces.dead_keys, run_id.to_be_bytes()) {
-        let (key, value) = entry.into_inner().map_err(|error| error.to_string())?;
+    for (key, value) in keyspaces
+        .dead_keys
+        .prefix_entries(read, run_id.to_be_bytes())?
+    {
         let key: [u8; 16] = key
-            .as_ref()
+            .as_slice()
             .try_into()
             .map_err(|_| "invalid Fjall dead-block key width".to_owned())?;
         if dead_block_run(&key) != run_id {
@@ -2018,6 +2170,62 @@ mod tests {
         assert_eq!(cohorts.len(), 1);
         assert_eq!(cohorts[0].0, 1);
         assert_eq!(cohorts[0].2, (0..COMPACTION_FAN_IN as u64).collect());
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn fjall_one_keyspace_prefixes_isolate_logical_tables_after_reopen() {
+        let scratch = tempfile::tempdir().unwrap();
+        let database = SingleWriterTxDatabase::builder(scratch.path())
+            .worker_threads(1)
+            .open()
+            .unwrap();
+        let keyspaces = FjallKeyspaces::open(&database, FjallPhysicalLayout::OneKeyspace).unwrap();
+        let mut write = database.write_tx().durability(Some(PersistMode::SyncAll));
+        keyspaces
+            .dictionaries
+            .insert(&mut write, [0, 1], b"dictionary");
+        keyspaces.run_meta.insert(&mut write, [0, 1], b"metadata");
+        keyspaces.segments.insert(&mut write, [2, 3, 4], b"a");
+        keyspaces.segments.insert(&mut write, [2, 3, 5], b"b");
+        keyspaces.segments.insert(&mut write, [2, 4, 6], b"c");
+        write.commit().unwrap();
+        drop(keyspaces);
+        drop(database);
+
+        let reopened = SingleWriterTxDatabase::builder(scratch.path())
+            .worker_threads(1)
+            .open()
+            .unwrap();
+        let keyspaces = FjallKeyspaces::open(&reopened, FjallPhysicalLayout::OneKeyspace).unwrap();
+        let read = reopened.read_tx();
+        assert_eq!(
+            keyspaces
+                .dictionaries
+                .get(&read, [0, 1])
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            b"dictionary"
+        );
+        assert_eq!(
+            keyspaces
+                .run_meta
+                .get(&read, [0, 1])
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            b"metadata"
+        );
+        assert_eq!(keyspaces.dictionaries.len(&read).unwrap(), 1);
+        assert_eq!(keyspaces.run_meta.len(&read).unwrap(), 1);
+        assert_eq!(
+            keyspaces.segments.prefix_entries(&read, [2, 3]).unwrap(),
+            vec![
+                (vec![2, 3, 4], b"a".to_vec()),
+                (vec![2, 3, 5], b"b".to_vec()),
+            ]
+        );
     }
 
     #[test]
