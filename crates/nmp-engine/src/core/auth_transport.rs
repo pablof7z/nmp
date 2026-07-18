@@ -1231,16 +1231,15 @@ impl<S: EventStore> EngineCore<S> {
             let frame = match frame {
                 RelayFrame::CommittedObservation(hit) => {
                     self.ingest_relay_observations(std::mem::take(&mut candidates), &mut effects);
-                    let Some((current, session)) = self.slot_to_relay.get(&handle.slot).cloned()
-                    else {
+                    let Some((current, session)) = self.slot_to_relay.get(&handle.slot) else {
                         continue;
                     };
-                    if current != handle || session != reported_session {
+                    if *current != handle || session != &reported_session {
                         continue;
                     }
                     *self
                         .events_by_session_kind
-                        .entry(session)
+                        .entry(reported_session)
                         .or_default()
                         .entry(hit.event_kind())
                         .or_insert(0) += 1;
@@ -1250,17 +1249,17 @@ impl<S: EventStore> EngineCore<S> {
             };
             #[cfg(feature = "bench-instrumentation")]
             if let Some((event_kind, _)) = frame.diagnostic_duplicate_ceiling() {
-                let Some((current, session)) = self.slot_to_relay.get(&handle.slot).cloned() else {
+                let Some((current, session)) = self.slot_to_relay.get(&handle.slot) else {
                     self.ingest_relay_observations(std::mem::take(&mut candidates), &mut effects);
                     continue;
                 };
-                if current != handle || session != reported_session {
+                if *current != handle || session != &reported_session {
                     self.ingest_relay_observations(std::mem::take(&mut candidates), &mut effects);
                     continue;
                 }
                 *self
                     .events_by_session_kind
-                    .entry(session)
+                    .entry(reported_session)
                     .or_default()
                     .entry(event_kind)
                     .or_insert(0) += 1;
@@ -1276,8 +1275,7 @@ impl<S: EventStore> EngineCore<S> {
                 Ok((event, candidate)) => {
                     #[cfg(feature = "bench-instrumentation")]
                     let phase_started = std::time::Instant::now();
-                    let Some((current, session)) = self.slot_to_relay.get(&handle.slot).cloned()
-                    else {
+                    let Some((current, session)) = self.slot_to_relay.get(&handle.slot) else {
                         self.ingest_relay_observations(
                             std::mem::take(&mut candidates),
                             &mut effects,
@@ -1288,7 +1286,7 @@ impl<S: EventStore> EngineCore<S> {
                     // generation OR a session that no longer occupies this
                     // slot is dropped exactly — never re-attributed to the
                     // slot's current occupant.
-                    if current != handle || session != reported_session {
+                    if *current != handle || session != &reported_session {
                         self.ingest_relay_observations(
                             std::mem::take(&mut candidates),
                             &mut effects,
@@ -1301,9 +1299,10 @@ impl<S: EventStore> EngineCore<S> {
                     );
                     #[cfg(feature = "bench-instrumentation")]
                     let phase_started = std::time::Instant::now();
+                    let observed_relay = reported_session.relay.clone();
                     *self
                         .events_by_session_kind
-                        .entry(session.clone())
+                        .entry(reported_session)
                         .or_default()
                         .entry(event.kind.as_u16())
                         .or_insert(0) += 1;
@@ -1315,7 +1314,7 @@ impl<S: EventStore> EngineCore<S> {
                     let phase_started = std::time::Instant::now();
                     candidates.push((
                         event,
-                        RelayObserved::new(session.relay, self.clock),
+                        RelayObserved::new(observed_relay, self.clock),
                         candidate,
                     ));
                     #[cfg(feature = "bench-instrumentation")]
@@ -1343,16 +1342,17 @@ impl<S: EventStore> EngineCore<S> {
     ) -> Vec<Effect> {
         let mut effects = Vec::new();
         let msg = frame.into_message();
-        let Some((current, session)) = self.slot_to_relay.get(&handle.slot).cloned() else {
+        let Some((current, session)) = self.slot_to_relay.get(&handle.slot) else {
             return effects; // frame from a slot we never saw RelayConnected for.
         };
         // BOTH halves must match (#8): the exact current generation AND the
         // exact session the reducer connected on this slot. A wrong-session
         // frame (however it was produced) must never consume another
         // session's attribution FIFO, coverage credit, probe, or write ack.
-        if current != handle || session != reported_session {
+        if *current != handle || session != &reported_session {
             return effects;
         }
+        let session = reported_session;
 
         match msg {
             RelayMessage::Event { event, .. } => {
