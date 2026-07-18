@@ -94,6 +94,6 @@ ready
 
 ## Hosted Artifacts
 
-- Plan page: Generated after publishing.
+- Plan page: https://pablof7z.github.io/nmp/plans/issue-694-larger-crash-atomic-ingest-cohorts/
 
 - TTS audio: https://blossom.primal.net/d5152218daa64c284558db90e0e5896199ab22b715955e67362c6d06949ffdea.mp3
