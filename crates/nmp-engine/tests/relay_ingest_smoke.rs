@@ -37,6 +37,7 @@ fn websocket_runtime_to_redb_smoke_crosses_every_bounded_queue() {
         expect_rejection: false,
         timeout: Duration::from_secs(30),
         store_path: None,
+        completion_window_output: None,
     })
     .expect("end-to-end relay ingest smoke");
 
@@ -87,6 +88,7 @@ fn websocket_runtime_to_memory_store_pins_the_no_persistence_ceiling() {
         expect_rejection: false,
         timeout: Duration::from_secs(30),
         store_path: None,
+        completion_window_output: None,
     })
     .expect("end-to-end memory-store ceiling smoke");
 
@@ -129,6 +131,7 @@ fn nondurable_redb_diagnostic_finishes_with_a_timed_durable_checkpoint() {
         expect_rejection: false,
         timeout: Duration::from_secs(30),
         store_path: None,
+        completion_window_output: None,
     })
     .expect("nondurable Redb diagnostic smoke");
 
@@ -178,6 +181,7 @@ fn duplicate_ceiling_bypasses_second_pass_parse_resolver_and_store_work() {
         expect_rejection: false,
         timeout: Duration::from_secs(30),
         store_path: None,
+        completion_window_output: None,
     })
     .expect("diagnostic duplicate ceiling smoke");
 
@@ -221,6 +225,7 @@ fn websocket_runtime_rejects_a_message_above_the_one_mib_ceiling() {
         expect_rejection: true,
         timeout: Duration::from_secs(30),
         store_path: None,
+        completion_window_output: None,
     })
     .expect("oversize relay message is rejected end to end");
 
