@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Committed duplicate observation fast path</title>
+    <link rel="stylesheet" href="../../assets/style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <nav class="topbar">
+        <a href="../../">Planning pages</a>
+        
+      </nav>
+      <section class="hero">
+        <div class="eyebrow">Architecture plan</div>
+        <h1>Committed duplicate observation fast path</h1>
+        <p class="summary">Use a bounded, volatile post-commit observation cache to bypass repeated EVENT parsing and governed ingest while preserving exact fallback semantics.</p>
+        <div class="meta">
+          <span class="pill ready">Ready to implement</span>
+          <span class="pill">78 percent certainty</span>
+        </div>
+      </section>
+      <div class="grid">
+        <div>
+
+          <section class="section">
+            <h2>Boundaries</h2>
+            <pre class="mermaid">flowchart LR
+  W[Owned relay text] --&gt; L{Relay + raw EVENT digest hit?}
+  L -- no --&gt; P[Parse and verify]
+  P --&gt; S[Governed store transaction]
+  S --&gt; C[Commit]
+  C --&gt; U[Publish bounded cache lease]
+  L -- yes --&gt; T[Raw fallback token + slot epoch]
+  T --&gt; V{Session, epoch, pending intent valid?}
+  V -- no --&gt; P
+  V -- yes --&gt; D[Count diagnostics; bypass ingest]
+  U --&gt; A[Applied acknowledgement]
+  D --&gt; A</pre>
+          </section>
+          <section class="section">
+            <h2>Very High Level</h2>
+            <p>Issue #663 addresses the dominant duplicate-replay cost under epic #612. A corrected production-shaped diagnostic ceiling now clears the replay gate while preserving the bounded transport, engine diagnostics, and applied acknowledgement. The production implementation will keep a bounded volatile cache keyed by canonical relay URL and a BLAKE3 digest of the exact raw EVENT object. Entries become visible only after the corresponding governed transaction commits. A cache hit carries the already-owned raw frame plus an epoch-stamped cache lease through the existing bounded pipeline. The engine validates the current transport session, cache epoch, and pending-intent state before bypassing parse, verification, resolver materialization, and store work. Any race, eviction, restart, other-relay observation, byte mismatch, or invalidation falls back to the ordinary exact path using the retained raw frame. Canonical removals invalidate entries through an EventId reverse index; mixed ordinary and hit frames are applied in wire order. No app-facing type or cross-platform facade changes. The implementation remains selected only if three fresh production runs retain the replay gate and the existing initial-ingest, reopen, query, RSS, and one-million-event gates.</p>
+          </section>
+          <section class="section">
+            <h2>Existing Rules Or ADRs</h2>
+            <ul><li>Issue-first discipline is satisfied by #663 under epic #612; the issue captures the performance consequence and correctness invariants.</li><li>The event store remains internally atomic; cache publication occurs only after governed commit and the cache is volatile, so restart is a safe miss.</li><li>The Noun Gate is preserved: all candidate, lease, epoch, and invalidation types remain internal to transport/engine/resolver.</li><li>The existing bounded queues, session-generation checks, diagnostics, and applied acknowledgement remain in the hit path.</li><li>No FFI, Swift, Kotlin, supported Rust facade, or surface snapshot changes are planned.</li></ul>
+          </section>
+          <section class="section">
+            <h2>Rule Tension And Tightening</h2>
+            <h3>Possible loosening</h3>
+            <ul><li>No repository rule or correctness invariant needs loosening. The cache is an optimization below the existing authority boundary, not a second event authority.</li></ul>
+            <h3>Possible tightening</h3>
+            <ul><li>Consider recording one durable internal invariant: a bypass token is valid only while its cache slot epoch is current and no local pending owner requires adoption; every failed validation must retain an exact raw fallback.</li></ul>
+          </section>
+          <section class="section">
+            <h2>Alternatives Considered</h2>
+            <ul><li>Store-only duplicate shortcut: rejected because measured parsing, materialization, and bridge work remain far above the replay budget.</li><li>EventId-only cache: rejected because an unverified ID cannot authorize a preparse bypass and a different relay must still grow provenance.</li><li>Persist the cache: rejected because volatility makes crash recovery a safe miss and avoids another authority or migration surface.</li><li>Suppress duplicate frames in transport: rejected because engine diagnostics, generation checks, pending-intent adoption, and ordered invalidation must remain exact.</li><li>Change storage engines first: retained as separate issue #658, but it cannot address the measured duplicate parse/materialization path.</li></ul>
+          </section>
+        </div>
+        <aside>
+          <section class="card">
+            <h2>TTS Version</h2>
+            <audio controls preload="metadata" src="https://blossom.primal.net/e292e40981742c35f5f4e68ed4d477c3e37bfaefaad13f1d6dd2e29ca0d5acb0.mp3"></audio>
+            <p>Audio-friendly narration generated from the planning payload.</p>
+          </section>
+          <section class="card">
+            <h2>Certainty</h2>
+            <div class="certainty ">78%</div>
+            <p>Ready to implement.</p>
+          </section>
+          <section class="card links">
+            <h2>Links</h2>
+            
+            <a href="https://blossom.primal.net/e292e40981742c35f5f4e68ed4d477c3e37bfaefaad13f1d6dd2e29ca0d5acb0.mp3">Open narration</a>
+            <a href="../../docs/plans/nmp-663-committed-duplicate-fast-path/plan.md">Detailed plan file</a>
+          </section>
+        </aside>
+      </div>
+    </main>
+
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral" });
+    </script>
+  </body>
+</html>

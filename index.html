@@ -1,155 +1,22 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NMP Status — Audio Briefings</title>
-<meta name="description" content="Audio status briefings for NMP, an embeddable Nostr client engine (Rust core + Swift/Kotlin SDKs). Listen to the latest episode, subscribe by RSS, or read the README.">
-<link rel="alternate" type="application/rss+xml" title="NMP Status Report" href="feed.xml">
-<style>
-  :root {
-    color-scheme: light dark;
-    --bg: #f7f7f5; --fg: #16181c; --muted: #5b6270; --card: #ffffff;
-    --border: #e3e5e8; --accent: #1f7a3f; --accent-bg: #e9f7ee;
-    --mono-bg: #eef0f2; --link: #1a56db; --shadow: rgba(20,20,30,0.06);
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0e1013; --fg: #e8eaed; --muted: #9aa2b1; --card: #171a1f;
-      --border: #2a2e35; --accent: #3ddc73; --accent-bg: #10241a;
-      --mono-bg: #1d2127; --link: #7aa2f7; --shadow: rgba(0,0,0,0.35);
-    }
-  }
-  :root[data-theme="dark"] {
-    --bg: #0e1013; --fg: #e8eaed; --muted: #9aa2b1; --card: #171a1f;
-    --border: #2a2e35; --accent: #3ddc73; --accent-bg: #10241a;
-    --mono-bg: #1d2127; --link: #7aa2f7; --shadow: rgba(0,0,0,0.35);
-  }
-  :root[data-theme="light"] {
-    --bg: #f7f7f5; --fg: #16181c; --muted: #5b6270; --card: #ffffff;
-    --border: #e3e5e8; --accent: #1f7a3f; --accent-bg: #e9f7ee;
-    --mono-bg: #eef0f2; --link: #1a56db; --shadow: rgba(20,20,30,0.06);
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; background: var(--bg); color: var(--fg);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    line-height: 1.6;
-  }
-  main { max-width: 640px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
-  .eyebrow {
-    text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.75rem;
-    font-weight: 600; color: var(--muted); margin-bottom: 0.2rem;
-  }
-  h1 { font-size: 1.5rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
-  .tagline { color: var(--muted); font-size: 0.98rem; margin: 0 0 1.75rem; }
-
-  .actions { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-bottom: 1.75rem; }
-  .btn {
-    display: inline-flex; align-items: center; gap: 0.4rem;
-    font-size: 0.9rem; font-weight: 600; text-decoration: none;
-    padding: 0.5rem 0.9rem; border-radius: 999px; border: 1px solid var(--border);
-    color: var(--fg); background: var(--card);
-  }
-  .btn.primary { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
-  .btn:hover { border-color: var(--accent); }
-
-  .player-card {
-    background: var(--card); border: 1px solid var(--border); border-radius: 16px;
-    padding: 1.25rem 1.4rem 1.4rem; box-shadow: 0 1px 3px var(--shadow);
-  }
-  .now-playing {
-    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.07em;
-    color: var(--accent); font-weight: 700; margin: 0 0 0.35rem;
-  }
-  .ep-title { font-size: 1.2rem; font-weight: 700; margin: 0 0 0.2rem; }
-  .ep-sub { color: var(--muted); font-size: 0.85rem; margin: 0 0 0.9rem; }
-  audio { width: 100%; height: 40px; margin: 0.2rem 0 0.9rem; }
-  .ep-blurb { font-size: 0.95rem; margin: 0; color: var(--fg); }
-
-  details.archive {
-    margin-top: 1.75rem; border: 1px solid var(--border); border-radius: 12px;
-    background: var(--card); padding: 0.9rem 1.1rem;
-  }
-  details.archive summary { cursor: pointer; font-weight: 600; font-size: 0.95rem; }
-  .archive-item { border-top: 1px solid var(--border); padding: 0.85rem 0; }
-  .archive-item:first-of-type { border-top: none; padding-top: 0.9rem; }
-  .archive-item h3 { font-size: 0.92rem; margin: 0 0 0.3rem; }
-  .archive-item pre { white-space: pre-wrap; font-family: inherit; font-size: 0.85rem; color: var(--muted); margin: 0.4rem 0; }
-  .archive-item audio { height: 34px; margin: 0.3rem 0; }
-  .tier-pill {
-    display: inline-block; font-size: 0.66rem; text-transform: uppercase;
-    letter-spacing: 0.05em; padding: 0.1rem 0.5rem; border-radius: 999px;
-    background: var(--mono-bg); color: var(--muted); margin-left: 0.4rem;
-  }
-  footer { margin-top: 2.5rem; text-align: center; font-size: 0.78rem; color: var(--muted); }
-  footer a { color: var(--muted); }
-</style>
-</head>
-<body>
-<main>
-  <div class="eyebrow">nmp status &middot; audio briefings</div>
-  <h1>NMP — the audio channel</h1>
-  <p class="tagline">Short, candid spoken briefings on <b>NMP</b>, an embeddable Nostr client engine (Rust core + Swift/Kotlin SDKs). What it is, what it can do today, and how solid it is.</p>
-
-  <div class="actions">
-    <a class="btn primary" href="https://github.com/pablof7z/nmp/blob/master/README.md">📄 Read the README</a>
-    <a class="btn" href="feed.xml">🎧 Subscribe (RSS)</a>
-    <a class="btn" href="https://github.com/pablof7z/nmp">⭐ Repo</a>
-  </div>
-
-  <section class="player-card">
-    <p class="now-playing">▶ Latest episode</p>
-    <p class="ep-title">NMP Pulse — 2026-07-16 13:53 UTC</p>
-    <p class="ep-sub">2026-07-16 &middot; Pulse: bounded query delivery under slow consumers, plus pre-signature write cancellation &middot; ~3.4 min</p>
-    <audio controls preload="none" src="reports/pulse-0022.mp3">
-      Your browser does not support audio. <a href="reports/pulse-0022.mp3">Download the mp3</a>.
-    </audio>
-    <p class="ep-blurb">Two reliability stories under one theme: never let something you can't control turn into unbounded growth or unrecoverable state. First, ordinary live-query delivery now runs through a one-slot mailbox instead of an unbounded queue &mdash; a slow observer gets one rebased transition to the current truth instead of a growing backlog of stale intermediate states, bounding memory by the delta since last delivery, not by how many updates it missed (<a href="https://github.com/pablof7z/nmp/pull/586">#586</a> merged, progresses <a href="https://github.com/pablof7z/nmp/issues/46">#46</a>). Second, writes can now be explicitly cancelled before they're signed &mdash; a durable, typed, idempotent <code>cancel(receiptId)</code> across Rust/FFI/Swift/Kotlin that atomically compensates the optimistic row and persists a durable Cancelled fact, or returns a precise refusal if the write already signed (<a href="https://github.com/pablof7z/nmp/issues/533">#533</a> closed, <a href="https://github.com/pablof7z/nmp/pull/585">#585</a> merged).</p>
-  </section>
-
-  <details class="archive" id="archive">
-    <summary>Episode archive</summary>
-    <div id="archive-list">
-      <p style="color: var(--muted); font-size: 0.85rem;">Loading episodes&hellip;</p>
-    </div>
-  </details>
-
-  <footer>
-    <p>Each briefing is self-contained and candid — risks and unverified items are named, not smoothed over.</p>
-    <p><a href="plans/index.html">Planning pages archive</a></p>
-  </footer>
-</main>
-
-<script>
-(function () {
-  var root = document.documentElement;
-  try { var saved = localStorage.getItem('nmp-theme'); if (saved) root.setAttribute('data-theme', saved); } catch (e) {}
-
-  fetch('episodes.json', { cache: 'no-store' })
-    .then(function (r) { return r.json(); })
-    .then(function (episodes) {
-      var list = document.getElementById('archive-list');
-      if (!Array.isArray(episodes) || episodes.length === 0) {
-        list.innerHTML = '<p>No episodes yet.</p>'; return;
-      }
-      var sorted = episodes.slice().sort(function (a, b) { return new Date(b.utc) - new Date(a.utc); });
-      list.innerHTML = sorted.map(function (ep) {
-        var safeTitle = (ep.title || ep.id || '').replace(/</g, '&lt;');
-        var safeText = (ep.text || '').replace(/</g, '&lt;');
-        var tier = (ep.tier || '').toUpperCase();
-        return '<div class="archive-item">' +
-          '<h3>' + safeTitle + '<span class="tier-pill">' + tier + '</span></h3>' +
-          '<audio controls preload="none" src="' + ep.mp3 + '"></audio>' +
-          '<pre>' + safeText + '</pre>' +
-          '</div>';
-      }).join('');
-    })
-    .catch(function (err) {
-      document.getElementById('archive-list').innerHTML =
-        '<p>Could not load episodes.json (' + err + ').</p>';
-    });
-})();
-</script>
-</body>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Planning Pages</title>
+    <link rel="stylesheet" href="assets/style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div class="eyebrow">Planning pages</div>
+        <h1>Hosted architecture plans</h1>
+        <p class="summary">Generated planning pages for complex agent-assigned work.</p>
+      </section>
+      <section class="card links">
+          <a href="plans/durable-retry-policy-79/">Single-owner durable retry policy and deadline consumption</a>
+          <a href="plans/nmp-663-committed-duplicate-fast-path/">Committed duplicate observation fast path</a>
+      </section>
+    </main>
+  </body>
 </html>
