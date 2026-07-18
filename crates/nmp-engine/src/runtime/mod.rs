@@ -194,6 +194,8 @@ impl HistoryReceiver {
     }
 
     fn reconcile(delivered: &mut BTreeMap<EventId, Row>, mut batch: HistoryBatch) -> HistoryBatch {
+        #[cfg(feature = "bench-instrumentation")]
+        let reconcile_started = std::time::Instant::now();
         let current: BTreeMap<_, _> = batch
             .rows
             .iter()
@@ -222,6 +224,8 @@ impl HistoryReceiver {
         }
         *delivered = current;
         batch.deltas = deltas;
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::history_receiver_reconcile(reconcile_started.elapsed());
         batch
     }
 }
@@ -5332,7 +5336,11 @@ fn dispatch_effect(
         }
         Effect::EmitHistory(id, batch) => {
             if let Some(tx) = history_channels.get(&id) {
+                #[cfg(feature = "bench-instrumentation")]
+                let send_started = std::time::Instant::now();
                 tx.send(batch);
+                #[cfg(feature = "bench-instrumentation")]
+                crate::ingest_attribution::history_channel_send(send_started.elapsed());
             }
         }
         Effect::HistoryLoadResult(..) => {}
