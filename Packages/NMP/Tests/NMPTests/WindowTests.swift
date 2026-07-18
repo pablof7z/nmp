@@ -1,10 +1,15 @@
 // #485: windowing is a policy on `observe`, not a parallel noun. These
-// tests prove the Swift half of that collapse: the ONE `RowBridge` handles
-// both frame shapes (unbounded delta folding, windowed authoritative
+// tests prove the Swift half of that collapse: the ONE `RowAccumulator` fold
+// handles both frame shapes (unbounded delta folding, windowed authoritative
 // replacement), `requestRows` is the declarative growth verb with typed
 // synchronous refusals only, validation failures stay typed on `NMPError`,
-// and windowed teardown keeps the same native-task and shutdown discipline
-// the unbounded read noun already guarantees.
+// and windowed teardown works over the #680 pull handle.
+//
+// #680: observations are pull-based async handles now -- there is no
+// native-task census, no `maxNativeTasks`, and no admission ceiling to assert.
+// The fold is proven directly on `RowAccumulator` (the exact per-frame mapping
+// the iterator runs); the coalescer over the pull loop is proven separately by
+// `FrameCoalescerTests`.
 
 import NMPFFI
 import XCTest
@@ -13,75 +18,67 @@ import XCTest
 final class WindowTests: XCTestCase {
     private static let emptyEvidence = FfiAcquisitionEvidence(sources: [], shortfall: [])
 
-    // MARK: - Bridge: windowed frames replace, unbounded frames fold
+    // MARK: - Fold: windowed frames replace, unbounded frames fold
 
-    /// A windowed frame is an authoritative snapshot: the bridge must
-    /// REPLACE its row state wholesale from `window.rows` and surface the
-    /// frame's load fact. Windowed frames carry empty `deltas` by contract
-    /// (rows never cross the FFI twice) -- so if the bridge folded deltas
-    /// instead of replacing, the third frame here (which drops "b" and adds
-    /// "c" with NO delta saying so) would deliver stale rows.
-    func testWindowedFramesReplaceRowStateAndCarryLoadFacts() async throws {
-        var continuation: AsyncStream<RowBatch>.Continuation!
-        let stream = AsyncStream<RowBatch> { continuation = $0 }
-        let bridge = RowBridge(continuation: continuation)
+    /// A windowed frame is an authoritative snapshot: the fold must REPLACE
+    /// its row state wholesale from `window.rows` and surface the frame's load
+    /// fact. Windowed frames carry empty `deltas` by contract (rows never
+    /// cross the FFI twice) -- so if the fold folded deltas instead of
+    /// replacing, the third frame here (which drops "b" and adds "c" with NO
+    /// delta saying so) would deliver stale rows.
+    func testWindowedFramesReplaceRowStateAndCarryLoadFacts() {
+        let accumulator = RowAccumulator()
         let a = ffiRow(id: "a", createdAt: 300)
         let b = ffiRow(id: "b", createdAt: 200)
         let c = ffiRow(id: "c", createdAt: 400)
 
-        bridge.onFrame(
-            frame: FfiFrame(
+        let first = accumulator.fold(
+            FfiFrame(
                 deltas: [],
                 window: FfiWindowContents(rows: [a], load: .idle),
                 evidence: Self.emptyEvidence
             )
         )
-        bridge.onFrame(
-            frame: FfiFrame(
+        let second = accumulator.fold(
+            FfiFrame(
                 deltas: [],
                 window: FfiWindowContents(rows: [a, b], load: .returned(added: 1)),
                 evidence: Self.emptyEvidence
             )
         )
-        bridge.onFrame(
-            frame: FfiFrame(
+        let third = accumulator.fold(
+            FfiFrame(
                 deltas: [],
                 window: FfiWindowContents(rows: [c, a], load: .requesting),
                 evidence: Self.emptyEvidence
             )
         )
-        bridge.onClosed()
 
-        var delivered: [RowBatch] = []
-        for await batch in stream {
-            delivered.append(batch)
-        }
-        XCTAssertFalse(delivered.isEmpty)
-        XCTAssertTrue(delivered.allSatisfy { $0.rows.count <= 2 })
-        XCTAssertTrue(delivered.allSatisfy { $0.load != nil })
-        XCTAssertEqual(delivered.last?.rows.map(\.id), ["c", "a"])
-        XCTAssertEqual(delivered.last?.load, .requesting)
+        XCTAssertEqual(first.rows.map(\.id), ["a"])
+        XCTAssertEqual(first.load, .idle)
+        XCTAssertEqual(second.rows.map(\.id), ["a", "b"])
+        XCTAssertEqual(second.load, .returned(added: 1))
+        XCTAssertEqual(third.rows.map(\.id), ["c", "a"])
+        XCTAssertEqual(third.load, .requesting)
     }
 
-    /// The unbounded shape through the SAME observer: `window == nil`
-    /// frames keep today's exact delta folding (add, grow-in-place,
-    /// remove), and their batches carry no window fact (`load == nil`).
-    func testUnboundedFramesStillFoldDeltas() async throws {
-        var continuation: AsyncStream<RowBatch>.Continuation!
-        let stream = AsyncStream<RowBatch> { continuation = $0 }
-        let bridge = RowBridge(continuation: continuation)
+    /// The unbounded shape through the SAME fold: `window == nil` frames keep
+    /// today's exact delta folding (add, grow-in-place, remove), and their
+    /// batches carry no window fact (`load == nil`).
+    func testUnboundedFramesStillFoldDeltas() {
+        let accumulator = RowAccumulator()
         let a = ffiRow(id: "a", createdAt: 300)
         let b = ffiRow(id: "b", createdAt: 200)
 
-        bridge.onFrame(
-            frame: FfiFrame(
+        let first = accumulator.fold(
+            FfiFrame(
                 deltas: [.added(row: a), .added(row: b)],
                 window: nil,
                 evidence: Self.emptyEvidence
             )
         )
-        bridge.onFrame(
-            frame: FfiFrame(
+        let second = accumulator.fold(
+            FfiFrame(
                 deltas: [
                     .removed(id: "a"),
                     .sourcesGrew(id: "b", sources: ["wss://r0.example", "wss://r1.example"]),
@@ -90,25 +87,23 @@ final class WindowTests: XCTestCase {
                 evidence: Self.emptyEvidence
             )
         )
-        bridge.onClosed()
 
-        var delivered: [RowBatch] = []
-        for await batch in stream {
-            delivered.append(batch)
-        }
-        XCTAssertFalse(delivered.isEmpty)
-        XCTAssertTrue(delivered.allSatisfy { $0.load == nil })
-        XCTAssertEqual(delivered.last?.rows.map(\.id), ["b"])
+        XCTAssertNil(first.load)
+        XCTAssertNil(second.load)
+        XCTAssertEqual(first.rows.map(\.id), ["a", "b"])
+        XCTAssertEqual(second.rows.map(\.id), ["b"])
         XCTAssertEqual(
-            delivered.last?.rows.first?.sources,
+            second.rows.first?.sources,
             ["wss://r0.example", "wss://r1.example"]
         )
     }
 
     // MARK: - Validation, growth refusals, and teardown discipline
 
-    func testWindowValidationAndCancellationReturnNativeTaskBaseline() async throws {
-        let engine = try NMPEngine(config: NMPConfig(maxNativeTasks: 1))
+    /// #680: window validation still fails closed and typed; opening and
+    /// cancelling a windowed query has no capacity census to reconcile.
+    func testWindowValidationAndCancellationAreTypedWithNoCapacityConcept() async throws {
+        let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
         let demand = NMPDemand(
             selection: NMPFilter(kinds: [7_779]),
@@ -139,15 +134,13 @@ final class WindowTests: XCTestCase {
         }
 
         let query = try engine.observe(demand, window: .expandable(initial: 1, max: 2))
-        XCTAssertEqual(engine.nativeTaskCensus().admitted, 1)
         let first = await Self.firstBatch(from: query, timeoutSeconds: 5)
         XCTAssertEqual(first?.rows, [])
         XCTAssertEqual(first?.load, .idle)
 
+        // Cancellation is idempotent and leaves nothing to reconcile (#680).
         query.cancel()
-        engine.awaitNativeTasksIdle()
-        XCTAssertEqual(engine.nativeTaskCensus().admitted, 0)
-        XCTAssertEqual(engine.nativeTaskCensus().running, 0)
+        query.cancel()
     }
 
     /// The growth capability's existence is DERIVED from the window policy:
@@ -176,18 +169,29 @@ final class WindowTests: XCTestCase {
             source: .public
         )
         let query = try engine.observe(demand, window: .expandable(initial: 1, max: 1))
-        _ = await Self.firstBatch(from: query, timeoutSeconds: 5)
 
-        XCTAssertNoThrow(try query.requestRows(atLeast: 2))
-        // Idempotent: the same declarative target again is a plain no-op.
-        XCTAssertNoThrow(try query.requestRows(atLeast: 2))
-
-        let atBound = await Self.firstBatch(
-            from: query,
-            timeoutSeconds: 5,
-            where: { $0.load == .atBound(max: 1) }
-        )
-        XCTAssertEqual(atBound?.load, .atBound(max: 1))
+        // #680: the handle is single-consumer/single-pass -- ONE iterator for
+        // the whole read (a second `makeAsyncIterator` would open a second
+        // pump on the one handle). Pull the initial batch, grow, then pull the
+        // in-band `.atBound` fact -- all on the same iterator, inside one Task
+        // raced against a hard timeout so a regression fails loudly.
+        let atBound = await Self.value(
+            of: Task { () -> WindowLoad? in
+                var iterator = query.makeAsyncIterator()
+                _ = try? await iterator.next()
+                try? query.requestRows(atLeast: 2)
+                // Idempotent: the same declarative target again is a no-op.
+                try? query.requestRows(atLeast: 2)
+                while let batch = try? await iterator.next() {
+                    if batch.load == .atBound(max: 1) {
+                        return batch.load
+                    }
+                }
+                return nil
+            },
+            timeoutSeconds: 5
+        ) ?? nil
+        XCTAssertEqual(atBound, .atBound(max: 1))
         query.cancel()
     }
 
@@ -198,11 +202,17 @@ final class WindowTests: XCTestCase {
             source: .public
         )
         let query = try engine.observe(demand, window: .expandable(initial: 1, max: 2))
-        _ = await Self.firstBatch(from: query, timeoutSeconds: 5)
 
+        // ONE iterator for the whole read (#680 single-pass handle): drain it
+        // to completion; engine shutdown drops the producer and closes it.
         let closed = Task {
             var iterator = query.makeAsyncIterator()
-            while await iterator.next() != nil {}
+            do {
+                while try await iterator.next() != nil {}
+            } catch {
+                // The stream ended with the single-consumer / withdrawal
+                // signal; a closed iterator is exactly what this asserts.
+            }
             return true
         }
         engine.shutdown()
@@ -263,11 +273,15 @@ final class WindowTests: XCTestCase {
     ) async -> RowBatch? {
         await withTaskGroup(of: RowBatch?.self) { group in
             group.addTask {
-                var iterator = query.makeAsyncIterator()
-                while let batch = await iterator.next() {
-                    if matches(batch) {
-                        return batch
+                do {
+                    var iterator = query.makeAsyncIterator()
+                    while let batch = try await iterator.next() {
+                        if matches(batch) {
+                            return batch
+                        }
                     }
+                } catch {
+                    return nil
                 }
                 return nil
             }

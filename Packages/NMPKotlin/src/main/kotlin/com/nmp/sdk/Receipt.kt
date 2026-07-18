@@ -1,15 +1,12 @@
 package com.nmp.sdk
 
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.flow
 import uniffi.nmp_ffi.FfiReceiptReattachment
 import uniffi.nmp_ffi.FfiCancelWriteException
 import uniffi.nmp_ffi.FfiCancelWriteOutcome
-import uniffi.nmp_ffi.FfiWriteStatus
 import uniffi.nmp_ffi.NmpEngineInterface
-import uniffi.nmp_ffi.ReceiptObserver
+import uniffi.nmp_ffi.NmpReceiptStream
 
 /** A stable receipt identity and its stream of retained/live write facts. */
 data class Receipt(
@@ -73,62 +70,57 @@ internal fun cancelWrite(engine: NmpEngineInterface, receiptId: ULong): WriteCan
         throw NMPWriteCancellationError.from(error)
     }
 
-private class ReceiptBridge {
-    val channel = Channel<WriteStatus>(Channel.UNLIMITED)
-    val observer =
-        object : ReceiptObserver {
-            override fun onStatus(status: FfiWriteStatus) {
-                channel.trySendBlocking(WriteStatus.from(status))
-            }
+/** Build the ergonomic [Receipt] from a live [NmpReceiptStream] (#680). The
+ * stable store-issued id is read synchronously off the handle; the status
+ * `Flow` is a cold pull loop over `next()` -- FIFO write facts, no folding
+ * and no conflation (receipts are durable facts, not disposable snapshots).
+ * Collection-scope teardown withdraws the LIVE stream via `handle.cancel()`;
+ * the durable receipt itself is untouched (a later `reattachReceipt` replays
+ * the durable prefix from the store). */
+private fun receiptFrom(stream: NmpReceiptStream): Receipt =
+    Receipt(id = stream.id(), status = receiptStatusFlow(stream))
 
-            override fun onClosed() {
-                // The receipt `Sender` was dropped (intent resolved / engine
-                // shut down) -- close the channel so its `Flow` completes,
-                // mirroring Query.kt's `RowObserver` bridge.
-                channel.close()
+private fun receiptStatusFlow(stream: NmpReceiptStream): Flow<WriteStatus> =
+    flow {
+        try {
+            while (true) {
+                val status = nmpRethrowingAsync { stream.next() } ?: break
+                emit(WriteStatus.from(status))
             }
+        } finally {
+            stream.cancel()
         }
-
-    fun receipt(id: ULong): Receipt = Receipt(id, channel.receiveAsFlow())
-}
+    }
 
 /** Enqueue immediately and retain the store-issued id needed for reattach. */
-fun publishReceipt(engine: NmpEngineInterface, intent: WriteIntent): Receipt {
-    val bridge = ReceiptBridge()
-    val id = nmpRethrowing { engine.publish(intent.toFfi(), bridge.observer) }
-    return bridge.receipt(id)
-}
+fun publishReceipt(engine: NmpEngineInterface, intent: WriteIntent): Receipt =
+    receiptFrom(nmpRethrowing { engine.publish(intent.toFfi()) })
 
 /** Publish a [GroupSendIntent] from `groupMessageIntent` (#156). Take-once:
  * `intent` is consumed by this call -- a second `publishComposed` on the
  * SAME [GroupSendIntent] throws `NMPError.IntentAlreadyConsumed` rather
  * than silently re-publishing a stale template (recompose via
  * `groupMessageIntent` again for a retry). Otherwise identical to
- * [publishReceipt]'s bridge. */
-fun publishComposedReceipt(engine: NmpEngineInterface, intent: GroupSendIntent): Receipt {
-    val bridge = ReceiptBridge()
-    val id = nmpRethrowing { engine.publishComposed(intent.ffi, bridge.observer) }
-    return bridge.receipt(id)
-}
+ * [publishReceipt]. */
+fun publishComposedReceipt(engine: NmpEngineInterface, intent: GroupSendIntent): Receipt =
+    receiptFrom(nmpRethrowing { engine.publishComposed(intent.ffi) })
 
+/** Map the reattachment outcome without collapsing corrupt retained
+ * evidence into the same result as an unknown id (#680). Extracted with an
+ * injectable `attach` so the [ReceiptReattachment.NotFound] /
+ * [ReceiptReattachment.RetainedButUnreadable] distinction is unit-testable
+ * without a live [NmpReceiptStream]. */
 internal fun mapReceiptReattachment(
     result: FfiReceiptReattachment,
-    id: ULong,
-    status: Flow<WriteStatus>,
+    attach: (NmpReceiptStream) -> Receipt,
 ): ReceiptReattachment =
     when (result) {
-        FfiReceiptReattachment.ATTACHED -> ReceiptReattachment.Attached(Receipt(id, status))
-        FfiReceiptReattachment.NOT_FOUND -> ReceiptReattachment.NotFound
-        FfiReceiptReattachment.RETAINED_BUT_UNREADABLE ->
+        is FfiReceiptReattachment.Attached -> ReceiptReattachment.Attached(attach(result.stream))
+        FfiReceiptReattachment.NotFound -> ReceiptReattachment.NotFound
+        FfiReceiptReattachment.RetainedButUnreadable ->
             ReceiptReattachment.RetainedButUnreadable
     }
 
 /** Attach without collapsing corrupt retained evidence into absence. */
-fun reattachReceipt(engine: NmpEngineInterface, id: ULong): ReceiptReattachment {
-    val bridge = ReceiptBridge()
-    val result = nmpRethrowing { engine.reattachReceipt(id, bridge.observer) }
-    if (result != FfiReceiptReattachment.ATTACHED) {
-        bridge.channel.close()
-    }
-    return mapReceiptReattachment(result, id, bridge.channel.receiveAsFlow())
-}
+fun reattachReceipt(engine: NmpEngineInterface, id: ULong): ReceiptReattachment =
+    mapReceiptReattachment(nmpRethrowing { engine.reattachReceipt(id) }, ::receiptFrom)

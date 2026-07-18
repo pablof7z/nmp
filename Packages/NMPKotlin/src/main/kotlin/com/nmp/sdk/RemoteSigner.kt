@@ -112,7 +112,6 @@ sealed interface NMPNip46Failure {
     data class Rejected(val reason: String) : NMPNip46Failure
     data class InvalidResponse(val reason: String) : NMPNip46Failure
     data class ThreadUnavailable(val component: String, val reason: String) : NMPNip46Failure
-    data class ExecutorSaturated(val component: String, val capacity: ULong) : NMPNip46Failure
     data object SignerMissingPublicKey : NMPNip46Failure
 
     companion object {
@@ -129,7 +128,6 @@ sealed interface NMPNip46Failure {
                 is FfiNip46Failure.Rejected -> Rejected(ffi.reason)
                 is FfiNip46Failure.InvalidResponse -> InvalidResponse(ffi.reason)
                 is FfiNip46Failure.ThreadUnavailable -> ThreadUnavailable(ffi.component, ffi.reason)
-                is FfiNip46Failure.ExecutorSaturated -> ExecutorSaturated(ffi.component, ffi.capacity)
                 FfiNip46Failure.SignerMissingPublicKey -> SignerMissingPublicKey
             }
     }

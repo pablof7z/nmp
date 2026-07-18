@@ -45,23 +45,18 @@ final class EvidenceMappingTests: XCTestCase {
         )
     }
 
-    func testEveryReceiptReattachmentVariantMapsWithoutCollapsingCorruptionIntoAbsence() {
-        let stream = AsyncStream<WriteStatus> { $0.finish() }
+    /// #680: `reattachReceipt` now maps the generated `FfiReceiptReattachment`
+    /// directly -- `.attached` carries a live `NmpReceiptStream` (proven
+    /// end-to-end by `WriteCancellationTests`), while an unknown id must stay
+    /// distinctly `.notFound`, never collapsed with corrupt-but-retained
+    /// evidence. Reattaching an id no receipt was ever issued for is the
+    /// reachable `.notFound` case.
+    func testUnknownReceiptReattachmentStaysNotFound() throws {
+        let engine = try NMPEngine(config: NMPConfig())
+        defer { engine.shutdown() }
 
-        guard case let .attached(receipt) = mapReceiptReattachment(.attached, id: 42, status: stream) else {
-            return XCTFail("attached must remain attached")
-        }
-        XCTAssertEqual(receipt.id, 42)
-
-        guard case .notFound = mapReceiptReattachment(.notFound, id: 42, status: stream) else {
-            return XCTFail("notFound must remain notFound")
-        }
-        guard case .retainedButUnreadable = mapReceiptReattachment(
-            .retainedButUnreadable,
-            id: 42,
-            status: stream
-        ) else {
-            return XCTFail("retained corruption must not collapse into absence")
+        guard case .notFound = try engine.reattachReceipt(id: 999_999) else {
+            return XCTFail("an id no receipt was issued for must remain notFound")
         }
     }
 
@@ -192,13 +187,12 @@ final class EvidenceMappingTests: XCTestCase {
     }
 
     /// #105: `SourcesGrew` must replace the row's provenance IN PLACE --
-    /// never a second `Added` for the same id. Drives `RowBridge` directly
-    /// (the same accumulator `NMPQuery` uses internally) since the coalescer
-    /// underneath it is already proven separately by `FrameCoalescerTests`.
-    func testRowBridgeSourcesGrewReplacesRowInPlaceWithoutDuplicating() async throws {
-        var continuation: AsyncStream<RowBatch>.Continuation!
-        let stream = AsyncStream<RowBatch> { continuation = $0 }
-        let bridge = RowBridge(continuation: continuation)
+    /// never a second `Added` for the same id. Drives `RowAccumulator`
+    /// directly (the exact per-frame fold `NMPQuery`'s iterator now runs,
+    /// #680) since the coalescer over the pull loop is proven separately by
+    /// `FrameCoalescerTests`.
+    func testRowAccumulatorSourcesGrewReplacesRowInPlaceWithoutDuplicating() throws {
+        let accumulator = RowAccumulator()
         let emptyEvidence = FfiAcquisitionEvidence(sources: [], shortfall: [])
 
         let ffiRow = FfiRow(
@@ -211,25 +205,19 @@ final class EvidenceMappingTests: XCTestCase {
             sig: "sig",
             sources: ["wss://r0.example"]
         )
-        bridge.onFrame(
-            frame: FfiFrame(deltas: [.added(row: ffiRow)], window: nil, evidence: emptyEvidence)
+        _ = accumulator.fold(
+            FfiFrame(deltas: [.added(row: ffiRow)], window: nil, evidence: emptyEvidence)
         )
-        bridge.onFrame(
-            frame: FfiFrame(
+        let last = accumulator.fold(
+            FfiFrame(
                 deltas: [.sourcesGrew(id: "abc", sources: ["wss://r0.example", "wss://r1.example"])],
                 window: nil,
                 evidence: emptyEvidence
             )
         )
-        bridge.onClosed()
 
-        var lastBatch: RowBatch?
-        for await batch in stream {
-            lastBatch = batch
-        }
-        let rows = try XCTUnwrap(lastBatch).rows
-        XCTAssertEqual(rows.count, 1, "SourcesGrew must never insert a second row for the same id")
-        XCTAssertEqual(rows.first?.sources, ["wss://r0.example", "wss://r1.example"])
+        XCTAssertEqual(last.rows.count, 1, "SourcesGrew must never insert a second row for the same id")
+        XCTAssertEqual(last.rows.first?.sources, ["wss://r0.example", "wss://r1.example"])
     }
 
     func testDiagnosticsIntervalIsDistinctFromQueryEvidence() {

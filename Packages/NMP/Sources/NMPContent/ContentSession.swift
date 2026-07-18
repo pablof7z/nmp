@@ -525,9 +525,14 @@ public final class NostrContentSession: ObservableObject {
             let canonical = try liveClient.engine.observe(plan.canonical)
             tasks.append(Task { [weak self] in
                 defer { canonical.cancel() }
-                for await batch in canonical {
-                    guard !Task.isCancelled else { break }
-                    self?.receiveCanonical(batch, targetKey: targetKey)
+                do {
+                    for try await batch in canonical {
+                        guard !Task.isCancelled else { break }
+                        self?.receiveCanonical(batch, targetKey: targetKey)
+                    }
+                } catch {
+                    // The observation ended (withdrawal / single-consumer
+                    // misuse); fall through to the stopped transition (#680).
                 }
                 guard !Task.isCancelled else { return }
                 self?.canonicalStopped(targetKey)
@@ -537,9 +542,13 @@ public final class NostrContentSession: ObservableObject {
                 let helper = try liveClient.engine.observe(demand)
                 tasks.append(Task { [weak self] in
                     defer { helper.cancel() }
-                    for await batch in helper {
-                        guard !Task.isCancelled else { break }
-                        self?.receiveHelper(batch, targetKey: targetKey, index: index)
+                    do {
+                        for try await batch in helper {
+                            guard !Task.isCancelled else { break }
+                            self?.receiveHelper(batch, targetKey: targetKey, index: index)
+                        }
+                    } catch {
+                        // The observation ended; nothing further to deliver (#680).
                     }
                 })
             }

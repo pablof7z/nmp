@@ -1,13 +1,14 @@
 // M5 replay-jank fix, Swift-delivery half (#17; docs/known-gaps.md's
 // "Unbounded historical replay can peg the main thread" entry). Historical
-// replay can push dozens of deltas through `RowBridge`/`DiagnosticsBridge`
-// faster than any `for await` consumer can re-render. Delivering one full
-// snapshot per delta forces the run loop through that many consecutive
-// re-renders. `FrameCoalescer` collapses a burst arriving faster than
-// `interval` into a single delivery of the LATEST value -- intermediate
-// values are dropped, never queued, so a slow consumer's backlog cannot
-// grow. This is purely an internal Swift-side delivery-cadence change: it
-// does not touch the FFI surface or either bridge's public shape.
+// replay can fold dozens of frames through an observation's pull loop
+// (`nmpPullStream`, #680) faster than any `for try await` consumer can
+// re-render. Delivering one full snapshot per pulled frame forces the run
+// loop through that many consecutive re-renders. `FrameCoalescer` collapses a
+// burst arriving faster than `interval` into a single delivery of the LATEST
+// value -- intermediate values are dropped, never queued, so a slow
+// consumer's backlog cannot grow. This is purely an internal Swift-side
+// delivery-cadence change over the pull loop: it does not touch the FFI
+// surface.
 
 import Foundation
 
@@ -19,9 +20,10 @@ import Foundation
 /// `AsyncStream`'s own `.bufferingNewest(1)` policy, applied at the
 /// producer instead of the consumer's buffer.
 ///
-/// Thread-safe: `push` is called from the FFI callback thread (`RowBridge`/
-/// `DiagnosticsBridge`'s `RowObserver`/`DiagnosticsObserver` conformance),
-/// concurrently with `flushNow` from wherever `onClosed` fires.
+/// Thread-safe: `push`/`flushNow` are called from the pull-loop task that
+/// drives an observation handle (`nmpPullStream`, #680) -- a latest-wins
+/// throttle over the pull loop, so a tight `for try await` replay burst
+/// coalesces to at most one delivery per `interval`.
 final class FrameCoalescer<Value: Sendable>: @unchecked Sendable {
     private let interval: Duration
     private let deliver: @Sendable (Value) -> Void

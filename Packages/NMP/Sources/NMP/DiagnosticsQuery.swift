@@ -1,61 +1,46 @@
-// The Rust-channel -> Swift-`AsyncSequence` bridge for the diagnostic
-// surface (M5 plan §1.3), mirroring `Query.swift`'s `NMPQuery`/`RowBridge`
-// exactly. This is the ONLY place `NMP` holds a `DiagnosticsObserver`
-// foreign-trait conformance.
+// The pull-based diagnostics `AsyncSequence` (#680), mirroring `NMPQuery`.
+// Each `next()` awaits `NmpDiagnosticsStream.next()`; there is no observer
+// conformance and no drain thread anymore.
 
 import Foundation
 import NMPFFI
 
 /// A live diagnostics stream (`nmp_engine`'s read-only diagnostic
-/// projection). Iterate directly with `for await`; there is no container or
-/// provider object required around it, same discipline as `NMPQuery`.
+/// projection). Iterate directly with `for try await`; there is no container
+/// or provider object required around it, same discipline as `NMPQuery`.
 ///
 /// Each element is the CURRENT engine-global `DiagnosticsSnapshot` -- never a
-/// delta (there is nothing to accumulate here: every snapshot is already the
-/// full current picture).
+/// delta (every snapshot is already the full current picture). Delivery is
+/// throttled through `FrameCoalescer` (#17), same as `NMPQuery`: a slow
+/// consumer keeps only the newest complete snapshot.
 ///
-/// Demand teardown is DEINIT-TIED, same as `NMPQuery`: once the last strong
-/// reference to the underlying observer handle is released, the Rust side's
-/// `Drop` withdraws the observer automatically. No `cancel()` call is
-/// required of the app.
+/// The sequence is THROWING (ends `nil` on withdrawal; surfaces
+/// `NMPError.concurrentNext` if two iterators pull one handle). Teardown is
+/// termination-tied: dropping the iterating task cancels the Rust handle
+/// (Swift task cancellation never reaches Rust, #680).
 public struct NMPDiagnostics: AsyncSequence, Sendable {
     public typealias Element = DiagnosticsSnapshot
 
-    private let handle: NmpDiagnosticsHandle
-    private let stream: AsyncStream<DiagnosticsSnapshot>
+    private let handle: NmpDiagnosticsStream
 
     init(engine: NmpEngineProtocol) throws {
-        var continuation: AsyncStream<DiagnosticsSnapshot>.Continuation!
-        // `.bufferingNewest(1)`: same discipline as `NMPQuery` (#17) --
-        // `observeDiagnostics()` must remain latest-wins and never regress
-        // into a backlog, belt-and-suspenders alongside `DiagnosticsBridge`'s
-        // own frame coalescing below.
-        let stream = AsyncStream<DiagnosticsSnapshot>(bufferingPolicy: .bufferingNewest(1)) {
-            continuation = $0
-        }
-        let bridge = DiagnosticsBridge(continuation: continuation)
-        self.handle = try nmpRethrowing { try engine.observeDiagnostics(observer: bridge) }
-        self.stream = stream
+        self.handle = try nmpRethrowing { try engine.observeDiagnostics() }
     }
 
     public func makeAsyncIterator() -> Iterator {
-        Iterator(handle: handle, base: stream.makeAsyncIterator())
+        let stream = nmpPullStream(
+            handle: handle,
+            bufferingPolicy: .bufferingNewest(1),
+            throttle: true
+        ) { snapshot in DiagnosticsSnapshot(snapshot) }
+        return Iterator(base: stream.makeAsyncIterator())
     }
 
     public struct Iterator: AsyncIteratorProtocol {
-        // Held for the iterator's lifetime so the observer survives at least
-        // as long as anything is actually consuming it; released (and
-        // therefore withdrawn) when the iterator itself is discarded.
-        private let handle: NmpDiagnosticsHandle
-        private var base: AsyncStream<DiagnosticsSnapshot>.AsyncIterator
+        var base: AsyncThrowingStream<DiagnosticsSnapshot, Error>.AsyncIterator
 
-        init(handle: NmpDiagnosticsHandle, base: AsyncStream<DiagnosticsSnapshot>.AsyncIterator) {
-            self.handle = handle
-            self.base = base
-        }
-
-        public mutating func next() async -> DiagnosticsSnapshot? {
-            await base.next()
+        public mutating func next() async throws -> DiagnosticsSnapshot? {
+            try await base.next()
         }
     }
 
@@ -64,35 +49,5 @@ public struct NMPDiagnostics: AsyncSequence, Sendable {
     /// never call at all.
     public func cancel() {
         handle.cancel()
-    }
-}
-
-/// Drains a live diagnostics stream into an `AsyncStream` (M5 plan §1.3).
-/// Not exposed publicly -- an implementation detail of `NMPDiagnostics`.
-///
-/// DELIVERY is coalesced through `FrameCoalescer` (#17/docs/known-gaps.md):
-/// `observeDiagnostics()`'s first jank finding was its own initial-snapshot
-/// storm, same shape as `RowBridge`'s -- at most one delivered snapshot per
-/// ~60Hz tick, always the latest, never a growing backlog.
-private final class DiagnosticsBridge: DiagnosticsObserver, @unchecked Sendable {
-    private let continuation: AsyncStream<DiagnosticsSnapshot>.Continuation
-    // Captures `continuation` only (not `self`) -- avoids a retain cycle
-    // between this bridge and its own coalescer.
-    private lazy var coalescer = FrameCoalescer<DiagnosticsSnapshot> {
-        [continuation = self.continuation] snapshot in
-        continuation.yield(snapshot)
-    }
-
-    init(continuation: AsyncStream<DiagnosticsSnapshot>.Continuation) {
-        self.continuation = continuation
-    }
-
-    func onSnapshot(snapshot: FfiDiagnosticsSnapshot) {
-        coalescer.push(DiagnosticsSnapshot(snapshot))
-    }
-
-    func onClosed() {
-        coalescer.flushNow()
-        continuation.finish()
     }
 }

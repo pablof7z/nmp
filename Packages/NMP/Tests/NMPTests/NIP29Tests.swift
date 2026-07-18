@@ -168,8 +168,12 @@ final class NIP29Tests: XCTestCase {
     private static func firstStatus(from receipt: Receipt, timeoutSeconds: UInt64) async -> WriteStatus? {
         await withTaskGroup(of: WriteStatus?.self) { group in
             group.addTask {
-                for await status in receipt.status {
-                    return status
+                do {
+                    for try await status in receipt.status {
+                        return status
+                    }
+                } catch {
+                    return nil
                 }
                 return nil
             }
@@ -187,10 +191,14 @@ final class NIP29Tests: XCTestCase {
     private static func firstRow(from query: NMPQuery, timeoutSeconds: UInt64) async -> Row? {
         await withTaskGroup(of: Row?.self) { group in
             group.addTask {
-                for await batch in query {
-                    if let row = batch.rows.first {
-                        return row
+                do {
+                    for try await batch in query {
+                        if let row = batch.rows.first {
+                            return row
+                        }
                     }
+                } catch {
+                    return nil
                 }
                 return nil
             }

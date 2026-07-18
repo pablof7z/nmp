@@ -39,7 +39,14 @@ public enum NMPError: Error, Sendable, Equatable {
     case storeResetFailed(String)
     case storeStillOpen(String)
     case threadUnavailable(component: String, reason: String)
-    case executorSaturated(component: String, capacity: UInt64)
+    /// #680: a second `next()` was awaited on an observation stream (or a
+    /// `signed()` on a sign handle) while a previous one was still in flight.
+    /// Every observation handle is single-consumer -- surface the misuse as a
+    /// typed error, never a hang. No frame is lost or duplicated.
+    case concurrentNext
+    /// #680: `NmpSignEventHandle.signed()` was awaited a second time -- the
+    /// one-shot result was already delivered to the first await.
+    case signEventAlreadyConsumed
     case invalidSignature(String)
     case engineClosed
     /// `decodeNostrEntity`'s input was not valid bech32, had an
@@ -99,8 +106,7 @@ public enum NMPError: Error, Sendable, Equatable {
         case .StoreStillOpen(let path): self = .storeStillOpen(path)
         case .ThreadUnavailable(let component, let reason):
             self = .threadUnavailable(component: component, reason: reason)
-        case .ExecutorSaturated(let component, let capacity):
-            self = .executorSaturated(component: component, capacity: capacity)
+        case .ConcurrentNext: self = .concurrentNext
         case .InvalidSignature(let got): self = .invalidSignature(got)
         case .EngineClosed: self = .engineClosed
         case .InvalidNostrEntity(let reason): self = .invalidNostrEntity(reason)
