@@ -1846,6 +1846,10 @@ fn send_relay_batch(
 }
 
 fn encoded_event_upper_bound(frame: &RelayFrame) -> Option<usize> {
+    #[cfg(feature = "bench-instrumentation")]
+    if let Some((_, encoded_bytes)) = frame.diagnostic_duplicate_ceiling() {
+        return Some(encoded_bytes);
+    }
     let event = frame.event()?;
     let tags = event.tags.iter().fold(0usize, |total, tag| {
         tag.as_slice()

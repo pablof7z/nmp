@@ -1109,7 +1109,28 @@ impl<S: EventStore> EngineCore<S> {
     ) -> Vec<Effect> {
         let mut effects = Vec::new();
         let mut events = Vec::new();
+        #[cfg(feature = "bench-instrumentation")]
+        let mut observed_diagnostic_duplicate = false;
         for (handle, reported_session, frame) in frames {
+            #[cfg(feature = "bench-instrumentation")]
+            if let Some((event_kind, _)) = frame.diagnostic_duplicate_ceiling() {
+                let Some((current, session)) = self.slot_to_relay.get(&handle.slot).cloned() else {
+                    self.ingest_relay_events(std::mem::take(&mut events), &mut effects);
+                    continue;
+                };
+                if current != handle || session != reported_session {
+                    self.ingest_relay_events(std::mem::take(&mut events), &mut effects);
+                    continue;
+                }
+                *self
+                    .events_by_session_kind
+                    .entry(session)
+                    .or_default()
+                    .entry(event_kind)
+                    .or_insert(0) += 1;
+                observed_diagnostic_duplicate = true;
+                continue;
+            }
             match frame.into_event() {
                 Ok(event) => {
                     let Some((current, session)) = self.slot_to_relay.get(&handle.slot).cloned()
@@ -1140,6 +1161,10 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
         self.ingest_relay_events(events, &mut effects);
+        #[cfg(feature = "bench-instrumentation")]
+        if observed_diagnostic_duplicate {
+            effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+        }
         effects
     }
 

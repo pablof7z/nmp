@@ -6,9 +6,10 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-bench-instrumentation = []
+bench-instrumentation = ["dep:blake3"]
 
 [dependencies]
+blake3 = { workspace = true, optional = true }
 nostr.workspace = true
 nmp-grammar.workspace = true
 # HARVEST target (M3 plan §4 "Transport pool"): the old repo's `mio`-driven

@@ -31,6 +31,13 @@ fn main() -> Result<(), ProbeError> {
             "--verified-cache-capacity" => {
                 config.verified_cache_capacity = value(&mut args, "--verified-cache-capacity")?
             }
+            "--diagnostic-duplicate-ceiling-capacity" => {
+                config.diagnostic_duplicate_ceiling_capacity =
+                    value(&mut args, "--diagnostic-duplicate-ceiling-capacity")?
+            }
+            "--diagnostic-duplicate-ceiling-event-payload" => {
+                config.diagnostic_duplicate_ceiling_event_payload = true
+            }
             "--verifier-workers" => {
                 config.verifier_workers = value(&mut args, "--verifier-workers")?
             }
@@ -116,6 +123,10 @@ fn print_help() {
                              benchmark nondurable foreground commits plus a timed final checkpoint\n\
          --queue-capacity N  every bounded runtime queue (default 1024)\n\
          --verified-cache-capacity N  verified ID/signature entries (default 131072)\n\
+         --diagnostic-duplicate-ceiling-capacity N\n\
+                             unsafe benchmark-only precommit exact-frame cache (default 0)\n\
+         --diagnostic-duplicate-ceiling-event-payload\n\
+                             fingerprint only the raw EVENT object, independent of subscription id\n\
          --verifier-workers N  native signature workers; 0 uses default 2 (maximum 16)\n\
          --verify-batch-size N  signature verification batch ceiling (default 128)\n\
          --engine-batch-size N  store transaction batch ceiling (default 128)\n\

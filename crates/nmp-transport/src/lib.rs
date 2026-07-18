@@ -40,6 +40,8 @@ pub use admission::{
 };
 pub use handle::RelayHandle;
 pub use health::{ConnState, RelayHealth};
+#[cfg(feature = "bench-instrumentation")]
+pub use pool::configure_diagnostic_duplicate_ceiling;
 pub use pool::{
     AttemptCorrelation, DisconnectReason, DurableSendOutcome, EphemeralSendOutcome,
     EphemeralSendStart, HandoffResult, Pool, PoolBuildError, PoolConfig, PoolEvent, PoolEventSink,

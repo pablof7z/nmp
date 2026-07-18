@@ -13,12 +13,13 @@
 //! thread. See those modules' docs for the generation-safety scheme and the
 //! harvest-vs-rewrite breakdown.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub use nmp_grammar::RelaySessionKey;
-use nostr::{Event, RelayMessage, RelayUrl, SubscriptionId};
+use nostr::{Event, EventId, RelayMessage, RelayUrl, SubscriptionId};
 
 use crate::handle::RelayHandle;
 use crate::health::RelayHealth;
@@ -31,6 +32,11 @@ mod verify;
 mod worker;
 
 use inner::PoolInner;
+
+#[cfg(feature = "bench-instrumentation")]
+pub fn configure_diagnostic_duplicate_ceiling(capacity: usize, event_payload_only: bool) {
+    frame::configure_diagnostic_duplicate_ceiling(capacity, event_payload_only);
+}
 
 /// Safe default for the single engine/transport relay ceiling. Zero is
 /// normalized to this value as well, so legacy/default construction cannot
@@ -266,6 +272,47 @@ impl RelayFrame {
             Self::Event { event, .. } => Some(event),
             Self::Message(_) => None,
         }
+    }
+
+    #[cfg(feature = "bench-instrumentation")]
+    const DIAGNOSTIC_DUPLICATE_CEILING_MARKER: &'static str = "\0nmp-663-ceiling";
+
+    #[cfg(feature = "bench-instrumentation")]
+    pub(crate) fn diagnostic_duplicate_ceiling_token(
+        event_kind: u16,
+        encoded_bytes: usize,
+    ) -> Self {
+        let mut encoded = [0_u8; EventId::LEN];
+        encoded[..2].copy_from_slice(&event_kind.to_be_bytes());
+        encoded[2..10].copy_from_slice(&(encoded_bytes as u64).to_be_bytes());
+        Self::Message(Box::new(RelayMessage::Ok {
+            event_id: EventId::from_byte_array(encoded),
+            status: false,
+            message: Cow::Borrowed(Self::DIAGNOSTIC_DUPLICATE_CEILING_MARKER),
+        }))
+    }
+
+    #[cfg(feature = "bench-instrumentation")]
+    #[must_use]
+    pub fn diagnostic_duplicate_ceiling(&self) -> Option<(u16, usize)> {
+        let Self::Message(message) = self else {
+            return None;
+        };
+        let RelayMessage::Ok {
+            event_id,
+            status: false,
+            message,
+        } = message.as_ref()
+        else {
+            return None;
+        };
+        if message.as_ref() != Self::DIAGNOSTIC_DUPLICATE_CEILING_MARKER {
+            return None;
+        }
+        let encoded = event_id.as_bytes();
+        let event_kind = u16::from_be_bytes(encoded[..2].try_into().ok()?);
+        let encoded_bytes = u64::from_be_bytes(encoded[2..10].try_into().ok()?);
+        Some((event_kind, usize::try_from(encoded_bytes).ok()?))
     }
 
     /// Move an EVENT into the engine, normally without cloning.
