@@ -166,14 +166,44 @@ fn membership_tuple(membership: Membership) -> (u8, u8, Vec<u8>, u64, [u8; 32], 
 
 #[derive(Default)]
 pub(super) struct PostingsBatch {
-    additions: BTreeMap<EventKey, Event>,
+    additions: BTreeMap<EventKey, PendingEvent>,
     deaths: BTreeSet<EventKey>,
+}
+
+struct PendingEvent {
+    event: Arc<RunEvent>,
+    author: [u8; 32],
+    kind: [u8; 2],
+    tags: Vec<Arc<[u8]>>,
+}
+
+impl PendingEvent {
+    fn prepare(event: &Event, event_key: EventKey) -> Self {
+        let mut tags = BTreeSet::new();
+        for tag in event.tags.iter() {
+            let (Some(name), Some(value)) = (tag.single_letter_tag(), tag.content()) else {
+                continue;
+            };
+            tags.insert(tag_index_prefix(name, value));
+        }
+        Self {
+            event: Arc::new(RunEvent {
+                created_at: event.created_at.as_secs(),
+                id: *event.id.as_bytes(),
+                event_key,
+            }),
+            author: *event.pubkey.as_bytes(),
+            kind: event.kind.as_u16().to_be_bytes(),
+            tags: tags.into_iter().map(Arc::from).collect(),
+        }
+    }
 }
 
 impl PostingsBatch {
     pub(super) fn insert(&mut self, event: &Event, event_key: EventKey) {
         self.deaths.remove(&event_key);
-        self.additions.insert(event_key, event.clone());
+        self.additions
+            .insert(event_key, PendingEvent::prepare(event, event_key));
     }
 
     pub(super) fn remove(&mut self, event_key: EventKey) {
@@ -190,7 +220,7 @@ impl PostingsBatch {
             apply_deaths(write_txn, &self.deaths)?;
         }
         if !self.additions.is_empty() {
-            publish_events(write_txn, &self.additions)?;
+            publish_pending(write_txn, &self.additions)?;
         }
         self.additions.clear();
         self.deaths.clear();
@@ -265,6 +295,25 @@ fn publish_events(
     let run_id = allocate_run_id(write_txn)?;
     let memberships = memberships_for_events(events);
     let encoded = encode_run(memberships).map_err(packed_err)?;
+    let min_event_key = *events.first_key_value().expect("nonempty additions").0;
+    let max_event_key = *events.last_key_value().expect("nonempty additions").0;
+    let meta = RunMeta {
+        run_id,
+        level: 0,
+        min_event_key,
+        max_event_key,
+        live_events: encoded.dictionary_entries,
+    };
+    insert_run(write_txn, meta, encoded)?;
+    compact_overfull_levels(write_txn)
+}
+
+fn publish_pending(
+    write_txn: &redb::WriteTransaction,
+    events: &BTreeMap<EventKey, PendingEvent>,
+) -> Result<(), PersistenceError> {
+    let run_id = allocate_run_id(write_txn)?;
+    let encoded = encode_run(memberships_for_pending(events)).map_err(packed_err)?;
     let min_event_key = *events.first_key_value().expect("nonempty additions").0;
     let max_event_key = *events.last_key_value().expect("nonempty additions").0;
     let meta = RunMeta {
@@ -500,6 +549,39 @@ fn memberships_for_events(events: &BTreeMap<EventKey, Event>) -> Vec<Membership>
                 Family::Tag,
                 Prefix::Tag(prefix.into()),
                 &run_event,
+            );
+        }
+    }
+    memberships
+}
+
+fn memberships_for_pending(events: &BTreeMap<EventKey, PendingEvent>) -> Vec<Membership> {
+    let mut memberships = Vec::new();
+    for event in events.values() {
+        push_membership(
+            &mut memberships,
+            Family::Global,
+            Prefix::Global,
+            &event.event,
+        );
+        push_membership(
+            &mut memberships,
+            Family::Author,
+            Prefix::Author(event.author),
+            &event.event,
+        );
+        push_membership(
+            &mut memberships,
+            Family::Kind,
+            Prefix::Kind(event.kind),
+            &event.event,
+        );
+        for prefix in &event.tags {
+            push_membership(
+                &mut memberships,
+                Family::Tag,
+                Prefix::Tag(prefix.clone()),
+                &event.event,
             );
         }
     }
