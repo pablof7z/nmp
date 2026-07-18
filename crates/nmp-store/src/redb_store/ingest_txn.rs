@@ -15,10 +15,13 @@ use super::schema::{
     persist_err, EventKey, ADDR_INDEX, ADDR_TOMBSTONES, EXPIRATION_INDEX, OUTBOX_DISPLACED,
     OUTBOX_INTENTS, OUTBOX_RECEIPTS, TOMBSTONES,
 };
+#[cfg(feature = "bench-instrumentation")]
+use super::store::BenchmarkDurability;
+use super::store::RedbStore;
 use super::{
     Event, EventId, LocalOrigin, PersistenceError, Provenance, RelayUrl, StoredEvent, Timestamp,
 };
-use redb::{Database, ReadableTable};
+use redb::ReadableTable;
 
 /// The only commit door for a transaction that mutates canonical event state.
 ///
@@ -32,9 +35,18 @@ pub(super) struct GovernedWrite {
 }
 
 impl GovernedWrite {
-    pub(super) fn begin(db: &Database) -> Result<Self, PersistenceError> {
+    pub(super) fn begin(store: &RedbStore) -> Result<Self, PersistenceError> {
+        let write_txn = store.db.begin_write().map_err(persist_err)?;
+        #[cfg(feature = "bench-instrumentation")]
+        let mut write_txn = write_txn;
+        #[cfg(feature = "bench-instrumentation")]
+        if store.benchmark_durability == BenchmarkDurability::NoneThenImmediateCheckpoint {
+            write_txn
+                .set_durability(redb::Durability::None)
+                .map_err(persist_err)?;
+        }
         Ok(Self {
-            write_txn: db.begin_write().map_err(persist_err)?,
+            write_txn,
             postings: PostingsBatch::default(),
         })
     }
@@ -61,10 +73,19 @@ impl GovernedWrite {
     }
 
     pub(super) fn commit(mut self) -> Result<(), PersistenceError> {
+        #[cfg(feature = "bench-instrumentation")]
+        let postings_started = std::time::Instant::now();
         self.postings.flush(&self.write_txn)?;
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::postings_flush(postings_started.elapsed());
         #[cfg(test)]
         crash_if_postings("postings-before-commit");
-        self.write_txn.commit().map_err(persist_err)?;
+        #[cfg(feature = "bench-instrumentation")]
+        let commit_started = std::time::Instant::now();
+        let committed = self.write_txn.commit().map_err(persist_err);
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::commit(commit_started.elapsed());
+        committed?;
         #[cfg(test)]
         crash_if_postings("postings-after-commit");
         Ok(())
