@@ -199,6 +199,7 @@ fn accept_write(signed: &Event, accepted_at: u64) -> AcceptWrite {
         routing: "local-mutation-benchmark".to_owned(),
         sig_state: IntentSigState::Pending,
         accepted_at: Timestamp::from(accepted_at),
+        correlation: None,
     }
 }
 
