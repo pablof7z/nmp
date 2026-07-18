@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Backend-independent storage semantic oracle</title>
+    <link rel="stylesheet" href="../../assets/style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <nav class="topbar">
+        <a href="../../">Planning pages</a>
+        
+      </nav>
+      <section class="hero">
+        <div class="eyebrow">Architecture plan</div>
+        <h1>Backend-independent storage semantic oracle</h1>
+        <p class="summary">Define one deterministic, backend-neutral semantic trace and crash matrix before NMP evaluates another persistent engine.</p>
+        <div class="meta">
+          <span class="pill ready">Ready to implement</span>
+          <span class="pill">90 percent certainty</span>
+        </div>
+      </section>
+      <div class="grid">
+        <div>
+
+          <section class="section">
+            <h2>Very High Level</h2>
+            <p>Keep redb as the production baseline and add a test-only semantic qualification layer, not a backend migration. The oracle will define deterministic operations for relay ingest, duplicate provenance growth, replaceable and addressable conflicts, deletions and pre-target tombstones, expiry, coverage, local pending writes, signing, cancellation, retries, and publication receipts. After every operation it will capture a normalized semantic snapshot, canonical ordered query projections, and a deterministic content digest.
+
+Run the same trace against the in-memory reference implementation and redb. Persistent-backend crash scenarios will reopen the store at declared durability seams and must resolve to an explicitly allowed pre-operation, post-operation, or reconciled state; physical row counts alone will not qualify recovery. The harness will expose a reusable adapter boundary so Fjall, packed LMDB, SQLite, and browser persistence can be assessed without copying expectations or changing production selection.
+
+Document the logical authority split: event-plane facts remain internally atomic; publishing/control obligations remain internally atomic; a split-store implementation must commit control intent first, project deterministically and idempotently, and reconcile before query or transport service. Native and browser engines may differ while satisfying the same oracle. Correct the checked-in benchmark language to say process-accounted write bytes and to mark the Fjall profile and reopen checks as benchmark evidence only.
+
+The PR will close #699 and advance #698. It will not select, introduce, or production-enable a replacement backend.</p>
+          </section>
+          <section class="section">
+            <h2>Existing Rules Or ADRs</h2>
+            <ul><li>AGENTS issue-first discipline is satisfied by epic #698 and child #699 before repository changes.</li><li>VISION section 3.1 and the design record already define Accepted as a logical crash-consistent boundary and allow a control-first replay journal across stores.</li><li>The Noun Gate remains satisfied because the oracle is test/qualification infrastructure, not a new app-facing noun.</li><li>The destructive and lifecycle gates are unchanged; the harness exercises existing typed operations rather than adding bypasses.</li><li>Redb remains the only production baseline, and no candidate backend becomes reachable in production.</li><li>Per-crate tests, architecture gates, and falsifier-honesty checks will run before publication.</li></ul>
+          </section>
+          <section class="section">
+            <h2>Rule Tension And Tightening</h2>
+            <h3>Possible loosening</h3>
+            <ul><li>Retire the historical wording that required event and publishing state to share one physical transaction. Preserve the stronger logical invariant through explicit authority, ordering, idempotency, replay, and startup reconciliation.</li><li>Do not require native and WASM targets to use the same physical engine; require them to pass the same semantic contract.</li></ul>
+            <h3>Possible tightening</h3>
+            <ul><li>A backend may not be called production-qualified from physical row counts, a basic reopen check, or write-byte measurements alone.</li><li>Future backend evaluations must pass the shared semantic trace and crash matrix and publish completed maintenance/compaction accounting before a production migration is proposed.</li></ul>
+          </section>
+          <section class="section">
+            <h2>Alternatives Considered</h2>
+            <ul><li>Port Fjall first: rejected because it would duplicate or discover semantics inside a candidate implementation and risk fitting the contract to one engine.</li><li>Treat MemoryStore tests as the complete oracle: rejected because volatile behavior cannot establish restart, journal replay, exact receipt recovery, or crash ordering.</li><li>Compare physical table row counts after reopen: rejected because equal counts can hide wrong winners, provenance, tombstones, receipt states, order, or bytes.</li><li>Require one database engine everywhere: rejected because portability is a logical-contract problem and browser persistence has different constraints.</li></ul>
+          </section>
+        </div>
+        <aside>
+          <section class="card">
+            <h2>TTS Version</h2>
+            <audio controls preload="metadata" src="https://blossom.primal.net/5d3cbfee5a65980eeb8873530e67dbba3e06fa0ef04475987ac6b3dcfc26f69c.mp3"></audio>
+            <p>Audio-friendly narration generated from the planning payload.</p>
+          </section>
+          <section class="card">
+            <h2>Certainty</h2>
+            <div class="certainty ">90%</div>
+            <p>Ready to implement.</p>
+          </section>
+          <section class="card links">
+            <h2>Links</h2>
+            
+            <a href="https://blossom.primal.net/5d3cbfee5a65980eeb8873530e67dbba3e06fa0ef04475987ac6b3dcfc26f69c.mp3">Open narration</a>
+            <a href="../../docs/plans/storage-semantic-oracle/plan.md">Detailed plan file</a>
+          </section>
+        </aside>
+      </div>
+    </main>
+
+  </body>
+</html>
