@@ -1536,3 +1536,206 @@ mod affected_handle_invalidation_tests {
         assert_eq!(core.discovered_private_relays_rejected, 0);
     }
 }
+
+#[cfg(test)]
+mod coverage_evidence_refresh_tests {
+    use std::{borrow::Cow, sync::Arc};
+
+    use nmp_router::FixtureDirectory;
+    use nmp_store::MemoryStore;
+    use nostr::{Kind, SubscriptionId};
+
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct CapturingRows(Arc<std::sync::Mutex<Vec<Vec<RowDelta>>>>);
+
+    impl RowSink for CapturingRows {
+        fn on_rows(&self, rows: Vec<RowDelta>) {
+            self.0.lock().unwrap().push(rows);
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturingHistory(Arc<std::sync::Mutex<Vec<HistoryBatch>>>);
+
+    impl HistorySink for CapturingHistory {
+        fn on_history(&self, batch: HistoryBatch) {
+            self.0.lock().unwrap().push(batch);
+        }
+    }
+
+    fn pinned_query(relay: &RelayUrl) -> LiveQuery {
+        LiveQuery(
+            nmp_grammar::Demand::new(
+                Filter {
+                    kinds: Some(BTreeSet::from([Kind::TextNote.as_u16()])),
+                    ..Filter::default()
+                },
+                SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+                AccessContext::Public,
+            )
+            .unwrap(),
+        )
+    }
+
+    fn connected_core(
+        relay: &RelayUrl,
+    ) -> (
+        EngineCore<MemoryStore>,
+        TransportRelayHandle,
+        RelaySessionKey,
+    ) {
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let handle = TransportRelayHandle {
+            slot: 7,
+            generation: 1,
+        };
+        let session = RelaySessionKey::public(relay.clone());
+        core.handle(EngineMsg::RelayConnected(handle, session.clone()));
+        core.handle(EngineMsg::RelayInformationResolved(relay.clone(), None));
+        core.handle(EngineMsg::Tick(Timestamp::from(100u64)));
+        (core, handle, session)
+    }
+
+    fn wire_id(effects: &[Effect]) -> String {
+        effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Wire(delta) => delta.ops.iter().find_map(|(_, ops)| {
+                    ops.iter().find_map(|op| match op {
+                        WireOp::Req(id, _) => Some(id.1.to_string()),
+                        WireOp::Close(_) => None,
+                    })
+                }),
+                _ => None,
+            })
+            .expect("subscription opens a wire request")
+    }
+
+    fn eose(
+        core: &mut EngineCore<MemoryStore>,
+        handle: TransportRelayHandle,
+        session: RelaySessionKey,
+        wire_id: String,
+    ) -> Vec<Effect> {
+        core.handle(EngineMsg::Tick(Timestamp::from(101u64)));
+        core.handle(EngineMsg::RelayFrame(
+            handle,
+            session,
+            RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
+                SubscriptionId::new(wire_id),
+            ))),
+        ))
+    }
+
+    #[test]
+    fn eose_refreshes_live_evidence_without_event_index_query() {
+        let relay = RelayUrl::parse("wss://evidence-only-live.example").unwrap();
+        let (mut core, transport, session) = connected_core(&relay);
+        let sink = CapturingRows::default();
+        let opened = core.handle(EngineMsg::Subscribe(
+            pinned_query(&relay),
+            Box::new(sink.clone()),
+        ));
+        let id = opened
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitRows(id, _, _) => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        let wire = wire_id(&opened);
+        sink.0.lock().unwrap().clear();
+        core.projection_store_queries.set(0);
+
+        let effects = eose(&mut core, transport, session, wire);
+
+        assert_eq!(core.projection_store_queries.get(), 0);
+        let (_, deltas, evidence) = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitRows(handle, deltas, evidence) if *handle == id => {
+                    Some((*handle, deltas, evidence))
+                }
+                _ => None,
+            })
+            .expect("coverage advance emits live evidence");
+        assert!(deltas.is_empty());
+        assert_eq!(
+            evidence.sources[0].reconciled_through,
+            Some(Timestamp::from(101u64))
+        );
+        assert!(matches!(sink.0.lock().unwrap().as_slice(), [rows] if rows.is_empty()));
+    }
+
+    #[test]
+    fn eose_does_not_requery_a_complete_history_projection() {
+        let relay = RelayUrl::parse("wss://evidence-only-history.example").unwrap();
+        let (mut core, transport, session) = connected_core(&relay);
+        let sink = CapturingHistory::default();
+        let opened = core.handle(EngineMsg::SubscribeHistory(
+            HistoryQuery::new(pinned_query(&relay), 3, 6),
+            Box::new(sink),
+        ));
+        let id = opened
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitHistory(id, _) => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        let wire = wire_id(&opened);
+        let remembered = core.histories[&id].last_rows.clone();
+        core.history_store_queries.set(0);
+
+        eose(&mut core, transport, session, wire);
+
+        assert_eq!(core.history_store_queries.get(), 0);
+        assert_eq!(core.histories[&id].last_rows, remembered);
+    }
+
+    #[test]
+    fn evidence_only_refresh_falls_back_for_incomplete_projections() {
+        let relay = RelayUrl::parse("wss://evidence-recovery.example").unwrap();
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let live = core.handle(EngineMsg::Subscribe(
+            pinned_query(&relay),
+            Box::new(CapturingRows::default()),
+        ));
+        let live_id = live
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitRows(id, _, _) => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        let history = core.handle(EngineMsg::SubscribeHistory(
+            HistoryQuery::new(pinned_query(&relay), 3, 6),
+            Box::new(CapturingHistory::default()),
+        ));
+        let history_id = history
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitHistory(id, _) => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        core.handles.get_mut(&live_id).unwrap().projection_complete = false;
+        core.histories
+            .get_mut(&history_id)
+            .unwrap()
+            .projection_complete = false;
+        core.projection_store_queries.set(0);
+        core.history_store_queries.set(0);
+
+        let mut effects = Vec::new();
+        core.refresh_all_handle_evidence(&mut effects);
+        core.refresh_all_history_evidence(&mut effects);
+
+        assert_eq!(core.projection_store_queries.get(), 1);
+        assert_eq!(core.history_store_queries.get(), 1);
+        assert!(core.handles[&live_id].projection_complete);
+        assert!(core.histories[&history_id].projection_complete);
+    }
+}

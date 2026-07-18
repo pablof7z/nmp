@@ -955,8 +955,8 @@ impl<S: EventStore> EngineCore<S> {
                 effects.push(Effect::RecordCoverage(key, relay.clone(), interval));
             }
         }
-        self.refresh_all_handles(effects);
-        self.refresh_all_histories(effects);
+        self.refresh_all_handle_evidence(effects);
+        self.refresh_all_history_evidence(effects);
     }
 
     /// Start one unlimited one-shot backlog REQ under a role-separated id.
@@ -1056,6 +1056,17 @@ impl<S: EventStore> EngineCore<S> {
     pub(super) fn refresh_all_handles(&mut self, effects: &mut Vec<Effect>) {
         let ids: Vec<HandleId> = self.handles.keys().copied().collect();
         self.refresh_handles(ids, effects);
+    }
+
+    /// Refresh only acquisition evidence after a coverage-only mutation.
+    /// Coverage cannot change canonical rows, so a complete projection can
+    /// retain its remembered row set and avoid reopening the store's event
+    /// indexes. An incomplete projection still falls back to the full oracle.
+    pub(super) fn refresh_all_handle_evidence(&mut self, effects: &mut Vec<Effect>) {
+        let ids: Vec<HandleId> = self.handles.keys().copied().collect();
+        for id in ids {
+            self.refresh_handle_evidence(id, effects);
+        }
     }
 
     pub(super) fn refresh_handles(
@@ -1520,6 +1531,53 @@ impl<S: EventStore> EngineCore<S> {
         effects.push(Effect::EmitRows(id, delta, evidence));
     }
 
+    fn refresh_handle_evidence(&mut self, id: HandleId, effects: &mut Vec<Effect>) {
+        let Some(state) = self.handles.get(&id) else {
+            return;
+        };
+        if !state.projection_complete {
+            self.refresh_handle(id, effects);
+            return;
+        }
+
+        let evidence = self.handle_evidence_for(id);
+        let Some(state) = self.handles.get_mut(&id) else {
+            return;
+        };
+        if state.last_evidence.as_ref() == Some(&evidence) {
+            return;
+        }
+        state.last_evidence = Some(evidence.clone());
+        state.sink.on_rows(Vec::new());
+        effects.push(Effect::EmitRows(id, Vec::new(), evidence));
+    }
+
+    fn handle_evidence_for(&self, id: HandleId) -> AcquisitionEvidence {
+        let subtree_atoms = self.resolver.subtree_atoms(id);
+        self.handle_evidence_for_atoms(id, &subtree_atoms)
+    }
+
+    fn handle_evidence_for_atoms(
+        &self,
+        id: HandleId,
+        subtree_atoms: &BTreeSet<ContextualAtom>,
+    ) -> AcquisitionEvidence {
+        let auth_status = self.auth_status_map();
+        let evidence_plan = self
+            .handles
+            .get(&id)
+            .and_then(|state| state.acquisition.evidence_plan())
+            .unwrap_or_else(|| self.router.plan());
+        evidence::acquisition_evidence(
+            subtree_atoms,
+            evidence_plan,
+            self.resolver.store(),
+            &self.connected_relays,
+            &auth_status,
+            &self.ever_connected_relays,
+        )
+    }
+
     /// The query's current matching row set (by id) + its
     /// [`AcquisitionEvidence`] -- an internal snapshot `refresh_handle`
     /// diffs against the handle's own remembered `last_rows` to compute the
@@ -1640,20 +1698,7 @@ impl<S: EventStore> EngineCore<S> {
                 by_id.retain(|event_id, _| keep.contains(event_id));
             }
         }
-        let auth_status = self.auth_status_map();
-        let evidence_plan = self
-            .handles
-            .get(&id)
-            .and_then(|state| state.acquisition.evidence_plan())
-            .unwrap_or_else(|| self.router.plan());
-        let evidence = evidence::acquisition_evidence(
-            &subtree_atoms,
-            evidence_plan,
-            self.resolver.store(),
-            &self.connected_relays,
-            &auth_status,
-            &self.ever_connected_relays,
-        );
+        let evidence = self.handle_evidence_for_atoms(id, &subtree_atoms);
         Ok((by_id, evidence))
     }
 }
