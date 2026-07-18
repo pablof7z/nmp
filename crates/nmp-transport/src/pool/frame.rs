@@ -22,6 +22,62 @@ use super::committed_observations::{
 use super::RelayFrame;
 
 #[cfg(feature = "bench-instrumentation")]
+mod diagnostic_preparsed_ceiling {
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    use super::RelayFrame;
+    use nostr::{Event, SubscriptionId};
+
+    #[derive(Default)]
+    struct Cache {
+        subscription_id: Option<SubscriptionId>,
+        events: VecDeque<Arc<Event>>,
+    }
+
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+    static ENABLED: AtomicBool = AtomicBool::new(false);
+
+    fn cache() -> &'static Mutex<Cache> {
+        CACHE.get_or_init(|| Mutex::new(Cache::default()))
+    }
+
+    pub(super) fn configure(subscription_id: Option<SubscriptionId>, events: Vec<Arc<Event>>) {
+        ENABLED.store(
+            subscription_id.is_some() && !events.is_empty(),
+            Ordering::Release,
+        );
+        *cache().lock().expect("diagnostic preparsed cache lock") = Cache {
+            subscription_id,
+            events: events.into(),
+        };
+    }
+
+    pub(super) fn take() -> Option<RelayFrame> {
+        if !ENABLED.load(Ordering::Acquire) {
+            return None;
+        }
+        let mut cache = cache().lock().expect("diagnostic preparsed cache lock");
+        if cache.events.is_empty() {
+            ENABLED.store(false, Ordering::Release);
+            return None;
+        }
+        let event = cache.events.pop_front();
+        let subscription_id = cache.subscription_id.clone();
+        let frame = event
+            .zip(subscription_id)
+            .map(|(event, subscription_id)| RelayFrame::Event {
+                subscription_id,
+                event,
+                observation_candidate: None,
+            });
+        crate::ingest_attribution::diagnostic_preparsed_ceiling_lookup(frame.is_some());
+        frame
+    }
+}
+
+#[cfg(feature = "bench-instrumentation")]
 mod diagnostic_duplicate_ceiling {
     use std::collections::{HashMap, VecDeque};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -110,6 +166,14 @@ pub(crate) fn configure_diagnostic_duplicate_ceiling(capacity: usize, event_payl
     diagnostic_duplicate_ceiling::configure(capacity, event_payload_only);
 }
 
+#[cfg(feature = "bench-instrumentation")]
+pub(crate) fn configure_diagnostic_preparsed_ceiling(
+    subscription_id: Option<nostr::SubscriptionId>,
+    events: Vec<std::sync::Arc<nostr::Event>>,
+) {
+    diagnostic_preparsed_ceiling::configure(subscription_id, events);
+}
+
 /// Convert one inbound `tungstenite::Message` into a [`RelayFrame`].
 /// Returns `None` for message kinds the engine never needs to see as a
 /// frame: `Ping`/`Pong` (keepalive-internal — consumed by the worker's
@@ -157,6 +221,10 @@ pub(super) fn classify_text_with_candidate(
     text: &str,
     observation_candidate: Option<CommittedObservationCandidate>,
 ) -> Option<RelayFrame> {
+    #[cfg(feature = "bench-instrumentation")]
+    if let Some(frame) = diagnostic_preparsed_ceiling::take() {
+        return Some(frame);
+    }
     #[cfg(feature = "bench-instrumentation")]
     let diagnostic_digest = match diagnostic_duplicate_ceiling::lookup(text) {
         Some((_, Some(hit))) => {
