@@ -79,6 +79,6 @@ ready
 
 ## Hosted Artifacts
 
-- Plan page: Generated after publishing.
+- Plan page: https://pablof7z.github.io/nmp/plans/storage-semantic-oracle/
 
 - TTS audio: https://blossom.primal.net/5d3cbfee5a65980eeb8873530e67dbba3e06fa0ef04475987ac6b3dcfc26f69c.mp3
