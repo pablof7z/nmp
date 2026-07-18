@@ -11,8 +11,9 @@
 //!   `nmp-ffi`/`nmp-demo` used to each assemble by hand.
 //! - [`Engine::observe`] -- a live query (and an optional [`Window`]) in, a
 //!   [`Subscription`] streaming [`Frame`]s out.
-//! - [`Engine::publish`] -- a [`WriteIntent`] in, a `Receiver<`[`WriteStatus`]`>`
-//!   out.
+//! - [`Engine::publish`] -- a [`WriteIntent`] in, a receipt stream of
+//!   [`WriteStatus`] out (drained by blocking `recv` or, over the FFI/SDK, an
+//!   awaited pull handle).
 //!
 //! Plus identity, signer, and NIP-42 AUTH-policy lifecycle
 //! ([`Engine::add_account`], [`Engine::remove_account`],
@@ -74,11 +75,25 @@ pub use engine::{
     SignEventRequest,
 };
 pub use error::EngineError;
+
 /// Monotonic count of real NMP-owned OS threads spawned this process (#680
-/// falsifier instrumentation) — see [`nmp_engine::nmp_threads_spawned`]. The
-/// thread-scaling falsifier asserts opening many observations leaves this
-/// delta at 0: an observation is a lightweight `Arc`+waker, never an OS thread.
-pub use nmp_engine::nmp_threads_spawned;
+/// falsifier instrumentation). The thread-scaling falsifier asserts opening
+/// many observations leaves this delta at 0: an observation is a lightweight
+/// `Arc`+waker, never an OS thread. Doc-hidden test instrumentation, not part
+/// of the product surface.
+#[doc(hidden)]
+#[must_use]
+pub fn nmp_threads_spawned() -> u64 {
+    nmp_engine::nmp_threads_spawned()
+}
+// The pull-based async observation surface (#680) is the FFI/SDK delivery
+// mechanism — its app contract is documented in `nmp-ffi`'s own surface
+// snapshot and the Swift/Kotlin SDKs. The documented direct-Rust product
+// surface stays the blocking `Subscription`/`recv()` nouns below; these async
+// twins remain fully usable (nmp-ffi and any direct-Rust app await them) but
+// are doc-hidden so they do not double the facade snapshot with generic
+// auto-trait expansions.
+#[doc(hidden)]
 pub use nmp_engine::runtime::ConcurrentNext;
 #[doc(hidden)]
 pub use nmp_executor::{Reservation as NativeTaskReservation, StartedTask as StartedNativeTask};
@@ -86,9 +101,11 @@ pub use relay_information::{
     RelayInformationCachePolicy, RelayInformationDocument, RelayInformationError,
     RelayInformationFreshness, RelayInformationLimitations, RelayInformationSnapshot,
 };
+#[doc(hidden)]
+pub use subscription::{AsyncDiagnosticsSubscription, AsyncSubscription};
 pub use subscription::{
-    AsyncDiagnosticsSubscription, AsyncSubscription, DiagnosticsSubscription, Frame,
-    ObservationCancel, RequestRowsError, Subscription, Window, WindowContents, WindowHandle,
+    DiagnosticsSubscription, Frame, ObservationCancel, RequestRowsError, Subscription, Window,
+    WindowContents, WindowHandle,
 };
 
 // The grammar an app builds a `LiveQuery`'s `Demand` out of. `Demand`'s
@@ -139,9 +156,22 @@ pub fn admits_network_relay_hint(relay: &nostr::RelayUrl) -> bool {
 pub use nmp_engine::core::ReceiptId;
 pub use nmp_engine::outbox::WriteStatus;
 pub use nmp_engine::runtime::{
-    fifo_channel, AsyncFifoReceiver, FifoReceiver, FifoSender, ReceiptReattachment, ReceiptStream,
-    SignEventCancel, SignEventError, SignEventOperation, SignerRegistration,
+    ReceiptReattachment, ReceiptStream, SignEventCancel, SignEventError, SignEventOperation,
+    SignerRegistration,
 };
+// The receipt/status receiver is delivery mechanism — it was previously an
+// external `std::sync::mpsc::Receiver` (never a documented nmp noun); it is now
+// the engine-owned waker-aware FIFO `FifoReceiver` (blocking `recv` for direct
+// Rust) plus its async `AsyncFifoReceiver` twin. Both stay doc-hidden so the
+// documented product surface keeps its previous shape: `publish` returns a
+// receipt stream you drain, not a new documented type family.
+#[doc(hidden)]
+pub use nmp_engine::runtime::{AsyncFifoReceiver, FifoReceiver};
+// Producer-side FIFO mechanism, used only by protocol modules (e.g. nmp-nip02's
+// follow-action worker) to feed a receipt/status stream — not app product
+// surface, so doc-hidden and kept out of the facade snapshot.
+#[doc(hidden)]
+pub use nmp_engine::runtime::{fifo_channel, FifoSender};
 pub use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 
 // Read outputs `Subscription`/`DiagnosticsSubscription` deliver -- every

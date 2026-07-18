@@ -454,7 +454,9 @@ impl Engine {
     /// Identical demand, validation, windowing, and withdrawal semantics — only
     /// the delivery wakeup differs (a waker, not a dedicated OS thread). This is
     /// what the FFI/SDK observation handles are built on, so opening one costs
-    /// no native thread.
+    /// no native thread. Doc-hidden: it is the FFI/SDK delivery mechanism, not
+    /// the documented direct-Rust product noun (which is blocking [`Self::observe`]).
+    #[doc(hidden)]
     pub fn observe_async(
         &self,
         query: LiveQuery,
@@ -786,6 +788,8 @@ impl Engine {
     }
 
     /// The pull-based async twin of [`Self::observe_diagnostics`] (#680).
+    /// Doc-hidden FFI/SDK delivery mechanism (see [`Self::observe_async`]).
+    #[doc(hidden)]
     pub fn observe_diagnostics_async(&self) -> Result<AsyncDiagnosticsSubscription, EngineError> {
         self.with_handle(|handle| {
             let (diag_handle, snapshots) = handle.observe_diagnostics();

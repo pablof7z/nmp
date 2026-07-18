@@ -197,9 +197,6 @@ pub nmp::EngineError::AuthCapabilityInstanceExhausted
 pub nmp::EngineError::AuthCapabilityRegistryFull
 pub nmp::EngineError::AuthCapabilityRegistryFull::limit: usize
 pub nmp::EngineError::EngineClosed
-pub nmp::EngineError::ExecutorSaturated
-pub nmp::EngineError::ExecutorSaturated::capacity: usize
-pub nmp::EngineError::ExecutorSaturated::component: alloc::string::String
 pub nmp::EngineError::InvalidRelayUrl
 pub nmp::EngineError::InvalidRelayUrl::url: alloc::string::String
 pub nmp::EngineError::InvalidSecretKey
@@ -257,8 +254,6 @@ impl core::panic::unwind_safe::RefUnwindSafe for nmp::RelayInformationCachePolic
 impl core::panic::unwind_safe::UnwindSafe for nmp::RelayInformationCachePolicy
 pub enum nmp::RelayInformationError
 pub nmp::RelayInformationError::CredentialedRelayUrl
-pub nmp::RelayInformationError::ExecutorSaturated
-pub nmp::RelayInformationError::ExecutorSaturated::capacity: usize
 pub nmp::RelayInformationError::Http
 pub nmp::RelayInformationError::Http::reason: alloc::string::String
 pub nmp::RelayInformationError::InvalidDocument
@@ -530,7 +525,7 @@ pub fn nmp::Engine::cancel(&self, nmp_engine::core::ReceiptId) -> core::result::
 pub fn nmp::Engine::new(nmp::EngineConfig) -> core::result::Result<Self, nmp::EngineError>
 pub fn nmp::Engine::observe(&self, nmp_resolver::engine::LiveQuery, core::option::Option<nmp::Window>) -> core::result::Result<nmp::Subscription, nmp::EngineError>
 pub fn nmp::Engine::observe_diagnostics(&self) -> core::result::Result<nmp::DiagnosticsSubscription, nmp::EngineError>
-pub fn nmp::Engine::publish(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<std::sync::mpsc::Receiver<nmp_engine::outbox::WriteStatus>, nmp::EngineError>
+pub fn nmp::Engine::publish(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<nmp_engine::runtime::fifo_channel::FifoReceiver<nmp_engine::outbox::WriteStatus>, nmp::EngineError>
 pub fn nmp::Engine::publish_tracked(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<nmp_engine::runtime::ReceiptStream, nmp::EngineError>
 pub fn nmp::Engine::reattach_receipt(&self, nmp_engine::core::ReceiptId) -> core::result::Result<nmp_engine::runtime::ReceiptReattachment, nmp::EngineError>
 pub async fn nmp::Engine::relay_information(&self, &str, nmp::RelayInformationCachePolicy) -> core::result::Result<nmp::RelayInformationSnapshot, nmp::RelayInformationRequestError>
@@ -556,7 +551,6 @@ pub nmp::EngineConfig::app_relays: alloc::vec::Vec<alloc::string::String>
 pub nmp::EngineConfig::fallback_relays: alloc::vec::Vec<alloc::string::String>
 pub nmp::EngineConfig::indexer_relays: alloc::vec::Vec<alloc::string::String>
 pub nmp::EngineConfig::max_auth_capabilities: usize
-pub nmp::EngineConfig::max_native_tasks: usize
 pub nmp::EngineConfig::max_relays: usize
 pub nmp::EngineConfig::store_path: core::option::Option<alloc::string::String>
 impl core::clone::Clone for nmp::EngineConfig
@@ -21025,49 +21019,6 @@ reexport nmp::Nip46Error => nmp_signer::nip46::Nip46Error
           },
           "name": "ThreadUnavailable",
           "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": {
-                "struct": {
-                  "fields": [
-                    {
-                      "attrs": [],
-                      "inner": {
-                        "struct_field": {
-                          "resolved_path": {
-                            "args": null,
-                            "path": "String",
-                            "resolved_item": {
-                              "path": "alloc::string::String"
-                            }
-                          }
-                        }
-                      },
-                      "name": "component",
-                      "visibility": "default"
-                    },
-                    {
-                      "attrs": [],
-                      "inner": {
-                        "struct_field": {
-                          "primitive": "usize"
-                        }
-                      },
-                      "name": "capacity",
-                      "visibility": "default"
-                    }
-                  ],
-                  "has_stripped_fields": false
-                }
-              }
-            }
-          },
-          "name": "ExecutorSaturated",
-          "visibility": "default"
         }
       ]
     }
@@ -25260,9 +25211,39 @@ reexport nmp::ReceiptReattachment => nmp_engine::runtime::ReceiptReattachment
                               "constraints": []
                             }
                           },
-                          "path": "std::sync::mpsc::Receiver",
+                          "path": "FifoReceiver",
                           "resolved_item": {
-                            "path": "std::sync::mpsc::Receiver"
+                            "definition": {
+                              "attrs": [],
+                              "inner": {
+                                "struct": {
+                                  "generics": {
+                                    "params": [
+                                      {
+                                        "kind": {
+                                          "type": {
+                                            "bounds": [],
+                                            "default": null,
+                                            "is_synthetic": false
+                                          }
+                                        },
+                                        "name": "T"
+                                      }
+                                    ],
+                                    "where_predicates": []
+                                  },
+                                  "kind": {
+                                    "plain": {
+                                      "fields": [],
+                                      "has_stripped_fields": true
+                                    }
+                                  }
+                                }
+                              },
+                              "name": "FifoReceiver",
+                              "visibility": "public"
+                            },
+                            "path": "nmp_engine::runtime::fifo_channel::FifoReceiver"
                           }
                         }
                       }
@@ -25362,9 +25343,12 @@ reexport nmp::ReceiptStream => nmp_engine::runtime::ReceiptStream
                         "constraints": []
                       }
                     },
-                    "path": "std::sync::mpsc::Receiver",
+                    "path": "FifoReceiver",
                     "resolved_item": {
-                      "path": "std::sync::mpsc::Receiver"
+                      "definition": {
+                        "previously_defined": "nmp_engine::runtime::fifo_channel::FifoReceiver"
+                      },
+                      "path": "nmp_engine::runtime::fifo_channel::FifoReceiver"
                     }
                   }
                 }
@@ -25986,33 +25970,6 @@ reexport nmp::SignEventError => nmp_engine::runtime::SignEventError
             }
           },
           "name": "InvalidSignerOutput",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": {
-                "struct": {
-                  "fields": [
-                    {
-                      "attrs": [],
-                      "inner": {
-                        "struct_field": {
-                          "primitive": "usize"
-                        }
-                      },
-                      "name": "capacity",
-                      "visibility": "default"
-                    }
-                  ],
-                  "has_stripped_fields": false
-                }
-              }
-            }
-          },
-          "name": "ExecutorSaturated",
           "visibility": "default"
         },
         {
