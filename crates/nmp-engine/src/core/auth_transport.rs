@@ -1051,6 +1051,8 @@ impl<S: EventStore> EngineCore<S> {
         if events.is_empty() {
             return;
         }
+        #[cfg(feature = "bench-instrumentation")]
+        let phase_started = std::time::Instant::now();
         let relay_list_authors: Vec<_> = events
             .iter()
             .filter_map(|(event, _, _)| {
@@ -1070,19 +1072,22 @@ impl<S: EventStore> EngineCore<S> {
                 })
             })
             .collect();
+        let observed_events = events
+            .into_iter()
+            .map(|(event, observed, _)| (event, observed))
+            .collect();
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::relay_ingest_prelude(phase_started.elapsed());
         // The per-session diagnostics counter (`events_by_session_kind`) is
         // bumped at the frame sites (`on_relay_frame`/`on_relay_frames`),
         // where the exact physical session is still known — a
         // `RelayObserved` carries only the URL, which cannot distinguish
         // access contexts (#8).
-        match self.resolver.ingest_observed_detailed(
-            events
-                .into_iter()
-                .map(|(event, observed, _)| (event, observed))
-                .collect(),
-        ) {
+        match self.resolver.ingest_observed_detailed(observed_events) {
             Err(error) => self.degrade_store(error, effects),
             Ok(ingest) => {
+                #[cfg(feature = "bench-instrumentation")]
+                let phase_started = std::time::Instant::now();
                 let published = publications
                     .into_iter()
                     .zip(ingest.current_after_commit.iter().copied())
@@ -1126,6 +1131,11 @@ impl<S: EventStore> EngineCore<S> {
                     effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
                 }
 
+                #[cfg(feature = "bench-instrumentation")]
+                crate::ingest_attribution::relay_ingest_post_store(phase_started.elapsed());
+                #[cfg(feature = "bench-instrumentation")]
+                let phase_started = std::time::Instant::now();
+
                 // A demand/directory change may alter the capped source plan
                 // and therefore evidence for otherwise-unrelated handles;
                 // keep that path broad. The dominant ordinary-ingest path is
@@ -1142,12 +1152,18 @@ impl<S: EventStore> EngineCore<S> {
                     directory_changed || satisfied_pending,
                     effects,
                 );
+                #[cfg(feature = "bench-instrumentation")]
+                crate::ingest_attribution::relay_ingest_apply_committed(phase_started.elapsed());
+                #[cfg(feature = "bench-instrumentation")]
+                let phase_started = std::time::Instant::now();
                 if !published.is_empty() {
                     effects.push(Effect::UpdateCommittedObservations {
                         invalidated: Vec::new(),
                         published,
                     });
                 }
+                #[cfg(feature = "bench-instrumentation")]
+                crate::ingest_attribution::relay_ingest_effect_build(phase_started.elapsed());
             }
         }
     }
