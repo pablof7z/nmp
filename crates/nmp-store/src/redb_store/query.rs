@@ -1,9 +1,7 @@
 use super::canonical::CanonicalWriteTables;
 #[cfg(test)]
 use super::canonical::{observation_event_key, observation_relay_key};
-use super::schema::{
-    persist_err, EventKey, BY_AUTHOR, BY_CREATED_AT, BY_KIND, BY_TAG, INDEX_CARDINALITY,
-};
+use super::schema::{persist_err, EventKey, INDEX_CARDINALITY};
 #[cfg(test)]
 use super::schema::{
     RelayKey, ADDR_INDEX, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS, EVENT_STORE_META,
@@ -12,10 +10,10 @@ use super::schema::{
     NEXT_EVENT_KEY, NEXT_RELAY_KEY, RELAYS, RELAY_KEYS, RELAY_META, RELAY_REFS,
 };
 #[cfg(test)]
-use super::{address_key_for, binary_event, Database, RelayUrl, StoredEventView, TableDefinition};
+use super::{address_key_for, binary_event, Database, RelayUrl};
 use super::{
-    decode_hex_32, BTreeMap, BTreeSet, Deserialize, Event, EventCursor, EventId, Filter,
-    IndexedMatch, Kind, PersistenceError, PublicKey, Serialize, SingleLetterTag, Timestamp,
+    decode_hex_32, BTreeMap, BTreeSet, Deserialize, Event, EventId, Filter, IndexedMatch, Kind,
+    PersistenceError, PublicKey, Serialize, SingleLetterTag, StoredEventView, Timestamp,
 };
 use redb::ReadableTable;
 #[cfg(test)]
@@ -45,6 +43,7 @@ pub(super) fn expiration_key_upper_bound(ts: Timestamp) -> [u8; 40] {
     key
 }
 
+#[cfg(feature = "bench-instrumentation")]
 pub(super) fn ordered_vec_key(prefix: &[u8], created_at: Timestamp, id: &EventId) -> Vec<u8> {
     let mut key = Vec::with_capacity(prefix.len() + 8 + 32);
     key.extend_from_slice(prefix);
@@ -53,6 +52,7 @@ pub(super) fn ordered_vec_key(prefix: &[u8], created_at: Timestamp, id: &EventId
     key
 }
 
+#[cfg(feature = "bench-instrumentation")]
 pub(super) fn ordered_fixed_key<const N: usize>(
     prefix: &[u8],
     created_at: Timestamp,
@@ -68,77 +68,12 @@ pub(super) fn ordered_fixed_key<const N: usize>(
     key
 }
 
-pub(super) fn ordered_vec_range(prefix: &[u8], since: u64, until: u64) -> (Vec<u8>, Vec<u8>) {
-    let mut lower = Vec::with_capacity(prefix.len() + 40);
-    lower.extend_from_slice(prefix);
-    lower.extend_from_slice(&since.to_be_bytes());
-    lower.extend_from_slice(&[0; 32]);
-    let mut upper = Vec::with_capacity(prefix.len() + 40);
-    upper.extend_from_slice(prefix);
-    upper.extend_from_slice(&until.to_be_bytes());
-    upper.extend_from_slice(&[u8::MAX; 32]);
-    (lower, upper)
-}
-
-pub(super) fn ordered_fixed_range<const N: usize>(
-    prefix: &[u8],
-    since: u64,
-    until: u64,
-) -> ([u8; N], [u8; N]) {
-    assert_eq!(prefix.len() + 40, N);
-    let mut lower = [0; N];
-    lower[..prefix.len()].copy_from_slice(prefix);
-    lower[prefix.len()..prefix.len() + 8].copy_from_slice(&since.to_be_bytes());
-    let mut upper = [u8::MAX; N];
-    upper[..prefix.len()].copy_from_slice(prefix);
-    upper[prefix.len()..prefix.len() + 8].copy_from_slice(&until.to_be_bytes());
-    (lower, upper)
-}
-
-/// Exact ordered range for a bounded page. `exclusive_upper` means the upper
-/// key is the caller's exact cursor rather than the filter's inclusive
-/// `until` ceiling. Because ordered ids are inverted, keys below that cursor
-/// are exactly `created_at < t || (created_at == t && id > cursor.id)`.
-pub(super) fn ordered_vec_page_range(
-    prefix: &[u8],
-    since: u64,
-    until: u64,
-    before: Option<EventCursor>,
-) -> Option<(Vec<u8>, Vec<u8>, bool)> {
-    let (lower, filter_upper) = ordered_vec_range(prefix, since, until);
-    match before {
-        Some(before) if before.created_at.as_secs() < since => None,
-        Some(before) if before.created_at.as_secs() <= until => Some((
-            lower,
-            ordered_vec_key(prefix, before.created_at, &before.event_id),
-            true,
-        )),
-        _ => Some((lower, filter_upper, false)),
-    }
-}
-
-pub(super) fn ordered_fixed_page_range<const N: usize>(
-    prefix: &[u8],
-    since: u64,
-    until: u64,
-    before: Option<EventCursor>,
-) -> Option<([u8; N], [u8; N], bool)> {
-    let (lower, filter_upper) = ordered_fixed_range(prefix, since, until);
-    match before {
-        Some(before) if before.created_at.as_secs() < since => None,
-        Some(before) if before.created_at.as_secs() <= until => Some((
-            lower,
-            ordered_fixed_key(prefix, before.created_at, &before.event_id),
-            true,
-        )),
-        _ => Some((lower, filter_upper, false)),
-    }
-}
-
+#[cfg(feature = "bench-instrumentation")]
 pub(super) fn created_at_key(event: &Event) -> [u8; 40] {
     ordered_fixed_key(&[], event.created_at, &event.id)
 }
 
+#[cfg(feature = "bench-instrumentation")]
 pub(super) fn by_author_key(event: &Event) -> [u8; 72] {
     ordered_fixed_key(event.pubkey.as_bytes(), event.created_at, &event.id)
 }
@@ -147,6 +82,7 @@ pub(super) fn by_author_prefix(author: &PublicKey) -> Vec<u8> {
     author.as_bytes().to_vec()
 }
 
+#[cfg(feature = "bench-instrumentation")]
 pub(super) fn by_kind_key(event: &Event) -> [u8; 42] {
     ordered_fixed_key(
         &event.kind.as_u16().to_be_bytes(),
@@ -232,6 +168,7 @@ pub(super) fn tag_index_prefix(tag: SingleLetterTag, value: &str) -> Vec<u8> {
     key
 }
 
+#[cfg(feature = "bench-instrumentation")]
 pub(super) fn tag_index_key(
     tag: SingleLetterTag,
     value: &str,
@@ -241,7 +178,6 @@ pub(super) fn tag_index_key(
     ordered_vec_key(&tag_index_prefix(tag, value), created_at, id)
 }
 
-#[cfg(test)]
 pub(super) fn add_event_cardinalities(
     counts: &mut BTreeMap<Vec<u8>, u64>,
     sample_key: &[u8; 32],
@@ -269,150 +205,31 @@ pub(super) fn add_event_cardinalities(
     }
 }
 
-pub(super) fn count_fixed_ordered_index_prefixes<const N: usize>(
-    counts: &mut BTreeMap<Vec<u8>, u64>,
-    index: &redb::Table<'_, &[u8; N], EventKey>,
-    namespace: u8,
-    sample_key: &[u8; 32],
-) -> Result<(), redb::StorageError> {
-    for entry in index.iter()? {
-        let (key, _event_key) = entry?;
-        let key = key.value();
-        if !event_is_cardinality_sample(sample_key, &ordered_index_event_id(key)) {
-            continue;
-        }
-        let prefix_len = key
-            .len()
-            .checked_sub(40)
-            .expect("redb: ordered index key carries created_at and id");
-        let count = counts
-            .entry(cardinality_key(namespace, &key[..prefix_len]))
-            .or_default();
-        *count = count
-            .checked_add(1)
-            .expect("ordered index cardinality fits in u64");
-    }
-    Ok(())
-}
-
-pub(super) fn count_variable_ordered_index_prefixes(
-    counts: &mut BTreeMap<Vec<u8>, u64>,
-    index: &redb::Table<'_, &[u8], EventKey>,
-    namespace: u8,
-    sample_key: &[u8; 32],
-) -> Result<(), redb::StorageError> {
-    for entry in index.iter()? {
-        let (key, _event_key) = entry?;
-        let key = key.value();
-        if !event_is_cardinality_sample(sample_key, &ordered_index_event_id(key)) {
-            continue;
-        }
-        let prefix_len = key
-            .len()
-            .checked_sub(40)
-            .expect("redb: ordered index key carries created_at and id");
-        let count = counts
-            .entry(cardinality_key(namespace, &key[..prefix_len]))
-            .or_default();
-        *count = count
-            .checked_add(1)
-            .expect("ordered index cardinality fits in u64");
-    }
-    Ok(())
-}
-
-/// Rebuild the independently versioned cardinality sidecar by counting
-/// ordered index keys only. No canonical event value is dereferenced. The
-/// caller publishes the marker in the same transaction, so a crash exposes
-/// either the prior complete sidecar or the fully rebuilt one.
-pub(super) fn rebuild_index_cardinality(
-    by_created_at: &redb::Table<'_, &[u8; 40], EventKey>,
-    by_author: &redb::Table<'_, &[u8; 72], EventKey>,
-    by_kind: &redb::Table<'_, &[u8; 42], EventKey>,
-    by_tag: &redb::Table<'_, &[u8], EventKey>,
+pub(super) fn rebuild_index_cardinality_from_events(
+    events: &redb::Table<'_, EventKey, &[u8]>,
     cardinality: &mut redb::Table<'_, &[u8], u64>,
     sample_key: &[u8; 32],
 ) -> Result<(), redb::StorageError> {
-    let old_keys = cardinality
+    let mut counts = BTreeMap::new();
+    for row in events.iter()? {
+        let (_event_key, value) = row?;
+        let event = StoredEventView::from_trusted(value.value())
+            .expect("redb: canonical event remains valid")
+            .materialize_event()
+            .expect("redb: canonical event materializes");
+        add_event_cardinalities(&mut counts, sample_key, &event);
+    }
+    let existing: Vec<Vec<u8>> = cardinality
         .iter()?
-        .map(|entry| entry.map(|(key, _value)| key.value().to_vec()))
-        .collect::<Result<Vec<_>, _>>()?;
-    for key in old_keys {
+        .map(|entry| entry.map(|(key, _)| key.value().to_vec()))
+        .collect::<Result<_, _>>()?;
+    for key in existing {
         cardinality.remove(key.as_slice())?;
     }
-
-    let mut counts = BTreeMap::new();
-    count_fixed_ordered_index_prefixes(&mut counts, by_created_at, CARDINALITY_GLOBAL, sample_key)?;
-    count_fixed_ordered_index_prefixes(&mut counts, by_author, CARDINALITY_AUTHOR, sample_key)?;
-    count_fixed_ordered_index_prefixes(&mut counts, by_kind, CARDINALITY_KIND, sample_key)?;
-    count_variable_ordered_index_prefixes(&mut counts, by_tag, CARDINALITY_TAG, sample_key)?;
     for (key, count) in counts {
         cardinality.insert(key.as_slice(), count)?;
     }
     Ok(())
-}
-
-pub(super) fn ordered_index_event_id(key: &[u8]) -> EventId {
-    let id_start = key
-        .len()
-        .checked_sub(32)
-        .expect("redb: tag index key is at least 32 bytes");
-    let mut id = [0u8; 32];
-    for (dst, encoded) in id.iter_mut().zip(&key[id_start..]) {
-        *dst = !encoded;
-    }
-    EventId::from_byte_array(id)
-}
-
-pub(super) fn ordered_index_created_at(key: &[u8]) -> u64 {
-    let timestamp_start = key
-        .len()
-        .checked_sub(40)
-        .expect("redb: ordered index key is at least 40 bytes");
-    u64::from_be_bytes(
-        key[timestamp_start..timestamp_start + 8]
-            .try_into()
-            .expect("timestamp slice is eight bytes"),
-    )
-}
-
-/// Test-only raw-table audit for v6 event/relay surrogate integrity. Every
-/// governed crash/reopen proof calls this directly, without going through
-/// query paths that could hide a missing or orphan pointer.
-#[cfg(test)]
-pub(super) fn fixed_ordered_rows<const N: usize>(
-    read_txn: &redb::ReadTransaction,
-    definition: TableDefinition<&[u8; N], EventKey>,
-) -> BTreeSet<(Vec<u8>, EventKey)> {
-    let index = read_txn
-        .open_table(definition)
-        .expect("audit fixed ordered index");
-    index
-        .iter()
-        .expect("iterate fixed ordered index")
-        .map(|entry| {
-            let (encoded_key, event_key) = entry.expect("read fixed ordered index");
-            (encoded_key.value().to_vec(), event_key.value())
-        })
-        .collect()
-}
-
-#[cfg(test)]
-pub(super) fn variable_ordered_rows(
-    read_txn: &redb::ReadTransaction,
-    definition: TableDefinition<&[u8], EventKey>,
-) -> BTreeSet<(Vec<u8>, EventKey)> {
-    let index = read_txn
-        .open_table(definition)
-        .expect("audit variable ordered index");
-    index
-        .iter()
-        .expect("iterate variable ordered index")
-        .map(|entry| {
-            let (encoded_key, event_key) = entry.expect("read variable ordered index");
-            (encoded_key.value().to_vec(), event_key.value())
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -573,28 +390,11 @@ pub(super) fn assert_canonical_integrity(db: &Database) {
         assert!(next > *max_key, "relay allocator must not reuse keys");
     }
 
-    let mut expected_created = BTreeSet::new();
-    let mut expected_author = BTreeSet::new();
-    let mut expected_kind = BTreeSet::new();
-    let mut expected_tag = BTreeSet::new();
     let mut expected_address = BTreeSet::new();
     let mut expected_expiration = BTreeSet::new();
     let mut expected_cardinality = BTreeMap::new();
     for (&event_key, event) in &canonical {
         add_event_cardinalities(&mut expected_cardinality, &cardinality_sample_key, event);
-        expected_created.insert((created_at_key(event).to_vec(), event_key));
-        expected_author.insert((by_author_key(event).to_vec(), event_key));
-        expected_kind.insert((by_kind_key(event).to_vec(), event_key));
-        for tag in event.tags.iter() {
-            let (Some(single_letter), Some(value)) = (tag.single_letter_tag(), tag.content())
-            else {
-                continue;
-            };
-            expected_tag.insert((
-                tag_index_key(single_letter, value, event.created_at, &event.id),
-                event_key,
-            ));
-        }
         if let Some(address) = address_key_for(event) {
             expected_address.insert((address.to_redb_key(), event_key));
         }
@@ -602,13 +402,7 @@ pub(super) fn assert_canonical_integrity(db: &Database) {
             expected_expiration.insert((expiration_key(timestamp, &event.id), event_key));
         }
     }
-    assert_eq!(
-        fixed_ordered_rows(&read_txn, BY_CREATED_AT),
-        expected_created
-    );
-    assert_eq!(fixed_ordered_rows(&read_txn, BY_AUTHOR), expected_author);
-    assert_eq!(fixed_ordered_rows(&read_txn, BY_KIND), expected_kind);
-    assert_eq!(variable_ordered_rows(&read_txn, BY_TAG), expected_tag);
+    super::postings_store::assert_packed_integrity(&read_txn, &canonical);
     let actual_cardinality = cardinality
         .iter()
         .expect("iterate audit cardinality")
@@ -646,133 +440,6 @@ pub(super) fn assert_canonical_integrity(db: &Database) {
     assert_eq!(actual_expiration, expected_expiration);
 }
 
-pub(super) struct VariableOrderedCursor {
-    pub(super) entries: std::iter::Rev<redb::Range<'static, &'static [u8], EventKey>>,
-}
-
-impl VariableOrderedCursor {
-    pub(super) fn new(
-        table: &redb::ReadOnlyTable<&[u8], EventKey>,
-        prefix: &[u8],
-        since: u64,
-        until: u64,
-        before: Option<EventCursor>,
-    ) -> Result<Option<Self>, PersistenceError> {
-        let Some((lower, upper, exclusive_upper)) =
-            ordered_vec_page_range(prefix, since, until, before)
-        else {
-            return Ok(None);
-        };
-        let entries = if exclusive_upper {
-            table
-                .range(lower.as_slice()..upper.as_slice())
-                .map_err(persist_err)?
-        } else {
-            table
-                .range(lower.as_slice()..=upper.as_slice())
-                .map_err(persist_err)?
-        };
-        Ok(Some(Self {
-            entries: entries.rev(),
-        }))
-    }
-
-    pub(super) fn next_head(
-        &mut self,
-        cursor: usize,
-    ) -> Result<Option<OrderedHead>, PersistenceError> {
-        Ok(match self.entries.next() {
-            Some(entry) => {
-                let (key, value) = entry.map_err(persist_err)?;
-                let key = key.value();
-                Some(OrderedHead {
-                    created_at: ordered_index_created_at(key),
-                    id: ordered_index_event_id(key),
-                    event_key: value.value(),
-                    cursor,
-                })
-            }
-            None => None,
-        })
-    }
-}
-
-pub(super) struct FixedOrderedCursor<const N: usize> {
-    pub(super) entries: std::iter::Rev<redb::Range<'static, &'static [u8; N], EventKey>>,
-}
-
-impl<const N: usize> FixedOrderedCursor<N> {
-    pub(super) fn new(
-        table: &redb::ReadOnlyTable<&[u8; N], EventKey>,
-        prefix: &[u8],
-        since: u64,
-        until: u64,
-        before: Option<EventCursor>,
-    ) -> Result<Option<Self>, PersistenceError> {
-        let Some((lower, upper, exclusive_upper)) =
-            ordered_fixed_page_range(prefix, since, until, before)
-        else {
-            return Ok(None);
-        };
-        let entries = if exclusive_upper {
-            table
-                .range::<&[u8; N]>(&lower..&upper)
-                .map_err(persist_err)?
-        } else {
-            table
-                .range::<&[u8; N]>(&lower..=&upper)
-                .map_err(persist_err)?
-        };
-        Ok(Some(Self {
-            entries: entries.rev(),
-        }))
-    }
-
-    pub(super) fn next_head(
-        &mut self,
-        cursor: usize,
-    ) -> Result<Option<OrderedHead>, PersistenceError> {
-        Ok(match self.entries.next() {
-            Some(entry) => {
-                let (key, value) = entry.map_err(persist_err)?;
-                let key = key.value();
-                Some(OrderedHead {
-                    created_at: ordered_index_created_at(key),
-                    id: ordered_index_event_id(key),
-                    event_key: value.value(),
-                    cursor,
-                })
-            }
-            None => None,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct OrderedHead {
-    pub(super) created_at: u64,
-    pub(super) id: EventId,
-    pub(super) event_key: EventKey,
-    pub(super) cursor: usize,
-}
-
-impl Ord for OrderedHead {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.created_at
-            .cmp(&other.created_at)
-            // Canonical ordering is id ascending at equal timestamps; a
-            // BinaryHeap pops the greatest item, so invert only this tie.
-            .then_with(|| other.id.cmp(&self.id))
-            .then_with(|| self.cursor.cmp(&other.cursor))
-    }
-}
-
-impl PartialOrd for OrderedHead {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum OrderedIndex {
     Global,
@@ -806,13 +473,6 @@ pub(super) struct OrderedPlan {
     pub(super) index: OrderedIndex,
     pub(super) prefixes: Vec<Vec<u8>>,
     pub(super) estimated_rows: u64,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(super) struct OrderedWindow {
-    pub(super) since: u64,
-    pub(super) until: u64,
-    pub(super) before: Option<EventCursor>,
 }
 
 pub(super) fn cardinality_of(
@@ -896,6 +556,7 @@ pub(super) fn plan_ordered_query(
         .expect("global ordered query plan always exists"))
 }
 
+#[cfg(feature = "bench-instrumentation")]
 pub(super) fn insert_tag_index_rows(
     by_tag: &mut redb::Table<'_, &[u8], EventKey>,
     event: &Event,
@@ -911,65 +572,12 @@ pub(super) fn insert_tag_index_rows(
     Ok(())
 }
 
-pub(super) fn remove_tag_index_rows(
-    by_tag: &mut redb::Table<'_, &[u8], EventKey>,
-    event: &Event,
-) -> Result<(), redb::StorageError> {
-    for tag in event.tags.iter() {
-        let (Some(single_letter), Some(value)) = (tag.single_letter_tag(), tag.content()) else {
-            continue;
-        };
-        let key = tag_index_key(single_letter, value, event.created_at, &event.id);
-        by_tag.remove(key.as_slice())?;
-    }
-    Ok(())
-}
-
-/// The four physical query indexes are one mutation unit. Keeping their
-/// tables bundled makes every governed writer go through the same
-/// insert/remove doors that also maintain prefix cardinalities.
-pub(super) struct QueryIndexWriteTables<'txn> {
-    pub(super) by_created_at: redb::Table<'txn, &'static [u8; 40], EventKey>,
-    pub(super) by_author: redb::Table<'txn, &'static [u8; 72], EventKey>,
-    pub(super) by_kind: redb::Table<'txn, &'static [u8; 42], EventKey>,
-    pub(super) by_tag: redb::Table<'txn, &'static [u8], EventKey>,
-}
-
-impl<'txn> QueryIndexWriteTables<'txn> {
-    pub(super) fn open(write_txn: &'txn redb::WriteTransaction) -> Result<Self, PersistenceError> {
-        Ok(Self {
-            by_created_at: write_txn.open_table(BY_CREATED_AT).map_err(persist_err)?,
-            by_author: write_txn.open_table(BY_AUTHOR).map_err(persist_err)?,
-            by_kind: write_txn.open_table(BY_KIND).map_err(persist_err)?,
-            by_tag: write_txn.open_table(BY_TAG).map_err(persist_err)?,
-        })
-    }
-}
-
-pub(super) fn insert_query_index_rows(
+pub(super) fn insert_query_cardinalities(
     canonical: &mut CanonicalWriteTables<'_>,
-    indexes: &mut QueryIndexWriteTables<'_>,
     event: &Event,
-    event_key: EventKey,
 ) -> Result<(), PersistenceError> {
     #[cfg(feature = "bench-instrumentation")]
     let started = std::time::Instant::now();
-    let created = created_at_key(event);
-    let author = by_author_key(event);
-    let kind = by_kind_key(event);
-    indexes
-        .by_created_at
-        .insert(&created, event_key)
-        .map_err(persist_err)?;
-    indexes
-        .by_author
-        .insert(&author, event_key)
-        .map_err(persist_err)?;
-    indexes
-        .by_kind
-        .insert(&kind, event_key)
-        .map_err(persist_err)?;
-    insert_tag_index_rows(&mut indexes.by_tag, event, event_key).map_err(persist_err)?;
     if event_is_cardinality_sample(&canonical.cardinality_sample_key, &event.id) {
         canonical.adjust_cardinality(global_cardinality_key(), 1)?;
         canonical.adjust_cardinality(author_cardinality_key(&event.pubkey), 1)?;
@@ -991,21 +599,10 @@ pub(super) fn insert_query_index_rows(
     Ok(())
 }
 
-pub(super) fn remove_query_index_rows(
+pub(super) fn remove_query_cardinalities(
     canonical: &mut CanonicalWriteTables<'_>,
-    indexes: &mut QueryIndexWriteTables<'_>,
     event: &Event,
 ) -> Result<(), PersistenceError> {
-    let created = created_at_key(event);
-    let author = by_author_key(event);
-    let kind = by_kind_key(event);
-    indexes
-        .by_created_at
-        .remove(&created)
-        .map_err(persist_err)?;
-    indexes.by_author.remove(&author).map_err(persist_err)?;
-    indexes.by_kind.remove(&kind).map_err(persist_err)?;
-    remove_tag_index_rows(&mut indexes.by_tag, event).map_err(persist_err)?;
     if event_is_cardinality_sample(&canonical.cardinality_sample_key, &event.id) {
         canonical.adjust_cardinality(global_cardinality_key(), -1)?;
         canonical.adjust_cardinality(author_cardinality_key(&event.pubkey), -1)?;

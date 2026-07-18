@@ -8,7 +8,7 @@
 use super::canonical::CanonicalWriteTables;
 use super::outbox::{OUTBOX_KIND5_CLAIMS, OUTBOX_SUPPRESS_BY_ADDR, OUTBOX_SUPPRESS_BY_ID};
 use super::postings_store::PostingsBatch;
-use super::query::{insert_query_index_rows, remove_query_index_rows, QueryIndexWriteTables};
+use super::query::{insert_query_cardinalities, remove_query_cardinalities};
 use super::schema::{
     persist_err, EventKey, ADDR_INDEX, ADDR_TOMBSTONES, EXPIRATION_INDEX, OUTBOX_DISPLACED,
     OUTBOX_INTENTS, OUTBOX_RECEIPTS, TOMBSTONES,
@@ -140,7 +140,6 @@ pub(super) struct RedbIngestTxn<'txn, 'batch> {
     pub(super) tombstones: redb::Table<'txn, &'static str, &'static str>,
     pub(super) addr_tombstones: redb::Table<'txn, &'static str, &'static str>,
     pub(super) expiration_index: redb::Table<'txn, &'static [u8; 40], EventKey>,
-    pub(super) indexes: QueryIndexWriteTables<'txn>,
     pub(super) outbox_intents: redb::Table<'txn, &'static str, &'static str>,
     pub(super) outbox_receipts: redb::Table<'txn, &'static str, &'static str>,
     pub(super) outbox_displaced: redb::Table<'txn, &'static str, &'static [u8]>,
@@ -163,7 +162,6 @@ impl<'txn, 'batch> RedbIngestTxn<'txn, 'batch> {
             expiration_index: write_txn
                 .open_table(EXPIRATION_INDEX)
                 .map_err(persist_err)?,
-            indexes: QueryIndexWriteTables::open(write_txn)?,
             outbox_intents: write_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?,
             outbox_receipts: write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?,
             outbox_displaced: write_txn
@@ -237,13 +235,13 @@ impl GovernedIngestTxn for RedbIngestTxn<'_, '_> {
     }
 
     fn insert_indexes(&mut self, event: &Event, key: EventKey) -> Result<(), PersistenceError> {
-        insert_query_index_rows(&mut self.canonical, &mut self.indexes, event, key)?;
+        insert_query_cardinalities(&mut self.canonical, event)?;
         self.postings.insert(event, key);
         Ok(())
     }
 
     fn remove_indexes(&mut self, event: &Event, key: EventKey) -> Result<(), PersistenceError> {
-        remove_query_index_rows(&mut self.canonical, &mut self.indexes, event)?;
+        remove_query_cardinalities(&mut self.canonical, event)?;
         self.postings.remove(key);
         Ok(())
     }

@@ -9,7 +9,11 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet};
 
 use redb::ReadableTable;
+#[cfg(test)]
+use redb::ReadableTableMetadata;
 
+#[cfg(test)]
+use super::postings::validate_run_metas;
 use super::postings::{
     encode_run, merge_dead_blocks, shard_for, DeadKeys, DictionaryView, Family, Membership,
     PostingCursor, Prefix, RunEvent, RunMeta, SegmentView, MAX_DEATH_BLOCKS,
@@ -24,6 +28,140 @@ use super::{Event, EventCursor, EventId, PersistenceError, StoredEventView};
 
 const RUN_FAN_IN: usize = 8;
 const MIGRATION_RUN_EVENTS: usize = 8_192;
+
+#[cfg(test)]
+pub(super) fn assert_packed_integrity(
+    read_txn: &redb::ReadTransaction,
+    canonical: &BTreeMap<EventKey, Event>,
+) {
+    let run_meta = read_txn
+        .open_table(POSTINGS_RUN_META)
+        .expect("audit packed run metadata");
+    let dictionaries = read_txn
+        .open_table(POSTINGS_DICTIONARIES)
+        .expect("audit packed dictionaries");
+    let segments = read_txn
+        .open_table(POSTINGS_SEGMENTS)
+        .expect("audit packed segments");
+    let deaths = read_txn
+        .open_table(POSTINGS_DEAD_KEYS)
+        .expect("audit packed deaths");
+    let by_min = read_txn
+        .open_table(POSTINGS_RUN_BY_MIN)
+        .expect("audit packed run ranges");
+    let meta = read_txn
+        .open_table(POSTINGS_META)
+        .expect("audit packed metadata");
+    assert_eq!(
+        meta.get(POSTINGS_READY)
+            .expect("audit packed readiness")
+            .expect("packed readiness exists")
+            .value(),
+        1
+    );
+
+    let metas: Vec<_> = run_meta
+        .iter()
+        .expect("iterate packed runs")
+        .map(|row| {
+            let (run_id, value) = row.expect("read packed run");
+            let decoded = RunMeta::decode(value.value()).expect("decode packed run metadata");
+            assert_eq!(run_id.value(), decoded.run_id);
+            decoded
+        })
+        .collect();
+    validate_run_metas(&metas).expect("packed run ranges are valid");
+    assert_eq!(
+        by_min.len().expect("count packed run ranges"),
+        metas.len() as u64
+    );
+    assert_eq!(
+        dictionaries.len().expect("count packed dictionaries"),
+        metas.len() as u64
+    );
+
+    let mut actual = Vec::new();
+    let mut seen_segments = 0u64;
+    for run in &metas {
+        assert_eq!(
+            by_min
+                .get(run.min_event_key)
+                .expect("audit packed run range")
+                .expect("packed run range exists")
+                .value(),
+            run.run_id
+        );
+        let dictionary_bytes = dictionaries
+            .get(run.run_id)
+            .expect("audit packed dictionary")
+            .expect("packed dictionary exists");
+        let dictionary = DictionaryView::parse(dictionary_bytes.value())
+            .and_then(DictionaryView::validate)
+            .expect("packed dictionary is valid");
+        let mut blocks = Vec::new();
+        for level in 0..MAX_DEATH_BLOCKS {
+            let key = death_key(run.run_id, level);
+            if let Some(value) = deaths.get(key.as_slice()).expect("audit death block") {
+                blocks.push(DeadKeys::decode(value.value()).expect("decode death block"));
+            }
+        }
+        let dead = merge_dead_blocks(&blocks).expect("merge death blocks");
+        let mut live_keys = BTreeSet::new();
+        for family in Family::ALL {
+            for shard in 0..=super::postings::SHARD_MASK {
+                let key = segment_key(family, shard, run.run_id);
+                let Some(value) = segments.get(key.as_slice()).expect("audit packed segment")
+                else {
+                    continue;
+                };
+                seen_segments += 1;
+                let segment = SegmentView::parse(value.value()).expect("parse packed segment");
+                segment
+                    .validate(dictionary)
+                    .expect("validate packed segment");
+                for membership in segment
+                    .memberships(dictionary)
+                    .expect("decode packed memberships")
+                {
+                    if dead
+                        .as_ref()
+                        .is_some_and(|keys| keys.contains(membership.event.event_key))
+                    {
+                        continue;
+                    }
+                    live_keys.insert(membership.event.event_key);
+                    actual.push(membership_tuple(membership));
+                }
+            }
+        }
+        assert_eq!(live_keys.len() as u64, run.live_events);
+    }
+    assert_eq!(
+        seen_segments,
+        segments.len().expect("count packed segments"),
+        "every packed segment belongs to a published run"
+    );
+
+    let mut expected: Vec<_> = memberships_for_events(canonical)
+        .into_iter()
+        .map(membership_tuple)
+        .collect();
+    actual.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(actual, expected);
+}
+
+#[cfg(test)]
+fn membership_tuple(membership: Membership) -> (u8, u8, Vec<u8>, u64, [u8; 32], EventKey) {
+    (
+        membership.family as u8,
+        membership.shard,
+        membership.prefix.as_bytes().to_vec(),
+        membership.event.created_at,
+        membership.event.id,
+        membership.event.event_key,
+    )
+}
 
 #[derive(Default)]
 pub(super) struct PostingsBatch {

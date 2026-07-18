@@ -5,11 +5,7 @@ use super::outbox::{
 };
 use super::postings::Family;
 use super::postings_store::{rebuild_from_canonical, scan_packed, PackedScan};
-use super::query::{
-    ordered_fixed_page_range, ordered_index_event_id, ordered_vec_page_range,
-    rebuild_index_cardinality, FixedOrderedCursor, OrderedIndex, OrderedPlan, OrderedWindow,
-    VariableOrderedCursor,
-};
+use super::query::{rebuild_index_cardinality_from_events, OrderedIndex, OrderedPlan};
 use super::schema::{
     persist_err, EventKey, RelayKey, ADDR_INDEX, ADDR_TOMBSTONES, BY_AUTHOR, BY_CREATED_AT,
     BY_KIND, BY_TAG, COVERAGE, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS,
@@ -31,9 +27,9 @@ use super::AtomicU8;
 #[cfg(any(test, feature = "bench-instrumentation"))]
 use super::Ordering;
 use super::{
-    binary_event, open_and_register, reset_store, BTreeMap, BTreeSet, BinaryHeap, CoverageKey,
-    Database, EventCursor, EventId, Filter, HashMap, LaneKey, LaneState, OpenStoreRegistration,
-    Path, PersistenceError, PreparedFilter, Provenance, RecoveredLane, RegisteredOpen, RelayUrl,
+    binary_event, open_and_register, reset_store, BTreeMap, BTreeSet, CoverageKey, Database,
+    EventCursor, EventId, Filter, HashMap, LaneKey, LaneState, OpenStoreRegistration, Path,
+    PersistenceError, PreparedFilter, Provenance, RecoveredLane, RegisteredOpen, RelayUrl,
     StoredEvent, StoredEventView, Timestamp,
 };
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableHandle};
@@ -242,22 +238,22 @@ impl RedbStore {
                             }
                         };
                         drop(cardinality_sample_meta);
-                        let by_created_at = write_txn.open_table(BY_CREATED_AT)?;
-                        let by_author = write_txn.open_table(BY_AUTHOR)?;
-                        let by_kind = write_txn.open_table(BY_KIND)?;
-                        let by_tag = write_txn.open_table(BY_TAG)?;
+                        let events = write_txn.open_table(EVENTS)?;
                         let mut cardinality = write_txn.open_table(INDEX_CARDINALITY)?;
-                        rebuild_index_cardinality(
-                            &by_created_at,
-                            &by_author,
-                            &by_kind,
-                            &by_tag,
+                        rebuild_index_cardinality_from_events(
+                            &events,
                             &mut cardinality,
                             &sample_key,
                         )?;
                         let mut cardinality_meta = write_txn.open_table(INDEX_CARDINALITY_META)?;
                         cardinality_meta
                             .insert(INDEX_CARDINALITY_VERSION_KEY, INDEX_CARDINALITY_VERSION)?;
+                    }
+                    if needs_schema_migration {
+                        write_txn.delete_table(BY_CREATED_AT)?;
+                        write_txn.delete_table(BY_AUTHOR)?;
+                        write_txn.delete_table(BY_KIND)?;
+                        write_txn.delete_table(BY_TAG)?;
                     }
                     if pending_ephemeral > 0 {
                         let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS)?;
@@ -298,10 +294,6 @@ impl RedbStore {
                 write_txn.open_table(TOMBSTONES)?;
                 write_txn.open_table(ADDR_TOMBSTONES)?;
                 write_txn.open_table(EXPIRATION_INDEX)?;
-                write_txn.open_table(BY_CREATED_AT)?;
-                write_txn.open_table(BY_AUTHOR)?;
-                write_txn.open_table(BY_KIND)?;
-                write_txn.open_table(BY_TAG)?;
                 write_txn.open_table(POSTINGS_SEGMENTS)?;
                 write_txn.open_table(POSTINGS_DICTIONARIES)?;
                 write_txn.open_table(POSTINGS_RUN_META)?;
@@ -527,168 +519,9 @@ impl RedbStore {
         })
     }
 
-    pub(super) fn scan_fixed_ordered<const N: usize, T>(
-        &self,
-        index: &redb::ReadOnlyTable<&[u8; N], EventKey>,
-        prefixes: &[Vec<u8>],
-        window: OrderedWindow,
-        limit: Option<usize>,
-        project_if_visible: &mut impl FnMut(EventKey, EventId) -> Result<Option<T>, PersistenceError>,
-    ) -> Result<Vec<T>, PersistenceError> {
-        if let [prefix] = prefixes {
-            let Some((lower, upper, exclusive_upper)) =
-                ordered_fixed_page_range(prefix, window.since, window.until, window.before)
-            else {
-                return Ok(Vec::new());
-            };
-            let entries = if exclusive_upper {
-                index
-                    .range::<&[u8; N]>(&lower..&upper)
-                    .map_err(persist_err)?
-            } else {
-                index
-                    .range::<&[u8; N]>(&lower..=&upper)
-                    .map_err(persist_err)?
-            };
-            let mut out = limit.map_or_else(Vec::new, Vec::with_capacity);
-            for entry in entries.rev() {
-                let (key, value) = entry.map_err(persist_err)?;
-                #[cfg(any(test, feature = "bench-instrumentation"))]
-                self.query_index_rows.fetch_add(1, Ordering::Relaxed);
-                if let Some(projected) =
-                    project_if_visible(value.value(), ordered_index_event_id(key.value()))?
-                {
-                    out.push(projected);
-                    if limit.is_some_and(|limit| out.len() == limit) {
-                        break;
-                    }
-                }
-            }
-            return Ok(out);
-        }
-
-        let mut cursors: Vec<_> = prefixes
-            .iter()
-            .map(|prefix| {
-                FixedOrderedCursor::new(index, prefix, window.since, window.until, window.before)
-            })
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .collect();
-        let mut heap = BinaryHeap::new();
-        for (cursor_index, cursor) in cursors.iter_mut().enumerate() {
-            if let Some(head) = cursor.next_head(cursor_index)? {
-                #[cfg(any(test, feature = "bench-instrumentation"))]
-                self.query_index_rows.fetch_add(1, Ordering::Relaxed);
-                heap.push(head);
-            }
-        }
-
-        let mut out = limit.map_or_else(Vec::new, Vec::with_capacity);
-        let mut last_event_key = None;
-        while let Some(head) = heap.pop() {
-            let is_new = last_event_key.replace(head.event_key) != Some(head.event_key);
-            if is_new {
-                if let Some(projected) = project_if_visible(head.event_key, head.id)? {
-                    out.push(projected);
-                    if limit.is_some_and(|limit| out.len() == limit) {
-                        break;
-                    }
-                }
-            }
-            if let Some(next) = cursors[head.cursor].next_head(head.cursor)? {
-                #[cfg(any(test, feature = "bench-instrumentation"))]
-                self.query_index_rows.fetch_add(1, Ordering::Relaxed);
-                heap.push(next);
-            }
-        }
-        Ok(out)
-    }
-
-    pub(super) fn scan_variable_ordered<T>(
-        &self,
-        index: &redb::ReadOnlyTable<&[u8], EventKey>,
-        prefixes: &[Vec<u8>],
-        window: OrderedWindow,
-        limit: Option<usize>,
-        project_if_visible: &mut impl FnMut(EventKey, EventId) -> Result<Option<T>, PersistenceError>,
-    ) -> Result<Vec<T>, PersistenceError> {
-        if let [prefix] = prefixes {
-            let Some((lower, upper, exclusive_upper)) =
-                ordered_vec_page_range(prefix, window.since, window.until, window.before)
-            else {
-                return Ok(Vec::new());
-            };
-            let entries = if exclusive_upper {
-                index
-                    .range(lower.as_slice()..upper.as_slice())
-                    .map_err(persist_err)?
-            } else {
-                index
-                    .range(lower.as_slice()..=upper.as_slice())
-                    .map_err(persist_err)?
-            };
-            let mut out = limit.map_or_else(Vec::new, Vec::with_capacity);
-            for entry in entries.rev() {
-                let (key, value) = entry.map_err(persist_err)?;
-                #[cfg(any(test, feature = "bench-instrumentation"))]
-                self.query_index_rows.fetch_add(1, Ordering::Relaxed);
-                if let Some(projected) =
-                    project_if_visible(value.value(), ordered_index_event_id(key.value()))?
-                {
-                    out.push(projected);
-                    if limit.is_some_and(|limit| out.len() == limit) {
-                        break;
-                    }
-                }
-            }
-            return Ok(out);
-        }
-
-        let mut cursors: Vec<_> = prefixes
-            .iter()
-            .map(|prefix| {
-                VariableOrderedCursor::new(index, prefix, window.since, window.until, window.before)
-            })
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .collect();
-        let mut heap = BinaryHeap::new();
-        for (cursor_index, cursor) in cursors.iter_mut().enumerate() {
-            if let Some(head) = cursor.next_head(cursor_index)? {
-                #[cfg(any(test, feature = "bench-instrumentation"))]
-                self.query_index_rows.fetch_add(1, Ordering::Relaxed);
-                heap.push(head);
-            }
-        }
-
-        let mut out = limit.map_or_else(Vec::new, Vec::with_capacity);
-        let mut last_event_key = None;
-        while let Some(head) = heap.pop() {
-            let is_new = last_event_key.replace(head.event_key) != Some(head.event_key);
-            if is_new {
-                if let Some(projected) = project_if_visible(head.event_key, head.id)? {
-                    out.push(projected);
-                    if limit.is_some_and(|limit| out.len() == limit) {
-                        break;
-                    }
-                }
-            }
-            if let Some(next) = cursors[head.cursor].next_head(head.cursor)? {
-                #[cfg(any(test, feature = "bench-instrumentation"))]
-                self.query_index_rows.fetch_add(1, Ordering::Relaxed);
-                heap.push(next);
-            }
-        }
-        Ok(out)
-    }
-
-    /// Reverse-merge one or more ranges from the planner's chosen index.
-    /// Each cursor asks redb for exactly its next key; once `limit` visible
-    /// rows have survived the borrowed binary post-filter, no older key or
-    /// event value is touched.
+    /// Merge the planner's chosen packed prefix lists. Once `limit` visible
+    /// rows survive the borrowed binary post-filter, no older posting or event
+    /// value is touched.
     pub(super) fn query_ordered_ids(
         &self,
         read_txn: &redb::ReadTransaction,
@@ -706,11 +539,8 @@ impl RedbStore {
             .map_err(persist_err)?;
         let suppression_possible = !outbox_suppress_by_id.is_empty().map_err(persist_err)?
             || !outbox_suppress_by_addr.is_empty().map_err(persist_err)?;
-        let window = OrderedWindow {
-            since: filter.since.map(|ts| ts.as_secs()).unwrap_or(0),
-            until: filter.until.map(|ts| ts.as_secs()).unwrap_or(u64::MAX),
-            before: None,
-        };
+        let since = filter.since.map(|ts| ts.as_secs()).unwrap_or(0);
+        let until = filter.until.map(|ts| ts.as_secs()).unwrap_or(u64::MAX);
         let prepared_filter = PreparedFilter::new(filter);
         let needs_event_value = prepared_filter.needs_event_value_after_index(plan.index.matched())
             || suppression_possible;
@@ -754,67 +584,22 @@ impl RedbStore {
             Ok(Some(event_id))
         };
 
-        if packed_query_ready(read_txn)? {
-            return scan_packed(
-                read_txn,
-                PackedScan {
-                    family: packed_family(plan.index),
-                    prefixes: &plan.prefixes,
-                    since: window.since,
-                    until: window.until,
-                    before: window.before,
-                    limit: Some(limit),
-                },
-                || {
-                    #[cfg(any(test, feature = "bench-instrumentation"))]
-                    self.query_index_rows.fetch_add(1, Ordering::Relaxed);
-                },
-                &mut project_if_visible,
-            );
-        }
-
-        match plan.index {
-            OrderedIndex::Global => {
-                let index = read_txn.open_table(BY_CREATED_AT).map_err(persist_err)?;
-                self.scan_fixed_ordered(
-                    &index,
-                    &plan.prefixes,
-                    window,
-                    Some(limit),
-                    &mut project_if_visible,
-                )
-            }
-            OrderedIndex::Author => {
-                let index = read_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
-                self.scan_fixed_ordered(
-                    &index,
-                    &plan.prefixes,
-                    window,
-                    Some(limit),
-                    &mut project_if_visible,
-                )
-            }
-            OrderedIndex::Kind => {
-                let index = read_txn.open_table(BY_KIND).map_err(persist_err)?;
-                self.scan_fixed_ordered(
-                    &index,
-                    &plan.prefixes,
-                    window,
-                    Some(limit),
-                    &mut project_if_visible,
-                )
-            }
-            OrderedIndex::Tag(_) => {
-                let index = read_txn.open_table(BY_TAG).map_err(persist_err)?;
-                self.scan_variable_ordered(
-                    &index,
-                    &plan.prefixes,
-                    window,
-                    Some(limit),
-                    &mut project_if_visible,
-                )
-            }
-        }
+        scan_packed(
+            read_txn,
+            PackedScan {
+                family: packed_family(plan.index),
+                prefixes: &plan.prefixes,
+                since,
+                until,
+                before: None,
+                limit: Some(limit),
+            },
+            || {
+                #[cfg(any(test, feature = "bench-instrumentation"))]
+                self.query_index_rows.fetch_add(1, Ordering::Relaxed);
+            },
+            &mut project_if_visible,
+        )
     }
 
     pub(super) fn query_ordered(
@@ -841,11 +626,6 @@ impl RedbStore {
             .map_err(persist_err)?;
         let since = filter.since.map(|ts| ts.as_secs()).unwrap_or(0);
         let until = filter.until.map(|ts| ts.as_secs()).unwrap_or(u64::MAX);
-        let window = OrderedWindow {
-            since,
-            until,
-            before,
-        };
         let mut relay_cache = HashMap::new();
         let eligible_relay_keys = if let Some(eligible) = observed_by {
             let mut keys = BTreeSet::new();
@@ -906,67 +686,22 @@ impl RedbStore {
             Ok(Some(stored))
         };
 
-        if packed_query_ready(read_txn)? {
-            return scan_packed(
-                read_txn,
-                PackedScan {
-                    family: packed_family(plan.index),
-                    prefixes: &plan.prefixes,
-                    since: window.since,
-                    until: window.until,
-                    before: window.before,
-                    limit,
-                },
-                || {
-                    #[cfg(any(test, feature = "bench-instrumentation"))]
-                    self.query_index_rows.fetch_add(1, Ordering::Relaxed);
-                },
-                &mut materialize_if_visible,
-            );
-        }
-
-        match plan.index {
-            OrderedIndex::Global => {
-                let index = read_txn.open_table(BY_CREATED_AT).map_err(persist_err)?;
-                self.scan_fixed_ordered(
-                    &index,
-                    &plan.prefixes,
-                    window,
-                    limit,
-                    &mut materialize_if_visible,
-                )
-            }
-            OrderedIndex::Author => {
-                let index = read_txn.open_table(BY_AUTHOR).map_err(persist_err)?;
-                self.scan_fixed_ordered(
-                    &index,
-                    &plan.prefixes,
-                    window,
-                    limit,
-                    &mut materialize_if_visible,
-                )
-            }
-            OrderedIndex::Kind => {
-                let index = read_txn.open_table(BY_KIND).map_err(persist_err)?;
-                self.scan_fixed_ordered(
-                    &index,
-                    &plan.prefixes,
-                    window,
-                    limit,
-                    &mut materialize_if_visible,
-                )
-            }
-            OrderedIndex::Tag(_) => {
-                let index = read_txn.open_table(BY_TAG).map_err(persist_err)?;
-                self.scan_variable_ordered(
-                    &index,
-                    &plan.prefixes,
-                    window,
-                    limit,
-                    &mut materialize_if_visible,
-                )
-            }
-        }
+        scan_packed(
+            read_txn,
+            PackedScan {
+                family: packed_family(plan.index),
+                prefixes: &plan.prefixes,
+                since,
+                until,
+                before,
+                limit,
+            },
+            || {
+                #[cfg(any(test, feature = "bench-instrumentation"))]
+                self.query_index_rows.fetch_add(1, Ordering::Relaxed);
+            },
+            &mut materialize_if_visible,
+        )
     }
 }
 
@@ -977,16 +712,4 @@ fn packed_family(index: OrderedIndex) -> Family {
         OrderedIndex::Kind => Family::Kind,
         OrderedIndex::Tag(_) => Family::Tag,
     }
-}
-
-fn packed_query_ready(read_txn: &redb::ReadTransaction) -> Result<bool, PersistenceError> {
-    let meta = match read_txn.open_table(POSTINGS_META) {
-        Ok(meta) => meta,
-        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(false),
-        Err(error) => return Err(persist_err(error)),
-    };
-    Ok(meta
-        .get(POSTINGS_READY)
-        .map_err(persist_err)?
-        .is_some_and(|value| value.value() == 1))
 }

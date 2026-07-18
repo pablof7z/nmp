@@ -18,7 +18,7 @@
 //! is corrupt, not a reachable, recoverable condition this crate's callers
 //! could usefully branch on today.
 
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 #[cfg(test)]
 use std::sync::atomic::AtomicU8;

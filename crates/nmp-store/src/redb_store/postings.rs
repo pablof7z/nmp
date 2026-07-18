@@ -6,7 +6,9 @@
 //! for cursors and time bounds without repeating ids or decoding earlier rows.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BinaryHeap, HashSet};
+#[cfg(any(test, feature = "bench-instrumentation"))]
+use std::collections::BinaryHeap;
+use std::collections::{BTreeMap, HashSet};
 
 const SEGMENT_MAGIC: &[u8; 8] = b"NMPPS\0\x03\0";
 const DICTIONARY_MAGIC: &[u8; 8] = b"NMPID\0\x02\0";
@@ -684,17 +686,20 @@ impl PostingCursor<'_> {
     }
 }
 
+#[cfg(any(test, feature = "bench-instrumentation"))]
 pub(super) struct MergeSource<'a> {
     pub(super) cursor: PostingCursor<'a>,
     pub(super) dead: Option<&'a DeadKeys>,
 }
 
+#[cfg(any(test, feature = "bench-instrumentation"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HeapEntry {
     event: RunEvent,
     source: usize,
 }
 
+#[cfg(any(test, feature = "bench-instrumentation"))]
 impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         self.event
@@ -706,12 +711,14 @@ impl Ord for HeapEntry {
     }
 }
 
+#[cfg(any(test, feature = "bench-instrumentation"))]
 impl PartialOrd for HeapEntry {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
+#[cfg(any(test, feature = "bench-instrumentation"))]
 pub(super) fn merge_posting_cursors(
     mut sources: Vec<MergeSource<'_>>,
     limit: usize,

@@ -50,7 +50,7 @@ pub(super) fn tombstone_refuses<T: GovernedIngestTxn>(
 /// Remove `id`'s row within an already-open write transaction, iff
 /// `predicate` accepts the decoded row — clearing the address index (if it
 /// still points at `id`), the expiration index (if the row carried a
-/// NIP-40 `expiration`), and the [`BY_AUTHOR`]/[`BY_KIND`]/[`BY_TAG`] query indexes in
+/// NIP-40 `expiration`), and the packed ordered-postings query indexes in
 /// the same pass. Shared by the trait's own `remove` (`predicate` always
 /// `true`) and kind:5 processing (`predicate` is the NIP-09 author-only
 /// check).

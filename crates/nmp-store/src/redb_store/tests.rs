@@ -1665,7 +1665,7 @@ fn strict_ordered_scan_stops_after_requested_eligible_rows() {
 }
 
 #[test]
-fn fixed_ordered_indexes_use_inclusive_equal_time_ranges_and_id_ascending_ties() {
+fn packed_postings_use_inclusive_equal_time_ranges_and_id_ascending_ties() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("fixed-index-tie-break.redb");
     let mut store = RedbStore::open(&path).expect("open redb store");
@@ -1890,7 +1890,7 @@ fn empty_filter_sets_and_reversed_windows_match_nostr_semantics() {
 }
 
 #[test]
-fn missing_cardinality_epoch_rebuilds_atomically_from_fixed_ordered_indexes() {
+fn missing_cardinality_epoch_rebuilds_atomically_from_canonical_events() {
     use nostr::EventBuilder;
 
     let dir = tempfile::tempdir().unwrap();
