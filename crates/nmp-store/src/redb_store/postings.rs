@@ -91,7 +91,7 @@ pub(super) struct Membership {
     pub(super) family: Family,
     pub(super) shard: u8,
     pub(super) prefix: Prefix,
-    pub(super) event: RunEvent,
+    pub(super) event: Arc<RunEvent>,
 }
 
 #[derive(Debug)]
@@ -508,16 +508,30 @@ impl<'a> SegmentView<'a> {
         self,
         dictionary: DictionaryView<'a>,
     ) -> Result<Vec<Membership>, String> {
+        let mut events = BTreeMap::new();
+        self.memberships_interned(dictionary, &mut events)
+    }
+
+    pub(super) fn memberships_interned(
+        self,
+        dictionary: DictionaryView<'a>,
+        events: &mut BTreeMap<u64, Arc<RunEvent>>,
+    ) -> Result<Vec<Membership>, String> {
         let mut memberships = Vec::new();
         for ordinal in 0..self.prefix_count {
             let record = self.record(ordinal)?;
             let prefix = Prefix::from_bytes(self.family, record.prefix)?;
             for posting in 0..record.list.posting_count {
+                let event = record.list.event(dictionary, posting)?;
+                let event = events
+                    .entry(event.event_key)
+                    .or_insert_with(|| Arc::new(event))
+                    .clone();
                 memberships.push(Membership {
                     family: self.family,
                     shard: self.shard,
                     prefix: prefix.clone(),
-                    event: record.list.event(dictionary, posting)?,
+                    event,
                 });
             }
         }
@@ -966,7 +980,8 @@ mod tests {
                     created_at,
                     id: id(ordinal as u64),
                     event_key: (count - ordinal) as u64,
-                },
+                }
+                .into(),
             })
             .collect()
     }
@@ -1015,7 +1030,8 @@ mod tests {
                     created_at: 1_000 - ordinal as u64,
                     id: id(ordinal as u64),
                     event_key: ordinal as u64 + 1,
-                },
+                }
+                .into(),
             })
             .collect();
         let encoded = encode_run(memberships).unwrap();
@@ -1042,7 +1058,8 @@ mod tests {
                     created_at: ordinal as u64,
                     id: id(ordinal as u64),
                     event_key: ordinal as u64 + 1,
-                },
+                }
+                .into(),
             })
             .collect();
         let encoded = encode_run(events).unwrap();
@@ -1184,13 +1201,13 @@ mod tests {
                             family: Family::Global,
                             shard: 0,
                             prefix: Prefix::Global,
-                            event: *event,
+                            event: (*event).into(),
                         },
                         Membership {
                             family: Family::Author,
                             shard: shard_for(Family::Author, &author),
                             prefix: Prefix::Author(author),
-                            event: *event,
+                            event: (*event).into(),
                         },
                     ]
                 })

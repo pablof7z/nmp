@@ -7,6 +7,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet};
+use std::sync::Arc;
 
 use redb::ReadableTable;
 #[cfg(test)]
@@ -468,23 +469,23 @@ fn allocate_run_id(write_txn: &redb::WriteTransaction) -> Result<u64, Persistenc
 fn memberships_for_events(events: &BTreeMap<EventKey, Event>) -> Vec<Membership> {
     let mut memberships = Vec::new();
     for (&event_key, event) in events {
-        let run_event = RunEvent {
+        let run_event = Arc::new(RunEvent {
             created_at: event.created_at.as_secs(),
             id: *event.id.as_bytes(),
             event_key,
-        };
-        push_membership(&mut memberships, Family::Global, Prefix::Global, run_event);
+        });
+        push_membership(&mut memberships, Family::Global, Prefix::Global, &run_event);
         push_membership(
             &mut memberships,
             Family::Author,
             Prefix::Author(*event.pubkey.as_bytes()),
-            run_event,
+            &run_event,
         );
         push_membership(
             &mut memberships,
             Family::Kind,
             Prefix::Kind(event.kind.as_u16().to_be_bytes()),
-            run_event,
+            &run_event,
         );
         let mut tags = BTreeSet::new();
         for tag in event.tags.iter() {
@@ -498,7 +499,7 @@ fn memberships_for_events(events: &BTreeMap<EventKey, Event>) -> Vec<Membership>
                 &mut memberships,
                 Family::Tag,
                 Prefix::Tag(prefix.into()),
-                run_event,
+                &run_event,
             );
         }
     }
@@ -509,13 +510,13 @@ fn push_membership(
     memberships: &mut Vec<Membership>,
     family: Family,
     prefix: Prefix,
-    event: RunEvent,
+    event: &Arc<RunEvent>,
 ) {
     memberships.push(Membership {
         family,
         shard: shard_for(family, prefix.as_bytes()),
         prefix,
-        event,
+        event: event.clone(),
     });
 }
 
@@ -715,6 +716,7 @@ fn load_run_memberships(
         .open_table(POSTINGS_SEGMENTS)
         .map_err(persist_err)?;
     let mut memberships = Vec::new();
+    let mut run_events = BTreeMap::new();
     for family in Family::ALL {
         for shard in 0..=super::postings::SHARD_MASK {
             let key = segment_key(family, shard, run_id);
@@ -724,7 +726,11 @@ fn load_run_memberships(
             let segment_bytes = value.value().to_vec();
             let segment = SegmentView::parse(&segment_bytes).map_err(packed_err)?;
             segment.validate(dictionary).map_err(packed_err)?;
-            memberships.extend(segment.memberships(dictionary).map_err(packed_err)?);
+            memberships.extend(
+                segment
+                    .memberships_interned(dictionary, &mut run_events)
+                    .map_err(packed_err)?,
+            );
         }
     }
     Ok(memberships)
