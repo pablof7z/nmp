@@ -1724,7 +1724,7 @@ fn add_event_memberships(
         segments,
         counts,
         Family::Author,
-        Prefix::Author(*event.pubkey.as_bytes()),
+        Prefix::Author(Arc::new(*event.pubkey.as_bytes())),
         &posting,
     );
     push_membership(

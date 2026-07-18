@@ -527,7 +527,7 @@ fn memberships_for_events(events: &BTreeMap<EventKey, Event>) -> Vec<Membership>
         push_membership(
             &mut memberships,
             Family::Author,
-            Prefix::Author(*event.pubkey.as_bytes()),
+            Prefix::Author(Arc::new(*event.pubkey.as_bytes())),
             &run_event,
         );
         push_membership(
@@ -567,7 +567,7 @@ fn memberships_for_pending(events: &BTreeMap<EventKey, PendingEvent>) -> Vec<Mem
         push_membership(
             &mut memberships,
             Family::Author,
-            Prefix::Author(event.author),
+            Prefix::Author(Arc::new(event.author)),
             &event.event,
         );
         push_membership(

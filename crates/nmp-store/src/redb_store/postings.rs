@@ -52,7 +52,7 @@ pub(super) struct RunEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Prefix {
     Global,
-    Author([u8; 32]),
+    Author(Arc<[u8; 32]>),
     Kind([u8; 2]),
     Tag(Arc<[u8]>),
 }
@@ -61,7 +61,7 @@ impl Prefix {
     pub(super) fn as_bytes(&self) -> &[u8] {
         match self {
             Self::Global => &[],
-            Self::Author(value) => value,
+            Self::Author(value) => value.as_ref(),
             Self::Kind(value) => value,
             Self::Tag(value) => value,
         }
@@ -70,11 +70,11 @@ impl Prefix {
     fn from_bytes(family: Family, value: &[u8]) -> Result<Self, String> {
         match family {
             Family::Global if value.is_empty() => Ok(Self::Global),
-            Family::Author => Ok(Self::Author(
-                value
-                    .try_into()
-                    .map_err(|_| "author prefix is not 32 bytes".to_owned())?,
-            )),
+            Family::Author => {
+                Ok(Self::Author(Arc::new(value.try_into().map_err(|_| {
+                    "author prefix is not 32 bytes".to_owned()
+                })?)))
+            }
             Family::Kind => Ok(Self::Kind(
                 value
                     .try_into()
@@ -1053,7 +1053,7 @@ mod tests {
             .map(|ordinal| Membership {
                 family: Family::Author,
                 shard: shard_for(Family::Author, &id(ordinal as u64)),
-                prefix: Prefix::Author(id(ordinal as u64)),
+                prefix: Prefix::Author(Arc::new(id(ordinal as u64))),
                 event: RunEvent {
                     created_at: ordinal as u64,
                     id: id(ordinal as u64),
@@ -1206,7 +1206,7 @@ mod tests {
                         Membership {
                             family: Family::Author,
                             shard: shard_for(Family::Author, &author),
-                            prefix: Prefix::Author(author),
+                            prefix: Prefix::Author(Arc::new(author)),
                             event: (*event).into(),
                         },
                     ]
