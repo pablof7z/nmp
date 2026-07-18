@@ -555,6 +555,17 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
+    /// Refresh only acquisition evidence after a coverage-only mutation.
+    /// The current bounded rows remain authoritative unless a prior store
+    /// failure marked the projection incomplete, in which case the full
+    /// refresh oracle repairs it before evidence is emitted.
+    pub(super) fn refresh_all_history_evidence(&mut self, effects: &mut Vec<Effect>) {
+        let ids: Vec<_> = self.histories.keys().copied().collect();
+        for id in ids {
+            self.refresh_history_evidence(id, effects);
+        }
+    }
+
     pub(super) fn refresh_all_histories_except(
         &mut self,
         except: HistorySessionId,
@@ -653,6 +664,51 @@ impl<S: EventStore> EngineCore<S> {
         Some(len)
     }
 
+    fn refresh_history_evidence(&mut self, id: HistorySessionId, effects: &mut Vec<Effect>) {
+        let Some(state) = self.histories.get(&id) else {
+            return;
+        };
+        if !state.projection_complete {
+            self.refresh_history(id, WindowLoad::Idle, effects);
+            return;
+        }
+
+        let evidence = self.history_evidence_for(id);
+        let Some(state) = self.histories.get_mut(&id) else {
+            return;
+        };
+        if state.last_evidence.as_ref() == Some(&evidence) && state.load == WindowLoad::Idle {
+            return;
+        }
+        state.last_evidence = Some(evidence);
+        let batch = self.history_batch(id, Vec::new(), WindowLoad::Idle);
+        if let Some(state) = self.histories.get(&id) {
+            state.sink.on_history(batch.clone());
+        }
+        effects.push(Effect::EmitHistory(id, batch));
+    }
+
+    fn history_evidence_for(&self, id: HistorySessionId) -> AcquisitionEvidence {
+        let state = self
+            .histories
+            .get(&id)
+            .expect("history evidence requires a live session");
+        let subtree_atoms = self.history_subtree_atoms(id);
+        let auth_status = self.auth_status_map();
+        let evidence_plan = state
+            .acquisition
+            .evidence_plan()
+            .unwrap_or_else(|| self.router.plan());
+        evidence::acquisition_evidence(
+            &subtree_atoms,
+            evidence_plan,
+            self.resolver.store(),
+            &self.connected_relays,
+            &auth_status,
+            &self.ever_connected_relays,
+        )
+    }
+
     pub(super) fn history_rows_and_evidence_for(
         &self,
         id: HistorySessionId,
@@ -666,7 +722,6 @@ impl<S: EventStore> EngineCore<S> {
             .first()
             .expect("history session always owns its initial resolver handle");
         let root_atoms = self.resolver.root_atoms(primary);
-        let subtree_atoms = self.history_subtree_atoms(id);
         let pinned_relays = match (
             state.query.live_query().0.cache,
             &state.query.live_query().0.source,
@@ -718,19 +773,7 @@ impl<S: EventStore> EngineCore<S> {
                 .collect();
             by_id.retain(|event_id, _| keep.contains(event_id));
         }
-        let auth_status = self.auth_status_map();
-        let evidence_plan = state
-            .acquisition
-            .evidence_plan()
-            .unwrap_or_else(|| self.router.plan());
-        let evidence = evidence::acquisition_evidence(
-            &subtree_atoms,
-            evidence_plan,
-            self.resolver.store(),
-            &self.connected_relays,
-            &auth_status,
-            &self.ever_connected_relays,
-        );
+        let evidence = self.history_evidence_for(id);
         Ok((by_id, evidence))
     }
 
