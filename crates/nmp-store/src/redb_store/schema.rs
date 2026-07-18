@@ -62,7 +62,7 @@ pub(super) const SCHEMA_VERSION: u64 = 8;
 // Packed runs are large immutable values and the operating system already
 // caches their pages. A larger Redb cache retains duplicate hot pages and
 // makes the one-million-event working set scale with query traffic.
-pub(super) const REDB_CACHE_BYTES: usize = 12 * 1024 * 1024;
+pub(super) const REDB_CACHE_BYTES: usize = 4 * 1024 * 1024;
 pub(super) const ADDR_INDEX: TableDefinition<&str, EventKey> =
     TableDefinition::new("addr_index_v6");
 pub(super) const COVERAGE: TableDefinition<&str, &str> = TableDefinition::new("coverage");
