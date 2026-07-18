@@ -854,6 +854,10 @@ struct PendingRequest {
     reply: PendingSignerSender<String>,
 }
 
+// Pool events stay owned values across this already-bounded channel. Boxing
+// the largest variant would add a heap allocation to every NIP-46 pool event
+// only to reduce the private enum's stack size.
+#[allow(clippy::large_enum_variant)]
 enum WorkerMsg {
     Pool(PoolEvent),
     Request {
@@ -1403,6 +1407,11 @@ impl SessionWorker {
     fn on_frame(&mut self, handle: nmp_transport::RelayHandle, frame: RelayFrame) {
         match frame {
             RelayFrame::Event { event, .. } => self.on_event(event.as_ref()),
+            frame @ RelayFrame::CommittedObservation(_) => {
+                if let Some(frame) = frame.into_ordinary_fallback() {
+                    self.on_frame(handle, frame);
+                }
+            }
             RelayFrame::Message(message) => {
                 if let RelayMessage::Auth { challenge } = message.as_ref() {
                     let relay = self.handles.get(&handle.slot).map(|(_, url)| url.clone());

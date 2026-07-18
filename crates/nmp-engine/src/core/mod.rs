@@ -79,7 +79,8 @@ use nmp_store::{
     TransientCause, WriteDurability,
 };
 use nmp_transport::{
-    AttemptCorrelation, DisconnectReason, HandoffResult, RelayFrame,
+    AttemptCorrelation, CommittedObservationCandidate, CommittedObservationHit,
+    CommittedObservationPublication, DisconnectReason, HandoffResult, RelayFrame,
     RelayHandle as TransportRelayHandle, RelayHealth,
 };
 
@@ -530,6 +531,13 @@ pub enum EngineMsg {
 /// judgment.
 #[derive(Debug)]
 pub enum Effect {
+    /// Update the transport's volatile exact-observation eligibility only
+    /// from durable post-commit facts. Invalidations are applied before
+    /// publications by the cache.
+    UpdateCommittedObservations {
+        invalidated: Vec<EventId>,
+        published: Vec<CommittedObservationPublication>,
+    },
     /// -> `Pool::send` per (relay, current handle).
     Wire(WireDelta),
     /// Prospective relay-session workers for a staged history advance. The

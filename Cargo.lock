@@ -2110,6 +2110,7 @@ dependencies = [
 name = "nmp-transport"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "mio",
  "nmp-grammar",
  "nmp-test-support",

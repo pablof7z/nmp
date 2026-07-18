@@ -8,7 +8,7 @@ use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,9 +25,18 @@ use tungstenite::{accept, Message};
 
 pub type ProbeError = Box<dyn Error + Send + Sync>;
 
-const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v10";
+const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v12";
 const CORPUS_SCHEMA: &str = "nmp-relay-ingest-corpus-v1";
 const BASE_CREATED_AT: u64 = 1_700_000_000;
+// Duplicate replay can advance diagnostics without producing a row delta.
+// Keep completion-clock observation comfortably below #663's 200 ms gate;
+// the former 100 ms poll quantized a true fast path into one or two whole
+// polling intervals and could decide the gate on observer latency alone.
+const OBSERVATION_POLL: Duration = Duration::from_millis(1);
+// Attribution counters and the benchmark-only duplicate ceiling cache are
+// process-global by design. Serialize in-process probe invocations so test
+// binaries cannot reset or reconfigure another run midway through evidence.
+static PROBE_RUN_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(feature = "bench-instrumentation")]
 struct CountingAllocator;
@@ -91,6 +100,9 @@ pub struct ProbeConfig {
     pub redb_nondurable_diagnostic: bool,
     pub queue_capacity: usize,
     pub verified_cache_capacity: usize,
+    pub committed_observation_cache_capacity: usize,
+    pub diagnostic_duplicate_ceiling_capacity: usize,
+    pub diagnostic_duplicate_ceiling_event_payload: bool,
     pub verifier_workers: usize,
     pub verify_batch_size: usize,
     pub engine_batch_size: usize,
@@ -117,11 +129,14 @@ impl Default for ProbeConfig {
             redb_nondurable_diagnostic: false,
             queue_capacity: 1_024,
             verified_cache_capacity: 131_072,
+            committed_observation_cache_capacity: 131_072,
+            diagnostic_duplicate_ceiling_capacity: 0,
+            diagnostic_duplicate_ceiling_event_payload: false,
             verifier_workers: 0,
             verify_batch_size: 128,
             engine_batch_size: 128,
             engine_batch_bytes: 8 * 1024 * 1024,
-            engine_batch_wait: Duration::ZERO,
+            engine_batch_wait: Duration::from_micros(200),
             visible_limit: Some(200),
             trim_allocator_during_ingest: false,
             frame_delay: Duration::ZERO,
@@ -157,6 +172,20 @@ impl ProbeConfig {
         }
         if self.visible_limit == Some(0) {
             return Err("visible-limit must be nonzero".into());
+        }
+        if self.diagnostic_duplicate_ceiling_capacity > 0 && (self.relays != 1 || self.passes < 2) {
+            return Err(
+                "diagnostic duplicate ceiling requires exactly one relay and at least two passes"
+                    .into(),
+            );
+        }
+        if self.diagnostic_duplicate_ceiling_event_payload
+            && self.diagnostic_duplicate_ceiling_capacity == 0
+        {
+            return Err(
+                "diagnostic event-payload ceiling requires a nonzero diagnostic cache capacity"
+                    .into(),
+            );
         }
         if self.expect_rejection && (self.events != 1 || self.relays != 1 || self.passes != 1) {
             return Err(
@@ -195,6 +224,9 @@ pub struct ProbeResult {
     pub store_durability: &'static str,
     pub queue_capacity: usize,
     pub verified_cache_capacity: usize,
+    pub committed_observation_cache_capacity: usize,
+    pub diagnostic_duplicate_ceiling_capacity: usize,
+    pub diagnostic_duplicate_ceiling_event_payload: bool,
     pub verifier_workers: usize,
     pub verify_batch_size: usize,
     pub engine_batch_size: usize,
@@ -277,6 +309,36 @@ struct ServerStats {
 struct Server {
     url: RelayUrl,
     join: thread::JoinHandle<Result<ServerStats, String>>,
+}
+
+#[derive(Default)]
+struct ReplayGate {
+    released: Mutex<bool>,
+    ready: Condvar,
+}
+
+impl ReplayGate {
+    fn release(&self) {
+        if let Ok(mut released) = self.released.lock() {
+            *released = true;
+            self.ready.notify_all();
+        }
+    }
+
+    fn wait(&self, timeout: Duration) -> Result<(), String> {
+        let released = self
+            .released
+            .lock()
+            .map_err(|_| "replay gate lock poisoned".to_string())?;
+        let (released, wait) = self
+            .ready
+            .wait_timeout_while(released, timeout, |released| !*released)
+            .map_err(|_| "replay gate lock poisoned".to_string())?;
+        if !*released && wait.timed_out() {
+            return Err("timed out waiting for first pass to become applied".to_string());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -456,6 +518,9 @@ impl CompletionMetrics {
 }
 
 pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
+    let _run_guard = PROBE_RUN_LOCK
+        .lock()
+        .map_err(|_| "relay ingest probe run lock poisoned")?;
     config.validate()?;
     let scratch = tempfile::tempdir()?;
     let corpus = generate_corpus(scratch.path(), &config)?;
@@ -495,6 +560,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     );
     let server_sent_frames = Arc::new(AtomicU64::new(0));
     let replay_started_at = Arc::new(Mutex::new(None));
+    let replay_gate = Arc::new(ReplayGate::default());
     let mut servers = Vec::with_capacity(config.relays);
     for relay_index in 0..config.relays {
         servers.push(spawn_server(
@@ -510,6 +576,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             Arc::clone(&sent_at),
             Arc::clone(&server_sent_frames),
             Arc::clone(&replay_started_at),
+            Arc::clone(&replay_gate),
         )?);
     }
     let relay_urls: BTreeSet<_> = servers.iter().map(|server| server.url.clone()).collect();
@@ -522,8 +589,18 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     )?;
     #[cfg(feature = "bench-instrumentation")]
     nmp_engine::ingest_attribution::reset();
+    #[cfg(feature = "bench-instrumentation")]
+    nmp_transport::configure_diagnostic_duplicate_ceiling(
+        config.diagnostic_duplicate_ceiling_capacity,
+        config.diagnostic_duplicate_ceiling_event_payload,
+    );
+    #[cfg(not(feature = "bench-instrumentation"))]
+    if config.diagnostic_duplicate_ceiling_capacity > 0 {
+        return Err("diagnostic duplicate ceiling requires bench-instrumentation".into());
+    }
     let queue_capacity = config.queue_capacity;
     let verified_cache_capacity = config.verified_cache_capacity;
+    let committed_observation_cache_capacity = config.committed_observation_cache_capacity;
     let verifier_workers = config.verifier_workers;
     let verify_batch_size = config.verify_batch_size;
     let engine_batch_size = config.engine_batch_size;
@@ -536,6 +613,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         event_sink_queue_capacity: queue_capacity,
         verifier_queue_capacity: queue_capacity,
         verified_cache_capacity,
+        committed_observation_cache_capacity,
         verifier_workers,
         max_verify_batch: verify_batch_size,
         max_engine_batch: engine_batch_size,
@@ -605,6 +683,9 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         .checked_mul(config.relays as u64)
         .and_then(|value| value.checked_mul(config.passes as u64))
         .ok_or("expected frame count overflow")?;
+    let expected_first_pass_frames = (config.events as u64)
+        .checked_mul(config.relays as u64)
+        .ok_or("expected first-pass frame count overflow")?;
     let expected_last_id = EventId::from_hex(&corpus.last_id)?;
     let process_write_bytes_before = process_write_bytes();
     let allocations_before = allocator_snapshot();
@@ -639,6 +720,13 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             .is_none_or(|ids| ids.contains(&expected_last_id));
         let accepted_projection_complete =
             observed_frames >= expected_frames && rows_complete && newest_visible;
+        if config.passes > 1
+            && observed_frames >= expected_first_pass_frames
+            && rows_complete
+            && newest_visible
+        {
+            replay_gate.release();
+        }
         if accepted_projection_complete {
             let completed_at = *accepted_completion_at.get_or_insert_with(Instant::now);
             accepted_completion_elapsed
@@ -664,7 +752,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             )
             .into());
         }
-        match rows.recv_timeout(remaining.min(Duration::from_millis(100))) {
+        match rows.recv_timeout(remaining.min(OBSERVATION_POLL)) {
             Ok((deltas, evidence)) => {
                 accepted_quiet_since = None;
                 observations.apply(deltas, &config, &sent_at, base, ingest_started)?;
@@ -884,6 +972,10 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         },
         queue_capacity,
         verified_cache_capacity,
+        committed_observation_cache_capacity,
+        diagnostic_duplicate_ceiling_capacity: config.diagnostic_duplicate_ceiling_capacity,
+        diagnostic_duplicate_ceiling_event_payload: config
+            .diagnostic_duplicate_ceiling_event_payload,
         verifier_workers,
         verify_batch_size,
         engine_batch_size,
@@ -965,6 +1057,13 @@ fn ingest_attribution_json() -> serde_json::Value {
     let store = nmp_store::ingest_attribution::snapshot();
     serde_json::json!({
         "transport": {
+            "committed_observation_lookups": transport.committed_observation_lookups,
+            "committed_observation_hits": transport.committed_observation_hits,
+            "committed_observation_publications": transport.committed_observation_publications,
+            "committed_observation_invalidations": transport.committed_observation_invalidations,
+            "diagnostic_duplicate_ceiling_lookups": transport.diagnostic_duplicate_ceiling_lookups,
+            "diagnostic_duplicate_ceiling_hits": transport.diagnostic_duplicate_ceiling_hits,
+            "diagnostic_duplicate_ceiling_inserts": transport.diagnostic_duplicate_ceiling_inserts,
             "parse_attempts": transport.parse_attempts, "parsed_frames": transport.parsed_frames,
             "parse_ns": transport.parse_ns, "translator_bursts": transport.translator_bursts,
             "translator_events": transport.translator_events, "max_translator_burst": transport.max_translator_burst,
@@ -1291,6 +1390,7 @@ fn spawn_server(
     sent_at: Arc<Vec<AtomicU64>>,
     server_sent_frames: Arc<AtomicU64>,
     replay_started_at: Arc<Mutex<Option<Instant>>>,
+    replay_gate: Arc<ReplayGate>,
 ) -> Result<Server, ProbeError> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let address = listener.local_addr()?;
@@ -1358,6 +1458,7 @@ fn spawn_server(
                         let sent_at = Arc::clone(&sent_at);
                         let server_sent_frames = Arc::clone(&server_sent_frames);
                         let replay_started_at = Arc::clone(&replay_started_at);
+                        let replay_gate = Arc::clone(&replay_gate);
                         connections.push(thread::spawn(move || {
                             let Ok(mut socket) = accept(stream) else {
                                 return;
@@ -1373,6 +1474,7 @@ fn spawn_server(
                                 &sent_at,
                                 &server_sent_frames,
                                 &replay_started_at,
+                                &replay_gate,
                             );
                             let _ = stats_tx.send(result);
                         }));
@@ -1394,6 +1496,7 @@ fn serve_corpus(
     sent_at: &[AtomicU64],
     server_sent_frames: &AtomicU64,
     replay_started_at: &Mutex<Option<Instant>>,
+    replay_gate: &ReplayGate,
 ) -> Result<ServerStats, String> {
     let subscription = loop {
         let message = socket.read().map_err(|error| error.to_string())?;
@@ -1414,6 +1517,9 @@ fn serve_corpus(
     let mut frames = 0u64;
     let mut bytes = 0u64;
     'passes: for pass_index in 0..config.passes {
+        if pass_index == 1 {
+            replay_gate.wait(Duration::from_secs(30))?;
+        }
         let reader = BufReader::new(File::open(&config.corpus_path).map_err(|e| e.to_string())?);
         for (ordinal, line) in reader.lines().enumerate() {
             let line = line.map_err(|e| e.to_string())?;

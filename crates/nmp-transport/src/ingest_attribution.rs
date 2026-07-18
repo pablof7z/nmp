@@ -5,6 +5,13 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Snapshot {
+    pub committed_observation_lookups: u64,
+    pub committed_observation_hits: u64,
+    pub committed_observation_publications: u64,
+    pub committed_observation_invalidations: u64,
+    pub diagnostic_duplicate_ceiling_lookups: u64,
+    pub diagnostic_duplicate_ceiling_hits: u64,
+    pub diagnostic_duplicate_ceiling_inserts: u64,
     pub parse_attempts: u64,
     pub parsed_frames: u64,
     pub parse_ns: u64,
@@ -21,6 +28,13 @@ pub struct Snapshot {
 
 macro_rules! counters { ($($name:ident),+ $(,)?) => { $(static $name: AtomicU64 = AtomicU64::new(0);)+ }; }
 counters!(
+    COMMITTED_OBSERVATION_LOOKUPS,
+    COMMITTED_OBSERVATION_HITS,
+    COMMITTED_OBSERVATION_PUBLICATIONS,
+    COMMITTED_OBSERVATION_INVALIDATIONS,
+    DIAGNOSTIC_DUPLICATE_CEILING_LOOKUPS,
+    DIAGNOSTIC_DUPLICATE_CEILING_HITS,
+    DIAGNOSTIC_DUPLICATE_CEILING_INSERTS,
     PARSE_ATTEMPTS,
     PARSED_FRAMES,
     PARSE_NS,
@@ -44,6 +58,13 @@ fn add(counter: &AtomicU64, duration: Duration) {
 
 pub fn reset() {
     for counter in [
+        &COMMITTED_OBSERVATION_LOOKUPS,
+        &COMMITTED_OBSERVATION_HITS,
+        &COMMITTED_OBSERVATION_PUBLICATIONS,
+        &COMMITTED_OBSERVATION_INVALIDATIONS,
+        &DIAGNOSTIC_DUPLICATE_CEILING_LOOKUPS,
+        &DIAGNOSTIC_DUPLICATE_CEILING_HITS,
+        &DIAGNOSTIC_DUPLICATE_CEILING_INSERTS,
         &PARSE_ATTEMPTS,
         &PARSED_FRAMES,
         &PARSE_NS,
@@ -64,6 +85,13 @@ pub fn reset() {
 pub fn snapshot() -> Snapshot {
     let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
     Snapshot {
+        committed_observation_lookups: load(&COMMITTED_OBSERVATION_LOOKUPS),
+        committed_observation_hits: load(&COMMITTED_OBSERVATION_HITS),
+        committed_observation_publications: load(&COMMITTED_OBSERVATION_PUBLICATIONS),
+        committed_observation_invalidations: load(&COMMITTED_OBSERVATION_INVALIDATIONS),
+        diagnostic_duplicate_ceiling_lookups: load(&DIAGNOSTIC_DUPLICATE_CEILING_LOOKUPS),
+        diagnostic_duplicate_ceiling_hits: load(&DIAGNOSTIC_DUPLICATE_CEILING_HITS),
+        diagnostic_duplicate_ceiling_inserts: load(&DIAGNOSTIC_DUPLICATE_CEILING_INSERTS),
         parse_attempts: load(&PARSE_ATTEMPTS),
         parsed_frames: load(&PARSED_FRAMES),
         parse_ns: load(&PARSE_NS),
@@ -77,6 +105,25 @@ pub fn snapshot() -> Snapshot {
         delivery_ns: load(&DELIVERY_NS),
         event_fallback_clones: load(&EVENT_FALLBACK_CLONES),
     }
+}
+
+pub(crate) fn committed_observation_lookup(hit: bool) {
+    COMMITTED_OBSERVATION_LOOKUPS.fetch_add(1, Ordering::Relaxed);
+    COMMITTED_OBSERVATION_HITS.fetch_add(hit as u64, Ordering::Relaxed);
+}
+
+pub(crate) fn committed_observation_update(publications: u64, invalidations: u64) {
+    COMMITTED_OBSERVATION_PUBLICATIONS.fetch_add(publications, Ordering::Relaxed);
+    COMMITTED_OBSERVATION_INVALIDATIONS.fetch_add(invalidations, Ordering::Relaxed);
+}
+
+pub(crate) fn diagnostic_duplicate_ceiling_lookup(hit: bool) {
+    DIAGNOSTIC_DUPLICATE_CEILING_LOOKUPS.fetch_add(1, Ordering::Relaxed);
+    DIAGNOSTIC_DUPLICATE_CEILING_HITS.fetch_add(hit as u64, Ordering::Relaxed);
+}
+
+pub(crate) fn diagnostic_duplicate_ceiling_insert() {
+    DIAGNOSTIC_DUPLICATE_CEILING_INSERTS.fetch_add(1, Ordering::Relaxed);
 }
 
 pub(crate) fn parse(duration: Duration, parsed: bool) {
