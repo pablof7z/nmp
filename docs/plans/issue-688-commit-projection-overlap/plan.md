@@ -142,6 +142,6 @@ ready
 
 ## Hosted Artifacts
 
-- Plan page: Generated after publishing.
+- Plan page: https://pablof7z.github.io/nmp/plans/issue-688-commit-projection-overlap/
 
 - TTS audio: https://blossom.primal.net/37336ecb45fafb798780ece161a7b103fb2eea42db512f0126aca515844b5a28.mp3
