@@ -4788,9 +4788,15 @@ fn reduce_and_dispatch_relay_frames<S: EventStore>(
 ) {
     #[cfg(feature = "bench-instrumentation")]
     let phase_started = std::time::Instant::now();
+    #[cfg(feature = "bench-instrumentation")]
+    let cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
     let effects = core.handle(EngineMsg::RelayFrames(frames));
     #[cfg(feature = "bench-instrumentation")]
     crate::ingest_attribution::relay_core_reduce(phase_started.elapsed());
+    #[cfg(feature = "bench-instrumentation")]
+    crate::ingest_attribution::relay_core_reduce_cpu(
+        crate::ingest_attribution::thread_cpu_time_ns().saturating_sub(cpu_started),
+    );
     #[cfg(feature = "bench-instrumentation")]
     let phase_started = std::time::Instant::now();
     dispatch_core_effects(

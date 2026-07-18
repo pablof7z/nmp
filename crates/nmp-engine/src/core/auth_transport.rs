@@ -1050,9 +1050,15 @@ impl<S: EventStore> EngineCore<S> {
     ) {
         #[cfg(feature = "bench-instrumentation")]
         let call_started = std::time::Instant::now();
+        #[cfg(feature = "bench-instrumentation")]
+        let cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
         self.ingest_relay_observations_inner(events, effects);
         #[cfg(feature = "bench-instrumentation")]
         crate::ingest_attribution::relay_ingest_observations_call(call_started.elapsed());
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::relay_ingest_observations_call_cpu(
+            crate::ingest_attribution::thread_cpu_time_ns().saturating_sub(cpu_started),
+        );
     }
 
     fn ingest_relay_observations_inner(

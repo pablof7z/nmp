@@ -14,12 +14,14 @@ pub struct Snapshot {
     pub bridge_applied_wait_ns: u64,
     pub engine_batch_process_ns: u64,
     pub relay_core_reduce_ns: u64,
+    pub relay_core_reduce_cpu_ns: u64,
     pub relay_effect_dispatch_ns: u64,
     pub relay_ingest_prelude_ns: u64,
     pub relay_ingest_post_store_ns: u64,
     pub relay_ingest_apply_committed_ns: u64,
     pub relay_ingest_effect_build_ns: u64,
     pub relay_ingest_observations_call_ns: u64,
+    pub relay_ingest_observations_call_cpu_ns: u64,
     pub relay_resolver_call_ns: u64,
     pub relay_frame_conversion_ns: u64,
     pub relay_frame_session_validation_ns: u64,
@@ -62,12 +64,14 @@ counters!(
     BRIDGE_APPLIED_WAIT_NS,
     ENGINE_BATCH_PROCESS_NS,
     RELAY_CORE_REDUCE_NS,
+    RELAY_CORE_REDUCE_CPU_NS,
     RELAY_EFFECT_DISPATCH_NS,
     RELAY_INGEST_PRELUDE_NS,
     RELAY_INGEST_POST_STORE_NS,
     RELAY_INGEST_APPLY_COMMITTED_NS,
     RELAY_INGEST_EFFECT_BUILD_NS,
     RELAY_INGEST_OBSERVATIONS_CALL_NS,
+    RELAY_INGEST_OBSERVATIONS_CALL_CPU_NS,
     RELAY_RESOLVER_CALL_NS,
     RELAY_FRAME_CONVERSION_NS,
     RELAY_FRAME_SESSION_VALIDATION_NS,
@@ -115,12 +119,14 @@ pub fn reset() {
         &BRIDGE_APPLIED_WAIT_NS,
         &ENGINE_BATCH_PROCESS_NS,
         &RELAY_CORE_REDUCE_NS,
+        &RELAY_CORE_REDUCE_CPU_NS,
         &RELAY_EFFECT_DISPATCH_NS,
         &RELAY_INGEST_PRELUDE_NS,
         &RELAY_INGEST_POST_STORE_NS,
         &RELAY_INGEST_APPLY_COMMITTED_NS,
         &RELAY_INGEST_EFFECT_BUILD_NS,
         &RELAY_INGEST_OBSERVATIONS_CALL_NS,
+        &RELAY_INGEST_OBSERVATIONS_CALL_CPU_NS,
         &RELAY_RESOLVER_CALL_NS,
         &RELAY_FRAME_CONVERSION_NS,
         &RELAY_FRAME_SESSION_VALIDATION_NS,
@@ -169,12 +175,14 @@ pub fn snapshot() -> Snapshot {
         bridge_applied_wait_ns: load(&BRIDGE_APPLIED_WAIT_NS),
         engine_batch_process_ns: load(&ENGINE_BATCH_PROCESS_NS),
         relay_core_reduce_ns: load(&RELAY_CORE_REDUCE_NS),
+        relay_core_reduce_cpu_ns: load(&RELAY_CORE_REDUCE_CPU_NS),
         relay_effect_dispatch_ns: load(&RELAY_EFFECT_DISPATCH_NS),
         relay_ingest_prelude_ns: load(&RELAY_INGEST_PRELUDE_NS),
         relay_ingest_post_store_ns: load(&RELAY_INGEST_POST_STORE_NS),
         relay_ingest_apply_committed_ns: load(&RELAY_INGEST_APPLY_COMMITTED_NS),
         relay_ingest_effect_build_ns: load(&RELAY_INGEST_EFFECT_BUILD_NS),
         relay_ingest_observations_call_ns: load(&RELAY_INGEST_OBSERVATIONS_CALL_NS),
+        relay_ingest_observations_call_cpu_ns: load(&RELAY_INGEST_OBSERVATIONS_CALL_CPU_NS),
         relay_resolver_call_ns: load(&RELAY_RESOLVER_CALL_NS),
         relay_frame_conversion_ns: load(&RELAY_FRAME_CONVERSION_NS),
         relay_frame_session_validation_ns: load(&RELAY_FRAME_SESSION_VALIDATION_NS),
@@ -227,6 +235,31 @@ pub(crate) fn relay_core_reduce(duration: Duration) {
     add(&RELAY_CORE_REDUCE_NS, duration);
 }
 
+pub(crate) fn relay_core_reduce_cpu(nanos: u64) {
+    RELAY_CORE_REDUCE_CPU_NS.fetch_add(nanos, Ordering::Relaxed);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn thread_cpu_time_ns() -> u64 {
+    let mut value = std::mem::MaybeUninit::<libc::timespec>::uninit();
+    // SAFETY: `clock_gettime` initializes the owned `timespec` on success.
+    let result = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, value.as_mut_ptr()) };
+    if result != 0 {
+        return 0;
+    }
+    // SAFETY: the successful call above initialized `value`.
+    let value = unsafe { value.assume_init() };
+    u64::try_from(value.tv_sec)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(u64::try_from(value.tv_nsec).unwrap_or(0))
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn thread_cpu_time_ns() -> u64 {
+    0
+}
+
 pub(crate) fn relay_effect_dispatch(duration: Duration) {
     add(&RELAY_EFFECT_DISPATCH_NS, duration);
 }
@@ -249,6 +282,10 @@ pub(crate) fn relay_ingest_effect_build(duration: Duration) {
 
 pub(crate) fn relay_ingest_observations_call(duration: Duration) {
     add(&RELAY_INGEST_OBSERVATIONS_CALL_NS, duration);
+}
+
+pub(crate) fn relay_ingest_observations_call_cpu(nanos: u64) {
+    RELAY_INGEST_OBSERVATIONS_CALL_CPU_NS.fetch_add(nanos, Ordering::Relaxed);
 }
 
 pub(crate) fn relay_resolver_call(duration: Duration) {
