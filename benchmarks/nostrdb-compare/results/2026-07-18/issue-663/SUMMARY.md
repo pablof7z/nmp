@@ -1,9 +1,58 @@
-# Issue #663 committed-duplicate ceiling
+# Issue #663 committed duplicate fast path
+
+## Production decision
+
+Select the crash-safe committed-observation fast path.
+
+All three fresh production runs cleared the 500,000 replay frames/s gate. The
+median was 534,503 frames/s, 6.9% above the gate. Every replay observation hit
+the bounded cache, while parsing, signature verification, resolver
+materialization, and store work remained confined to the first pass.
+
+| Run | Replay ms | Replay frames/s | Safe hits | Parsed frames | Resolver events | Store events |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 187.090 | 534,503 | 100,000 | 100,001 | 100,000 | 100,000 |
+| 2 | 195.987 | 510,238 | 100,000 | 100,001 | 100,000 | 100,000 |
+| 3 | 173.781 | 575,438 | 100,000 | 100,001 | 100,000 | 100,000 |
+| **Median** | **187.090** | **534,503** | **100,000** | **100,001** | **100,000** | **100,000** |
+
+This is the production protocol, not the favorable ceiling. Cache entries are
+published only after the governed transaction commits. A token retains the
+exact websocket text for fallback and is accepted only after current-session,
+slot-epoch, and pending-write revalidation. Every canonical removal
+invalidates all observations for that EventId before effects are published.
+Mixed ordinary and cached frames retain wire order through commit barriers.
+
+## Acceptance gates
+
+- The production median is 16.4% below the unsafe 639,563 frames/s ceiling,
+  but remains above the required gate in every run.
+- A 200 us bounded engine coalescing wait produced 41,330 events/s median
+  first-seen throughput, 11.8% above the same candidate with no wait. Against
+  #661's fresh 42,234 events/s Redb baseline, the candidate is 2.1% lower and
+  remains inside the epic's 10% regression allowance.
+- The one-million scale run observed, committed, and reopened exactly
+  1,000,000 events. It completed at 21,633 events/s with 184,774,656 bytes of
+  peak RSS growth. That RSS result is 9.9% above #650's packed-Redb
+  one-million qualifier and remains inside the 10% allowance.
+- `nmp-store` has no source diff in this change. The exact selective-query
+  implementation and packed representation qualified by #650 are unchanged;
+  this transport/engine optimization cannot alter store query planning or
+  result order.
+- The cache is volatile, globally bounded to 131,072 observations by default,
+  and has no persistent schema or recovery obligation. Eviction, restart,
+  invalidation, poisoned synchronization, and malformed frames all take the
+  ordinary exact path.
+
+The 200 us wait is now the production default because it improved both replay
+batching and ordinary first-seen throughput in the controlled matrix.
+
+## Favorable ceiling history
 
 ## Decision
 
-Proceed to a production-safe prototype, with a hard negative close if its
-three-run replay median falls below 500,000 frames/s.
+The favorable ceiling justified the production prototype. The production
+result above now supersedes this intermediate decision.
 
 The production-shaped favorable ceiling reached a median 639,563 replay
 frames/s across three fresh processes, 27.9% above the epic gate. Every run
