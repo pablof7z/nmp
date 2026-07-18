@@ -1048,6 +1048,28 @@ impl<S: EventStore> EngineCore<S> {
         )>,
         effects: &mut Vec<Effect>,
     ) {
+        #[cfg(feature = "bench-instrumentation")]
+        let call_started = std::time::Instant::now();
+        #[cfg(feature = "bench-instrumentation")]
+        let cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
+        self.ingest_relay_observations_inner(events, effects);
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::relay_ingest_observations_call(call_started.elapsed());
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::relay_ingest_observations_call_cpu(
+            crate::ingest_attribution::thread_cpu_time_ns().saturating_sub(cpu_started),
+        );
+    }
+
+    fn ingest_relay_observations_inner(
+        &mut self,
+        events: Vec<(
+            SignedEvent,
+            RelayObserved,
+            Option<CommittedObservationCandidate>,
+        )>,
+        effects: &mut Vec<Effect>,
+    ) {
         if events.is_empty() {
             return;
         }
@@ -1083,7 +1105,12 @@ impl<S: EventStore> EngineCore<S> {
         // where the exact physical session is still known — a
         // `RelayObserved` carries only the URL, which cannot distinguish
         // access contexts (#8).
-        match self.resolver.ingest_observed_detailed(observed_events) {
+        #[cfg(feature = "bench-instrumentation")]
+        let resolver_started = std::time::Instant::now();
+        let resolver_result = self.resolver.ingest_observed_detailed(observed_events);
+        #[cfg(feature = "bench-instrumentation")]
+        crate::ingest_attribution::relay_resolver_call(resolver_started.elapsed());
+        match resolver_result {
             Err(error) => self.degrade_store(error, effects),
             Ok(ingest) => {
                 #[cfg(feature = "bench-instrumentation")]
@@ -1246,8 +1273,15 @@ impl<S: EventStore> EngineCore<S> {
                 observed_diagnostic_duplicate = true;
                 continue;
             }
-            match frame.into_observed_event() {
+            #[cfg(feature = "bench-instrumentation")]
+            let phase_started = std::time::Instant::now();
+            let observed_event = frame.into_observed_event();
+            #[cfg(feature = "bench-instrumentation")]
+            crate::ingest_attribution::relay_frame_conversion(phase_started.elapsed());
+            match observed_event {
                 Ok((event, candidate)) => {
+                    #[cfg(feature = "bench-instrumentation")]
+                    let phase_started = std::time::Instant::now();
                     let Some((current, session)) = self.slot_to_relay.get(&handle.slot).cloned()
                     else {
                         self.ingest_relay_observations(
@@ -1267,17 +1301,31 @@ impl<S: EventStore> EngineCore<S> {
                         );
                         continue;
                     }
+                    #[cfg(feature = "bench-instrumentation")]
+                    crate::ingest_attribution::relay_frame_session_validation(
+                        phase_started.elapsed(),
+                    );
+                    #[cfg(feature = "bench-instrumentation")]
+                    let phase_started = std::time::Instant::now();
                     *self
                         .events_by_session_kind
                         .entry(session.clone())
                         .or_default()
                         .entry(event.kind.as_u16())
                         .or_insert(0) += 1;
+                    #[cfg(feature = "bench-instrumentation")]
+                    crate::ingest_attribution::relay_frame_diagnostics_count(
+                        phase_started.elapsed(),
+                    );
+                    #[cfg(feature = "bench-instrumentation")]
+                    let phase_started = std::time::Instant::now();
                     candidates.push((
                         event,
                         RelayObserved::new(session.relay, self.clock),
                         candidate,
                     ));
+                    #[cfg(feature = "bench-instrumentation")]
+                    crate::ingest_attribution::relay_frame_candidate_build(phase_started.elapsed());
                 }
                 Err(frame) => {
                     self.ingest_relay_observations(std::mem::take(&mut candidates), &mut effects);
