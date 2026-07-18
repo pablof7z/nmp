@@ -12,10 +12,13 @@ process writes fell `53.3%`, stored bytes fell `32.1%`, and peak RSS rose `7.4%`
 The user explicitly accepted advancing a material gain even when it does not
 independently close the full performance program.
 
-This is a physical-layout selection, not a production performance claim. Using
-the #647 median full-pipeline decomposition as a first-order projection, applying
-the observed store-time ratio would improve representative production ingest by
-about `20%`. Only the later end-to-end port can confirm that estimate.
+This is a physical-layout selection, not a production performance claim. The
+`44.8%` figure is foreground throughput and excludes separately measured
+compaction. Amortizing the median `173.1 ms` maintenance phase gives roughly a
+`19%` sustained store-time reduction. Applied to #647's median full-pipeline
+decomposition, that projects to only a **low-teens** production improvement.
+Only the later end-to-end port can confirm it, and real streaming compaction may
+cost more than this benchmark's in-memory rebuild.
 
 ## Format proved
 
@@ -82,7 +85,9 @@ death plus the already-measured ordinary append for the new incarnation.
 Quiescent fan-in compaction took `173.1 ms` and `14.2 MiB` of process writes on
 packed Redb. It reduced active segment rows from `4,264` to `705`; active segment
 values occupied `8.8 MiB`. Compaction atomically removes source segments and
-their dead-key blocks while publishing equivalent live postings.
+their dead-key blocks while publishing equivalent live postings. This debt is
+not included in the foreground table above; adding it to packed Redb's median
+foreground wall time yields about `1.19 s`, versus row Redb's `1.48 s`.
 
 ## Crash and scale proofs
 
@@ -103,8 +108,8 @@ benchmark oracle in memory.
 Packed representation is the selected remaining storage lever. It materially
 reduces write amplification but cannot supply #627's or #612's multiplier by
 itself. The next issue should port this design behind the existing event-store
-authority boundary and measure the complete resolver/engine/live-query path.
+authority boundary and measure the complete resolver/engine/live-query path,
+including amortized maintenance rather than foreground time alone.
 The cross-store atomicity relaxation already recorded in #627 permits that
 event-plane change without forcing the low-volume publishing control plane into
 the same physical engine.
-
