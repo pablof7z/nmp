@@ -8,7 +8,7 @@ use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,7 +25,7 @@ use tungstenite::{accept, Message};
 
 pub type ProbeError = Box<dyn Error + Send + Sync>;
 
-const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v9";
+const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v10";
 const CORPUS_SCHEMA: &str = "nmp-relay-ingest-corpus-v1";
 const BASE_CREATED_AT: u64 = 1_700_000_000;
 
@@ -215,8 +215,11 @@ pub struct ProbeResult {
     pub corpus_bytes: u64,
     pub database_bytes: u64,
     pub generation_ms: f64,
-    pub ingest_ms: f64,
-    pub relay_frames_per_second: f64,
+    pub completion_ingest_ms: f64,
+    pub completion_relay_frames_per_second: f64,
+    pub replay_completion_ms: Option<f64>,
+    pub replay_frames_per_second: Option<f64>,
+    pub observation_and_quiet_ms: f64,
     pub first_row_ms: f64,
     pub last_row_ms: f64,
     pub apply_latency_p50_ms: f64,
@@ -425,6 +428,33 @@ impl ObservationState {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CompletionMetrics {
+    completion: Duration,
+    observation_and_quiet: Duration,
+    frames_per_second: f64,
+}
+
+impl CompletionMetrics {
+    fn new(
+        expected_frames: u64,
+        completion: Duration,
+        observation_and_quiet: Duration,
+    ) -> Result<Self, ProbeError> {
+        if completion.is_zero() {
+            return Err("ingest completion duration must be nonzero".into());
+        }
+        if completion > observation_and_quiet {
+            return Err("ingest completion cannot follow observation and quiet proof".into());
+        }
+        Ok(Self {
+            completion,
+            observation_and_quiet,
+            frames_per_second: expected_frames as f64 / completion.as_secs_f64(),
+        })
+    }
+}
+
 pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     config.validate()?;
     let scratch = tempfile::tempdir()?;
@@ -464,6 +494,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             .collect::<Vec<_>>(),
     );
     let server_sent_frames = Arc::new(AtomicU64::new(0));
+    let replay_started_at = Arc::new(Mutex::new(None));
     let mut servers = Vec::with_capacity(config.relays);
     for relay_index in 0..config.relays {
         servers.push(spawn_server(
@@ -478,6 +509,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             base,
             Arc::clone(&sent_at),
             Arc::clone(&server_sent_frames),
+            Arc::clone(&replay_started_at),
         )?);
     }
     let relay_urls: BTreeSet<_> = servers.iter().map(|server| server.url.clone()).collect();
@@ -584,6 +616,8 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     let mut all_sources_reconciled = false;
     let mut rejection_quiet_since = None;
     let mut accepted_quiet_since = None;
+    let mut accepted_completion_elapsed = None;
+    let mut accepted_completion_at = None;
 
     loop {
         let observed_frames = observed_relay_frames.load(Ordering::Acquire);
@@ -603,7 +637,12 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             .visible_ids
             .as_ref()
             .is_none_or(|ids| ids.contains(&expected_last_id));
-        if observed_frames >= expected_frames && rows_complete && newest_visible {
+        let accepted_projection_complete =
+            observed_frames >= expected_frames && rows_complete && newest_visible;
+        if accepted_projection_complete {
+            let completed_at = *accepted_completion_at.get_or_insert_with(Instant::now);
+            accepted_completion_elapsed
+                .get_or_insert_with(|| completed_at.duration_since(ingest_started));
             accepted_quiet_since.get_or_insert_with(Instant::now);
         } else {
             accepted_quiet_since = None;
@@ -645,7 +684,43 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     while let Ok((deltas, _)) = rows.recv_timeout(Duration::from_millis(100)) {
         observations.apply(deltas, &config, &sent_at, base, ingest_started)?;
     }
-    let ingest_elapsed = ingest_started.elapsed();
+    let observation_and_quiet_elapsed = ingest_started.elapsed();
+    let completion_ingest_elapsed = if config.expect_rejection {
+        // Proving a rejected frame produced no observable state inherently
+        // requires the quiet interval. Rejection probes are correctness
+        // falsifiers, not accepted-ingest throughput measurements.
+        observation_and_quiet_elapsed
+    } else {
+        accepted_completion_elapsed
+            .ok_or("accepted ingest completed without a captured completion instant")?
+    };
+    let completion_metrics = CompletionMetrics::new(
+        expected_frames,
+        completion_ingest_elapsed,
+        observation_and_quiet_elapsed,
+    )?;
+    let replay_metrics = if config.passes > 1 {
+        let replay_started_at = replay_started_at
+            .lock()
+            .map_err(|_| "replay start clock lock poisoned")?
+            .ok_or("replay passes completed without a captured start instant")?;
+        let replay_completed_at = accepted_completion_at
+            .ok_or("replay passes completed without a captured completion instant")?;
+        let replay_elapsed = replay_completed_at
+            .checked_duration_since(replay_started_at)
+            .ok_or("replay completion preceded its first offered frame")?;
+        let replay_frames = (config.events as u64)
+            .checked_mul(config.relays as u64)
+            .and_then(|value| value.checked_mul((config.passes - 1) as u64))
+            .ok_or("expected replay frame count overflow")?;
+        Some(CompletionMetrics::new(
+            replay_frames,
+            replay_elapsed,
+            replay_elapsed,
+        )?)
+    } else {
+        None
+    };
     let memory_after_ingest = current_memory();
     let peak_ingest_memory = memory_sampler.stop();
     let allocations_after = allocator_snapshot();
@@ -780,7 +855,6 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         (fs::metadata(&store_path)?.len(), verify_started.elapsed())
     };
 
-    let ingest_seconds = ingest_elapsed.as_secs_f64();
     Ok(ProbeResult {
         schema: RESULT_SCHEMA,
         git_commit: command_output("git", &["rev-parse", "HEAD"]),
@@ -834,8 +908,11 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         corpus_bytes: corpus.bytes,
         database_bytes,
         generation_ms: duration_ms(corpus.generation),
-        ingest_ms: duration_ms(ingest_elapsed),
-        relay_frames_per_second: expected_frames as f64 / ingest_seconds,
+        completion_ingest_ms: duration_ms(completion_metrics.completion),
+        completion_relay_frames_per_second: completion_metrics.frames_per_second,
+        replay_completion_ms: replay_metrics.map(|metrics| duration_ms(metrics.completion)),
+        replay_frames_per_second: replay_metrics.map(|metrics| metrics.frames_per_second),
+        observation_and_quiet_ms: duration_ms(completion_metrics.observation_and_quiet),
         first_row_ms,
         last_row_ms,
         apply_latency_p50_ms,
@@ -1213,6 +1290,7 @@ fn spawn_server(
     base: Instant,
     sent_at: Arc<Vec<AtomicU64>>,
     server_sent_frames: Arc<AtomicU64>,
+    replay_started_at: Arc<Mutex<Option<Instant>>>,
 ) -> Result<Server, ProbeError> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let address = listener.local_addr()?;
@@ -1279,6 +1357,7 @@ fn spawn_server(
                         let config = config.clone();
                         let sent_at = Arc::clone(&sent_at);
                         let server_sent_frames = Arc::clone(&server_sent_frames);
+                        let replay_started_at = Arc::clone(&replay_started_at);
                         connections.push(thread::spawn(move || {
                             let Ok(mut socket) = accept(stream) else {
                                 return;
@@ -1293,6 +1372,7 @@ fn spawn_server(
                                 base,
                                 &sent_at,
                                 &server_sent_frames,
+                                &replay_started_at,
                             );
                             let _ = stats_tx.send(result);
                         }));
@@ -1313,6 +1393,7 @@ fn serve_corpus(
     base: Instant,
     sent_at: &[AtomicU64],
     server_sent_frames: &AtomicU64,
+    replay_started_at: &Mutex<Option<Instant>>,
 ) -> Result<ServerStats, String> {
     let subscription = loop {
         let message = socket.read().map_err(|error| error.to_string())?;
@@ -1332,12 +1413,18 @@ fn serve_corpus(
     let started = Instant::now();
     let mut frames = 0u64;
     let mut bytes = 0u64;
-    'passes: for _ in 0..config.passes {
+    'passes: for pass_index in 0..config.passes {
         let reader = BufReader::new(File::open(&config.corpus_path).map_err(|e| e.to_string())?);
         for (ordinal, line) in reader.lines().enumerate() {
             let line = line.map_err(|e| e.to_string())?;
             if ordinal >= config.events {
                 return Err("corpus contains more rows than declared".to_string());
+            }
+            if pass_index == 1 && ordinal == 0 {
+                replay_started_at
+                    .lock()
+                    .map_err(|_| "replay start clock lock poisoned".to_string())?
+                    .get_or_insert_with(Instant::now);
             }
             let now = elapsed_ns(base).max(1);
             let _ = sent_at[ordinal].compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire);
@@ -1536,6 +1623,28 @@ fn trim_allocator() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completion_throughput_excludes_quiet_proof() {
+        let completion = Duration::from_millis(500);
+        let first = CompletionMetrics::new(100_000, completion, Duration::from_secs(1)).unwrap();
+        let extended =
+            CompletionMetrics::new(100_000, completion, Duration::from_secs(10)).unwrap();
+
+        assert_eq!(first.frames_per_second, 200_000.0);
+        assert_eq!(extended.frames_per_second, first.frames_per_second);
+        assert!(first.completion <= first.observation_and_quiet);
+        assert!(extended.completion <= extended.observation_and_quiet);
+    }
+
+    #[test]
+    fn completion_rejects_an_inverted_timeline() {
+        let error =
+            CompletionMetrics::new(1, Duration::from_secs(2), Duration::from_secs(1)).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("completion cannot follow observation"));
+    }
 
     fn string_shape(
         utf8_bytes: usize,
