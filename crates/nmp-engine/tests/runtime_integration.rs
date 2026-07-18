@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use nmp_engine::core::RelayAdmissionPolicy;
 use nmp_engine::core::RowDelta;
 use nmp_engine::outbox::WriteStatus;
-use nmp_engine::runtime::{EngineThread, ReceiptReattachment, RowsReceiver};
+use nmp_engine::runtime::{EngineThread, FifoReceiver, ReceiptReattachment, RowsReceiver};
 use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, Derived, Filter, Freshness,
     IdentityField, Selector, SourceAuthority,
@@ -52,7 +52,7 @@ use nostr_relay_builder::prelude::{
     Tag as RelayTag, Timestamp as RelayTimestamp,
 };
 
-fn expect_attached(result: ReceiptReattachment) -> Receiver<WriteStatus> {
+fn expect_attached(result: ReceiptReattachment) -> FifoReceiver<WriteStatus> {
     match result {
         ReceiptReattachment::Attached(statuses) => statuses,
         ReceiptReattachment::NotFound => panic!("known receipt was not found"),
@@ -263,7 +263,7 @@ fn wait_for_rows(
 
 /// Same shape as [`wait_for_rows`], for the receipt-status stream.
 fn wait_for_status(
-    rx: &Receiver<WriteStatus>,
+    rx: &FifoReceiver<WriteStatus>,
     timeout: Duration,
     pred: impl Fn(&WriteStatus) -> bool,
 ) -> bool {

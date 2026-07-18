@@ -24,8 +24,6 @@
 //! write-relay map -- there is nothing for a caller to resolve up front.
 
 use std::sync::Arc;
-#[cfg(test)]
-use std::thread;
 
 use crate::auth::{
     FfiAccountRegistration, FfiAuthPolicyAdapter, FfiAuthPolicyCallback, FfiAuthPolicyRegistration,
@@ -37,222 +35,34 @@ use crate::convert::{
     sign_event_start_error, signed_event_to_ffi, window_from_ffi, write_intent_from_ffi,
     write_status_to_ffi, FfiError, FfiRequestRowsError, WriteStatusRef,
 };
-use crate::nip02::{
-    action_status_to_ffi, handle as follow_handle, snapshot_to_ffi, FollowActionObserver,
-    FollowObserver, NmpFollowHandle,
-};
-use crate::observer::{DiagnosticsObserver, ReceiptObserver, RowObserver, SignEventObserver};
+use crate::nip02::{NmpFollowActionStream, NmpFollowStream};
 use crate::types::{
-    FfiCancelWriteError, FfiCancelWriteOutcome, FfiDemand, FfiFilter, FfiReceiptReattachment,
-    FfiRelayInformation, FfiRelayInformationCachePolicy, FfiRelayInformationDocument,
-    FfiRelayInformationFreshness, FfiRelayInformationLimitations, FfiSignEventRequest, FfiWindow,
-    FfiWriteIntent,
+    FfiCancelWriteError, FfiCancelWriteOutcome, FfiDemand, FfiDiagnosticsSnapshot, FfiFilter,
+    FfiFrame, FfiReceiptReattachment, FfiRelayInformation, FfiRelayInformationCachePolicy,
+    FfiRelayInformationDocument, FfiRelayInformationFreshness, FfiRelayInformationLimitations,
+    FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiWindow, FfiWriteIntent,
+    FfiWriteStatus,
 };
 use nmp::ReceiptReattachment;
 
-fn spawn_native_bridge(
-    reservation: nmp::NativeTaskReservation,
-    cancel: nmp::NativeTaskCancel,
-    component: &'static str,
-    task: impl FnOnce() + Send + 'static,
-) -> Result<(), FfiError> {
-    start_native_bridge(reservation, cancel, component).map(|starter| starter.run(task))
-}
-
-fn start_native_bridge(
-    reservation: nmp::NativeTaskReservation,
-    cancel: nmp::NativeTaskCancel,
-    component: &'static str,
-) -> Result<nmp::StartedNativeTask, FfiError> {
-    reservation
-        .start_with_cancel(move || cancel.cancel())
-        .map_err(|error| FfiError::ThreadUnavailable {
-            component: component.to_string(),
-            reason: error.to_string(),
-        })
-}
-
-#[cfg(test)]
-fn spawn_native_bridge_with(
-    component: &'static str,
-    task: Box<dyn FnOnce() + Send + 'static>,
-    spawn: impl FnOnce(
-        thread::Builder,
-        Box<dyn FnOnce() + Send + 'static>,
-    ) -> std::io::Result<thread::JoinHandle<()>>,
-) -> Result<(), FfiError> {
-    spawn(
-        thread::Builder::new().name(format!("nmp-ffi-{component}")),
-        task,
-    )
-    .map(|_| ())
-    .map_err(|error| FfiError::ThreadUnavailable {
-        component: component.to_string(),
-        reason: error.to_string(),
-    })
-}
-
-#[cfg(test)]
-mod thread_spawn_tests {
-    use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::Mutex;
-
-    struct RecordingFollowActionObserver {
-        statuses: Arc<Mutex<Vec<crate::nip02::FfiFollowActionStatus>>>,
-        closes: Arc<AtomicUsize>,
-    }
-
-    impl FollowActionObserver for RecordingFollowActionObserver {
-        fn on_status(&self, status: crate::nip02::FfiFollowActionStatus) {
-            self.statuses.lock().unwrap().push(status);
-        }
-
-        fn on_closed(&self) {
-            self.closes.fetch_add(1, Ordering::AcqRel);
-        }
-    }
-
-    #[test]
-    fn injected_native_bridge_refusal_is_typed_and_preserves_safe_reason() {
-        let error = spawn_native_bridge_with(
-            "row-observer",
-            Box::new(|| panic!("refused task must never run")),
-            |_, _| {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::WouldBlock,
-                    "injected thread pressure",
-                ))
-            },
-        )
-        .unwrap_err();
-        assert_eq!(
-            error,
-            FfiError::ThreadUnavailable {
-                component: "row-observer".to_string(),
-                reason: "injected thread pressure".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn follow_bridge_refusal_reports_once_before_the_action_can_start() {
-        let engine = Arc::new(nmp::Engine::new(nmp::EngineConfig::default()).unwrap());
-        let statuses = Arc::new(Mutex::new(Vec::new()));
-        let closes = Arc::new(AtomicUsize::new(0));
-        let started = Arc::new(AtomicBool::new(false));
-        let start_flag = Arc::clone(&started);
-        start_following_action_with(
-            engine,
-            nostr::Keys::generate().public_key().to_hex(),
-            nmp_nip02::FollowChange::Follow,
-            Box::new(RecordingFollowActionObserver {
-                statuses: Arc::clone(&statuses),
-                closes: Arc::clone(&closes),
-            }),
-            |task| {
-                drop(task);
-                Err(FfiError::ThreadUnavailable {
-                    component: "follow-action-observer".to_string(),
-                    reason: "injected bridge pressure".to_string(),
-                })
-            },
-            move |_| {
-                start_flag.store(true, Ordering::Release);
-            },
-        );
-        assert!(!started.load(Ordering::Acquire));
-        assert_eq!(closes.load(Ordering::Acquire), 1);
-        assert_eq!(
-            *statuses.lock().unwrap(),
-            vec![crate::nip02::FfiFollowActionStatus::Failed {
-                failure: crate::nip02::FfiFollowActionFailure::ThreadUnavailable {
-                    component: "follow-action-observer".to_string(),
-                    reason: "injected bridge pressure".to_string(),
-                },
-            }]
-        );
-    }
-}
-
-fn reattachment_to_ffi(value: &ReceiptReattachment) -> FfiReceiptReattachment {
-    match value {
-        ReceiptReattachment::Attached(_) => FfiReceiptReattachment::Attached,
-        ReceiptReattachment::NotFound => FfiReceiptReattachment::NotFound,
-        ReceiptReattachment::RetainedButUnreadable => FfiReceiptReattachment::RetainedButUnreadable,
-    }
-}
-
+/// Start a follow/unfollow action and expose its status stream (#680). A valid
+/// target starts the transient action worker (one thread on the engine's
+/// internal blocking-adapter pool, per user action — never observation-count
+/// driven); an unparseable target yields a one-shot stream carrying a single
+/// `Failed(InvalidTarget)` fact. The status FIFO is delivered pull-based over
+/// [`NmpFollowActionStream`], so no drain thread bridges it.
 fn start_following_action(
     engine: Arc<nmp::Engine>,
     target: String,
     change: nmp_nip02::FollowChange,
-    observer: Box<dyn FollowActionObserver>,
-) {
-    let bridge_engine = Arc::clone(&engine);
-    start_following_action_with(
-        engine,
-        target,
-        change,
-        observer,
-        move |task| {
-            let reservation = bridge_engine.reserve_native_task("follow-action-observer")?;
-            let cancel = bridge_engine.native_task_cancel()?;
-            spawn_native_bridge(reservation, cancel, "follow-action-observer", task)
-        },
-        nmp_nip02::FollowActionRunner::start,
-    );
-}
-
-fn start_following_action_with(
-    engine: Arc<nmp::Engine>,
-    target: String,
-    change: nmp_nip02::FollowChange,
-    observer: Box<dyn FollowActionObserver>,
-    spawn_bridge: impl FnOnce(Box<dyn FnOnce() + Send + 'static>) -> Result<(), FfiError>,
-    start_runner: impl FnOnce(nmp_nip02::FollowActionRunner),
-) {
-    let target = match parse_pubkey(&target) {
-        Ok(target) => target,
-        Err(_) => {
-            observer.on_status(crate::nip02::FfiFollowActionStatus::Failed {
-                failure: crate::nip02::FfiFollowActionFailure::InvalidTarget { got: target },
-            });
-            observer.on_closed();
-            return;
-        }
+) -> Arc<NmpFollowActionStream> {
+    let action = match parse_pubkey(&target) {
+        Ok(target) => nmp_nip02::set_following(engine, target, change),
+        Err(_) => nmp_nip02::FollowAction::one_shot_failure(
+            nmp_nip02::FollowActionFailure::InvalidTarget { got: target },
+        ),
     };
-    let (action, runner) = nmp_nip02::prepare_set_following(engine, target, change);
-    let observer: Arc<dyn FollowActionObserver> = Arc::from(observer);
-    let bridge = Arc::clone(&observer);
-    match spawn_bridge(Box::new(move || {
-        while let Ok(status) = action.recv() {
-            bridge.on_status(action_status_to_ffi(status));
-        }
-        bridge.on_closed();
-    })) {
-        Ok(()) => start_runner(runner),
-        Err(error) => {
-            let failure = match error {
-                FfiError::ThreadUnavailable { component, reason } => {
-                    crate::nip02::FfiFollowActionFailure::ThreadUnavailable { component, reason }
-                }
-                FfiError::ExecutorSaturated {
-                    component,
-                    capacity,
-                } => crate::nip02::FfiFollowActionFailure::ExecutorSaturated {
-                    component,
-                    capacity,
-                },
-                other => crate::nip02::FfiFollowActionFailure::ThreadUnavailable {
-                    component: "follow-action-observer".to_string(),
-                    reason: format!("unexpected bridge refusal: {other:?}"),
-                },
-            };
-            observer.on_status(crate::nip02::FfiFollowActionStatus::Failed { failure });
-            observer.on_closed();
-        }
-    }
+    NmpFollowActionStream::new(action.into_async())
 }
 
 /// Construction config for [`NmpEngine::new`]. See the module doc: the only
@@ -292,11 +102,6 @@ pub struct NmpEngineConfig {
     /// literal is its foreign-binding mirror.
     #[uniffi(default = 10)]
     pub max_relays: u32,
-    /// Maximum immediately-running native observer/action/waiter tasks.
-    /// Zero selects the finite default; saturation never queues an accepted
-    /// stream behind a long-lived drain.
-    #[uniffi(default = 12)]
-    pub max_native_tasks: u32,
     /// Maximum live signer and AUTH-policy registrations. Zero deliberately
     /// admits none rather than selecting the default.
     #[uniffi(default = 64)]
@@ -307,7 +112,6 @@ pub struct NmpEngineConfig {
 /// (#20). Update BOTH this const AND the `#[uniffi(default = N)]` literal
 /// on [`NmpEngineConfig::max_relays`] above — they must match.
 pub const DEFAULT_MAX_RELAYS: u32 = 10;
-pub const DEFAULT_MAX_NATIVE_TASKS: u32 = 12;
 pub const DEFAULT_MAX_AUTH_CAPABILITIES: u32 = 64;
 
 // A DERIVED `Default` would zero `max_auth_capabilities` — and zero
@@ -323,7 +127,6 @@ impl Default for NmpEngineConfig {
             fallback_relays: Vec::new(),
             allowed_local_relay_hosts: Vec::new(),
             max_relays: DEFAULT_MAX_RELAYS,
-            max_native_tasks: DEFAULT_MAX_NATIVE_TASKS,
             max_auth_capabilities: DEFAULT_MAX_AUTH_CAPABILITIES,
         }
     }
@@ -344,19 +147,7 @@ pub fn reset_persistent_store(store_path: String) -> Result<(), FfiError> {
 
 // Keep the native-facing literal pinned to the canonical finite default.
 const _: () = assert!(DEFAULT_MAX_RELAYS == 10);
-const _: () = assert!(DEFAULT_MAX_NATIVE_TASKS == 12);
 const _: () = assert!(DEFAULT_MAX_AUTH_CAPABILITIES == 64);
-
-/// Exact, lock-protected executor accounting for deterministic lifecycle and
-/// saturation falsifiers. `admitted` includes a reservation during its brief
-/// pre-handoff window; `running` counts OS task handles not yet joined.
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
-pub struct FfiNativeTaskCensus {
-    pub capacity: u64,
-    pub admitted: u64,
-    pub running: u64,
-    pub accepting: bool,
-}
 
 impl From<NmpEngineConfig> for nmp::EngineConfig {
     fn from(config: NmpEngineConfig) -> Self {
@@ -367,7 +158,6 @@ impl From<NmpEngineConfig> for nmp::EngineConfig {
             fallback_relays: config.fallback_relays,
             allowed_local_relay_hosts: config.allowed_local_relay_hosts,
             max_relays: config.max_relays as usize,
-            max_native_tasks: config.max_native_tasks as usize,
             max_auth_capabilities: config.max_auth_capabilities as usize,
         }
     }
@@ -517,103 +307,77 @@ impl NmpEngine {
 
     /// Sign one exact event through the active account without accepting a
     /// write, persisting a row/receipt, planning relays, or publishing. The
-    /// returned handle cancels only this signer operation; completion fires
-    /// exactly once through `observer`.
+    /// returned [`NmpSignEventHandle`] delivers the outcome once through its
+    /// `async fn signed()`; [`NmpSignEventHandle::cancel`] cancels only this
+    /// signer operation.
     pub fn sign_event(
         &self,
         event: FfiSignEventRequest,
-        observer: Box<dyn SignEventObserver>,
     ) -> Result<Arc<NmpSignEventHandle>, FfiError> {
         let request = sign_event_request_from_ffi(event)?;
+        // One-shot result channel: the engine-admitted completion fires exactly
+        // once (success / failure / cancellation), sending the result and then
+        // dropping the sender so `signed()`'s awaited FIFO ends after it.
+        let (sender, receiver) = nmp::fifo_channel::<Result<nmp::Event, nmp::SignEventError>>();
         let cancel = self
             .engine
-            .sign_event_with_completion(request, move |result| match result {
-                Ok(event) => observer.on_signed(signed_event_to_ffi(event)),
-                Err(error) => observer.on_failed(sign_event_failure(error)),
+            .sign_event_with_completion(request, move |result| {
+                sender.send(result);
             })
             .map_err(sign_event_start_error)?;
-        Ok(Arc::new(NmpSignEventHandle { cancel }))
-    }
-
-    pub fn native_task_census(&self) -> FfiNativeTaskCensus {
-        let census = self.engine.native_task_census();
-        FfiNativeTaskCensus {
-            capacity: census.capacity as u64,
-            admitted: census.admitted as u64,
-            running: census.running as u64,
-            accepting: census.accepting,
-        }
-    }
-
-    /// Event-driven barrier for lifecycle tests and hosts that require proof
-    /// all cancelled native callbacks have returned before releasing state.
-    pub fn await_native_tasks_idle(&self) {
-        self.engine.wait_for_native_tasks_idle();
+        Ok(Arc::new(NmpSignEventHandle {
+            cancel,
+            result: receiver.into_async(),
+        }))
     }
 
     /// Observe the active account's relationship to `target` through the
-    /// NMP-owned NIP-02 resource. The returned handle only owns demand
-    /// cancellation; contact-list semantics and acquisition state stay in
-    /// Rust and arrive as closed snapshots.
-    pub fn observe_following(
-        &self,
-        target: String,
-        observer: Box<dyn FollowObserver>,
-    ) -> Result<Arc<NmpFollowHandle>, FfiError> {
+    /// NMP-owned NIP-02 resource (#680). Awaiting [`NmpFollowStream::next`]
+    /// costs no NMP-owned OS thread: the relationship snapshot is folded inline
+    /// over the engine's waker-driven async row mailbox. Contact-list
+    /// semantics and acquisition state stay in Rust and arrive as complete
+    /// self-contained snapshots.
+    pub fn observe_following(&self, target: String) -> Result<Arc<NmpFollowStream>, FfiError> {
         let target = parse_pubkey(&target)?;
-        let reservation = self.engine.reserve_native_task("follow-observer")?;
-        let task_cancel = self.engine.native_task_cancel()?;
-        let starter = start_native_bridge(reservation, task_cancel, "follow-observer")?;
-        let observation = nmp_nip02::observe_following(self.engine.clone(), target)?;
-        let cancel = observation.cancel_handle();
-        starter.run(move || {
-            while let Some(snapshot) = observation.recv() {
-                observer.on_snapshot(snapshot_to_ffi(snapshot));
-            }
-            observer.on_closed();
-        });
-        Ok(follow_handle(cancel))
+        let observation = nmp_nip02::observe_following_async(self.engine.clone(), target)?;
+        Ok(NmpFollowStream::new(observation))
     }
 
     /// Ask NMP to follow `target`. This is the complete NIP-02 action: it
     /// waits for the module's source-evidence policy, preserves the exact
     /// kind:3 base, atomically guards that base, signs, routes, and streams
-    /// the durable receipt. The native button owns none of those steps.
-    pub fn follow(&self, target: String, observer: Box<dyn FollowActionObserver>) {
-        start_following_action(
-            self.engine.clone(),
-            target,
-            nmp_nip02::FollowChange::Follow,
-            observer,
-        );
+    /// the durable receipt. The native button owns none of those steps; it
+    /// only awaits [`NmpFollowActionStream::next`].
+    pub fn follow(&self, target: String) -> Arc<NmpFollowActionStream> {
+        start_following_action(self.engine.clone(), target, nmp_nip02::FollowChange::Follow)
     }
 
     /// The inverse of [`Self::follow`], with the same acquisition,
     /// compare-and-swap, signer, routing, and receipt guarantees.
-    pub fn unfollow(&self, target: String, observer: Box<dyn FollowActionObserver>) {
+    pub fn unfollow(&self, target: String) -> Arc<NmpFollowActionStream> {
         start_following_action(
             self.engine.clone(),
             target,
             nmp_nip02::FollowChange::Unfollow,
-            observer,
-        );
+        )
     }
 
-    /// Open a live subscription. `observer` is driven from a dedicated drain
-    /// thread (M4 plan §4b) -- never the engine thread itself. The returned
-    /// [`NmpQueryHandle`]'s `Drop` withdraws the subscription (deinit-tied
-    /// demand drop, plan §4c); call [`NmpQueryHandle::cancel`] for an
-    /// explicit early teardown instead of waiting on Swift's own `deinit`
-    /// timing.
+    /// Open a live subscription (#680). Delivery is pull-based: await
+    /// [`NmpRowStream::next`], which parks a waker on the engine-owned mailbox
+    /// rather than blocking a dedicated OS thread — opening one costs no native
+    /// thread. `None` from `next()` is the terminal signal (cancel / engine
+    /// shutdown / producer drop). The returned [`NmpRowStream`]'s `Drop`
+    /// withdraws the subscription; call [`NmpRowStream::cancel`] for an
+    /// explicit early teardown.
     ///
     /// `window` selects the observation's delivery policy (#485). `None` is
     /// today's unbounded observation: exact deltas are rebased when a slow
-    /// observer skips intermediate reducer emits, and the full set is never
+    /// consumer skips intermediate reducer emits, and the full set is never
     /// redelivered. `Some(FfiWindow::Expandable { initial, max })` is a
     /// bounded newest-first window: each frame carries the complete
     /// current row set + growth fact in `FfiFrame::window` (deltas stay
     /// empty on the wire) and grows only via
-    /// [`NmpQueryHandle::request_rows`], never above `max`. Zero bounds and
+    /// [`NmpRowStream::request_rows`], never above `max`. Zero bounds and
     /// `initial > max` fail closed here with a typed [`FfiError`]; a
     /// windowed selection that already declares a NIP-01 `limit` fails with
     /// [`FfiError::WindowSelectionHasLimit`].
@@ -621,39 +385,14 @@ impl NmpEngine {
         &self,
         query: FfiFilter,
         window: Option<FfiWindow>,
-        observer: Box<dyn RowObserver>,
-    ) -> Result<Arc<NmpQueryHandle>, FfiError> {
+    ) -> Result<Arc<NmpRowStream>, FfiError> {
         let filter = filter_from_ffi(query)?;
         let window = window_from_ffi(window)?;
-        // Validate + open the subscription BEFORE reserving a native task.
-        // A window-validation error (e.g. `WindowInitialExceedsMax`) must not
-        // leave an admitted row-observer reservation stranded in the native
-        // executor -- a dropped `StartedNativeTask` that never `run`s does not
-        // release its reservation, so reserving after this fallible step is the
-        // guard. If reservation/bridge start then fails, `subscription` drops
-        // and unsubscribes cleanly.
         let subscription = self
             .engine
-            .observe(nmp::LiveQuery::from_filter(filter), window)?;
-        let reservation = self.engine.reserve_native_task("row-observer")?;
-        let task_cancel = self.engine.native_task_cancel()?;
-        let starter = start_native_bridge(reservation, task_cancel, "row-observer")?;
-        let cancel = subscription.cancel_handle();
-        // Taken BEFORE the drain thread owns the subscription: `recv` blocks
-        // there forever, so this cloneable capability is the only way the
-        // handle can grow the window from another thread.
-        let window_handle = subscription.window_handle();
-
-        starter.run(move || {
-            while let Ok(frame) = subscription.recv() {
-                observer.on_frame(frame_to_ffi(frame));
-            }
-            observer.on_closed();
-        });
-
-        Ok(Arc::new(NmpQueryHandle {
-            cancel,
-            window: window_handle,
+            .observe_async(nmp::LiveQuery::from_filter(filter), window)?;
+        Ok(Arc::new(NmpRowStream {
+            inner: subscription,
         }))
     }
 
@@ -662,72 +401,37 @@ impl NmpEngine {
     /// `FfiFilter` (which always takes `Demand::from_filter`'s static
     /// default) isn't enough: declaring `Pinned` wire authority, a non-
     /// default `AccessContext`, or a non-`Agnostic` `CacheMode`. Same
-    /// drain-thread/cancel-handle/window shape as `observe` in every other
-    /// respect (see that method's doc for the `window` policy).
+    /// pull-based/cancel/window shape as `observe` in every other respect
+    /// (see that method's doc for the `window` policy).
     pub fn observe_demand(
         &self,
         query: FfiDemand,
         window: Option<FfiWindow>,
-        observer: Box<dyn RowObserver>,
-    ) -> Result<Arc<NmpQueryHandle>, FfiError> {
+    ) -> Result<Arc<NmpRowStream>, FfiError> {
         let demand = demand_from_ffi(query)?;
         let window = window_from_ffi(window)?;
-        // Validate + open the subscription BEFORE reserving a native task, so a
-        // window-validation error cannot strand an admitted demand-observer
-        // reservation (a `StartedNativeTask` dropped without `run` does not
-        // release it). See `observe` for the full rationale.
-        let subscription = self.engine.observe(nmp::LiveQuery(demand), window)?;
-        let reservation = self.engine.reserve_native_task("demand-observer")?;
-        let task_cancel = self.engine.native_task_cancel()?;
-        let starter = start_native_bridge(reservation, task_cancel, "demand-observer")?;
-        let cancel = subscription.cancel_handle();
-        let window_handle = subscription.window_handle();
-
-        starter.run(move || {
-            while let Ok(frame) = subscription.recv() {
-                observer.on_frame(frame_to_ffi(frame));
-            }
-            observer.on_closed();
-        });
-
-        Ok(Arc::new(NmpQueryHandle {
-            cancel,
-            window: window_handle,
+        let subscription = self.engine.observe_async(nmp::LiveQuery(demand), window)?;
+        Ok(Arc::new(NmpRowStream {
+            inner: subscription,
         }))
     }
 
-    /// Enqueue a write. `observer` streams every `WriteStatus` this intent
-    /// ever reaches (ledger #9 -- enqueue is not converged; the first value
-    /// is never a terminal for a durable/at-most-once intent). A
-    /// caller-supplied `Signed` payload that fails verification is no
-    /// longer a synchronous error here (that guarantee moved to
-    /// `nmp-engine::core::EngineCore::on_publish`'s acceptance boundary,
-    /// Unit A0/#56, so it holds for every entry point, not only this one) --
-    /// it surfaces as `WriteStatus::Failed`, the FIRST and only status
-    /// `observer` receives, with no preceding `Accepted`.
-    /// Exhaustion of the pre-acceptance correlation namespace instead returns
-    /// a typed `FfiError` synchronously: no receipt id or stream exists.
-    pub fn publish(
-        &self,
-        intent: FfiWriteIntent,
-        observer: Box<dyn ReceiptObserver>,
-    ) -> Result<u64, FfiError> {
+    /// Enqueue a write (#680). The returned [`NmpReceiptStream`] exposes the
+    /// stable receipt id ([`NmpReceiptStream::id`]) and streams every
+    /// `WriteStatus` this intent ever reaches (ledger #9 -- enqueue is not
+    /// converged; the first value is never a terminal for a durable/
+    /// at-most-once intent) via `async fn next()`. A caller-supplied `Signed`
+    /// payload that fails verification is no longer a synchronous error here
+    /// (that guarantee moved to `nmp-engine::core::EngineCore::on_publish`'s
+    /// acceptance boundary, Unit A0/#56, so it holds for every entry point) --
+    /// it surfaces as `WriteStatus::Failed`, the FIRST and only status the
+    /// stream delivers, with no preceding `Accepted`. Exhaustion of the
+    /// pre-acceptance correlation namespace instead returns a typed `FfiError`
+    /// synchronously: no receipt id or stream exists.
+    pub fn publish(&self, intent: FfiWriteIntent) -> Result<Arc<NmpReceiptStream>, FfiError> {
         let write_intent = write_intent_from_ffi(intent)?;
-        let reservation = self.engine.reserve_native_task("receipt-observer")?;
-        let task_cancel = self.engine.native_task_cancel()?;
-        let starter = start_native_bridge(reservation, task_cancel, "receipt-observer")?;
         let receipt = self.engine.publish_tracked(write_intent)?;
-        let receipt_id = receipt.id.0;
-        let receipt_rx = receipt.statuses;
-
-        starter.run(move || {
-            while let Ok(status) = receipt_rx.recv() {
-                observer.on_status(write_status_to_ffi(WriteStatusRef(&status)));
-            }
-            observer.on_closed();
-        });
-
-        Ok(receipt_id)
+        Ok(NmpReceiptStream::new(receipt))
     }
 
     /// Compose an ordinary kind:9 NIP-29 message from semantic inputs
@@ -768,56 +472,28 @@ impl NmpEngine {
     pub fn publish_composed(
         &self,
         intent: Arc<crate::nip29::FfiComposedWriteIntent>,
-        observer: Box<dyn ReceiptObserver>,
-    ) -> Result<u64, FfiError> {
-        let reservation = self
-            .engine
-            .reserve_native_task("composed-receipt-observer")?;
-        let task_cancel = self.engine.native_task_cancel()?;
-        let starter = start_native_bridge(reservation, task_cancel, "composed-receipt-observer")?;
+    ) -> Result<Arc<NmpReceiptStream>, FfiError> {
         let write_intent = intent.take()?;
         let receipt = self.engine.publish_tracked(write_intent)?;
-        let receipt_id = receipt.id.0;
-        let receipt_rx = receipt.statuses;
-
-        starter.run(move || {
-            while let Ok(status) = receipt_rx.recv() {
-                observer.on_status(write_status_to_ffi(WriteStatusRef(&status)));
-            }
-            observer.on_closed();
-        });
-
-        Ok(receipt_id)
+        Ok(NmpReceiptStream::new(receipt))
     }
 
     /// Attach to a retained receipt without collapsing corrupt durable
-    /// evidence into the same result as an unknown id.
-    pub fn reattach_receipt(
-        &self,
-        receipt_id: u64,
-        observer: Box<dyn ReceiptObserver>,
-    ) -> Result<FfiReceiptReattachment, FfiError> {
-        let reservation = self
-            .engine
-            .reserve_native_task("reattached-receipt-observer")?;
-        let task_cancel = self.engine.native_task_cancel()?;
-        let starter = start_native_bridge(reservation, task_cancel, "reattached-receipt-observer")?;
+    /// evidence into the same result as an unknown id (#680). The `Attached`
+    /// variant carries an [`NmpReceiptStream`] that replays the durable
+    /// `WriteStatus` prefix from the store and streams onward, delivered
+    /// pull-based via `async fn next()`.
+    pub fn reattach_receipt(&self, receipt_id: u64) -> Result<FfiReceiptReattachment, FfiError> {
         let result = self.engine.reattach_receipt(nmp::ReceiptId(receipt_id))?;
-        let ffi_result = reattachment_to_ffi(&result);
-        match result {
-            ReceiptReattachment::Attached(receipt_rx) => {
-                starter.run(move || {
-                    while let Ok(status) = receipt_rx.recv() {
-                        observer.on_status(write_status_to_ffi(WriteStatusRef(&status)));
-                    }
-                    observer.on_closed();
-                });
+        Ok(match result {
+            ReceiptReattachment::Attached(statuses) => FfiReceiptReattachment::Attached {
+                stream: NmpReceiptStream::from_statuses(nmp::ReceiptId(receipt_id), statuses),
+            },
+            ReceiptReattachment::NotFound => FfiReceiptReattachment::NotFound,
+            ReceiptReattachment::RetainedButUnreadable => {
+                FfiReceiptReattachment::RetainedButUnreadable
             }
-            ReceiptReattachment::NotFound | ReceiptReattachment::RetainedButUnreadable => {
-                drop(starter);
-            }
-        }
-        Ok(ffi_result)
+        })
     }
 
     /// Explicitly cancel one accepted unsigned write. A successful outcome
@@ -830,32 +506,20 @@ impl NmpEngine {
             .map_err(cancel_write_error_to_ffi)
     }
 
-    /// Open a live diagnostics stream (M5 plan §1.2 step 5) -- "the
-    /// acceptance test rendered on screen, permanently." `observer` is
-    /// driven from a dedicated drain thread, mirroring [`Self::observe`];
-    /// the returned [`NmpDiagnosticsHandle`]'s `Drop` withdraws the
-    /// observer (deinit-tied teardown, same discipline as
-    /// [`NmpQueryHandle`]). Delivers the CURRENT snapshot immediately, then
-    /// a fresh one on every recompile/EOSE-driven coverage change --
-    /// pushed reactively, never polled.
-    pub fn observe_diagnostics(
-        &self,
-        observer: Box<dyn DiagnosticsObserver>,
-    ) -> Result<Arc<NmpDiagnosticsHandle>, FfiError> {
-        let reservation = self.engine.reserve_native_task("diagnostics-observer")?;
-        let task_cancel = self.engine.native_task_cancel()?;
-        let starter = start_native_bridge(reservation, task_cancel, "diagnostics-observer")?;
-        let subscription = self.engine.observe_diagnostics()?;
-        let cancel = subscription.cancel_handle();
-
-        starter.run(move || {
-            while let Some(snapshot) = subscription.recv() {
-                observer.on_snapshot(diagnostics_snapshot_to_ffi(snapshot));
-            }
-            observer.on_closed();
-        });
-
-        Ok(Arc::new(NmpDiagnosticsHandle { cancel }))
+    /// Open a live diagnostics stream (#680) -- "the acceptance test rendered
+    /// on screen, permanently." Delivery is pull-based: await
+    /// [`NmpDiagnosticsStream::next`], which parks a waker on the engine's
+    /// latest-state diagnostics mailbox — no dedicated drain thread. The
+    /// returned stream's `Drop` withdraws the observer; call
+    /// [`NmpDiagnosticsStream::cancel`] for an explicit early teardown. The
+    /// first `next()` yields the CURRENT snapshot immediately, then a fresh one
+    /// on every recompile/EOSE-driven coverage change. `None` is the terminal
+    /// signal (cancel / engine shutdown).
+    pub fn observe_diagnostics(&self) -> Result<Arc<NmpDiagnosticsStream>, FfiError> {
+        let subscription = self.engine.observe_diagnostics_async()?;
+        Ok(Arc::new(NmpDiagnosticsStream {
+            inner: subscription,
+        }))
     }
 
     /// Stop the engine. Idempotent: a second call is a no-op (`nmp::Engine`'s
@@ -865,36 +529,38 @@ impl NmpEngine {
     }
 }
 
-/// The app-facing handle to a live subscription (returned by
-/// [`NmpEngine::observe`]). `Drop` withdraws the subscription -- the SDK
-/// never requires an app-owned container or lifecycle hook to make this
-/// happen (plan §7's kill test). Holds ONLY two opaque capabilities: the
-/// [`nmp::ObservationCancel`] token (`Subscription::cancel_handle`) and,
-/// for windowed observations, the [`nmp::WindowHandle`] growth capability
-/// -- no `Handle`/`QueryHandle` (the raw imperative engine-control
-/// capability) ever reaches this crate. The receiving half of the
-/// subscription is owned entirely by [`NmpEngine::observe`]'s drain thread,
-/// since `recv()` blocks; `cancel()`/`Drop` here and the drain thread's own
-/// teardown converge on the token's single withdrawal guard (see that
-/// type's doc).
+/// The app-facing pull-based handle to a live subscription (returned by
+/// [`NmpEngine::observe`], #680). Await [`Self::next`] for the next
+/// [`FfiFrame`], or `None` once the observation ends; `Drop`/[`Self::cancel`]
+/// withdraw it. Holds ONLY the `Send + Sync` [`nmp::AsyncSubscription`] — no
+/// dedicated drain thread and no raw engine-control capability ever reaches
+/// this crate. Awaiting `next()` reserves no native thread and no runtime; the
+/// engine mailbox wakes the parked future.
 #[derive(uniffi::Object)]
-pub struct NmpQueryHandle {
-    cancel: nmp::ObservationCancel,
-    /// `Some` iff the observation was opened with a window -- the growth
-    /// capability's existence is DERIVED from the window policy, never a
-    /// separate handle type. Cloned off the subscription before the drain
-    /// thread took ownership of it.
-    window: Option<nmp::WindowHandle>,
+pub struct NmpRowStream {
+    inner: nmp::AsyncSubscription,
 }
 
 #[uniffi::export]
-impl NmpQueryHandle {
-    /// Withdraw the subscription now, rather than waiting for `Drop` (a
-    /// Swift `deinit` can be delayed by ARC in ways an app may want to
-    /// preempt explicitly). Safe to call more than once, and safe to never
-    /// call at all (in which case `Drop` is what withdraws it).
+impl NmpRowStream {
+    /// Await the next observation [`FfiFrame`], or `None` once the engine has
+    /// torn the subscription down (cancel / shutdown / producer drop).
+    /// [`FfiError::ConcurrentNext`] if a `next()` is already in flight — the
+    /// stream is single-consumer.
+    pub async fn next(&self) -> Result<Option<FfiFrame>, FfiError> {
+        match self.inner.next().await {
+            Ok(Some(frame)) => Ok(Some(frame_to_ffi(frame))),
+            Ok(None) => Ok(None),
+            Err(_) => Err(FfiError::ConcurrentNext),
+        }
+    }
+
+    /// Withdraw the subscription now, rather than waiting for `Drop` (a Swift
+    /// `deinit` can be delayed by ARC in ways an app may want to preempt).
+    /// Wakes any parked `next()` to `None`. Safe to call more than once, and
+    /// safe to never call at all.
     pub fn cancel(&self) {
-        self.cancel.cancel();
+        self.inner.cancel();
     }
 
     /// Windowed observations only: monotonically raise the window's row
@@ -908,45 +574,149 @@ impl NmpQueryHandle {
     /// Unbounded observations fail with
     /// [`FfiRequestRowsError::Unwindowed`].
     pub fn request_rows(&self, at_least: u64) -> Result<(), FfiRequestRowsError> {
-        let Some(window) = &self.window else {
-            return Err(FfiRequestRowsError::Unwindowed);
-        };
         // Saturating u64→usize: `at_least` is a declarative lower bound the
         // engine clamps to the window's `max` anyway, so a value beyond the
         // platform's addressable row count is behaviorally identical to
         // usize::MAX (only reachable on sub-64-bit targets).
         let at_least = usize::try_from(at_least).unwrap_or(usize::MAX);
-        window
+        self.inner
             .request_rows(at_least)
             .map_err(FfiRequestRowsError::from)
     }
 }
 
-impl Drop for NmpQueryHandle {
+impl Drop for NmpRowStream {
     fn drop(&mut self) {
-        self.cancel.cancel();
+        self.inner.cancel();
     }
 }
 
-/// The app-facing handle to a live diagnostics stream (returned by
-/// [`NmpEngine::observe_diagnostics`]). Same discipline as [`NmpQueryHandle`]
-/// -- holds ONLY the opaque [`nmp::ObservationCancel`] token
-/// (`DiagnosticsSubscription::cancel_handle`), the SAME type
-/// [`NmpQueryHandle`] holds.
+/// The app-facing pull-based handle to a live diagnostics stream (returned by
+/// [`NmpEngine::observe_diagnostics`], #680). Same discipline as
+/// [`NmpRowStream`] — await [`Self::next`], `Drop`/[`Self::cancel`] withdraw.
 #[derive(uniffi::Object)]
-pub struct NmpDiagnosticsHandle {
-    cancel: nmp::ObservationCancel,
+pub struct NmpDiagnosticsStream {
+    inner: nmp::AsyncDiagnosticsSubscription,
 }
 
-/// Scoped cancellation handle for one sign-only operation. It owns no
-/// signer registration and cannot affect accepted durable writes.
+#[uniffi::export]
+impl NmpDiagnosticsStream {
+    /// Await the next [`FfiDiagnosticsSnapshot`] — the current snapshot on the
+    /// first call, a fresh one on every coverage change afterward, or `None`
+    /// once the stream is withdrawn. [`FfiError::ConcurrentNext`] on an
+    /// overlapping call.
+    pub async fn next(&self) -> Result<Option<FfiDiagnosticsSnapshot>, FfiError> {
+        match self.inner.next().await {
+            Ok(Some(snapshot)) => Ok(Some(diagnostics_snapshot_to_ffi(snapshot))),
+            Ok(None) => Ok(None),
+            Err(_) => Err(FfiError::ConcurrentNext),
+        }
+    }
+
+    /// Withdraw this diagnostics observer now, rather than waiting for `Drop`.
+    /// Safe to call more than once; safe to never call at all.
+    pub fn cancel(&self) {
+        self.inner.cancel();
+    }
+}
+
+impl Drop for NmpDiagnosticsStream {
+    fn drop(&mut self) {
+        self.inner.cancel();
+    }
+}
+
+/// The app-facing pull-based receipt stream (returned by [`NmpEngine::publish`]/
+/// [`NmpEngine::publish_composed`], and the `Attached` reattachment, #680). It
+/// exposes the stable store-issued receipt id via [`Self::id`] and streams
+/// every `WriteStatus` this intent reaches via `async fn next()`. Receipt facts
+/// are durable: the persisted outbox/redb store is the source of truth, so a
+/// dropped stream can be reattached and its `WriteStatus` prefix replayed.
+#[derive(uniffi::Object)]
+pub struct NmpReceiptStream {
+    id: nmp::ReceiptId,
+    inner: nmp::AsyncFifoReceiver<nmp::WriteStatus>,
+}
+
+impl NmpReceiptStream {
+    fn new(receipt: nmp::ReceiptStream) -> Arc<Self> {
+        Arc::new(Self {
+            id: receipt.id,
+            inner: receipt.statuses.into_async(),
+        })
+    }
+
+    fn from_statuses(
+        id: nmp::ReceiptId,
+        statuses: nmp::FifoReceiver<nmp::WriteStatus>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            id,
+            inner: statuses.into_async(),
+        })
+    }
+}
+
+#[uniffi::export]
+impl NmpReceiptStream {
+    /// The stable store-issued receipt id, needed for process-later
+    /// reattachment ([`NmpEngine::reattach_receipt`]) and explicit cancellation
+    /// ([`NmpEngine::cancel`]).
+    pub fn id(&self) -> u64 {
+        self.id.0
+    }
+
+    /// Await the next `WriteStatus`, or `None` once the intent has fully
+    /// resolved or the engine has shut down. [`FfiError::ConcurrentNext`] on an
+    /// overlapping call.
+    pub async fn next(&self) -> Result<Option<FfiWriteStatus>, FfiError> {
+        match self.inner.next().await {
+            Ok(Some(status)) => Ok(Some(write_status_to_ffi(WriteStatusRef(&status)))),
+            Ok(None) => Ok(None),
+            Err(_) => Err(FfiError::ConcurrentNext),
+        }
+    }
+
+    /// Stop delivering live status frames to this stream. The durable receipt
+    /// itself is untouched (the write is not cancelled — use
+    /// [`NmpEngine::cancel`] for that); a later [`NmpEngine::reattach_receipt`]
+    /// replays the durable prefix. Safe to call more than once.
+    pub fn cancel(&self) {
+        self.inner.close();
+    }
+}
+
+impl Drop for NmpReceiptStream {
+    fn drop(&mut self) {
+        self.inner.close();
+    }
+}
+
+/// Scoped one-shot sign-only handle (#680). It owns no signer registration and
+/// cannot affect accepted durable writes. Await [`Self::signed`] once for the
+/// verified event (or a typed failure); [`Self::cancel`] cancels only this
+/// signer operation.
 #[derive(uniffi::Object)]
 pub struct NmpSignEventHandle {
     cancel: nmp::SignEventCancel,
+    result: nmp::AsyncFifoReceiver<Result<nmp::Event, nmp::SignEventError>>,
 }
 
 #[uniffi::export]
 impl NmpSignEventHandle {
+    /// Await the one-shot outcome: the fully-verified signed event, or a typed
+    /// [`FfiSignEventFailure`]. This is one-shot — a second await (sequential or
+    /// concurrent) returns [`FfiSignEventFailure::AlreadyConsumed`], because the
+    /// single result was already delivered to the first await.
+    pub async fn signed(&self) -> Result<FfiSignedEvent, FfiSignEventFailure> {
+        match self.result.next().await {
+            Ok(Some(Ok(event))) => Ok(signed_event_to_ffi(event)),
+            Ok(Some(Err(error))) => Err(sign_event_failure(error)),
+            Ok(None) | Err(_) => Err(FfiSignEventFailure::AlreadyConsumed),
+        }
+    }
+
+    /// Cancel this sign-only operation. Idempotent; safe after completion.
     pub fn cancel(&self) {
         self.cancel.cancel();
     }
@@ -958,34 +728,27 @@ impl Drop for NmpSignEventHandle {
     }
 }
 
-#[uniffi::export]
-impl NmpDiagnosticsHandle {
-    /// Withdraw this diagnostics observer now, rather than waiting for
-    /// `Drop`. Safe to call more than once; safe to never call at all.
-    pub fn cancel(&self) {
-        self.cancel.cancel();
-    }
-}
-
-impl Drop for NmpDiagnosticsHandle {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::{
         FfiAccessContext, FfiBinding, FfiCacheMode, FfiDemand, FfiDurability, FfiFilter, FfiFrame,
-        FfiRowDelta, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiSourceAuthority,
-        FfiWindow, FfiWindowLoad, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
+        FfiRowDelta, FfiSignEventFailure, FfiSignEventRequest, FfiSourceAuthority, FfiWindow,
+        FfiWindowLoad, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
     };
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::mpsc;
     use std::sync::Mutex;
     use std::time::Duration;
+
+    // #680 replaced push/callback observers with pull-based async stream handles:
+    // `observe`/`observe_demand`/`observe_diagnostics`/`publish`/`sign_event` take
+    // no observer argument and return `Arc<Nmp*Stream>`/`Arc<NmpSignEventHandle>`
+    // whose `async fn next()`/`signed()` drive delivery. `None` from `next()`
+    // replaces `on_closed`. The `RowObserver`/`DiagnosticsObserver`/
+    // `ReceiptObserver`/`SignEventObserver`/`FollowObserver` traits are deleted,
+    // as is the native-task capacity/census surface. Tests below drive the async
+    // handles on a real Tokio executor (`#[tokio::test]`, dev-only).
 
     struct AllowPolicyCallback;
 
@@ -1001,6 +764,24 @@ mod tests {
         }
 
         fn on_cancelled(&self, _request: crate::auth::FfiAuthPolicyRequest) {}
+    }
+
+    /// Await the next row frame within the lifecycle bound. `None` is the
+    /// terminal signal (cancel / shutdown / producer drop).
+    async fn next_frame(stream: &NmpRowStream) -> Option<FfiFrame> {
+        tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("a frame must arrive within the lifecycle bound")
+            .expect("row next() is not a concurrent-misuse")
+    }
+
+    /// Await the next receipt status within the lifecycle bound. `None` is the
+    /// terminal signal (the intent fully resolved / engine shutdown).
+    async fn next_status(stream: &NmpReceiptStream) -> Option<FfiWriteStatus> {
+        tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("a status must arrive within the lifecycle bound")
+            .expect("receipt next() is not a concurrent-misuse")
     }
 
     #[test]
@@ -1061,25 +842,6 @@ mod tests {
         );
     }
 
-    struct CensusDiagnosticsObserver {
-        closes: Arc<AtomicUsize>,
-    }
-
-    struct RecordingRowObserver {
-        frames: mpsc::Sender<FfiFrame>,
-        closes: Arc<AtomicUsize>,
-    }
-
-    impl RowObserver for RecordingRowObserver {
-        fn on_frame(&self, frame: FfiFrame) {
-            let _ = self.frames.send(frame);
-        }
-
-        fn on_closed(&self) {
-            self.closes.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
     fn ffi_windowed_demand(author: String) -> FfiDemand {
         FfiDemand {
             selection: FfiFilter {
@@ -1096,14 +858,15 @@ mod tests {
         }
     }
 
-    fn recv_window_load(
-        frames: &mpsc::Receiver<FfiFrame>,
+    /// Drive `next()` until a windowed frame with the wanted load fact arrives.
+    async fn recv_window_load(
+        stream: &NmpRowStream,
         wanted: impl Fn(FfiWindowLoad) -> bool,
     ) -> FfiFrame {
         loop {
-            let frame = frames
-                .recv_timeout(Duration::from_secs(5))
-                .expect("windowed frame must arrive within the lifecycle bound");
+            let frame = next_frame(stream)
+                .await
+                .expect("windowed stream must not end before the wanted frame");
             assert!(
                 frame.deltas.is_empty(),
                 "windowed frames must never ship wire deltas alongside the snapshot"
@@ -1119,13 +882,12 @@ mod tests {
         }
     }
 
-    /// #485's FFI drain proof, replacing the deleted continuation-token
-    /// history test while keeping every behavioral guarantee it pinned:
-    /// bounded delivery over tie-second rows, explicit declarative growth,
-    /// AtBound as a delivered FACT (never a thrown error), the
-    /// windowed/unbounded split on the same handle type, and teardown-once.
-    #[test]
-    fn ffi_windowed_observe_delivers_snapshot_frames_grows_and_reports_at_bound() {
+    /// #485's FFI drain proof, ported to the pull-based handle: bounded delivery
+    /// over tie-second rows, explicit declarative growth, AtBound as a delivered
+    /// FACT (never a thrown error), and the windowed/unbounded split on the same
+    /// handle type.
+    #[tokio::test]
+    async fn ffi_windowed_observe_delivers_snapshot_frames_grows_and_reports_at_bound() {
         use nmp_store::EventStore;
 
         let fixture = tempfile::tempdir().unwrap();
@@ -1155,43 +917,34 @@ mod tests {
 
         let engine = NmpEngine::new(NmpEngineConfig {
             store_path: Some(path.to_string_lossy().into_owned()),
-            max_native_tasks: 4,
             ..NmpEngineConfig::default()
         })
         .unwrap();
-        let (frame_tx, frame_rx) = mpsc::channel();
-        let closes = Arc::new(AtomicUsize::new(0));
         let handle = engine
             .observe_demand(
                 ffi_windowed_demand(keys.public_key().to_hex()),
                 Some(FfiWindow::Expandable { initial: 1, max: 2 }),
-                Box::new(RecordingRowObserver {
-                    frames: frame_tx,
-                    closes: Arc::clone(&closes),
-                }),
             )
             .unwrap();
 
-        let first = recv_window_load(&frame_rx, |load| load == FfiWindowLoad::Idle);
+        let first = recv_window_load(&handle, |load| load == FfiWindowLoad::Idle).await;
         assert_eq!(first.window.unwrap().rows.len(), 1);
 
         // Declarative growth: no token to thread back, just a row target.
         handle.request_rows(2).unwrap();
-        let second = recv_window_load(&frame_rx, |load| {
-            load == FfiWindowLoad::Returned { added: 1 }
-        });
+        let second =
+            recv_window_load(&handle, |load| load == FfiWindowLoad::Returned { added: 1 }).await;
         assert_eq!(second.window.unwrap().rows.len(), 2);
 
         // Raising the target past `max` clamps and is NEVER an error --
         // being at the bound arrives as the AtBound FACT in a frame.
         handle.request_rows(5).unwrap();
-        let bounded = recv_window_load(&frame_rx, |load| load == FfiWindowLoad::AtBound { max: 2 });
+        let bounded =
+            recv_window_load(&handle, |load| load == FfiWindowLoad::AtBound { max: 2 }).await;
         assert_eq!(bounded.window.unwrap().rows.len(), 2);
 
         // An UNBOUNDED handle on the same engine has no window to grow --
         // the same verb fails closed, typed.
-        let (unbounded_tx, _unbounded_rx) = mpsc::channel();
-        let unbounded_closes = Arc::new(AtomicUsize::new(0));
         let unbounded = engine
             .observe(
                 FfiFilter {
@@ -1199,10 +952,6 @@ mod tests {
                     ..FfiFilter::default()
                 },
                 None,
-                Box::new(RecordingRowObserver {
-                    frames: unbounded_tx,
-                    closes: Arc::clone(&unbounded_closes),
-                }),
             )
             .unwrap();
         assert_eq!(
@@ -1212,114 +961,62 @@ mod tests {
 
         drop(handle);
         drop(unbounded);
-        engine.await_native_tasks_idle();
-        assert_eq!(closes.load(Ordering::SeqCst), 1);
-        assert_eq!(unbounded_closes.load(Ordering::SeqCst), 1);
         engine.shutdown();
     }
 
     /// Window validation fails closed at the conversion/facade seam, typed,
-    /// BEFORE any drain thread or native-task slot is charged.
+    /// BEFORE any observation is opened.
     #[test]
-    fn ffi_window_validation_is_typed_and_charges_no_native_task() {
+    fn ffi_window_validation_is_typed() {
         let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
 
-        let zero = match engine.observe(
-            FfiFilter::default(),
-            Some(FfiWindow::Expandable { initial: 0, max: 4 }),
-            Box::new(CensusRowObserver),
-        ) {
-            Ok(_) => panic!("a zero window bound must fail closed"),
-            Err(error) => error,
-        };
+        let zero = engine
+            .observe(
+                FfiFilter::default(),
+                Some(FfiWindow::Expandable { initial: 0, max: 4 }),
+            )
+            .map(|_| ())
+            .expect_err("a zero window bound must fail closed");
         assert_eq!(zero, FfiError::WindowZeroRows);
 
-        let inverted = match engine.observe(
-            FfiFilter::default(),
-            Some(FfiWindow::Expandable { initial: 5, max: 2 }),
-            Box::new(CensusRowObserver),
-        ) {
-            Ok(_) => panic!("an inverted window must fail closed"),
-            Err(error) => error,
-        };
+        let inverted = engine
+            .observe(
+                FfiFilter::default(),
+                Some(FfiWindow::Expandable { initial: 5, max: 2 }),
+            )
+            .map(|_| ())
+            .expect_err("an inverted window must fail closed");
         assert_eq!(
             inverted,
             FfiError::WindowInitialExceedsMax { initial: 5, max: 2 }
         );
 
-        let limited = match engine.observe(
-            FfiFilter {
-                limit: Some(1),
-                ..FfiFilter::default()
-            },
-            Some(FfiWindow::Expandable { initial: 1, max: 4 }),
-            Box::new(CensusRowObserver),
-        ) {
-            Ok(_) => panic!("a limit-carrying windowed selection must fail closed"),
-            Err(error) => error,
-        };
+        let limited = engine
+            .observe(
+                FfiFilter {
+                    limit: Some(1),
+                    ..FfiFilter::default()
+                },
+                Some(FfiWindow::Expandable { initial: 1, max: 4 }),
+            )
+            .map(|_| ())
+            .expect_err("a limit-carrying windowed selection must fail closed");
         assert_eq!(limited, FfiError::WindowSelectionHasLimit);
 
-        engine.await_native_tasks_idle();
-        assert_eq!(engine.native_task_census().admitted, 0);
-        assert_eq!(engine.native_task_census().running, 0);
         engine.shutdown();
     }
 
-    /// Regression (#485/#486): a window-validation failure must charge NO
-    /// native task even transiently, so a saturated single-slot executor is
-    /// never stranded. The default-capacity test above drains before it
-    /// asserts, so it missed the transient reservation the old code took
-    /// *before* validating (a `StartedNativeTask` dropped without `run` never
-    /// releases it) -- Swift's capacity-1 `WindowTests` falsifier caught it.
-    /// Here the single slot must survive a rejected observe and still admit
-    /// the next valid one.
-    #[test]
-    fn ffi_window_validation_does_not_strand_a_capacity_one_executor() {
-        let engine = NmpEngine::new(NmpEngineConfig {
-            max_native_tasks: 1,
-            ..NmpEngineConfig::default()
-        })
-        .expect("engine must build");
+    // #680 deleted `ffi_window_validation_does_not_strand_a_capacity_one_executor`:
+    // it asserted the removed native-task census (`max_native_tasks`,
+    // `native_task_census`) around a rejected observe. Observations no longer
+    // touch a capacity slot at all, so there is nothing to strand; window
+    // validation itself is covered by `ffi_window_validation_is_typed`.
 
-        let inverted = match engine.observe(
-            FfiFilter::default(),
-            Some(FfiWindow::Expandable { initial: 3, max: 2 }),
-            Box::new(CensusRowObserver),
-        ) {
-            Ok(_) => panic!("an inverted window must fail closed"),
-            Err(error) => error,
-        };
-        assert_eq!(
-            inverted,
-            FfiError::WindowInitialExceedsMax { initial: 3, max: 2 }
-        );
-        // The rejected observe took no slot: the one native task is still free.
-        assert_eq!(engine.native_task_census().admitted, 0);
-
-        let handle = engine
-            .observe(
-                FfiFilter::default(),
-                Some(FfiWindow::Expandable { initial: 1, max: 2 }),
-                Box::new(CensusRowObserver),
-            )
-            .expect("a valid windowed observe must admit the one free native task");
-        assert_eq!(engine.native_task_census().admitted, 1);
-
-        drop(handle);
-        engine.await_native_tasks_idle();
-        assert_eq!(engine.native_task_census().admitted, 0);
-        assert_eq!(engine.native_task_census().running, 0);
-        engine.shutdown();
-    }
-
-    /// Engine shutdown closes a windowed observer exactly once, and a
-    /// post-shutdown growth request fails closed, typed.
-    #[test]
-    fn ffi_shutdown_closes_windowed_observer_and_fails_request_rows_closed() {
+    /// Engine shutdown closes a windowed observation (its `next()` terminates in
+    /// `None`), and a post-shutdown growth request fails closed, typed.
+    #[tokio::test]
+    async fn ffi_shutdown_closes_windowed_observer_and_fails_request_rows_closed() {
         let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
-        let (frame_tx, _frame_rx) = mpsc::channel();
-        let closes = Arc::new(AtomicUsize::new(0));
         let handle = engine
             .observe(
                 FfiFilter {
@@ -1327,16 +1024,18 @@ mod tests {
                     ..FfiFilter::default()
                 },
                 Some(FfiWindow::Expandable { initial: 1, max: 4 }),
-                Box::new(RecordingRowObserver {
-                    frames: frame_tx,
-                    closes: Arc::clone(&closes),
-                }),
             )
             .expect("windowed observation must start");
 
         engine.shutdown();
-        engine.await_native_tasks_idle();
-        assert_eq!(closes.load(Ordering::SeqCst), 1);
+
+        // Shutdown drops the producer, so `next()` drains any pending frame and
+        // then terminates in `None` — the pull-based replacement for `on_closed`.
+        loop {
+            if next_frame(&handle).await.is_none() {
+                break;
+            }
+        }
         assert!(
             handle.request_rows(2).is_err(),
             "growth after shutdown must fail closed, never hang or panic"
@@ -1344,120 +1043,16 @@ mod tests {
         drop(handle);
     }
 
-    impl DiagnosticsObserver for CensusDiagnosticsObserver {
-        fn on_snapshot(&self, _snapshot: crate::types::FfiDiagnosticsSnapshot) {}
+    // #680 deleted `simultaneous_query_demand_follow_and_receipt_drains_charge_five_tasks`:
+    // its only purpose was asserting the removed native-task census (five charged
+    // tasks via `spawn_native_bridge`/`reserve_native_task`/`native_task_census`).
+    // Dense simultaneous composition without refusal is now proven by
+    // `tests/async_observation_falsifiers.rs::dense_composition_never_refuses_and_delivers_current_state`.
 
-        fn on_closed(&self) {
-            self.closes.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
-    struct CensusRowObserver;
-
-    impl RowObserver for CensusRowObserver {
-        fn on_frame(&self, _frame: FfiFrame) {}
-
-        fn on_closed(&self) {}
-    }
-
-    struct CensusFollowObserver;
-
-    impl crate::nip02::FollowObserver for CensusFollowObserver {
-        fn on_snapshot(&self, _snapshot: crate::nip02::FfiFollowSnapshot) {}
-
-        fn on_closed(&self) {}
-    }
-
-    #[test]
-    fn simultaneous_query_demand_follow_and_receipt_drains_charge_five_tasks() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
-        let query = engine
-            .observe(FfiFilter::default(), None, Box::new(CensusRowObserver))
-            .expect("query observer must start");
-        let demand = engine
-            .observe_demand(
-                crate::types::FfiDemand {
-                    selection: FfiFilter::default(),
-                    source: crate::types::FfiSourceAuthority::Public,
-                    access: crate::types::FfiAccessContext::Public,
-                    cache: crate::types::FfiCacheMode::Agnostic,
-                    freshness: crate::types::FfiFreshness::Live,
-                },
-                None,
-                Box::new(CensusRowObserver),
-            )
-            .expect("demand observer must start");
-        let target = nostr::Keys::generate().public_key().to_hex();
-        let follow = engine
-            .observe_following(target, Box::new(CensusFollowObserver))
-            .expect("follow projection and bridge must start");
-
-        let (receipt_tx, receipt_rx) = mpsc::channel::<()>();
-        let reservation = engine
-            .engine
-            .reserve_native_task("receipt-observer")
-            .unwrap();
-        let cancel = engine.engine.native_task_cancel().unwrap();
-        spawn_native_bridge(reservation, cancel, "receipt-observer", move || {
-            while receipt_rx.recv().is_ok() {}
-        })
-        .unwrap();
-
-        assert_eq!(
-            engine.native_task_census().admitted,
-            5,
-            "query + demand + follow projection/bridge + receipt drain"
-        );
-        query.cancel();
-        demand.cancel();
-        follow.cancel();
-        drop(query);
-        drop(demand);
-        drop(follow);
-        drop(receipt_tx);
-        engine.await_native_tasks_idle();
-        assert_eq!(engine.native_task_census().admitted, 0);
-        assert_eq!(engine.native_task_census().running, 0);
-        engine.shutdown();
-    }
-
-    #[test]
-    fn finite_native_executor_refuses_before_acceptance_and_returns_exact_baseline() {
-        let engine = NmpEngine::new(NmpEngineConfig {
-            max_native_tasks: 1,
-            ..NmpEngineConfig::default()
-        })
-        .expect("engine must build");
-        let closes = Arc::new(AtomicUsize::new(0));
-        let handle = engine
-            .observe_diagnostics(Box::new(CensusDiagnosticsObserver {
-                closes: Arc::clone(&closes),
-            }))
-            .expect("cap-sized observer must start");
-        assert_eq!(engine.native_task_census().admitted, 1);
-
-        let refusal = match engine.observe_diagnostics(Box::new(CensusDiagnosticsObserver {
-            closes: Arc::new(AtomicUsize::new(0)),
-        })) {
-            Ok(_) => panic!("a cap-sized executor must refuse another observer"),
-            Err(error) => error,
-        };
-        assert_eq!(
-            refusal,
-            FfiError::ExecutorSaturated {
-                component: "diagnostics-observer".to_string(),
-                capacity: 1,
-            }
-        );
-
-        handle.cancel();
-        drop(handle);
-        engine.await_native_tasks_idle();
-        assert_eq!(engine.native_task_census().admitted, 0);
-        assert_eq!(engine.native_task_census().running, 0);
-        assert_eq!(closes.load(Ordering::SeqCst), 1);
-        engine.shutdown();
-    }
+    // #680 deleted `finite_native_executor_refuses_before_acceptance_and_returns_exact_baseline`:
+    // it asserted the removed `FfiError::ExecutorSaturated` capacity refusal for
+    // observations, a concept that no longer exists (observations never touch the
+    // internal adapter pool).
 
     #[test]
     fn ffi_persistent_store_reset_is_destructive_and_idempotent() {
@@ -1499,239 +1094,12 @@ mod tests {
         reopened.shutdown();
     }
 
-    #[test]
-    fn reattachment_mapping_is_exhaustive_and_distinct() {
-        let (_tx, rx) = mpsc::channel();
-        assert_eq!(
-            reattachment_to_ffi(&ReceiptReattachment::Attached(rx)),
-            FfiReceiptReattachment::Attached
-        );
-        assert_eq!(
-            reattachment_to_ffi(&ReceiptReattachment::NotFound),
-            FfiReceiptReattachment::NotFound
-        );
-        assert_eq!(
-            reattachment_to_ffi(&ReceiptReattachment::RetainedButUnreadable),
-            FfiReceiptReattachment::RetainedButUnreadable
-        );
-    }
-
-    struct ChannelReceiptObserver {
-        tx: Mutex<mpsc::Sender<FfiWriteStatus>>,
-    }
-
-    enum SignEventOutcome {
-        Signed(FfiSignedEvent),
-        Failed(FfiSignEventFailure),
-    }
-
-    struct ChannelSignEventObserver {
-        tx: Mutex<mpsc::Sender<SignEventOutcome>>,
-    }
-
-    impl SignEventObserver for ChannelSignEventObserver {
-        fn on_signed(&self, event: FfiSignedEvent) {
-            let _ = self
-                .tx
-                .lock()
-                .unwrap()
-                .send(SignEventOutcome::Signed(event));
-        }
-
-        fn on_failed(&self, failure: FfiSignEventFailure) {
-            let _ = self
-                .tx
-                .lock()
-                .unwrap()
-                .send(SignEventOutcome::Failed(failure));
-        }
-    }
-
-    struct CountingFfiSigner {
-        keys: nostr::Keys,
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl nmp_signer::SigningCapability for CountingFfiSigner {
-        fn public_key(&self) -> Option<nostr::PublicKey> {
-            Some(self.keys.public_key())
-        }
-
-        fn sign(&self, unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            nmp_signer::SignerOp::ok(unsigned.sign_with_keys(&self.keys).unwrap())
-        }
-    }
-
-    #[test]
-    fn ffi_sign_event_cap_one_returns_the_exact_verified_event_without_publish_api_use() {
-        let engine = NmpEngine::new(NmpEngineConfig {
-            max_native_tasks: 1,
-            ..NmpEngineConfig::default()
-        })
-        .expect("engine must build");
-        let author = engine
-            .add_account(format!("{:064x}", 17u8))
-            .expect("account must register");
-        engine
-            .set_active_account(Some(author.public_key()))
-            .expect("account must activate");
-        let request = FfiSignEventRequest {
-            created_at: 1_723_456_789,
-            kind: 27_272,
-            tags: vec![vec!["t".to_string(), "ffi-sign-only".to_string()]],
-            content: "exact ffi body".to_string(),
-        };
-        let (tx, rx) = mpsc::channel();
-        let handle = engine
-            .sign_event(
-                request.clone(),
-                Box::new(ChannelSignEventObserver { tx: Mutex::new(tx) }),
-            )
-            .expect("sign operation must start");
-
-        let signed = match rx.recv_timeout(Duration::from_secs(5)).unwrap() {
-            SignEventOutcome::Signed(event) => event,
-            SignEventOutcome::Failed(failure) => panic!("unexpected sign failure: {failure:?}"),
-        };
-        assert_eq!(signed.pubkey, author.public_key());
-        assert_eq!(signed.created_at, request.created_at);
-        assert_eq!(signed.kind, request.kind);
-        assert_eq!(signed.tags, request.tags);
-        assert_eq!(signed.content, request.content);
-        assert_eq!(signed.id.len(), 64);
-        assert_eq!(signed.sig.len(), 128);
-        drop(handle);
-        engine.await_native_tasks_idle();
-        assert_eq!(engine.native_task_census().admitted, 0);
-        assert_eq!(engine.native_task_census().running, 0);
-        engine.shutdown();
-    }
-
-    #[test]
-    fn ffi_sign_event_missing_active_signer_is_typed_and_starts_no_callback() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
-        let keys = nostr::Keys::generate();
-        engine
-            .set_active_account(Some(keys.public_key().to_hex()))
-            .unwrap();
-        let (tx, rx) = mpsc::channel();
-        let result = engine.sign_event(
-            FfiSignEventRequest {
-                created_at: 1,
-                kind: 1,
-                tags: Vec::new(),
-                content: "body".to_string(),
-            },
-            Box::new(ChannelSignEventObserver { tx: Mutex::new(tx) }),
-        );
-        match result {
-            Err(error) => assert_eq!(error, FfiError::NoActiveSigner),
-            Ok(_) => panic!("missing signer must refuse synchronously"),
-        }
-        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
-        engine.await_native_tasks_idle();
-        engine.shutdown();
-    }
-
-    #[test]
-    fn ffi_sign_event_refuses_malformed_tags_before_callback_or_admission() {
-        let engine = NmpEngine::new(NmpEngineConfig {
-            max_native_tasks: 1,
-            ..NmpEngineConfig::default()
-        })
-        .expect("engine must build");
-        let author = engine.add_account(format!("{:064x}", 31u8)).unwrap();
-        engine
-            .set_active_account(Some(author.public_key()))
-            .unwrap();
-        let (tx, rx) = mpsc::channel();
-
-        let result = engine.sign_event(
-            FfiSignEventRequest {
-                created_at: 1,
-                kind: 1,
-                tags: vec![Vec::new()],
-                content: "malformed".to_string(),
-            },
-            Box::new(ChannelSignEventObserver { tx: Mutex::new(tx) }),
-        );
-        match result {
-            Err(error) => assert_eq!(error, FfiError::InvalidTag { got: Vec::new() }),
-            Ok(_) => panic!("malformed input must fail before operation admission"),
-        }
-        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
-        assert_eq!(engine.native_task_census().admitted, 0);
-        assert_eq!(engine.native_task_census().running, 0);
-        engine.shutdown();
-    }
-
-    #[test]
-    fn ffi_sign_event_capacity_refusal_precedes_signer_invocation_and_callback() {
-        let engine = NmpEngine::new(NmpEngineConfig {
-            max_native_tasks: 1,
-            ..NmpEngineConfig::default()
-        })
-        .expect("engine must build");
-        let keys = nostr::Keys::generate();
-        let calls = Arc::new(AtomicUsize::new(0));
-        engine
-            .engine
-            .add_signer(CountingFfiSigner {
-                keys: keys.clone(),
-                calls: Arc::clone(&calls),
-            })
-            .unwrap();
-        engine
-            .engine
-            .set_active_account(Some(keys.public_key()))
-            .unwrap();
-        let held = engine
-            .engine
-            .reserve_native_task("capacity fixture")
-            .unwrap();
-        let (tx, rx) = mpsc::channel();
-
-        let result = engine.sign_event(
-            pending_ffi_request(),
-            Box::new(ChannelSignEventObserver { tx: Mutex::new(tx) }),
-        );
-        match result {
-            Err(error) => assert_eq!(
-                error,
-                FfiError::ExecutorSaturated {
-                    component: "sign-event".to_string(),
-                    capacity: 1,
-                }
-            ),
-            Ok(_) => panic!("capacity must refuse before operation admission"),
-        }
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
-        drop(held);
-        engine.await_native_tasks_idle();
-        assert_eq!(engine.native_task_census().admitted, 0);
-        assert_eq!(engine.native_task_census().running, 0);
-        engine.shutdown();
-    }
-
-    #[test]
-    fn ffi_sign_event_after_engine_close_is_typed_and_never_calls_back() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
-        engine.shutdown();
-        let (tx, rx) = mpsc::channel();
-        let result = engine.sign_event(
-            pending_ffi_request(),
-            Box::new(ChannelSignEventObserver { tx: Mutex::new(tx) }),
-        );
-        match result {
-            Err(error) => assert_eq!(error, FfiError::EngineClosed),
-            Ok(_) => panic!("a closed engine must refuse before operation admission"),
-        }
-        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
-        assert_eq!(engine.native_task_census().admitted, 0);
-        assert_eq!(engine.native_task_census().running, 0);
-    }
+    // #680 deleted `reattachment_mapping_is_exhaustive_and_distinct`: it drove the
+    // removed pure `reattachment_to_ffi` enum-mapping helper. The real reattach
+    // behavior is exercised end-to-end by
+    // `ffi_reattach_replays_real_receipt_facts_through_a_fresh_stream`,
+    // `ffi_reattach_of_unknown_id_is_not_found`, and
+    // `ffi_reattach_of_corrupt_retained_receipt_is_unreadable`.
 
     struct MismatchedFfiSigner {
         reported: nostr::PublicKey,
@@ -1753,41 +1121,6 @@ mod tests {
             );
             nmp_signer::SignerOp::ok(substituted.sign_with_keys(&self.actual).unwrap())
         }
-    }
-
-    #[test]
-    fn ffi_sign_event_reports_malicious_output_without_fabricating_success() {
-        let engine = NmpEngine::new(NmpEngineConfig {
-            max_native_tasks: 1,
-            ..NmpEngineConfig::default()
-        })
-        .expect("engine must build");
-        let reported = nostr::Keys::generate().public_key();
-        engine
-            .engine
-            .add_signer(MismatchedFfiSigner {
-                reported,
-                actual: nostr::Keys::generate(),
-            })
-            .unwrap();
-        engine.engine.set_active_account(Some(reported)).unwrap();
-        let (tx, rx) = mpsc::channel();
-        let handle = engine
-            .sign_event(
-                pending_ffi_request(),
-                Box::new(ChannelSignEventObserver { tx: Mutex::new(tx) }),
-            )
-            .expect("operation must start");
-        assert!(matches!(
-            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
-            SignEventOutcome::Failed(FfiSignEventFailure::InvalidSignerOutput { .. })
-        ));
-        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
-        drop(handle);
-        engine.await_native_tasks_idle();
-        assert_eq!(engine.native_task_census().admitted, 0);
-        assert_eq!(engine.native_task_census().running, 0);
-        engine.shutdown();
     }
 
     struct PendingFfiSigner {
@@ -1816,11 +1149,7 @@ mod tests {
     }
 
     fn pending_ffi_sign_engine() -> (Arc<NmpEngine>, Arc<AtomicUsize>) {
-        let engine = NmpEngine::new(NmpEngineConfig {
-            max_native_tasks: 1,
-            ..NmpEngineConfig::default()
-        })
-        .expect("engine must build");
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
         let keys = nostr::Keys::generate();
         let cancellations = Arc::new(AtomicUsize::new(0));
         engine
@@ -1847,129 +1176,194 @@ mod tests {
         }
     }
 
-    struct ReentrantSignObserver {
-        engine: Arc<NmpEngine>,
-        tx: Mutex<mpsc::Sender<(String, bool)>>,
-    }
+    #[tokio::test]
+    async fn ffi_sign_event_returns_the_exact_verified_event_without_publish_api_use() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let author = engine
+            .add_account(format!("{:064x}", 17u8))
+            .expect("account must register");
+        engine
+            .set_active_account(Some(author.public_key()))
+            .expect("account must activate");
+        let request = FfiSignEventRequest {
+            created_at: 1_723_456_789,
+            kind: 27_272,
+            tags: vec![vec!["t".to_string(), "ffi-sign-only".to_string()]],
+            content: "exact ffi body".to_string(),
+        };
+        let handle = engine
+            .sign_event(request.clone())
+            .expect("sign operation must start");
 
-    impl SignEventObserver for ReentrantSignObserver {
-        fn on_signed(&self, event: FfiSignedEvent) {
-            let active_before_shutdown = self
-                .engine
-                .active_account()
-                .expect("callback can call an engine verb")
-                .expect("fixture has an active account");
-            self.engine.shutdown();
-            let closed_after_shutdown =
-                matches!(self.engine.active_account(), Err(FfiError::EngineClosed));
-            let _ = self.tx.lock().unwrap().send((
-                format!("{}:{}", active_before_shutdown, event.id),
-                closed_after_shutdown,
-            ));
-        }
-
-        fn on_failed(&self, failure: FfiSignEventFailure) {
-            panic!("unexpected sign failure: {failure:?}");
-        }
+        let signed = handle.signed().await.expect("sign operation must succeed");
+        assert_eq!(signed.pubkey, author.public_key());
+        assert_eq!(signed.created_at, request.created_at);
+        assert_eq!(signed.kind, request.kind);
+        assert_eq!(signed.tags, request.tags);
+        assert_eq!(signed.content, request.content);
+        assert_eq!(signed.id.len(), 64);
+        assert_eq!(signed.sig.len(), 128);
+        engine.shutdown();
     }
 
     #[test]
-    fn ffi_sign_event_callback_can_reenter_verbs_and_shutdown_without_deadlock() {
-        let engine = NmpEngine::new(NmpEngineConfig {
-            max_native_tasks: 1,
-            ..NmpEngineConfig::default()
-        })
-        .expect("engine must build");
+    fn ffi_sign_event_missing_active_signer_is_typed() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let keys = nostr::Keys::generate();
+        engine
+            .set_active_account(Some(keys.public_key().to_hex()))
+            .unwrap();
+        let result = engine.sign_event(FfiSignEventRequest {
+            created_at: 1,
+            kind: 1,
+            tags: Vec::new(),
+            content: "body".to_string(),
+        });
+        assert_eq!(
+            result.map(|_| ()).unwrap_err(),
+            FfiError::NoActiveSigner,
+            "missing signer must refuse synchronously"
+        );
+        engine.shutdown();
+    }
+
+    #[test]
+    fn ffi_sign_event_refuses_malformed_tags_before_admission() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let author = engine.add_account(format!("{:064x}", 31u8)).unwrap();
+        engine
+            .set_active_account(Some(author.public_key()))
+            .unwrap();
+
+        let result = engine.sign_event(FfiSignEventRequest {
+            created_at: 1,
+            kind: 1,
+            tags: vec![Vec::new()],
+            content: "malformed".to_string(),
+        });
+        assert_eq!(
+            result.map(|_| ()).unwrap_err(),
+            FfiError::InvalidTag { got: Vec::new() },
+            "malformed input must fail before operation admission"
+        );
+        engine.shutdown();
+    }
+
+    // #680 deleted `ffi_sign_event_capacity_refusal_precedes_signer_invocation_and_callback`:
+    // it asserted the removed `FfiError::ExecutorSaturated` sign-event capacity
+    // refusal (`reserve_native_task` + `max_native_tasks`), a concept #680 removed.
+
+    #[test]
+    fn ffi_sign_event_after_engine_close_is_typed() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        engine.shutdown();
+        let result = engine.sign_event(pending_ffi_request());
+        assert_eq!(
+            result.map(|_| ()).unwrap_err(),
+            FfiError::EngineClosed,
+            "a closed engine must refuse before operation admission"
+        );
+    }
+
+    #[tokio::test]
+    async fn ffi_sign_event_reports_malicious_output_without_fabricating_success() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let reported = nostr::Keys::generate().public_key();
+        engine
+            .engine
+            .add_signer(MismatchedFfiSigner {
+                reported,
+                actual: nostr::Keys::generate(),
+            })
+            .unwrap();
+        engine.engine.set_active_account(Some(reported)).unwrap();
+        let handle = engine
+            .sign_event(pending_ffi_request())
+            .expect("operation must start");
+        assert!(matches!(
+            handle.signed().await.unwrap_err(),
+            FfiSignEventFailure::InvalidSignerOutput { .. }
+        ));
+        // One-shot: the single result was already delivered to the first await.
+        assert!(matches!(
+            handle.signed().await.unwrap_err(),
+            FfiSignEventFailure::AlreadyConsumed
+        ));
+        engine.shutdown();
+    }
+
+    /// The pull-based replacement for the old callback-reentrancy proof: the
+    /// task that awaits `signed()` runs on its own executor (never the engine
+    /// reducer thread), so it can freely re-enter engine verbs and drive
+    /// `shutdown()` to completion without deadlock.
+    #[tokio::test]
+    async fn ffi_sign_event_completion_consumer_can_reenter_verbs_and_shutdown() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
         let author = engine.add_account(format!("{:064x}", 32u8)).unwrap();
         engine
             .set_active_account(Some(author.public_key()))
             .unwrap();
-        let (tx, rx) = mpsc::channel();
         let handle = engine
-            .sign_event(
-                pending_ffi_request(),
-                Box::new(ReentrantSignObserver {
-                    engine: Arc::clone(&engine),
-                    tx: Mutex::new(tx),
-                }),
-            )
+            .sign_event(pending_ffi_request())
             .expect("operation must start");
 
-        let (value, closed_after_shutdown) = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("reentrant callback must complete");
-        assert!(value.starts_with(&author.public_key()));
-        assert!(closed_after_shutdown);
-        drop(handle);
-        engine.await_native_tasks_idle();
-        assert_eq!(engine.native_task_census().admitted, 0);
-        assert_eq!(engine.native_task_census().running, 0);
+        let signed = handle.signed().await.expect("local signer must complete");
+        assert_eq!(signed.pubkey, author.public_key());
+        // Re-enter engine verbs from the awaiting consumer.
+        let active = engine
+            .active_account()
+            .expect("callback consumer can call an engine verb")
+            .expect("fixture has an active account");
+        assert_eq!(active, author.public_key());
+        engine.shutdown();
+        assert!(matches!(
+            engine.active_account(),
+            Err(FfiError::EngineClosed)
+        ));
     }
 
-    #[test]
-    fn ffi_sign_event_caller_cancel_completes_once_and_returns_executor_to_zero() {
+    #[tokio::test]
+    async fn ffi_sign_event_caller_cancel_completes_once() {
         let (engine, cancellations) = pending_ffi_sign_engine();
-        let (tx, rx) = mpsc::channel();
         let handle = engine
-            .sign_event(
-                pending_ffi_request(),
-                Box::new(ChannelSignEventObserver { tx: Mutex::new(tx) }),
-            )
+            .sign_event(pending_ffi_request())
             .expect("operation must start");
         handle.cancel();
         assert!(matches!(
-            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
-            SignEventOutcome::Failed(FfiSignEventFailure::Cancelled)
+            handle.signed().await.unwrap_err(),
+            FfiSignEventFailure::Cancelled
         ));
-        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
-        drop(handle);
-        engine.await_native_tasks_idle();
+        // One-shot: a second await sees the drained result.
+        assert!(matches!(
+            handle.signed().await.unwrap_err(),
+            FfiSignEventFailure::AlreadyConsumed
+        ));
+        // The cancel hook runs inside `recv_or_cancel` before the completion
+        // resolves, so it has fired exactly once by the time `signed()` returns.
         assert_eq!(cancellations.load(Ordering::SeqCst), 1);
-        assert_eq!(engine.native_task_census().admitted, 0);
-        assert_eq!(engine.native_task_census().running, 0);
         engine.shutdown();
     }
 
-    #[test]
-    fn ffi_sign_event_shutdown_completes_once_and_joins_to_zero() {
+    #[tokio::test]
+    async fn ffi_sign_event_shutdown_completes_once() {
         let (engine, cancellations) = pending_ffi_sign_engine();
-        let (tx, rx) = mpsc::channel();
         let handle = engine
-            .sign_event(
-                pending_ffi_request(),
-                Box::new(ChannelSignEventObserver { tx: Mutex::new(tx) }),
-            )
+            .sign_event(pending_ffi_request())
             .expect("operation must start");
         engine.shutdown();
         assert!(matches!(
-            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
-            SignEventOutcome::Failed(FfiSignEventFailure::Cancelled)
+            handle.signed().await.unwrap_err(),
+            FfiSignEventFailure::Cancelled
         ));
-        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
-        drop(handle);
         assert_eq!(cancellations.load(Ordering::SeqCst), 1);
-        assert_eq!(engine.native_task_census().admitted, 0);
-        assert_eq!(engine.native_task_census().running, 0);
     }
 
-    impl ReceiptObserver for ChannelReceiptObserver {
-        fn on_status(&self, status: FfiWriteStatus) {
-            let _ = self.tx.lock().unwrap().send(status);
-        }
-
-        fn on_closed(&self) {}
-    }
-
-    /// #52's headline falsifier, exercised through the FFI boundary this
-    /// time (the direct-Rust equivalent lives in `nmp::Engine`'s own tests):
-    /// a tampered `FfiWritePayload::Signed` is no longer a synchronous
-    /// `FfiError` -- `NmpEngine::publish` accepts it and the rejection
-    /// surfaces on the receipt stream as `WriteStatus::Failed`, the FIRST
-    /// and only status delivered, proving the verify inherited from
-    /// `nmp::Engine`'s acceptance boundary (Unit A0) covers this entry point
-    /// too, not only direct-Rust.
-    #[test]
-    fn ffi_tampered_signed_publish_fails_closed_on_receipt_stream() {
+    /// #52's headline falsifier through the FFI boundary: a tampered
+    /// `FfiWritePayload::Signed` is no longer a synchronous `FfiError` --
+    /// `NmpEngine::publish` accepts it and the rejection surfaces on the receipt
+    /// stream as `WriteStatus::Failed`, the FIRST and only status delivered.
+    #[tokio::test]
+    async fn ffi_tampered_signed_publish_fails_closed_on_receipt_stream() {
         let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
 
         let keys = nostr::Keys::generate();
@@ -1984,9 +1378,7 @@ mod tests {
                 created_at: event.created_at.as_secs(),
                 kind: event.kind.as_u16(),
                 tags: event.tags.iter().map(|t| t.clone().to_vec()).collect(),
-                // Tampered after signing: id/sig no longer match this
-                // content, but every field still parses fine at the FFI
-                // boundary (marshaling only, no verify here anymore).
+                // Tampered after signing: id/sig no longer match this content.
                 content: "tampered".to_string(),
                 sig: event.sig.to_string(),
             },
@@ -1995,41 +1387,35 @@ mod tests {
             identity_override: None,
         };
 
-        let (tx, rx) = mpsc::channel();
-        let observer = Box::new(ChannelReceiptObserver { tx: Mutex::new(tx) });
-
-        let receipt_id = engine
-            .publish(intent, observer)
+        let receipt = engine
+            .publish(intent)
             .expect("a well-formed (if tampered) Signed payload must parse at the FFI boundary");
-        assert!(receipt_id > 0, "publish must expose its stable receipt id");
+        assert!(
+            receipt.id() > 0,
+            "publish must expose its stable receipt id"
+        );
 
-        match rx
-            .recv_timeout(Duration::from_secs(5))
+        match next_status(&receipt)
+            .await
             .expect("a Durable intent must yield a status")
         {
             FfiWriteStatus::Failed { .. } => {}
             other => panic!("expected FfiWriteStatus::Failed, got {other:?}"),
         }
         assert!(
-            rx.recv_timeout(Duration::from_secs(1)).is_err(),
-            "Failed must be the sole terminal status -- no Accepted, nothing further"
+            next_status(&receipt).await.is_none(),
+            "Failed must be the sole terminal status -- the stream then ends"
         );
 
         engine.shutdown();
     }
 
     /// #47 Unit A through the FFI boundary: an `identity_override` naming a
-    /// pubkey with NO registered signer capability is a well-formed intent
-    /// (it names its own payload's author), so acceptance admits it --
-    /// `Accepted` -- and then PARKS it as `AwaitingCapability` until that
-    /// signer attaches, exactly the retained steady state the reattach test
-    /// above builds on. It must never silently terminate: no `Failed`, no
-    /// terminal, and the receipt channel stays OPEN (a `Timeout`, never a
-    /// `Disconnected`) -- the obligation is retained, not abandoned. The
-    /// active account (a different, registered-active identity) must not be
-    /// silently substituted; the override is what pins the author.
-    #[test]
-    fn ffi_override_publish_for_unregistered_pubkey_parks_awaiting_capability() {
+    /// pubkey with NO registered signer capability is accepted and PARKED as
+    /// `AwaitingCapability`. It must never silently terminate: after
+    /// `AwaitingCapability` the stream stays open (a timeout, never `None`).
+    #[tokio::test]
+    async fn ffi_override_publish_for_unregistered_pubkey_parks_awaiting_capability() {
         let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
         let active = nostr::Keys::generate();
         let overridden = nostr::Keys::generate();
@@ -2039,9 +1425,6 @@ mod tests {
 
         let intent = FfiWriteIntent {
             payload: FfiWritePayload::Unsigned {
-                // The payload author IS the override -- the one well-formed
-                // shape; a mismatch would be the acceptance boundary's
-                // Failed, tested at the engine tier (#47 Unit A).
                 pubkey: overridden.public_key().to_hex(),
                 created_at: nostr::Timestamp::now().as_secs(),
                 kind: 9999,
@@ -2053,38 +1436,39 @@ mod tests {
             identity_override: Some(overridden.public_key().to_hex()),
         };
 
-        let (tx, rx) = mpsc::channel();
-        let observer = Box::new(ChannelReceiptObserver { tx: Mutex::new(tx) });
-        let receipt_id = engine
-            .publish(intent, observer)
+        let receipt = engine
+            .publish(intent)
             .expect("a well-formed override intent must enqueue");
-        assert!(receipt_id > 0, "publish must expose its stable receipt id");
+        assert!(
+            receipt.id() > 0,
+            "publish must expose its stable receipt id"
+        );
 
         assert_eq!(
-            rx.recv_timeout(Duration::from_secs(10))
-                .expect("must observe Accepted"),
-            FfiWriteStatus::Accepted
+            next_status(&receipt).await,
+            Some(FfiWriteStatus::Accepted),
+            "must observe Accepted"
         );
         assert_eq!(
-            rx.recv_timeout(Duration::from_secs(10))
-                .expect("must observe AwaitingCapability"),
-            FfiWriteStatus::AwaitingCapability {
+            next_status(&receipt).await,
+            Some(FfiWriteStatus::AwaitingCapability {
                 pubkey: overridden.public_key().to_hex()
-            },
+            }),
             "the parked pubkey must be the frozen override, never the active account"
         );
-        assert_eq!(
-            rx.recv_timeout(Duration::from_secs(1)),
-            Err(mpsc::RecvTimeoutError::Timeout),
-            "an unregistered override must park retained -- no further fact, and the receipt \
-             stream must stay open (Disconnected would be a silent termination)"
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), receipt.next())
+                .await
+                .is_err(),
+            "an unregistered override must park retained -- no further fact, and the stream \
+             must stay open (a terminal None would be a silent termination)"
         );
 
         engine.shutdown();
     }
 
-    #[test]
-    fn ffi_cancel_returns_and_observes_the_same_typed_durable_fact() {
+    #[tokio::test]
+    async fn ffi_cancel_returns_and_observes_the_same_typed_durable_fact() {
         let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
         let keys = nostr::Keys::generate();
         engine
@@ -2102,28 +1486,26 @@ mod tests {
             routing: FfiWriteRouting::AuthorOutbox,
             identity_override: None,
         };
-        let (tx, rx) = mpsc::channel();
-        let receipt = engine
-            .publish(
-                intent,
-                Box::new(ChannelReceiptObserver { tx: Mutex::new(tx) }),
-            )
-            .unwrap();
-        assert_eq!(
-            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            FfiWriteStatus::Accepted
-        );
+        let receipt = engine.publish(intent).unwrap();
+        let receipt_id = receipt.id();
+        assert_eq!(next_status(&receipt).await, Some(FfiWriteStatus::Accepted));
 
-        assert_eq!(engine.cancel(receipt), Ok(FfiCancelWriteOutcome::Cancelled));
+        assert_eq!(
+            engine.cancel(receipt_id),
+            Ok(FfiCancelWriteOutcome::Cancelled)
+        );
         let mut observed = false;
-        while let Ok(status) = rx.recv_timeout(Duration::from_secs(1)) {
+        while let Some(status) = next_status(&receipt).await {
             if status == FfiWriteStatus::Cancelled {
                 observed = true;
                 break;
             }
         }
         assert!(observed);
-        assert_eq!(engine.cancel(receipt), Ok(FfiCancelWriteOutcome::Cancelled));
+        assert_eq!(
+            engine.cancel(receipt_id),
+            Ok(FfiCancelWriteOutcome::Cancelled)
+        );
         assert_eq!(
             engine.cancel(u64::MAX),
             Err(FfiCancelWriteError::UnknownReceipt {
@@ -2132,19 +1514,17 @@ mod tests {
         );
         engine.shutdown();
         assert_eq!(
-            engine.cancel(receipt),
+            engine.cancel(receipt_id),
             Err(FfiCancelWriteError::EngineClosed)
         );
     }
 
     /// #156 account-switch falsifier through the public native boundary.
     /// Composition snapshots A, but switching to B is serialized ahead of
-    /// publish on the sole engine command path. Acceptance must reject the
-    /// stale A draft before `Accepted`, canonical storage, or the durable
-    /// outbox journal can observe it. The lower engine test uses counting
-    /// signers to prove neither account capability is invoked.
-    #[test]
-    fn ffi_group_message_composed_as_a_cannot_publish_after_switching_to_b() {
+    /// publish. Acceptance must reject the stale A draft before `Accepted` or
+    /// any canonical/durable residue.
+    #[tokio::test]
+    async fn ffi_group_message_composed_as_a_cannot_publish_after_switching_to_b() {
         use redb::{ReadableDatabase, ReadableTableMetadata};
 
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -2177,15 +1557,12 @@ mod tests {
             .set_active_account(Some(b.public_key()))
             .expect("B must activate before publish");
 
-        let (tx, rx) = mpsc::channel();
-        let receipt_id = engine
-            .publish_composed(
-                intent,
-                Box::new(ChannelReceiptObserver { tx: Mutex::new(tx) }),
-            )
+        let receipt = engine
+            .publish_composed(intent)
             .expect("pre-acceptance failure still has a stream-local correlation id");
-        match rx
-            .recv_timeout(Duration::from_secs(5))
+        let receipt_id = receipt.id();
+        match next_status(&receipt)
+            .await
             .expect("stale author must fail deterministically")
         {
             FfiWriteStatus::Failed { reason } => assert_eq!(
@@ -2194,9 +1571,8 @@ mod tests {
             ),
             other => panic!("Failed must be first, before Accepted; got {other:?}"),
         }
-        assert_eq!(
-            rx.recv_timeout(Duration::from_secs(1)),
-            Err(mpsc::RecvTimeoutError::Disconnected),
+        assert!(
+            next_status(&receipt).await.is_none(),
             "Failed must be the sole receipt fact"
         );
         // Reuse the protocol selection but ask the empty configured Public
@@ -2222,19 +1598,12 @@ mod tests {
         );
         drop(subscription);
 
-        let (reattach_tx, reattach_rx) = mpsc::channel();
         let outcome = engine
-            .reattach_receipt(
-                receipt_id,
-                Box::new(ChannelReceiptObserver {
-                    tx: Mutex::new(reattach_tx),
-                }),
-            )
+            .reattach_receipt(receipt_id)
             .expect("reattach lookup must succeed");
-        assert_eq!(outcome, FfiReceiptReattachment::NotFound);
-        assert_eq!(
-            reattach_rx.try_recv(),
-            Err(mpsc::TryRecvError::Disconnected)
+        assert!(
+            matches!(outcome, FfiReceiptReattachment::NotFound),
+            "a pre-acceptance rejection retains no durable receipt"
         );
         engine.shutdown();
 
@@ -2277,26 +1646,14 @@ mod tests {
         ));
     }
 
-    /// #99: PR #97's FFI reattach coverage stopped at `reattachment_to_ffi`,
-    /// a pure enum-mapping unit test -- it never drove the real
-    /// `NmpEngine::reattach_receipt` method, so a broken observer-forwarding
-    /// observer bridge spawn (facade.rs's `Attached` arm) could leave direct Rust
-    /// correct while every FFI caller silently received nothing. This test
-    /// publishes a real durable intent (no signer ever attaches, so it
-    /// settles into a genuinely RETAINED `Accepted`+`AwaitingCapability`
-    /// steady state -- see `EngineCore::reattach_receipt`'s replay match),
-    /// reattaches with a SECOND, independent observer, and proves that
-    /// fresh observer receives the identical replayed fact sequence the
-    /// original one saw -- through the real forwarding thread, not a mock.
-    #[test]
-    fn ffi_reattach_replays_real_receipt_facts_through_a_fresh_observer() {
+    /// #99 end-to-end reattach: a real durable intent (no signer ever attaches,
+    /// so it settles into a retained `Accepted`+`AwaitingCapability` steady
+    /// state) is reattached through a SECOND, independent stream that replays the
+    /// identical durable `WriteStatus` prefix.
+    #[tokio::test]
+    async fn ffi_reattach_replays_real_receipt_facts_through_a_fresh_stream() {
         let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
         let keys = nostr::Keys::generate();
-        // Active WITHOUT `add_account`: satisfies publish's "there must be
-        // an active account" gate while registering no signer capability at
-        // all, so the accepted intent has no way to ever leave
-        // `AwaitingCapability` -- exactly the retained steady state this
-        // test needs to reattach against.
         engine
             .set_active_account(Some(keys.public_key().to_hex()))
             .expect("account must activate");
@@ -2314,97 +1671,69 @@ mod tests {
             identity_override: None,
         };
 
-        let (tx, rx) = mpsc::channel();
-        let observer = Box::new(ChannelReceiptObserver { tx: Mutex::new(tx) });
-        let receipt_id = engine
-            .publish(intent, observer)
+        let receipt = engine
+            .publish(intent)
             .expect("a well-formed unsigned intent must enqueue");
+        let receipt_id = receipt.id();
         assert!(receipt_id > 0, "publish must expose its stable receipt id");
 
-        // Real synchronization on the ORIGINAL observer first: block for
-        // the exact retained steady state (Accepted, then AwaitingCapability
-        // because no signer is ever attached) before reattaching at all --
-        // proves the obligation is genuinely retained, not a guessed delay.
+        // Block for the exact retained steady state on the ORIGINAL stream first.
         assert_eq!(
-            rx.recv_timeout(Duration::from_secs(10))
-                .expect("must observe Accepted"),
-            FfiWriteStatus::Accepted
+            next_status(&receipt).await,
+            Some(FfiWriteStatus::Accepted),
+            "must observe Accepted"
         );
         assert_eq!(
-            rx.recv_timeout(Duration::from_secs(10))
-                .expect("must observe AwaitingCapability"),
-            FfiWriteStatus::AwaitingCapability {
+            next_status(&receipt).await,
+            Some(FfiWriteStatus::AwaitingCapability {
                 pubkey: keys.public_key().to_hex()
-            }
+            })
         );
 
-        // Reattach through a FRESH observer/channel -- exercises the real
-        // observer forwarding path in `NmpEngine::reattach_receipt`,
-        // not just the enum mapping.
-        let (tx2, rx2) = mpsc::channel();
-        let replay_observer = Box::new(ChannelReceiptObserver {
-            tx: Mutex::new(tx2),
-        });
-        let outcome = engine
-            .reattach_receipt(receipt_id, replay_observer)
-            .expect("reattach call must succeed while the engine is open");
-        assert_eq!(outcome, FfiReceiptReattachment::Attached);
+        // Reattach through a FRESH stream -- exercises the real durable-prefix
+        // replay in `NmpEngine::reattach_receipt`.
+        let replay = match engine
+            .reattach_receipt(receipt_id)
+            .expect("reattach call must succeed while the engine is open")
+        {
+            FfiReceiptReattachment::Attached { stream } => stream,
+            FfiReceiptReattachment::NotFound => panic!("expected Attached, got NotFound"),
+            FfiReceiptReattachment::RetainedButUnreadable => {
+                panic!("expected Attached, got RetainedButUnreadable")
+            }
+        };
 
         assert_eq!(
-            rx2.recv_timeout(Duration::from_secs(10))
-                .expect("replay must deliver Accepted"),
-            FfiWriteStatus::Accepted
+            next_status(&replay).await,
+            Some(FfiWriteStatus::Accepted),
+            "replay must deliver Accepted"
         );
         assert_eq!(
-            rx2.recv_timeout(Duration::from_secs(10))
-                .expect("replay must deliver AwaitingCapability"),
-            FfiWriteStatus::AwaitingCapability {
+            next_status(&replay).await,
+            Some(FfiWriteStatus::AwaitingCapability {
                 pubkey: keys.public_key().to_hex()
-            }
+            })
         );
 
         engine.shutdown();
     }
 
-    /// #99: a `NotFound`/`RetainedButUnreadable` reattach must spawn NO
-    /// forwarding thread and deliver NO facts -- `NmpEngine::reattach_receipt`
-    /// simply never moves `observer` out of its own stack frame on those
-    /// arms, so it is dropped, synchronously, before this call even returns.
-    /// That makes the proof fully deterministic (no bounded wait needed at
-    /// all, let alone a sleep): if a forwarding thread had wrongly captured
-    /// `observer` (or a clone of its sender), the channel would still be
-    /// open and `try_recv` would block forever/return `Empty`, not
-    /// `Disconnected`.
+    /// #99: an unknown receipt id reattaches to `NotFound` (no stream, no facts).
     #[test]
-    fn ffi_reattach_of_unknown_id_spawns_no_forwarding_thread_and_delivers_no_facts() {
+    fn ffi_reattach_of_unknown_id_is_not_found() {
         let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
-        let (tx, rx) = mpsc::channel();
-        let observer = Box::new(ChannelReceiptObserver { tx: Mutex::new(tx) });
-
         let outcome = engine
-            .reattach_receipt(999_999, observer)
+            .reattach_receipt(999_999)
             .expect("reattach call must succeed while the engine is open");
-        assert_eq!(outcome, FfiReceiptReattachment::NotFound);
-
-        assert_eq!(
-            rx.try_recv(),
-            Err(mpsc::TryRecvError::Disconnected),
-            "no forwarding thread must have been spawned -- the dropped observer's sender must \
-             already be gone by the time reattach_receipt returns, not merely quiet"
-        );
-
+        assert!(matches!(outcome, FfiReceiptReattachment::NotFound));
         engine.shutdown();
     }
 
-    /// #99's other `RetainedButUnreadable` half: a GENUINELY corrupt
-    /// retained receipt (real undecodable bytes in a real `RedbStore` file,
-    /// the same technique `nmp-engine`'s own restart/corruption tests use)
-    /// must report `RetainedButUnreadable` through the FFI boundary too,
-    /// and -- like `NotFound` above -- spawn no forwarding thread and
-    /// deliver no facts (same code path: `NotFound | RetainedButUnreadable
-    /// => {}`).
-    #[test]
-    fn ffi_reattach_of_corrupt_retained_receipt_is_unreadable_and_spawns_no_thread() {
+    /// #99's `RetainedButUnreadable` half: a GENUINELY corrupt retained receipt
+    /// (real undecodable bytes in a real `RedbStore` file) reattaches to
+    /// `RetainedButUnreadable` (no stream, no facts) through the FFI boundary.
+    #[tokio::test]
+    async fn ffi_reattach_of_corrupt_retained_receipt_is_unreadable() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("corrupt-receipt.redb");
 
@@ -2430,22 +1759,20 @@ mod tests {
                 routing: FfiWriteRouting::AuthorOutbox,
                 identity_override: None,
             };
-            let (tx, rx) = mpsc::channel();
-            let observer = Box::new(ChannelReceiptObserver { tx: Mutex::new(tx) });
-            let receipt_id = engine
-                .publish(intent, observer)
+            let receipt = engine
+                .publish(intent)
                 .expect("a well-formed unsigned intent must enqueue");
+            let receipt_id = receipt.id();
             assert_eq!(
-                rx.recv_timeout(Duration::from_secs(10))
-                    .expect("must observe Accepted"),
-                FfiWriteStatus::Accepted
+                next_status(&receipt).await,
+                Some(FfiWriteStatus::Accepted),
+                "must observe Accepted"
             );
             engine.shutdown();
             receipt_id
         };
 
-        // Overwrite the receipt's own durable row with undecodable bytes --
-        // the store must have already released the file after `shutdown()`.
+        // Overwrite the receipt's own durable row with undecodable bytes.
         const RECEIPTS: redb::TableDefinition<&str, &str> =
             redb::TableDefinition::new("outbox_receipts");
         let db = redb::Database::open(&path).expect("redb: reopen for corruption");
@@ -2464,114 +1791,64 @@ mod tests {
             ..NmpEngineConfig::default()
         })
         .expect("engine must reopen over the corrupted store");
-        let (tx2, rx2) = mpsc::channel();
-        let observer = Box::new(ChannelReceiptObserver {
-            tx: Mutex::new(tx2),
-        });
         let outcome = engine
-            .reattach_receipt(receipt_id, observer)
+            .reattach_receipt(receipt_id)
             .expect("reattach call must succeed while the engine is open");
-        assert_eq!(outcome, FfiReceiptReattachment::RetainedButUnreadable);
-        assert_eq!(
-            rx2.try_recv(),
-            Err(mpsc::TryRecvError::Disconnected),
-            "an unreadable retained receipt must spawn no forwarding thread either"
-        );
+        assert!(matches!(
+            outcome,
+            FfiReceiptReattachment::RetainedButUnreadable
+        ));
 
         engine.shutdown();
     }
 
-    struct ClosedCountingRowObserver {
-        closed_tx: Mutex<mpsc::Sender<()>>,
-    }
-
-    impl RowObserver for ClosedCountingRowObserver {
-        fn on_frame(&self, _frame: FfiFrame) {}
-
-        fn on_closed(&self) {
-            let _ = self.closed_tx.lock().unwrap().send(());
-        }
-    }
-
-    /// codex-nova's non-negotiable proof #2, wired all the way through the
-    /// real FFI drain thread (the isolated `ObservationCancel` guard proof
-    /// lives in `nmp::subscription::tests`): calling `cancel()` on the SAME
-    /// `NmpQueryHandle` from two different `Arc` owners, then dropping
-    /// both, must still withdraw exactly once and deliver the drain
-    /// thread's `RowObserver::on_closed` exactly once -- never zero (a
-    /// hang), never more than once.
-    #[test]
-    fn ffi_repeated_cancel_across_arc_owners_and_drop_yields_exactly_one_on_closed() {
+    /// codex-nova's cancellation proof, ported to the pull-based handle: calling
+    /// `cancel()` on the SAME `NmpRowStream` from two `Arc` owners, then dropping
+    /// both, wakes a parked `next()` to `None` and keeps yielding `None` -- never
+    /// a hang, never a post-cancel frame.
+    #[tokio::test]
+    async fn ffi_repeated_cancel_across_arc_owners_and_drop_yields_terminal_none() {
         let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
 
-        let (closed_tx, closed_rx) = mpsc::channel();
-        let observer = Box::new(ClosedCountingRowObserver {
-            closed_tx: Mutex::new(closed_tx),
-        });
-
-        let filter = FfiFilter {
-            kinds: Some(vec![9999]),
-            ..FfiFilter::default()
-        };
         let handle = engine
-            .observe(filter, None, observer)
+            .observe(
+                FfiFilter {
+                    kinds: Some(vec![9999]),
+                    ..FfiFilter::default()
+                },
+                None,
+            )
             .expect("a well-formed filter must be accepted");
 
-        // Two independent `Arc` owners of the SAME `NmpQueryHandle` -- both
-        // call `cancel()`, then both are dropped, mirroring a caller that
-        // cancels explicitly and also lets its last reference go out of
-        // scope.
+        // Two independent `Arc` owners of the SAME `NmpRowStream` -- both call
+        // `cancel()`, then both are dropped.
         let handle_other_owner = Arc::clone(&handle);
         handle.cancel();
         handle_other_owner.cancel();
-        handle.cancel();
+        handle.cancel(); // idempotent
+
+        assert!(
+            next_frame(&handle).await.is_none(),
+            "cancel wakes next() to a terminal None, never a hang"
+        );
+        assert!(
+            next_frame(&handle).await.is_none(),
+            "None is stable after cancel -- no post-cancel frame is ever observed"
+        );
         drop(handle);
         drop(handle_other_owner);
-
-        closed_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("on_closed must fire once the subscription is withdrawn, not hang");
-        assert!(
-            closed_rx.recv_timeout(Duration::from_millis(200)).is_err(),
-            "on_closed must fire EXACTLY once, not once per cancel() call/Arc owner/Drop"
-        );
 
         engine.shutdown();
     }
 
-    struct BlockingRebasedRowObserver {
-        frame_index: AtomicUsize,
-        first_frame_started: mpsc::Sender<()>,
-        release_first_frame: Mutex<mpsc::Receiver<()>>,
-        frames: mpsc::Sender<FfiFrame>,
-        closed: mpsc::Sender<()>,
-    }
-
-    impl RowObserver for BlockingRebasedRowObserver {
-        fn on_frame(&self, frame: FfiFrame) {
-            if self.frame_index.fetch_add(1, Ordering::SeqCst) == 0 {
-                let _ = self.first_frame_started.send(());
-                self.release_first_frame
-                    .lock()
-                    .unwrap()
-                    .recv_timeout(Duration::from_secs(5))
-                    .expect("test must release the blocked first callback");
-            }
-            let _ = self.frames.send(frame);
-        }
-
-        fn on_closed(&self) {
-            let _ = self.closed.send(());
-        }
-    }
-
-    /// Exercise the complete producer-mailbox -> `nmp::Subscription` -> FFI
-    /// drain-thread path under real callback backpressure. While the first
-    /// callback is blocked, durable local acceptance produces many distinct
-    /// rows and cancellation retracts half of them. The one subsequent frame
-    /// must be the exact net transition, then cancellation closes once.
-    #[test]
-    fn ffi_blocked_callback_receives_one_exact_rebased_frame_then_closes_once() {
+    /// The slow-consumer conflation falsifier, ported to pull-based delivery.
+    /// After the initial current-state frame is consumed, the consumer stops
+    /// pulling while durable local acceptance produces many distinct rows and
+    /// cancellation retracts half of them. The single subsequent `next()` must
+    /// deliver the exact net transition (the engine mailbox folds obsolete
+    /// intermediates), then cancellation closes it once.
+    #[tokio::test]
+    async fn ffi_slow_consumer_receives_one_exact_rebased_frame_then_closes() {
         let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
         let keys = nostr::Keys::generate();
         engine
@@ -2579,17 +1856,6 @@ mod tests {
             .set_active_account(Some(keys.public_key()))
             .expect("engine must accept a read-only active identity");
 
-        let (started_tx, started_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel();
-        let (frame_tx, frame_rx) = mpsc::channel();
-        let (closed_tx, closed_rx) = mpsc::channel();
-        let observer = Box::new(BlockingRebasedRowObserver {
-            frame_index: AtomicUsize::new(0),
-            first_frame_started: started_tx,
-            release_first_frame: Mutex::new(release_rx),
-            frames: frame_tx,
-            closed: closed_tx,
-        });
         let kind = nostr::Kind::Custom(44_646);
         let handle = engine
             .observe(
@@ -2598,13 +1864,17 @@ mod tests {
                     ..FfiFilter::default()
                 },
                 None,
-                observer,
             )
             .expect("query must open");
-        started_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the initial callback must start and block");
 
+        // Consume the initial current-state frame (empty store -> empty deltas).
+        let initial = next_frame(&handle)
+            .await
+            .expect("the initial current-state frame must arrive");
+        assert!(initial.deltas.is_empty());
+
+        // Now, WITHOUT pulling again, produce 64 rows and cancel the evens. They
+        // fold into the single engine-owned mailbox slot -- the slow-consumer path.
         let mut expected = BTreeSet::new();
         for index in 0..64u64 {
             let unsigned = nostr::UnsignedEvent::new(
@@ -2641,22 +1911,16 @@ mod tests {
         }
 
         // A synchronous diagnostics open is a command-loop barrier: every
-        // preceding publish/cancel effect has reached the row mailbox before
-        // the blocked callback is released.
+        // preceding publish/cancel effect has folded into the row mailbox slot.
         drop(
             engine
                 .engine
                 .observe_diagnostics()
                 .expect("barrier observation must open"),
         );
-        release_tx.send(()).unwrap();
 
-        let initial = frame_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the released initial frame must arrive");
-        assert!(initial.deltas.is_empty());
-        let rebased = frame_rx
-            .recv_timeout(Duration::from_secs(5))
+        let rebased = next_frame(&handle)
+            .await
             .expect("the exact rebased frame must follow");
         let actual: BTreeSet<_> = rebased
             .deltas
@@ -2668,46 +1932,20 @@ mod tests {
             .collect();
         assert_eq!(actual, expected);
         assert_eq!(rebased.deltas.len(), expected.len());
-        assert!(matches!(
-            frame_rx.try_recv(),
-            Err(mpsc::TryRecvError::Empty)
-        ));
 
         handle.cancel();
-        closed_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("cancel must close the blocked observer drain");
         assert!(
-            closed_rx.recv_timeout(Duration::from_millis(200)).is_err(),
-            "the drain must call on_closed exactly once"
+            next_frame(&handle).await.is_none(),
+            "cancel must close the stream once"
         );
         engine.shutdown();
     }
 
-    struct ClosedCountingReceiptObserver {
-        status_tx: Mutex<mpsc::Sender<FfiWriteStatus>>,
-        closed_tx: Mutex<mpsc::Sender<()>>,
-    }
-
-    impl ReceiptObserver for ClosedCountingReceiptObserver {
-        fn on_status(&self, status: FfiWriteStatus) {
-            let _ = self.status_tx.lock().unwrap().send(status);
-        }
-
-        fn on_closed(&self) {
-            let _ = self.closed_tx.lock().unwrap().send(());
-        }
-    }
-
-    /// #125's falsifier, mirroring the `RowObserver` close proof above but for
-    /// the receipt drain: a receipt stream must terminate its observer with
-    /// exactly one `on_closed` when the receipt `Sender` is dropped (here via
-    /// a tampered `Signed` payload that fails closed -- `Failed` is the sole
-    /// terminal, after which the engine drops the receipt sender). Before this
-    /// fix `NmpEngine::publish`'s drain loop ended silently, so a Swift/Kotlin
-    /// receipt stream was never finished and its continuation leaked/hung.
-    #[test]
-    fn ffi_receipt_stream_yields_exactly_one_on_closed_when_sender_dropped() {
+    /// #125's falsifier ported to the pull path: a receipt stream must terminate
+    /// in `None` when its `WriteStatus` sender is dropped (here via a tampered
+    /// `Signed` payload whose `Failed` is the sole terminal), after real delivery.
+    #[tokio::test]
+    async fn ffi_receipt_stream_ends_with_none_when_sender_dropped() {
         let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
 
         let keys = nostr::Keys::generate();
@@ -2721,8 +1959,6 @@ mod tests {
                 created_at: event.created_at.as_secs(),
                 kind: event.kind.as_u16(),
                 tags: event.tags.iter().map(|t| t.clone().to_vec()).collect(),
-                // Tampered after signing: guarantees a fail-closed terminal so
-                // the receipt sender is dropped and the drain loop ends.
                 content: "tampered".to_string(),
                 sig: event.sig.to_string(),
             },
@@ -2731,49 +1967,32 @@ mod tests {
             identity_override: None,
         };
 
-        let (status_tx, status_rx) = mpsc::channel();
-        let (closed_tx, closed_rx) = mpsc::channel();
-        let observer = Box::new(ClosedCountingReceiptObserver {
-            status_tx: Mutex::new(status_tx),
-            closed_tx: Mutex::new(closed_tx),
-        });
-
-        engine
-            .publish(intent, observer)
+        let receipt = engine
+            .publish(intent)
             .expect("a well-formed (if tampered) Signed payload must parse at the FFI boundary");
 
-        // The stream is genuinely active first (the terminal fact arrives),
-        // proving `on_closed` follows real delivery, not an empty stream.
-        match status_rx
-            .recv_timeout(Duration::from_secs(5))
+        // The stream is genuinely active first (the terminal fact arrives).
+        match next_status(&receipt)
+            .await
             .expect("a Durable intent must yield a status")
         {
             FfiWriteStatus::Failed { .. } => {}
             other => panic!("expected FfiWriteStatus::Failed, got {other:?}"),
         }
 
-        closed_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("on_closed must fire once the receipt sender is dropped, not hang");
         assert!(
-            closed_rx.recv_timeout(Duration::from_millis(200)).is_err(),
-            "on_closed must fire EXACTLY once when the receipt stream terminates"
+            next_status(&receipt).await.is_none(),
+            "the receipt stream must end in None once the sender is dropped, not hang"
         );
 
         engine.shutdown();
     }
 
-    /// #156: `publish_composed` takes its `FfiComposedWriteIntent`
-    /// exactly once. No signer is ever attached (`set_active_account` without
-    /// `add_account`), so the first call settles into the SAME retained
-    /// `Accepted`+`AwaitingCapability` steady state
-    /// `ffi_reattach_replays_real_receipt_facts_through_a_fresh_observer`
-    /// relies on -- no live relay needed to prove take-once. A second call on
-    /// the identical `Arc<FfiComposedWriteIntent>` must fail closed with
-    /// `FfiError::IntentAlreadyConsumed`, never silently re-publish the same
-    /// template or hand back a fresh receipt.
-    #[test]
-    fn ffi_publish_composed_takes_the_intent_exactly_once() {
+    /// #156: `publish_composed` takes its `FfiComposedWriteIntent` exactly once.
+    /// A second call on the identical `Arc<FfiComposedWriteIntent>` must fail
+    /// closed with `FfiError::IntentAlreadyConsumed`.
+    #[tokio::test]
+    async fn ffi_publish_composed_takes_the_intent_exactly_once() {
         let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
         let keys = nostr::Keys::generate();
         engine
@@ -2790,27 +2009,25 @@ mod tests {
             )
             .expect("a well-formed group message must compose");
 
-        let (tx_a, rx_a) = mpsc::channel();
-        let observer_a = Box::new(ChannelReceiptObserver {
-            tx: Mutex::new(tx_a),
-        });
-        let receipt_id = engine
-            .publish_composed(intent.clone(), observer_a)
+        let receipt = engine
+            .publish_composed(intent.clone())
             .expect("the first publish_composed call must consume the intent and succeed");
-        assert!(receipt_id > 0, "publish_composed must expose a receipt id");
+        assert!(
+            receipt.id() > 0,
+            "publish_composed must expose a receipt id"
+        );
         assert!(matches!(
-            rx_a.recv_timeout(Duration::from_secs(5)),
-            Ok(FfiWriteStatus::Accepted)
+            next_status(&receipt).await,
+            Some(FfiWriteStatus::Accepted)
         ));
 
-        let (tx_b, _rx_b) = mpsc::channel();
-        let observer_b = Box::new(ChannelReceiptObserver {
-            tx: Mutex::new(tx_b),
-        });
-        match engine.publish_composed(intent, observer_b) {
+        match engine.publish_composed(intent) {
             Err(FfiError::IntentAlreadyConsumed) => {}
-            other => {
+            Err(other) => {
                 panic!("expected FfiError::IntentAlreadyConsumed on the second call, got {other:?}")
+            }
+            Ok(_) => {
+                panic!("a second publish_composed must not re-publish the consumed intent")
             }
         }
 

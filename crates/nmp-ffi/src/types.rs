@@ -52,7 +52,6 @@ pub struct FfiRelayInformationLimitations {
 /// throw in `convert::FfiError::RelayInformationUnavailable`).
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiRelayInformationErrorKind {
-    ExecutorSaturated { capacity: u64 },
     WaiterSaturated { capacity: u64 },
     ThreadUnavailable { reason: String },
     ServiceClosed,
@@ -279,7 +278,7 @@ pub struct FfiDemand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub enum FfiWindow {
     /// Bounded newest-first window: starts with `initial` canonical rows,
-    /// grows only by explicit `NmpQueryHandle::request_rows`, never above
+    /// grows only by explicit `NmpRowStream::request_rows`, never above
     /// `max`.
     Expandable { initial: u64, max: u64 },
 }
@@ -373,14 +372,43 @@ pub struct FfiSignedEvent {
     pub sig: String,
 }
 
-/// Failures that may resolve after a sign-only operation was accepted.
-#[derive(Debug, Clone, PartialEq, Eq, Enum)]
+/// Failures that may resolve after a sign-only operation was accepted. Thrown
+/// from [`crate::facade::NmpSignEventHandle::signed`] (#680).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
 pub enum FfiSignEventFailure {
-    SignerUnavailable { reason: String },
-    SignerRejected { reason: String },
-    InvalidSignerOutput { reason: String },
+    SignerUnavailable {
+        reason: String,
+    },
+    SignerRejected {
+        reason: String,
+    },
+    InvalidSignerOutput {
+        reason: String,
+    },
     Cancelled,
+    /// `NmpSignEventHandle::signed()` is one-shot: this is returned when
+    /// `signed()` is awaited a second time (sequentially or concurrently) —
+    /// the single result was already delivered to the first await (#680).
+    AlreadyConsumed,
 }
+
+impl std::fmt::Display for FfiSignEventFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SignerUnavailable { reason } => write!(f, "signer unavailable: {reason}"),
+            Self::SignerRejected { reason } => write!(f, "signer rejected request: {reason}"),
+            Self::InvalidSignerOutput { reason } => {
+                write!(f, "signer returned invalid output: {reason}")
+            }
+            Self::Cancelled => f.write_str("sign-only operation was cancelled"),
+            Self::AlreadyConsumed => {
+                f.write_str("sign-only result was already delivered to a prior signed() await")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FfiSignEventFailure {}
 
 /// A remembered NIP-29 group reference (#108, `nmp_nip29::GroupRef`
 /// mirror) -- group id, host relay, and optional display name.
@@ -708,7 +736,7 @@ pub struct FfiDiagnosticsSnapshot {
 }
 
 /// The receipt STREAM (`nmp::WriteStatus` mirror; ledger #9 — enqueue is
-/// not converged, the app's `ReceiptObserver` may see many of these per
+/// not converged, the app's `NmpReceiptStream` may yield many of these per
 /// publish).
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiWriteStatus {
@@ -822,10 +850,14 @@ impl std::fmt::Display for FfiCancelWriteError {
 
 impl std::error::Error for FfiCancelWriteError {}
 
-/// Result of looking up a stable retained receipt id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+/// Result of looking up a stable retained receipt id. The `Attached` variant
+/// carries the pull-based [`crate::facade::NmpReceiptStream`] that replays the
+/// durable `WriteStatus` prefix and streams onward (#680).
+#[derive(uniffi::Enum)]
 pub enum FfiReceiptReattachment {
-    Attached,
+    Attached {
+        stream: Arc<crate::facade::NmpReceiptStream>,
+    },
     NotFound,
     RetainedButUnreadable,
 }

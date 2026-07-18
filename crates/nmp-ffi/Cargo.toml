@@ -63,3 +63,6 @@ redb = "4.1"
 tempfile = "3"
 tungstenite = "0.29"
 url = "2"
+# #680 async observation falsifiers drive the pull-based `next()` futures with a
+# real executor. `#[tokio::test]` only, dev-only — production stays runtime-free.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

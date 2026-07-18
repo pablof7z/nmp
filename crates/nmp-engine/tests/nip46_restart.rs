@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use nmp_engine::core::{RelayAdmissionPolicy, RowDelta};
 use nmp_engine::outbox::WriteStatus;
-use nmp_engine::runtime::{EngineThread, ReceiptReattachment, RowsReceiver};
+use nmp_engine::runtime::{EngineThread, FifoReceiver, ReceiptReattachment, RowsReceiver};
 use nmp_grammar::{Binding, Durability, Filter, WriteIntent, WritePayload, WriteRouting};
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
@@ -176,7 +176,7 @@ fn spawn_write_relay() -> (RelayUrl, mpsc::Receiver<Event>) {
 }
 
 fn wait_for_status(
-    statuses: &mpsc::Receiver<WriteStatus>,
+    statuses: &FifoReceiver<WriteStatus>,
     predicate: impl Fn(&WriteStatus) -> bool,
 ) -> WriteStatus {
     let deadline = Instant::now() + Duration::from_secs(5);

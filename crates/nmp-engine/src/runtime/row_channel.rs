@@ -23,7 +23,9 @@ use nostr::{EventId, RelayUrl};
 
 use crate::core::{AcquisitionEvidence, Row, RowDelta};
 
-use super::diagnostics_channel::{latest_channel, LatestReceiver, LatestSender};
+use super::diagnostics_channel::{
+    latest_channel, AsyncLatestReceiver, ConcurrentNext, LatestReceiver, LatestSender,
+};
 use super::RowsMsg;
 
 enum PendingTransition {
@@ -192,6 +194,37 @@ impl RowsReceiver {
 
     pub fn try_recv(&self) -> Result<RowsMsg, TryRecvError> {
         self.pending.try_recv().map(PendingRows::into_message)
+    }
+
+    /// Convert to the `Send + Sync` async pull surface (#680). Consumes the
+    /// blocking receiver — a stream is drained either by a direct-Rust blocking
+    /// consumer or by an async foreign consumer, never both.
+    pub fn into_async(self) -> AsyncRowsReceiver {
+        AsyncRowsReceiver {
+            pending: AsyncLatestReceiver::new(self.pending),
+        }
+    }
+}
+
+/// The async single-consumer half of an ordinary live-query stream (#680).
+/// Awaiting [`Self::next`] parks a waker on the mailbox rather than blocking an
+/// OS thread; the fold that keeps exactly one pending exact transition is
+/// entirely sender-side, so this receiver carries no per-frame state and is
+/// `Send + Sync`.
+pub struct AsyncRowsReceiver {
+    pending: AsyncLatestReceiver<PendingRows>,
+}
+
+impl AsyncRowsReceiver {
+    /// Await the next exact rebased transition, or `None` once the producer is
+    /// gone / the consumer cancelled. [`ConcurrentNext`] on an overlapping call.
+    pub async fn next(&self) -> Result<Option<RowsMsg>, ConcurrentNext> {
+        Ok(self.pending.next().await?.map(PendingRows::into_message))
+    }
+
+    /// Idempotent consumer-initiated close; wakes a parked `next()` to `None`.
+    pub fn close(&self) {
+        self.pending.close();
     }
 }
 

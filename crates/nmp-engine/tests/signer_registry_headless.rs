@@ -15,14 +15,14 @@
 
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nmp_engine::core::RelayAdmissionPolicy;
 use nmp_engine::core::RowDelta;
 use nmp_engine::outbox::WriteStatus;
-use nmp_engine::runtime::{EngineThread, RowsReceiver};
+use nmp_engine::runtime::{EngineThread, FifoReceiver, RowsReceiver};
 use nmp_grammar::{Binding, Filter, IdentityField};
 use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 use nmp_resolver::LiveQuery;
@@ -100,7 +100,7 @@ fn wait_for_rows(
 /// Waits until `pred` matches some status on the stream (never assumes the
 /// FIRST value is a terminal -- ledger #9).
 fn wait_for_status(
-    rx: &Receiver<WriteStatus>,
+    rx: &FifoReceiver<WriteStatus>,
     timeout: Duration,
     pred: impl Fn(&WriteStatus) -> bool,
 ) -> bool {
@@ -627,7 +627,7 @@ fn stale_registration_cannot_detach_replacement_for_same_pubkey() {
 /// The #47 no-retarget falsifiers need a bounded NEGATIVE observation: after
 /// a read-root change, a pinned parked intent must emit no progress at all.
 fn assert_no_status_within(
-    rx: &Receiver<WriteStatus>,
+    rx: &FifoReceiver<WriteStatus>,
     window: Duration,
     forbidden: impl Fn(&WriteStatus) -> bool,
 ) {

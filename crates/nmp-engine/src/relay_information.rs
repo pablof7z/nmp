@@ -53,9 +53,6 @@ pub enum RelayInformationFreshness {
 /// values; they are never represented as an empty relay document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelayInformationError {
-    ExecutorSaturated {
-        capacity: usize,
-    },
     WaiterSaturated {
         capacity: usize,
     },
@@ -81,10 +78,6 @@ pub enum RelayInformationError {
 impl std::fmt::Display for RelayInformationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ExecutorSaturated { capacity } => write!(
-                f,
-                "NIP-11 acquisition refused: native task capacity {capacity} is full"
-            ),
             Self::WaiterSaturated { capacity } => write!(
                 f,
                 "NIP-11 acquisition refused: per-relay waiter capacity {capacity} is full"
@@ -1085,8 +1078,8 @@ impl RelayInformationService {
         let reservation = self
             .executor
             .reserve("NIP-11 acquisition")
-            .map_err(|error| RelayInformationError::ExecutorSaturated {
-                capacity: error.capacity,
+            .map_err(|error| RelayInformationError::ThreadUnavailable {
+                reason: error.to_string(),
             })?;
 
         // Another caller may have won the flight while this caller reserved.
@@ -1542,8 +1535,7 @@ fn complete(
             Err(error) => {
                 let allows_stale = !matches!(
                     error,
-                    RelayInformationError::ExecutorSaturated { .. }
-                        | RelayInformationError::WaiterSaturated { .. }
+                    RelayInformationError::WaiterSaturated { .. }
                         | RelayInformationError::ThreadUnavailable { .. }
                         | RelayInformationError::ServiceClosed
                         | RelayInformationError::CredentialedRelayUrl
@@ -2557,9 +2549,13 @@ mod tests {
             .unwrap();
         let service = RelayInformationService::new(executor.clone());
         let relay = RelayUrl::parse("wss://refused.example").unwrap();
+        // #680 removed the global `ExecutorSaturated` concept; a full internal
+        // adapter pool now surfaces the class-specific `ThreadUnavailable`
+        // refusal. The real semantic preserved here: the refusal publishes no
+        // flight and consumes no caller intent.
         assert!(matches!(
             service.request(relay, RelayInformationCachePolicy::Refresh),
-            Err(RelayInformationError::ExecutorSaturated { capacity: 1 })
+            Err(RelayInformationError::ThreadUnavailable { .. })
         ));
         assert!(service.shared.state.lock().unwrap().entries.is_empty());
         assert_eq!(executor.census().admitted, 1);

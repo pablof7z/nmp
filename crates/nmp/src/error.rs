@@ -34,9 +34,6 @@ pub enum EngineError {
     /// configured relay budget could not be represented safely. No partial
     /// engine escapes construction.
     ThreadUnavailable { component: String, reason: String },
-    /// The finite native task executor had no immediately-startable slot.
-    /// No stream or operation was accepted behind this refusal.
-    ExecutorSaturated { component: String, capacity: usize },
     /// [`Engine::add_account`](crate::Engine::add_account)'s secret key did
     /// not parse as a valid nostr key (hex or bech32 `nsec`).
     InvalidSecretKey,
@@ -81,13 +78,6 @@ impl std::fmt::Display for EngineError {
             Self::ThreadUnavailable { component, reason } => {
                 write!(f, "{component} thread unavailable: {reason}")
             }
-            Self::ExecutorSaturated {
-                component,
-                capacity,
-            } => write!(
-                f,
-                "{component} refused: native task executor is at capacity {capacity}"
-            ),
             Self::InvalidSecretKey => write!(f, "invalid secret key"),
             Self::SignerMissingPublicKey => write!(f, "signer has no public key"),
             Self::AuthCapabilityRegistryFull { limit } => {

@@ -95,10 +95,6 @@ pub enum FfiNip46Failure {
         component: String,
         reason: String,
     },
-    ExecutorSaturated {
-        component: String,
-        capacity: u64,
-    },
     /// `nmp::Engine::add_signer` maps every internal `AddSignerError` to
     /// `EngineError::SignerMissingPublicKey` (crates/nmp/src/engine.rs). This
     /// is the signer-side engine-attach failure; the other reachable
@@ -169,13 +165,6 @@ fn nip46_failure_to_ffi(error: nmp_signer::Nip46Error) -> FfiNip46Failure {
         nmp_signer::Nip46Error::ThreadUnavailable { component, reason } => {
             FfiNip46Failure::ThreadUnavailable { component, reason }
         }
-        nmp_signer::Nip46Error::ExecutorSaturated {
-            component,
-            capacity,
-        } => FfiNip46Failure::ExecutorSaturated {
-            component,
-            capacity: capacity as u64,
-        },
     }
 }
 
@@ -562,13 +551,11 @@ impl NmpEngine {
         let reservation = self
             .engine
             .reserve_native_task("NIP-46 bunker connection")?;
-        let executor = self.engine.native_task_executor();
         let engine = Arc::clone(&self.engine);
         let observer: Arc<dyn Nip46ConnectionObserver> = Arc::from(observer);
         let connection = Nip46Connection::new(engine, observer);
         spawn_bunker_connection(
             reservation,
-            executor,
             Arc::downgrade(&connection),
             connection.cancellation.clone(),
             bunker_uri,
@@ -586,7 +573,6 @@ impl NmpEngine {
         let reservation = self
             .engine
             .reserve_native_task("NIP-46 invitation connection")?;
-        let executor = self.engine.native_task_executor();
         let invitation = invitation
             .inner
             .lock()
@@ -602,7 +588,6 @@ impl NmpEngine {
         let connection = Nip46Connection::new(engine, observer);
         spawn_invitation_connection(
             reservation,
-            executor,
             Arc::downgrade(&connection),
             connection.cancellation.clone(),
             invitation,
@@ -614,7 +599,6 @@ impl NmpEngine {
 
 fn spawn_bunker_connection(
     reservation: nmp::NativeTaskReservation,
-    executor: nmp::NativeTaskExecutor,
     connection: Weak<Nip46Connection>,
     cancellation: nmp_signer::Nip46Cancellation,
     bunker_uri: String,
@@ -626,16 +610,21 @@ fn spawn_bunker_connection(
             move || shutdown.cancel(),
             move || {
                 let events = lifecycle_sink(connection.clone());
-                let result =
-                    nmp::Nip46Signer::connect_bunker_observed_with_executor_and_cancellation(
-                        &bunker_uri,
-                        None,
-                        nmp::Nip46ClientMetadata::default(),
-                        Duration::from_millis(timeout_millis),
-                        events,
-                        &cancellation,
-                        executor,
-                    );
+                // #680 Part 5: the NIP-46 session's own long-lived workers run
+                // on a session-owned executor (bounded by app-identity session
+                // count), not the shared engine adapter pool — so an unrelated
+                // `relay_information()` can never be refused because a signer
+                // session is open. This transient connect worker is the only
+                // engine-pool slot the connection uses, and it is released the
+                // moment the handshake completes and the session detaches.
+                let result = nmp::Nip46Signer::connect_bunker_observed_with_cancellation(
+                    &bunker_uri,
+                    None,
+                    nmp::Nip46ClientMetadata::default(),
+                    Duration::from_millis(timeout_millis),
+                    events,
+                    &cancellation,
+                );
                 let Some(connection) = connection.upgrade() else {
                     return;
                 };
@@ -653,7 +642,6 @@ fn spawn_bunker_connection(
 
 fn spawn_invitation_connection(
     reservation: nmp::NativeTaskReservation,
-    executor: nmp::NativeTaskExecutor,
     connection: Weak<Nip46Connection>,
     cancellation: nmp_signer::Nip46Cancellation,
     invitation: nmp::Nip46Invitation,
@@ -665,11 +653,11 @@ fn spawn_invitation_connection(
             move || shutdown.cancel(),
             move || {
                 let events = lifecycle_sink(connection.clone());
-                let result = invitation.connect_observed_with_executor_and_cancellation(
+                // #680 Part 5: session-owned executor (see spawn_bunker_connection).
+                let result = invitation.connect_observed_with_cancellation(
                     Duration::from_millis(timeout_millis),
                     events,
                     &cancellation,
-                    executor,
                 );
                 let Some(connection) = connection.upgrade() else {
                     return;
@@ -932,7 +920,6 @@ mod tests {
             engine
                 .reserve_native_task("NIP-46 bunker connection")
                 .unwrap(),
-            engine.native_task_executor(),
             weak.clone(),
             connection.cancellation.clone(),
             uri,

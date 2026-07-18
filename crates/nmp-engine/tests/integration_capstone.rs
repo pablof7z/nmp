@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use nmp_engine::core::RelayAdmissionPolicy;
 use nmp_engine::core::{AcquisitionEvidence, RowDelta, SourceStatus};
 use nmp_engine::outbox::WriteStatus;
-use nmp_engine::runtime::{EngineThread, RowsReceiver};
+use nmp_engine::runtime::{EngineThread, FifoReceiver, RowsReceiver};
 use nmp_engine::{AuthPolicy, AuthPolicyOp, AuthPolicyRequest};
 use nmp_grammar::{
     AccessContext, Binding, Demand, Derived, Filter, IdentityField, Selector, SetAlgebra, SetOp,
@@ -115,7 +115,7 @@ fn wait_for_rows(
 }
 
 fn wait_for_status(
-    rx: &Receiver<WriteStatus>,
+    rx: &FifoReceiver<WriteStatus>,
     timeout: Duration,
     pred: impl Fn(&WriteStatus) -> bool,
 ) -> bool {

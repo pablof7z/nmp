@@ -74,18 +74,21 @@ pub use engine::{
     SignEventRequest,
 };
 pub use error::EngineError;
+/// Monotonic count of real NMP-owned OS threads spawned this process (#680
+/// falsifier instrumentation) — see [`nmp_engine::nmp_threads_spawned`]. The
+/// thread-scaling falsifier asserts opening many observations leaves this
+/// delta at 0: an observation is a lightweight `Arc`+waker, never an OS thread.
+pub use nmp_engine::nmp_threads_spawned;
+pub use nmp_engine::runtime::ConcurrentNext;
 #[doc(hidden)]
-pub use nmp_executor::{
-    Census as NativeTaskCensus, Executor as NativeTaskExecutor,
-    Reservation as NativeTaskReservation, StartedTask as StartedNativeTask,
-};
+pub use nmp_executor::{Reservation as NativeTaskReservation, StartedTask as StartedNativeTask};
 pub use relay_information::{
     RelayInformationCachePolicy, RelayInformationDocument, RelayInformationError,
     RelayInformationFreshness, RelayInformationLimitations, RelayInformationSnapshot,
 };
 pub use subscription::{
-    DiagnosticsSubscription, Frame, ObservationCancel, RequestRowsError, Subscription, Window,
-    WindowContents, WindowHandle,
+    AsyncDiagnosticsSubscription, AsyncSubscription, DiagnosticsSubscription, Frame,
+    ObservationCancel, RequestRowsError, Subscription, Window, WindowContents, WindowHandle,
 };
 
 // The grammar an app builds a `LiveQuery`'s `Demand` out of. `Demand`'s
@@ -136,8 +139,8 @@ pub fn admits_network_relay_hint(relay: &nostr::RelayUrl) -> bool {
 pub use nmp_engine::core::ReceiptId;
 pub use nmp_engine::outbox::WriteStatus;
 pub use nmp_engine::runtime::{
-    ReceiptReattachment, ReceiptStream, SignEventCancel, SignEventError, SignEventOperation,
-    SignerRegistration,
+    fifo_channel, AsyncFifoReceiver, FifoReceiver, FifoSender, ReceiptReattachment, ReceiptStream,
+    SignEventCancel, SignEventError, SignEventOperation, SignerRegistration,
 };
 pub use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 

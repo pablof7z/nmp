@@ -65,6 +65,7 @@
 
 mod auth;
 mod diagnostics_channel;
+mod fifo_channel;
 mod row_channel;
 
 pub use auth::{
@@ -112,10 +113,11 @@ use crate::relay_information::{
 };
 use nmp_grammar::WriteIntent;
 
-pub use diagnostics_channel::LatestReceiver;
 use diagnostics_channel::{latest_channel, LatestSender};
-pub use row_channel::RowsReceiver;
+pub use diagnostics_channel::{AsyncLatestReceiver, ConcurrentNext, LatestReceiver};
+pub use fifo_channel::{fifo_channel, AsyncFifoReceiver, FifoReceiver, FifoSender};
 use row_channel::{rows_channel, RowsSender};
+pub use row_channel::{AsyncRowsReceiver, RowsReceiver};
 
 /// NIP-11 may refine a capability decision, but a slow/unavailable HTTP
 /// endpoint must not hold the WebSocket protocol path hostage. This is a
@@ -193,6 +195,17 @@ impl HistoryReceiver {
         Ok(Self::reconcile(&mut delivered, batch))
     }
 
+    /// Convert to the `Send + Sync` async pull surface (#680). The
+    /// receiver-side `delivered` reconcile map moves behind a `Mutex`; the
+    /// single-reader guard on the async receiver means `next()` never contends
+    /// it with itself.
+    pub fn into_async(self) -> AsyncHistoryReceiver {
+        AsyncHistoryReceiver {
+            batches: AsyncLatestReceiver::new(self.batches),
+            delivered: Mutex::new(self.delivered.into_inner()),
+        }
+    }
+
     fn reconcile(delivered: &mut BTreeMap<EventId, Row>, mut batch: HistoryBatch) -> HistoryBatch {
         let current: BTreeMap<_, _> = batch
             .rows
@@ -223,6 +236,34 @@ impl HistoryReceiver {
         *delivered = current;
         batch.deltas = deltas;
         batch
+    }
+}
+
+/// The async single-consumer half of a bounded, latest-wins history stream
+/// (#680). `Send + Sync`: the receiver-side reconcile map is behind a `Mutex`,
+/// and the single-reader guard on [`AsyncLatestReceiver`] serialises `next()`.
+pub struct AsyncHistoryReceiver {
+    batches: AsyncLatestReceiver<HistoryBatch>,
+    delivered: Mutex<BTreeMap<EventId, Row>>,
+}
+
+impl AsyncHistoryReceiver {
+    /// Await the next bounded latest snapshot with exact deltas rebased against
+    /// this receiver's last delivered frame, or `None` once the producer is
+    /// gone / the consumer cancelled. [`ConcurrentNext`] on an overlapping call.
+    pub async fn next(&self) -> Result<Option<HistoryBatch>, ConcurrentNext> {
+        match self.batches.next().await? {
+            Some(batch) => {
+                let mut delivered = self.delivered.lock().unwrap();
+                Ok(Some(HistoryReceiver::reconcile(&mut delivered, batch)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Idempotent consumer-initiated close; wakes a parked `next()` to `None`.
+    pub fn close(&self) {
+        self.batches.close();
     }
 }
 
@@ -545,14 +586,14 @@ pub struct HistoryHandle(HistorySessionId);
 /// call [`Handle::reattach_receipt`] without replaying acceptance.
 pub struct ReceiptStream {
     pub id: ReceiptId,
-    pub statuses: Receiver<WriteStatus>,
+    pub statuses: FifoReceiver<WriteStatus>,
 }
 
 /// Result of looking up retained receipt facts by stable id.
 pub enum ReceiptReattachment {
     /// The observer is attached and this channel is already primed with all
     /// readable retained facts.
-    Attached(Receiver<WriteStatus>),
+    Attached(FifoReceiver<WriteStatus>),
     /// No retained receipt with this id exists.
     NotFound,
     /// The id is retained, but durable receipt or attempt evidence is corrupt
@@ -581,11 +622,11 @@ impl HistorySink for NullHistorySink {
 /// caller's channel. This IS the receipt delivery path (see the module doc):
 /// `Effect::EmitReceipt` carries the identical value and is not separately
 /// redelivered.
-struct ChannelReceiptSink(Sender<WriteStatus>);
+struct ChannelReceiptSink(FifoSender<WriteStatus>);
 
 impl ReceiptSink for ChannelReceiptSink {
     fn on_status(&self, status: WriteStatus) {
-        let _ = self.0.send(status);
+        self.0.send(status);
     }
 }
 
@@ -753,7 +794,6 @@ pub enum SignEventError {
     SignerUnavailable { reason: String },
     SignerRejected { reason: String },
     InvalidSignerOutput { reason: String },
-    ExecutorSaturated { capacity: usize },
     ThreadUnavailable { component: String, reason: String },
     EngineClosed,
     Cancelled,
@@ -845,12 +885,6 @@ impl std::fmt::Display for SignEventError {
             Self::SignerRejected { reason } => write!(f, "signer rejected request: {reason}"),
             Self::InvalidSignerOutput { reason } => {
                 write!(f, "signer returned invalid output: {reason}")
-            }
-            Self::ExecutorSaturated { capacity } => {
-                write!(
-                    f,
-                    "sign-event refused: native task executor is at capacity {capacity}"
-                )
             }
             Self::ThreadUnavailable { component, reason } => {
                 write!(f, "{component} thread unavailable: {reason}")
@@ -1129,19 +1163,30 @@ fn pool_build_error(error: nmp_transport::PoolBuildError) -> EngineThreadError {
 
 pub const DEFAULT_MAX_AUTH_CAPABILITIES: usize = 64;
 
-/// Finite admission limits for engine-owned native work and live AUTH
-/// policy/signer registrations. Unlike legacy zero-valued relay/task
-/// settings, zero AUTH capabilities intentionally admits none.
+/// Fixed internal capacity of the engine's blocking-adapter pool (#680). This
+/// pool hosts ONLY transient blocking foreign/reactor adapters — NIP-11
+/// flights, remote-signer result waiters, the sign-event drain, AUTH foreign
+/// calls, and the follow-action worker. Observations never touch it (they are
+/// pure-waker async since #680), and engine-associated NIP-46 sessions run on
+/// their own session-owned executors, so this ceiling is generous for the
+/// remaining transient work and is deliberately NOT app-configurable, NOT
+/// CPU-derived, and NOT surfaced (there is no census/idle/capacity field
+/// anywhere in the SDK). Residual saturation surfaces as an adapter-specific
+/// `ThreadUnavailable`, never a global native-task ceiling.
+pub const ADAPTER_POOL_CAPACITY: usize = 32;
+
+/// Finite admission limit for live AUTH policy/signer registrations. Unlike
+/// legacy zero-valued relay settings, zero AUTH capabilities intentionally
+/// admits none. The blocking-adapter pool it accompanies is sized by the
+/// fixed internal [`ADAPTER_POOL_CAPACITY`], never by config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeConfig {
-    pub max_native_tasks: usize,
     pub max_auth_capabilities: usize,
 }
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            max_native_tasks: nmp_executor::DEFAULT_MAX_TASKS,
             max_auth_capabilities: DEFAULT_MAX_AUTH_CAPABILITIES,
         }
     }
@@ -1178,31 +1223,6 @@ impl EngineThread {
         )
     }
 
-    pub fn spawn_with_native_task_limit<S, D>(
-        store: S,
-        directory: D,
-        cap: usize,
-        pool_config: PoolConfig,
-        admission: RelayAdmissionPolicy,
-        max_native_tasks: usize,
-    ) -> Result<(Self, Handle), EngineThreadError>
-    where
-        S: EventStore + Send + 'static,
-        D: RelayDirectory + Send + 'static,
-    {
-        Self::spawn_with_runtime_config(
-            store,
-            directory,
-            cap,
-            pool_config,
-            admission,
-            RuntimeConfig {
-                max_native_tasks,
-                ..RuntimeConfig::default()
-            },
-        )
-    }
-
     pub fn spawn_with_runtime_config<S, D>(
         store: S,
         directory: D,
@@ -1215,13 +1235,12 @@ impl EngineThread {
         S: EventStore + Send + 'static,
         D: RelayDirectory + Send + 'static,
     {
-        let native_tasks =
-            nmp_executor::Executor::new(runtime_config.max_native_tasks).map_err(|error| {
-                EngineThreadError::ThreadUnavailable {
-                    component: "native task executor".to_string(),
-                    reason: error.to_string(),
-                }
-            })?;
+        let native_tasks = nmp_executor::Executor::new(ADAPTER_POOL_CAPACITY).map_err(|error| {
+            EngineThreadError::ThreadUnavailable {
+                component: "blocking-adapter pool".to_string(),
+                reason: error.to_string(),
+            }
+        })?;
         // One limit owns both compilation and connection admission. Legacy
         // zero values select the finite default; conflicting mechanism-test
         // inputs fail closed to the smaller non-zero ceiling.
@@ -1282,7 +1301,10 @@ impl EngineThread {
                 let _thread_count = RuntimeThreadCountGuard::enter(bridge_runtime_threads);
                 pool_bridge_loop(&pool_evt_rx, &pool_stop_rx, &bridge_inbox, max_engine_batch)
             }) {
-            Ok(join) => join,
+            Ok(join) => {
+                nmp_executor::note_thread_spawn();
+                join
+            }
             Err(error) => {
                 pool.shutdown();
                 native_tasks.shutdown();
@@ -1310,7 +1332,10 @@ impl EngineThread {
                     }
                 }
             }) {
-            Ok(join) => join,
+            Ok(join) => {
+                nmp_executor::note_thread_spawn();
+                join
+            }
             Err(error) => {
                 drop(pool_stop_tx);
                 pool.shutdown();
@@ -1353,7 +1378,10 @@ impl EngineThread {
                         &self_inbox,
                     )
                 }) {
-                Ok(join) => join,
+                Ok(join) => {
+                    nmp_executor::note_thread_spawn();
+                    join
+                }
                 Err(error) => {
                     drop(pool_stop_tx);
                     pool.shutdown();
@@ -1428,13 +1456,14 @@ mod reentrant_shutdown_tests {
     use nostr::{Keys, Kind};
 
     fn runtime() -> (EngineThread, Handle) {
-        EngineThread::spawn_with_native_task_limit(
+        // #680 removed the configurable native-task limit; the blocking-adapter
+        // pool is a fixed internal capacity, so spawn takes no limit argument.
+        EngineThread::spawn(
             MemoryStore::new(),
             FixtureDirectory::new(),
             1,
             PoolConfig::default(),
             RelayAdmissionPolicy::default(),
-            2,
         )
         .expect("engine construction")
     }
@@ -2749,7 +2778,6 @@ mod auth_registry_admission_tests {
             PoolConfig::default(),
             RelayAdmissionPolicy::default(),
             RuntimeConfig {
-                max_native_tasks: 1,
                 max_auth_capabilities: limit,
             },
         )
@@ -5429,8 +5457,9 @@ impl Handle {
         completion: impl FnOnce(Result<SignedEvent, SignEventError>) + Send + 'static,
     ) -> Result<SignEventCancel, SignEventError> {
         let reservation = self.native_tasks.reserve("sign-event").map_err(|error| {
-            SignEventError::ExecutorSaturated {
-                capacity: error.capacity,
+            SignEventError::ThreadUnavailable {
+                reason: error.to_string(),
+                component: error.component,
             }
         })?;
         let (reply_tx, reply_rx) = mpsc::channel();
@@ -5470,7 +5499,7 @@ impl Handle {
     /// no durable delivery obligation or query-visible pending row. If no
     /// pre-acceptance correlation id remains, this returns a typed error and
     /// creates no receipt stream.
-    pub fn publish(&self, intent: WriteIntent) -> Result<Receiver<WriteStatus>, PublishError> {
+    pub fn publish(&self, intent: WriteIntent) -> Result<FifoReceiver<WriteStatus>, PublishError> {
         self.publish_tracked(intent).map(|receipt| receipt.statuses)
     }
 
@@ -5479,7 +5508,7 @@ impl Handle {
     /// never for signing, routing, network I/O, or ACKs. Correlation-id
     /// exhaustion is returned before any stream or identity is fabricated.
     pub fn publish_tracked(&self, intent: WriteIntent) -> Result<ReceiptStream, PublishError> {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = fifo_channel();
         let sink: Box<dyn ReceiptSink> = Box::new(ChannelReceiptSink(tx));
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox
@@ -5499,7 +5528,7 @@ impl Handle {
     /// channel is primed with durable receipt/attempt facts. Missing and
     /// retained-but-unreadable evidence are distinct outcomes.
     pub fn reattach_receipt(&self, id: ReceiptId) -> ReceiptReattachment {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = fifo_channel();
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox
             .send(Cmd::ReattachReceipt {

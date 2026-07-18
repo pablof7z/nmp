@@ -124,7 +124,6 @@ pub enum Nip46Error {
     Rejected(String),
     InvalidResponse(String),
     ThreadUnavailable { component: String, reason: String },
-    ExecutorSaturated { component: String, capacity: usize },
 }
 
 impl fmt::Display for Nip46Error {
@@ -151,13 +150,6 @@ impl fmt::Display for Nip46Error {
             Self::ThreadUnavailable { component, reason } => {
                 write!(f, "{component} thread unavailable: {reason}")
             }
-            Self::ExecutorSaturated {
-                component,
-                capacity,
-            } => write!(
-                f,
-                "{component} refused: native task executor is at capacity {capacity}"
-            ),
         }
     }
 }
@@ -1457,9 +1449,9 @@ fn forward_events(
 
 fn map_executor_error(error: nmp_executor::ExecutorError) -> Nip46Error {
     match error {
-        nmp_executor::ExecutorError::Saturated(error) => Nip46Error::ExecutorSaturated {
+        nmp_executor::ExecutorError::Saturated(error) => Nip46Error::ThreadUnavailable {
+            reason: error.to_string(),
             component: error.component,
-            capacity: error.capacity,
         },
         nmp_executor::ExecutorError::Spawn(error) => Nip46Error::ThreadUnavailable {
             component: "NIP-46 native task".to_string(),
@@ -1573,13 +1565,18 @@ mod tests {
             SessionExecutor::Shared(executor.clone()),
         )
         .unwrap();
+        // #680 removed the global `ExecutorSaturated` variant; a full internal
+        // adapter pool now surfaces the class-specific `ThreadUnavailable`
+        // refusal. Real semantic preserved: two engine sessions occupy four of
+        // five slots, so the third forwarder is refused.
         let refusal = forward_events(&third, Arc::new(|_| {})).unwrap_err();
-        assert_eq!(
-            refusal,
-            Nip46Error::ExecutorSaturated {
-                component: "NIP-46 event forwarder".to_string(),
-                capacity: 5,
-            }
+        assert!(
+            matches!(
+                &refusal,
+                Nip46Error::ThreadUnavailable { component, .. }
+                    if component == "NIP-46 event forwarder"
+            ),
+            "unexpected refusal: {refusal:?}"
         );
 
         drop(third);

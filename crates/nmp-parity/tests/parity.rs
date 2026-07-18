@@ -5,29 +5,33 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::RecvTimeoutError;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use nmp::{
     AcquisitionEvidence, AuthPhase, Binding, CancelWriteOutcome, DiagnosticsSnapshot, Durability,
-    Engine, EngineConfig, Filter, Lane, LiveQuery, ObservationCancel, ReceiptId,
+    Engine, EngineConfig, FifoReceiver, Filter, Lane, LiveQuery, ObservationCancel, ReceiptId,
     ReceiptReattachment, Row, RowDelta, ShortfallFact, SourceStatus, Timestamp, UnsignedEvent,
     WriteIntent, WritePayload, WriteRouting, WriteStatus,
 };
 use nmp_bdd::relays::{RelayConfig, ScriptedRelay};
 use nmp_ffi::convert::{write_status_to_ffi, WriteStatusRef};
-use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpQueryHandle};
+// #680: observers/callbacks are gone; the facade exposes pull-based async
+// stream objects whose `next()` we bridge into the existing mpsc drains via a
+// forwarding Tokio task (all parity tests are `#[tokio::test(multi_thread)]`).
+use nmp_ffi::facade::{
+    NmpDiagnosticsStream, NmpEngine, NmpEngineConfig, NmpReceiptStream, NmpRowStream,
+};
 use nmp_ffi::nip02::{
     FfiFollowActionStatus, FfiFollowAvailability, FfiFollowRelationship, FfiFollowSnapshot,
-    FollowActionObserver, FollowObserver,
+    NmpFollowActionStream, NmpFollowStream,
 };
-use nmp_ffi::observer::{DiagnosticsObserver, ReceiptObserver, RowObserver};
 use nmp_ffi::types::{
     FfiAcquisitionEvidence, FfiAuthPhase, FfiBinding, FfiCancelWriteOutcome,
-    FfiDiagnosticsSnapshot, FfiDurability, FfiFilter, FfiFrame, FfiReceiptReattachment,
-    FfiRowDelta, FfiShortfallFact, FfiSourceStatus, FfiWriteIntent, FfiWritePayload,
-    FfiWriteRouting, FfiWriteStatus,
+    FfiDiagnosticsSnapshot, FfiDurability, FfiFilter, FfiReceiptReattachment, FfiRowDelta,
+    FfiShortfallFact, FfiSourceStatus, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
+    FfiWriteStatus,
 };
 use nmp_nip02::{
     observe_following, set_following, FollowAction, FollowActionStatus, FollowAvailability,
@@ -229,36 +233,82 @@ struct FollowScenarioOutcome {
     preserved_existing_follow: NormFollowSnapshot,
 }
 
-struct FfiFollowSnapshots {
-    tx: Mutex<mpsc::Sender<FfiFollowSnapshot>>,
+// #680: bridge each pull-based FFI stream handle into an mpsc channel via a
+// forwarding Tokio task, so every existing mpsc-based collect/wait helper is
+// reused unchanged. The task holds a clone of the handle, keeping the stream
+// open until `next()` yields `None` (cancel / shutdown / producer drop). The
+// caller keeps its own handle clone for explicit `cancel()`.
+fn bridge_rows(
+    stream: &Arc<NmpRowStream>,
+) -> mpsc::Receiver<(Vec<FfiRowDelta>, FfiAcquisitionEvidence)> {
+    let (tx, rx) = mpsc::channel();
+    let stream = Arc::clone(stream);
+    tokio::spawn(async move {
+        while let Ok(Some(frame)) = stream.next().await {
+            // Unbounded FFI observations carry deltas + evidence; `window` is
+            // always `None` (windowing is a policy on the read noun, #485).
+            if tx.send((frame.deltas, frame.evidence)).is_err() {
+                break;
+            }
+        }
+    });
+    rx
 }
 
-impl FollowObserver for FfiFollowSnapshots {
-    fn on_snapshot(&self, snapshot: FfiFollowSnapshot) {
-        let _ = self
-            .tx
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .send(snapshot);
-    }
-
-    fn on_closed(&self) {}
+fn bridge_diagnostics(
+    stream: &Arc<NmpDiagnosticsStream>,
+) -> mpsc::Receiver<FfiDiagnosticsSnapshot> {
+    let (tx, rx) = mpsc::channel();
+    let stream = Arc::clone(stream);
+    tokio::spawn(async move {
+        while let Ok(Some(snapshot)) = stream.next().await {
+            if tx.send(snapshot).is_err() {
+                break;
+            }
+        }
+    });
+    rx
 }
 
-struct FfiFollowActions {
-    tx: Mutex<mpsc::Sender<FfiFollowActionStatus>>,
+fn bridge_receipts(stream: &Arc<NmpReceiptStream>) -> mpsc::Receiver<FfiWriteStatus> {
+    let (tx, rx) = mpsc::channel();
+    let stream = Arc::clone(stream);
+    tokio::spawn(async move {
+        while let Ok(Some(status)) = stream.next().await {
+            if tx.send(status).is_err() {
+                break;
+            }
+        }
+    });
+    rx
 }
 
-impl FollowActionObserver for FfiFollowActions {
-    fn on_status(&self, status: FfiFollowActionStatus) {
-        let _ = self
-            .tx
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .send(status);
-    }
+fn bridge_follow_snapshots(stream: &Arc<NmpFollowStream>) -> mpsc::Receiver<FfiFollowSnapshot> {
+    let (tx, rx) = mpsc::channel();
+    let stream = Arc::clone(stream);
+    tokio::spawn(async move {
+        while let Ok(Some(snapshot)) = stream.next().await {
+            if tx.send(snapshot).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
 
-    fn on_closed(&self) {}
+fn bridge_follow_actions(
+    stream: &Arc<NmpFollowActionStream>,
+) -> mpsc::Receiver<FfiFollowActionStatus> {
+    let (tx, rx) = mpsc::channel();
+    let stream = Arc::clone(stream);
+    tokio::spawn(async move {
+        while let Ok(Some(status)) = stream.next().await {
+            if tx.send(status).is_err() {
+                break;
+            }
+        }
+    });
+    rx
 }
 
 fn fixed_keys() -> Keys {
@@ -273,14 +323,33 @@ fn normalize_url(value: &str, relay: &str) -> String {
     }
 }
 
-fn recv_before<T>(rx: &mpsc::Receiver<T>, deadline: Instant, what: &str) -> T {
+// The direct-Rust receipt streams are `nmp::FifoReceiver`s; the FFI streams are
+// bridged into `mpsc::Receiver`s. Both expose the same timed pull, so
+// `recv_before` is generic over this one trait (#680: receipts became FIFO).
+trait TimedRecv<T> {
+    fn recv_before_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError>;
+}
+
+impl<T> TimedRecv<T> for mpsc::Receiver<T> {
+    fn recv_before_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
+        self.recv_timeout(timeout)
+    }
+}
+
+impl<T> TimedRecv<T> for FifoReceiver<T> {
+    fn recv_before_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
+        self.recv_timeout(timeout)
+    }
+}
+
+fn recv_before<T, R: TimedRecv<T>>(rx: &R, deadline: Instant, what: &str) -> T {
     let remaining = deadline.saturating_duration_since(Instant::now());
     assert!(
         !remaining.is_zero(),
         "{what} did not settle within the total {:?} bound",
         WAIT
     );
-    rx.recv_timeout(remaining).unwrap_or_else(|error| {
+    rx.recv_before_timeout(remaining).unwrap_or_else(|error| {
         panic!("{what} did not settle within the total {WAIT:?} bound: {error}")
     })
 }
@@ -867,7 +936,7 @@ fn expected_limited_evidence() -> NormEvidence {
     }
 }
 
-fn collect_direct_receipts(rx: mpsc::Receiver<WriteStatus>, relay: &str) -> Vec<NormStatus> {
+fn collect_direct_receipts(rx: FifoReceiver<WriteStatus>, relay: &str) -> Vec<NormStatus> {
     let mut statuses = Vec::new();
     let deadline = Instant::now() + WAIT;
     loop {
@@ -892,7 +961,7 @@ fn collect_direct_receipts(rx: mpsc::Receiver<WriteStatus>, relay: &str) -> Vec<
 /// at the first `AwaitingAuth` beat instead. Borrows the receiver so the
 /// caller can afterwards prove NO further status arrives.
 fn collect_direct_receipts_until_awaiting_auth(
-    rx: &mpsc::Receiver<WriteStatus>,
+    rx: &FifoReceiver<WriteStatus>,
     relay: &str,
 ) -> Vec<NormStatus> {
     let mut statuses = Vec::new();
@@ -984,44 +1053,6 @@ fn expected_auth_parked_receipts(keys: &Keys) -> Vec<NormStatus> {
     receipts
 }
 
-struct FfiRows {
-    tx: Mutex<mpsc::Sender<(Vec<FfiRowDelta>, FfiAcquisitionEvidence)>>,
-}
-
-impl RowObserver for FfiRows {
-    fn on_frame(&self, frame: FfiFrame) {
-        // Unbounded FFI observations carry deltas + evidence; `window` is
-        // always `None` (windowing is a policy on the read noun, #485).
-        let _ = self
-            .tx
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .send((frame.deltas, frame.evidence));
-    }
-
-    fn on_closed(&self) {}
-}
-
-struct FfiDiagnostics {
-    tx: Mutex<mpsc::Sender<FfiDiagnosticsSnapshot>>,
-}
-
-impl DiagnosticsObserver for FfiDiagnostics {
-    fn on_snapshot(&self, snapshot: FfiDiagnosticsSnapshot) {
-        let _ = self
-            .tx
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .send(snapshot);
-    }
-
-    fn on_closed(&self) {}
-}
-
-struct FfiReceipts {
-    tx: Mutex<mpsc::Sender<FfiWriteStatus>>,
-}
-
 fn stage_direct_discovery(
     engine: &Engine,
     pubkey: &str,
@@ -1058,15 +1089,11 @@ fn stage_ffi_discovery(
     engine: &NmpEngine,
     pubkey: &str,
     relay: &ScriptedRelay,
-) -> Arc<NmpQueryHandle> {
-    let (tx, rx) = mpsc::channel();
+) -> Arc<NmpRowStream> {
     let handle = engine
-        .observe(
-            ffi_filter(pubkey, DISCOVERY_TRIGGER_KIND),
-            None,
-            Box::new(FfiRows { tx: Mutex::new(tx) }),
-        )
+        .observe(ffi_filter(pubkey, DISCOVERY_TRIGGER_KIND), None)
         .expect("FFI discovery query must open");
+    let rx = bridge_rows(&handle);
 
     let deadline = Instant::now() + WAIT;
     loop {
@@ -1077,18 +1104,6 @@ fn stage_ffi_discovery(
         }
     }
     handle
-}
-
-impl ReceiptObserver for FfiReceipts {
-    fn on_status(&self, status: FfiWriteStatus) {
-        let _ = self
-            .tx
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .send(status);
-    }
-
-    fn on_closed(&self) {}
 }
 
 async fn setup_relay(keys: &Keys, query_event: &nostr::Event) -> ScriptedRelay {
@@ -1418,56 +1433,31 @@ async fn run_ffi_follow_scenario(
         .set_active_account(Some(active.public_key()))
         .expect("FFI follow account must activate");
 
-    let (snapshot_tx, snapshot_rx) = mpsc::channel();
     let observation = engine
-        .observe_following(
-            target.public_key().to_hex(),
-            Box::new(FfiFollowSnapshots {
-                tx: Mutex::new(snapshot_tx),
-            }),
-        )
+        .observe_following(target.public_key().to_hex())
         .expect("FFI following observation must open");
+    let snapshot_rx = bridge_follow_snapshots(&observation);
     let initial = wait_for_ffi_follow_snapshot(&snapshot_rx, FfiFollowRelationship::NotFollowing);
 
-    let (follow_tx, follow_rx) = mpsc::channel();
-    engine.follow(
-        target.public_key().to_hex(),
-        Box::new(FfiFollowActions {
-            tx: Mutex::new(follow_tx),
-        }),
-    );
+    let follow_action = engine.follow(target.public_key().to_hex());
+    let follow_rx = bridge_follow_actions(&follow_action);
     let follow = collect_ffi_follow_action(&follow_rx);
     let after_follow = wait_for_ffi_follow_snapshot(&snapshot_rx, FfiFollowRelationship::Following);
 
-    let (no_change_tx, no_change_rx) = mpsc::channel();
-    engine.follow(
-        target.public_key().to_hex(),
-        Box::new(FfiFollowActions {
-            tx: Mutex::new(no_change_tx),
-        }),
-    );
+    let no_change_action = engine.follow(target.public_key().to_hex());
+    let no_change_rx = bridge_follow_actions(&no_change_action);
     let no_change = collect_ffi_follow_action(&no_change_rx);
 
-    let (unfollow_tx, unfollow_rx) = mpsc::channel();
-    engine.unfollow(
-        target.public_key().to_hex(),
-        Box::new(FfiFollowActions {
-            tx: Mutex::new(unfollow_tx),
-        }),
-    );
+    let unfollow_action = engine.unfollow(target.public_key().to_hex());
+    let unfollow_rx = bridge_follow_actions(&unfollow_action);
     let unfollow = collect_ffi_follow_action(&unfollow_rx);
     let after_unfollow =
         wait_for_ffi_follow_snapshot(&snapshot_rx, FfiFollowRelationship::NotFollowing);
 
-    let (existing_tx, existing_rx) = mpsc::channel();
     let existing_observation = engine
-        .observe_following(
-            existing.public_key().to_hex(),
-            Box::new(FfiFollowSnapshots {
-                tx: Mutex::new(existing_tx),
-            }),
-        )
+        .observe_following(existing.public_key().to_hex())
         .expect("FFI preserved-follow observation must open");
+    let existing_rx = bridge_follow_snapshots(&existing_observation);
     let preserved_existing_follow =
         wait_for_ffi_follow_snapshot(&existing_rx, FfiFollowRelationship::Following);
 
@@ -1551,24 +1541,14 @@ async fn run_ffi_missing_contact_list(
         .set_active_account(Some(active.public_key()))
         .expect("FFI missing-list account must activate");
 
-    let (snapshot_tx, snapshot_rx) = mpsc::channel();
     let observation = engine
-        .observe_following(
-            target.public_key().to_hex(),
-            Box::new(FfiFollowSnapshots {
-                tx: Mutex::new(snapshot_tx),
-            }),
-        )
+        .observe_following(target.public_key().to_hex())
         .expect("FFI missing-list observation must open");
+    let snapshot_rx = bridge_follow_snapshots(&observation);
     let snapshot =
         wait_for_ffi_follow_availability(&snapshot_rx, FfiFollowAvailability::NoContactList);
-    let (action_tx, action_rx) = mpsc::channel();
-    engine.follow(
-        target.public_key().to_hex(),
-        Box::new(FfiFollowActions {
-            tx: Mutex::new(action_tx),
-        }),
-    );
+    let action_handle = engine.follow(target.public_key().to_hex());
+    let action_rx = bridge_follow_actions(&action_handle);
     let action = collect_ffi_follow_action(&action_rx);
 
     observation.cancel();
@@ -1748,23 +1728,15 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
         .set_active_account(Some(pubkey.clone()))
         .expect("FFI account must activate");
 
-    let (diag_tx, diag_rx) = mpsc::channel();
     let diagnostics_handle = engine
-        .observe_diagnostics(Box::new(FfiDiagnostics {
-            tx: Mutex::new(diag_tx),
-        }))
+        .observe_diagnostics()
         .expect("FFI diagnostics must open");
+    let diag_rx = bridge_diagnostics(&diagnostics_handle);
     let discovery_handle = stage_ffi_discovery(&engine, &pubkey, &relay);
-    let (rows_tx, rows_rx) = mpsc::channel();
     let query_handle = engine
-        .observe(
-            ffi_filter(&pubkey, QUERY_KIND),
-            None,
-            Box::new(FfiRows {
-                tx: Mutex::new(rows_tx),
-            }),
-        )
+        .observe(ffi_filter(&pubkey, QUERY_KIND), None)
         .expect("FFI query must open");
+    let rows_rx = bridge_rows(&query_handle);
     let mut rows = BTreeMap::new();
     let rows_deadline = Instant::now() + WAIT;
     let evidence = loop {
@@ -1800,26 +1772,21 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
     };
     assert_content_phase_diagnostics(&diagnostics, handoff_baseline, &relay, "FFI");
 
-    let (receipt_tx, receipt_rx) = mpsc::channel();
-    engine
-        .publish(
-            FfiWriteIntent {
-                payload: FfiWritePayload::Unsigned {
-                    pubkey,
-                    created_at: WRITE_CREATED_AT,
-                    kind: WRITE_KIND,
-                    tags: vec![],
-                    content: "parity-write".to_string(),
-                },
-                durability: FfiDurability::Durable,
-                routing: FfiWriteRouting::AuthorOutbox,
-                identity_override: None,
+    let receipt = engine
+        .publish(FfiWriteIntent {
+            payload: FfiWritePayload::Unsigned {
+                pubkey,
+                created_at: WRITE_CREATED_AT,
+                kind: WRITE_KIND,
+                tags: vec![],
+                content: "parity-write".to_string(),
             },
-            Box::new(FfiReceipts {
-                tx: Mutex::new(receipt_tx),
-            }),
-        )
+            durability: FfiDurability::Durable,
+            routing: FfiWriteRouting::AuthorOutbox,
+            identity_override: None,
+        })
         .expect("FFI publish must enqueue");
+    let receipt_rx = bridge_receipts(&receipt);
     let receipts = collect_ffi_receipts(&receipt_rx, &relay_url);
     assert_eq!(
         receipts,
@@ -1933,26 +1900,21 @@ async fn run_ffi_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<Nor
 
     let discovery_handle = stage_ffi_discovery(&engine, &pubkey, &relay);
 
-    let (receipt_tx, receipt_rx) = mpsc::channel();
-    engine
-        .publish(
-            FfiWriteIntent {
-                payload: FfiWritePayload::Unsigned {
-                    pubkey,
-                    created_at: WRITE_CREATED_AT,
-                    kind: WRITE_KIND,
-                    tags: vec![],
-                    content: "parity-write".to_string(),
-                },
-                durability: FfiDurability::Durable,
-                routing: FfiWriteRouting::AuthorOutbox,
-                identity_override: None,
+    let receipt = engine
+        .publish(FfiWriteIntent {
+            payload: FfiWritePayload::Unsigned {
+                pubkey,
+                created_at: WRITE_CREATED_AT,
+                kind: WRITE_KIND,
+                tags: vec![],
+                content: "parity-write".to_string(),
             },
-            Box::new(FfiReceipts {
-                tx: Mutex::new(receipt_tx),
-            }),
-        )
+            durability: FfiDurability::Durable,
+            routing: FfiWriteRouting::AuthorOutbox,
+            identity_override: None,
+        })
         .expect("FFI auth-parked publish must enqueue");
+    let receipt_rx = bridge_receipts(&receipt);
     let receipts = collect_ffi_receipts_until_awaiting_auth(&receipt_rx, &relay_url);
     assert_eq!(
         receipt_rx.recv_timeout(Duration::from_secs(2)),
@@ -2056,26 +2018,21 @@ async fn run_ffi_override_publish(active: &Keys, override_keys: &Keys) -> Vec<No
 
     let discovery_handle = stage_ffi_discovery(&engine, &override_pubkey, &relay);
 
-    let (receipt_tx, receipt_rx) = mpsc::channel();
-    engine
-        .publish(
-            FfiWriteIntent {
-                payload: FfiWritePayload::Unsigned {
-                    pubkey: override_pubkey.clone(),
-                    created_at: WRITE_CREATED_AT,
-                    kind: WRITE_KIND,
-                    tags: vec![],
-                    content: "parity-write".to_string(),
-                },
-                durability: FfiDurability::Durable,
-                routing: FfiWriteRouting::AuthorOutbox,
-                identity_override: Some(override_pubkey),
+    let receipt = engine
+        .publish(FfiWriteIntent {
+            payload: FfiWritePayload::Unsigned {
+                pubkey: override_pubkey.clone(),
+                created_at: WRITE_CREATED_AT,
+                kind: WRITE_KIND,
+                tags: vec![],
+                content: "parity-write".to_string(),
             },
-            Box::new(FfiReceipts {
-                tx: Mutex::new(receipt_tx),
-            }),
-        )
+            durability: FfiDurability::Durable,
+            routing: FfiWriteRouting::AuthorOutbox,
+            identity_override: Some(override_pubkey),
+        })
         .expect("FFI override publish must enqueue");
+    let receipt_rx = bridge_receipts(&receipt);
     let receipts = collect_ffi_receipts(&receipt_rx, &relay_url);
 
     discovery_handle.cancel();
@@ -2142,28 +2099,23 @@ async fn run_ffi_tampered(keys: &Keys) -> TamperedOutcome {
         .custom_created_at(Timestamp::from(WRITE_CREATED_AT))
         .sign_with_keys(keys)
         .expect("tampered fixture must first sign cleanly");
-    let (receipt_tx, receipt_rx) = mpsc::channel();
-    engine
-        .publish(
-            FfiWriteIntent {
-                payload: FfiWritePayload::Signed {
-                    id: event.id.to_hex(),
-                    pubkey: event.pubkey.to_hex(),
-                    created_at: event.created_at.as_secs(),
-                    kind: event.kind.as_u16(),
-                    tags: event.tags.iter().map(|tag| tag.clone().to_vec()).collect(),
-                    content: "tampered".to_string(),
-                    sig: event.sig.to_string(),
-                },
-                durability: FfiDurability::Durable,
-                routing: FfiWriteRouting::AuthorOutbox,
-                identity_override: None,
+    let receipt = engine
+        .publish(FfiWriteIntent {
+            payload: FfiWritePayload::Signed {
+                id: event.id.to_hex(),
+                pubkey: event.pubkey.to_hex(),
+                created_at: event.created_at.as_secs(),
+                kind: event.kind.as_u16(),
+                tags: event.tags.iter().map(|tag| tag.clone().to_vec()).collect(),
+                content: "tampered".to_string(),
+                sig: event.sig.to_string(),
             },
-            Box::new(FfiReceipts {
-                tx: Mutex::new(receipt_tx),
-            }),
-        )
+            durability: FfiDurability::Durable,
+            routing: FfiWriteRouting::AuthorOutbox,
+            identity_override: None,
+        })
         .expect("well-formed tampered input must parse at the FFI call boundary");
+    let receipt_rx = bridge_receipts(&receipt);
     let first = receipt_rx
         .recv_timeout(WAIT)
         .expect("tampered FFI publish must fail on the receipt stream");
@@ -2214,9 +2166,11 @@ fn direct_reattach_outcome(value: &ReceiptReattachment) -> NormReattach {
     }
 }
 
-fn ffi_reattach_outcome(value: FfiReceiptReattachment) -> NormReattach {
+fn ffi_reattach_outcome(value: &FfiReceiptReattachment) -> NormReattach {
     match value {
-        FfiReceiptReattachment::Attached => NormReattach::Attached,
+        // #680: `Attached` now carries the pull-based receipt stream, so it is a
+        // struct variant classified by ref (we drain the stream separately).
+        FfiReceiptReattachment::Attached { .. } => NormReattach::Attached,
         FfiReceiptReattachment::NotFound => NormReattach::NotFound,
         FfiReceiptReattachment::RetainedButUnreadable => NormReattach::RetainedButUnreadable,
     }
@@ -2326,25 +2280,22 @@ async fn run_ffi_reattach_live() -> ReattachProof {
         .set_active_account(Some(keys.public_key().to_hex()))
         .expect("FFI account must activate");
 
-    let (tx, rx) = mpsc::channel();
-    let observer = Box::new(FfiReceipts { tx: Mutex::new(tx) });
-    let receipt_id = engine
-        .publish(
-            FfiWriteIntent {
-                payload: FfiWritePayload::Unsigned {
-                    pubkey: keys.public_key().to_hex(),
-                    created_at: WRITE_CREATED_AT,
-                    kind: REATTACH_LIVE_KIND,
-                    tags: vec![],
-                    content: "reattach-live".to_string(),
-                },
-                durability: FfiDurability::Durable,
-                routing: FfiWriteRouting::AuthorOutbox,
-                identity_override: None,
+    let receipt = engine
+        .publish(FfiWriteIntent {
+            payload: FfiWritePayload::Unsigned {
+                pubkey: keys.public_key().to_hex(),
+                created_at: WRITE_CREATED_AT,
+                kind: REATTACH_LIVE_KIND,
+                tags: vec![],
+                content: "reattach-live".to_string(),
             },
-            observer,
-        )
+            durability: FfiDurability::Durable,
+            routing: FfiWriteRouting::AuthorOutbox,
+            identity_override: None,
+        })
         .expect("FFI publish must enqueue");
+    let receipt_id = receipt.id();
+    let rx = bridge_receipts(&receipt);
 
     let deadline = Instant::now() + WAIT;
     assert_eq!(
@@ -2359,16 +2310,13 @@ async fn run_ffi_reattach_live() -> ReattachProof {
         NormStatus::AwaitingCapability(keys.public_key().to_hex())
     );
 
-    let (replay_tx, replay_rx) = mpsc::channel();
-    let replay_observer = Box::new(FfiReceipts {
-        tx: Mutex::new(replay_tx),
-    });
     let outcome = engine
-        .reattach_receipt(receipt_id, replay_observer)
+        .reattach_receipt(receipt_id)
         .expect("FFI reattach call must succeed while the engine is open");
-    let norm_outcome = ffi_reattach_outcome(outcome);
+    let norm_outcome = ffi_reattach_outcome(&outcome);
     let replay = match outcome {
-        FfiReceiptReattachment::Attached => {
+        FfiReceiptReattachment::Attached { stream } => {
+            let replay_rx = bridge_receipts(&stream);
             let deadline = Instant::now() + WAIT;
             vec![
                 normalize_ffi_status(
@@ -2381,22 +2329,18 @@ async fn run_ffi_reattach_live() -> ReattachProof {
                 ),
             ]
         }
-        other => panic!("expected Attached for a live retained receipt, got {other:?}"),
+        FfiReceiptReattachment::NotFound => {
+            panic!("expected Attached for a live retained receipt, got NotFound")
+        }
+        FfiReceiptReattachment::RetainedButUnreadable => {
+            panic!("expected Attached for a live retained receipt, got RetainedButUnreadable")
+        }
     };
 
-    let (unknown_tx, unknown_rx) = mpsc::channel();
-    let unknown_observer = Box::new(FfiReceipts {
-        tx: Mutex::new(unknown_tx),
-    });
     let unknown_id_outcome = ffi_reattach_outcome(
-        engine
-            .reattach_receipt(u64::MAX, unknown_observer)
+        &engine
+            .reattach_receipt(u64::MAX)
             .expect("FFI reattach call must succeed while the engine is open"),
-    );
-    assert_eq!(
-        unknown_rx.try_recv(),
-        Err(mpsc::TryRecvError::Disconnected),
-        "an unknown-id reattach must spawn no forwarding thread"
     );
 
     engine.shutdown();
@@ -2472,30 +2416,28 @@ fn run_direct_cancellation() -> CancellationProof {
     }
 }
 
-fn run_ffi_cancellation() -> CancellationProof {
+async fn run_ffi_cancellation() -> CancellationProof {
     let keys = fixed_keys();
     let engine = NmpEngine::new(NmpEngineConfig::default()).expect("FFI engine must construct");
     engine
         .set_active_account(Some(keys.public_key().to_hex()))
         .expect("FFI account must activate");
-    let (tx, rx) = mpsc::channel();
-    let receipt_id = engine
-        .publish(
-            FfiWriteIntent {
-                payload: FfiWritePayload::Unsigned {
-                    pubkey: keys.public_key().to_hex(),
-                    created_at: WRITE_CREATED_AT,
-                    kind: REATTACH_LIVE_KIND,
-                    tags: vec![],
-                    content: "cancel-parity".to_string(),
-                },
-                durability: FfiDurability::Durable,
-                routing: FfiWriteRouting::AuthorOutbox,
-                identity_override: None,
+    let receipt = engine
+        .publish(FfiWriteIntent {
+            payload: FfiWritePayload::Unsigned {
+                pubkey: keys.public_key().to_hex(),
+                created_at: WRITE_CREATED_AT,
+                kind: REATTACH_LIVE_KIND,
+                tags: vec![],
+                content: "cancel-parity".to_string(),
             },
-            Box::new(FfiReceipts { tx: Mutex::new(tx) }),
-        )
+            durability: FfiDurability::Durable,
+            routing: FfiWriteRouting::AuthorOutbox,
+            identity_override: None,
+        })
         .expect("FFI publish must enqueue");
+    let receipt_id = receipt.id();
+    let rx = bridge_receipts(&receipt);
     let deadline = Instant::now() + WAIT;
     let mut observed = vec![
         normalize_ffi_status(
@@ -2616,25 +2558,22 @@ async fn run_ffi_reattach_terminal(path: &std::path::Path) -> ReattachProof {
         engine
             .set_active_account(Some(keys.public_key().to_hex()))
             .expect("FFI account must activate");
-        let (tx, rx) = mpsc::channel();
-        let observer = Box::new(FfiReceipts { tx: Mutex::new(tx) });
-        let receipt_id = engine
-            .publish(
-                FfiWriteIntent {
-                    payload: FfiWritePayload::Unsigned {
-                        pubkey: keys.public_key().to_hex(),
-                        created_at: WRITE_CREATED_AT,
-                        kind: REATTACH_TERMINAL_KIND,
-                        tags: vec![],
-                        content: "reattach-terminal".to_string(),
-                    },
-                    durability: FfiDurability::Ephemeral,
-                    routing: FfiWriteRouting::AuthorOutbox,
-                    identity_override: None,
+        let receipt = engine
+            .publish(FfiWriteIntent {
+                payload: FfiWritePayload::Unsigned {
+                    pubkey: keys.public_key().to_hex(),
+                    created_at: WRITE_CREATED_AT,
+                    kind: REATTACH_TERMINAL_KIND,
+                    tags: vec![],
+                    content: "reattach-terminal".to_string(),
                 },
-                observer,
-            )
+                durability: FfiDurability::Ephemeral,
+                routing: FfiWriteRouting::AuthorOutbox,
+                identity_override: None,
+            })
             .expect("FFI ephemeral publish must enqueue");
+        let receipt_id = receipt.id();
+        let rx = bridge_receipts(&receipt);
         let deadline = Instant::now() + WAIT;
         assert_eq!(
             normalize_ffi_status(
@@ -2652,37 +2591,30 @@ async fn run_ffi_reattach_terminal(path: &std::path::Path) -> ReattachProof {
         ..NmpEngineConfig::default()
     })
     .expect("FFI engine must reopen over the same store");
-    let (replay_tx, replay_rx) = mpsc::channel();
-    let replay_observer = Box::new(FfiReceipts {
-        tx: Mutex::new(replay_tx),
-    });
     let outcome = engine
-        .reattach_receipt(receipt_id, replay_observer)
+        .reattach_receipt(receipt_id)
         .expect("FFI reattach call must succeed while the engine is open");
-    let norm_outcome = ffi_reattach_outcome(outcome);
+    let norm_outcome = ffi_reattach_outcome(&outcome);
     let replay = match outcome {
-        FfiReceiptReattachment::Attached => {
+        FfiReceiptReattachment::Attached { stream } => {
+            let replay_rx = bridge_receipts(&stream);
             let deadline = Instant::now() + WAIT;
             vec![normalize_ffi_status(
                 recv_before(&replay_rx, deadline, "FFI terminal replay"),
                 "n/a",
             )]
         }
-        other => panic!("expected Attached for an abandoned terminal receipt, got {other:?}"),
+        FfiReceiptReattachment::NotFound => {
+            panic!("expected Attached for an abandoned terminal receipt, got NotFound")
+        }
+        FfiReceiptReattachment::RetainedButUnreadable => {
+            panic!("expected Attached for an abandoned terminal receipt, got RetainedButUnreadable")
+        }
     };
-    let (unknown_tx, unknown_rx) = mpsc::channel();
-    let unknown_observer = Box::new(FfiReceipts {
-        tx: Mutex::new(unknown_tx),
-    });
     let unknown_id_outcome = ffi_reattach_outcome(
-        engine
-            .reattach_receipt(u64::MAX, unknown_observer)
+        &engine
+            .reattach_receipt(u64::MAX)
             .expect("FFI reattach call must succeed while the engine is open"),
-    );
-    assert_eq!(
-        unknown_rx.try_recv(),
-        Err(mpsc::TryRecvError::Disconnected),
-        "an unknown-id reattach must spawn no forwarding thread"
     );
 
     engine.shutdown();
@@ -2706,10 +2638,10 @@ async fn direct_and_ffi_reattach_are_semantically_identical_for_a_live_retained_
     assert_eq!(direct.unknown_id_outcome, NormReattach::NotFound);
 }
 
-#[test]
-fn direct_and_ffi_cancellation_return_and_observe_the_same_terminal_fact() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn direct_and_ffi_cancellation_return_and_observe_the_same_terminal_fact() {
     let direct = run_direct_cancellation();
-    let ffi = run_ffi_cancellation();
+    let ffi = run_ffi_cancellation().await;
     assert_eq!(
         direct, ffi,
         "direct and FFI cancellation must return and stream identical typed facts"

@@ -104,10 +104,15 @@ Fairness policy must prevent one relay, query, or outbox lane from permanently
 starving unrelated work. The precise algorithm is provisional; starvation and
 queue pressure must be measurable.
 
-Blocking native receiver drains use the zero-queue admission mechanism in
-`native-task-executor.md`. They never enter a conventional worker queue:
-capacity or OS-thread refusal is known before stream/write ownership transfers,
-and one admitted task preserves its receiver's FIFO order.
+Observation delivery is pull-based: a foreign consumer awaits `next()` on an
+observation handle, which parks a waker on the engine-owned bounded mailbox
+rather than blocking a dedicated OS thread (`async-observation-handles.md`,
+#680). Live observations therefore do not consume a native thread each and
+there is no app-visible native-task ceiling. Genuinely-blocking *transient*
+foreign/reactor adapters (NIP-11 flights, remote-signer/AUTH waiters, the
+follow-action worker) run on a fixed-capacity internal pool that ordinary
+observations never touch; engine-associated NIP-46 sessions own their own
+executor.
 
 ## 7. Diagnostics
 
@@ -135,6 +140,8 @@ Required proofs include:
 - an overwhelming relay cannot grow memory unboundedly and leaves a diagnostic
   reason when disconnected;
 - scheduler load remains bounded and fair without polling;
-- native task saturation refuses before ownership transfer, and cancellation
-  returns the join-backed census to its exact baseline without a timeout;
+- opening thousands of live observations creates O(1) engine threads, not one
+  per observation, and no operation is refused for a native-task-capacity reason
+  (#680); a parked `next()` wakes deterministically on value, close, cancel, or
+  shutdown;
 - no test can obtain silent first-N truncation at any limit boundary.

@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 use std::io;
-use std::sync::mpsc::{self, Receiver, RecvError, RecvTimeoutError, Sender};
+use std::sync::mpsc::{RecvError, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use nmp::{
-    AcquisitionEvidence, Engine, Event, EventId, ObservationCancel, PublicKey, RowDelta,
-    ShortfallFact, SourceStatus, Timestamp, WriteStatus,
+    fifo_channel, AcquisitionEvidence, AsyncFifoReceiver, Engine, Event, EventId, FifoReceiver,
+    FifoSender, ObservationCancel, PublicKey, RowDelta, ShortfallFact, SourceStatus, Timestamp,
+    WriteStatus,
 };
 
 use crate::demand::active_account_demand;
@@ -49,6 +50,10 @@ pub struct FollowSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FollowActionFailure {
+    /// The requested target public key did not parse (hex). No worker started.
+    InvalidTarget {
+        got: String,
+    },
     SignedOut,
     AccountChanged,
     AcquisitionTimedOut,
@@ -58,8 +63,10 @@ pub enum FollowActionFailure {
     Compose(ComposeFollowError),
     EngineClosed,
     ReceiptUnavailable,
-    ThreadUnavailable { component: String, reason: String },
-    ExecutorSaturated { component: String, capacity: usize },
+    ThreadUnavailable {
+        component: String,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -329,64 +336,135 @@ fn observe_following_with_spawn(
     Ok(FollowObservation { cancel, latest })
 }
 
+/// The pull-based async twin of [`FollowObservation`] (#680). Instead of a
+/// dedicated worker thread draining a blocking subscription into a latest-slot
+/// (one native thread per follow observation — the defect), this projects
+/// inline when the consumer awaits [`Self::next`]: the relationship snapshot is
+/// derived from the folded accumulator the moment a row frame is pulled. The
+/// projection is a complete self-contained snapshot, so a lost/redelivered
+/// frame under per-call cancellation is benign.
+pub struct AsyncFollowObservation {
+    subscription: nmp::AsyncSubscription,
+    engine: Arc<Engine>,
+    target: PublicKey,
+    accumulator: Mutex<Accumulator>,
+}
+
+impl AsyncFollowObservation {
+    /// Await the next relationship snapshot, or `None` once the underlying
+    /// demand is withdrawn. [`nmp::ConcurrentNext`] on an overlapping call.
+    pub async fn next(&self) -> Result<Option<FollowSnapshot>, nmp::ConcurrentNext> {
+        match self.subscription.next().await? {
+            Some(frame) => {
+                let mut accumulator = self.accumulator.lock().unwrap();
+                accumulator.apply(frame.deltas);
+                let active = self.engine.active_account().ok().flatten();
+                Ok(Some(project(
+                    active,
+                    self.target,
+                    &accumulator,
+                    &frame.evidence,
+                )))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Withdraw the observation now (idempotent; `Drop` does the same).
+    pub fn cancel(&self) {
+        self.subscription.cancel();
+    }
+
+    pub fn cancel_handle(&self) -> ObservationCancel {
+        self.subscription.cancel_handle()
+    }
+}
+
+/// Open a follow observation delivered by awaiting `next()` (#680). Costs no
+/// native thread: the projection folds inline in `next()` over the engine's
+/// waker-driven async row mailbox.
+pub fn observe_following_async(
+    engine: Arc<Engine>,
+    target: PublicKey,
+) -> Result<AsyncFollowObservation, nmp::EngineError> {
+    let subscription = engine.observe_async(nmp::LiveQuery(active_account_demand()), None)?;
+    Ok(AsyncFollowObservation {
+        subscription,
+        engine,
+        target,
+        accumulator: Mutex::new(Accumulator::default()),
+    })
+}
+
 pub struct FollowAction {
-    statuses: Receiver<FollowActionStatus>,
+    statuses: FifoReceiver<FollowActionStatus>,
 }
 
 /// A prepared follow action whose worker has not started yet. Native bridges
 /// use this split to establish their observer before any acquisition or write
 /// can run unseen.
+///
+/// The status FIFO's single [`FifoSender`] lives here (not in the worker
+/// closure) until [`Self::start`] runs: on a reservation/spawn refusal the
+/// runner keeps the sender and emits the terminal failure through it; on
+/// success the sender is handed to the worker. This is what lets the
+/// single-producer channel report a pre-start failure without a second sender.
 pub struct FollowActionRunner {
-    task: Box<dyn FnOnce() + Send + 'static>,
-    failures: Sender<FollowActionStatus>,
+    task: Box<dyn FnOnce(FifoSender<FollowActionStatus>) + Send + 'static>,
+    sender: FifoSender<FollowActionStatus>,
     reservation: Result<nmp::NativeTaskReservation, nmp::EngineError>,
     cancellation: Result<nmp::NativeTaskCancel, nmp::EngineError>,
 }
 
 impl FollowActionRunner {
     pub fn start(self) {
-        self.start_with(|reservation, cancellation, task| {
+        self.start_with(|reservation, cancellation| {
             reservation
-                .spawn_with_cancel(move || cancellation.cancel(), task)
+                .start_with_cancel(move || cancellation.cancel())
                 .map_err(|error| io::Error::other(error.to_string()))
         });
     }
 
     fn start_with(
         self,
-        spawn: impl FnOnce(
+        start: impl FnOnce(
             nmp::NativeTaskReservation,
             nmp::NativeTaskCancel,
-            Box<dyn FnOnce() + Send + 'static>,
-        ) -> io::Result<()>,
+        ) -> io::Result<nmp::StartedNativeTask>,
     ) {
         let Self {
             task,
-            failures,
+            sender,
             reservation,
             cancellation,
         } = self;
         let reservation = match reservation {
             Ok(reservation) => reservation,
             Err(error) => {
-                let _ = failures.send(FollowActionStatus::Failed(engine_failure(error)));
+                sender.send(FollowActionStatus::Failed(engine_failure(error)));
                 return;
             }
         };
         let cancellation = match cancellation {
             Ok(cancellation) => cancellation,
             Err(error) => {
-                let _ = failures.send(FollowActionStatus::Failed(engine_failure(error)));
+                sender.send(FollowActionStatus::Failed(engine_failure(error)));
                 return;
             }
         };
-        if let Err(error) = spawn(reservation, cancellation, task) {
-            let _ = failures.send(FollowActionStatus::Failed(
-                FollowActionFailure::ThreadUnavailable {
-                    component: "NIP-02 follow action".to_string(),
-                    reason: error.to_string(),
-                },
-            ));
+        // Start the OS thread BEFORE the sender crosses into it: a spawn
+        // refusal leaves `sender` here to carry the terminal failure, while a
+        // success hands it to the worker via the one-shot starter.
+        match start(reservation, cancellation) {
+            Ok(starter) => starter.run(move || task(sender)),
+            Err(error) => {
+                sender.send(FollowActionStatus::Failed(
+                    FollowActionFailure::ThreadUnavailable {
+                        component: "NIP-02 follow action".to_string(),
+                        reason: error.to_string(),
+                    },
+                ));
+            }
         }
     }
 }
@@ -398,6 +476,26 @@ impl FollowAction {
 
     pub fn recv_timeout(&self, timeout: Duration) -> Result<FollowActionStatus, RecvTimeoutError> {
         self.statuses.recv_timeout(timeout)
+    }
+
+    /// The pull-based async surface over the same status FIFO (#680). The FFI
+    /// follow-action stream awaits `next()` on this; direct-Rust drains keep
+    /// using [`Self::recv`]/[`Self::recv_timeout`].
+    #[must_use]
+    pub fn into_async(self) -> AsyncFifoReceiver<FollowActionStatus> {
+        self.statuses.into_async()
+    }
+
+    /// A one-shot action that never starts a worker: it carries exactly the one
+    /// terminal `Failed(failure)` fact, then ends. Used for a pre-worker
+    /// rejection (e.g. an unparseable target) that must still be observed as a
+    /// terminal follow-action status rather than a separate error channel.
+    #[must_use]
+    pub fn one_shot_failure(failure: FollowActionFailure) -> Self {
+        let (sender, statuses) = fifo_channel();
+        sender.send(FollowActionStatus::Failed(failure));
+        // `sender` drops here → the FIFO ends after the single fact drains.
+        Self { statuses }
     }
 }
 
@@ -441,20 +539,19 @@ fn prepare_set_following_with_timeout(
     change: FollowChange,
     timeout: Duration,
 ) -> (FollowAction, FollowActionRunner) {
-    let (tx, rx) = mpsc::channel();
-    let failures = tx.clone();
+    let (sender, statuses) = fifo_channel();
     let reservation = engine.reserve_native_task("NIP-02 follow action");
     let cancellation = engine.native_task_cancel();
-    let task = Box::new(move || {
-        let _ = tx.send(FollowActionStatus::Acquiring);
+    let task = Box::new(move |tx: FifoSender<FollowActionStatus>| {
+        tx.send(FollowActionStatus::Acquiring);
         let author = match engine.active_account() {
             Ok(Some(author)) => author,
             Ok(None) => {
-                let _ = tx.send(FollowActionStatus::Failed(FollowActionFailure::SignedOut));
+                tx.send(FollowActionStatus::Failed(FollowActionFailure::SignedOut));
                 return;
             }
             Err(error) => {
-                let _ = tx.send(FollowActionStatus::Failed(engine_failure(error)));
+                tx.send(FollowActionStatus::Failed(engine_failure(error)));
                 return;
             }
         };
@@ -462,7 +559,7 @@ fn prepare_set_following_with_timeout(
         let subscription = match engine.observe(nmp::LiveQuery(active_account_demand()), None) {
             Ok(subscription) => subscription,
             Err(error) => {
-                let _ = tx.send(FollowActionStatus::Failed(engine_failure(error)));
+                tx.send(FollowActionStatus::Failed(engine_failure(error)));
                 return;
             }
         };
@@ -472,7 +569,7 @@ fn prepare_set_following_with_timeout(
 
         let base = loop {
             if remaining_snapshots == 0 {
-                let _ = tx.send(FollowActionStatus::Failed(
+                tx.send(FollowActionStatus::Failed(
                     FollowActionFailure::AcquisitionTimedOut,
                 ));
                 return;
@@ -484,26 +581,26 @@ fn prepare_set_following_with_timeout(
                     let active = match engine.active_account() {
                         Ok(active) => active,
                         Err(error) => {
-                            let _ = tx.send(FollowActionStatus::Failed(engine_failure(error)));
+                            tx.send(FollowActionStatus::Failed(engine_failure(error)));
                             return;
                         }
                     };
                     if active != Some(author) {
-                        let _ = tx.send(FollowActionStatus::Failed(
+                        tx.send(FollowActionStatus::Failed(
                             FollowActionFailure::AccountChanged,
                         ));
                         return;
                     }
                     last_availability = availability(active, &frame.evidence);
                     if last_availability == FollowAvailability::SourceUnavailable {
-                        let _ = tx.send(FollowActionStatus::Failed(
+                        tx.send(FollowActionStatus::Failed(
                             FollowActionFailure::SourceUnavailable,
                         ));
                         return;
                     }
                     if last_availability == FollowAvailability::Ready {
                         let Some(base) = accumulator.base_for(author).cloned() else {
-                            let _ = tx.send(FollowActionStatus::Failed(
+                            tx.send(FollowActionStatus::Failed(
                                 FollowActionFailure::NoContactList,
                             ));
                             return;
@@ -519,11 +616,11 @@ fn prepare_set_following_with_timeout(
                         }
                         _ => FollowActionFailure::AcquisitionTimedOut,
                     };
-                    let _ = tx.send(FollowActionStatus::Failed(failure));
+                    tx.send(FollowActionStatus::Failed(failure));
                     return;
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    let _ = tx.send(FollowActionStatus::Failed(
+                    tx.send(FollowActionStatus::Failed(
                         FollowActionFailure::EngineClosed,
                     ));
                     return;
@@ -535,7 +632,7 @@ fn prepare_set_following_with_timeout(
         {
             Ok(value) => value,
             Err(error) => {
-                let _ = tx.send(FollowActionStatus::Failed(FollowActionFailure::Compose(
+                tx.send(FollowActionStatus::Failed(FollowActionFailure::Compose(
                     error,
                 )));
                 return;
@@ -543,7 +640,7 @@ fn prepare_set_following_with_timeout(
         };
         let intent = match composed {
             ComposeFollowResult::NoChange => {
-                let _ = tx.send(FollowActionStatus::NoChange {
+                tx.send(FollowActionStatus::NoChange {
                     following: change == FollowChange::Follow,
                 });
                 return;
@@ -559,25 +656,20 @@ fn prepare_set_following_with_timeout(
                     nmp::EngineError::EngineClosed => FollowActionFailure::EngineClosed,
                     _ => FollowActionFailure::ReceiptUnavailable,
                 };
-                let _ = tx.send(FollowActionStatus::Failed(failure));
+                tx.send(FollowActionStatus::Failed(failure));
                 return;
             }
         };
         let receipt_id = receipt.id.0;
         while let Ok(status) = receipt.statuses.recv() {
-            if tx
-                .send(FollowActionStatus::Receipt { receipt_id, status })
-                .is_err()
-            {
-                return;
-            }
+            tx.send(FollowActionStatus::Receipt { receipt_id, status });
         }
     });
     (
-        FollowAction { statuses: rx },
+        FollowAction { statuses },
         FollowActionRunner {
             task,
-            failures,
+            sender,
             reservation,
             cancellation,
         },
@@ -589,13 +681,6 @@ fn engine_failure(error: nmp::EngineError) -> FollowActionFailure {
         nmp::EngineError::ThreadUnavailable { component, reason } => {
             FollowActionFailure::ThreadUnavailable { component, reason }
         }
-        nmp::EngineError::ExecutorSaturated {
-            component,
-            capacity,
-        } => FollowActionFailure::ExecutorSaturated {
-            component,
-            capacity,
-        },
         _ => FollowActionFailure::EngineClosed,
     }
 }
@@ -634,8 +719,9 @@ mod tests {
             FollowChange::Follow,
             Duration::from_millis(10),
         );
-        runner.start_with(|_, _, task| {
-            drop(task);
+        runner.start_with(|reservation, cancellation| {
+            drop(reservation);
+            drop(cancellation);
             Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "injected NIP-02 action pressure",
