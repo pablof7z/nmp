@@ -113,6 +113,6 @@ ready
 
 ## Hosted Artifacts
 
-- Plan page: Generated after publishing.
+- Plan page: https://pablof7z.github.io/nmp/plans/nmp-663-committed-duplicate-fast-path/
 
 - TTS audio: https://blossom.primal.net/e292e40981742c35f5f4e68ed4d477c3e37bfaefaad13f1d6dd2e29ca0d5acb0.mp3
