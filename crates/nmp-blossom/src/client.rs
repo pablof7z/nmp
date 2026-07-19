@@ -708,7 +708,6 @@ impl BlossomClient {
         )
         .map_err(|reason| ClientBuildError { reason })?;
         let http = reqwest::Client::builder()
-            .hickory_dns(true)
             .dns_resolver(Arc::new(resolver))
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
@@ -1213,14 +1212,17 @@ impl AdmittedDnsResolver {
         let mut builder = match config {
             Some(config) => hickory_resolver::TokioResolver::builder_with_config(
                 config,
-                hickory_resolver::name_server::TokioConnectionProvider::default(),
+                hickory_resolver::net::runtime::TokioRuntimeProvider::default(),
             ),
             None => hickory_resolver::TokioResolver::builder_tokio()
                 .map_err(|error| format!("could not read the system DNS configuration: {error}"))?,
         };
         builder.options_mut().ip_strategy = strategy;
+        let resolver = builder
+            .build()
+            .map_err(|error| format!("could not construct the DNS resolver: {error}"))?;
         Ok(Self {
-            resolver: builder.build(),
+            resolver,
             allowed_local_hosts,
         })
     }
@@ -1235,7 +1237,7 @@ impl reqwest::dns::Resolve for AdmittedDnsResolver {
             let lookup = resolver.lookup_ip(query_name.clone()).await?;
             let host_opted_in = allowed_local_hosts.contains(&normalize_bare_host(&query_name));
             let mut admitted = Vec::new();
-            for address in lookup {
+            for address in lookup.iter() {
                 if classify_ip(address) == RelayHostClass::Local && !host_opted_in {
                     continue;
                 }
@@ -1330,6 +1332,18 @@ mod tests {
         assert_eq!(literal_host_class("8.8.8.8"), RelayHostClass::Public);
     }
 
+    fn resolver_config_for_dns_server(
+        address: std::net::SocketAddr,
+    ) -> hickory_resolver::config::ResolverConfig {
+        let mut udp = hickory_resolver::config::ConnectionConfig::udp();
+        udp.port = address.port();
+        let mut tcp = hickory_resolver::config::ConnectionConfig::tcp();
+        tcp.port = address.port();
+        let nameserver =
+            hickory_resolver::config::NameServerConfig::new(address.ip(), true, vec![udp, tcp]);
+        hickory_resolver::config::ResolverConfig::from_parts(None, Vec::new(), vec![nameserver])
+    }
+
     /// Engine-precedent DNS harness (issue #519,
     /// `nmp-engine/src/relay_information.rs` test module): a raw loopback
     /// UDP server answering ANY A query with `127.0.0.1` (60-second TTL),
@@ -1368,13 +1382,7 @@ mod tests {
             ]);
             dns.send_to(&response, peer).unwrap();
         });
-        let nameservers = hickory_resolver::config::NameServerConfigGroup::from_ips_clear(
-            &[dns_address.ip()],
-            dns_address.port(),
-            true,
-        );
-        let resolver =
-            hickory_resolver::config::ResolverConfig::from_parts(None, Vec::new(), nameservers);
+        let resolver = resolver_config_for_dns_server(dns_address);
         (resolver, dns_server)
     }
 
