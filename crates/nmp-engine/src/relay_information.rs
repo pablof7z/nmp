@@ -19,7 +19,7 @@ use futures_channel::oneshot;
 use nmp_transport::{
     classify_ip, classify_relay_host, normalize_bare_host, relay_host_key, RelayHostClass,
 };
-use nostr::RelayUrl;
+use nostr::{types::url::Host, RelayUrl};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -651,17 +651,22 @@ async fn fetch_http(
 ) -> Result<FetchResult, RelayInformationError> {
     // The client is deliberately born and dropped inside this flight's
     // current-thread runtime. Hickory therefore cannot retain runtime-bound
-    // DNS work, and no client clone can outlive the owned executor task.
-    let resolver =
-        HickoryReqwestResolver::new(resolver_config, resolver_strategy, allowed_local_hosts)?;
-    let client = reqwest::Client::builder()
-        .hickory_dns(true)
-        .dns_resolver(Arc::new(resolver))
+    // DNS work, and no client clone can outlive the owned executor task. An
+    // IP-literal URL bypasses DNS in reqwest, so do not synchronously read the
+    // host's resolver configuration for work reqwest will never request. The
+    // literal address was already admitted by `reject_unadmitted_local_host`.
+    let mut client_builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .no_proxy()
         .referer(false)
-        .timeout(FETCH_DEADLINE)
+        .timeout(FETCH_DEADLINE);
+    if matches!(url.0.host(), Some(Host::Domain(_))) {
+        let resolver =
+            HickoryReqwestResolver::new(resolver_config, resolver_strategy, allowed_local_hosts)?;
+        client_builder = client_builder.dns_resolver(Arc::new(resolver));
+    }
+    let client = client_builder
         .build()
         .map_err(|error| RelayInformationError::Http {
             reason: format!("HTTP client construction failed: {error}"),
@@ -774,7 +779,7 @@ impl HickoryReqwestResolver {
         let mut builder = match config {
             Some(config) => hickory_resolver::TokioResolver::builder_with_config(
                 config,
-                hickory_resolver::name_server::TokioConnectionProvider::default(),
+                hickory_resolver::net::runtime::TokioRuntimeProvider::default(),
             ),
             None => hickory_resolver::TokioResolver::builder_tokio().map_err(|error| {
                 RelayInformationError::Http {
@@ -783,8 +788,13 @@ impl HickoryReqwestResolver {
             })?,
         };
         builder.options_mut().ip_strategy = strategy;
+        let resolver = builder
+            .build()
+            .map_err(|error| RelayInformationError::Http {
+                reason: format!("could not construct the DNS resolver: {error}"),
+            })?;
         Ok(Self {
-            resolver: builder.build(),
+            resolver,
             allowed_local_hosts,
         })
     }
@@ -809,7 +819,7 @@ impl reqwest::dns::Resolve for HickoryReqwestResolver {
             let lookup = resolver.lookup_ip(query_name.clone()).await?;
             let host_opted_in = allowed_local_hosts.contains(&normalize_bare_host(&query_name));
             let mut admitted = Vec::new();
-            for address in lookup {
+            for address in lookup.iter() {
                 if classify_ip(address) == RelayHostClass::Local && !host_opted_in {
                     continue;
                 }
@@ -1706,6 +1716,18 @@ mod tests {
             "::1".to_string(),
             "localhost".to_string(),
         ]))
+    }
+
+    fn resolver_config_for_dns_server(
+        address: std::net::SocketAddr,
+    ) -> hickory_resolver::config::ResolverConfig {
+        let mut udp = hickory_resolver::config::ConnectionConfig::udp();
+        udp.port = address.port();
+        let mut tcp = hickory_resolver::config::ConnectionConfig::tcp();
+        tcp.port = address.port();
+        let nameserver =
+            hickory_resolver::config::NameServerConfig::new(address.ip(), true, vec![udp, tcp]);
+        hickory_resolver::config::ResolverConfig::from_parts(None, Vec::new(), vec![nameserver])
     }
 
     fn local_relay_information_service(
@@ -2818,13 +2840,7 @@ mod tests {
             ]);
             dns.send_to(&response, peer).unwrap();
         });
-        let nameservers = hickory_resolver::config::NameServerConfigGroup::from_ips_clear(
-            &[dns_address.ip()],
-            dns_address.port(),
-            true,
-        );
-        let resolver =
-            hickory_resolver::config::ResolverConfig::from_parts(None, Vec::new(), nameservers);
+        let resolver = resolver_config_for_dns_server(dns_address);
         (resolver, dns_server)
     }
 
@@ -2893,13 +2909,7 @@ mod tests {
             query_seen_tx.send(()).unwrap();
             let _ = release_dns_rx.recv();
         });
-        let nameservers = hickory_resolver::config::NameServerConfigGroup::from_ips_clear(
-            &[dns_address.ip()],
-            dns_address.port(),
-            true,
-        );
-        let resolver =
-            hickory_resolver::config::ResolverConfig::from_parts(None, Vec::new(), nameservers);
+        let resolver = resolver_config_for_dns_server(dns_address);
         let executor = nmp_executor::Executor::new(1).unwrap();
         let service = RelayInformationService::with_executor_and_limits(
             executor.clone(),
