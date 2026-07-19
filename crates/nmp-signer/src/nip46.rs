@@ -299,12 +299,11 @@ impl Nip46Invitation {
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: Option<&Nip46Cancellation>,
     ) -> Result<Nip46Signer, Nip46Error> {
-        let runtime = standalone_runtime()?;
         self.connect_observed_inner_with_runtime(
             timeout,
             event_sink,
             cancellation,
-            SessionRuntime::Owned(runtime),
+            SessionRuntime(standalone_runtime()?),
         )
     }
 
@@ -320,7 +319,7 @@ impl Nip46Invitation {
             timeout,
             event_sink,
             Some(cancellation),
-            SessionRuntime::Shared(runtime),
+            SessionRuntime(runtime),
         )
     }
 
@@ -479,7 +478,6 @@ impl Nip46Signer {
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: Option<&Nip46Cancellation>,
     ) -> Result<Self, Nip46Error> {
-        let runtime = standalone_runtime()?;
         Self::connect_bunker_observed_inner_with_runtime(
             uri,
             permissions,
@@ -487,7 +485,7 @@ impl Nip46Signer {
             timeout,
             event_sink,
             cancellation,
-            SessionRuntime::Owned(runtime),
+            SessionRuntime(standalone_runtime()?),
         )
     }
 
@@ -508,7 +506,7 @@ impl Nip46Signer {
             timeout,
             event_sink,
             Some(cancellation),
-            SessionRuntime::Shared(runtime),
+            SessionRuntime(runtime),
         )
     }
 
@@ -652,21 +650,20 @@ impl Nip46Signer {
         parts: Nip46SessionCheckpoint,
         timeout: Duration,
     ) -> Result<Self, Nip46Error> {
-        let runtime = standalone_runtime()?;
         Self::from_parts_inner(
             parts,
             timeout,
             Arc::new(|_| {}),
             None,
-            SessionRuntime::Owned(runtime),
+            SessionRuntime(standalone_runtime()?),
         )
     }
 
     /// #680: engine-associated restore path. Like [`Self::from_parts`] but
-    /// with an observer event sink and external cancellation, and — like the
-    /// bunker/invitation connect paths — a *session-owned* executor (bounded
-    /// by app-identity session count), never the shared engine adapter pool,
-    /// so restoring a session can never refuse an unrelated engine operation.
+    /// with an observer event sink and external cancellation. #704: the session
+    /// runs its tasks on the process-wide shared standalone runtime (O(1) in
+    /// session count), never a per-session executor and never blocking an
+    /// unrelated engine operation.
     #[doc(hidden)]
     pub fn from_parts_observed_with_cancellation(
         parts: Nip46SessionCheckpoint,
@@ -674,13 +671,12 @@ impl Nip46Signer {
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: &Nip46Cancellation,
     ) -> Result<Self, Nip46Error> {
-        let runtime = standalone_runtime()?;
         Self::from_parts_inner(
             parts,
             timeout,
             event_sink,
             Some(cancellation),
-            SessionRuntime::Owned(runtime),
+            SessionRuntime(standalone_runtime()?),
         )
     }
 
@@ -883,41 +879,46 @@ fn session_pool_config() -> PoolConfig {
 }
 
 /// #704: the async runtime a [`Session`] runs its worker/forwarder/switch-
-/// relays/result-map tasks on. `Owned` is a small session-private multi-thread
-/// runtime built for a standalone direct-Rust connect (dropped — and shut down
-/// — when the session drops); `Shared` borrows the engine's runtime handle
-/// (engine-associated sessions), which outlives the session and must never be
-/// shut down by it. This replaces the removed per-session `nmp-executor`.
-enum SessionRuntime {
-    Owned(Arc<tokio::runtime::Runtime>),
-    Shared(tokio::runtime::Handle),
-}
+/// relays/result-map tasks on. Always a borrowed `Handle` — engine-associated
+/// sessions borrow the engine's runtime, and standalone direct-Rust sessions
+/// borrow the process-wide shared NIP-46 runtime ([`standalone_runtime`]).
+/// Either way the runtime outlives the session and is never shut down by it, so
+/// thread growth is O(1) in the number of sessions. This replaces the removed
+/// per-session `nmp-executor`.
+struct SessionRuntime(tokio::runtime::Handle);
 
 impl SessionRuntime {
     fn handle(&self) -> tokio::runtime::Handle {
-        match self {
-            SessionRuntime::Owned(runtime) => runtime.handle().clone(),
-            SessionRuntime::Shared(handle) => handle.clone(),
-        }
+        self.0.clone()
     }
 }
 
-/// Build the small session-private runtime backing a standalone direct-Rust
-/// NIP-46 connect. Its worker threads bump the process-wide OS-thread counter
-/// so `nmp::nmp_threads_spawned` still reflects them; the count is
-/// application-owned (one runtime per standalone session), as before #704.
-fn standalone_runtime() -> Result<Arc<tokio::runtime::Runtime>, Nip46Error> {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .thread_name("nmp-nip46")
-        .on_thread_start(nmp_executor::note_thread_spawn)
-        .build()
-        .map(Arc::new)
-        // A failure to build the session runtime is an infrastructure failure
+/// Borrow the process-wide shared runtime backing every standalone direct-Rust
+/// NIP-46 connect. Built once, lazily, and never shut down — so the number of
+/// standalone NIP-46 sessions does NOT drive OS-thread growth (#704: thread
+/// count must not be proportional to logical session count). Its worker threads
+/// bump the process-wide OS-thread counter so `nmp::nmp_threads_spawned` still
+/// reflects them, but that is an O(1) one-time cost shared across all sessions.
+fn standalone_runtime() -> Result<tokio::runtime::Handle, Nip46Error> {
+    static RUNTIME: std::sync::OnceLock<Option<Arc<tokio::runtime::Runtime>>> =
+        std::sync::OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .thread_name("nmp-nip46")
+                .on_thread_start(nmp_executor::note_thread_spawn)
+                .build()
+                .ok()
+                .map(Arc::new)
+        })
+        .as_ref()
+        .map(|runtime| runtime.handle().clone())
+        // A failure to build the shared runtime is an infrastructure failure
         // that leaves the session unusable; surfaced as the terminal
         // connection-ended outcome (#704 removed `ThreadUnavailable`).
-        .map_err(|_| Nip46Error::Disconnected)
+        .ok_or(Nip46Error::Disconnected)
 }
 
 type EventSink = Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>;
@@ -1136,9 +1137,10 @@ impl Drop for Session {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .clear();
-        // An `Owned` standalone runtime is shut down by dropping its `Arc`
-        // here (its worker task already observed `Shutdown` above); a `Shared`
-        // engine runtime outlives the session and is never shut down by it.
+        // #704: the session only borrows a runtime `Handle` (the process-wide
+        // shared standalone runtime, or the engine's), so dropping the session
+        // never shuts a runtime down — the worker task already observed
+        // `Shutdown` above and exits on its own.
     }
 }
 
@@ -1728,7 +1730,7 @@ mod tests {
             subscribers: Arc::clone(&subscribers),
             event_sinks: Arc::clone(&event_sinks),
             availability_error: Arc::clone(&availability_error),
-            runtime: SessionRuntime::Owned(standalone_runtime().unwrap()),
+            runtime: SessionRuntime(standalone_runtime().unwrap()),
             current_relays: Mutex::new(Vec::new()),
         });
         let mut worker = SessionWorker::new(
