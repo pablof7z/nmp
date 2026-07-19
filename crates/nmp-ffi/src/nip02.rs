@@ -53,7 +53,8 @@ pub enum FfiFollowActionFailure {
     InvalidGeneratedTag,
     EngineClosed,
     ReceiptUnavailable,
-    ThreadUnavailable { component: String, reason: String },
+    // #704: `ThreadUnavailable` was removed -- the follow action runs as an
+    // async task and has no worker/thread admission refusal to report.
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]

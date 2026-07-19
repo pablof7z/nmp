@@ -111,7 +111,6 @@ sealed interface NMPNip46Failure {
     data object Disconnected : NMPNip46Failure
     data class Rejected(val reason: String) : NMPNip46Failure
     data class InvalidResponse(val reason: String) : NMPNip46Failure
-    data class ThreadUnavailable(val component: String, val reason: String) : NMPNip46Failure
     data object SignerMissingPublicKey : NMPNip46Failure
 
     /** A restore/import's live answer did not match the checkpoint's
@@ -132,7 +131,6 @@ sealed interface NMPNip46Failure {
                 FfiNip46Failure.Disconnected -> Disconnected
                 is FfiNip46Failure.Rejected -> Rejected(ffi.reason)
                 is FfiNip46Failure.InvalidResponse -> InvalidResponse(ffi.reason)
-                is FfiNip46Failure.ThreadUnavailable -> ThreadUnavailable(ffi.component, ffi.reason)
                 FfiNip46Failure.SignerMissingPublicKey -> SignerMissingPublicKey
                 is FfiNip46Failure.RestoredIdentityMismatch ->
                     RestoredIdentityMismatch(ffi.expected, ffi.actual)

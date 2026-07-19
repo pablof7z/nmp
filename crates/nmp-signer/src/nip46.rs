@@ -323,6 +323,54 @@ impl Nip46Invitation {
         )
     }
 
+    /// #704: async twin of
+    /// [`Self::connect_observed_with_executor_and_cancellation`]. Identical
+    /// handshake, except the availability wait is awaited
+    /// ([`Session::wait_available_async`]) instead of blocking a std channel,
+    /// so it runs as a task on the engine's shared adapter `runtime` and holds
+    /// no OS thread while the signer comes online. `#[doc(hidden)]` for the same
+    /// reason as its blocking `_with_executor_` sibling.
+    #[doc(hidden)]
+    pub async fn connect_observed_async(
+        self,
+        timeout: Duration,
+        event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
+        cancellation: &Nip46Cancellation,
+        runtime: tokio::runtime::Handle,
+    ) -> Result<Nip46Signer, Nip46Error> {
+        let client_keys = self.client_keys.clone();
+        let session = Session::spawn(
+            self.relays,
+            self.client_keys,
+            None,
+            Some(cancellation),
+            SessionRuntime(runtime),
+        )?;
+        forward_events(&session, event_sink)?;
+        session.wait_available_async(timeout).await?;
+        let remote_signer_public_key = session
+            .accept_invitation(self.secret.as_str())
+            .recv_timeout(timeout)
+            .map_err(map_connect_recv)??;
+        let user_public_key = request_string(&session, "get_public_key", Vec::new())
+            .wait(timeout)
+            .map_err(Nip46Error::from)
+            .and_then(|value| {
+                PublicKey::from_hex(&value).map_err(|error| {
+                    Nip46Error::InvalidResponse(format!("get_public_key: {error}"))
+                })
+            })?;
+        session.emit(Nip46ConnectionEvent::Connected { user_public_key });
+        session.request_switch_relays();
+        Ok(Nip46Signer {
+            user_public_key,
+            remote_signer_public_key,
+            session,
+            client_keys,
+            origin: Nip46Origin::ClientInitiated,
+        })
+    }
+
     fn connect_observed_inner_with_runtime(
         self,
         timeout: Duration,
@@ -510,6 +558,80 @@ impl Nip46Signer {
         )
     }
 
+    /// #704: async twin of
+    /// [`Self::connect_bunker_observed_with_executor_and_cancellation`].
+    /// Identical `bunker://` handshake, except the availability wait is awaited
+    /// ([`Session::wait_available_async`]) instead of blocking a std channel, so
+    /// it runs as a task on the engine's shared adapter `runtime` and holds no
+    /// OS thread while the signer comes online. `#[doc(hidden)]` for the same
+    /// reason as its blocking `_with_executor_` sibling.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn connect_bunker_observed_async(
+        uri: &str,
+        permissions: Option<String>,
+        metadata: Nip46ClientMetadata,
+        timeout: Duration,
+        event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
+        cancellation: &Nip46Cancellation,
+        runtime: tokio::runtime::Handle,
+    ) -> Result<Self, Nip46Error> {
+        let parsed = parse_bunker_uri(uri).map_err(Nip46Error::InvalidBunkerUri)?;
+        let remote_signer_public_key = parsed.remote_signer_public_key;
+        let client_keys = Keys::generate();
+        let session = Session::spawn(
+            parsed.relays,
+            client_keys.clone(),
+            Some(remote_signer_public_key),
+            Some(cancellation),
+            SessionRuntime(runtime),
+        )?;
+        forward_events(&session, event_sink)?;
+        session.wait_available_async(timeout).await?;
+
+        let metadata_json = serde_json::to_string(&metadata)
+            .map_err(|error| Nip46Error::InvalidResponse(error.to_string()))?;
+        let params = vec![
+            remote_signer_public_key.to_hex(),
+            parsed
+                .secret
+                .as_deref()
+                .map(String::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            permissions.unwrap_or_default(),
+            metadata_json,
+        ];
+        let connect_result = request_string(&session, "connect", params)
+            .wait(timeout)
+            .map_err(Nip46Error::from)?;
+        if connect_result != "ack"
+            && parsed.secret.as_deref().map(String::as_str) != Some(connect_result.as_str())
+        {
+            return Err(Nip46Error::InvalidResponse(format!(
+                "connect returned {connect_result:?}"
+            )));
+        }
+
+        let user_public_key = request_string(&session, "get_public_key", Vec::new())
+            .wait(timeout)
+            .map_err(Nip46Error::from)
+            .and_then(|value| {
+                PublicKey::from_hex(&value).map_err(|error| {
+                    Nip46Error::InvalidResponse(format!("get_public_key: {error}"))
+                })
+            })?;
+        session.emit(Nip46ConnectionEvent::Connected { user_public_key });
+        session.request_switch_relays();
+        Ok(Self {
+            user_public_key,
+            remote_signer_public_key,
+            session,
+            client_keys,
+            origin: Nip46Origin::Bunker,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn connect_bunker_observed_inner_with_runtime(
         uri: &str,
@@ -678,6 +800,59 @@ impl Nip46Signer {
             Some(cancellation),
             SessionRuntime(standalone_runtime()?),
         )
+    }
+
+    /// #704: engine-associated async twin of
+    /// [`Self::from_parts_observed_with_cancellation`]. Identical restore-and-
+    /// validate reconnect, except the availability wait is awaited
+    /// ([`Session::wait_available_async`]) instead of blocking a std channel, so
+    /// it runs as a task on the engine's shared adapter `runtime` — removing the
+    /// last standalone-runtime use on the FFI restore path — and holds no OS
+    /// thread while the session comes online. `#[doc(hidden)]` for the same
+    /// reason as its blocking sibling.
+    #[doc(hidden)]
+    pub async fn from_parts_observed_async(
+        parts: Nip46SessionCheckpoint,
+        timeout: Duration,
+        event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
+        cancellation: &Nip46Cancellation,
+        runtime: tokio::runtime::Handle,
+    ) -> Result<Self, Nip46Error> {
+        let client_keys = Keys::new(parts.client_secret_key.clone());
+        let session = Session::spawn(
+            parts.relays,
+            client_keys.clone(),
+            Some(parts.remote_signer_public_key),
+            Some(cancellation),
+            SessionRuntime(runtime),
+        )?;
+        forward_events(&session, event_sink)?;
+        session.wait_available_async(timeout).await?;
+        let live_user_public_key = request_string(&session, "get_public_key", Vec::new())
+            .wait(timeout)
+            .map_err(Nip46Error::from)
+            .and_then(|value| {
+                PublicKey::from_hex(&value).map_err(|error| {
+                    Nip46Error::InvalidResponse(format!("get_public_key: {error}"))
+                })
+            })?;
+        if live_user_public_key != parts.user_public_key {
+            return Err(Nip46Error::RestoredIdentityMismatch {
+                expected: parts.user_public_key,
+                actual: live_user_public_key,
+            });
+        }
+        session.emit(Nip46ConnectionEvent::Connected {
+            user_public_key: live_user_public_key,
+        });
+        session.request_switch_relays();
+        Ok(Self {
+            user_public_key: live_user_public_key,
+            remote_signer_public_key: parts.remote_signer_public_key,
+            session,
+            client_keys,
+            origin: parts.origin,
+        })
     }
 
     fn from_parts_inner(
@@ -933,6 +1108,12 @@ struct Session {
     /// is a lightweight non-blocking notification, so this holds no worker).
     event_sinks: Arc<Mutex<Vec<EventSink>>>,
     availability_error: Arc<Mutex<Option<Nip46Error>>>,
+    /// #704: await-able availability signal. Every availability-state
+    /// transition (`Available`/`Unavailable`/recorded relay-open error) fires
+    /// `notify_waiters()` so an async connect parked in [`Session::wait_available_async`]
+    /// re-checks without holding an OS thread. The blocking `wait_available`
+    /// keeps using the subscriber channel; this signal is the async twin's edge.
+    availability_signal: Arc<tokio::sync::Notify>,
     runtime: SessionRuntime,
     /// The relay set this session currently targets, kept live by
     /// `SessionWorker::replace_relays` (#571's checkpoint reads this back
@@ -959,6 +1140,7 @@ impl Session {
             subscribers: Arc::clone(&subscribers),
             event_sinks: Arc::clone(&event_sinks),
             availability_error: Arc::clone(&availability_error),
+            availability_signal: Arc::new(tokio::sync::Notify::new()),
             runtime,
             current_relays: Mutex::new(relays.clone()),
         });
@@ -1058,6 +1240,54 @@ impl Session {
                 Ok(_) => {}
                 Err(RecvTimeoutError::Timeout) => return Err(Nip46Error::Timeout),
                 Err(RecvTimeoutError::Disconnected) => return Err(Nip46Error::Disconnected),
+            }
+        }
+    }
+
+    /// #704: fire the await-able availability edge so any task parked in
+    /// [`Self::wait_available_async`] re-checks. Called by the worker at every
+    /// availability-state transition. `notify_waiters()` wakes only currently
+    /// armed waiters and stores no permit, which is why `wait_available_async`
+    /// arms (`enable`s) its waiter BEFORE re-reading the state.
+    fn signal_availability_change(&self) {
+        self.availability_signal.notify_waiters();
+    }
+
+    /// Async twin of [`Self::wait_available`] with identical outcomes: `Ok` once
+    /// a relay is connected, the recorded [`Nip46Error`] on an availability
+    /// error, [`Nip46Error::Timeout`] on the deadline. Holds no OS thread while
+    /// parked — it awaits the [`availability_signal`](Self) rather than blocking
+    /// a std channel `recv_timeout`, so it can run as a task on the engine's
+    /// shared adapter runtime.
+    async fn wait_available_async(&self, timeout: Duration) -> Result<(), Nip46Error> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.is_available() {
+                return Ok(());
+            }
+            if let Some(error) = self.availability_error() {
+                return Err(error);
+            }
+            // Arm the waiter BEFORE the re-check so a transition that fires
+            // `notify_waiters()` between the check and the await is not lost
+            // (`notify_waiters` stores no permit for a not-yet-armed waiter).
+            let mut notified = std::pin::pin!(self.availability_signal.notified());
+            notified.as_mut().enable();
+            if self.is_available() {
+                return Ok(());
+            }
+            if let Some(error) = self.availability_error() {
+                return Err(error);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(Nip46Error::Timeout);
+            }
+            if tokio::time::timeout(remaining, notified.as_mut())
+                .await
+                .is_err()
+            {
+                return Err(Nip46Error::Timeout);
             }
         }
     }
@@ -1243,6 +1473,11 @@ impl SessionWorker {
             .availability_error
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = Some(error);
+        // #704: wake an async connect parked in `wait_available_async` so it
+        // observes the recorded error instead of running out its deadline.
+        if let Some(session) = self.session.upgrade() {
+            session.signal_availability_change();
+        }
     }
 
     fn open_relays(&mut self, relays: Vec<RelayUrl>) -> Result<(), Nip46Error> {
@@ -1374,6 +1609,10 @@ impl SessionWorker {
                 }
                 if was_empty {
                     self.emit(Nip46ConnectionEvent::Available);
+                    // #704: fire the async availability edge too.
+                    if let Some(session) = self.session.upgrade() {
+                        session.signal_availability_change();
+                    }
                 }
             }
             PoolEvent::Disconnected { handle, .. } => {
@@ -1395,6 +1634,10 @@ impl SessionWorker {
                         let _ = pending.reply.resolve(Err(SignerError::Disconnected));
                     }
                     self.emit(Nip46ConnectionEvent::Unavailable);
+                    // #704: fire the async availability edge too.
+                    if let Some(session) = self.session.upgrade() {
+                        session.signal_availability_change();
+                    }
                 }
             }
             PoolEvent::Frame { handle, frame, .. } => {
@@ -1730,6 +1973,7 @@ mod tests {
             subscribers: Arc::clone(&subscribers),
             event_sinks: Arc::clone(&event_sinks),
             availability_error: Arc::clone(&availability_error),
+            availability_signal: Arc::new(tokio::sync::Notify::new()),
             runtime: SessionRuntime(standalone_runtime().unwrap()),
             current_relays: Mutex::new(Vec::new()),
         });

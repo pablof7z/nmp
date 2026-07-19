@@ -87,7 +87,7 @@ Exercise the product-relevant subset:
 - one ACK plus one rejection remains mixed evidence;
 - at-most-once ambiguity never offers blind retry;
 - pre-acceptance failure leaves no durable row/receipt;
-- native receipt-bridge saturation/OS-thread refusal occurs before acceptance and leaves no obligation or consumed composed intent;
+- the native receipt bridge is established before acceptance with no capacity or thread refusal, so a returned handle reflects an accepted obligation and consumed composed intent;
 - process restart reattaches the same receipt and frozen intent;
 - restart replays persisted `AwaitingRelay`, `AwaitingAuth`, `RetryEligible`, `HandoffAmbiguous`, and exact-`Written` `Sent` facts while never replaying transient `Routed` or turning `AttemptStarted`, ambiguity, or an ephemeral handoff into `Sent`;
 - old remote-signer close cannot detach its replacement;
@@ -117,7 +117,7 @@ Do not golden-test screenshots or health scores. Do not assert unprojected Rust-
 
 Every async test needs a real deadline/task race. Avoid polling loops with `sleep`. A failed wait must report the missing state and most recent rows/evidence/receipt/diagnostics.
 
-Stress repeated query, diagnostics, follow, signer, receipt attachment, and content-session open/close when resource ownership changes. A successful native lifecycle test must show admitted tasks never exceed `maxNativeTasks`, drive the event-based idle barrier, and show exact executor census `admitted == 0 && running == 0`; it must also show app-level aggregate content/observer counts stay capped. Exercise both `ExecutorSaturated` and `ThreadUnavailable` without panic, preserve no-handle refusal for observations/direct signer setup, and preserve the terminal failure on the deliberately returned NIP-02 action handle.
+Stress repeated query, diagnostics, follow, signer, receipt attachment, and content-session open/close when resource ownership changes. A successful native lifecycle test must show that after teardown the shared engine runtime retains no lingering async work and no OS thread for the ended observers/sessions, proven by an event rather than polling or sleeps; it must also show app-level aggregate content/observer counts stay capped. There is no worker/task admission ceiling and no capacity refusal, so concurrent operations must simply make progress. Exercise the genuine infra failures (`EngineStartFailed` at construction, `ObservationUnavailable` for a live observe) without panic, preserve no-handle failure for observations/direct signer setup, and preserve the terminal failure on the deliberately returned NIP-02 action handle.
 
 ## Live smoke discipline
 

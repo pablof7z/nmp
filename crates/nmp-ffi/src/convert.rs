@@ -111,10 +111,20 @@ pub enum FfiError {
     StoreStillOpen {
         path: String,
     },
-    /// One named engine/native thread could not be created. The component
-    /// and safe OS reason survive Swift/Kotlin error translation unchanged.
-    ThreadUnavailable {
+    /// The engine could not be constructed (`NmpEngine::new`). A genuine
+    /// engine-start infrastructure failure -- the OS refused an engine-owned
+    /// thread, or the configured relay budget was unrepresentable. The
+    /// component and safe OS reason survive Swift/Kotlin translation unchanged.
+    /// Never raised by an ordinary operation (#704).
+    EngineStartFailed {
         component: String,
+        reason: String,
+    },
+    /// A live observation could not be established because a required relay
+    /// connection (or its canonical projection) could not be opened -- a rare,
+    /// genuine infrastructure outcome of `observe`. Carries no internal
+    /// worker/pool/thread concept (#704).
+    ObservationUnavailable {
         reason: String,
     },
     /// A second `next()`/`signed()` was awaited on a stream/handle while a
@@ -196,18 +206,14 @@ pub enum FfiError {
     /// (recompose via `group_message_intent` again is the correct retry path,
     /// since NMP-owned event time must refresh).
     IntentAlreadyConsumed,
-    /// NIP-11 acquisition failed before any last-good document existed.
-    /// `RelayInformationWaitersSaturated`/`ThreadUnavailable` above already
-    /// carry the two acquisition discriminants with dedicated `FfiError`
-    /// shapes (#494); every other `nmp::RelayInformationError` variant carries
-    /// here instead of collapsing to a message string.
+    /// NIP-11 acquisition failed before any last-good document existed. Every
+    /// `nmp::RelayInformationError` variant carries here as a typed
+    /// `FfiRelayInformationErrorKind` instead of collapsing to a message
+    /// string (#494). (#704 removed the waiter/thread admission discriminants
+    /// that once had dedicated `FfiError` shapes -- the async NIP-11 fetch has
+    /// no admission refusal.)
     RelayInformationUnavailable {
         kind: FfiRelayInformationErrorKind,
-    },
-    /// A single relay's in-flight NIP-11 waiter set reached its finite
-    /// admission bound. The refused caller was not retained.
-    RelayInformationWaitersSaturated {
-        capacity: u64,
     },
     /// #591: `FfiWriteIntent.correlation` was `Some` but failed
     /// `nmp_grammar::CorrelationToken`'s `TryFrom<&str>` bounded/non-empty
@@ -254,8 +260,11 @@ impl From<nmp::EngineError> for FfiError {
             nmp::EngineError::StoreOpenFailed { reason } => Self::StoreOpenFailed { reason },
             nmp::EngineError::StoreResetFailed { reason } => Self::StoreResetFailed { reason },
             nmp::EngineError::StoreStillOpen { path } => Self::StoreStillOpen { path },
-            nmp::EngineError::ThreadUnavailable { component, reason } => {
-                Self::ThreadUnavailable { component, reason }
+            nmp::EngineError::EngineStartFailed { component, reason } => {
+                Self::EngineStartFailed { component, reason }
+            }
+            nmp::EngineError::ObservationUnavailable { reason } => {
+                Self::ObservationUnavailable { reason }
             }
             nmp::EngineError::InvalidSecretKey => Self::InvalidSecretKey,
             nmp::EngineError::SignerMissingPublicKey => Self::InvalidSigner {
@@ -312,8 +321,11 @@ impl std::fmt::Display for FfiError {
             Self::StoreStillOpen { path } => {
                 write!(f, "persistent store is still open: {path}")
             }
-            Self::ThreadUnavailable { component, reason } => {
-                write!(f, "{component} thread unavailable: {reason}")
+            Self::EngineStartFailed { component, reason } => {
+                write!(f, "engine could not start ({component}): {reason}")
+            }
+            Self::ObservationUnavailable { reason } => {
+                write!(f, "observation could not be established: {reason}")
             }
             Self::ConcurrentNext => write!(
                 f,
@@ -363,10 +375,6 @@ impl std::fmt::Display for FfiError {
             Self::RelayInformationUnavailable { kind } => {
                 write!(f, "relay information unavailable: {kind:?}")
             }
-            Self::RelayInformationWaitersSaturated { capacity } => write!(
-                f,
-                "relay information refused: per-relay waiter capacity {capacity} is full"
-            ),
             Self::InvalidCorrelationToken { got, reason } => {
                 write!(f, "invalid correlation token {got:?}: {reason}")
             }
@@ -2686,16 +2694,31 @@ mod tests {
     }
 }
 #[test]
-fn engine_thread_refusal_preserves_component_and_reason_across_ffi() {
-    let error = FfiError::from(nmp::EngineError::ThreadUnavailable {
+fn engine_start_failure_preserves_component_and_reason_across_ffi() {
+    let error = FfiError::from(nmp::EngineError::EngineStartFailed {
         component: "signature verifier".to_string(),
         reason: "Resource temporarily unavailable".to_string(),
     });
     assert_eq!(
         error,
-        FfiError::ThreadUnavailable {
+        FfiError::EngineStartFailed {
             component: "signature verifier".to_string(),
             reason: "Resource temporarily unavailable".to_string(),
+        }
+    );
+}
+
+#[test]
+fn observation_unavailable_maps_to_domain_error_across_ffi() {
+    // #704: an `observe` relay-worker/projection open failure crosses FFI as a
+    // domain outcome carrying no worker/pool/thread concept.
+    let error = FfiError::from(nmp::EngineError::ObservationUnavailable {
+        reason: "relay worker: Resource temporarily unavailable".to_string(),
+    });
+    assert_eq!(
+        error,
+        FfiError::ObservationUnavailable {
+            reason: "relay worker: Resource temporarily unavailable".to_string(),
         }
     );
 }

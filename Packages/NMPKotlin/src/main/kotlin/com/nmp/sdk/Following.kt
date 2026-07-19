@@ -146,8 +146,6 @@ sealed class FollowActionFailure {
 
     object ReceiptUnavailable : FollowActionFailure()
 
-    data class ThreadUnavailable(val component: String, val reason: String) : FollowActionFailure()
-
     companion object {
         fun from(ffi: FfiFollowActionFailure): FollowActionFailure =
             when (ffi) {
@@ -164,7 +162,6 @@ sealed class FollowActionFailure {
                 is FfiFollowActionFailure.InvalidGeneratedTag -> InvalidGeneratedTag
                 is FfiFollowActionFailure.EngineClosed -> EngineClosed
                 is FfiFollowActionFailure.ReceiptUnavailable -> ReceiptUnavailable
-                is FfiFollowActionFailure.ThreadUnavailable -> ThreadUnavailable(ffi.component, ffi.reason)
             }
     }
 }

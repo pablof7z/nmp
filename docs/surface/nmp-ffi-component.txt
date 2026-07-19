@@ -2751,7 +2751,7 @@ enum Enum {
             ),
         },
         Variant {
-            name: "ThreadUnavailable",
+            name: "EngineStartFailed",
             discr: None,
             fields: [
                 Field {
@@ -2768,7 +2768,22 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "One named engine/native thread could not be created. The component\nand safe OS reason survive Swift/Kotlin error translation unchanged.",
+                "The engine could not be constructed (`NmpEngine::new`). A genuine\nengine-start infrastructure failure -- the OS refused an engine-owned\nthread, or the configured relay budget was unrepresentable. The\ncomponent and safe OS reason survive Swift/Kotlin translation unchanged.\nNever raised by an ordinary operation (#704).",
+            ),
+        },
+        Variant {
+            name: "ObservationUnavailable",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "A live observation could not be established because a required relay\nconnection (or its canonical projection) could not be opened -- a rare,\ngenuine infrastructure outcome of `observe`. Carries no internal\nworker/pool/thread concept (#704).",
             ),
         },
         Variant {
@@ -2941,22 +2956,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "NIP-11 acquisition failed before any last-good document existed.\n`RelayInformationWaitersSaturated`/`ThreadUnavailable` above already\ncarry the two acquisition discriminants with dedicated `FfiError`\nshapes (#494); every other `nmp::RelayInformationError` variant carries\nhere instead of collapsing to a message string.",
-            ),
-        },
-        Variant {
-            name: "RelayInformationWaitersSaturated",
-            discr: None,
-            fields: [
-                Field {
-                    name: "capacity",
-                    type_: UInt64,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: Some(
-                "A single relay's in-flight NIP-11 waiter set reached its finite\nadmission bound. The refused caller was not retained.",
+                "NIP-11 acquisition failed before any last-good document existed. Every\n`nmp::RelayInformationError` variant carries here as a typed\n`FfiRelayInformationErrorKind` instead of collapsing to a message\nstring (#494). (#704 removed the waiter/thread admission discriminants\nthat once had dedicated `FfiError` shapes -- the async NIP-11 fetch has\nno admission refusal.)",
             ),
         },
         Variant {
@@ -3094,25 +3094,6 @@ enum Enum {
             name: "ReceiptUnavailable",
             discr: None,
             fields: [],
-            docstring: None,
-        },
-        Variant {
-            name: "ThreadUnavailable",
-            discr: None,
-            fields: [
-                Field {
-                    name: "component",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "reason",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
             docstring: None,
         },
     ],
@@ -3744,25 +3725,6 @@ enum Enum {
             docstring: None,
         },
         Variant {
-            name: "ThreadUnavailable",
-            discr: None,
-            fields: [
-                Field {
-                    name: "component",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "reason",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
             name: "SignerMissingPublicKey",
             discr: None,
             fields: [],
@@ -4202,32 +4164,6 @@ enum Enum {
     remote: false,
     discr_type: None,
     variants: [
-        Variant {
-            name: "WaiterSaturated",
-            discr: None,
-            fields: [
-                Field {
-                    name: "capacity",
-                    type_: UInt64,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "ThreadUnavailable",
-            discr: None,
-            fields: [
-                Field {
-                    name: "reason",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
         Variant {
             name: "ServiceClosed",
             discr: None,

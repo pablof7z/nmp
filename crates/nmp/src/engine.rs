@@ -294,7 +294,7 @@ impl Engine {
                     admission,
                     runtime_config,
                 )
-                .map_err(EngineError::from_thread_error)?
+                .map_err(EngineError::from_start_error)?
             }
             None => {
                 let store = MemoryStore::new();
@@ -306,7 +306,7 @@ impl Engine {
                     admission,
                     runtime_config,
                 )
-                .map_err(EngineError::from_thread_error)?
+                .map_err(EngineError::from_start_error)?
             }
         };
 
@@ -346,7 +346,7 @@ impl Engine {
     {
         let (engine_thread, handle) =
             EngineThread::spawn(store, directory, cap, pool_config, admission)
-                .map_err(EngineError::from_thread_error)?;
+                .map_err(EngineError::from_start_error)?;
         Ok(Self {
             inner: Mutex::new(Some(Inner {
                 handle,
@@ -456,7 +456,7 @@ impl Engine {
                         .subscribe(query)
                         .map(|(query_handle, rows)| unbounded(handle.clone(), query_handle, rows))
                 })?
-                .map_err(EngineError::from_thread_error),
+                .map_err(EngineError::from_observe_error),
             Some(Window::Expandable { initial, max }) => {
                 if initial > max {
                     return Err(EngineError::WindowInitialExceedsMax {
@@ -476,7 +476,7 @@ impl Engine {
                             windowed(handle.clone(), history_handle, batches)
                         })
                 })?
-                .map_err(EngineError::from_thread_error)
+                .map_err(EngineError::from_observe_error)
             }
         }
     }
@@ -1211,7 +1211,7 @@ mod tests {
         )
         .err()
         .expect("unrepresentable relay envelope must refuse construction");
-        assert!(matches!(failure, EngineError::ThreadUnavailable { .. }));
+        assert!(matches!(failure, EngineError::EngineStartFailed { .. }));
         Engine::reset_persistent_store(&path)
             .expect("post-open spawn failure must release RedbStore ownership");
     }

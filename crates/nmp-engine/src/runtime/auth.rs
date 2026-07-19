@@ -279,14 +279,47 @@ impl Future for PendingAuthPolicyOp {
 
 impl Drop for PendingAuthPolicyOp {
     fn drop(&mut self) {
-        if let Ok(mut state) = self.door.state.lock() {
-            state.receiver_gone = true;
+        // A future that already drained a terminal outcome (poll_recv →
+        // finish) has run its cancel/complete linearization already.
+        if self.done {
+            return;
         }
-        if !self.done {
-            if let Some(cancel) = self.cancel.take() {
-                cancel();
+        // Terminal-cancel door (an epoch/capability signal, or a dropped
+        // awaiting future). This must reproduce the pre-#704 crossbeam
+        // handshake: a resolver that already owns completion is still allowed
+        // to deliver before the receiver is released, and a value already
+        // committed to the door wins over cancellation (suppressing the
+        // adapter cancel hook). Marking `receiver_gone` up front would defeat
+        // an in-flight `resolve()` — so it is set only after the handshake.
+        {
+            let mut state = self
+                .door
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if state.value.take().is_some() || state.resolved {
+                // A resolution already won: consume it, never cancel.
+                state.receiver_gone = true;
+                self.cancel = None;
+                return;
             }
         }
+        // No committed resolution yet. Run the adapter cancel hook WITHOUT
+        // holding the door lock and WITHOUT yet marking the receiver gone, so a
+        // resolver racing this handshake still resolves successfully; the hook
+        // blocks until that resolver finishes (or its sender disconnects).
+        if let Some(cancel) = self.cancel.take() {
+            cancel();
+        }
+        // The handshake is over: consume any value the racing resolver
+        // delivered and release the receiver so a later resolve is refused.
+        let mut state = self
+            .door
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _ = state.value.take();
+        state.receiver_gone = true;
     }
 }
 

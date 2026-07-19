@@ -30,10 +30,17 @@ pub enum EngineError {
     /// Destructive reset was refused because an engine in this process still
     /// owns the same canonical persistent-store path.
     StoreStillOpen { path: String },
-    /// The OS refused one engine-owned transport/runtime thread, or the
-    /// configured relay budget could not be represented safely. No partial
-    /// engine escapes construction.
-    ThreadUnavailable { component: String, reason: String },
+    /// The engine could not be constructed: the OS refused one engine-owned
+    /// transport/runtime thread, or the configured relay budget could not be
+    /// represented safely. No partial engine escapes construction. This is an
+    /// engine-start (`Engine::new`) failure only — it never surfaces from an
+    /// ordinary operation (#704).
+    EngineStartFailed { component: String, reason: String },
+    /// A live observation could not be established because a required relay
+    /// connection could not be opened, or its canonical projection could not
+    /// be initialized. A rare, genuine infrastructure outcome of the `observe`
+    /// verb — carries no internal worker/pool/thread concept (#704).
+    ObservationUnavailable { reason: String },
     /// [`Engine::add_account`](crate::Engine::add_account)'s secret key did
     /// not parse as a valid nostr key (hex or bech32 `nsec`).
     InvalidSecretKey,
@@ -75,8 +82,11 @@ impl std::fmt::Display for EngineError {
             Self::StoreStillOpen { path } => {
                 write!(f, "persistent store is still open: {path}")
             }
-            Self::ThreadUnavailable { component, reason } => {
-                write!(f, "{component} thread unavailable: {reason}")
+            Self::EngineStartFailed { component, reason } => {
+                write!(f, "engine could not start ({component}): {reason}")
+            }
+            Self::ObservationUnavailable { reason } => {
+                write!(f, "observation could not be established: {reason}")
             }
             Self::InvalidSecretKey => write!(f, "invalid secret key"),
             Self::SignerMissingPublicKey => write!(f, "signer has no public key"),
@@ -103,13 +113,16 @@ impl std::fmt::Display for EngineError {
 impl std::error::Error for EngineError {}
 
 impl EngineError {
-    pub(crate) fn from_thread_error(error: nmp_engine::runtime::EngineThreadError) -> Self {
+    /// Map an engine-thread failure raised during engine CONSTRUCTION
+    /// (`Engine::new`) to its engine-start error. A genuine OS thread refusal
+    /// or an unrepresentable relay budget both mean no engine was built (#704).
+    pub(crate) fn from_start_error(error: nmp_engine::runtime::EngineThreadError) -> Self {
         match error {
             nmp_engine::runtime::EngineThreadError::ThreadUnavailable { component, reason } => {
-                Self::ThreadUnavailable { component, reason }
+                Self::EngineStartFailed { component, reason }
             }
             nmp_engine::runtime::EngineThreadError::RelayBudgetOverflow { relay_limit } => {
-                Self::ThreadUnavailable {
+                Self::EngineStartFailed {
                     component: "relay worker budget".to_string(),
                     reason: format!(
                         "configured max_relays {relay_limit} cannot represent its finite retirement envelope"
@@ -119,6 +132,30 @@ impl EngineError {
             // The runtime's finite shutdown drain (#8 U4) refuses new work
             // with a typed engine-level error; at this facade it is the same
             // closed-engine fact `EngineClosed` already names.
+            nmp_engine::runtime::EngineThreadError::EngineShuttingDown => Self::EngineClosed,
+        }
+    }
+
+    /// Map an engine-thread failure raised while establishing an OBSERVATION
+    /// (`observe`) to a domain outcome. A required relay connection (or the
+    /// canonical projection) could not be opened; the caller learns the
+    /// observation failed, never that an internal worker/pool exists (#704).
+    /// `RelayBudgetOverflow` is a construction-only fault and cannot reach
+    /// here, but is folded in defensively rather than panicking.
+    pub(crate) fn from_observe_error(error: nmp_engine::runtime::EngineThreadError) -> Self {
+        match error {
+            nmp_engine::runtime::EngineThreadError::ThreadUnavailable { component, reason } => {
+                Self::ObservationUnavailable {
+                    reason: format!("{component}: {reason}"),
+                }
+            }
+            nmp_engine::runtime::EngineThreadError::RelayBudgetOverflow { relay_limit } => {
+                Self::ObservationUnavailable {
+                    reason: format!(
+                        "configured max_relays {relay_limit} cannot represent its finite retirement envelope"
+                    ),
+                }
+            }
             nmp_engine::runtime::EngineThreadError::EngineShuttingDown => Self::EngineClosed,
         }
     }

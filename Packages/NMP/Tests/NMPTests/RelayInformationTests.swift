@@ -151,7 +151,13 @@ final class RelayInformationTests: XCTestCase {
         }
     }
 
-    func testRelayInformationWaiterSaturationRemainsTypedThroughWrapper() async throws {
+    /// #704: many concurrent NIP-11 fetches on one relay must NEVER be refused
+    /// for internal capacity -- the async fetch has no waiter/thread admission
+    /// bound. Every one of the 65 concurrent requests makes progress; none
+    /// returns a capacity/`ThreadUnavailable`/waiter-saturation error (those
+    /// wrapper cases no longer exist). This is the falsifier that replaced the
+    /// old "typed waiter saturation" test, which asserted a refusal #704 removed.
+    func testConcurrentRelayInformationFetchesAreNeverCapacityRefused() async throws {
         let server = try LocalNIP11Server(
             body: #"{"name":"Shared"}"#,
             gated: true
@@ -162,7 +168,6 @@ final class RelayInformationTests: XCTestCase {
 
         enum Outcome: Sendable {
             case value
-            case waiters(UInt64)
             case failure(String)
         }
 
@@ -175,11 +180,6 @@ final class RelayInformationTests: XCTestCase {
                             policy: .refresh
                         )
                         return .value
-                    } catch let error as NMPError {
-                        if case .relayInformationWaitersSaturated(let capacity) = error {
-                            return .waiters(capacity)
-                        }
-                        return .failure(String(describing: error))
                     } catch {
                         return .failure(String(describing: error))
                     }
@@ -198,14 +198,9 @@ final class RelayInformationTests: XCTestCase {
         }
 
         XCTAssertEqual(outcomes.count, 65)
-        XCTAssertEqual(outcomes.filter { if case .value = $0 { true } else { false } }.count, 64)
-        XCTAssertEqual(
-            outcomes.compactMap { if case .waiters(let capacity) = $0 { capacity } else { nil } },
-            [UInt64(64)]
-        )
         XCTAssertTrue(
-            outcomes.allSatisfy { if case .failure = $0 { false } else { true } },
-            "only the typed waiter refusal is allowed"
+            outcomes.allSatisfy { if case .value = $0 { true } else { false } },
+            "no concurrent NIP-11 fetch may be refused: \(outcomes)"
         )
     }
 }

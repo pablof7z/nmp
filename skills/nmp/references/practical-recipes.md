@@ -98,7 +98,7 @@ Goal: accept a post offline, show honest delivery, and resume after process loss
 6. Distinguish attached, not found, and retained-but-unreadable. Reattachment reconstructs persisted relay/AUTH waits, retry eligibility, ambiguous handoffs, and `Sent` only where an exact durable lane has persisted `Written`; it does not reproduce transient `Routed` history or invent ephemeral handoffs. Journal non-retained live progress separately if the product needs a complete historical activity log.
 7. Remove the app's receipt pointer only under explicit product retention policy after terminal evidence has been handled.
 
-Receipt bridge admission now happens before core acceptance, so executor saturation or OS-thread refusal returns without an accepted obligation; composed publication also leaves its take-once intent unconsumed on this refusal path. One lost-id window remains because receipt enumeration does not exist: process loss after a successful return but before app persistence. State that limitation rather than claiming perfect app-level recovery, and do not blindly publish a replacement for an obligation whose id is unknown.
+The receipt bridge starts as async work on the shared engine runtime before core acceptance, and there is no capacity or thread refusal on this path, so a returned id reflects an accepted obligation and a consumed composed intent. One lost-id window remains because receipt enumeration does not exist: process loss after a successful return but before app persistence. State that limitation rather than claiming perfect app-level recovery, and do not blindly publish a replacement for an obligation whose id is unknown.
 
 ## Relay-debug sheet
 
@@ -131,7 +131,7 @@ Goal: connect a remote signer without treating OS launch as readiness.
 2. On iOS, query only declared schemes. On Android, use the exact package from `androidHandoff` and launch explicitly to that package.
 3. Observe connection states and wait for `ready`; a successful `open`/`startActivity` is only handoff evidence.
 4. Activate `ready`'s user pubkey with `setActiveAccount` before an unsigned operation such as `groupMessageIntent`. Signer registration does not select the active account.
-5. Handle synchronous outer `ExecutorSaturated` or `ThreadUnavailable` as connection admission refusal with no returned handle. Invitation capacity is reserved before take: saturation leaves the invitation reusable, but a later OS spawn failure consumes it and requires a fresh invitation/handoff. After a handle exists, inner session/relay refusal arrives as streamed `failed(reason)`/`Failed` followed by closure; do not relabel it as a timeout or reconstruct a typed error from the reason.
+5. NIP-46 connection has no capacity or thread refusal; a genuine relay/session setup failure returns a typed `NMPNip46Failure`/`Nip46Error` with no returned handle. After a handle exists, inner session/relay failure arrives as streamed `failed(reason)`/`Failed` followed by closure; do not relabel it as a timeout or reconstruct a typed error from the reason.
 6. Keep the exact returned connection as the ownership token and close it deterministically. Closing an older replaced registration must not detach a newer one.
 7. Never log invitation secrets, bunker credentials, or full handoff URIs.
 

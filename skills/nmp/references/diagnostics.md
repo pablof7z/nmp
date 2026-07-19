@@ -20,11 +20,11 @@ Do not claim that diagnostics currently provide:
 - a global connection generation or populated AUTH lifecycle;
 - database row counts or GC telemetry.
 
-Executor saturation and OS-thread refusal are call/action facts, not diagnostics snapshot fields. Ordinary direct-Rust engine/query setup can return `EngineError::ThreadUnavailable`; NIP-02 observation additionally reserves a native task and can return `EngineError::ExecutorSaturated`. NIP-02 action-worker refusal is a terminal `FollowActionStatus::Failed` with the matching failure value, and initial direct-Rust NIP-46 setup returns the matching `Nip46Error`. Native synchronous outer-bridge errors and post-handle streamed NIP-46 failures are separate again. Preserve the exact owning shape instead of waiting for diagnostics to explain an absent or closed stream.
+Engine-start and observation infra failures are call facts, not diagnostics snapshot fields. Engine construction can return `EngineError::EngineStartFailed`; a live observe (including NIP-02 following observation) can return `EngineError::ObservationUnavailable` when a required relay connection cannot be opened. The follow action has no capacity or thread refusal and reports any genuine terminal failure as `FollowActionStatus::Failed` with a `FollowActionFailure` value, and initial direct-Rust NIP-46 setup returns the matching `Nip46Error`. Native post-handle streamed NIP-46 failures are separate again. Preserve the exact owning shape instead of waiting for diagnostics to explain an absent or closed stream.
 
-NIP-11 executor saturation, per-relay waiter saturation, service closure, and acquisition failure are likewise one-shot call facts, not scheduler diagnostics. A successful stale snapshot can carry its refresh error while diagnostics retain the cited last-good advertisement; absence of behavioral proof remains absence.
+NIP-11 service closure and acquisition failure are likewise one-shot call facts, not scheduler diagnostics. A successful stale snapshot can carry its refresh error while diagnostics retain the cited last-good advertisement; absence of behavioral proof remains absence.
 
-The raw FFI native-task census and exact idle barrier are lifecycle-test seams, not engine diagnostics. Swift/Kotlin keep their wrapper methods internal. Do not poll the census as queue pressure, expose it as product telemetry, or infer that increasing `maxNativeTasks` is a retry policy.
+There is no worker/task census, idle barrier, or task-capacity knob to poll: #704 removed internal task admission. Do not model queue pressure, expose task counts as product telemetry, or treat any capacity as a retry policy.
 
 `SourceStatus.awaitingAuth`/`authDenied` and `AuthPhase` exist as reserved public vocabulary but are not populated by the current engine. Label them reserved if they appear in exhaustive UI switches.
 
