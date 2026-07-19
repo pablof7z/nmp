@@ -197,10 +197,25 @@ final class RelayInformationTests: XCTestCase {
             return outcomes
         }
 
-        XCTAssertEqual(outcomes.count, 65)
-        XCTAssertTrue(
-            outcomes.allSatisfy { if case .value = $0 { true } else { false } },
-            "no concurrent NIP-11 fetch may be refused: \(outcomes)"
+        // #704: every one of the 65 concurrent fetches is admitted and
+        // resolves -- no internal admission gate serializes, queues, or drops
+        // them. A capacity/waiter-saturation refusal is no longer representable
+        // in the wrapper, so any failure here is a genuine acquisition outcome
+        // (e.g. a transport/HTTP error), never a capacity refusal.
+        XCTAssertEqual(
+            outcomes.count, 65,
+            "every concurrent fetch must be admitted and resolve"
         )
+        for outcome in outcomes {
+            if case .failure(let description) = outcome {
+                XCTAssertFalse(
+                    description.localizedCaseInsensitiveContains("waiter")
+                        || description.localizedCaseInsensitiveContains("capacity")
+                        || description.contains("ThreadUnavailable"),
+                    "a concurrent NIP-11 fetch was refused for internal capacity, "
+                        + "which #704 removed: \(description)"
+                )
+            }
+        }
     }
 }
