@@ -65,12 +65,7 @@ fn threads_now() -> u64 {
     nmp_executor::nmp_threads_spawned()
 }
 
-fn response_event(
-    signer: &Keys,
-    client: PublicKey,
-    id: &str,
-    result: Option<String>,
-) -> Event {
+fn response_event(signer: &Keys, client: PublicKey, id: &str, result: Option<String>) -> Event {
     let plaintext = json!({ "id": id, "result": result, "error": Value::Null }).to_string();
     let ciphertext = nip44::encrypt(
         signer.secret_key(),
@@ -205,10 +200,10 @@ fn nip46_sessions_scale_with_zero_per_session_executor_thread() {
     );
     let mut prev_sessions = 0usize;
     let mut prev_threads = table[0].1; // baseline includes the one-time shared runtime
-    // The one-time shared standalone runtime + the first session's pool are
-    // both folded into the first checkpoint; report it as the baseline row and
-    // measure the per-session RATE from the INCREMENTS between checkpoints,
-    // which exclude every one-time cost.
+                                       // The one-time shared standalone runtime + the first session's pool are
+                                       // both folded into the first checkpoint; report it as the baseline row and
+                                       // measure the per-session RATE from the INCREMENTS between checkpoints,
+                                       // which exclude every one-time cost.
     for (i, (sessions_n, threads)) in table.iter().enumerate() {
         if i == 0 {
             eprintln!(

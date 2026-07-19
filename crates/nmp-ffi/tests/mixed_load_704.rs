@@ -177,7 +177,10 @@ async fn mixed_engine_load_makes_progress_without_capacity_refusal() {
         .await
         .expect("local sign resolves within 10s")
         .expect("local sign succeeds under mixed load");
-    assert_eq!(signed.pubkey, author, "sign is attributed to the active account");
+    assert_eq!(
+        signed.pubkey, author,
+        "sign is attributed to the active account"
+    );
 
     // The NIP-11 fetch resolves to a real document (progress), not a capacity
     // refusal.
@@ -204,7 +207,10 @@ async fn mixed_engine_load_makes_progress_without_capacity_refusal() {
             .await
             .expect("a row observation delivers within 10s")
             .expect("row next() is not a misuse");
-        assert!(frame.is_some(), "each row observation yields an initial frame");
+        assert!(
+            frame.is_some(),
+            "each row observation yields an initial frame"
+        );
     }
 
     // The follow action and the receipt stream both remain live, progressing

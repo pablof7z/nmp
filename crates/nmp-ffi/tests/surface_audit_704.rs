@@ -79,11 +79,7 @@ fn scan_file(path: &Path, root: &Path, offenders: &mut Vec<String>) {
         }
         for token in BANNED {
             if line.contains(token) {
-                offenders.push(format!(
-                    "{display}:{}: [{token}] {}",
-                    i + 1,
-                    line.trim()
-                ));
+                offenders.push(format!("{display}:{}: [{token}] {}", i + 1, line.trim()));
             }
         }
     }
