@@ -23,9 +23,8 @@ use serde_json::Value;
 use zeroize::Zeroizing;
 
 use crate::{
-    parse_bunker_uri, pending_signer_cancellation, BunkerParseError, CryptoCapability,
-    PendingSignerSender, SignerError, SignerOp, SigningCapability, MAX_BUNKER_URI_LEN,
-    MAX_NIP46_RELAYS,
+    parse_bunker_uri, BunkerParseError, CryptoCapability, PendingSignerSender, SignerError,
+    SignerOp, SigningCapability, MAX_BUNKER_URI_LEN, MAX_NIP46_RELAYS,
 };
 
 const DEFAULT_PERMISSIONS: &str = "sign_event,nip44_encrypt,nip44_decrypt";
@@ -1605,20 +1604,23 @@ where
         SignerOp::Ready(Ok(value)) => SignerOp::Ready(map(value)),
         SignerOp::Ready(Err(error)) => SignerOp::Ready(Err(error)),
         SignerOp::Pending(pending) => {
-            let (cancel, cancelled) = pending_signer_cancellation();
-            let mapped_cancel = cancel.clone();
+            // #704: cancellation is bound into the op's door; the mapped op's
+            // cancel hook and the worker's shutdown hook both cancel the inner
+            // op, which wakes its `recv()` to a disconnected end and runs its
+            // adapter cancel hook once.
+            let inner_canceller = pending.canceller();
+            let mapped_cancel = inner_canceller.clone();
             let (completion, mapped) = SignerOp::pending_channel_with_cancel(move || {
                 mapped_cancel.cancel();
             });
             let failure = completion.clone();
             let spawned = executor.spawn_with_cancel(
                 "NIP-46 result-map",
-                move || cancel.cancel(),
+                move || inner_canceller.cancel(),
                 move || {
-                    let result = match pending.recv_or_cancel(cancelled) {
-                        Some(Ok(value)) => map(value),
-                        Some(Err(error)) => Err(error),
-                        None => Err(SignerError::Disconnected),
+                    let result = match pending.recv() {
+                        Ok(value) => map(value),
+                        Err(error) => Err(error),
                     };
                     let _ = completion.resolve(result);
                 },
