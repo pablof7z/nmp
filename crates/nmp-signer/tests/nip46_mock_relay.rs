@@ -1,12 +1,11 @@
 use std::net::TcpListener;
-use std::sync::{mpsc, Arc};
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
 use nmp_signer::{
-    pending_signer_cancellation, CryptoCapability, Nip46Cancellation, Nip46ClientMetadata,
-    Nip46ConnectionEvent, Nip46Invitation, Nip46Origin, Nip46Signer, SignerError, SignerOp,
-    SigningCapability,
+    CryptoCapability, Nip46ClientMetadata, Nip46ConnectionEvent, Nip46Invitation, Nip46Origin,
+    Nip46Signer, SignerError, SignerOp, SigningCapability,
 };
 use nostr::nips::nip44;
 use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
@@ -800,85 +799,13 @@ fn unavailable_signer_operation_is_retryable() {
     );
 }
 
-#[test]
-fn engine_associated_connection_and_signing_peak_is_six_executor_tasks() {
-    let (relay, remote, user, _closed, sign_seen) = spawn_unresponsive_remote_signer();
-    let uri = format!(
-        "bunker://{}?relay={}&secret=executor-peak",
-        remote.public_key().to_hex(),
-        url::form_urlencoded::byte_serialize(relay.as_bytes()).collect::<String>()
-    );
-    let executor = nmp_executor::Executor::new(nmp_executor::DEFAULT_MAX_TASKS).unwrap();
-    let cancellation = Nip46Cancellation::default();
-    let shutdown_cancellation = cancellation.clone();
-    let connect_cancellation = cancellation.clone();
-    let connect_executor = executor.clone();
-    let (signer_tx, signer_rx) = mpsc::channel();
-    let (release_connection_tx, release_connection_rx) = mpsc::channel();
-
-    executor
-        .spawn_with_cancel(
-            "NIP-46 connection",
-            move || {
-                shutdown_cancellation.cancel();
-                let _ = release_connection_tx.send(());
-            },
-            move || {
-                let signer = Nip46Signer::connect_bunker_observed_with_executor_and_cancellation(
-                    &uri,
-                    None,
-                    Nip46ClientMetadata::default(),
-                    Duration::from_secs(5),
-                    Arc::new(|_| {}),
-                    &connect_cancellation,
-                    connect_executor,
-                )
-                .unwrap();
-                signer_tx.send(signer).unwrap();
-                let _ = release_connection_rx.recv();
-            },
-        )
-        .unwrap();
-    let signer = signer_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    let unsigned = UnsignedEvent::new(
-        user.public_key(),
-        Timestamp::from(1_700_000_003),
-        Kind::TextNote,
-        Vec::new(),
-        "held signing peak",
-    );
-    let pending = match signer.sign(unsigned) {
-        SignerOp::Pending(pending) => pending,
-        SignerOp::Ready(_) => panic!("remote signing must be pending"),
-    };
-    sign_seen
-        .recv_timeout(Duration::from_secs(2))
-        .expect("mock signer must receive the held sign request");
-
-    let (cancel, cancelled) = pending_signer_cancellation();
-    let shutdown_cancel = cancel.clone();
-    executor
-        .spawn_with_cancel(
-            "engine signer waiter",
-            move || {
-                shutdown_cancel.cancel();
-            },
-            move || {
-                let _ = pending.recv_or_cancel(cancelled);
-            },
-        )
-        .unwrap();
-
-    assert_eq!(
-        executor.census().admitted,
-        6,
-        "connection, session, event-forward, switch-relays, mapper, and engine waiter"
-    );
-    executor.shutdown();
-    assert_eq!(executor.census().admitted, 0);
-    assert_eq!(executor.census().running, 0);
-    drop(signer);
-}
+// #704: `engine_associated_connection_and_signing_peak_is_six_executor_tasks`
+// was deleted. It asserted the per-session `nmp-executor` census reached
+// exactly six admitted blocking tasks (connection, session, event-forward,
+// switch-relays, mapper, engine waiter). Those tasks are now async futures on a
+// runtime that hold no OS thread and expose no census/admission count, so there
+// is nothing left to assert. The connect/sign round-trip it also exercised is
+// covered by the other mock-relay tests in this file.
 
 #[test]
 fn ignored_switch_relays_cannot_keep_the_session_alive_after_signer_drop() {

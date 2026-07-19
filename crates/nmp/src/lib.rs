@@ -67,8 +67,6 @@ pub use diagnostics::{
     AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, DiagnosticsSnapshot, FilterCoverageEntry,
     RelayDiagnosticsSnapshot,
 };
-#[doc(hidden)]
-pub use engine::NativeTaskCancel;
 pub use engine::RelayInformationRequestError;
 pub use engine::{
     AccountRegistration, AuthPolicyRegistration, CancelWriteError, CancelWriteOutcome, Engine,
@@ -95,8 +93,6 @@ pub fn nmp_threads_spawned() -> u64 {
 // auto-trait expansions.
 #[doc(hidden)]
 pub use nmp_engine::runtime::ConcurrentNext;
-#[doc(hidden)]
-pub use nmp_executor::{Reservation as NativeTaskReservation, StartedTask as StartedNativeTask};
 pub use relay_information::{
     RelayInformationCachePolicy, RelayInformationDocument, RelayInformationError,
     RelayInformationFreshness, RelayInformationLimitations, RelayInformationSnapshot,

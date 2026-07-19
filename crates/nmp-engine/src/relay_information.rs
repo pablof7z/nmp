@@ -31,7 +31,6 @@ const DEFAULT_FRESH_FOR: Duration = Duration::from_secs(60 * 60);
 const FETCH_DEADLINE: Duration = Duration::from_secs(3);
 const MAX_RESPONSE_BYTES: u64 = 256 * 1024;
 const CACHE_CAPACITY: usize = 256;
-const WAITER_CAPACITY: usize = 64;
 
 /// Whether a one-shot read may use a still-fresh cached result or must
 /// revalidate/refetch it. Concurrent reads of either kind still share one
@@ -53,12 +52,6 @@ pub enum RelayInformationFreshness {
 /// values; they are never represented as an empty relay document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelayInformationError {
-    WaiterSaturated {
-        capacity: usize,
-    },
-    ThreadUnavailable {
-        reason: String,
-    },
     ServiceClosed,
     /// Relay URL credentials are rejected before an HTTP request is
     /// constructed; reqwest otherwise converts them into a Basic
@@ -78,13 +71,6 @@ pub enum RelayInformationError {
 impl std::fmt::Display for RelayInformationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::WaiterSaturated { capacity } => write!(
-                f,
-                "NIP-11 acquisition refused: per-relay waiter capacity {capacity} is full"
-            ),
-            Self::ThreadUnavailable { reason } => {
-                write!(f, "NIP-11 acquisition thread unavailable: {reason}")
-            }
             Self::ServiceClosed => f.write_str("NIP-11 acquisition service is closed"),
             Self::CredentialedRelayUrl => {
                 f.write_str("NIP-11 acquisition refuses relay URL userinfo")
@@ -356,7 +342,7 @@ pub struct RelayInformationCapabilityEvidence {
 #[derive(Clone)]
 pub struct RelayInformationService {
     shared: Arc<Shared>,
-    executor: nmp_executor::Executor,
+    runtime: tokio::runtime::Handle,
     fetcher: Arc<dyn Fetcher>,
 }
 
@@ -366,7 +352,6 @@ struct Shared {
     next_flight: AtomicU64,
     next_waiter: AtomicU64,
     cache_capacity: usize,
-    waiter_capacity: usize,
 }
 
 /// Mechanism-only retention evidence used to falsify cache/flight ownership.
@@ -466,24 +451,17 @@ struct FetchResult {
 }
 
 trait Fetcher: Send + Sync + 'static {
-    fn fetch(
-        &self,
-        relay: &RelayUrl,
-        validators: Option<(&str, &str)>,
-    ) -> Result<FetchResult, RelayInformationError>;
-
-    fn fetch_cancellable(
-        &self,
-        relay: &RelayUrl,
-        validators: Option<(&str, &str)>,
+    /// Run one NIP-11 acquisition as an async task on the engine runtime.
+    /// The returned future selects on `cancellation` so engine teardown
+    /// interrupts DNS, connect, headers, and body (the production HTTP
+    /// implementation); deterministic test fetchers ignore it and are
+    /// released by their own harness.
+    fn fetch_cancellable_async<'a>(
+        &'a self,
+        relay: RelayUrl,
+        validators: Option<(String, String)>,
         cancellation: FetchCancellation,
-    ) -> Result<FetchResult, RelayInformationError> {
-        // Deterministic test fetchers are released by their test harness.
-        // The production HTTP implementation overrides this method so
-        // executor shutdown interrupts DNS, connect, headers, and body.
-        drop(cancellation);
-        self.fetch(relay, validators)
-    }
+    ) -> Pin<Box<dyn Future<Output = Result<FetchResult, RelayInformationError>> + Send + 'a>>;
 }
 
 struct HttpFetcher {
@@ -545,36 +523,50 @@ impl HttpFetcher {
     }
 }
 
-impl Fetcher for HttpFetcher {
+impl HttpFetcher {
+    /// Blocking one-shot fetch for the several synchronous `#[test]` callers.
+    /// It builds a private current-thread runtime and drives the same async
+    /// acquisition the engine runtime would; production never uses this path
+    /// (the engine spawns [`Fetcher::fetch_cancellable_async`] directly).
+    #[cfg(test)]
     fn fetch(
         &self,
         relay: &RelayUrl,
         validators: Option<(&str, &str)>,
     ) -> Result<FetchResult, RelayInformationError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| RelayInformationError::Http {
+                reason: format!("HTTP runtime: {error}"),
+            })?;
         let (_cancel, receiver) = oneshot::channel();
-        self.fetch_cancellable(relay, validators, FetchCancellation { receiver })
+        runtime.block_on(self.fetch_cancellable_async(
+            relay.clone(),
+            validators.map(|(etag, last_modified)| (etag.to_string(), last_modified.to_string())),
+            FetchCancellation { receiver },
+        ))
     }
+}
 
-    fn fetch_cancellable(
-        &self,
-        relay: &RelayUrl,
-        validators: Option<(&str, &str)>,
+impl Fetcher for HttpFetcher {
+    fn fetch_cancellable_async<'a>(
+        &'a self,
+        relay: RelayUrl,
+        validators: Option<(String, String)>,
         cancellation: FetchCancellation,
-    ) -> Result<FetchResult, RelayInformationError> {
-        // Issue #519 (HIGH): refuse a literal loopback/private/link-local/
-        // unspecified/onion HOST before a request is even built. This is the
-        // ONLY defense for an IP-literal relay URL (`ws://127.0.0.1`) — a
-        // literal address never reaches the DNS resolver below, so the
-        // resolver's own filtering can't see it. Matches the SAME
-        // classification `nmp-transport::classify_relay_host` applies at
-        // discovery-time admission; an operator-opted-in host still passes.
-        reject_unadmitted_local_host(relay, &self.allowed_local_hosts)?;
-        let url = relay_http_url(relay)?;
-        let validators =
-            validators.map(|(etag, last_modified)| (etag.to_string(), last_modified.to_string()));
-        let runtime = http_runtime()?;
-        let allowed_local_hosts = Arc::clone(&self.allowed_local_hosts);
-        runtime.block_on(async move {
+    ) -> Pin<Box<dyn Future<Output = Result<FetchResult, RelayInformationError>> + Send + 'a>> {
+        Box::pin(async move {
+            // Issue #519 (HIGH): refuse a literal loopback/private/link-local/
+            // unspecified/onion HOST before a request is even built. This is
+            // the ONLY defense for an IP-literal relay URL (`ws://127.0.0.1`)
+            // — a literal address never reaches the DNS resolver below, so the
+            // resolver's own filtering can't see it. Matches the SAME
+            // classification `nmp-transport::classify_relay_host` applies at
+            // discovery-time admission; an operator-opted-in host still passes.
+            reject_unadmitted_local_host(&relay, &self.allowed_local_hosts)?;
+            let url = relay_http_url(&relay)?;
+            let allowed_local_hosts = Arc::clone(&self.allowed_local_hosts);
             let request = fetch_http(
                 url,
                 validators,
@@ -623,16 +615,6 @@ fn reject_unadmitted_local_host(
         });
     }
     Ok(())
-}
-
-fn http_runtime() -> Result<tokio::runtime::Runtime, RelayInformationError> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .map_err(|error| RelayInformationError::ThreadUnavailable {
-            reason: format!("HTTP runtime: {error}"),
-        })
 }
 
 async fn fetch_http(
@@ -895,13 +877,8 @@ fn relay_http_url(relay: &RelayUrl) -> Result<UncredentialedHttpUrl, RelayInform
 }
 
 impl RelayInformationService {
-    pub fn new(executor: nmp_executor::Executor) -> Self {
-        Self::with_executor_and_limits(
-            executor,
-            Arc::new(HttpFetcher::new()),
-            CACHE_CAPACITY,
-            WAITER_CAPACITY,
-        )
+    pub fn new(runtime: tokio::runtime::Handle) -> Self {
+        Self::with_runtime_and_limits(runtime, Arc::new(HttpFetcher::new()), CACHE_CAPACITY)
     }
 
     /// Production constructor (issue #519): identical to [`Self::new`] but
@@ -911,14 +888,13 @@ impl RelayInformationService {
     /// reachable — see `EngineThread::spawn_with_native_task_limit`, the one
     /// production call site.
     pub(crate) fn new_with_admission(
-        executor: nmp_executor::Executor,
+        runtime: tokio::runtime::Handle,
         allowed_local_hosts: Arc<BTreeSet<String>>,
     ) -> Self {
-        Self::with_executor_and_limits(
-            executor,
+        Self::with_runtime_and_limits(
+            runtime,
             Arc::new(HttpFetcher::new_with_admission(allowed_local_hosts)),
             CACHE_CAPACITY,
-            WAITER_CAPACITY,
         )
     }
 
@@ -932,27 +908,30 @@ impl RelayInformationService {
         fetcher: Arc<dyn Fetcher>,
         cache_capacity: usize,
     ) -> std::io::Result<Self> {
-        let executor = nmp_executor::Executor::new(nmp_executor::DEFAULT_MAX_TASKS)
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-        Ok(Self::with_executor_and_limits(
-            executor,
+        // The engine owns the runtime in production; a test that only needs a
+        // fetcher builds and intentionally leaks a small multi-thread runtime
+        // so its handle stays valid for the whole test (a bare `Handle` does
+        // not keep the runtime alive). Four workers keep several concurrently
+        // gated flights from deadlocking their blocking test harness.
+        let runtime = Box::leak(Box::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .enable_all()
+                .build()?,
+        ));
+        Ok(Self::with_runtime_and_limits(
+            runtime.handle().clone(),
             fetcher,
             cache_capacity,
-            WAITER_CAPACITY,
         ))
     }
 
-    fn with_executor_and_limits(
-        executor: nmp_executor::Executor,
+    fn with_runtime_and_limits(
+        runtime: tokio::runtime::Handle,
         fetcher: Arc<dyn Fetcher>,
         cache_capacity: usize,
-        waiter_capacity: usize,
     ) -> Self {
         assert!(cache_capacity > 0, "NIP-11 cache capacity must be non-zero");
-        assert!(
-            waiter_capacity > 0,
-            "NIP-11 waiter capacity must be non-zero"
-        );
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 closed: false,
@@ -962,11 +941,10 @@ impl RelayInformationService {
             next_flight: AtomicU64::new(1),
             next_waiter: AtomicU64::new(1),
             cache_capacity,
-            waiter_capacity,
         });
         Self {
             shared,
-            executor,
+            runtime,
             fetcher,
         }
     }
@@ -1067,75 +1045,17 @@ impl RelayInformationService {
             }
         }
         if let Some(flight) = entry.flight.as_mut() {
-            if flight.waiters.len() >= self.shared.waiter_capacity {
-                return Err(RelayInformationError::WaiterSaturated {
-                    capacity: self.shared.waiter_capacity,
-                });
-            }
             let generation = flight.generation;
             flight
                 .waiters
                 .push(waiter.take().expect("waiter is present"));
             return Ok(Some((generation, waiter_id)));
         }
-        if entry.cached.is_none() {
-            state.entries.remove(&relay);
-        }
-        drop(state);
 
-        // Reservation precedes publication: a zero-queue refusal cannot
-        // create a flight or consume caller intent.
-        let reservation = self
-            .executor
-            .reserve("NIP-11 acquisition")
-            .map_err(|error| RelayInformationError::ThreadUnavailable {
-                reason: error.to_string(),
-            })?;
-
-        // Another caller may have won the flight while this caller reserved.
-        // Re-check every condition before publishing this generation.
-        let mut state = self
-            .shared
-            .state
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if state.closed {
-            return Err(RelayInformationError::ServiceClosed);
-        }
-        let access = self.shared.access_clock.fetch_add(1, Ordering::Relaxed);
-        let entry = state.entries.entry(relay.clone()).or_default();
-        entry.last_access = access;
-        if policy == RelayInformationCachePolicy::UseCache {
-            if let Some(cached) = &entry.cached {
-                if now_secs() < cached.fresh_until {
-                    let snapshot = cached
-                        .snapshot
-                        .with_read_state(RelayInformationFreshness::Fresh, None);
-                    drop(state);
-                    drop(reservation);
-                    waiter
-                        .take()
-                        .expect("waiter is present")
-                        .deliver(Ok(snapshot));
-                    return Ok(None);
-                }
-            }
-        }
-        if let Some(flight) = entry.flight.as_mut() {
-            if flight.waiters.len() >= self.shared.waiter_capacity {
-                return Err(RelayInformationError::WaiterSaturated {
-                    capacity: self.shared.waiter_capacity,
-                });
-            }
-            let generation = flight.generation;
-            flight
-                .waiters
-                .push(waiter.take().expect("waiter is present"));
-            drop(state);
-            drop(reservation);
-            return Ok(Some((generation, waiter_id)));
-        }
-
+        // No live flight: publish this generation and spawn its fetch as an
+        // async task on the engine-owned runtime. There is no admission
+        // reservation and no waiter-capacity cap (#704); the flight simply
+        // becomes observable and a single async task services all its waiters.
         let generation = self.shared.next_flight.fetch_add(1, Ordering::Relaxed);
         let (cancel_sender, cancel_receiver) = oneshot::channel();
         let cancellation = Arc::new(CancelSignal {
@@ -1144,36 +1064,14 @@ impl RelayInformationService {
         entry.flight = Some(Flight {
             generation,
             waiters: vec![waiter.take().expect("waiter is present")],
-            cancellation: Arc::clone(&cancellation),
+            cancellation,
         });
-
-        let cancel_for_executor = Arc::clone(&cancellation);
-        let starter = match reservation.start_with_cancel(move || {
-            cancel_for_executor.cancel();
-        }) {
-            Ok(starter) => starter,
-            Err(error) => {
-                if entry
-                    .flight
-                    .as_ref()
-                    .is_some_and(|flight| flight.generation == generation)
-                {
-                    entry.flight = None;
-                }
-                if entry.cached.is_none() {
-                    state.entries.remove(&relay);
-                }
-                return Err(RelayInformationError::ThreadUnavailable {
-                    reason: error.to_string(),
-                });
-            }
-        };
         drop(state);
 
         let shared = Arc::clone(&self.shared);
         let fetcher = Arc::clone(&self.fetcher);
         let task_relay = relay.clone();
-        starter.run(move || {
+        self.runtime.spawn(async move {
             worker(
                 shared,
                 task_relay,
@@ -1182,7 +1080,8 @@ impl RelayInformationService {
                 FetchCancellation {
                     receiver: cancel_receiver,
                 },
-            );
+            )
+            .await;
         });
         Ok(Some((generation, waiter_id)))
     }
@@ -1278,7 +1177,7 @@ impl RelayInformationService {
     }
 }
 
-fn worker(
+async fn worker(
     shared: Arc<Shared>,
     relay: RelayUrl,
     generation: u64,
@@ -1310,10 +1209,11 @@ fn worker(
         .as_ref()
         .and_then(|value| value.snapshot.last_modified())
         .unwrap_or("");
-    let validators =
-        (!etag.is_empty() || !last_modified.is_empty()).then_some((etag, last_modified));
+    let validators = (!etag.is_empty() || !last_modified.is_empty())
+        .then(|| (etag.to_string(), last_modified.to_string()));
     let result = fetcher
-        .fetch_cancellable(&relay, validators, cancellation)
+        .fetch_cancellable_async(relay.clone(), validators, cancellation)
+        .await
         .and_then(|fetched| finish_fetch(&relay, cached.as_ref(), fetched));
     complete(&shared, &relay, generation, result);
 }
@@ -1545,9 +1445,7 @@ fn complete(
             Err(error) => {
                 let allows_stale = !matches!(
                     error,
-                    RelayInformationError::WaiterSaturated { .. }
-                        | RelayInformationError::ThreadUnavailable { .. }
-                        | RelayInformationError::ServiceClosed
+                    RelayInformationError::ServiceClosed
                         | RelayInformationError::CredentialedRelayUrl
                 );
                 match state
@@ -1722,15 +1620,24 @@ mod tests {
         hickory_resolver::config::ResolverConfig::from_parts(None, Vec::new(), vec![nameserver])
     }
 
-    fn local_relay_information_service(
-        executor: nmp_executor::Executor,
-    ) -> RelayInformationService {
-        RelayInformationService::with_executor_and_limits(
-            executor,
+    fn local_relay_information_service(runtime: tokio::runtime::Handle) -> RelayInformationService {
+        RelayInformationService::with_runtime_and_limits(
+            runtime,
             Arc::new(HttpFetcher::new_with_admission(loopback_admission())),
             CACHE_CAPACITY,
-            WAITER_CAPACITY,
         )
+    }
+
+    /// A small multi-thread runtime for tests that drive real flights. Four
+    /// workers keep several concurrently gated flights (whose test fetchers
+    /// block a worker thread) from deadlocking. Callers keep it alive for the
+    /// test's duration and `drop` it in place of the old `executor.shutdown()`.
+    fn test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap()
     }
 
     struct CountingFetcher {
@@ -1743,72 +1650,38 @@ mod tests {
         release: Receiver<()>,
     }
 
-    struct MaxBodyGatedFetcher {
-        started: Sender<()>,
-        release: Receiver<()>,
-        body: Arc<String>,
-        ungated_calls: usize,
-        calls: AtomicUsize,
-    }
-
     struct MalformedThenGoodFetcher {
         calls: AtomicUsize,
     }
 
     impl Fetcher for GatedFetcher {
-        fn fetch(
-            &self,
-            _relay: &RelayUrl,
-            _validators: Option<(&str, &str)>,
-        ) -> Result<FetchResult, RelayInformationError> {
-            let _ = self.started.send(());
-            self.release
-                .recv()
-                .map_err(|_| RelayInformationError::ServiceClosed)?;
-            Ok(FetchResult {
-                raw_json: Some(r#"{"name":"Async"}"#.to_string()),
-                etag: None,
-                last_modified: None,
-                cache_control: None,
-                expires: None,
-                fresh_for: Some(DEFAULT_FRESH_FOR),
-            })
-        }
-    }
-
-    impl Fetcher for MaxBodyGatedFetcher {
-        fn fetch(
-            &self,
-            _relay: &RelayUrl,
-            _validators: Option<(&str, &str)>,
-        ) -> Result<FetchResult, RelayInformationError> {
-            // Materialize the response before publishing `started`, so each
-            // gated worker is known to hold one complete maximum-size body.
-            let raw_json = (*self.body).clone();
-            if self.calls.fetch_add(1, Ordering::SeqCst) >= self.ungated_calls {
-                let _ = self.started.send(());
-                self.release
+        fn fetch_cancellable_async<'a>(
+            &'a self,
+            _relay: RelayUrl,
+            _validators: Option<(String, String)>,
+            _cancellation: FetchCancellation,
+        ) -> Pin<Box<dyn Future<Output = Result<FetchResult, RelayInformationError>> + Send + 'a>>
+        {
+            let started = self.started.clone();
+            let release = self.release.clone();
+            Box::pin(async move {
+                let _ = started.send(());
+                // Deliberately a blocking recv: this test double stands in for
+                // an HTTP worker stuck mid-request, occupying a runtime worker
+                // thread until its harness releases it.
+                release
                     .recv()
                     .map_err(|_| RelayInformationError::ServiceClosed)?;
-            }
-            Ok(FetchResult {
-                raw_json: Some(raw_json),
-                etag: None,
-                last_modified: None,
-                cache_control: None,
-                expires: None,
-                fresh_for: Some(DEFAULT_FRESH_FOR),
+                Ok(FetchResult {
+                    raw_json: Some(r#"{"name":"Async"}"#.to_string()),
+                    etag: None,
+                    last_modified: None,
+                    cache_control: None,
+                    expires: None,
+                    fresh_for: Some(DEFAULT_FRESH_FOR),
+                })
             })
         }
-    }
-
-    fn maximum_valid_body() -> String {
-        let prefix = r#"{"description":""#;
-        let suffix = r#""}"#;
-        let content = "x".repeat(MAX_RESPONSE_BYTES as usize - prefix.len() - suffix.len());
-        let body = format!("{prefix}{content}{suffix}");
-        assert_eq!(body.len(), MAX_RESPONSE_BYTES as usize);
-        body
     }
 
     struct ChannelWake(std::sync::mpsc::Sender<()>);
@@ -1834,48 +1707,57 @@ mod tests {
     }
 
     impl Fetcher for CountingFetcher {
-        fn fetch(
-            &self,
-            _relay: &RelayUrl,
-            _validators: Option<(&str, &str)>,
-        ) -> Result<FetchResult, RelayInformationError> {
+        fn fetch_cancellable_async<'a>(
+            &'a self,
+            _relay: RelayUrl,
+            _validators: Option<(String, String)>,
+            _cancellation: FetchCancellation,
+        ) -> Pin<Box<dyn Future<Output = Result<FetchResult, RelayInformationError>> + Send + 'a>>
+        {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
-            if self.fail_after_first && call > 0 {
-                return Err(RelayInformationError::Http {
-                    reason: "offline".to_string(),
-                });
-            }
-            Ok(FetchResult {
-                raw_json: Some(
-                    r#"{"name":"Example","supported_nips":[11,50,77],"limitation":{"max_subscriptions":20,"max_limit":500,"auth_required":true,"future_limit":"kept"},"future":{"x":1}}"#.to_string(),
-                ),
-                etag: Some("v1".to_string()),
-                last_modified: None,
-                cache_control: Some("max-age=3600".to_string()),
-                expires: None,
-                fresh_for: Some(DEFAULT_FRESH_FOR),
+            let fail_after_first = self.fail_after_first;
+            Box::pin(async move {
+                if fail_after_first && call > 0 {
+                    return Err(RelayInformationError::Http {
+                        reason: "offline".to_string(),
+                    });
+                }
+                Ok(FetchResult {
+                    raw_json: Some(
+                        r#"{"name":"Example","supported_nips":[11,50,77],"limitation":{"max_subscriptions":20,"max_limit":500,"auth_required":true,"future_limit":"kept"},"future":{"x":1}}"#.to_string(),
+                    ),
+                    etag: Some("v1".to_string()),
+                    last_modified: None,
+                    cache_control: Some("max-age=3600".to_string()),
+                    expires: None,
+                    fresh_for: Some(DEFAULT_FRESH_FOR),
+                })
             })
         }
     }
 
     impl Fetcher for MalformedThenGoodFetcher {
-        fn fetch(
-            &self,
-            _relay: &RelayUrl,
-            _validators: Option<(&str, &str)>,
-        ) -> Result<FetchResult, RelayInformationError> {
+        fn fetch_cancellable_async<'a>(
+            &'a self,
+            _relay: RelayUrl,
+            _validators: Option<(String, String)>,
+            _cancellation: FetchCancellation,
+        ) -> Pin<Box<dyn Future<Output = Result<FetchResult, RelayInformationError>> + Send + 'a>>
+        {
             let raw_json = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 "not-json"
             } else {
                 r#"{"name":"Recovered"}"#
             };
-            Ok(FetchResult {
-                raw_json: Some(raw_json.to_string()),
-                etag: None,
-                last_modified: None,
-                cache_control: None,
-                expires: None,
-                fresh_for: Some(DEFAULT_FRESH_FOR),
+            Box::pin(async move {
+                Ok(FetchResult {
+                    raw_json: Some(raw_json.to_string()),
+                    etag: None,
+                    last_modified: None,
+                    cache_control: None,
+                    expires: None,
+                    fresh_for: Some(DEFAULT_FRESH_FOR),
+                })
             })
         }
     }
@@ -1908,98 +1790,11 @@ mod tests {
         assert_eq!(a.document_revision().len(), 64);
     }
 
-    #[test]
-    fn twelve_maximum_flights_fan_out_to_64_waiters_without_payload_copies() {
-        const FLIGHTS: usize = nmp_executor::DEFAULT_MAX_TASKS;
-        const WAITERS: usize = WAITER_CAPACITY;
-
-        let (started_tx, started_rx) = bounded(FLIGHTS);
-        let (release_tx, release_rx) = bounded(FLIGHTS);
-        let executor = nmp_executor::Executor::new(FLIGHTS).unwrap();
-        let service = RelayInformationService::with_executor_and_limits(
-            executor.clone(),
-            Arc::new(MaxBodyGatedFetcher {
-                started: started_tx,
-                release: release_rx,
-                body: Arc::new(maximum_valid_body()),
-                ungated_calls: CACHE_CAPACITY,
-                calls: AtomicUsize::new(0),
-            }),
-            CACHE_CAPACITY,
-            WAITERS,
-        );
-
-        let relays = (0..CACHE_CAPACITY)
-            .map(|index| RelayUrl::parse(&format!("wss://fanout-{index}.example")).unwrap())
-            .collect::<Vec<_>>();
-        for relay in &relays {
-            service
-                .get(relay.clone(), RelayInformationCachePolicy::Refresh)
-                .unwrap();
-        }
-        let full_cache = service.retention_census();
-        assert_eq!(full_cache.cached_entries, CACHE_CAPACITY);
-        assert_eq!(full_cache.cached_payloads, CACHE_CAPACITY);
-        assert_eq!(
-            full_cache.cached_raw_body_bytes,
-            CACHE_CAPACITY * MAX_RESPONSE_BYTES as usize
-        );
-
-        let mut receivers = Vec::with_capacity(FLIGHTS * WAITERS);
-        for relay in relays.iter().take(FLIGHTS) {
-            for _ in 0..WAITERS {
-                receivers.push(
-                    service
-                        .request(relay.clone(), RelayInformationCachePolicy::Refresh)
-                        .unwrap(),
-                );
-            }
-        }
-        for _ in 0..FLIGHTS {
-            started_rx.recv().unwrap();
-        }
-
-        let census = service.retention_census();
-        assert_eq!(census.active_flights, FLIGHTS);
-        assert_eq!(census.admitted_waiters, FLIGHTS * WAITERS);
-        assert_eq!(census.cached_entries, CACHE_CAPACITY);
-        assert_eq!(census.cached_payloads, CACHE_CAPACITY);
-        assert_eq!(
-            census.cached_raw_body_bytes + FLIGHTS * MAX_RESPONSE_BYTES as usize,
-            70_254_592,
-            "256 cached bodies plus 12 active response bodies are exactly 67 MiB"
-        );
-
-        for _ in 0..FLIGHTS {
-            release_tx.send(()).unwrap();
-        }
-
-        let mut identities = HashMap::<usize, usize>::new();
-        for receiver in receivers {
-            let snapshot = receiver.recv().unwrap().unwrap();
-            assert_eq!(snapshot.raw_json().len(), MAX_RESPONSE_BYTES as usize);
-            *identities.entry(snapshot.payload_identity()).or_default() += 1;
-        }
-        assert_eq!(identities.len(), FLIGHTS);
-        assert!(identities.values().all(|count| *count == WAITERS));
-        assert_eq!(
-            FLIGHTS * WAITERS * std::mem::size_of::<RelayInformationSnapshot>(),
-            6_144,
-            "768 waiter results retain one pointer each on this qualified 64-bit target"
-        );
-
-        let census = service.retention_census();
-        assert_eq!(census.cached_entries, CACHE_CAPACITY);
-        assert_eq!(census.cached_payloads, CACHE_CAPACITY);
-        assert_eq!(
-            census.cached_raw_body_bytes,
-            CACHE_CAPACITY * MAX_RESPONSE_BYTES as usize
-        );
-        assert_eq!(census.active_flights, 0);
-        assert_eq!(census.admitted_waiters, 0);
-        service.close();
-        executor.shutdown();
-    }
+    // #704: deleted — asserted the removed executor/waiter admission-capacity
+    // model: exactly DEFAULT_MAX_TASKS (12) concurrent flights each fanning out
+    // to WAITER_CAPACITY (64) admitted waiters, plus executor.shutdown(). Both
+    // the flight and per-relay waiter caps are gone; flights are now unbounded
+    // async tasks with no admission ceiling to fan out against.
 
     #[test]
     fn async_cold_miss_suspends_while_http_worker_is_blocked() {
@@ -2183,8 +1978,8 @@ mod tests {
             stream.write_all(response.as_bytes()).unwrap();
         });
         let relay = RelayUrl::parse(&format!("ws://{address}")).unwrap();
-        let executor = nmp_executor::Executor::new(2).unwrap();
-        let service = local_relay_information_service(executor.clone());
+        let rt = test_runtime();
+        let service = local_relay_information_service(rt.handle().clone());
         let value = service
             .get(relay.clone(), RelayInformationCachePolicy::Refresh)
             .unwrap();
@@ -2198,7 +1993,7 @@ mod tests {
             RelayInformationFreshness::Stale
         );
         service.close();
-        executor.shutdown();
+        drop(rt);
     }
 
     #[test]
@@ -2219,8 +2014,8 @@ mod tests {
             stream.write_all(response.as_bytes()).unwrap();
         });
         let relay = RelayUrl::parse(&format!("ws://{address}")).unwrap();
-        let executor = nmp_executor::Executor::new(2).unwrap();
-        let service = local_relay_information_service(executor.clone());
+        let rt = test_runtime();
+        let service = local_relay_information_service(rt.handle().clone());
         let value = service
             .get(relay, RelayInformationCachePolicy::Refresh)
             .unwrap();
@@ -2230,7 +2025,7 @@ mod tests {
         assert!(value.fresh_until().saturating_sub(value.fetched_at()) >= 115);
         assert!(value.fresh_until().saturating_sub(value.fetched_at()) <= 120);
         service.close();
-        executor.shutdown();
+        drop(rt);
     }
 
     #[test]
@@ -2303,8 +2098,8 @@ mod tests {
             }
         });
         let relay = RelayUrl::parse(&format!("ws://{address}")).unwrap();
-        let executor = nmp_executor::Executor::new(2).unwrap();
-        let service = local_relay_information_service(executor.clone());
+        let rt = test_runtime();
+        let service = local_relay_information_service(rt.handle().clone());
 
         let maximum = service
             .get(relay.clone(), RelayInformationCachePolicy::Refresh)
@@ -2317,7 +2112,7 @@ mod tests {
 
         server.join().unwrap();
         service.close();
-        executor.shutdown();
+        drop(rt);
     }
 
     #[test]
@@ -2383,7 +2178,6 @@ mod tests {
             next_flight: AtomicU64::new(20_000),
             next_waiter: AtomicU64::new(1),
             cache_capacity: CACHE_CAPACITY,
-            waiter_capacity: WAITER_CAPACITY,
         };
         let completed = finish_fetch(
             &relay_257,
@@ -2447,158 +2241,32 @@ mod tests {
         );
     }
 
-    #[test]
-    fn waiter_saturation_is_typed_and_close_resolves_every_admitted_waiter() {
-        let (started_tx, started_rx) = bounded(1);
-        let (release_tx, release_rx) = bounded(1);
-        let executor = nmp_executor::Executor::new(2).unwrap();
-        let service = RelayInformationService::with_executor_and_limits(
-            executor.clone(),
-            Arc::new(GatedFetcher {
-                started: started_tx,
-                release: release_rx,
-            }),
-            2,
-            2,
-        );
-        let relay = RelayUrl::parse("wss://saturated.example").unwrap();
-        let first = service
-            .request(relay.clone(), RelayInformationCachePolicy::Refresh)
-            .unwrap();
-        started_rx.recv().unwrap();
-        let second = service
-            .request(relay.clone(), RelayInformationCachePolicy::Refresh)
-            .unwrap();
-        assert!(matches!(
-            service.request(relay, RelayInformationCachePolicy::Refresh),
-            Err(RelayInformationError::WaiterSaturated { capacity: 2 })
-        ));
+    // #704: deleted — asserted the removed per-relay `WaiterSaturated`
+    // admission cap (a third request to a saturated flight was refused with
+    // `WaiterSaturated { capacity: 2 }`). With async flights there is no
+    // waiter-capacity ceiling, so no such refusal exists; close-drains-waiters
+    // on ServiceClosed is still covered by the retained close tests below.
 
-        service.close();
-        assert_eq!(
-            first.recv().unwrap(),
-            Err(RelayInformationError::ServiceClosed)
-        );
-        assert_eq!(
-            second.recv().unwrap(),
-            Err(RelayInformationError::ServiceClosed)
-        );
-        release_tx.send(()).unwrap();
-        executor.shutdown();
-    }
+    // #704: deleted — asserted DEFAULT_MAX_TASKS (12) flights each draining a
+    // full WAITER_CAPACITY (64) waiter set plus executor.census() teardown.
+    // Both capacity constants are gone; flights and waiters are now unbounded.
 
-    #[test]
-    fn close_drains_twelve_full_waiter_sets_without_retaining_flights() {
-        const FLIGHTS: usize = nmp_executor::DEFAULT_MAX_TASKS;
-        const WAITERS: usize = WAITER_CAPACITY;
-
-        let (started_tx, started_rx) = bounded(FLIGHTS);
-        let (release_tx, release_rx) = bounded(FLIGHTS);
-        let executor = nmp_executor::Executor::new(FLIGHTS).unwrap();
-        let service = RelayInformationService::with_executor_and_limits(
-            executor.clone(),
-            Arc::new(GatedFetcher {
-                started: started_tx,
-                release: release_rx,
-            }),
-            CACHE_CAPACITY,
-            WAITERS,
-        );
-        let mut receivers = Vec::with_capacity(FLIGHTS * WAITERS);
-        for flight in 0..FLIGHTS {
-            let relay = RelayUrl::parse(&format!("wss://shutdown-{flight}.example")).unwrap();
-            for _ in 0..WAITERS {
-                receivers.push(
-                    service
-                        .request(relay.clone(), RelayInformationCachePolicy::Refresh)
-                        .unwrap(),
-                );
-            }
-        }
-        for _ in 0..FLIGHTS {
-            started_rx.recv().unwrap();
-        }
-        assert_eq!(
-            service.retention_census().admitted_waiters,
-            FLIGHTS * WAITERS
-        );
-
-        service.close();
-        for receiver in receivers {
-            assert_eq!(
-                receiver.recv().unwrap(),
-                Err(RelayInformationError::ServiceClosed)
-            );
-        }
-        let census = service.retention_census();
-        assert_eq!(census.cached_entries, 0);
-        assert_eq!(census.cached_payloads, 0);
-        assert_eq!(census.cached_raw_body_bytes, 0);
-        assert_eq!(census.active_flights, 0);
-        assert_eq!(census.admitted_waiters, 0);
-        assert!(matches!(
-            service.request(
-                RelayUrl::parse("wss://closed.example").unwrap(),
-                RelayInformationCachePolicy::Refresh
-            ),
-            Err(RelayInformationError::ServiceClosed)
-        ));
-
-        for _ in 0..FLIGHTS {
-            release_tx.send(()).unwrap();
-        }
-        executor.shutdown();
-        assert_eq!(executor.census().admitted, 0);
-        assert_eq!(executor.census().running, 0);
-        assert!(!executor.census().accepting);
-    }
-
-    #[test]
-    fn executor_saturation_refuses_without_publishing_a_flight() {
-        let executor = nmp_executor::Executor::new(1).unwrap();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let cancel = release_tx.clone();
-        executor
-            .spawn_with_cancel(
-                "held obligation",
-                move || {
-                    let _ = cancel.send(());
-                },
-                move || {
-                    let _ = release_rx.recv();
-                },
-            )
-            .unwrap();
-        let service = RelayInformationService::new(executor.clone());
-        let relay = RelayUrl::parse("wss://refused.example").unwrap();
-        // #680 removed the global `ExecutorSaturated` concept; a full internal
-        // adapter pool now surfaces the class-specific `ThreadUnavailable`
-        // refusal. The real semantic preserved here: the refusal publishes no
-        // flight and consumes no caller intent.
-        assert!(matches!(
-            service.request(relay, RelayInformationCachePolicy::Refresh),
-            Err(RelayInformationError::ThreadUnavailable { .. })
-        ));
-        assert!(service.shared.state.lock().unwrap().entries.is_empty());
-        assert_eq!(executor.census().admitted, 1);
-        assert_eq!(executor.census().running, 1);
-        service.close();
-        release_tx.send(()).unwrap();
-        executor.shutdown();
-    }
+    // #704: deleted — asserted the removed executor's zero-queue saturation
+    // refusal (`ThreadUnavailable`) when the internal adapter pool was full,
+    // publishing no flight. There is no admission pool to saturate now; every
+    // flight spawns unconditionally on the engine runtime.
 
     #[test]
     fn dropping_the_last_async_waiter_cancels_its_exact_generation() {
         let (started_tx, started_rx) = bounded(1);
         let (release_tx, release_rx) = bounded(1);
-        let executor = nmp_executor::Executor::new(1).unwrap();
-        let service = RelayInformationService::with_executor_and_limits(
-            executor.clone(),
+        let rt = test_runtime();
+        let service = RelayInformationService::with_runtime_and_limits(
+            rt.handle().clone(),
             Arc::new(GatedFetcher {
                 started: started_tx,
                 release: release_rx,
             }),
-            2,
             2,
         );
         let relay = RelayUrl::parse("wss://cancelled.example").unwrap();
@@ -2616,8 +2284,11 @@ mod tests {
             .unwrap()
             .entries
             .contains_key(&relay));
+        // Release the gated worker so its runtime task can finish before the
+        // runtime is dropped (the fetcher blocks on this recv, ignoring the
+        // generation cancellation the dropped waiter fired).
         release_tx.send(()).unwrap();
-        executor.shutdown();
+        drop(rt);
     }
 
     #[test]
@@ -2652,7 +2323,6 @@ mod tests {
             next_flight: AtomicU64::new(3),
             next_waiter: AtomicU64::new(3),
             cache_capacity: 2,
-            waiter_capacity: 2,
         };
         let old = finish_fetch(
             &relay,
@@ -2725,8 +2395,8 @@ mod tests {
             let mut sink = Vec::new();
             let _ = stream.read_to_end(&mut sink);
         });
-        let executor = nmp_executor::Executor::new(2).unwrap();
-        let service = local_relay_information_service(executor.clone());
+        let rt = test_runtime();
+        let service = local_relay_information_service(rt.handle().clone());
         let retained = service.clone();
         let relay = RelayUrl::parse(&format!("ws://{address}")).unwrap();
         let receiver = service
@@ -2736,7 +2406,7 @@ mod tests {
 
         let started = Instant::now();
         service.close();
-        executor.shutdown();
+        drop(rt);
         assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(
             receiver.recv().unwrap(),
@@ -2906,11 +2576,10 @@ mod tests {
             let _ = release_dns_rx.recv();
         });
         let resolver = resolver_config_for_dns_server(dns_address);
-        let executor = nmp_executor::Executor::new(1).unwrap();
-        let service = RelayInformationService::with_executor_and_limits(
-            executor.clone(),
+        let rt = test_runtime();
+        let service = RelayInformationService::with_runtime_and_limits(
+            rt.handle().clone(),
             Arc::new(HttpFetcher::with_resolver_config(resolver)),
-            2,
             2,
         );
         let relay = RelayUrl::parse("ws://held-dns.nmp.test:80").unwrap();
@@ -2927,25 +2596,20 @@ mod tests {
             result.recv_timeout(Duration::from_secs(1)),
             Ok(Err(RelayInformationError::ServiceClosed))
         ));
-        executor.shutdown();
+        // Dropping the runtime joins the cancelled fetch task; the held DNS
+        // query's future is dropped when cancellation fires, so teardown stays
+        // inside the public <5s lifecycle bound.
+        drop(rt);
         assert!(started.elapsed() < Duration::from_secs(5));
-        assert_eq!(executor.census().admitted, 0);
-        assert_eq!(executor.census().running, 0);
-        assert!(!executor.census().accepting);
 
         release_dns_tx.send(()).unwrap();
         dns_server.join().unwrap();
     }
 
-    #[test]
-    fn http_runtime_has_one_current_thread_worker_and_no_tokio_worker_pool() {
-        let runtime = http_runtime().unwrap();
-        assert_eq!(
-            runtime.handle().runtime_flavor(),
-            tokio::runtime::RuntimeFlavor::CurrentThread
-        );
-        assert_eq!(runtime.metrics().num_workers(), 1);
-    }
+    // #704: deleted — asserted the internal per-fetch `http_runtime()` was a
+    // single-worker current-thread runtime with no tokio worker pool. That
+    // per-fetch runtime is gone; fetches now run as async tasks on the shared
+    // engine-owned multi-thread runtime, so the invariant no longer applies.
 
     #[test]
     fn websocket_urls_map_to_http_without_losing_path() {

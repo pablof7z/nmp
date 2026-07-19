@@ -1904,7 +1904,6 @@ name = "nmp"
 version = "0.1.0"
 dependencies = [
  "nmp-engine",
- "nmp-executor",
  "nmp-grammar",
  "nmp-resolver",
  "nmp-router",
@@ -1913,6 +1912,7 @@ dependencies = [
  "nmp-transport",
  "nostr 0.44.4",
  "tempfile",
+ "tokio",
  "tungstenite 0.29.0",
 ]
 
@@ -2084,6 +2084,7 @@ dependencies = [
  "nmp-ownership",
  "nostr 0.44.4",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -2174,6 +2175,7 @@ dependencies = [
  "nostr 0.44.4",
  "serde",
  "serde_json",
+ "tokio",
  "tungstenite 0.29.0",
  "url",
  "zeroize",

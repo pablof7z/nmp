@@ -377,19 +377,11 @@ impl std::fmt::Display for FfiError {
 
 impl From<nmp::RelayInformationRequestError> for FfiError {
     fn from(error: nmp::RelayInformationRequestError) -> Self {
+        // #704: `WaiterSaturated`/`ThreadUnavailable` were deleted from the
+        // NIP-11 error — the async runtime has no waiter/thread admission
+        // refusal. Real acquisition failures keep their domain kinds.
         match error {
             nmp::RelayInformationRequestError::Engine(error) => error.into(),
-            nmp::RelayInformationRequestError::Acquisition(
-                nmp::RelayInformationError::WaiterSaturated { capacity },
-            ) => Self::RelayInformationWaitersSaturated {
-                capacity: capacity as u64,
-            },
-            nmp::RelayInformationRequestError::Acquisition(
-                nmp::RelayInformationError::ThreadUnavailable { reason },
-            ) => Self::ThreadUnavailable {
-                component: "NIP-11 acquisition".to_string(),
-                reason,
-            },
             nmp::RelayInformationRequestError::Acquisition(error) => {
                 Self::RelayInformationUnavailable {
                     kind: relay_information_error_kind(error),
@@ -408,14 +400,6 @@ pub fn relay_information_error_kind(
     error: nmp::RelayInformationError,
 ) -> FfiRelayInformationErrorKind {
     match error {
-        nmp::RelayInformationError::WaiterSaturated { capacity } => {
-            FfiRelayInformationErrorKind::WaiterSaturated {
-                capacity: capacity as u64,
-            }
-        }
-        nmp::RelayInformationError::ThreadUnavailable { reason } => {
-            FfiRelayInformationErrorKind::ThreadUnavailable { reason }
-        }
         nmp::RelayInformationError::ServiceClosed => FfiRelayInformationErrorKind::ServiceClosed,
         nmp::RelayInformationError::CredentialedRelayUrl => {
             FfiRelayInformationErrorKind::CredentialedRelayUrl
@@ -459,9 +443,6 @@ pub fn sign_event_start_error(error: nmp::SignEventError) -> FfiError {
     match error {
         nmp::SignEventError::NoActiveSigner => FfiError::NoActiveSigner,
         nmp::SignEventError::InvalidRequest { reason } => FfiError::InvalidSignRequest { reason },
-        nmp::SignEventError::ThreadUnavailable { component, reason } => {
-            FfiError::ThreadUnavailable { component, reason }
-        }
         nmp::SignEventError::EngineClosed => FfiError::EngineClosed,
         nmp::SignEventError::SignerUnavailable { reason }
         | nmp::SignEventError::SignerRejected { reason }

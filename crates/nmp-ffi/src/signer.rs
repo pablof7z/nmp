@@ -266,9 +266,6 @@ fn nip46_failure_to_ffi(error: nmp_signer::Nip46Error) -> FfiNip46Failure {
         nmp_signer::Nip46Error::InvalidResponse(reason) => {
             FfiNip46Failure::InvalidResponse { reason }
         }
-        nmp_signer::Nip46Error::ThreadUnavailable { component, reason } => {
-            FfiNip46Failure::ThreadUnavailable { component, reason }
-        }
         nmp_signer::Nip46Error::RestoredIdentityMismatch { expected, actual } => {
             FfiNip46Failure::RestoredIdentityMismatch {
                 expected: expected.to_hex(),
@@ -682,14 +679,12 @@ impl NmpEngine {
         timeout_millis: u64,
         observer: Box<dyn Nip46ConnectionObserver>,
     ) -> Result<Arc<Nip46Connection>, FfiError> {
-        let reservation = self
-            .engine
-            .reserve_native_task("NIP-46 bunker connection")?;
+        let runtime = self.engine.adapter_runtime()?;
         let engine = Arc::clone(&self.engine);
         let observer: Arc<dyn Nip46ConnectionObserver> = Arc::from(observer);
         let connection = Nip46Connection::new(engine, observer);
         spawn_bunker_connection(
-            reservation,
+            runtime,
             Arc::downgrade(&connection),
             connection.cancellation.clone(),
             bunker_uri,
@@ -704,9 +699,7 @@ impl NmpEngine {
         timeout_millis: u64,
         observer: Box<dyn Nip46ConnectionObserver>,
     ) -> Result<Arc<Nip46Connection>, FfiError> {
-        let reservation = self
-            .engine
-            .reserve_native_task("NIP-46 invitation connection")?;
+        let runtime = self.engine.adapter_runtime()?;
         let invitation = invitation
             .inner
             .lock()
@@ -721,7 +714,7 @@ impl NmpEngine {
         let observer: Arc<dyn Nip46ConnectionObserver> = Arc::from(observer);
         let connection = Nip46Connection::new(engine, observer);
         spawn_invitation_connection(
-            reservation,
+            runtime,
             Arc::downgrade(&connection),
             connection.cancellation.clone(),
             invitation,
@@ -747,12 +740,10 @@ impl NmpEngine {
         observer: Box<dyn Nip46ConnectionObserver>,
     ) -> Result<Arc<Nip46Connection>, FfiError> {
         let checkpoint = checkpoint_from_ffi(checkpoint)?;
-        let reservation = self.engine.reserve_native_task("NIP-46 session restore")?;
         let engine = Arc::clone(&self.engine);
         let observer: Arc<dyn Nip46ConnectionObserver> = Arc::from(observer);
         let connection = Nip46Connection::new(engine, observer);
         spawn_from_parts_connection(
-            reservation,
             Arc::downgrade(&connection),
             connection.cancellation.clone(),
             checkpoint,
@@ -779,116 +770,99 @@ impl NmpEngine {
     }
 }
 
+/// #704: run one BLOCKING NIP-46 connect handshake on a fresh dedicated OS
+/// thread (O(concurrent connects), app-owned) instead of a slot on the deleted
+/// engine executor. The handshake blocks on availability, so it must never run
+/// on an engine runtime worker; the SESSION it produces runs its async tasks on
+/// the engine runtime handle passed to the engine-associated connect variant.
+/// On completion the connection attaches the signer or reports a typed failure.
+fn spawn_nip46_connect(
+    component: &'static str,
+    connection: Weak<Nip46Connection>,
+    connect: impl FnOnce(
+            Arc<dyn Fn(nmp::Nip46ConnectionEvent) + Send + Sync>,
+        ) -> Result<nmp::Nip46Signer, nmp_signer::Nip46Error>
+        + Send
+        + 'static,
+) -> Result<(), FfiError> {
+    let spawned = std::thread::Builder::new()
+        .name("nmp-nip46-connect".to_string())
+        .spawn(move || {
+            let events = lifecycle_sink(connection.clone());
+            let result = connect(events);
+            let Some(connection) = connection.upgrade() else {
+                return;
+            };
+            match result {
+                Ok(signer) => connection.attach(signer),
+                Err(error) => connection.fail(nip46_failure_to_ffi(error)),
+            }
+        });
+    if spawned.is_ok() {
+        Ok(())
+    } else {
+        // A genuine OS thread-creation failure (not the removed admission
+        // refusal) — an engine-start-class infrastructure error.
+        Err(FfiError::ThreadUnavailable {
+            component: component.to_string(),
+            reason: "could not spawn NIP-46 connect thread".to_string(),
+        })
+    }
+}
+
 fn spawn_bunker_connection(
-    reservation: nmp::NativeTaskReservation,
+    runtime: tokio::runtime::Handle,
     connection: Weak<Nip46Connection>,
     cancellation: nmp_signer::Nip46Cancellation,
     bunker_uri: String,
     timeout_millis: u64,
 ) -> Result<(), FfiError> {
-    let shutdown = cancellation.clone();
-    reservation
-        .spawn_with_cancel(
-            move || shutdown.cancel(),
-            move || {
-                let events = lifecycle_sink(connection.clone());
-                // #680 Part 5: the NIP-46 session's own long-lived workers run
-                // on a session-owned executor (bounded by app-identity session
-                // count), not the shared engine adapter pool — so an unrelated
-                // `relay_information()` can never be refused because a signer
-                // session is open. This transient connect worker is the only
-                // engine-pool slot the connection uses, and it is released the
-                // moment the handshake completes and the session detaches.
-                let result = nmp::Nip46Signer::connect_bunker_observed_with_cancellation(
-                    &bunker_uri,
-                    None,
-                    nmp::Nip46ClientMetadata::default(),
-                    Duration::from_millis(timeout_millis),
-                    events,
-                    &cancellation,
-                );
-                let Some(connection) = connection.upgrade() else {
-                    return;
-                };
-                match result {
-                    Ok(signer) => connection.attach(signer),
-                    Err(error) => connection.fail(nip46_failure_to_ffi(error)),
-                }
-            },
+    spawn_nip46_connect("NIP-46 bunker connection", connection, move |events| {
+        nmp::Nip46Signer::connect_bunker_observed_with_executor_and_cancellation(
+            &bunker_uri,
+            None,
+            nmp::Nip46ClientMetadata::default(),
+            Duration::from_millis(timeout_millis),
+            events,
+            &cancellation,
+            runtime,
         )
-        .map_err(|error| FfiError::ThreadUnavailable {
-            component: "NIP-46 bunker connection".to_string(),
-            reason: error.to_string(),
-        })
+    })
 }
 
 fn spawn_invitation_connection(
-    reservation: nmp::NativeTaskReservation,
+    runtime: tokio::runtime::Handle,
     connection: Weak<Nip46Connection>,
     cancellation: nmp_signer::Nip46Cancellation,
     invitation: nmp::Nip46Invitation,
     timeout_millis: u64,
 ) -> Result<(), FfiError> {
-    let shutdown = cancellation.clone();
-    reservation
-        .spawn_with_cancel(
-            move || shutdown.cancel(),
-            move || {
-                let events = lifecycle_sink(connection.clone());
-                // #680 Part 5: session-owned executor (see spawn_bunker_connection).
-                let result = invitation.connect_observed_with_cancellation(
-                    Duration::from_millis(timeout_millis),
-                    events,
-                    &cancellation,
-                );
-                let Some(connection) = connection.upgrade() else {
-                    return;
-                };
-                match result {
-                    Ok(signer) => connection.attach(signer),
-                    Err(error) => connection.fail(nip46_failure_to_ffi(error)),
-                }
-            },
+    spawn_nip46_connect("NIP-46 invitation connection", connection, move |events| {
+        invitation.connect_observed_with_executor_and_cancellation(
+            Duration::from_millis(timeout_millis),
+            events,
+            &cancellation,
+            runtime,
         )
-        .map_err(|error| FfiError::ThreadUnavailable {
-            component: "NIP-46 invitation connection".to_string(),
-            reason: error.to_string(),
-        })
+    })
 }
 
 fn spawn_from_parts_connection(
-    reservation: nmp::NativeTaskReservation,
     connection: Weak<Nip46Connection>,
     cancellation: nmp_signer::Nip46Cancellation,
     checkpoint: nmp_signer::Nip46SessionCheckpoint,
     timeout_millis: u64,
 ) -> Result<(), FfiError> {
-    let shutdown = cancellation.clone();
-    reservation
-        .spawn_with_cancel(
-            move || shutdown.cancel(),
-            move || {
-                let events = lifecycle_sink(connection.clone());
-                // #680 Part 5: session-owned executor (see spawn_bunker_connection).
-                let result = nmp::Nip46Signer::from_parts_observed_with_cancellation(
-                    checkpoint,
-                    Duration::from_millis(timeout_millis),
-                    events,
-                    &cancellation,
-                );
-                let Some(connection) = connection.upgrade() else {
-                    return;
-                };
-                match result {
-                    Ok(signer) => connection.attach(signer),
-                    Err(error) => connection.fail(nip46_failure_to_ffi(error)),
-                }
-            },
+    // Restore uses the standalone constructor, which builds its own small
+    // session runtime (there is no engine-associated `from_parts` variant).
+    spawn_nip46_connect("NIP-46 session restore", connection, move |events| {
+        nmp::Nip46Signer::from_parts_observed_with_cancellation(
+            checkpoint,
+            Duration::from_millis(timeout_millis),
+            events,
+            &cancellation,
         )
-        .map_err(|error| FfiError::ThreadUnavailable {
-            component: "NIP-46 session restore".to_string(),
-            reason: error.to_string(),
-        })
+    })
 }
 
 fn lifecycle_sink(
@@ -1158,9 +1132,7 @@ mod tests {
             url::form_urlencoded::byte_serialize(relay.as_bytes()).collect::<String>()
         );
         spawn_bunker_connection(
-            engine
-                .reserve_native_task("NIP-46 bunker connection")
-                .unwrap(),
+            engine.adapter_runtime().unwrap(),
             weak.clone(),
             connection.cancellation.clone(),
             uri,

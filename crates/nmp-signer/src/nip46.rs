@@ -10,6 +10,8 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tokio::sync::mpsc as tokio_mpsc;
+
 use nmp_transport::{
     Pool, PoolConfig, PoolEvent, PoolEventSink, RelayFrame, RelayOpenError, WireFrame,
 };
@@ -33,7 +35,7 @@ const SWITCH_RELAYS_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Nip46CancellationInner {
     cancelled: AtomicBool,
-    commands: Mutex<Option<Sender<WorkerMsg>>>,
+    commands: Mutex<Option<tokio_mpsc::UnboundedSender<WorkerMsg>>>,
 }
 
 /// Explicit cancellation for a connection attempt that has not produced a
@@ -56,7 +58,7 @@ impl Default for Nip46Cancellation {
 }
 
 impl Nip46Cancellation {
-    fn bind(&self, commands: Sender<WorkerMsg>) {
+    fn bind(&self, commands: tokio_mpsc::UnboundedSender<WorkerMsg>) {
         let mut current = self
             .inner
             .commands
@@ -122,10 +124,6 @@ pub enum Nip46Error {
     Disconnected,
     Rejected(String),
     InvalidResponse(String),
-    ThreadUnavailable {
-        component: String,
-        reason: String,
-    },
     /// A restored/imported session's live `get_public_key` answer did not
     /// match the checkpoint's expected identity (#571). The signer is never
     /// returned/attached in this case -- restore fails closed rather than
@@ -157,9 +155,6 @@ impl fmt::Display for Nip46Error {
             Self::Disconnected => f.write_str("NIP-46 connection ended"),
             Self::Rejected(reason) => write!(f, "NIP-46 signer rejected request: {reason}"),
             Self::InvalidResponse(reason) => write!(f, "invalid NIP-46 response: {reason}"),
-            Self::ThreadUnavailable { component, reason } => {
-                write!(f, "{component} thread unavailable: {reason}")
-            }
             Self::RestoredIdentityMismatch { expected, actual } => write!(
                 f,
                 "restored NIP-46 session answered as {actual} but the checkpoint expected {expected}"
@@ -304,18 +299,12 @@ impl Nip46Invitation {
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: Option<&Nip46Cancellation>,
     ) -> Result<Nip46Signer, Nip46Error> {
-        let executor =
-            nmp_executor::Executor::new(nmp_executor::DEFAULT_MAX_TASKS).map_err(|error| {
-                Nip46Error::ThreadUnavailable {
-                    component: "NIP-46 native task executor".to_string(),
-                    reason: error.to_string(),
-                }
-            })?;
-        self.connect_observed_inner_with_executor(
+        let runtime = standalone_runtime()?;
+        self.connect_observed_inner_with_runtime(
             timeout,
             event_sink,
             cancellation,
-            SessionExecutor::Owned(executor),
+            SessionRuntime::Owned(runtime),
         )
     }
 
@@ -325,25 +314,25 @@ impl Nip46Invitation {
         timeout: Duration,
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: &Nip46Cancellation,
-        executor: nmp_executor::Executor,
+        runtime: tokio::runtime::Handle,
     ) -> Result<Nip46Signer, Nip46Error> {
-        self.connect_observed_inner_with_executor(
+        self.connect_observed_inner_with_runtime(
             timeout,
             event_sink,
             Some(cancellation),
-            SessionExecutor::Shared(executor),
+            SessionRuntime::Shared(runtime),
         )
     }
 
-    fn connect_observed_inner_with_executor(
+    fn connect_observed_inner_with_runtime(
         self,
         timeout: Duration,
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: Option<&Nip46Cancellation>,
-        executor: SessionExecutor,
+        runtime: SessionRuntime,
     ) -> Result<Nip46Signer, Nip46Error> {
         let client_keys = self.client_keys.clone();
-        let session = Session::spawn(self.relays, self.client_keys, None, cancellation, executor)?;
+        let session = Session::spawn(self.relays, self.client_keys, None, cancellation, runtime)?;
         forward_events(&session, event_sink)?;
         session.wait_available(timeout)?;
         let remote_signer_public_key = session
@@ -490,21 +479,15 @@ impl Nip46Signer {
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: Option<&Nip46Cancellation>,
     ) -> Result<Self, Nip46Error> {
-        let executor =
-            nmp_executor::Executor::new(nmp_executor::DEFAULT_MAX_TASKS).map_err(|error| {
-                Nip46Error::ThreadUnavailable {
-                    component: "NIP-46 native task executor".to_string(),
-                    reason: error.to_string(),
-                }
-            })?;
-        Self::connect_bunker_observed_inner_with_executor(
+        let runtime = standalone_runtime()?;
+        Self::connect_bunker_observed_inner_with_runtime(
             uri,
             permissions,
             metadata,
             timeout,
             event_sink,
             cancellation,
-            SessionExecutor::Owned(executor),
+            SessionRuntime::Owned(runtime),
         )
     }
 
@@ -516,28 +499,28 @@ impl Nip46Signer {
         timeout: Duration,
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: &Nip46Cancellation,
-        executor: nmp_executor::Executor,
+        runtime: tokio::runtime::Handle,
     ) -> Result<Self, Nip46Error> {
-        Self::connect_bunker_observed_inner_with_executor(
+        Self::connect_bunker_observed_inner_with_runtime(
             uri,
             permissions,
             metadata,
             timeout,
             event_sink,
             Some(cancellation),
-            SessionExecutor::Shared(executor),
+            SessionRuntime::Shared(runtime),
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn connect_bunker_observed_inner_with_executor(
+    fn connect_bunker_observed_inner_with_runtime(
         uri: &str,
         permissions: Option<String>,
         metadata: Nip46ClientMetadata,
         timeout: Duration,
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: Option<&Nip46Cancellation>,
-        executor: SessionExecutor,
+        runtime: SessionRuntime,
     ) -> Result<Self, Nip46Error> {
         let parsed = parse_bunker_uri(uri).map_err(Nip46Error::InvalidBunkerUri)?;
         let remote_signer_public_key = parsed.remote_signer_public_key;
@@ -547,7 +530,7 @@ impl Nip46Signer {
             client_keys.clone(),
             Some(remote_signer_public_key),
             cancellation,
-            executor,
+            runtime,
         )?;
         forward_events(&session, event_sink)?;
         session.wait_available(timeout)?;
@@ -618,7 +601,7 @@ impl Nip46Signer {
 
     pub fn logout(&self) -> SignerOp<()> {
         map_string(
-            self.session.executor(),
+            &self.session.runtime_handle(),
             request_string(&self.session, "logout", Vec::new()),
             |result| {
                 (result == "ack").then_some(()).ok_or_else(|| {
@@ -669,19 +652,13 @@ impl Nip46Signer {
         parts: Nip46SessionCheckpoint,
         timeout: Duration,
     ) -> Result<Self, Nip46Error> {
-        let executor =
-            nmp_executor::Executor::new(nmp_executor::DEFAULT_MAX_TASKS).map_err(|error| {
-                Nip46Error::ThreadUnavailable {
-                    component: "NIP-46 native task executor".to_string(),
-                    reason: error.to_string(),
-                }
-            })?;
+        let runtime = standalone_runtime()?;
         Self::from_parts_inner(
             parts,
             timeout,
             Arc::new(|_| {}),
             None,
-            SessionExecutor::Owned(executor),
+            SessionRuntime::Owned(runtime),
         )
     }
 
@@ -697,19 +674,13 @@ impl Nip46Signer {
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: &Nip46Cancellation,
     ) -> Result<Self, Nip46Error> {
-        let executor =
-            nmp_executor::Executor::new(nmp_executor::DEFAULT_MAX_TASKS).map_err(|error| {
-                Nip46Error::ThreadUnavailable {
-                    component: "NIP-46 native task executor".to_string(),
-                    reason: error.to_string(),
-                }
-            })?;
+        let runtime = standalone_runtime()?;
         Self::from_parts_inner(
             parts,
             timeout,
             event_sink,
             Some(cancellation),
-            SessionExecutor::Owned(executor),
+            SessionRuntime::Owned(runtime),
         )
     }
 
@@ -718,7 +689,7 @@ impl Nip46Signer {
         timeout: Duration,
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: Option<&Nip46Cancellation>,
-        executor: SessionExecutor,
+        runtime: SessionRuntime,
     ) -> Result<Self, Nip46Error> {
         let client_keys = Keys::new(parts.client_secret_key.clone());
         let session = Session::spawn(
@@ -726,7 +697,7 @@ impl Nip46Signer {
             client_keys.clone(),
             Some(parts.remote_signer_public_key),
             cancellation,
-            executor,
+            runtime,
         )?;
         forward_events(&session, event_sink)?;
         session.wait_available(timeout)?;
@@ -778,7 +749,7 @@ impl SigningCapability for Nip46Signer {
         .to_string();
         let user_public_key = self.user_public_key;
         map_string(
-            self.session.executor(),
+            &self.session.runtime_handle(),
             request_string(&self.session, "sign_event", vec![body]),
             move |result| {
                 let event = Event::from_json(&result).map_err(|error| {
@@ -875,10 +846,12 @@ enum WorkerMsg {
 }
 
 #[derive(Clone)]
-struct SessionPoolSink(Sender<WorkerMsg>);
+struct SessionPoolSink(tokio_mpsc::UnboundedSender<WorkerMsg>);
 
 impl PoolEventSink for SessionPoolSink {
     fn on_event(&self, event: PoolEvent) {
+        // The pool's mio worker thread pushes here; an unbounded tokio channel
+        // send is non-blocking and wakes the async session worker.
         let _ = self.0.send(WorkerMsg::Pool(event));
     }
 }
@@ -909,35 +882,57 @@ fn session_pool_config() -> PoolConfig {
     }
 }
 
-/// Encodes whether a [`Session`] owns its executor (and must shut it down
-/// when the session is torn down) or merely borrows a shared/engine-owned
-/// executor (which outlives the session and must never be shut down by it).
-///
-/// This makes the illegal combination — "shared executor + shut it down on
-/// drop" — unrepresentable: there is exactly one `Drop` behavior per variant.
-enum SessionExecutor {
-    /// A fresh executor created for and used exclusively by this session.
-    /// Shut down when the session drops.
-    Owned(nmp_executor::Executor),
-    /// A caller/engine-owned executor shared across sessions. Never shut
-    /// down by this session; the owner controls its lifetime.
-    Shared(nmp_executor::Executor),
+/// #704: the async runtime a [`Session`] runs its worker/forwarder/switch-
+/// relays/result-map tasks on. `Owned` is a small session-private multi-thread
+/// runtime built for a standalone direct-Rust connect (dropped — and shut down
+/// — when the session drops); `Shared` borrows the engine's runtime handle
+/// (engine-associated sessions), which outlives the session and must never be
+/// shut down by it. This replaces the removed per-session `nmp-executor`.
+enum SessionRuntime {
+    Owned(Arc<tokio::runtime::Runtime>),
+    Shared(tokio::runtime::Handle),
 }
 
-impl SessionExecutor {
-    fn handle(&self) -> &nmp_executor::Executor {
+impl SessionRuntime {
+    fn handle(&self) -> tokio::runtime::Handle {
         match self {
-            SessionExecutor::Owned(executor) | SessionExecutor::Shared(executor) => executor,
+            SessionRuntime::Owned(runtime) => runtime.handle().clone(),
+            SessionRuntime::Shared(handle) => handle.clone(),
         }
     }
 }
 
+/// Build the small session-private runtime backing a standalone direct-Rust
+/// NIP-46 connect. Its worker threads bump the process-wide OS-thread counter
+/// so `nmp::nmp_threads_spawned` still reflects them; the count is
+/// application-owned (one runtime per standalone session), as before #704.
+fn standalone_runtime() -> Result<Arc<tokio::runtime::Runtime>, Nip46Error> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .thread_name("nmp-nip46")
+        .on_thread_start(nmp_executor::note_thread_spawn)
+        .build()
+        .map(Arc::new)
+        // A failure to build the session runtime is an infrastructure failure
+        // that leaves the session unusable; surfaced as the terminal
+        // connection-ended outcome (#704 removed `ThreadUnavailable`).
+        .map_err(|_| Nip46Error::Disconnected)
+}
+
+type EventSink = Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>;
+
 struct Session {
-    commands: Sender<WorkerMsg>,
+    commands: tokio_mpsc::UnboundedSender<WorkerMsg>,
     connected_relays: AtomicUsize,
     subscribers: Arc<Mutex<Vec<Sender<Nip46ConnectionEvent>>>>,
+    /// #704: the connection-event observers `forward_events` installs. Since
+    /// the per-session executor is gone, the forwarder is no longer a blocking
+    /// recv thread — each sink is invoked inline by `emit` (the sink contract
+    /// is a lightweight non-blocking notification, so this holds no worker).
+    event_sinks: Arc<Mutex<Vec<EventSink>>>,
     availability_error: Arc<Mutex<Option<Nip46Error>>>,
-    executor: SessionExecutor,
+    runtime: SessionRuntime,
     /// The relay set this session currently targets, kept live by
     /// `SessionWorker::replace_relays` (#571's checkpoint reads this back
     /// through [`Session::current_relays`] without a worker round trip).
@@ -950,67 +945,62 @@ impl Session {
         client_keys: Keys,
         remote: Option<PublicKey>,
         cancellation: Option<&Nip46Cancellation>,
-        executor: SessionExecutor,
+        runtime: SessionRuntime,
     ) -> Result<Arc<Self>, Nip46Error> {
-        let (commands, inbox) = mpsc::channel();
+        let (commands, inbox) = tokio_mpsc::unbounded_channel();
         let subscribers = Arc::new(Mutex::new(Vec::new()));
+        let event_sinks: Arc<Mutex<Vec<EventSink>>> = Arc::new(Mutex::new(Vec::new()));
         let availability_error = Arc::new(Mutex::new(None));
-        let executor_handle = executor.handle().clone();
+        let runtime_handle = runtime.handle();
         let session = Arc::new(Self {
             commands: commands.clone(),
             connected_relays: AtomicUsize::new(0),
             subscribers: Arc::clone(&subscribers),
+            event_sinks: Arc::clone(&event_sinks),
             availability_error: Arc::clone(&availability_error),
-            executor,
+            runtime,
             current_relays: Mutex::new(relays.clone()),
         });
         if let Some(cancellation) = cancellation {
             cancellation.bind(session.commands.clone());
         }
         let weak = Arc::downgrade(&session);
-        let pool = Pool::new(session_pool_config(), SessionPoolSink(commands.clone())).map_err(
-            |error| Nip46Error::ThreadUnavailable {
-                component: "NIP-46 transport".to_string(),
-                reason: error.to_string(),
-            },
-        )?;
+        // A transport-pool build failure leaves the session unusable; #704
+        // removed the operation-level `ThreadUnavailable`, so it surfaces as
+        // the terminal connection-ended outcome.
+        let pool = Pool::new(session_pool_config(), SessionPoolSink(commands.clone()))
+            .map_err(|_| Nip46Error::Disconnected)?;
         let worker_pool = pool.clone();
-        let cancel_commands = commands.clone();
-        let spawn = executor_handle.spawn_with_cancel(
-            "NIP-46 session",
-            move || {
-                let _ = cancel_commands.send(WorkerMsg::Shutdown);
-            },
-            move || {
-                let mut worker = SessionWorker::new(
-                    worker_pool,
-                    client_keys,
-                    remote,
-                    weak,
-                    subscribers,
-                    availability_error,
-                );
-                worker.emit(Nip46ConnectionEvent::Connecting);
-                if let Err(error) = worker.open_relays(relays) {
-                    worker.record_availability_error(error);
-                    worker.emit(Nip46ConnectionEvent::Unavailable);
-                }
-                worker.run(inbox);
-            },
-        );
-        if let Err(error) = spawn {
-            pool.shutdown();
-            return Err(map_executor_error(error));
-        }
+        // #704: the session worker is an async task on the runtime; its whole
+        // lifetime it awaits the inbox, holding no OS thread. Session teardown
+        // (and external cancellation) posts `WorkerMsg::Shutdown`, which ends
+        // the `run` loop; the `Owned` runtime is additionally dropped on
+        // `Session::drop`, aborting any still-parked task.
+        runtime_handle.spawn(async move {
+            let mut worker = SessionWorker::new(
+                worker_pool,
+                client_keys,
+                remote,
+                weak,
+                subscribers,
+                event_sinks,
+                availability_error,
+            );
+            worker.emit(Nip46ConnectionEvent::Connecting);
+            if let Err(error) = worker.open_relays(relays) {
+                worker.record_availability_error(error);
+                worker.emit(Nip46ConnectionEvent::Unavailable);
+            }
+            worker.run(inbox).await;
+        });
         drop(pool);
         Ok(session)
     }
 
-    /// Handle to the underlying executor, regardless of ownership. Callers
-    /// that only need to spawn tasks (as opposed to deciding shutdown
-    /// semantics) go through this accessor.
-    fn executor(&self) -> &nmp_executor::Executor {
-        self.executor.handle()
+    /// The runtime handle this session spawns its async tasks (result-map,
+    /// switch-relays) on.
+    fn runtime_handle(&self) -> tokio::runtime::Handle {
+        self.runtime.handle()
     }
 
     fn is_available(&self) -> bool {
@@ -1036,7 +1026,7 @@ impl Session {
     }
 
     fn emit(&self, event: Nip46ConnectionEvent) {
-        emit_to(&self.subscribers, event);
+        emit_to(&self.subscribers, &self.event_sinks, event);
     }
 
     fn wait_available(&self, timeout: Duration) -> Result<(), Nip46Error> {
@@ -1096,42 +1086,42 @@ impl Session {
     fn request_switch_relays(self: &Arc<Self>) {
         let op = request_string(self, "switch_relays", Vec::new());
         let session = Arc::downgrade(self);
-        let cancel_commands = self.commands.clone();
-        let _ = self.executor().spawn_with_cancel(
-            "NIP-46 switch-relays",
-            move || {
-                let _ = cancel_commands.send(WorkerMsg::Shutdown);
-            },
-            move || {
-                let Ok(result) = op.wait(SWITCH_RELAYS_TIMEOUT) else {
+        // #704: the switch-relays wait is an async task on the session runtime;
+        // it holds no OS thread while the remote round-trip is outstanding.
+        // Dropping the task (session teardown) fires the op's cancel hook.
+        self.runtime_handle().spawn(async move {
+            let Ok(result) = tokio::time::timeout(SWITCH_RELAYS_TIMEOUT, op.recv_async()).await
+            else {
+                return;
+            };
+            let Ok(result) = result else {
+                return;
+            };
+            if result == "null" {
+                return;
+            }
+            let Ok(relays) = serde_json::from_str::<Vec<String>>(&result) else {
+                return;
+            };
+            let mut parsed = Vec::new();
+            for relay in relays {
+                let Ok(relay) = RelayUrl::parse(&relay) else {
                     return;
                 };
-                if result == "null" {
-                    return;
-                }
-                let Ok(relays) = serde_json::from_str::<Vec<String>>(&result) else {
-                    return;
-                };
-                let mut parsed = Vec::new();
-                for relay in relays {
-                    let Ok(relay) = RelayUrl::parse(&relay) else {
+                if !parsed.contains(&relay) {
+                    parsed.push(relay);
+                    if parsed.len() > MAX_NIP46_RELAYS {
                         return;
-                    };
-                    if !parsed.contains(&relay) {
-                        parsed.push(relay);
-                        if parsed.len() > MAX_NIP46_RELAYS {
-                            return;
-                        }
                     }
                 }
-                if !parsed.is_empty() {
-                    let Some(session) = session.upgrade() else {
-                        return;
-                    };
-                    let _ = session.commands.send(WorkerMsg::ReplaceRelays(parsed));
-                }
-            },
-        );
+            }
+            if !parsed.is_empty() {
+                let Some(session) = session.upgrade() else {
+                    return;
+                };
+                let _ = session.commands.send(WorkerMsg::ReplaceRelays(parsed));
+            }
+        });
     }
 }
 
@@ -1142,9 +1132,13 @@ impl Drop for Session {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .clear();
-        if let SessionExecutor::Owned(executor) = &self.executor {
-            executor.shutdown();
-        }
+        self.event_sinks
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clear();
+        // An `Owned` standalone runtime is shut down by dropping its `Arc`
+        // here (its worker task already observed `Shutdown` above); a `Shared`
+        // engine runtime outlives the session and is never shut down by it.
     }
 }
 
@@ -1154,6 +1148,7 @@ struct SessionWorker {
     remote: Option<PublicKey>,
     session: std::sync::Weak<Session>,
     subscribers: Arc<Mutex<Vec<Sender<Nip46ConnectionEvent>>>>,
+    event_sinks: Arc<Mutex<Vec<EventSink>>>,
     availability_error: Arc<Mutex<Option<Nip46Error>>>,
     handles: HashMap<u32, (nmp_transport::RelayHandle, RelayUrl)>,
     configured: HashMap<RelayUrl, nmp_transport::RelayHandle>,
@@ -1169,6 +1164,7 @@ impl SessionWorker {
         remote: Option<PublicKey>,
         session: std::sync::Weak<Session>,
         subscribers: Arc<Mutex<Vec<Sender<Nip46ConnectionEvent>>>>,
+        event_sinks: Arc<Mutex<Vec<EventSink>>>,
         availability_error: Arc<Mutex<Option<Nip46Error>>>,
     ) -> Self {
         static NEXT_SUB: AtomicU64 = AtomicU64::new(1);
@@ -1178,6 +1174,7 @@ impl SessionWorker {
             remote,
             session,
             subscribers,
+            event_sinks,
             availability_error,
             handles: HashMap::new(),
             configured: HashMap::new(),
@@ -1190,8 +1187,8 @@ impl SessionWorker {
         }
     }
 
-    fn run(&mut self, inbox: Receiver<WorkerMsg>) {
-        while let Ok(message) = inbox.recv() {
+    async fn run(&mut self, mut inbox: tokio_mpsc::UnboundedReceiver<WorkerMsg>) {
+        while let Some(message) = inbox.recv().await {
             match message {
                 WorkerMsg::Pool(event) => self.on_pool(event),
                 WorkerMsg::Request {
@@ -1211,6 +1208,17 @@ impl SessionWorker {
                 WorkerMsg::Shutdown => break,
             }
         }
+        // Teardown lives in `Drop` so it runs on both a clean `Shutdown` break
+        // AND an aborted task — dropping a standalone `Owned` runtime aborts the
+        // worker future at its `.await`, and the drop guard is the only thing
+        // that still fires the pool/pending/subscriber cleanup then (#704).
+    }
+
+    fn emit(&self, event: Nip46ConnectionEvent) {
+        emit_to(&self.subscribers, &self.event_sinks, event);
+    }
+
+    fn teardown(&mut self) {
         for (_, pending) in self.pending.drain() {
             let _ = pending.reply.resolve(Err(SignerError::Disconnected));
         }
@@ -1221,11 +1229,11 @@ impl SessionWorker {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .clear();
+        self.event_sinks
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clear();
         self.pool.shutdown();
-    }
-
-    fn emit(&self, event: Nip46ConnectionEvent) {
-        emit_to(&self.subscribers, event);
     }
 
     fn record_availability_error(&self, error: Nip46Error) {
@@ -1256,11 +1264,11 @@ impl SessionWorker {
             }
             let handle = match ensure_open(&self.pool, &relay) {
                 Ok(handle) => handle,
-                Err(RelayOpenError::ThreadUnavailable(error)) => {
-                    thread_refusal.get_or_insert(Nip46Error::ThreadUnavailable {
-                        component: error.role.to_string(),
-                        reason: error.reason,
-                    });
+                Err(RelayOpenError::ThreadUnavailable(_error)) => {
+                    // #704: a transport relay-worker spawn failure leaves this
+                    // relay unusable; surfaced as the terminal connection-ended
+                    // outcome rather than the removed `ThreadUnavailable`.
+                    thread_refusal.get_or_insert(Nip46Error::Disconnected);
                     continue;
                 }
                 Err(_) => continue,
@@ -1572,6 +1580,12 @@ impl SessionWorker {
     }
 }
 
+impl Drop for SessionWorker {
+    fn drop(&mut self) {
+        self.teardown();
+    }
+}
+
 fn request_string(session: &Arc<Session>, method: &str, params: Vec<String>) -> SignerOp<String> {
     let id = Keys::generate().public_key().to_hex();
     let commands = session.commands.clone();
@@ -1595,7 +1609,7 @@ fn request_string(session: &Arc<Session>, method: &str, params: Vec<String>) -> 
     operation
 }
 
-fn map_string<T, F>(executor: &nmp_executor::Executor, op: SignerOp<String>, map: F) -> SignerOp<T>
+fn map_string<T, F>(runtime: &tokio::runtime::Handle, op: SignerOp<String>, map: F) -> SignerOp<T>
 where
     T: Send + 'static,
     F: FnOnce(String) -> Result<T, SignerError> + Send + 'static,
@@ -1605,29 +1619,22 @@ where
         SignerOp::Ready(Err(error)) => SignerOp::Ready(Err(error)),
         SignerOp::Pending(pending) => {
             // #704: cancellation is bound into the op's door; the mapped op's
-            // cancel hook and the worker's shutdown hook both cancel the inner
-            // op, which wakes its `recv()` to a disconnected end and runs its
-            // adapter cancel hook once.
+            // cancel hook cancels the inner op, which wakes its `.await` to a
+            // disconnected end and runs its adapter cancel hook once. The map
+            // runs as an async task on the session runtime — no OS thread is
+            // held while the inner round-trip is outstanding.
             let inner_canceller = pending.canceller();
             let mapped_cancel = inner_canceller.clone();
             let (completion, mapped) = SignerOp::pending_channel_with_cancel(move || {
                 mapped_cancel.cancel();
             });
-            let failure = completion.clone();
-            let spawned = executor.spawn_with_cancel(
-                "NIP-46 result-map",
-                move || inner_canceller.cancel(),
-                move || {
-                    let result = match pending.recv() {
-                        Ok(value) => map(value),
-                        Err(error) => Err(error),
-                    };
-                    let _ = completion.resolve(result);
-                },
-            );
-            if spawned.is_err() {
-                let _ = failure.resolve(Err(SignerError::Unavailable));
-            }
+            runtime.spawn(async move {
+                let result = match pending.await {
+                    Ok(value) => map(value),
+                    Err(error) => Err(error),
+                };
+                let _ = completion.resolve(result);
+            });
             mapped
         }
     }
@@ -1642,46 +1649,34 @@ fn map_connect_recv(error: RecvTimeoutError) -> Nip46Error {
 
 fn emit_to(
     subscribers: &Arc<Mutex<Vec<Sender<Nip46ConnectionEvent>>>>,
+    sinks: &Arc<Mutex<Vec<EventSink>>>,
     event: Nip46ConnectionEvent,
 ) {
+    // #704: connection-event observers are invoked inline (no forwarder
+    // thread). The sink contract is a lightweight non-blocking notification.
+    let installed: Vec<EventSink> = sinks.lock().map(|guard| guard.clone()).unwrap_or_default();
+    for sink in &installed {
+        sink(event.clone());
+    }
     if let Ok(mut subscribers) = subscribers.lock() {
         subscribers.retain(|subscriber| subscriber.send(event.clone()).is_ok());
     }
 }
 
+/// #704: install a connection-event observer. The per-session executor is
+/// gone, so this no longer spawns a blocking forwarder thread — the sink is
+/// registered and invoked inline by `emit`. Any event emitted after this call
+/// (including the terminal `Connected`) reaches the sink; infallible.
 fn forward_events(
     session: &Arc<Session>,
     event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
 ) -> Result<(), Nip46Error> {
-    let events = session.subscribe();
-    let cancel_commands = session.commands.clone();
     session
-        .executor()
-        .spawn_with_cancel(
-            "NIP-46 event forwarder",
-            move || {
-                let _ = cancel_commands.send(WorkerMsg::Shutdown);
-            },
-            move || {
-                while let Ok(event) = events.recv() {
-                    event_sink(event);
-                }
-            },
-        )
-        .map_err(map_executor_error)
-}
-
-fn map_executor_error(error: nmp_executor::ExecutorError) -> Nip46Error {
-    match error {
-        nmp_executor::ExecutorError::Saturated(error) => Nip46Error::ThreadUnavailable {
-            reason: error.to_string(),
-            component: error.component,
-        },
-        nmp_executor::ExecutorError::Spawn(error) => Nip46Error::ThreadUnavailable {
-            component: "NIP-46 native task".to_string(),
-            reason: error.to_string(),
-        },
-    }
+        .event_sinks
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push(event_sink);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1723,15 +1718,17 @@ mod tests {
     fn injected_initial_relay_worker_refusal_reaches_the_waiting_caller_typed() {
         let (pool_tx, _pool_rx) = mpsc::channel();
         let pool = Pool::new(PoolConfig::default(), pool_tx).expect("test pool construction");
-        let (commands, _inbox) = mpsc::channel();
+        let (commands, _inbox) = tokio_mpsc::unbounded_channel();
         let subscribers = Arc::new(Mutex::new(Vec::new()));
+        let event_sinks = Arc::new(Mutex::new(Vec::new()));
         let availability_error = Arc::new(Mutex::new(None));
         let session = Arc::new(Session {
             commands,
             connected_relays: AtomicUsize::new(0),
             subscribers: Arc::clone(&subscribers),
+            event_sinks: Arc::clone(&event_sinks),
             availability_error: Arc::clone(&availability_error),
-            executor: SessionExecutor::Owned(nmp_executor::Executor::new(4).unwrap()),
+            runtime: SessionRuntime::Owned(standalone_runtime().unwrap()),
             current_relays: Mutex::new(Vec::new()),
         });
         let mut worker = SessionWorker::new(
@@ -1740,6 +1737,7 @@ mod tests {
             None,
             Arc::downgrade(&session),
             subscribers,
+            event_sinks,
             availability_error,
         );
         let error = worker
@@ -1756,85 +1754,23 @@ mod tests {
             )
             .unwrap_err();
         worker.record_availability_error(error.clone());
-        assert_eq!(
-            error,
-            Nip46Error::ThreadUnavailable {
-                component: "relay worker".to_string(),
-                reason: "injected NIP-46 relay pressure".to_string(),
-            }
-        );
+        // #704 deleted `Nip46Error::ThreadUnavailable`; a transport relay-worker
+        // spawn failure that leaves every requested relay unusable now surfaces
+        // as the terminal connection-ended outcome. The real semantic — a
+        // relay-open infra failure reaches the waiting caller typed, not as an
+        // empty document — is preserved.
+        assert_eq!(error, Nip46Error::Disconnected);
         assert_eq!(session.wait_available(Duration::from_secs(1)), Err(error));
         assert!(worker.configured.is_empty());
         worker.pool.shutdown();
     }
 
-    #[test]
-    fn borrowed_engine_executor_survives_session_teardown() {
-        let executor = nmp_executor::Executor::new(2).unwrap();
-        let session = Session::spawn(
-            Vec::new(),
-            Keys::generate(),
-            None,
-            None,
-            SessionExecutor::Shared(executor.clone()),
-        )
-        .unwrap();
-
-        drop(session);
-        executor.wait_for_idle();
-        assert!(executor.census().accepting);
-
-        let reservation = executor.reserve("post-session engine work").unwrap();
-        drop(reservation);
-        executor.shutdown();
-    }
-
-    #[test]
-    fn every_forwardable_engine_session_owns_two_slots() {
-        let executor = nmp_executor::Executor::new(5).unwrap();
-        let mut sessions = Vec::new();
-        for _ in 0..2 {
-            let session = Session::spawn(
-                Vec::new(),
-                Keys::generate(),
-                None,
-                None,
-                SessionExecutor::Shared(executor.clone()),
-            )
-            .unwrap();
-            forward_events(&session, Arc::new(|_| {})).unwrap();
-            sessions.push(session);
-        }
-        assert_eq!(executor.census().admitted, 4);
-
-        let third = Session::spawn(
-            Vec::new(),
-            Keys::generate(),
-            None,
-            None,
-            SessionExecutor::Shared(executor.clone()),
-        )
-        .unwrap();
-        // #680 removed the global `ExecutorSaturated` variant; a full internal
-        // adapter pool now surfaces the class-specific `ThreadUnavailable`
-        // refusal. Real semantic preserved: two engine sessions occupy four of
-        // five slots, so the third forwarder is refused.
-        let refusal = forward_events(&third, Arc::new(|_| {})).unwrap_err();
-        assert!(
-            matches!(
-                &refusal,
-                Nip46Error::ThreadUnavailable { component, .. }
-                    if component == "NIP-46 event forwarder"
-            ),
-            "unexpected refusal: {refusal:?}"
-        );
-
-        drop(third);
-        drop(sessions);
-        executor.wait_for_idle();
-        assert_eq!(executor.census().admitted, 0);
-        executor.shutdown();
-    }
+    // #704: `borrowed_engine_executor_survives_session_teardown` and
+    // `every_forwardable_engine_session_owns_two_slots` were deleted. They
+    // asserted per-session `nmp-executor` census/reservation/capacity-refusal
+    // behavior (admitted slot counts, `Saturated`-style refusal of the third
+    // forwarder), which no longer exists: sessions run async tasks on a runtime
+    // and `forward_events` never refuses. No admission remains to assert.
 
     #[test]
     fn one_usable_initial_relay_keeps_a_later_spawn_refusal_nonterminal() {
@@ -1845,6 +1781,7 @@ mod tests {
             Keys::generate(),
             None,
             std::sync::Weak::new(),
+            Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(None)),
         );
@@ -1887,6 +1824,7 @@ mod tests {
             None,
             std::sync::Weak::new(),
             Arc::clone(&subscribers),
+            Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(None)),
         );
         let relay = RelayUrl::parse("wss://relay.example").unwrap();

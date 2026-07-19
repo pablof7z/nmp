@@ -200,9 +200,6 @@ fn failure_to_ffi(failure: FollowActionFailure) -> FfiFollowActionFailure {
         },
         FollowActionFailure::EngineClosed => FfiFollowActionFailure::EngineClosed,
         FollowActionFailure::ReceiptUnavailable => FfiFollowActionFailure::ReceiptUnavailable,
-        FollowActionFailure::ThreadUnavailable { component, reason } => {
-            FfiFollowActionFailure::ThreadUnavailable { component, reason }
-        }
     }
 }
 

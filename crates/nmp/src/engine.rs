@@ -23,7 +23,7 @@
 //! tears down `EngineThread` cleanly rather than detaching it.
 
 use nmp_engine::runtime::FifoReceiver;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use nmp_engine::core::ReceiptId;
 use nmp_engine::outbox::WriteStatus;
@@ -66,7 +66,6 @@ struct Inner {
 /// `inner` implements.
 pub struct Engine {
     inner: Mutex<Option<Inner>>,
-    native_tasks: nmp_executor::Executor,
 }
 
 /// The only successful result from explicit pre-signature cancellation.
@@ -224,21 +223,6 @@ pub struct SignEventRequest {
     pub content: String,
 }
 
-/// Executor-owned cancellation fallback for a blocking task whose producer
-/// is the engine runtime itself. It contains only a raw shutdown sender, not
-/// an `Arc<Engine>`, so task registration cannot create an ownership cycle.
-#[doc(hidden)]
-#[derive(Clone)]
-pub struct NativeTaskCancel {
-    action: Arc<dyn Fn() + Send + Sync>,
-}
-
-impl NativeTaskCancel {
-    pub fn cancel(&self) {
-        (self.action)();
-    }
-}
-
 /// Failure of an explicit NIP-11 one-shot: lifecycle/URL validation stays
 /// distinct from network/document acquisition.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -326,14 +310,12 @@ impl Engine {
             }
         };
 
-        let native_tasks = engine_thread.native_tasks();
         Ok(Self {
             inner: Mutex::new(Some(Inner {
                 handle,
                 engine_thread,
                 active_pubkey: None,
             })),
-            native_tasks,
         })
     }
 
@@ -365,14 +347,12 @@ impl Engine {
         let (engine_thread, handle) =
             EngineThread::spawn(store, directory, cap, pool_config, admission)
                 .map_err(EngineError::from_thread_error)?;
-        let native_tasks = engine_thread.native_tasks();
         Ok(Self {
             inner: Mutex::new(Some(Inner {
                 handle,
                 engine_thread,
                 active_pubkey: None,
             })),
-            native_tasks,
         })
     }
 
@@ -394,35 +374,22 @@ impl Engine {
         }
     }
 
-    /// Reserve a slot on the engine's fixed internal blocking-adapter pool
-    /// before accepting the transient blocking work it will own (the NIP-02
-    /// follow observer/action worker). This is intentionally hidden mechanism
-    /// used by protocol adapters, not an app scheduling API — the pool has no
-    /// app-visible capacity, census, or idle barrier, and observations never
-    /// touch it (they are pure-waker async since #680). A residual refusal at
-    /// the fixed ceiling surfaces as [`EngineError::ThreadUnavailable`], never
-    /// a global native-task ceiling.
+    /// #704: the engine-owned adapter runtime handle. Protocol adapters
+    /// (NIP-02 follow-action, NIP-46 connect handshakes) spawn their async
+    /// tasks here instead of reserving a slot on the deleted blocking-adapter
+    /// executor. Hidden mechanism, not an app scheduling API — the runtime has
+    /// no app-visible capacity, census, or admission, and observations never
+    /// touch it (they are pure-waker async since #680).
     #[doc(hidden)]
-    pub fn reserve_native_task(
-        &self,
-        component: impl Into<String>,
-    ) -> Result<nmp_executor::Reservation, EngineError> {
-        let component = component.into();
-        self.with_handle(|_| self.native_tasks.reserve(component))?
-            .map_err(|error| EngineError::ThreadUnavailable {
-                reason: error.to_string(),
-                component: error.component,
-            })
-    }
-
-    #[doc(hidden)]
-    pub fn native_task_cancel(&self) -> Result<NativeTaskCancel, EngineError> {
-        self.with_handle(|handle| {
-            let handle = handle.clone();
-            NativeTaskCancel {
-                action: Arc::new(move || handle.shutdown()),
-            }
-        })
+    pub fn adapter_runtime(&self) -> Result<tokio::runtime::Handle, EngineError> {
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        match &*guard {
+            Some(inner) => Ok(inner.engine_thread.adapter_runtime()),
+            None => Err(EngineError::EngineClosed),
+        }
     }
 
     /// Noun 1: open a live query (#485). `window: None` ⇒ the unbounded delta
