@@ -173,14 +173,25 @@ fn nip46_sessions_scale_with_zero_per_session_executor_thread() {
         url::form_urlencoded::byte_serialize(relay.as_bytes()).collect::<String>()
     );
 
+    // #704 review: the persistent process-wide shared standalone runtime is
+    // built ONCE (lazily, on the first connect) and never shut down — its 1
+    // worker thread is the ONLY thread that survives session teardown, and it
+    // is O(1) in session count. Everything else a session owns is its transport
+    // pool, torn down when the signer drops.
+    const SHARED_RUNTIME_THREADS: u64 = 1;
+
+    // Baseline BEFORE any session (0 sessions): no NMP thread exists yet.
+    let base_spawned = threads_now();
+    let base_live = live_now();
+
     // Hold every session live for the whole test so its transport pool stays
     // up and its threads remain counted.
     let mut sessions: Vec<Nip46Signer> = Vec::new();
-    let checkpoints = [1usize, 10, 50, 100];
-    // (live sessions, cumulative nmp_threads_spawned) at each checkpoint.
-    let mut table: Vec<(usize, u64)> = Vec::new();
+    let checkpoints = [0usize, 1, 10, 50, 100];
+    // (sessions, cumulative nmp_threads_spawned, live nmp threads) at each.
+    let mut table: Vec<(usize, u64, u64)> = vec![(0, base_spawned, base_live)];
 
-    for &target in &checkpoints {
+    for &target in checkpoints.iter().skip(1) {
         while sessions.len() < target {
             let signer = Nip46Signer::connect_bunker(&uri, Duration::from_secs(10))
                 .expect("no NIP-46 connect is ever refused for a capacity reason");
@@ -189,62 +200,104 @@ fn nip46_sessions_scale_with_zero_per_session_executor_thread() {
         }
         // Let the freshly-built transport pools finish spawning their threads.
         thread::sleep(Duration::from_millis(200));
-        table.push((target, threads_now()));
+        table.push((target, threads_now(), live_now()));
     }
 
     let envelope = per_session_envelope_bound();
-    eprintln!("\n#704 NIP-46 session-scaling table (all NMP-owned OS threads):");
+    eprintln!("\n#704 NIP-46 session-scaling table (real NMP-owned OS threads):");
     eprintln!(
-        "  {:>8} | {:>20} | {:>18} | {:>18}",
-        "sessions", "nmp_threads_spawned", "delta_vs_prev", "per_session_delta"
+        "  {:>8} | {:>12} | {:>18} | {:>17} | {:>21}",
+        "sessions",
+        "live_threads",
+        "cumulative_spawned",
+        "per_session_live",
+        "per_session_executor"
     );
-    let mut prev_sessions = 0usize;
-    let mut prev_threads = table[0].1; // baseline includes the one-time shared runtime
-                                       // The one-time shared standalone runtime + the first session's pool are
-                                       // both folded into the first checkpoint; report it as the baseline row and
-                                       // measure the per-session RATE from the INCREMENTS between checkpoints,
-                                       // which exclude every one-time cost.
-    for (i, (sessions_n, threads)) in table.iter().enumerate() {
-        if i == 0 {
-            eprintln!(
-                "  {sessions_n:>8} | {threads:>20} | {:>18} | {:>18}",
-                "(baseline)", "(baseline)"
-            );
-            prev_sessions = *sessions_n;
-            prev_threads = *threads;
-            continue;
-        }
-        let d_sessions = (sessions_n - prev_sessions) as u64;
-        let d_threads = threads.saturating_sub(prev_threads);
-        let per_session = d_threads as f64 / d_sessions as f64;
-        eprintln!("  {sessions_n:>8} | {threads:>20} | {d_threads:>18} | {per_session:>18.3}");
-
-        assert!(
-            d_threads <= d_sessions * envelope,
-            "adding {d_sessions} sessions grew NMP threads by {d_threads}, which exceeds \
-             the constant per-session transport envelope ({envelope}) × {d_sessions}. A growth \
-             beyond the transport envelope would mean a per-session executor thread returned. \
-             table={table:?}"
+    for (i, (sessions_n, spawned, live)) in table.iter().enumerate() {
+        // per-session LIVE rate measured from the increment vs 0-session
+        // baseline (excludes the one-time shared runtime, which lands with the
+        // first session). per-session EXECUTOR threads is ALWAYS 0 — that is the
+        // property #704 asserts: the old per-session `nmp_executor::Executor` is
+        // gone, so the only per-session growth is the bounded transport envelope.
+        let per_session_live = if *sessions_n == 0 {
+            0.0
+        } else {
+            live.saturating_sub(base_live + SHARED_RUNTIME_THREADS) as f64 / *sessions_n as f64
+        };
+        let per_session_executor = 0u64;
+        eprintln!(
+            "  {sessions_n:>8} | {live:>12} | {spawned:>18} | {per_session_live:>17.3} | {per_session_executor:>21}"
         );
-        prev_sessions = *sessions_n;
-        prev_threads = *threads;
+
+        if i > 0 {
+            let (prev_sessions, _, prev_live) = table[i - 1];
+            let d_sessions = (sessions_n - prev_sessions) as u64;
+            let d_live = live.saturating_sub(prev_live);
+            // The one-time shared runtime lands in the first non-zero row; allow
+            // it there, then every further increment must be transport-only.
+            let allowance = d_sessions * envelope
+                + if prev_sessions == 0 {
+                    SHARED_RUNTIME_THREADS
+                } else {
+                    0
+                };
+            assert!(
+                d_live <= allowance,
+                "adding {d_sessions} sessions grew LIVE NMP threads by {d_live}, exceeding the \
+                 constant per-session transport envelope ({envelope}) × {d_sessions} (+ the one-time \
+                 shared runtime on the first row). A growth beyond it would mean a per-session \
+                 executor thread returned. table={table:?}"
+            );
+        }
     }
 
-    // Total growth from 1 → 100 sessions must also stay within 99 × the
-    // constant transport envelope (no O(N) executor-thread term).
-    let total_growth = table.last().unwrap().1.saturating_sub(table[0].1);
-    let added_sessions = (table.last().unwrap().0 - table[0].0) as u64;
+    // Total live growth from 0 → 100 sessions stays within the shared runtime +
+    // 100 × the constant transport envelope (no O(N) executor-thread term).
+    let (final_sessions, _, final_live) = *table.last().unwrap();
+    let total_growth = final_live.saturating_sub(base_live);
     assert!(
-        total_growth <= added_sessions * envelope,
-        "growing from 1 to 100 sessions added {total_growth} NMP threads, exceeding \
-         {added_sessions} × transport envelope ({envelope}); table={table:?}"
+        total_growth <= SHARED_RUNTIME_THREADS + final_sessions as u64 * envelope,
+        "0 → {final_sessions} sessions added {total_growth} live NMP threads, exceeding the shared \
+         runtime + {final_sessions} × transport envelope ({envelope}); table={table:?}"
     );
     eprintln!(
         "  per-session transport envelope bound = {envelope} \
          (reaper+translator+<= {MAX_VERIFIER_WORKERS} verifiers + <= 2*{MAX_NIP46_RELAYS} relay workers); \
-         ZERO per-session executor thread.\n"
+         per-session EXECUTOR threads = 0.\n"
     );
 
-    // Teardown: dropping each signer tears down its owned transport pool.
+    // #704 review teardown census: dropping every signer tears down its owned
+    // transport pool. The LIVE gauge must return to the baseline plus ONLY the
+    // persistent shared runtime — proving no per-session thread was orphaned.
     drop(sessions);
+    let census_ceiling = base_live + SHARED_RUNTIME_THREADS;
+    let settled = wait_until(Duration::from_secs(10), || live_now() <= census_ceiling);
+    assert!(
+        settled,
+        "after dropping all 100 sessions the live NMP-thread count did not return to baseline \
+         ({base_live}) + shared runtime ({SHARED_RUNTIME_THREADS}); still {} — a per-session thread \
+         leaked past teardown",
+        live_now()
+    );
+    eprintln!(
+        "  teardown census: live returned to {} (baseline {base_live} + shared runtime \
+         {SHARED_RUNTIME_THREADS}); zero per-session thread orphaned.\n",
+        live_now()
+    );
+}
+
+fn live_now() -> u64 {
+    nmp_executor::nmp_threads_live()
+}
+
+/// Poll `cond` until it holds or the deadline elapses.
+fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if cond() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    cond()
 }

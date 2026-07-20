@@ -954,22 +954,22 @@ fn spawn_sign_event_completion(
     let spawned = thread::Builder::new()
         .name("nmp-sign-event-completion".to_string())
         .spawn(move || {
-            SIGN_EVENT_COMPLETION_OP.with(|op| op.set(Some(operation_id)));
-            let _finished = SignEventFinishedGuard {
-                inbox: thread_inbox,
-                operation_id,
-            };
-            let result = match signer_result {
-                Some(result) if terminal.resolve() => result
-                    .map_err(signer_error)
-                    .and_then(|signed| validate_signer_output(&unsigned, expected_id, signed)),
-                Some(_) | None => Err(SignEventError::Cancelled),
-            };
-            completion(result);
+            nmp_executor::run_counted_thread(move || {
+                SIGN_EVENT_COMPLETION_OP.with(|op| op.set(Some(operation_id)));
+                let _finished = SignEventFinishedGuard {
+                    inbox: thread_inbox,
+                    operation_id,
+                };
+                let result = match signer_result {
+                    Some(result) if terminal.resolve() => result
+                        .map_err(signer_error)
+                        .and_then(|signed| validate_signer_output(&unsigned, expected_id, signed)),
+                    Some(_) | None => Err(SignEventError::Cancelled),
+                };
+                completion(result);
+            });
         });
-    if spawned.is_ok() {
-        nmp_executor::note_thread_spawn();
-    } else {
+    if spawned.is_err() {
         // OS thread exhaustion (astronomically rare): the failed spawn dropped
         // the completion closure without calling it, so the caller observes a
         // disconnected result. Clear the operation from the shutdown drain.
@@ -1383,6 +1383,7 @@ impl EngineThread {
             .enable_all()
             .thread_name("nmp-adapter")
             .on_thread_start(nmp_executor::note_thread_spawn)
+            .on_thread_stop(nmp_executor::note_thread_exit)
             .build()
             .map(Arc::new)
             .map_err(|error| EngineThreadError::ThreadUnavailable {
@@ -1447,21 +1448,20 @@ impl EngineThread {
         let bridge_join = match thread::Builder::new()
             .name("nmp-engine-pool-bridge".to_string())
             .spawn(move || {
-                #[cfg(test)]
-                let _thread_count = RuntimeThreadCountGuard::enter(bridge_runtime_threads);
-                pool_bridge_loop(
-                    &pool_evt_rx,
-                    &pool_stop_rx,
-                    &bridge_inbox,
-                    max_engine_batch,
-                    max_engine_batch_bytes,
-                    max_engine_batch_wait,
-                )
+                nmp_executor::run_counted_thread(move || {
+                    #[cfg(test)]
+                    let _thread_count = RuntimeThreadCountGuard::enter(bridge_runtime_threads);
+                    pool_bridge_loop(
+                        &pool_evt_rx,
+                        &pool_stop_rx,
+                        &bridge_inbox,
+                        max_engine_batch,
+                        max_engine_batch_bytes,
+                        max_engine_batch_wait,
+                    )
+                })
             }) {
-            Ok(join) => {
-                nmp_executor::note_thread_spawn();
-                join
-            }
+            Ok(join) => join,
             Err(error) => {
                 pool.shutdown();
                 return Err(EngineThreadError::ThreadUnavailable {
@@ -1482,28 +1482,27 @@ impl EngineThread {
             match thread::Builder::new()
                 .name("nmp-engine".to_string())
                 .spawn(move || {
-                    #[cfg(test)]
-                    let _thread_count = RuntimeThreadCountGuard::enter(engine_runtime_threads);
-                    engine_loop(
-                        store,
-                        directory,
-                        cap,
-                        admission,
-                        EnginePoolRuntime {
-                            pool: engine_pool,
-                            stop: engine_stop,
-                            runtime: engine_runtime,
-                            relay_information: engine_relay_information,
-                            max_auth_capabilities: runtime_config.max_auth_capabilities,
-                        },
-                        &cmd_rx,
-                        &self_inbox,
-                    )
+                    nmp_executor::run_counted_thread(move || {
+                        #[cfg(test)]
+                        let _thread_count = RuntimeThreadCountGuard::enter(engine_runtime_threads);
+                        engine_loop(
+                            store,
+                            directory,
+                            cap,
+                            admission,
+                            EnginePoolRuntime {
+                                pool: engine_pool,
+                                stop: engine_stop,
+                                runtime: engine_runtime,
+                                relay_information: engine_relay_information,
+                                max_auth_capabilities: runtime_config.max_auth_capabilities,
+                            },
+                            &cmd_rx,
+                            &self_inbox,
+                        )
+                    })
                 }) {
-                Ok(join) => {
-                    nmp_executor::note_thread_spawn();
-                    join
-                }
+                Ok(join) => join,
                 Err(error) => {
                     drop(pool_stop_tx);
                     pool.shutdown();
@@ -5165,14 +5164,17 @@ fn preflight_query_relay_workers(effects: &[Effect], pool: &Pool) -> Result<(), 
         |session| pool.live_session_handle(session).is_some(),
         |session| match pool.ensure_session(session) {
             Ok(handle) => Ok(Some(handle)),
-            Err(nmp_transport::RelayOpenError::ThreadUnavailable(error)) => {
-                Err(EngineThreadError::ThreadUnavailable {
-                    component: error.role.to_string(),
-                    reason: error.reason,
-                })
-            }
-            // Capacity/unavailable remains ordinary local shortfall. It is
-            // represented by acquisition evidence, not construction failure.
+            // #704 (review): a relay whose connection worker cannot be opened
+            // -- for ANY reason, including a genuine OS thread-spawn refusal --
+            // is an unavailable relay, represented as acquisition evidence in
+            // the observation's stream, exactly like an over-budget or
+            // unreachable relay. An observation is NEVER refused, and never
+            // surfaces a worker/thread/spawn/admission concept to the app; the
+            // query simply proceeds on its other planned sources and reports the
+            // relay as unavailable. (The per-relay transport worker is a genuine
+            // bounded I/O thread, O(distinct relays), outside the eliminated
+            // admission executor -- its rare pthread refusal is an OS-resource
+            // fact about one connection, not an engine-level failure.)
             Err(_) => Ok(None),
         },
         |handle| {
@@ -6106,10 +6108,12 @@ impl Handle {
 
     /// Open a live subscription. Blocks (briefly — one engine-thread round
     /// trip, never network-bound) until `EngineCore` has assigned the
-    /// `HandleId` and the row channel is registered, then returns both. An
-    /// OS refusal to create an initially required relay worker rolls the
-    /// subscription back and returns [`EngineThreadError::ThreadUnavailable`]
-    /// before a handle escapes.
+    /// `HandleId` and the row channel is registered, then returns both. #704
+    /// (review): a relay whose initially-required connection worker cannot be
+    /// opened — including a rare OS thread-spawn refusal — is NOT a subscription
+    /// failure; that relay is reported as unavailable in acquisition evidence
+    /// and the subscription proceeds on its other sources. An unwindowed
+    /// subscription therefore never returns a construction error here.
     ///
     /// # Panics
     /// If the engine thread has already shut down. Calling `subscribe`

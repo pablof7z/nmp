@@ -84,6 +84,18 @@ pub use error::EngineError;
 pub fn nmp_threads_spawned() -> u64 {
     nmp_engine::nmp_threads_spawned()
 }
+
+/// The number of real NMP-owned OS threads currently ALIVE (#704 review
+/// falsifier instrumentation). Unlike [`nmp_threads_spawned`] (monotonic), this
+/// gauge decrements when a thread exits, so a teardown falsifier can assert it
+/// returns to baseline after sessions are dropped and the engine is shut down —
+/// proving no orphaned worker survives cancellation/drop/shutdown. Doc-hidden
+/// test instrumentation, not part of the product surface.
+#[doc(hidden)]
+#[must_use]
+pub fn nmp_threads_live() -> u64 {
+    nmp_engine::nmp_threads_live()
+}
 // The pull-based async observation surface (#680) is the FFI/SDK delivery
 // mechanism — its app contract is documented in `nmp-ffi`'s own surface
 // snapshot and the Swift/Kotlin SDKs. The documented direct-Rust product

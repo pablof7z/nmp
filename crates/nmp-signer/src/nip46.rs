@@ -1084,6 +1084,7 @@ fn standalone_runtime() -> Result<tokio::runtime::Handle, Nip46Error> {
                 .enable_all()
                 .thread_name("nmp-nip46")
                 .on_thread_start(nmp_executor::note_thread_spawn)
+                .on_thread_stop(nmp_executor::note_thread_exit)
                 .build()
                 .ok()
                 .map(Arc::new)

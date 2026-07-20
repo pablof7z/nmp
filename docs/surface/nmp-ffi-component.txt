@@ -2783,7 +2783,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "A live observation could not be established because a required relay\nconnection (or its canonical projection) could not be opened -- a rare,\ngenuine infrastructure outcome of `observe`. Carries no internal\nworker/pool/thread concept (#704).",
+                "A windowed `observe` could not open its canonical store projection (the\nstore degraded while establishing the history session). This is the ONLY\nthing it means (#704 review): a concrete store-projection failure, NEVER\na worker/thread/pool/runtime-busy, task-admission, spawn-failure, or\nqueue-full condition. A relay whose connection cannot be opened is NOT\nthis error -- it is ordinary acquisition evidence in the observation's\nstream, and the observation still succeeds on its other sources.",
             ),
         },
         Variant {

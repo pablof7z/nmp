@@ -120,10 +120,13 @@ pub enum FfiError {
         component: String,
         reason: String,
     },
-    /// A live observation could not be established because a required relay
-    /// connection (or its canonical projection) could not be opened -- a rare,
-    /// genuine infrastructure outcome of `observe`. Carries no internal
-    /// worker/pool/thread concept (#704).
+    /// A windowed `observe` could not open its canonical store projection (the
+    /// store degraded while establishing the history session). This is the ONLY
+    /// thing it means (#704 review): a concrete store-projection failure, NEVER
+    /// a worker/thread/pool/runtime-busy, task-admission, spawn-failure, or
+    /// queue-full condition. A relay whose connection cannot be opened is NOT
+    /// this error -- it is ordinary acquisition evidence in the observation's
+    /// stream, and the observation still succeeds on its other sources.
     ObservationUnavailable {
         reason: String,
     },
