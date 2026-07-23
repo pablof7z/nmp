@@ -44,7 +44,13 @@ let package = Package(
         ),
         .target(
             name: "NMPFFI",
-            dependencies: ["nmp_ffiFFI"]
+            dependencies: ["nmp_ffiFFI"],
+            linkerSettings: [
+                .linkedFramework(
+                    "SystemConfiguration",
+                    .when(platforms: [.iOS, .macOS])
+                ),
+            ]
         ),
         .target(
             name: "NMP",

@@ -132,6 +132,17 @@ fn event_table_len(path: &Path) -> u64 {
 fn assert_path_canonical_integrity(path: &Path) {
     let db = Database::open(path).expect("open raw database for canonical integrity audit");
     assert_canonical_integrity(&db);
+    drop(db);
+
+    let store = RedbStore::open(path).expect("open recovered store for semantic digest");
+    let first = crate::semantic_oracle::recovered_semantic_digest(&store);
+    drop(store);
+    let reopened = RedbStore::open(path).expect("reopen recovered store for semantic digest");
+    assert_eq!(
+        crate::semantic_oracle::recovered_semantic_digest(&reopened),
+        first,
+        "semantic state changed on the second reopen after an injected crash"
+    );
 }
 
 fn crash_worker(path: &Path, point: &str, audit_v8: bool) {

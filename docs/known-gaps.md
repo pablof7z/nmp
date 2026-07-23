@@ -333,6 +333,15 @@ about current code:
 
 ## Persistence robustness
 
+- **Backend candidates are not semantically qualified (#698/#699).** The
+  backend-independent oracle now compares MemoryStore and Redb after every
+  operation in the reference event/publishing trace, closes and reopens Redb
+  at every checkpoint, and attaches a stable semantic recovery digest to every
+  existing process-death failpoint. Fjall has not yet passed that full path or
+  completed compaction settlement accounting; LMDB has not been tested with a
+  packed backend-native Nostr layout; SQLite and browser persistence remain a
+  separate portability track. Redb remains the production baseline.
+
 - **Fallible ingest/read store doors landed; two read peeks and FFI plumbing deferred (#122).** The six ingest/read `EventStore` doors (`insert`/`query`/`remove`/`expire_due`/`record_coverage`/`gc`) now return `Result<_, PersistenceError>` — `RedbStore` propagates real redb I/O errors instead of `.expect()`-panicking on every EVENT frame, and the engine degrades the local cache to read-only (a `DiagnosticsSnapshot.store_degraded` signal) instead of crashing the host app. Deliberately NOT done in that change, flagged here so nothing hides: (1) `EventStore::next_expiration` and `get_coverage` (small index/coverage read peeks) are still `.expect()`-on-I/O — a disk error there still panics; widening them ripples into the engine's deadline-arming hot path and was scoped out. (2) `store_degraded` is surfaced only on the Rust `DiagnosticsSnapshot`; it is NOT plumbed through `FfiDiagnosticsSnapshot`/Swift/Kotlin, so a native host cannot yet observe the read-only degrade. (3) The degrade policy is intentionally minimal (latch first error, skip the reactive step, emit a diagnostic, keep running) — there is no recovery/reopen path, no per-door policy, and no bounded-retry framework.
 
 ## Security hardening deferred
