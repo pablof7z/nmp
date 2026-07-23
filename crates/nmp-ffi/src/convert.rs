@@ -237,7 +237,8 @@ pub enum FfiError {
 /// Exact failure returned by `NmpRowStream::request_rows`
 /// (`nmp::RequestRowsError` mirror). Growth is declarative -- there is no
 /// token to misuse and no generation to go stale, so the only failures left
-/// are the structural one (`Unwindowed`) and genuine advance failures.
+/// are the structural one (`Unwindowed`), engine teardown, and canonical-store
+/// failure while staging an advance.
 /// `AtBound` is deliberately NOT here: reaching the declared `max` is a FACT
 /// delivered in frames ([`FfiWindowLoad::AtBound`]), never a thrown error.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
@@ -249,11 +250,6 @@ pub enum FfiRequestRowsError {
     /// The canonical store could not serve the advance (the staged load was
     /// rolled back).
     StoreUnavailable,
-    /// No planned source could serve the advance (the staged load was rolled
-    /// back).
-    TransportUnavailable {
-        reason: String,
-    },
 }
 
 impl From<nmp::EngineError> for FfiError {
@@ -488,16 +484,6 @@ impl From<RequestRowsError> for FfiRequestRowsError {
             RequestRowsError::Unwindowed => Self::Unwindowed,
             RequestRowsError::EngineClosed => Self::EngineClosed,
             RequestRowsError::StoreUnavailable => Self::StoreUnavailable,
-            RequestRowsError::TransportUnavailable { reason } => {
-                Self::TransportUnavailable { reason }
-            }
-            // `nmp::RequestRowsError` is `#[non_exhaustive]`: a variant added
-            // upstream before this seam learns it must still cross typed --
-            // as an advance failure carrying the upstream Display -- never a
-            // panic across the FFI boundary.
-            other => Self::TransportUnavailable {
-                reason: other.to_string(),
-            },
         }
     }
 }
@@ -511,9 +497,6 @@ impl std::fmt::Display for FfiRequestRowsError {
             Self::EngineClosed => f.write_str("engine already shut down"),
             Self::StoreUnavailable => {
                 f.write_str("window advance could not read or resolve the canonical store")
-            }
-            Self::TransportUnavailable { reason } => {
-                write!(f, "window advance transport unavailable: {reason}")
             }
         }
     }
@@ -658,14 +641,6 @@ mod window_conversion_tests {
         assert_eq!(
             FfiRequestRowsError::from(RequestRowsError::StoreUnavailable),
             FfiRequestRowsError::StoreUnavailable
-        );
-        assert_eq!(
-            FfiRequestRowsError::from(RequestRowsError::TransportUnavailable {
-                reason: "offline".to_string(),
-            }),
-            FfiRequestRowsError::TransportUnavailable {
-                reason: "offline".to_string(),
-            }
         );
     }
 

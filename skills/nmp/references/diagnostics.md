@@ -20,11 +20,11 @@ Do not claim that diagnostics currently provide:
 - a global connection generation or populated AUTH lifecycle;
 - database row counts or GC telemetry.
 
-Engine-start and observation infra failures are call facts, not diagnostics snapshot fields. Engine construction can return `EngineError::EngineStartFailed`; a live observe (including NIP-02 following observation) can return `EngineError::ObservationUnavailable` when a required relay connection cannot be opened. The follow action has no capacity or thread refusal and reports any genuine terminal failure as `FollowActionStatus::Failed` with a `FollowActionFailure` value, and initial direct-Rust NIP-46 setup returns the matching `Nip46Error`. Native post-handle streamed NIP-46 failures are separate again. Preserve the exact owning shape instead of waiting for diagnostics to explain an absent or closed stream.
+Engine-start and observation infra failures are call facts, not diagnostics snapshot fields. Engine construction can return `EngineError::EngineStartFailed`; a windowed observe can return `EngineError::ObservationUnavailable` only when store degradation prevents its canonical history projection from opening. Relay connection/worker failure is acquisition evidence, not this error. The follow action has no capacity or thread refusal and reports any genuine terminal failure as `FollowActionStatus::Failed` with a `FollowActionFailure` value, and initial direct-Rust NIP-46 setup returns the matching `Nip46Error`. Native post-handle streamed NIP-46 failures are separate again. Preserve the exact owning shape instead of waiting for diagnostics to explain an absent or closed stream.
 
 NIP-11 service closure and acquisition failure are likewise one-shot call facts, not scheduler diagnostics. A successful stale snapshot can carry its refresh error while diagnostics retain the cited last-good advertisement; absence of behavioral proof remains absence.
 
-There is no worker/task census, idle barrier, or task-capacity knob to poll: #704 removed internal task admission. Do not model queue pressure, expose task counts as product telemetry, or treat any capacity as a retry policy.
+There is no worker/task census, idle barrier, public task-capacity knob, or saturation outcome to poll. Private NIP-11/NIP-46 bounds apply backpressure internally; do not model queue pressure, expose task counts as product telemetry, or treat a physical bound as an app retry policy.
 
 `SourceStatus.awaitingAuth`/`authDenied` and `AuthPhase` exist as reserved public vocabulary but are not populated by the current engine. Label them reserved if they appear in exhaustive UI switches.
 

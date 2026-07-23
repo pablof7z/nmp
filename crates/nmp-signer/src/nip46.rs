@@ -31,11 +31,14 @@ use crate::{
 
 const DEFAULT_PERMISSIONS: &str = "sign_event,nip44_encrypt,nip44_decrypt";
 const MAX_PENDING_REQUESTS: usize = 64;
+const REQUEST_QUEUE_CAPACITY: usize = MAX_PENDING_REQUESTS;
+const CONTROL_QUEUE_CAPACITY: usize = 8;
+const POOL_EVENT_QUEUE_CAPACITY: usize = 256;
 const SWITCH_RELAYS_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Nip46CancellationInner {
     cancelled: AtomicBool,
-    commands: Mutex<Option<tokio_mpsc::UnboundedSender<WorkerMsg>>>,
+    control: Mutex<Option<Arc<SessionControl>>>,
 }
 
 /// Explicit cancellation for a connection attempt that has not produced a
@@ -51,23 +54,23 @@ impl Default for Nip46Cancellation {
         Self {
             inner: Arc::new(Nip46CancellationInner {
                 cancelled: AtomicBool::new(false),
-                commands: Mutex::new(None),
+                control: Mutex::new(None),
             }),
         }
     }
 }
 
 impl Nip46Cancellation {
-    fn bind(&self, commands: tokio_mpsc::UnboundedSender<WorkerMsg>) {
+    fn bind(&self, control: Arc<SessionControl>) {
         let mut current = self
             .inner
-            .commands
+            .control
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         if self.inner.cancelled.load(Ordering::Acquire) {
-            let _ = commands.send(WorkerMsg::Shutdown);
+            control.shutdown();
         } else {
-            *current = Some(commands);
+            *current = Some(control);
         }
     }
 
@@ -76,14 +79,14 @@ impl Nip46Cancellation {
         if self.inner.cancelled.swap(true, Ordering::AcqRel) {
             return;
         }
-        let commands = self
+        let control = self
             .inner
-            .commands
+            .control
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .take();
-        if let Some(commands) = commands {
-            let _ = commands.send(WorkerMsg::Shutdown);
+        if let Some(control) = control {
+            control.shutdown();
         }
     }
 }
@@ -993,37 +996,100 @@ struct RpcEnvelope {
 struct PendingRequest {
     frame: String,
     reply: PendingSignerSender<String>,
+    cancellation: Arc<RequestCancellation>,
 }
 
-// Pool events stay owned values across this already-bounded channel. Boxing
-// the largest variant would add a heap allocation to every NIP-46 pool event
-// only to reduce the private enum's stack size.
-#[allow(clippy::large_enum_variant)]
+struct SessionControl {
+    shutdown: AtomicBool,
+    signal: tokio::sync::Notify,
+}
+
+impl SessionControl {
+    fn new() -> Self {
+        Self {
+            shutdown: AtomicBool::new(false),
+            signal: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        self.signal.notify_one();
+    }
+
+    fn is_shutdown(&self) -> bool {
+        self.shutdown.load(Ordering::Acquire)
+    }
+}
+
+struct RequestCancellation {
+    cancelled: AtomicBool,
+    admission_signal: tokio::sync::Notify,
+    worker_signal: Arc<tokio::sync::Notify>,
+}
+
+impl RequestCancellation {
+    fn new(worker_signal: Arc<tokio::sync::Notify>) -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            admission_signal: tokio::sync::Notify::new(),
+            worker_signal,
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.admission_signal.notify_waiters();
+        self.worker_signal.notify_one();
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        let notified = self.admission_signal.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.is_cancelled() {
+            return;
+        }
+        notified.await;
+    }
+}
+
+// Requests stay owned values across this bounded channel. The finite queue is
+// the physical envelope; producers beyond it remain in caller-owned,
+// cancellable admission futures.
+struct RequestMsg {
+    id: String,
+    method: String,
+    params: Vec<String>,
+    reply: PendingSignerSender<String>,
+    cancellation: Arc<RequestCancellation>,
+}
+
 enum WorkerMsg {
-    Pool(PoolEvent),
-    Request {
-        id: String,
-        method: String,
-        params: Vec<String>,
-        reply: PendingSignerSender<String>,
-    },
     AcceptInvitation {
         expected_secret: String,
         reply: Sender<Result<PublicKey, Nip46Error>>,
     },
     ReplaceRelays(Vec<RelayUrl>),
-    CancelRequest(String),
-    Shutdown,
 }
 
 #[derive(Clone)]
-struct SessionPoolSink(tokio_mpsc::UnboundedSender<WorkerMsg>);
+struct SessionPoolSink(tokio_mpsc::Sender<PoolEvent>);
 
 impl PoolEventSink for SessionPoolSink {
     fn on_event(&self, event: PoolEvent) {
-        // The pool's mio worker thread pushes here; an unbounded tokio channel
-        // send is non-blocking and wakes the async session worker.
-        let _ = self.0.send(WorkerMsg::Pool(event));
+        // The pool translator is a genuine bounded native I/O worker. A full
+        // session queue blocks that producer and propagates pressure to the
+        // pool's already-bounded ingest path. Shutdown drops the receiver
+        // before joining the pool, which wakes a blocked send with `Err`.
+        let _ = self.0.blocking_send(event);
     }
 }
 
@@ -1032,6 +1098,7 @@ fn session_pool_config() -> PoolConfig {
     // protocol/session relay ceiling enforced at every NIP-46 input door.
     PoolConfig {
         max_relays: MAX_NIP46_RELAYS,
+        event_sink_queue_capacity: POOL_EVENT_QUEUE_CAPACITY,
         // Issue #519's resolved-IP admission check (`pool::connect`) refuses
         // a loopback/private/link-local dial by default — the right default
         // for a DISCOVERED relay (a network-sourced kind:10002/kind:10050
@@ -1100,7 +1167,10 @@ fn standalone_runtime() -> Result<tokio::runtime::Handle, Nip46Error> {
 type EventSink = Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>;
 
 struct Session {
-    commands: tokio_mpsc::UnboundedSender<WorkerMsg>,
+    requests: tokio_mpsc::Sender<RequestMsg>,
+    commands: tokio_mpsc::Sender<WorkerMsg>,
+    control: Arc<SessionControl>,
+    request_cancellation_signal: Arc<tokio::sync::Notify>,
     connected_relays: AtomicUsize,
     subscribers: Arc<Mutex<Vec<Sender<Nip46ConnectionEvent>>>>,
     /// #704: the connection-event observers `forward_events` installs. Since
@@ -1130,13 +1200,20 @@ impl Session {
         cancellation: Option<&Nip46Cancellation>,
         runtime: SessionRuntime,
     ) -> Result<Arc<Self>, Nip46Error> {
-        let (commands, inbox) = tokio_mpsc::unbounded_channel();
+        let (requests, request_inbox) = tokio_mpsc::channel(REQUEST_QUEUE_CAPACITY);
+        let (commands, inbox) = tokio_mpsc::channel(CONTROL_QUEUE_CAPACITY);
+        let (pool_events, pool_inbox) = tokio_mpsc::channel(POOL_EVENT_QUEUE_CAPACITY);
+        let control = Arc::new(SessionControl::new());
+        let request_cancellation_signal = Arc::new(tokio::sync::Notify::new());
         let subscribers = Arc::new(Mutex::new(Vec::new()));
         let event_sinks: Arc<Mutex<Vec<EventSink>>> = Arc::new(Mutex::new(Vec::new()));
         let availability_error = Arc::new(Mutex::new(None));
         let runtime_handle = runtime.handle();
         let session = Arc::new(Self {
+            requests,
             commands: commands.clone(),
+            control: Arc::clone(&control),
+            request_cancellation_signal: Arc::clone(&request_cancellation_signal),
             connected_relays: AtomicUsize::new(0),
             subscribers: Arc::clone(&subscribers),
             event_sinks: Arc::clone(&event_sinks),
@@ -1146,20 +1223,19 @@ impl Session {
             current_relays: Mutex::new(relays.clone()),
         });
         if let Some(cancellation) = cancellation {
-            cancellation.bind(session.commands.clone());
+            cancellation.bind(Arc::clone(&control));
         }
         let weak = Arc::downgrade(&session);
         // A transport-pool build failure leaves the session unusable; #704
         // removed the operation-level `ThreadUnavailable`, so it surfaces as
         // the terminal connection-ended outcome.
-        let pool = Pool::new(session_pool_config(), SessionPoolSink(commands.clone()))
+        let pool = Pool::new(session_pool_config(), SessionPoolSink(pool_events))
             .map_err(|_| Nip46Error::Disconnected)?;
         let worker_pool = pool.clone();
         // #704: the session worker is an async task on the runtime; its whole
-        // lifetime it awaits the inbox, holding no OS thread. Session teardown
-        // (and external cancellation) posts `WorkerMsg::Shutdown`, which ends
-        // the `run` loop; the `Owned` runtime is additionally dropped on
-        // `Session::drop`, aborting any still-parked task.
+        // lifetime it awaits bounded inboxes, holding no OS thread. Session
+        // teardown and external cancellation use an independent control signal,
+        // so a full data queue cannot delay shutdown.
         runtime_handle.spawn(async move {
             let mut worker = SessionWorker::new(
                 worker_pool,
@@ -1175,7 +1251,15 @@ impl Session {
                 worker.record_availability_error(error);
                 worker.emit(Nip46ConnectionEvent::Unavailable);
             }
-            worker.run(inbox).await;
+            worker
+                .run(
+                    inbox,
+                    request_inbox,
+                    pool_inbox,
+                    control,
+                    request_cancellation_signal,
+                )
+                .await;
         });
         drop(pool);
         Ok(session)
@@ -1302,16 +1386,21 @@ impl Session {
 
     fn accept_invitation(&self, expected_secret: &str) -> Receiver<Result<PublicKey, Nip46Error>> {
         let (tx, rx) = mpsc::channel();
-        if self
-            .commands
-            .send(WorkerMsg::AcceptInvitation {
-                expected_secret: expected_secret.to_string(),
-                reply: tx.clone(),
-            })
-            .is_err()
-        {
-            let _ = tx.send(Err(Nip46Error::Disconnected));
-        }
+        let commands = self.commands.clone();
+        let expected_secret = expected_secret.to_string();
+        let failure = tx.clone();
+        self.runtime_handle().spawn(async move {
+            if commands
+                .send(WorkerMsg::AcceptInvitation {
+                    expected_secret,
+                    reply: tx,
+                })
+                .await
+                .is_err()
+            {
+                let _ = failure.send(Err(Nip46Error::Disconnected));
+            }
+        });
         rx
     }
 
@@ -1351,7 +1440,10 @@ impl Session {
                 let Some(session) = session.upgrade() else {
                     return;
                 };
-                let _ = session.commands.send(WorkerMsg::ReplaceRelays(parsed));
+                let _ = session
+                    .commands
+                    .send(WorkerMsg::ReplaceRelays(parsed))
+                    .await;
             }
         });
     }
@@ -1359,7 +1451,7 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = self.commands.send(WorkerMsg::Shutdown);
+        self.control.shutdown();
         self.subscribers
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -1370,8 +1462,8 @@ impl Drop for Session {
             .clear();
         // #704: the session only borrows a runtime `Handle` (the process-wide
         // shared standalone runtime, or the engine's), so dropping the session
-        // never shuts a runtime down — the worker task already observed
-        // `Shutdown` above and exits on its own.
+        // never shuts a runtime down — the worker task observes the independent
+        // control signal above and exits on its own.
     }
 }
 
@@ -1420,31 +1512,75 @@ impl SessionWorker {
         }
     }
 
-    async fn run(&mut self, mut inbox: tokio_mpsc::UnboundedReceiver<WorkerMsg>) {
-        while let Some(message) = inbox.recv().await {
-            match message {
-                WorkerMsg::Pool(event) => self.on_pool(event),
-                WorkerMsg::Request {
-                    id,
-                    method,
-                    params,
-                    reply,
-                } => self.on_request(id, method, params, reply),
-                WorkerMsg::AcceptInvitation {
-                    expected_secret,
-                    reply,
-                } => self.invitation = Some((expected_secret, reply)),
-                WorkerMsg::ReplaceRelays(relays) => self.replace_relays(relays),
-                WorkerMsg::CancelRequest(id) => {
-                    self.pending.remove(&id);
+    async fn run(
+        &mut self,
+        mut commands: tokio_mpsc::Receiver<WorkerMsg>,
+        mut requests: tokio_mpsc::Receiver<RequestMsg>,
+        mut pool_events: tokio_mpsc::Receiver<PoolEvent>,
+        control: Arc<SessionControl>,
+        request_cancellation_signal: Arc<tokio::sync::Notify>,
+    ) {
+        loop {
+            if control.is_shutdown() {
+                break;
+            }
+            tokio::select! {
+                biased;
+                _ = control.signal.notified() => {
+                    if control.is_shutdown() {
+                        break;
+                    }
                 }
-                WorkerMsg::Shutdown => break,
+                _ = request_cancellation_signal.notified() => {
+                    self.prune_cancelled_requests();
+                }
+                message = commands.recv() => {
+                    let Some(message) = message else {
+                        break;
+                    };
+                    match message {
+                        WorkerMsg::AcceptInvitation {
+                            expected_secret,
+                            reply,
+                        } => self.invitation = Some((expected_secret, reply)),
+                        WorkerMsg::ReplaceRelays(relays) => self.replace_relays(relays),
+                    }
+                }
+                request = requests.recv(), if self.pending.len() < MAX_PENDING_REQUESTS => {
+                    let Some(RequestMsg {
+                            id,
+                            method,
+                            params,
+                            reply,
+                            cancellation,
+                        }) = request else {
+                            break;
+                        };
+                    self.on_request(id, method, params, reply, cancellation);
+                }
+                event = pool_events.recv() => {
+                    let Some(event) = event else {
+                        break;
+                    };
+                    self.on_pool(event);
+                }
             }
         }
-        // Teardown lives in `Drop` so it runs on both a clean `Shutdown` break
+        // Close both bounded inboxes before `Drop` joins the transport pool.
+        // Any pool translator blocked on a full event channel wakes with
+        // `SendError`, so shutdown cannot deadlock behind backpressure.
+        commands.close();
+        requests.close();
+        pool_events.close();
+        // Teardown lives in `Drop` so it runs on both a clean control break
         // AND an aborted task — dropping a standalone `Owned` runtime aborts the
         // worker future at its `.await`, and the drop guard is the only thing
         // that still fires the pool/pending/subscriber cleanup then (#704).
+    }
+
+    fn prune_cancelled_requests(&mut self) {
+        self.pending
+            .retain(|_, pending| !pending.cancellation.is_cancelled());
     }
 
     fn emit(&self, event: Nip46ConnectionEvent) {
@@ -1772,12 +1908,12 @@ impl SessionWorker {
         method: String,
         params: Vec<String>,
         reply: PendingSignerSender<String>,
+        cancellation: Arc<RequestCancellation>,
     ) {
-        if self.handles.is_empty() {
-            let _ = reply.resolve(Err(SignerError::Unavailable));
+        if cancellation.is_cancelled() {
             return;
         }
-        if self.pending.len() >= MAX_PENDING_REQUESTS {
+        if self.handles.is_empty() {
             let _ = reply.resolve(Err(SignerError::Unavailable));
             return;
         }
@@ -1818,6 +1954,7 @@ impl SessionWorker {
             PendingRequest {
                 frame: frame.clone(),
                 reply,
+                cancellation,
             },
         );
         for (handle, _) in self.handles.values() {
@@ -1834,24 +1971,32 @@ impl Drop for SessionWorker {
 
 fn request_string(session: &Arc<Session>, method: &str, params: Vec<String>) -> SignerOp<String> {
     let id = Keys::generate().public_key().to_hex();
-    let commands = session.commands.clone();
-    let cancel_commands = commands.clone();
-    let cancel_id = id.clone();
+    let requests = session.requests.clone();
+    let cancellation = Arc::new(RequestCancellation::new(Arc::clone(
+        &session.request_cancellation_signal,
+    )));
+    let cancel_hook = Arc::clone(&cancellation);
     let (reply, operation) = SignerOp::pending_channel_with_cancel(move || {
-        let _ = cancel_commands.send(WorkerMsg::CancelRequest(cancel_id));
+        cancel_hook.cancel();
     });
-    if session
-        .commands
-        .send(WorkerMsg::Request {
-            id,
-            method: method.to_string(),
-            params,
-            reply,
-        })
-        .is_err()
-    {
-        return SignerOp::err(SignerError::Disconnected);
-    }
+    let message = RequestMsg {
+        id,
+        method: method.to_string(),
+        params,
+        reply,
+        cancellation: Arc::clone(&cancellation),
+    };
+    session.runtime_handle().spawn(async move {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {}
+            result = requests.send(message) => {
+                if let Err(tokio_mpsc::error::SendError(RequestMsg { reply, .. })) = result {
+                    let _ = reply.resolve(Err(SignerError::Disconnected));
+                }
+            }
+        }
+    });
     operation
 }
 
@@ -1933,6 +2078,227 @@ mod tests {
     fn session_transport_worker_budget_equals_the_protocol_relay_ceiling() {
         assert_eq!(session_pool_config().max_relays, MAX_NIP46_RELAYS);
         assert_eq!(MAX_NIP46_RELAYS, 8);
+        assert_eq!(
+            session_pool_config().event_sink_queue_capacity,
+            POOL_EVENT_QUEUE_CAPACITY
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn nip46_queue_overload_is_finite_backpressured_and_control_still_progresses() {
+        fn invitation_message() -> WorkerMsg {
+            let (reply, _receiver) = mpsc::channel();
+            WorkerMsg::AcceptInvitation {
+                expected_secret: "bounded".to_string(),
+                reply,
+            }
+        }
+
+        fn request_message(worker_signal: &Arc<tokio::sync::Notify>) -> RequestMsg {
+            let (reply, operation) = SignerOp::pending_channel();
+            drop(operation);
+            RequestMsg {
+                id: Keys::generate().public_key().to_hex(),
+                method: "sign_event".to_string(),
+                params: Vec::new(),
+                reply,
+                cancellation: Arc::new(RequestCancellation::new(Arc::clone(worker_signal))),
+            }
+        }
+
+        let worker_signal = Arc::new(tokio::sync::Notify::new());
+        let (requests, mut request_inbox) =
+            tokio_mpsc::channel::<RequestMsg>(REQUEST_QUEUE_CAPACITY);
+        assert_eq!(requests.max_capacity(), REQUEST_QUEUE_CAPACITY);
+        for _ in 0..REQUEST_QUEUE_CAPACITY {
+            requests.try_send(request_message(&worker_signal)).unwrap();
+        }
+        assert_eq!(requests.capacity(), 0);
+        assert!(matches!(
+            requests.try_send(request_message(&worker_signal)),
+            Err(tokio_mpsc::error::TrySendError::Full(_))
+        ));
+
+        let mut backpressured_request = Box::pin(requests.send(request_message(&worker_signal)));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut backpressured_request)
+                .await
+                .is_err(),
+            "an app request suspends outside the finite request queue instead of expanding it"
+        );
+
+        let (commands, mut command_inbox) =
+            tokio_mpsc::channel::<WorkerMsg>(CONTROL_QUEUE_CAPACITY);
+        assert_eq!(commands.max_capacity(), CONTROL_QUEUE_CAPACITY);
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            commands.send(invitation_message()),
+        )
+        .await
+        .expect("control traffic progresses while request admission is saturated")
+        .unwrap();
+        command_inbox.recv().await.unwrap();
+
+        let control = Arc::new(SessionControl::new());
+        let observed_control = Arc::clone(&control);
+        let control_wait = tokio::spawn(async move {
+            loop {
+                if observed_control.is_shutdown() {
+                    return;
+                }
+                observed_control.signal.notified().await;
+            }
+        });
+        tokio::task::yield_now().await;
+        control.shutdown();
+        tokio::time::timeout(Duration::from_millis(100), control_wait)
+            .await
+            .expect("shutdown progresses independently of the saturated command queue")
+            .unwrap();
+
+        request_inbox.recv().await.unwrap();
+        tokio::time::timeout(Duration::from_millis(100), backpressured_request)
+            .await
+            .expect("one drained request slot admits the suspended producer")
+            .unwrap();
+
+        for _ in 0..CONTROL_QUEUE_CAPACITY {
+            commands.try_send(invitation_message()).unwrap();
+        }
+        assert_eq!(commands.capacity(), 0);
+        assert!(matches!(
+            commands.try_send(invitation_message()),
+            Err(tokio_mpsc::error::TrySendError::Full(_))
+        ));
+
+        let (pool_events, mut pool_inbox) =
+            tokio_mpsc::channel::<PoolEvent>(POOL_EVENT_QUEUE_CAPACITY);
+        assert_eq!(pool_events.max_capacity(), POOL_EVENT_QUEUE_CAPACITY);
+        for _ in 0..POOL_EVENT_QUEUE_CAPACITY {
+            pool_events.try_send(PoolEvent::WorkerRetired).unwrap();
+        }
+        assert_eq!(pool_events.capacity(), 0);
+        assert!(matches!(
+            pool_events.try_send(PoolEvent::WorkerRetired),
+            Err(tokio_mpsc::error::TrySendError::Full(_))
+        ));
+        let mut backpressured_event = Box::pin(pool_events.send(PoolEvent::WorkerRetired));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut backpressured_event)
+                .await
+                .is_err(),
+            "the pool producer suspends outside the finite event queue"
+        );
+        pool_inbox.recv().await.unwrap();
+        tokio::time::timeout(Duration::from_millis(100), backpressured_event)
+            .await
+            .expect("one drained event slot admits the suspended producer")
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pending_rpc_cap_keeps_control_live_and_admits_after_exact_cancellation() {
+        let (pool_tx, _pool_rx) = mpsc::channel();
+        let pool = Pool::new(PoolConfig::default(), pool_tx).expect("test pool construction");
+        let worker_signal = Arc::new(tokio::sync::Notify::new());
+        let mut worker = SessionWorker::new(
+            pool,
+            Keys::generate(),
+            None,
+            std::sync::Weak::<Session>::new(),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(None)),
+        );
+
+        let mut retained_operations = Vec::new();
+        let mut released_cancellation = None;
+        for index in 0..MAX_PENDING_REQUESTS {
+            let (reply, operation) = SignerOp::pending_channel();
+            retained_operations.push(operation);
+            let cancellation = Arc::new(RequestCancellation::new(Arc::clone(&worker_signal)));
+            if index == 0 {
+                released_cancellation = Some(Arc::clone(&cancellation));
+            }
+            worker.pending.insert(
+                format!("pending-{index}"),
+                PendingRequest {
+                    frame: String::new(),
+                    reply,
+                    cancellation,
+                },
+            );
+        }
+        assert_eq!(worker.pending.len(), MAX_PENDING_REQUESTS);
+
+        let (requests, request_inbox) = tokio_mpsc::channel(REQUEST_QUEUE_CAPACITY);
+        let (request_reply, request_operation) = SignerOp::pending_channel();
+        requests
+            .send(RequestMsg {
+                id: "admitted-after-cancel".to_string(),
+                method: "sign_event".to_string(),
+                params: Vec::new(),
+                reply: request_reply,
+                cancellation: Arc::new(RequestCancellation::new(Arc::clone(&worker_signal))),
+            })
+            .await
+            .unwrap();
+
+        let (commands, command_inbox) = tokio_mpsc::channel(CONTROL_QUEUE_CAPACITY);
+        let (invitation_reply, invitation_result) = mpsc::channel();
+        commands
+            .send(WorkerMsg::AcceptInvitation {
+                expected_secret: "control-progress".to_string(),
+                reply: invitation_reply,
+            })
+            .await
+            .unwrap();
+        let (_pool_events, pool_inbox) = tokio_mpsc::channel(POOL_EVENT_QUEUE_CAPACITY);
+        let control = Arc::new(SessionControl::new());
+        let task_control = Arc::clone(&control);
+        let task_signal = Arc::clone(&worker_signal);
+        let worker_task = tokio::spawn(async move {
+            worker
+                .run(
+                    command_inbox,
+                    request_inbox,
+                    pool_inbox,
+                    task_control,
+                    task_signal,
+                )
+                .await;
+            (worker.pending.len(), worker.invitation.is_some())
+        });
+
+        tokio::task::yield_now().await;
+        released_cancellation
+            .expect("one exact pending request is cancellable")
+            .cancel();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(100), request_operation.recv_async())
+                .await
+                .expect("freeing one pending slot admits exactly one queued request"),
+            Err(SignerError::Unavailable),
+            "the admitted request reaches ordinary signer availability semantics, not saturation"
+        );
+
+        control.shutdown();
+        let (pending, invitation_was_installed) =
+            tokio::time::timeout(Duration::from_millis(100), worker_task)
+                .await
+                .expect("independent shutdown completes")
+                .unwrap();
+        assert_eq!(pending, MAX_PENDING_REQUESTS - 1);
+        assert!(
+            invitation_was_installed,
+            "control traffic is serviced while the pending RPC envelope is full"
+        );
+        assert_eq!(
+            invitation_result.recv_timeout(Duration::from_millis(100)),
+            Ok(Err(Nip46Error::Disconnected)),
+            "teardown resolves the installed control operation"
+        );
+        drop(retained_operations);
     }
 
     /// #571 secrecy falsifier: `{:?}` on `Nip46SessionCheckpoint` must never
@@ -1964,12 +2330,18 @@ mod tests {
     fn injected_initial_relay_worker_refusal_reaches_the_waiting_caller_typed() {
         let (pool_tx, _pool_rx) = mpsc::channel();
         let pool = Pool::new(PoolConfig::default(), pool_tx).expect("test pool construction");
-        let (commands, _inbox) = tokio_mpsc::unbounded_channel();
+        let (requests, _request_inbox) = tokio_mpsc::channel(REQUEST_QUEUE_CAPACITY);
+        let (commands, _inbox) = tokio_mpsc::channel(CONTROL_QUEUE_CAPACITY);
+        let control = Arc::new(SessionControl::new());
+        let request_cancellation_signal = Arc::new(tokio::sync::Notify::new());
         let subscribers = Arc::new(Mutex::new(Vec::new()));
         let event_sinks = Arc::new(Mutex::new(Vec::new()));
         let availability_error = Arc::new(Mutex::new(None));
         let session = Arc::new(Session {
+            requests,
             commands,
+            control,
+            request_cancellation_signal,
             connected_relays: AtomicUsize::new(0),
             subscribers: Arc::clone(&subscribers),
             event_sinks: Arc::clone(&event_sinks),

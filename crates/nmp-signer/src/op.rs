@@ -372,8 +372,9 @@ impl<T: Send + 'static> Drop for PendingSignerOp<T> {
 /// An op that may complete synchronously (`Ready`) or later (`Pending`).
 /// `Pending` carries an NMP-owned asynchronous operation that yields exactly
 /// one result when the operation completes — callers may poll it
-/// (non-blocking, via [`SignerOp::poll`]) or blocks on it (via
-/// [`SignerOp::wait`]); no tokio is ever pulled into the engine (D8).
+/// (non-blocking, via [`SignerOp::poll`]), block on it (via
+/// [`SignerOp::wait`]), or await it. The async runtime remains an engine-owned
+/// implementation detail and never crosses this public door (D8).
 ///
 /// `LocalKeySigner` resolves synchronously (`Ready`). `Nip46Signer` uses
 /// `Pending` for an in-flight remote round-trip; the engine's recv loop drives

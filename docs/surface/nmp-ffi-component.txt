@@ -4275,28 +4275,13 @@ enum Enum {
                 "The canonical store could not serve the advance (the staged load was\nrolled back).",
             ),
         },
-        Variant {
-            name: "TransportUnavailable",
-            discr: None,
-            fields: [
-                Field {
-                    name: "reason",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: Some(
-                "No planned source could serve the advance (the staged load was rolled\nback).",
-            ),
-        },
     ],
     shape: Error {
         flat: false,
     },
     non_exhaustive: false,
     docstring: Some(
-        "Exact failure returned by `NmpRowStream::request_rows`\n(`nmp::RequestRowsError` mirror). Growth is declarative -- there is no\ntoken to misuse and no generation to go stale, so the only failures left\nare the structural one (`Unwindowed`) and genuine advance failures.\n`AtBound` is deliberately NOT here: reaching the declared `max` is a FACT\ndelivered in frames ([`FfiWindowLoad::AtBound`]), never a thrown error.",
+        "Exact failure returned by `NmpRowStream::request_rows`\n(`nmp::RequestRowsError` mirror). Growth is declarative -- there is no\ntoken to misuse and no generation to go stale, so the only failures left\nare the structural one (`Unwindowed`), engine teardown, and canonical-store\nfailure while staging an advance.\n`AtBound` is deliberately NOT here: reaching the declared `max` is a FACT\ndelivered in frames ([`FfiWindowLoad::AtBound`]), never a thrown error.",
     ),
 }
 

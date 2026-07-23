@@ -42,10 +42,10 @@ public enum NMPError: Error, Sendable, Equatable {
     /// engine-start infrastructure failure. Never raised by an ordinary
     /// operation (#704).
     case engineStartFailed(component: String, reason: String)
-    /// A live `observe` could not be established because a required relay
-    /// connection (or its canonical projection) could not be opened -- a rare,
-    /// genuine infrastructure outcome carrying no internal worker/pool concept
-    /// (#704).
+    /// A windowed `observe` could not open its canonical history projection
+    /// because the store degraded during setup. This is the case's sole
+    /// production meaning; relay connection/worker failure remains ordinary
+    /// acquisition evidence in the observation stream (#704).
     case observationUnavailable(reason: String)
     /// #680: a second `next()` was awaited on an observation stream (or a
     /// `signed()` on a sign handle) while a previous one was still in flight.

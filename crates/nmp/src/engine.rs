@@ -2627,7 +2627,7 @@ mod tests {
         assert_eq!(while_callers_retain.cached_payloads, 1);
         assert_eq!(while_callers_retain.cached_raw_body_bytes, BODY_BYTES);
         assert_eq!(while_callers_retain.active_flights, 0);
-        assert_eq!(while_callers_retain.admitted_waiters, 0);
+        assert_eq!(while_callers_retain.subscribed_callers, 0);
 
         // The 64 ordinary facade values above intentionally own 64 public
         // copies. Dropping them cannot change the engine census because those

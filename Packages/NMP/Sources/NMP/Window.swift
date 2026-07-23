@@ -71,17 +71,12 @@ public enum NMPRequestRowsError: Error, Sendable, Equatable {
     /// The canonical store could not serve the advance (the staged load
     /// was rolled back; delivered state is untouched).
     case storeUnavailable
-    /// No planned source could serve the advance (the staged load was
-    /// rolled back; delivered state is untouched).
-    case transportUnavailable(reason: String)
 
     init(_ ffi: FfiRequestRowsError) {
         switch ffi {
         case .Unwindowed: self = .unwindowed
         case .EngineClosed: self = .engineClosed
         case .StoreUnavailable: self = .storeUnavailable
-        case .TransportUnavailable(let reason):
-            self = .transportUnavailable(reason: reason)
         }
     }
 }

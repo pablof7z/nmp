@@ -36,15 +36,13 @@ pub enum EngineError {
     /// engine-start (`Engine::new`) failure only — it never surfaces from an
     /// ordinary operation (#704).
     EngineStartFailed { component: String, reason: String },
-    /// [`Engine::observe`](crate::Engine::observe) could not establish the
-    /// resources required for its initial session: either a required relay
-    /// transport worker could not be spawned during preflight, or a windowed
-    /// observation could not open its canonical history projection. This is a
-    /// concrete OS/store failure, never a worker-pool-busy, task-admission,
-    /// permit, or queue-full condition. Preflight rolls back every partial
-    /// owner before returning it; later relay loss remains ordinary acquisition
-    /// evidence in the stream. The engine-closed case is
-    /// [`Self::EngineClosed`].
+    /// A windowed [`Engine::observe`](crate::Engine::observe) could not open
+    /// its canonical history projection because the store degraded during
+    /// setup. This is the variant's sole production construction site. Relay
+    /// connection or relay-worker failure is ordinary acquisition evidence in
+    /// the observation stream and never constructs this error. It is also
+    /// never a worker-pool-busy, task-admission, permit, or queue-full outcome.
+    /// The engine-closed case is [`Self::EngineClosed`].
     ObservationUnavailable { reason: String },
     /// [`Engine::add_account`](crate::Engine::add_account)'s secret key did
     /// not parse as a valid nostr key (hex or bech32 `nsec`).
@@ -141,15 +139,13 @@ impl EngineError {
         }
     }
 
-    /// Map an engine-thread failure raised while establishing an OBSERVATION
-    /// (`observe`) to a domain outcome. Reachable construction sites are the
-    /// relay-worker preflight in `runtime::engine_loop` and the canonical
-    /// history-projection open there; both surface as
-    /// [`Self::ObservationUnavailable`] after rolling back partial ownership.
-    /// Neither is scheduler admission or capacity. `RelayBudgetOverflow` is a
-    /// construction-only fault and cannot reach here; `EngineShuttingDown` is
-    /// the closed-engine fact. Both are folded in defensively rather than
-    /// panicking.
+    /// Map an engine-thread failure returned while opening an observation. The
+    /// only production `ThreadUnavailable` at this call boundary is the
+    /// canonical history-projection failure constructed by
+    /// `runtime::engine_loop`; relay opens deliberately have no error edge into
+    /// this mapping. `RelayBudgetOverflow` is construction-only and
+    /// `EngineShuttingDown` is the closed-engine fact; both remain exhaustive
+    /// defensive arms rather than alternate documented meanings.
     pub(crate) fn from_observe_error(error: nmp_engine::runtime::EngineThreadError) -> Self {
         match error {
             nmp_engine::runtime::EngineThreadError::ThreadUnavailable { component, reason } => {

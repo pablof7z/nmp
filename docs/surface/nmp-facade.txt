@@ -323,11 +323,9 @@ impl core::marker::Unpin for nmp::RelayInformationRequestError
 impl core::marker::UnsafeUnpin for nmp::RelayInformationRequestError
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::RelayInformationRequestError
 impl core::panic::unwind_safe::UnwindSafe for nmp::RelayInformationRequestError
-#[non_exhaustive] pub enum nmp::RequestRowsError
+pub enum nmp::RequestRowsError
 pub nmp::RequestRowsError::EngineClosed
 pub nmp::RequestRowsError::StoreUnavailable
-pub nmp::RequestRowsError::TransportUnavailable
-pub nmp::RequestRowsError::TransportUnavailable::reason: alloc::string::String
 pub nmp::RequestRowsError::Unwindowed
 impl core::clone::Clone for nmp::RequestRowsError
 pub fn nmp::RequestRowsError::clone(&self) -> nmp::RequestRowsError

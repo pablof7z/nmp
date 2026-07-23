@@ -14,7 +14,7 @@
 
 ## Construction and observation failures
 
-Observers, actions, signers, and NIP-46 sessions run as async tasks on one shared engine-owned runtime. No OS thread is consumed per observation or session while waiting, and there is no admission ceiling or capacity refusal for ordinary operations, so concurrent operations simply make progress. The only genuine infrastructure outcomes are `EngineStartFailed` when the engine itself cannot be constructed (the OS refused an engine-owned thread, or the relay budget was unrepresentable) and `ObservationUnavailable` when a live `observe` cannot open a required relay connection or its canonical projection.
+Observers, actions, signers, and NIP-46 sessions run as async tasks on one shared engine-owned runtime. No OS thread is consumed per observation or session while waiting, and there is no public capacity refusal; private NIP-11/NIP-46 bounds backpressure producers. `EngineStartFailed` means the engine itself could not be constructed. `ObservationUnavailable` means only that store degradation prevented a windowed observation's canonical history projection from opening; relay connection/worker failure remains acquisition evidence.
 
 Handle each failure at the operation that owns it. Engine construction is the throwing creation call. For a live observe the failure surfaces where observation starts: for Swift the throwing creation call, and for Kotlin `observe(...)` returns a cold `Flow`, so it surfaces when collection starts, not when the flow value is created.
 
@@ -24,7 +24,7 @@ Handle each failure at the operation that owns it. Engine construction is the th
 4. Record the component/reason without secrets.
 5. Respect each public ownership shape: query/NIP-02 observation and direct NIP-46 setup return no handle on error, while `set_following` always returns a `FollowAction` and reports any genuine terminal failure through its status.
 
-Direct Rust `Engine::new` can return `EngineError::EngineStartFailed`. Ordinary `Engine::observe` and `nmp_nip02::observe_following` can return `EngineError::ObservationUnavailable` only when a live observation cannot open its relay connection; neither consumes any task or thread slot. `set_following` returns `FollowAction`, not `Result`; it has no capacity or thread refusal, and a genuine terminal failure reads from `FollowAction::recv` as `FollowActionStatus::Failed` with a `FollowActionFailure` variant. Direct `Nip46Invitation::connect*` and `Nip46Signer::connect_bunker*` return a `Nip46Error` for genuine setup failures, without a signer handle.
+Direct Rust `Engine::new` can return `EngineError::EngineStartFailed`. A windowed `Engine::observe` can return `EngineError::ObservationUnavailable` only for canonical history-projection setup failure after store degradation; relay opens do not feed this error. `set_following` returns `FollowAction`, not `Result`; it has no capacity or thread refusal, and a genuine terminal failure reads from `FollowAction::recv` as `FollowActionStatus::Failed` with a `FollowActionFailure` variant. Direct `Nip46Invitation::connect*` and `Nip46Signer::connect_bunker*` return a `Nip46Error` for genuine setup failures, without a signer handle.
 
 Swift NIP-46 connection methods are throwing and Kotlin normalizes synchronous raw exceptions through `nmpRethrowing`. Derive/cache any URI or Android handoff value before invitation connection consumes the invitation; then connect, observe state, and launch the cached handoff. NIP-46 connection has no capacity or thread refusal; a genuine relay/session setup failure returns a typed `Nip46Error`/`NMPNip46Failure` without a handle. If a connection handle returns and inner session/relay setup later fails, consume the immediate streamed `failed(reason)`/`Failed` and closure; do not parse the reason into a typed error or call it a readiness timeout.
 
@@ -102,7 +102,7 @@ Keep recovery owned by the failing layer:
 - durable relay failure: outbox owns attempts/backoff and emits receipt facts;
 - at-most-once ambiguity: preserve `OutcomeUnknown`; never blind resend;
 - replaceable conflict: acquire the new canonical base and make a new user decision;
-- engine-start or observation infra failure (`EngineStartFailed` at construction, `ObservationUnavailable` for a live observe): preserve the owning boundary and retry only as a new bounded attempt; ordinary operations are never refused for capacity;
+- engine-start or observation infra failure (`EngineStartFailed` at construction, `ObservationUnavailable` for canonical windowed history-projection setup): preserve the owning boundary and retry only as a new bounded attempt; relay connection failure remains acquisition evidence and ordinary operations are never refused for capacity;
 - store reset: explicit destructive user/maintenance operation, never automatic fallback.
 
 ## Teardown proof

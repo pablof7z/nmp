@@ -48,8 +48,9 @@ a single shared, bounded, async-admission scheduler — designed, not assumed.
    `resolve()` fires the oneshot (and wakes the parked task) from whatever thread
    owns the result; the engine `.await`s it on the runtime, holding no thread.
    Drop-runs-cancel semantics map directly onto the future's `Drop`. A blocking
-   `recv()` stays available for direct-Rust callers, layered over the same
-   oneshot via `futures::executor::block_on`, never as the architectural centre.
+   `recv()` stays available for direct-Rust callers over the same enum-shaped
+   completion door and condition variable, never as the architectural centre
+   and never by creating another runtime or helper thread.
 
 3. **Per-user conversion** (audit classification):
    - NIP-11 (cat 2): delete `http_runtime`/`block_on`; run `fetch_http` as a task
@@ -66,36 +67,41 @@ a single shared, bounded, async-admission scheduler — designed, not assumed.
      transport event stream + request channel; forwarder/switch-relays/result-map
      become async awaits. No per-session executor.
 
-4. **NIP-46 transport: one shared signer-transport pool.** Per-session
-   `Pool::new` is the transport-thread growth source, but signer-relay frames are
-   ordinary `kind:24133` Nostr traffic — the separation is a policy choice
-   (permissive local-host admission for user-pasted bunker relays), not a
-   transport requirement. All engine-associated NIP-46 sessions share ONE
-   signer-transport pool whose sink multiplexes pool events to the owning session
-   by relay handle. Its worker envelope is bounded by one global signer-relay cap
-   (not per session). So NIP-46 threads are O(1) infra + O(bounded signer relays),
-   **independent of session count.** (Standalone direct-Rust NIP-46 constructed
-   without an engine keeps its own pool — that count is application-owned, as
-   before.)
+4. **NIP-46 async execution is shared; transport identity remains
+   per-session and bounded.** Every session worker, result mapper, and
+   switch-relays operation runs on the engine runtime (or the one process-wide
+   standalone runtime), so logical session count creates no executor thread.
+   Each session retains its own finite transport pool, capped at
+   `MAX_NIP46_RELAYS`, because sessions on the same provider relay authenticate
+   with different client keys and cannot safely share a URL-deduplicated
+   socket. The adversarial-review resolution below records why a global pool
+   would either alias those identities or reintroduce a public admission
+   refusal.
 
-5. **Remove the admission concept.** Delete `nmp-executor` (or reduce it to
-   nothing), `ADAPTER_POOL_CAPACITY`, the per-session executors, and every
+5. **Remove the capacity-refusal concept, not physical bounds.** Delete
+   `nmp-executor` (or reduce it to nothing), `ADAPTER_POOL_CAPACITY`, the
+   per-session executors, and every
    `ThreadUnavailable`/`ExecutorSaturated`/`Saturated`/`WaiterSaturated`/census/
    idle-barrier surface from Rust, UniFFI, Swift, Kotlin, snapshots, docs, parity.
-   No aliases.
+   Finite network/body/queue resources use private async backpressure and
+   coalescing; callers suspend cancellably and never receive scheduler
+   saturation. No aliases.
 
 ## Failure-mode split (the `ThreadUnavailable` question)
 
 `ThreadUnavailable` today conflates two things; split them:
 
 - **Real infrastructure-start failure** (engine construction): the reducer
-  thread, the transport pool, and now the async runtime build. These stay/become
-  an **engine-start** error (`Engine::new` fails). The `pool-bridge` becomes an
-  async task; the `auth-release-bridge` and the 32-slot executor disappear.
+  thread, the fixed pool-bridge thread, the transport pool, and now the async
+  runtime build. These stay/become an **engine-start** error
+  (`Engine::new` fails). The `auth-release-bridge` and the 32-slot executor
+  disappear; the one pool bridge remains fixed transport infrastructure rather
+  than a logical-work admission mechanism.
 - **Operation-level `ThreadUnavailable`** (NIP-11, AUTH, sign-event,
   engine-signer-waiter, NIP-46 connect, follow-action, FFI): these exist *only*
-  because a finite admission pool could refuse. With every user an async task
-  there is no admission to refuse, so they are **deleted**. Real operation
+  because a finite admission pool could refuse. With every logical wait
+  caller-owned and physical resources backpressured privately, there is no
+  admission refusal to expose, so these are **deleted**. Real operation
   failures keep their domain errors: signer unreachable/rejected
   (`SignerError::Unavailable`/`Rejected`), deadline exceeded
   (`SignerError::Timeout`), relay connection failed. "An internal worker was
@@ -105,14 +111,19 @@ a single shared, bounded, async-admission scheduler — designed, not assumed.
 
 - **Cancellation:** each async task holds a cancel token / its future's `Drop`
   runs the adapter cancel hook; cancelling the task (or dropping the awaiting
-  future) releases the correlation slot immediately — no thread, no permit.
+  future) releases its correlation and any admitted physical permit
+  immediately, or withdraws it while still awaiting admission — no thread is
+  held.
 - **Deadlines:** `tokio::time::timeout` around each finite await (NIP-11 3s,
   switch-relays 10s, connect/request timeouts as today). Long waits (remote
   signing, durable retry) are deadline-free by design and hold no worker.
 - **Fairness:** the multi-thread runtime schedules ready tasks; no operation
-  class can starve another because none holds a worker while waiting. Saturating
-  one class (e.g. slow NIP-11) parks those tasks at their `.await` and frees the
-  workers for other ready tasks. There is no per-class or per-session pool.
+  holds a runtime worker while waiting. NIP-11 uses 8 physical flight permits
+  plus same-relay shared completion; each NIP-46 session uses finite request,
+  control, and event queues whose producers await space. The worker stops
+  polling requests at its 64-RPC pending envelope while continuing to process
+  responses, cancellation, control changes, and shutdown. Saturating one class
+  parks its caller-owned futures and leaves unrelated ready work runnable.
 - **Shutdown:** the runtime is shut down deterministically after the reducer
   drains: pending awaits resolve to cancelled/disconnected, tasks abort at their
   next poll, no orphaned worker, no leaked permit, no post-shutdown callback
@@ -128,9 +139,11 @@ a single shared, bounded, async-admission scheduler — designed, not assumed.
    transports; none exposes admission to refuse.
 2. Fairness: saturate NIP-11; signing/AUTH/follow/NIP-46 progress (tasks parked
    at await free the workers).
-3. Cancellable "admission": N concurrent operations >> worker count all run as
-   async tasks, none waits on a permit, all cancel immediately (there is no
-   permit — the strongest form of the requirement).
+3. Cancellable admission: N concurrent operations >> runtime worker count all
+   remain async tasks. NIP-11 callers beyond the 8-flight physical envelope and
+   NIP-46 request producers beyond a finite queue await private admission in
+   their caller-owned futures; dropping one withdraws it without a public
+   saturation result or a blocked OS thread.
 4. NIP-46 scaling 1/10/50/100 over deterministic transports: no per-session
    executor; the retained per-session transport envelope is bounded by
    `MAX_NIP46_RELAYS`, measured, proven, and explained.
@@ -213,11 +226,12 @@ folded into the plan above.
   enters the runtime). D8 is restated: **no runtime types in public API** (kept,
   guarded by a surface scan); the stale `op.rs:190` "no tokio (D8)" comment is
   rewritten.
-- **Shutdown order (`EngineThread::join`):** reducer observes `Shutdown` and
-  stops spawning → the shared runtime is shut down **from the join thread, never
-  a worker** → dropped task futures fire their Drop guards, delivering
-  `Err(Cancelled/Disconnected)` to each foreign completion exactly once → pool /
-  bridge / transport joins. Post-shutdown `Cmd` posts are harmless (`self_inbox`
+- **Shutdown order (`EngineThread::join`):** reducer observes `Shutdown`, stops
+  spawning, closes adapter owners, and shuts down its transport pool → the pool
+  bridge joins → the shared runtime is dropped on a fresh joined shutdown
+  thread, never a runtime worker → remaining task futures fire their Drop
+  guards, delivering `Err(Cancelled/Disconnected)` to each foreign completion
+  exactly once. Post-shutdown `Cmd` posts are harmless (`self_inbox`
   is the existing unbounded std mpsc; adapter results are `Cmd`s on it — this is
   the same inbox, not a new admission queue). Confirm hickory resolver tasks
   terminate on client drop (or accept abort-at-shutdown explicitly).
@@ -232,8 +246,9 @@ folded into the plan above.
 
 ## What this is NOT
 
-Not raising 32/12, not hiding constants, not renaming `ThreadUnavailable`, not
-one-executor-per-subsystem/session, not retries around admission, not
-`spawn_blocking` for long waits, not an unbounded queue. Physical threads
+Not raising 32/12, not hiding a saturation refusal behind another constant, not
+renaming `ThreadUnavailable`, not one-executor-per-subsystem/session, not
+retries around refusal, not `spawn_blocking` for long waits, not an unbounded
+queue. Physical threads
 (runtime workers = fixed 2; transport = bounded by relay caps; reducer = 1),
 memory, and network remain explicitly bounded.

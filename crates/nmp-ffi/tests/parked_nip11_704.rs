@@ -1,20 +1,19 @@
 //! #704 falsifier — many parked NIP-11 waits hold NO OS thread, and cancel
 //! immediately.
 //!
-//! Start N concurrent `relay_information` fetches against N distinct
-//! never-answering local relays. Each fetch establishes its TCP connection
-//! (the kernel completes the handshake into the listen backlog even though the
-//! server never `accept()`s) and then PARKS awaiting an HTTP response that
-//! never comes, until the engine's internal fetch deadline. #704 makes every
-//! such wait an async future on the shared engine runtime — there is no per-op
-//! worker or permit — so N genuinely-pending fetches add ZERO OS threads.
+//! Start N concurrent `relay_information` callers against N distinct
+//! never-answering local relays. Exactly the private 8-flight network/body
+//! envelope establishes TCP connections and parks awaiting HTTP; the remaining
+//! callers park cancellably in their own futures awaiting admission. #704
+//! makes both states async on the shared engine runtime, so N genuinely-pending
+//! callers add ZERO per-operation OS threads and never receive saturation.
 //! Under the removed admission design each blocked adapter call held a pooled
 //! OS thread (and past a bound refused with the deleted `ThreadUnavailable`).
 //!
 //! Then we CANCEL (abort) every pending fetch and confirm each resolves
-//! immediately (well under the ~3s fetch deadline) — a parked future cancels at
-//! once because it is not sitting behind any thread/permit. This is the
-//! "cancellable admission — no permit exists" property in its strongest form.
+//! immediately (well under the ~3s fetch deadline) — both an admitted flight
+//! and a caller awaiting a permit cancel at once instead of sitting behind a
+//! thread or public queue.
 //!
 //! Thread count via `nmp::nmp_threads_spawned()`. One thread-counting test per
 //! binary keeps the global counter isolated. The complementary parked-`next()`
@@ -39,10 +38,11 @@ const THREAD_GROWTH_BOUND: u64 = 8;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn parked_nip11_waits_hold_no_os_thread_and_cancel_immediately() {
-    // N distinct never-answering relays. Distinct URLs guarantee N distinct
-    // engine flights (a shared URL would coalesce into one). We keep the
-    // listeners bound (in scope) but NEVER accept, so each connection parks
-    // after the kernel completes its handshake.
+    // N distinct never-answering relays. Distinct URLs prevent same-relay
+    // coalescing; the fixed physical flight envelope admits a bounded prefix
+    // while the rest remain caller-owned admission futures. We keep listeners
+    // bound but NEVER accept, so each admitted connection parks after the
+    // kernel completes its handshake.
     let mut listeners: Vec<TcpListener> = Vec::new();
     let mut urls: Vec<String> = Vec::new();
     for _ in 0..PENDING_FETCHES {
@@ -59,7 +59,8 @@ async fn parked_nip11_waits_hold_no_os_thread_and_cancel_immediately() {
 
     let baseline = nmp::nmp_threads_spawned();
 
-    // Fire all N fetches concurrently; each parks awaiting a response.
+    // Fire all N callers concurrently; each parks either in the bounded
+    // physical flight set or awaiting admission.
     let mut fetches: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     for url in &urls {
         let engine = engine.clone();
@@ -97,8 +98,8 @@ async fn parked_nip11_waits_hold_no_os_thread_and_cancel_immediately() {
     );
 
     // Cancel every parked fetch and confirm each resolves IMMEDIATELY — a
-    // parked future is not behind any thread/permit, so aborting wakes it at
-    // once, far under the ~3s fetch deadline.
+    // parked future holds no OS thread, so aborting wakes admitted and
+    // admission-waiting callers at once, far under the ~3s fetch deadline.
     let cancel_start = Instant::now();
     for fetch in &fetches {
         fetch.abort();

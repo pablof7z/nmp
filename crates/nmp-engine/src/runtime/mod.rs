@@ -1,5 +1,5 @@
-//! The async edge (plan §2 position 2). `EngineThread` spawns THREE dedicated
-//! OS threads:
+//! The async edge (plan §2 position 2). `EngineThread` owns two dedicated OS
+//! threads plus one fixed two-worker async runtime:
 //!
 //! - the **engine thread**, which owns `core::EngineCore` and runs a
 //!   deadline-armed blocking recv loop (D8: the existing blocking
@@ -17,9 +17,10 @@
 //!   `nmp_transport::PoolEvent`s (the pool's OWN `mio` worker threads push
 //!   these) and forwards each as a `core::EngineMsg` onto the engine
 //!   thread's inbox;
-//! - the **AUTH-release bridge**, which forwards only destructor-free
-//!   executor `ReleaseId`s. Rich session/terminal state remains in the
-//!   engine-thread registry and is never owned or dropped by the reaper.
+//! - the **adapter runtime**, whose fixed workers host waker-driven NIP-11,
+//!   signer, AUTH, and platform-adapter tasks. Logical concurrency changes
+//!   task count, not runtime-thread count; private subsystem bounds control
+//!   physical network/body/queue work.
 //!
 //! `Handle` is the cheap, `Clone + Send` value the app holds: it sends
 //! command `EngineMsg`s in (wrapped in the runtime-private [`Cmd`] envelope)
@@ -1336,7 +1337,8 @@ impl Default for RuntimeConfig {
 }
 
 impl EngineThread {
-    /// Spawn the engine thread and its two bridge threads. `store`/`directory`
+    /// Spawn the engine thread, pool bridge, and fixed adapter runtime.
+    /// `store`/`directory`
     /// are constructed by the CALLER but moved whole into the engine
     /// thread's closure and built into `EngineCore` there — they never cross
     /// back out, which is what lets `EngineCore` itself stay `!Send`-friendly
@@ -1545,7 +1547,7 @@ impl EngineThread {
         self.runtime.handle().clone()
     }
 
-    /// Block until the engine and both bridge threads have exited. Only
+    /// Block until the engine and pool-bridge threads have exited. Only
     /// returns once a [`Handle::shutdown`] has actually been observed by the
     /// engine thread (which then tears down its `Pool` clone, allowing the
     /// pool bridge to disconnect) — callers that never shut down any `Handle`
@@ -2662,11 +2664,6 @@ mod relay_worker_reconciliation_tests {
                 if delta.ops.iter().any(|(candidate, ops)| candidate == &session
                     && ops.iter().any(|op| matches!(op, WireOp::Req(..))))
         )));
-        preflight_query_relay_workers(&first, &pool)
-            .expect("protected worker is acquired before the subscribe reply");
-        let first_transport = pool
-            .live_session_handle(&session)
-            .expect("preflight opens the protected worker");
         dispatch_core_effects(
             &mut core,
             first,
@@ -2678,6 +2675,9 @@ mod relay_worker_reconciliation_tests {
             &registry,
             dispatch_runtime,
         );
+        let first_transport = pool
+            .live_session_handle(&session)
+            .expect("ordinary effect dispatch opens the protected worker");
         assert_eq!(pool.live_session_handle(&session), Some(first_transport));
         assert!(!preambles.contains_key(&session));
 
@@ -2734,160 +2734,6 @@ mod relay_worker_reconciliation_tests {
             dispatch_runtime,
         );
         assert!(pool.live_session_handle(&session).is_none());
-
-        pool.shutdown();
-    }
-
-    #[test]
-    fn protected_initial_subscribe_spawn_refusal_rolls_back_every_owned_layer() {
-        let signer = Keys::generate().public_key();
-        let first_relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
-        let refused_relay = RelayUrl::parse("ws://127.0.0.1:10").unwrap();
-        let access = AccessContext::Nip42(signer);
-        let first_session = RelaySessionKey::new(first_relay.clone(), access);
-        let refused_session = RelaySessionKey::new(refused_relay.clone(), access);
-        let query = LiveQuery(
-            Demand::new(
-                Filter {
-                    kinds: Some(BTreeSet::from([1])),
-                    ..Filter::default()
-                },
-                SourceAuthority::Pinned(BTreeSet::from([
-                    first_relay.clone(),
-                    refused_relay.clone(),
-                ])),
-                access,
-            )
-            .unwrap(),
-        );
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 2);
-        let (pool_tx, _pool_rx) = mpsc::channel();
-        let mut config = PoolConfig::default();
-        config.max_relays = 2;
-        let pool = Pool::new(config, pool_tx).expect("test pool construction");
-        let mut rows = HashMap::new();
-        let mut histories = HashMap::new();
-        let mut diagnostics = HashMap::new();
-        let mut preambles = Preambles::new();
-        let registry = SignerRegistry::default();
-        let (self_inbox, _inbox_rx) = mpsc::channel();
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap();
-        let relay_information = RelayInformationService::new(rt.handle().clone());
-        let nip11_decisions = RefCell::new(Nip11DecisionState::default());
-        let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
-        let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
-        let dispatch_runtime = DispatchRuntime {
-            self_inbox: &self_inbox,
-            relay_information: &relay_information,
-            runtime: rt.handle(),
-            nip11_decisions: &nip11_decisions,
-            auth_policies: &auth_policies,
-            auth_tasks: &auth_tasks,
-        };
-
-        let effects = core.handle(EngineMsg::Subscribe(query, Box::new(NullRowSink)));
-        let id = effects
-            .iter()
-            .find_map(|effect| match effect {
-                Effect::EmitRows(id, ..) => Some(*id),
-                _ => None,
-            })
-            .expect("initial protected target exists until preflight resolves");
-        let (rows_tx, _rows_rx) = rows_channel();
-        rows.insert(id, rows_tx);
-
-        let mut opened = None;
-        let mut attempts = 0usize;
-        let refusal = preflight_query_relay_workers_with(
-            &effects,
-            |session| pool.live_session_handle(session).is_some(),
-            |session| {
-                attempts += 1;
-                if opened.is_none() {
-                    let handle = pool.ensure_session(session).unwrap();
-                    opened = Some((session.clone(), handle));
-                    Ok(Some(handle))
-                } else {
-                    Err(EngineThreadError::ThreadUnavailable {
-                        component: "relay worker".to_string(),
-                        reason: "injected protected subscribe refusal".to_string(),
-                    })
-                }
-            },
-            |handle| {
-                let _ = pool.close(handle);
-            },
-        )
-        .unwrap_err();
-        assert_eq!(attempts, 2, "both deduplicated sessions were preflighted");
-        assert!(matches!(
-            refusal,
-            EngineThreadError::ThreadUnavailable { component, reason }
-                if component == "relay worker"
-                    && reason == "injected protected subscribe refusal"
-        ));
-        // The landed preflight rolls back every worker it just opened when a
-        // later session's spawn is refused (same discipline as the history
-        // preflight): the refused subscribe leaves no live protected worker
-        // behind.
-        assert!(pool
-            .live_session_handle(&opened.as_ref().unwrap().0)
-            .is_none());
-
-        rows.remove(&id);
-        let withdraw = core.handle(EngineMsg::Unsubscribe(id));
-        dispatch_core_effects(
-            &mut core,
-            withdraw,
-            &pool,
-            &mut rows,
-            &mut histories,
-            &mut diagnostics,
-            &mut preambles,
-            &registry,
-            dispatch_runtime,
-        );
-
-        assert!(!rows.contains_key(&id));
-        assert_eq!(core.required_relay_workers(), Some(BTreeSet::new()));
-        assert!(pool.live_session_handle(&first_session).is_none());
-        assert!(pool.live_session_handle(&refused_session).is_none());
-        assert!(preambles.is_empty());
-        let snapshot = core.diagnostics_snapshot();
-        assert!(snapshot.relays.is_empty());
-        assert!(snapshot.auth_sessions.is_empty());
-
-        let late = core.handle(EngineMsg::RelayOpenFailed(
-            refused_session.clone(),
-            "late unowned failure".to_string(),
-        ));
-        assert!(late.is_empty());
-        assert!(core.diagnostics_snapshot().transport_degraded.is_none());
-
-        assert!(
-            preflight_query_relay_workers_with(&effects, |_| false, |_| Ok(None), |_| {}).is_ok(),
-            "capacity refusal remains ordinary local shortfall"
-        );
-        let duplicate_edges = [
-            Effect::EnsureRelay(first_session.clone()),
-            Effect::EnsureRelay(first_session.clone()),
-        ];
-        let mut duplicate_attempts = 0usize;
-        preflight_query_relay_workers_with(
-            &duplicate_edges,
-            |_| false,
-            |_| {
-                duplicate_attempts += 1;
-                Ok(None)
-            },
-            |_| {},
-        )
-        .unwrap();
-        assert_eq!(duplicate_attempts, 1, "EnsureRelay edges are deduplicated");
 
         pool.shutdown();
     }
@@ -3930,11 +3776,9 @@ fn engine_loop<S, D>(
                 Cmd::SubscribeHistory { reply, .. } => {
                     let _ = reply.send(Err(EngineThreadError::EngineShuttingDown));
                 }
-                Cmd::RequestRows { reply, .. } => {
-                    let _ = reply.send(Err(HistoryAdvanceError::TransportUnavailable {
-                        reason: "engine is shutting down".to_string(),
-                    }));
-                }
+                // Dropping this reply makes `Handle::request_rows` return
+                // `None`, which the facade truthfully maps to `EngineClosed`.
+                Cmd::RequestRows { .. } => {}
                 Cmd::PublishTracked { reply, .. } => {
                     let _ = reply.send(Err(PublishError::EngineShuttingDown));
                 }
@@ -4611,23 +4455,6 @@ fn engine_loop<S, D>(
                     .expect("Subscribe must yield a fresh EmitRows for its own handle");
                 let (rows_tx, rows_rx) = rows_channel();
                 row_channels.insert(id, rows_tx);
-                if let Err(error) = preflight_query_relay_workers(&effects, &pool) {
-                    row_channels.remove(&id);
-                    let withdraw = core.handle(EngineMsg::Unsubscribe(id));
-                    dispatch_core_effects(
-                        &mut core,
-                        withdraw,
-                        &pool,
-                        &mut row_channels,
-                        &mut history_channels,
-                        &mut diag_channels,
-                        &mut preambles,
-                        &registry,
-                        dispatch_runtime,
-                    );
-                    let _ = reply.send(Err(error));
-                    continue;
-                }
                 if reply.send(Ok((id, rows_rx))).is_err() {
                     // Caller already gave up on `subscribe()` -- withdraw
                     // immediately rather than leak a live demand atom nobody
@@ -4689,23 +4516,6 @@ fn engine_loop<S, D>(
                 };
                 let (history_tx, history_rx) = latest_channel();
                 history_channels.insert(id, history_tx);
-                if let Err(error) = preflight_query_relay_workers(&effects, &pool) {
-                    history_channels.remove(&id);
-                    let withdraw = core.handle(EngineMsg::UnsubscribeHistory(id));
-                    dispatch_core_effects(
-                        &mut core,
-                        withdraw,
-                        &pool,
-                        &mut row_channels,
-                        &mut history_channels,
-                        &mut diag_channels,
-                        &mut preambles,
-                        &registry,
-                        dispatch_runtime,
-                    );
-                    let _ = reply.send(Err(error));
-                    continue;
-                }
                 if reply
                     .send(Ok((id, HistoryReceiver::new(history_rx))))
                     .is_err()
@@ -4750,26 +4560,6 @@ fn engine_loop<S, D>(
                     _ => None,
                 });
                 if result.as_ref().is_some_and(Result::is_ok) {
-                    // Preflight the staged advance's (possibly empty) relay
-                    // workers before it becomes observable.
-                    if let Err(error) = preflight_query_relay_workers(&effects, &pool) {
-                        let rollback = core.handle(EngineMsg::RollbackHistoryLoad(id));
-                        dispatch_core_effects(
-                            &mut core,
-                            rollback,
-                            &pool,
-                            &mut row_channels,
-                            &mut history_channels,
-                            &mut diag_channels,
-                            &mut preambles,
-                            &registry,
-                            dispatch_runtime,
-                        );
-                        let _ = reply.send(Err(HistoryAdvanceError::TransportUnavailable {
-                            reason: error.to_string(),
-                        }));
-                        continue;
-                    }
                     if reply.send(Ok(())).is_err() {
                         let rollback = core.handle(EngineMsg::RollbackHistoryLoad(id));
                         dispatch_core_effects(
@@ -4798,35 +4588,6 @@ fn engine_loop<S, D>(
                                 Effect::HistoryLoadResult(session, Ok(())) if *session == id
                             )
                         });
-                        if restaged && preflight_query_relay_workers(&committed, &pool).is_err() {
-                            // The continuation advance's workers are
-                            // unavailable. Frames already delivered stand; roll
-                            // the staged continuation back and stop growing.
-                            let rollback = core.handle(EngineMsg::RollbackHistoryLoad(id));
-                            dispatch_core_effects(
-                                &mut core,
-                                committed,
-                                &pool,
-                                &mut row_channels,
-                                &mut history_channels,
-                                &mut diag_channels,
-                                &mut preambles,
-                                &registry,
-                                dispatch_runtime,
-                            );
-                            dispatch_core_effects(
-                                &mut core,
-                                rollback,
-                                &pool,
-                                &mut row_channels,
-                                &mut history_channels,
-                                &mut diag_channels,
-                                &mut preambles,
-                                &registry,
-                                dispatch_runtime,
-                            );
-                            break;
-                        }
                         dispatch_core_effects(
                             &mut core,
                             committed,
@@ -5157,85 +4918,6 @@ fn dispatch_core_effects<S: EventStore>(
     );
 }
 
-/// Acquire the relay worker threads needed by one new query before its
-/// synchronous handle crosses the supported facade. Capacity refusal remains
-/// ordinary local shortfall, but an OS spawn refusal is returned as the typed
-/// construction error #442 requires. Successful opens are idempotently reused
-/// by ordinary effect dispatch.
-fn preflight_query_relay_workers(effects: &[Effect], pool: &Pool) -> Result<(), EngineThreadError> {
-    preflight_query_relay_workers_with(
-        effects,
-        |session| pool.live_session_handle(session).is_some(),
-        |session| match pool.ensure_session(session) {
-            Ok(handle) => Ok(Some(handle)),
-            // #704 (review): a relay whose connection worker cannot be opened
-            // -- for ANY reason, including a genuine OS thread-spawn refusal --
-            // is an unavailable relay, represented as acquisition evidence in
-            // the observation's stream, exactly like an over-budget or
-            // unreachable relay. An observation is NEVER refused, and never
-            // surfaces a worker/thread/spawn/admission concept to the app; the
-            // query simply proceeds on its other planned sources and reports the
-            // relay as unavailable. (The per-relay transport worker is a genuine
-            // bounded I/O thread, O(distinct relays), outside the eliminated
-            // admission executor -- its rare pthread refusal is an OS-resource
-            // fact about one connection, not an engine-level failure.)
-            Err(_) => Ok(None),
-        },
-        |handle| {
-            let _ = pool.close(handle);
-        },
-    )
-}
-
-fn preflight_query_relay_workers_with(
-    effects: &[Effect],
-    mut is_live: impl FnMut(&RelaySessionKey) -> bool,
-    mut ensure_session: impl FnMut(
-        &RelaySessionKey,
-    ) -> Result<Option<nmp_transport::RelayHandle>, EngineThreadError>,
-    mut close: impl FnMut(nmp_transport::RelayHandle),
-) -> Result<(), EngineThreadError> {
-    let mut sessions = BTreeSet::new();
-    for effect in effects {
-        match effect {
-            Effect::Wire(delta) => {
-                for (session, ops) in &delta.ops {
-                    if ops.iter().any(|op| matches!(op, WireOp::Req(..))) {
-                        sessions.insert(session.clone());
-                    }
-                }
-            }
-            // A PROTECTED session's REQs stay parked until AUTH readiness,
-            // so its acquisition edge is `Effect::EnsureRelay`, never a
-            // `WireOp::Req` (#8 U4): the worker must exist before the relay
-            // can deliver the challenge that makes readiness possible, and a
-            // spawn refusal for it is the same typed construction failure as
-            // for an ordinary REQ session.
-            Effect::EnsureRelay(session) => {
-                sessions.insert(session.clone());
-            }
-            Effect::PreflightHistoryRelays(planned) => sessions.extend(planned.iter().cloned()),
-            _ => {}
-        }
-    }
-
-    let mut opened = Vec::new();
-    for session in sessions {
-        let was_live = is_live(&session);
-        match ensure_session(&session) {
-            Ok(Some(handle)) if !was_live => opened.push(handle),
-            Ok(_) => {}
-            Err(error) => {
-                for handle in opened {
-                    close(handle);
-                }
-                return Err(error);
-            }
-        }
-    }
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)]
 fn dispatch_relay_open_failure(
     core: &mut EngineCore<impl EventStore>,
@@ -5314,83 +4996,6 @@ fn dispatch_relay_open_failure(
                 // retry owner left to notify.
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod history_preflight_tests {
-    use std::cell::RefCell;
-
-    use nmp_grammar::{AccessContext, SourceAuthority};
-    use nmp_transport::RelayHandle;
-
-    use super::*;
-
-    #[test]
-    fn partial_history_preflight_failure_closes_every_worker_it_opened() {
-        let first = RelayUrl::parse("wss://a-history-preflight.example").unwrap();
-        let second = RelayUrl::parse("wss://b-history-preflight.example").unwrap();
-        let filter = ConcreteFilter::default();
-        let delta = WireDelta {
-            ops: vec![
-                (
-                    RelaySessionKey::public(first.clone()),
-                    vec![WireOp::Req(
-                        SubId::for_wire(
-                            first.clone(),
-                            &filter,
-                            &SourceAuthority::Public,
-                            AccessContext::Public,
-                        ),
-                        filter.clone(),
-                    )],
-                ),
-                (
-                    RelaySessionKey::public(second.clone()),
-                    vec![WireOp::Req(
-                        SubId::for_wire(
-                            second.clone(),
-                            &filter,
-                            &SourceAuthority::Public,
-                            AccessContext::Public,
-                        ),
-                        filter,
-                    )],
-                ),
-            ],
-        };
-        let effects = vec![Effect::Wire(delta)];
-        let closed = RefCell::new(Vec::new());
-        let result = preflight_query_relay_workers_with(
-            &effects,
-            |_| false,
-            |session| {
-                if session.relay == first {
-                    Ok(Some(RelayHandle {
-                        slot: 7,
-                        generation: 1,
-                    }))
-                } else {
-                    Err(EngineThreadError::ThreadUnavailable {
-                        component: "relay worker".to_string(),
-                        reason: "injected refusal".to_string(),
-                    })
-                }
-            },
-            |handle| closed.borrow_mut().push(handle),
-        );
-
-        assert!(matches!(
-            result,
-            Err(EngineThreadError::ThreadUnavailable { .. })
-        ));
-        assert_eq!(
-            closed.into_inner(),
-            vec![RelayHandle {
-                slot: 7,
-                generation: 1
-            }]
-        );
     }
 }
 
@@ -5488,7 +5093,6 @@ fn dispatch_effect(
             crate::ingest_attribution::committed_observation_effect(phase_started.elapsed());
         }
         Effect::Wire(delta) => apply_wire_delta(&delta, pool, preambles),
-        Effect::PreflightHistoryRelays(_) => {}
         Effect::Replay(session, reqs) => apply_replay(&session, reqs, pool, preambles),
         Effect::ReleaseInitialRead(handle) => {
             let _ = pool.release_initial_read(handle);
@@ -6170,8 +5774,8 @@ impl Handle {
     /// (#485). Monotonic, idempotent, and clamped to the window's declared
     /// `max_rows`. Returns `None` when the engine thread is gone (the facade
     /// maps this to `EngineClosed`); `Some(Ok(()))` when the advance was
-    /// accepted (or was a no-op / `AtBound` beat); `Some(Err(_))` for a staged
-    /// advance the store or transport could not serve.
+    /// accepted (or was a no-op / `AtBound` beat); `Some(Err(_))` when the
+    /// canonical store could not stage the advance.
     pub fn request_rows(
         &self,
         handle: HistoryHandle,
