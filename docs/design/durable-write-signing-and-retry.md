@@ -4,7 +4,8 @@
   signer reattachment, the one durable retry scheduler, and truthful governed
   lane-state projection across Rust/FFI/Swift/Kotlin satisfy this contract.
 - **Owns:** the meaning of `Accepted`, pending-row semantics, signer selection,
-  receipt persistence, and retry ownership.
+  receipt persistence, retry ownership, and bounded progress when read and
+  write access contexts compete for physical relay sessions.
 
 ## 1. Acceptance transaction
 
@@ -175,6 +176,37 @@ the fleet.
 There is no fixed-rate polling. The scheduler sleeps until the earliest real
 deadline and rearms after every state transition.
 
+### Access-scoped sessions under the physical cap
+
+A relay URL does not imply one interchangeable socket. Public reads and
+identity-scoped `Nip42(author)` work are distinct `RelaySessionKey`s and never
+share authentication state. `max_relays` is nevertheless a ceiling on physical
+sessions, not on distinct URLs. At a ceiling of one, a live Public read and a
+durable write to that same relay therefore cannot coexist.
+
+The reducer makes the scheduling authority explicit:
+
+- read demand emits `EnsureReadRelay`; it cannot displace another live session;
+- nonterminal write ownership emits `EnsureWriteRelay`; only that effect may
+  release the same relay's Public session and claim its slot;
+- a protected read does not gain write priority merely because it also uses a
+  non-Public access context;
+- no admission path evicts a different relay or raises the physical-session
+  ceiling.
+
+Releasing the Public session does not withdraw its query demand or erase its
+reconnect preamble. The ordinary reducer receives the exact closed-session
+fact, the write's access-scoped worker runs through its normal AUTH and outbox
+path, and terminal write reconciliation releases it. The next real worker
+retirement restores any still-required Public session and replays its current
+preamble. Retry ordering derives from one coherent reducer snapshot whose
+`writes` set is a typed subset of the exact retained worker set.
+
+This is bounded time-sharing, not socket-context coalescing and not public
+saturation. It closes the `max_relays = 1` deadlock where the Public read could
+hold the only slot forever while its own discovered route left the durable
+write parked at `AwaitingRelay` (#598).
+
 ## 7. Falsification
 
 Required proofs include:
@@ -190,5 +222,10 @@ Required proofs include:
   produces a typed conflict with no intent, receipt, or pending-row residue;
 - all relays rejecting a signed event leaves the signed row intact;
 - transport reconnect cannot duplicate durable buffering ownership;
+- at `max_relays = 1`, an ordinary public route-discovery query plus a durable
+  write to the same relay progresses through exact single publish, ACK, and
+  public-query restoration on a real iOS Simulator;
+- a protected read emits only read admission and cannot claim the write's
+  same-relay time-sharing authority;
 - restart preserves attempt ordinal and next eligibility;
 - at-most-once ambiguity never emits a second send.

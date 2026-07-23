@@ -79,8 +79,12 @@ public struct NMPConfig: Sendable {
     /// Host-only match (port- and path-insensitive). Default empty.
     public var allowedLocalRelayHosts: [String]
     /// The one whole-engine relay ceiling. It bounds the complete compiled
-    /// demand and the transport worker set with the same effective value.
-    /// Legacy zero is normalized to the finite default, never uncapped.
+    /// demand and simultaneous physical transport workers with the same
+    /// effective value. Access contexts never share a socket; competing read
+    /// and write contexts for the same admitted relay time-share its slot and
+    /// the read is restored afterward, so apps do not multiply this value per
+    /// context. Legacy zero is normalized to the finite default, never
+    /// uncapped.
     public var maxRelays: UInt32
     /// Shared ceiling for live local-account signer and AUTH-policy
     /// registrations. Zero deliberately admits none.

@@ -7239,7 +7239,7 @@ record Record {
                 ),
             ),
             docstring: Some(
-                "The one whole-engine relay ceiling. It bounds the complete compiled\ndemand and the transport worker set with the same effective value.\nLegacy zero is normalized to the finite default, never uncapped.\n\nThe `default =` literal below MUST stay equal to\n[`DEFAULT_MAX_RELAYS`] (uniffi record defaults accept only a literal,\nnever a const path) — the const is the single Rust-side knob; the\nliteral is its foreign-binding mirror.",
+                "The one whole-engine relay ceiling. It bounds the complete compiled\ndemand and simultaneous physical transport workers with the same\neffective value. Access contexts never share a socket; competing read\nand write contexts for the same admitted relay time-share its slot and\nthe read is restored afterward, so apps do not multiply this value per\ncontext (#598). Legacy zero is normalized to the finite default, never\nuncapped.\n\nThe `default =` literal below MUST stay equal to\n[`DEFAULT_MAX_RELAYS`] (uniffi record defaults accept only a literal,\nnever a const path) — the const is the single Rust-side knob; the\nliteral is its foreign-binding mirror.",
             ),
         },
         Field {

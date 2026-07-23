@@ -2606,6 +2606,78 @@ mod relay_worker_reconciliation_tests {
         )
     }
 
+    /// #598's mechanical root cause at the runtime boundary: one relay's
+    /// Public read session already owns the only physical slot, while the
+    /// durable write requires a distinct `Nip42(author)` session. The write
+    /// must time-share that SAME relay slot instead of remaining silently
+    /// cap-refused forever.
+    #[test]
+    fn protected_write_session_preempts_same_relay_public_slot_at_cap_one() {
+        let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
+        let public = RelaySessionKey::public(relay.clone());
+        let protected =
+            RelaySessionKey::new(relay, AccessContext::Nip42(Keys::generate().public_key()));
+        let (pool_tx, _pool_rx) = mpsc::channel();
+        let mut config = PoolConfig::default();
+        config.max_relays = 1;
+        let pool = Pool::new(config, pool_tx).expect("test pool construction");
+        let public_handle = pool
+            .ensure_session(&public)
+            .expect("Public read owns the cap-sized pool");
+        let (self_inbox, inbox_rx) = mpsc::channel();
+
+        let protected_handle = ensure_write_effect_session(&protected, &pool, &self_inbox)
+            .expect("write displaces Public");
+
+        assert_eq!(pool.live_session_handle(&public), None);
+        assert_eq!(pool.live_session_handle(&protected), Some(protected_handle));
+        assert!(matches!(
+            inbox_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(Cmd::Engine(EngineMsg::RelayDisconnected(
+                handle,
+                session,
+                nmp_transport::DisconnectReason::Closed,
+            ))) if handle == public_handle && session == public
+        ));
+
+        pool.shutdown();
+    }
+
+    #[test]
+    fn protected_read_session_cannot_claim_write_preemption_authority() {
+        let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
+        let public = RelaySessionKey::public(relay.clone());
+        let signer = Keys::generate().public_key();
+        let protected_read = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer));
+        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 1);
+        let effects = core.handle(EngineMsg::Subscribe(
+            protected_query(&relay, signer, 1),
+            Box::new(NullRowSink),
+        ));
+        assert!(effects.iter().any(
+            |effect| matches!(effect, Effect::EnsureReadRelay(session) if session == &protected_read)
+        ));
+        assert!(!effects.iter().any(
+            |effect| matches!(effect, Effect::EnsureWriteRelay(session) if session == &protected_read)
+        ));
+
+        let (pool_tx, _pool_rx) = mpsc::channel();
+        let mut config = PoolConfig::default();
+        config.max_relays = 1;
+        let pool = Pool::new(config, pool_tx).expect("test pool construction");
+        let public_handle = pool
+            .ensure_session(&public)
+            .expect("Public read owns the cap-sized pool");
+        assert!(matches!(
+            pool.ensure_session(&protected_read),
+            Err(nmp_transport::RelayOpenError::AtCapacity { max_relays: 1 })
+        ));
+        assert_eq!(pool.live_session_handle(&public), Some(public_handle));
+        assert_eq!(pool.live_session_handle(&protected_read), None);
+
+        pool.shutdown();
+    }
+
     #[test]
     fn fresh_protected_read_opens_one_worker_without_a_req_preamble_and_releases_on_withdrawal() {
         let signer = Keys::generate().public_key();
@@ -2654,7 +2726,7 @@ mod relay_worker_reconciliation_tests {
         assert_eq!(
             first
                 .iter()
-                .filter(|effect| matches!(effect, Effect::EnsureRelay(candidate) if candidate == &session))
+                .filter(|effect| matches!(effect, Effect::EnsureReadRelay(candidate) if candidate == &session))
                 .count(),
             1
         );
@@ -2831,7 +2903,11 @@ mod relay_worker_reconciliation_tests {
             .is_some_and(|failure| failure.contains("withdraw-owned")));
         let withdraw = core.handle(EngineMsg::Unsubscribe(id));
         assert!(core.diagnostics_snapshot().transport_degraded.is_none());
-        assert_eq!(core.required_relay_workers(), Some(BTreeSet::new()));
+        assert_eq!(
+            core.relay_worker_requirements()
+                .map(|requirements| requirements.all),
+            Some(BTreeSet::new())
+        );
         dispatch_core_effects(
             &mut core,
             withdraw,
@@ -3452,7 +3528,7 @@ fn translate_pool_event(event: PoolEvent) -> Option<EngineMsg> {
         // permanent failure (401/403 -- the relay worker has already
         // retired itself, see `nmp_transport::DisconnectReason::
         // PermanentlyFailed`'s doc) apart from an ordinary transient one, so
-        // it never re-issues `Effect::EnsureRelay` into a busy 401 redial
+        // it never re-issues an ensure effect into a busy 401 redial
         // loop.
         PoolEvent::Disconnected {
             handle,
@@ -4880,7 +4956,7 @@ fn reduce_and_dispatch_relay_frames<S: EventStore>(
 /// Release MUST happen first: when a cap-sized plan replaces every relay,
 /// keeping the old workers through `apply_wire_delta` would make every new
 /// `ensure_open` fail even though the new plan itself is within the cap.
-/// `required_relay_workers` includes nonterminal durable/ephemeral write work,
+/// `relay_worker_requirements` includes nonterminal durable/ephemeral write work,
 /// so this cannot evict a worker merely because its last read REQ vanished.
 // Deliberately mirrors `dispatch_effects`' reviewed runtime destinations and
 // adds only the reducer reference needed for exact ownership reconciliation.
@@ -4896,13 +4972,13 @@ fn dispatch_core_effects<S: EventStore>(
     registry: &SignerRegistry,
     runtime: DispatchRuntime<'_>,
 ) {
-    if let Some(required) = core.required_relay_workers() {
-        for event in pool.close_unrequired_sessions(&required) {
+    if let Some(required) = core.relay_worker_requirements() {
+        for event in pool.close_unrequired_sessions(&required.all) {
             if let Some(msg) = translate_pool_event(event) {
                 let _ = runtime.self_inbox.send(Cmd::Engine(msg));
             }
         }
-        preambles.retain(|session, _| required.contains(session));
+        preambles.retain(|session, _| required.all.contains(session));
     }
 
     dispatch_effects(
@@ -4999,6 +5075,49 @@ fn dispatch_relay_open_failure(
     }
 }
 
+/// Open one reducer-required session for `Effect::EnsureWriteRelay`.
+///
+/// `max_relays` is a physical-session ceiling (#8), so a Public read and a
+/// `Nip42(author)` write to the same URL cannot coexist at `max_relays = 1`.
+/// The old behavior let the already-live Public worker win forever: every
+/// write retry was cap-refused while nothing ever released the read owner,
+/// leaving a durable receipt parked at `AwaitingRelay` (#598).
+///
+/// A protected write is a durable obligation, so it may time-share the SAME
+/// relay's one slot by releasing that relay's Public worker first. The
+/// reducer still owns both demands: the Public reconnect preamble remains in
+/// `preambles`, the synchronous disconnect fact is fed back through the
+/// ordinary engine inbox, and once the write lane becomes terminal exact
+/// worker reconciliation retires the protected worker. The ensuing
+/// `RelayWorkerRetired` retry restores the still-required Public session.
+///
+/// This never exceeds the configured worker/thread envelope, never merges
+/// access contexts onto one socket, and never evicts a different relay.
+fn ensure_write_effect_session(
+    session: &RelaySessionKey,
+    pool: &Pool,
+    self_inbox: &Sender<Cmd>,
+) -> Result<nmp_transport::RelayHandle, nmp_transport::RelayOpenError> {
+    match pool.ensure_session(session) {
+        Ok(handle) => Ok(handle),
+        Err(nmp_transport::RelayOpenError::AtCapacity { .. })
+            if session.access != nmp_grammar::AccessContext::Public =>
+        {
+            let public = RelaySessionKey::public(session.relay.clone());
+            let Some(public_handle) = pool.live_session_handle(&public) else {
+                return pool.ensure_session(session);
+            };
+            if let Some(event) = pool.close(public_handle) {
+                if let Some(message) = translate_pool_event(event) {
+                    let _ = self_inbox.send(Cmd::Engine(message));
+                }
+            }
+            pool.ensure_session(session)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Retry the exact currently-owned relay-session set once after an actual
 /// worker join releases retirement capacity. Public read sessions replay the
 /// full preamble retained even when their first spawn was refused;
@@ -5012,10 +5131,22 @@ fn retry_required_relay_workers<S: EventStore>(
     pool: &Pool,
     preambles: &mut Preambles,
 ) {
-    let Some(required) = core.required_relay_workers() else {
+    let Some(required) = core.relay_worker_requirements() else {
         return;
     };
-    for session in required {
+    // #598: a protected durable obligation may have released a same-relay
+    // Public worker to time-share a cap-sized pool. When the retirement slot
+    // becomes reusable, restore the protected session first; reopening Public
+    // first would consume the slot again and recreate the permanent
+    // AwaitingRelay stall. Once the write becomes terminal, it leaves
+    // `required` and the still-owned Public session is the next retry.
+    let mut all: Vec<_> = required.all.into_iter().collect();
+    all.sort_by(|left, right| {
+        let left_write = required.writes.contains(left);
+        let right_write = required.writes.contains(right);
+        right_write.cmp(&left_write).then_with(|| left.cmp(right))
+    });
+    for session in all {
         if pool.live_session_handle(&session).is_some() {
             continue;
         }
@@ -5142,12 +5273,32 @@ fn dispatch_effect(
                     .send(Cmd::Engine(EngineMsg::EventHandoff(correlation, result)));
             }
         }
-        Effect::EnsureRelay(session) => {
+        Effect::EnsureReadRelay(session) => {
+            // Read ownership cannot displace an already-live physical
+            // session. A typed cap refusal remains observable in pool
+            // diagnostics and is reconciled after a real worker retirement.
+            if let Err(error) = pool.ensure_session(&session) {
+                dispatch_relay_open_failure(
+                    core,
+                    session,
+                    error,
+                    pool,
+                    row_channels,
+                    history_channels,
+                    diag_channels,
+                    preambles,
+                    registry,
+                    runtime,
+                );
+            }
+        }
+        Effect::EnsureWriteRelay(session) => {
             // The durable lane is already persisted as WaitingConnection.
             // A typed cap refusal remains observable in pool diagnostics and
             // must not be converted back into an invalid handle or a busy
-            // retry loop here.
-            if let Err(error) = pool.ensure_session(&session) {
+            // retry loop here. A protected write may, however, time-share
+            // this relay's already-live Public slot (#598).
+            if let Err(error) = ensure_write_effect_session(&session, pool, runtime.self_inbox) {
                 dispatch_relay_open_failure(
                     core,
                     session,

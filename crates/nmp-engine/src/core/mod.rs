@@ -671,10 +671,27 @@ pub enum Effect {
     /// session now exists, and an OK is only ever trusted from the exact
     /// session the write was published on.
     PublishEvent(RelaySessionKey, SignedEvent, AttemptCorrelation),
-    /// Ensure a write-only relay session is dialing without creating an
+    /// Ensure a read-owned relay session is dialing. This effect carries no
+    /// durable-write priority: a protected read cannot displace another
+    /// physical session merely because its access context is non-Public.
+    EnsureReadRelay(RelaySessionKey),
+    /// Ensure a write-owned relay session is dialing without creating an
     /// attempt. An ordinal is allocated only after `RelayConnected` proves
-    /// the session online, so offline time consumes zero attempts.
-    EnsureRelay(RelaySessionKey),
+    /// the session online, so offline time consumes zero attempts. Keeping
+    /// this distinct from [`Self::EnsureReadRelay`] makes same-relay
+    /// time-sharing authority a reducer-issued capability, never a runtime
+    /// guess from the session's access context (#598).
+    EnsureWriteRelay(RelaySessionKey),
+}
+
+/// One coherent reducer snapshot of physical relay-worker ownership.
+///
+/// `all` is the exact close/retain set. `writes` is its subset backed by a
+/// nonterminal durable or ephemeral write obligation; only that subset may
+/// time-share a same-relay Public slot under the physical-session cap (#598).
+pub(crate) struct RelayWorkerRequirements {
+    pub(crate) all: BTreeSet<RelaySessionKey>,
+    pub(crate) writes: BTreeSet<RelaySessionKey>,
 }
 
 /// Per-handle bookkeeping `EngineCore` must retain across `handle()` calls:
@@ -1305,15 +1322,28 @@ impl<S: EventStore> EngineCore<S> {
     /// A store read failure returns `None`. In that case the runtime retains
     /// every worker rather than risking eviction of a durable lane whose
     /// persisted state could not be inspected.
-    pub(crate) fn required_relay_workers(&self) -> Option<BTreeSet<RelaySessionKey>> {
-        let mut required: BTreeSet<RelaySessionKey> =
-            self.router.plan().reqs.keys().cloned().collect();
+    pub(crate) fn relay_worker_requirements(&self) -> Option<RelayWorkerRequirements> {
+        let writes = self.write_relay_workers()?;
+        let mut all: BTreeSet<RelaySessionKey> = self.router.plan().reqs.keys().cloned().collect();
+        all.extend(writes.iter().cloned());
+        Some(RelayWorkerRequirements { all, writes })
+    }
 
-        required.extend(
-            self.attempt_correlations
-                .values()
-                .map(|target| target.session.clone()),
-        );
+    /// Exact physical sessions owned by nonterminal write work, excluding
+    /// read-plan ownership. This builds the `writes` subset in
+    /// [`Self::relay_worker_requirements`] so the runtime can give a durable
+    /// obligation bounded same-relay time-sharing priority (#598) without
+    /// accidentally giving a long-lived protected read the same authority.
+    ///
+    /// As with the union above, a store read failure returns `None`; callers
+    /// then retain current workers and decline priority changes rather than
+    /// guessing about durable ownership.
+    fn write_relay_workers(&self) -> Option<BTreeSet<RelaySessionKey>> {
+        let mut required: BTreeSet<RelaySessionKey> = self
+            .attempt_correlations
+            .values()
+            .map(|target| target.session.clone())
+            .collect();
 
         for pending in self.pending.values() {
             let access = AccessContext::Nip42(pending.signing_pubkey);
@@ -1703,8 +1733,8 @@ impl<S: EventStore> EngineCore<S> {
             }
             EngineMsg::RelayOpenFailed(session, reason) => {
                 if self
-                    .required_relay_workers()
-                    .is_some_and(|required| required.contains(&session))
+                    .relay_worker_requirements()
+                    .is_some_and(|required| required.all.contains(&session))
                 {
                     self.relay_open_failures.insert(session, reason);
                     vec![Effect::EmitDiagnostics(self.diagnostics_snapshot())]
@@ -1753,21 +1783,21 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     fn prune_unowned_relay_state(&mut self) -> bool {
-        // `required_relay_workers()` reads outbox lanes from the store; with
+        // `relay_worker_requirements()` reads outbox lanes from the store; with
         // nothing to prune it must not tax every reducer message with that
         // scan (the wake-falsifiers in `core_headless.rs` count exactly
         // these reads).
         if self.relay_open_failures.is_empty() && self.auth_required_sessions.is_empty() {
             return false;
         }
-        let Some(required) = self.required_relay_workers() else {
+        let Some(required) = self.relay_worker_requirements() else {
             return false;
         };
         let before = self.relay_open_failures.len();
         self.relay_open_failures
-            .retain(|session, _| required.contains(session));
+            .retain(|session, _| required.all.contains(session));
         self.auth_required_sessions
-            .retain(|session| required.contains(session));
+            .retain(|session| required.all.contains(session));
         self.relay_open_failures.len() != before
     }
 

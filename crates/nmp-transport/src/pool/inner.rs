@@ -1376,7 +1376,7 @@ mod tests {
     /// `PermanentlyFailed` (never the ordinary transient `Error` reason) and
     /// still retire the worker. Losing this distinction is exactly what
     /// would make the engine's `on_relay_disconnected` re-issue
-    /// `Effect::EnsureRelay` into a 401 busy-loop.
+    /// `Effect::EnsureReadRelay` into a 401 busy-loop.
     #[test]
     fn permanent_failure_after_a_connected_session_reports_permanent_and_retires() {
         let (inner, _rx) = test_pool();

@@ -47,8 +47,14 @@ about current code:
   and diagnostics; the transport boundary returns typed admission errors and
   preserves durable write lanes as explicit waiting work. Runtime
   reconciliation releases workers that have no current read, write, or
-  ephemeral owner before dialing replacements, while nonterminal durable
-  lanes retain their shared socket ownership. Discovered local,
+  ephemeral owner before dialing replacements. Access contexts remain
+  physically isolated sockets, but a nonterminal write may time-share the
+  same relay's Public slot under the finite ceiling (#598): reducer-issued
+  read/write admission effects make the authority explicit, only write
+  ownership may release Public, and terminal reconciliation restores any
+  still-required read preamble. A protected read has no such authority, no
+  different relay is evicted, and the configured physical-session envelope is
+  never exceeded. Discovered local,
   private, link-local, and `.onion` targets remain rejected by default, while
   operator-configured and explicit contextual authority keep their separate
   trusted path. Other non-relay limit classes remain open under ledger #17.

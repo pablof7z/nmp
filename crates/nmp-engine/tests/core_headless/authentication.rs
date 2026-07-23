@@ -18,7 +18,7 @@ fn fresh_protected_read_ensures_one_worker_and_replays_only_current_demand_after
         first
             .iter()
             .filter(
-                |effect| matches!(effect, Effect::EnsureRelay(candidate) if candidate == &session)
+                |effect| matches!(effect, Effect::EnsureReadRelay(candidate) if candidate == &session)
             )
             .count(),
         1,
@@ -42,7 +42,7 @@ fn fresh_protected_read_ensures_one_worker_and_replays_only_current_demand_after
         second
             .iter()
             .filter(
-                |effect| matches!(effect, Effect::EnsureRelay(candidate) if candidate == &session)
+                |effect| matches!(effect, Effect::EnsureReadRelay(candidate) if candidate == &session)
             )
             .count(),
         1,
@@ -55,7 +55,7 @@ fn fresh_protected_read_ensures_one_worker_and_replays_only_current_demand_after
         newest_only
             .iter()
             .filter(
-                |effect| matches!(effect, Effect::EnsureRelay(candidate) if candidate == &session)
+                |effect| matches!(effect, Effect::EnsureReadRelay(candidate) if candidate == &session)
             )
             .count(),
         1,
@@ -79,9 +79,9 @@ fn fresh_protected_read_ensures_one_worker_and_replays_only_current_demand_after
         session.clone(),
         nmp_transport::DisconnectReason::Error,
     ));
-    assert!(disconnected
-        .iter()
-        .any(|effect| matches!(effect, Effect::EnsureRelay(candidate) if candidate == &session)));
+    assert!(disconnected.iter().any(
+        |effect| matches!(effect, Effect::EnsureReadRelay(candidate) if candidate == &session)
+    ));
 
     let generation_two = RelayHandle {
         slot: 0,
@@ -112,7 +112,7 @@ fn fresh_protected_read_ensures_one_worker_and_replays_only_current_demand_after
     let removed = core.handle(EngineMsg::Unsubscribe(second_id));
     assert!(
         !removed.iter().any(
-            |effect| matches!(effect, Effect::EnsureRelay(candidate) if candidate == &session)
+            |effect| matches!(effect, Effect::EnsureReadRelay(candidate) if candidate == &session)
         ),
         "the final demand withdrawal must not reopen the protected session"
     );
