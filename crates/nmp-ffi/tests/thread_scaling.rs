@@ -8,11 +8,10 @@
 //! pull-based async design an observation is a lightweight `Arc` + waker.
 //!
 //! Instrumentation: `nmp::nmp_threads_spawned()` counts EVERY real NMP-owned OS
-//! thread — the transient blocking-adapter pool (`nmp-executor`), the engine
-//! runtime + its two bridges (`nmp-engine`), and every transport thread
-//! (`nmp-transport`'s single `SystemThreadSpawner`). There is no uninstrumented
-//! NMP thread source, so a "0 growth" result cannot hide a thread behind an
-//! unmeasured spawn site.
+//! thread — the engine reducer, its fixed pool bridge, its fixed adapter-runtime
+//! workers, and every transport thread (`nmp-transport`'s single
+//! `SystemThreadSpawner`). There is no uninstrumented NMP thread source, so a
+//! "0 growth" result cannot hide a thread behind an unmeasured spawn site.
 //!
 //! Each opened handle has a live consumer task that drains its initial frame
 //! and then PARKS on a pending `next()` — proving a parked `next()` future

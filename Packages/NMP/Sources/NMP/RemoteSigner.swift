@@ -122,7 +122,6 @@ public enum NMPNip46Failure: Sendable, Equatable {
     case disconnected
     case rejected(String)
     case invalidResponse(String)
-    case threadUnavailable(component: String, reason: String)
     case signerMissingPublicKey
     /// A restore/import's live answer did not match the checkpoint's
     /// expected identity (#571). No signer was attached under the wrong
@@ -140,8 +139,6 @@ public enum NMPNip46Failure: Sendable, Equatable {
         case .disconnected: self = .disconnected
         case .rejected(let reason): self = .rejected(reason)
         case .invalidResponse(let reason): self = .invalidResponse(reason)
-        case .threadUnavailable(let component, let reason):
-            self = .threadUnavailable(component: component, reason: reason)
         case .signerMissingPublicKey: self = .signerMissingPublicKey
         case .restoredIdentityMismatch(let expected, let actual):
             self = .restoredIdentityMismatch(expected: expected, actual: actual)

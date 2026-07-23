@@ -594,14 +594,6 @@ pub enum Effect {
     },
     /// -> `Pool::send` per (relay, current handle).
     Wire(WireDelta),
-    /// Prospective relay-session workers for a staged history advance. The
-    /// runtime may preflight these workers, but dispatch never sends protocol
-    /// work from this effect. The live router/attribution state changes only
-    /// after the synchronous caller has accepted the successful reply. Keyed
-    /// by full [`RelaySessionKey`] (#8): the staged shadow plan's demand
-    /// atoms carry their access context, and preflighting the URL's PUBLIC
-    /// session for a protected atom would acquire the wrong physical worker.
-    PreflightHistoryRelays(BTreeSet<RelaySessionKey>),
     /// Reconnect: resend the current wire subs on the NEW generation of
     /// exactly this session.
     Replay(RelaySessionKey, Vec<WireReq>),
@@ -1558,11 +1550,6 @@ impl<S: EventStore> EngineCore<S> {
             };
         }
         snapshot
-    }
-
-    #[cfg(test)]
-    pub(crate) fn nip11_information_len(&self) -> usize {
-        self.nip11_information.len()
     }
 
     /// A pure clock update PLUS two deadline sweeps: NIP-40 expiry

@@ -11,8 +11,14 @@ publish.workspace = true
 # the older connect shape.
 nostr = { workspace = true, features = ["nip46"] }
 nmp-transport.workspace = true
+# #704: reduced to the process-wide OS-thread-spawn counter only; the
+# standalone NIP-46 runtime's worker threads bump it via `on_thread_start`.
 nmp-executor.workspace = true
 crossbeam-channel = "0.5"
+# #704: NIP-46 session workers/forwarders/switch-relays/result-map are async
+# tasks on a tokio runtime — the engine's shared handle when engine-associated,
+# or a small session-owned runtime for standalone direct-Rust connects.
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"

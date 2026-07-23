@@ -26,7 +26,7 @@
 - [ ] Missing signer pins expected identity.
 - [ ] Receipt observation cancellation does not cancel write.
 - [ ] At-most-once ambiguity is not retried blindly.
-- [ ] Executor/thread refusal preserves its exact boundary: no observation/direct-signer handle, terminal NIP-02 action failure, or post-handle NIP-46 stream failure.
+- [ ] Genuine infra failures preserve their exact boundary: `EngineStartFailed` at construction, `ObservationUnavailable` for a live observe (no handle), terminal NIP-02 action failure, or post-handle NIP-46 stream failure; ordinary operations are never refused for capacity.
 - [ ] Shutdown/reset ordering is deterministic.
 - [ ] Secrets are absent from output/artifacts.
 

@@ -53,7 +53,8 @@ pub enum FfiFollowActionFailure {
     InvalidGeneratedTag,
     EngineClosed,
     ReceiptUnavailable,
-    ThreadUnavailable { component: String, reason: String },
+    // #704: `ThreadUnavailable` was removed -- the follow action runs as an
+    // async task and has no worker/thread admission refusal to report.
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -200,9 +201,6 @@ fn failure_to_ffi(failure: FollowActionFailure) -> FfiFollowActionFailure {
         },
         FollowActionFailure::EngineClosed => FfiFollowActionFailure::EngineClosed,
         FollowActionFailure::ReceiptUnavailable => FfiFollowActionFailure::ReceiptUnavailable,
-        FollowActionFailure::ThreadUnavailable { component, reason } => {
-            FfiFollowActionFailure::ThreadUnavailable { component, reason }
-        }
     }
 }
 

@@ -10,6 +10,8 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tokio::sync::mpsc as tokio_mpsc;
+
 use nmp_transport::{
     Pool, PoolConfig, PoolEvent, PoolEventSink, RelayFrame, RelayOpenError, WireFrame,
 };
@@ -23,18 +25,20 @@ use serde_json::Value;
 use zeroize::Zeroizing;
 
 use crate::{
-    parse_bunker_uri, pending_signer_cancellation, BunkerParseError, CryptoCapability,
-    PendingSignerSender, SignerError, SignerOp, SigningCapability, MAX_BUNKER_URI_LEN,
-    MAX_NIP46_RELAYS,
+    parse_bunker_uri, BunkerParseError, CryptoCapability, PendingSignerSender, SignerError,
+    SignerOp, SigningCapability, MAX_BUNKER_URI_LEN, MAX_NIP46_RELAYS,
 };
 
 const DEFAULT_PERMISSIONS: &str = "sign_event,nip44_encrypt,nip44_decrypt";
 const MAX_PENDING_REQUESTS: usize = 64;
+const REQUEST_QUEUE_CAPACITY: usize = MAX_PENDING_REQUESTS;
+const CONTROL_QUEUE_CAPACITY: usize = 8;
+const POOL_EVENT_QUEUE_CAPACITY: usize = 256;
 const SWITCH_RELAYS_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Nip46CancellationInner {
     cancelled: AtomicBool,
-    commands: Mutex<Option<Sender<WorkerMsg>>>,
+    control: Mutex<Option<Arc<SessionControl>>>,
 }
 
 /// Explicit cancellation for a connection attempt that has not produced a
@@ -50,23 +54,23 @@ impl Default for Nip46Cancellation {
         Self {
             inner: Arc::new(Nip46CancellationInner {
                 cancelled: AtomicBool::new(false),
-                commands: Mutex::new(None),
+                control: Mutex::new(None),
             }),
         }
     }
 }
 
 impl Nip46Cancellation {
-    fn bind(&self, commands: Sender<WorkerMsg>) {
+    fn bind(&self, control: Arc<SessionControl>) {
         let mut current = self
             .inner
-            .commands
+            .control
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         if self.inner.cancelled.load(Ordering::Acquire) {
-            let _ = commands.send(WorkerMsg::Shutdown);
+            control.shutdown();
         } else {
-            *current = Some(commands);
+            *current = Some(control);
         }
     }
 
@@ -75,14 +79,14 @@ impl Nip46Cancellation {
         if self.inner.cancelled.swap(true, Ordering::AcqRel) {
             return;
         }
-        let commands = self
+        let control = self
             .inner
-            .commands
+            .control
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .take();
-        if let Some(commands) = commands {
-            let _ = commands.send(WorkerMsg::Shutdown);
+        if let Some(control) = control {
+            control.shutdown();
         }
     }
 }
@@ -123,10 +127,6 @@ pub enum Nip46Error {
     Disconnected,
     Rejected(String),
     InvalidResponse(String),
-    ThreadUnavailable {
-        component: String,
-        reason: String,
-    },
     /// A restored/imported session's live `get_public_key` answer did not
     /// match the checkpoint's expected identity (#571). The signer is never
     /// returned/attached in this case -- restore fails closed rather than
@@ -158,9 +158,6 @@ impl fmt::Display for Nip46Error {
             Self::Disconnected => f.write_str("NIP-46 connection ended"),
             Self::Rejected(reason) => write!(f, "NIP-46 signer rejected request: {reason}"),
             Self::InvalidResponse(reason) => write!(f, "invalid NIP-46 response: {reason}"),
-            Self::ThreadUnavailable { component, reason } => {
-                write!(f, "{component} thread unavailable: {reason}")
-            }
             Self::RestoredIdentityMismatch { expected, actual } => write!(
                 f,
                 "restored NIP-46 session answered as {actual} but the checkpoint expected {expected}"
@@ -305,18 +302,11 @@ impl Nip46Invitation {
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: Option<&Nip46Cancellation>,
     ) -> Result<Nip46Signer, Nip46Error> {
-        let executor =
-            nmp_executor::Executor::new(nmp_executor::DEFAULT_MAX_TASKS).map_err(|error| {
-                Nip46Error::ThreadUnavailable {
-                    component: "NIP-46 native task executor".to_string(),
-                    reason: error.to_string(),
-                }
-            })?;
-        self.connect_observed_inner_with_executor(
+        self.connect_observed_inner_with_runtime(
             timeout,
             event_sink,
             cancellation,
-            SessionExecutor::Owned(executor),
+            SessionRuntime(standalone_runtime()?),
         )
     }
 
@@ -326,25 +316,73 @@ impl Nip46Invitation {
         timeout: Duration,
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: &Nip46Cancellation,
-        executor: nmp_executor::Executor,
+        runtime: tokio::runtime::Handle,
     ) -> Result<Nip46Signer, Nip46Error> {
-        self.connect_observed_inner_with_executor(
+        self.connect_observed_inner_with_runtime(
             timeout,
             event_sink,
             Some(cancellation),
-            SessionExecutor::Shared(executor),
+            SessionRuntime(runtime),
         )
     }
 
-    fn connect_observed_inner_with_executor(
+    /// #704: async twin of
+    /// [`Self::connect_observed_with_executor_and_cancellation`]. Identical
+    /// handshake, except the availability wait is awaited
+    /// ([`Session::wait_available_async`]) instead of blocking a std channel,
+    /// so it runs as a task on the engine's shared adapter `runtime` and holds
+    /// no OS thread while the signer comes online. `#[doc(hidden)]` for the same
+    /// reason as its blocking `_with_executor_` sibling.
+    #[doc(hidden)]
+    pub async fn connect_observed_async(
+        self,
+        timeout: Duration,
+        event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
+        cancellation: &Nip46Cancellation,
+        runtime: tokio::runtime::Handle,
+    ) -> Result<Nip46Signer, Nip46Error> {
+        let client_keys = self.client_keys.clone();
+        let session = Session::spawn(
+            self.relays,
+            self.client_keys,
+            None,
+            Some(cancellation),
+            SessionRuntime(runtime),
+        )?;
+        forward_events(&session, event_sink)?;
+        session.wait_available_async(timeout).await?;
+        let remote_signer_public_key = session
+            .accept_invitation(self.secret.as_str())
+            .recv_timeout(timeout)
+            .map_err(map_connect_recv)??;
+        let user_public_key = request_string(&session, "get_public_key", Vec::new())
+            .wait(timeout)
+            .map_err(Nip46Error::from)
+            .and_then(|value| {
+                PublicKey::from_hex(&value).map_err(|error| {
+                    Nip46Error::InvalidResponse(format!("get_public_key: {error}"))
+                })
+            })?;
+        session.emit(Nip46ConnectionEvent::Connected { user_public_key });
+        session.request_switch_relays();
+        Ok(Nip46Signer {
+            user_public_key,
+            remote_signer_public_key,
+            session,
+            client_keys,
+            origin: Nip46Origin::ClientInitiated,
+        })
+    }
+
+    fn connect_observed_inner_with_runtime(
         self,
         timeout: Duration,
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: Option<&Nip46Cancellation>,
-        executor: SessionExecutor,
+        runtime: SessionRuntime,
     ) -> Result<Nip46Signer, Nip46Error> {
         let client_keys = self.client_keys.clone();
-        let session = Session::spawn(self.relays, self.client_keys, None, cancellation, executor)?;
+        let session = Session::spawn(self.relays, self.client_keys, None, cancellation, runtime)?;
         forward_events(&session, event_sink)?;
         session.wait_available(timeout)?;
         let remote_signer_public_key = session
@@ -491,21 +529,14 @@ impl Nip46Signer {
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: Option<&Nip46Cancellation>,
     ) -> Result<Self, Nip46Error> {
-        let executor =
-            nmp_executor::Executor::new(nmp_executor::DEFAULT_MAX_TASKS).map_err(|error| {
-                Nip46Error::ThreadUnavailable {
-                    component: "NIP-46 native task executor".to_string(),
-                    reason: error.to_string(),
-                }
-            })?;
-        Self::connect_bunker_observed_inner_with_executor(
+        Self::connect_bunker_observed_inner_with_runtime(
             uri,
             permissions,
             metadata,
             timeout,
             event_sink,
             cancellation,
-            SessionExecutor::Owned(executor),
+            SessionRuntime(standalone_runtime()?),
         )
     }
 
@@ -517,28 +548,102 @@ impl Nip46Signer {
         timeout: Duration,
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: &Nip46Cancellation,
-        executor: nmp_executor::Executor,
+        runtime: tokio::runtime::Handle,
     ) -> Result<Self, Nip46Error> {
-        Self::connect_bunker_observed_inner_with_executor(
+        Self::connect_bunker_observed_inner_with_runtime(
             uri,
             permissions,
             metadata,
             timeout,
             event_sink,
             Some(cancellation),
-            SessionExecutor::Shared(executor),
+            SessionRuntime(runtime),
         )
     }
 
+    /// #704: async twin of
+    /// [`Self::connect_bunker_observed_with_executor_and_cancellation`].
+    /// Identical `bunker://` handshake, except the availability wait is awaited
+    /// ([`Session::wait_available_async`]) instead of blocking a std channel, so
+    /// it runs as a task on the engine's shared adapter `runtime` and holds no
+    /// OS thread while the signer comes online. `#[doc(hidden)]` for the same
+    /// reason as its blocking `_with_executor_` sibling.
+    #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
-    fn connect_bunker_observed_inner_with_executor(
+    pub async fn connect_bunker_observed_async(
+        uri: &str,
+        permissions: Option<String>,
+        metadata: Nip46ClientMetadata,
+        timeout: Duration,
+        event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
+        cancellation: &Nip46Cancellation,
+        runtime: tokio::runtime::Handle,
+    ) -> Result<Self, Nip46Error> {
+        let parsed = parse_bunker_uri(uri).map_err(Nip46Error::InvalidBunkerUri)?;
+        let remote_signer_public_key = parsed.remote_signer_public_key;
+        let client_keys = Keys::generate();
+        let session = Session::spawn(
+            parsed.relays,
+            client_keys.clone(),
+            Some(remote_signer_public_key),
+            Some(cancellation),
+            SessionRuntime(runtime),
+        )?;
+        forward_events(&session, event_sink)?;
+        session.wait_available_async(timeout).await?;
+
+        let metadata_json = serde_json::to_string(&metadata)
+            .map_err(|error| Nip46Error::InvalidResponse(error.to_string()))?;
+        let params = vec![
+            remote_signer_public_key.to_hex(),
+            parsed
+                .secret
+                .as_deref()
+                .map(String::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            permissions.unwrap_or_default(),
+            metadata_json,
+        ];
+        let connect_result = request_string(&session, "connect", params)
+            .wait(timeout)
+            .map_err(Nip46Error::from)?;
+        if connect_result != "ack"
+            && parsed.secret.as_deref().map(String::as_str) != Some(connect_result.as_str())
+        {
+            return Err(Nip46Error::InvalidResponse(format!(
+                "connect returned {connect_result:?}"
+            )));
+        }
+
+        let user_public_key = request_string(&session, "get_public_key", Vec::new())
+            .wait(timeout)
+            .map_err(Nip46Error::from)
+            .and_then(|value| {
+                PublicKey::from_hex(&value).map_err(|error| {
+                    Nip46Error::InvalidResponse(format!("get_public_key: {error}"))
+                })
+            })?;
+        session.emit(Nip46ConnectionEvent::Connected { user_public_key });
+        session.request_switch_relays();
+        Ok(Self {
+            user_public_key,
+            remote_signer_public_key,
+            session,
+            client_keys,
+            origin: Nip46Origin::Bunker,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn connect_bunker_observed_inner_with_runtime(
         uri: &str,
         permissions: Option<String>,
         metadata: Nip46ClientMetadata,
         timeout: Duration,
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: Option<&Nip46Cancellation>,
-        executor: SessionExecutor,
+        runtime: SessionRuntime,
     ) -> Result<Self, Nip46Error> {
         let parsed = parse_bunker_uri(uri).map_err(Nip46Error::InvalidBunkerUri)?;
         let remote_signer_public_key = parsed.remote_signer_public_key;
@@ -548,7 +653,7 @@ impl Nip46Signer {
             client_keys.clone(),
             Some(remote_signer_public_key),
             cancellation,
-            executor,
+            runtime,
         )?;
         forward_events(&session, event_sink)?;
         session.wait_available(timeout)?;
@@ -619,7 +724,7 @@ impl Nip46Signer {
 
     pub fn logout(&self) -> SignerOp<()> {
         map_string(
-            self.session.executor(),
+            &self.session.runtime_handle(),
             request_string(&self.session, "logout", Vec::new()),
             |result| {
                 (result == "ack").then_some(()).ok_or_else(|| {
@@ -670,27 +775,20 @@ impl Nip46Signer {
         parts: Nip46SessionCheckpoint,
         timeout: Duration,
     ) -> Result<Self, Nip46Error> {
-        let executor =
-            nmp_executor::Executor::new(nmp_executor::DEFAULT_MAX_TASKS).map_err(|error| {
-                Nip46Error::ThreadUnavailable {
-                    component: "NIP-46 native task executor".to_string(),
-                    reason: error.to_string(),
-                }
-            })?;
         Self::from_parts_inner(
             parts,
             timeout,
             Arc::new(|_| {}),
             None,
-            SessionExecutor::Owned(executor),
+            SessionRuntime(standalone_runtime()?),
         )
     }
 
     /// #680: engine-associated restore path. Like [`Self::from_parts`] but
-    /// with an observer event sink and external cancellation, and — like the
-    /// bunker/invitation connect paths — a *session-owned* executor (bounded
-    /// by app-identity session count), never the shared engine adapter pool,
-    /// so restoring a session can never refuse an unrelated engine operation.
+    /// with an observer event sink and external cancellation. #704: the session
+    /// runs its tasks on the process-wide shared standalone runtime (O(1) in
+    /// session count), never a per-session executor and never blocking an
+    /// unrelated engine operation.
     #[doc(hidden)]
     pub fn from_parts_observed_with_cancellation(
         parts: Nip46SessionCheckpoint,
@@ -698,20 +796,66 @@ impl Nip46Signer {
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: &Nip46Cancellation,
     ) -> Result<Self, Nip46Error> {
-        let executor =
-            nmp_executor::Executor::new(nmp_executor::DEFAULT_MAX_TASKS).map_err(|error| {
-                Nip46Error::ThreadUnavailable {
-                    component: "NIP-46 native task executor".to_string(),
-                    reason: error.to_string(),
-                }
-            })?;
         Self::from_parts_inner(
             parts,
             timeout,
             event_sink,
             Some(cancellation),
-            SessionExecutor::Owned(executor),
+            SessionRuntime(standalone_runtime()?),
         )
+    }
+
+    /// #704: engine-associated async twin of
+    /// [`Self::from_parts_observed_with_cancellation`]. Identical restore-and-
+    /// validate reconnect, except the availability wait is awaited
+    /// ([`Session::wait_available_async`]) instead of blocking a std channel, so
+    /// it runs as a task on the engine's shared adapter `runtime` — removing the
+    /// last standalone-runtime use on the FFI restore path — and holds no OS
+    /// thread while the session comes online. `#[doc(hidden)]` for the same
+    /// reason as its blocking sibling.
+    #[doc(hidden)]
+    pub async fn from_parts_observed_async(
+        parts: Nip46SessionCheckpoint,
+        timeout: Duration,
+        event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
+        cancellation: &Nip46Cancellation,
+        runtime: tokio::runtime::Handle,
+    ) -> Result<Self, Nip46Error> {
+        let client_keys = Keys::new(parts.client_secret_key.clone());
+        let session = Session::spawn(
+            parts.relays,
+            client_keys.clone(),
+            Some(parts.remote_signer_public_key),
+            Some(cancellation),
+            SessionRuntime(runtime),
+        )?;
+        forward_events(&session, event_sink)?;
+        session.wait_available_async(timeout).await?;
+        let live_user_public_key = request_string(&session, "get_public_key", Vec::new())
+            .wait(timeout)
+            .map_err(Nip46Error::from)
+            .and_then(|value| {
+                PublicKey::from_hex(&value).map_err(|error| {
+                    Nip46Error::InvalidResponse(format!("get_public_key: {error}"))
+                })
+            })?;
+        if live_user_public_key != parts.user_public_key {
+            return Err(Nip46Error::RestoredIdentityMismatch {
+                expected: parts.user_public_key,
+                actual: live_user_public_key,
+            });
+        }
+        session.emit(Nip46ConnectionEvent::Connected {
+            user_public_key: live_user_public_key,
+        });
+        session.request_switch_relays();
+        Ok(Self {
+            user_public_key: live_user_public_key,
+            remote_signer_public_key: parts.remote_signer_public_key,
+            session,
+            client_keys,
+            origin: parts.origin,
+        })
     }
 
     fn from_parts_inner(
@@ -719,7 +863,7 @@ impl Nip46Signer {
         timeout: Duration,
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: Option<&Nip46Cancellation>,
-        executor: SessionExecutor,
+        runtime: SessionRuntime,
     ) -> Result<Self, Nip46Error> {
         let client_keys = Keys::new(parts.client_secret_key.clone());
         let session = Session::spawn(
@@ -727,7 +871,7 @@ impl Nip46Signer {
             client_keys.clone(),
             Some(parts.remote_signer_public_key),
             cancellation,
-            executor,
+            runtime,
         )?;
         forward_events(&session, event_sink)?;
         session.wait_available(timeout)?;
@@ -779,7 +923,7 @@ impl SigningCapability for Nip46Signer {
         .to_string();
         let user_public_key = self.user_public_key;
         map_string(
-            self.session.executor(),
+            &self.session.runtime_handle(),
             request_string(&self.session, "sign_event", vec![body]),
             move |result| {
                 let event = Event::from_json(&result).map_err(|error| {
@@ -852,35 +996,100 @@ struct RpcEnvelope {
 struct PendingRequest {
     frame: String,
     reply: PendingSignerSender<String>,
+    cancellation: Arc<RequestCancellation>,
 }
 
-// Pool events stay owned values across this already-bounded channel. Boxing
-// the largest variant would add a heap allocation to every NIP-46 pool event
-// only to reduce the private enum's stack size.
-#[allow(clippy::large_enum_variant)]
+struct SessionControl {
+    shutdown: AtomicBool,
+    signal: tokio::sync::Notify,
+}
+
+impl SessionControl {
+    fn new() -> Self {
+        Self {
+            shutdown: AtomicBool::new(false),
+            signal: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        self.signal.notify_one();
+    }
+
+    fn is_shutdown(&self) -> bool {
+        self.shutdown.load(Ordering::Acquire)
+    }
+}
+
+struct RequestCancellation {
+    cancelled: AtomicBool,
+    admission_signal: tokio::sync::Notify,
+    worker_signal: Arc<tokio::sync::Notify>,
+}
+
+impl RequestCancellation {
+    fn new(worker_signal: Arc<tokio::sync::Notify>) -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            admission_signal: tokio::sync::Notify::new(),
+            worker_signal,
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.admission_signal.notify_waiters();
+        self.worker_signal.notify_one();
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        let notified = self.admission_signal.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.is_cancelled() {
+            return;
+        }
+        notified.await;
+    }
+}
+
+// Requests stay owned values across this bounded channel. The finite queue is
+// the physical envelope; producers beyond it remain in caller-owned,
+// cancellable admission futures.
+struct RequestMsg {
+    id: String,
+    method: String,
+    params: Vec<String>,
+    reply: PendingSignerSender<String>,
+    cancellation: Arc<RequestCancellation>,
+}
+
 enum WorkerMsg {
-    Pool(PoolEvent),
-    Request {
-        id: String,
-        method: String,
-        params: Vec<String>,
-        reply: PendingSignerSender<String>,
-    },
     AcceptInvitation {
         expected_secret: String,
         reply: Sender<Result<PublicKey, Nip46Error>>,
     },
     ReplaceRelays(Vec<RelayUrl>),
-    CancelRequest(String),
-    Shutdown,
 }
 
 #[derive(Clone)]
-struct SessionPoolSink(Sender<WorkerMsg>);
+struct SessionPoolSink(tokio_mpsc::Sender<PoolEvent>);
 
 impl PoolEventSink for SessionPoolSink {
     fn on_event(&self, event: PoolEvent) {
-        let _ = self.0.send(WorkerMsg::Pool(event));
+        // The pool translator is a genuine bounded native I/O worker. A full
+        // session queue blocks that producer and propagates pressure to the
+        // pool's already-bounded ingest path. Shutdown drops the receiver
+        // before joining the pool, which wakes a blocked send with `Err`.
+        let _ = self.0.blocking_send(event);
     }
 }
 
@@ -889,6 +1098,7 @@ fn session_pool_config() -> PoolConfig {
     // protocol/session relay ceiling enforced at every NIP-46 input door.
     PoolConfig {
         max_relays: MAX_NIP46_RELAYS,
+        event_sink_queue_capacity: POOL_EVENT_QUEUE_CAPACITY,
         // Issue #519's resolved-IP admission check (`pool::connect`) refuses
         // a loopback/private/link-local dial by default — the right default
         // for a DISCOVERED relay (a network-sourced kind:10002/kind:10050
@@ -910,35 +1120,72 @@ fn session_pool_config() -> PoolConfig {
     }
 }
 
-/// Encodes whether a [`Session`] owns its executor (and must shut it down
-/// when the session is torn down) or merely borrows a shared/engine-owned
-/// executor (which outlives the session and must never be shut down by it).
-///
-/// This makes the illegal combination — "shared executor + shut it down on
-/// drop" — unrepresentable: there is exactly one `Drop` behavior per variant.
-enum SessionExecutor {
-    /// A fresh executor created for and used exclusively by this session.
-    /// Shut down when the session drops.
-    Owned(nmp_executor::Executor),
-    /// A caller/engine-owned executor shared across sessions. Never shut
-    /// down by this session; the owner controls its lifetime.
-    Shared(nmp_executor::Executor),
-}
+/// #704: the async runtime a [`Session`] runs its worker/forwarder/switch-
+/// relays/result-map tasks on. Always a borrowed `Handle` — engine-associated
+/// sessions borrow the engine's runtime, and standalone direct-Rust sessions
+/// borrow the process-wide shared NIP-46 runtime ([`standalone_runtime`]).
+/// Either way the runtime outlives the session and is never shut down by it, so
+/// thread growth is O(1) in the number of sessions. This replaces the removed
+/// per-session `nmp-executor`.
+struct SessionRuntime(tokio::runtime::Handle);
 
-impl SessionExecutor {
-    fn handle(&self) -> &nmp_executor::Executor {
-        match self {
-            SessionExecutor::Owned(executor) | SessionExecutor::Shared(executor) => executor,
-        }
+impl SessionRuntime {
+    fn handle(&self) -> tokio::runtime::Handle {
+        self.0.clone()
     }
 }
 
+/// Borrow the process-wide shared runtime backing every standalone direct-Rust
+/// NIP-46 connect. Built once, lazily, and never shut down — so the number of
+/// standalone NIP-46 sessions does NOT drive OS-thread growth (#704: thread
+/// count must not be proportional to logical session count). Its worker threads
+/// bump the process-wide OS-thread counter so `nmp::nmp_threads_spawned` still
+/// reflects them, but that is an O(1) one-time cost shared across all sessions.
+fn standalone_runtime() -> Result<tokio::runtime::Handle, Nip46Error> {
+    static RUNTIME: std::sync::OnceLock<Option<Arc<tokio::runtime::Runtime>>> =
+        std::sync::OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .thread_name("nmp-nip46")
+                .on_thread_start(nmp_executor::note_thread_spawn)
+                .on_thread_stop(nmp_executor::note_thread_exit)
+                .build()
+                .ok()
+                .map(Arc::new)
+        })
+        .as_ref()
+        .map(|runtime| runtime.handle().clone())
+        // A failure to build the shared runtime is an infrastructure failure
+        // that leaves the session unusable; surfaced as the terminal
+        // connection-ended outcome (#704 removed `ThreadUnavailable`).
+        .ok_or(Nip46Error::Disconnected)
+}
+
+type EventSink = Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>;
+
 struct Session {
-    commands: Sender<WorkerMsg>,
+    requests: tokio_mpsc::Sender<RequestMsg>,
+    commands: tokio_mpsc::Sender<WorkerMsg>,
+    control: Arc<SessionControl>,
+    request_cancellation_signal: Arc<tokio::sync::Notify>,
     connected_relays: AtomicUsize,
     subscribers: Arc<Mutex<Vec<Sender<Nip46ConnectionEvent>>>>,
+    /// #704: the connection-event observers `forward_events` installs. Since
+    /// the per-session executor is gone, the forwarder is no longer a blocking
+    /// recv thread — each sink is invoked inline by `emit` (the sink contract
+    /// is a lightweight non-blocking notification, so this holds no worker).
+    event_sinks: Arc<Mutex<Vec<EventSink>>>,
     availability_error: Arc<Mutex<Option<Nip46Error>>>,
-    executor: SessionExecutor,
+    /// #704: await-able availability signal. Every availability-state
+    /// transition (`Available`/`Unavailable`/recorded relay-open error) fires
+    /// `notify_waiters()` so an async connect parked in [`Session::wait_available_async`]
+    /// re-checks without holding an OS thread. The blocking `wait_available`
+    /// keeps using the subscriber channel; this signal is the async twin's edge.
+    availability_signal: Arc<tokio::sync::Notify>,
+    runtime: SessionRuntime,
     /// The relay set this session currently targets, kept live by
     /// `SessionWorker::replace_relays` (#571's checkpoint reads this back
     /// through [`Session::current_relays`] without a worker round trip).
@@ -951,67 +1198,77 @@ impl Session {
         client_keys: Keys,
         remote: Option<PublicKey>,
         cancellation: Option<&Nip46Cancellation>,
-        executor: SessionExecutor,
+        runtime: SessionRuntime,
     ) -> Result<Arc<Self>, Nip46Error> {
-        let (commands, inbox) = mpsc::channel();
+        let (requests, request_inbox) = tokio_mpsc::channel(REQUEST_QUEUE_CAPACITY);
+        let (commands, inbox) = tokio_mpsc::channel(CONTROL_QUEUE_CAPACITY);
+        let (pool_events, pool_inbox) = tokio_mpsc::channel(POOL_EVENT_QUEUE_CAPACITY);
+        let control = Arc::new(SessionControl::new());
+        let request_cancellation_signal = Arc::new(tokio::sync::Notify::new());
         let subscribers = Arc::new(Mutex::new(Vec::new()));
+        let event_sinks: Arc<Mutex<Vec<EventSink>>> = Arc::new(Mutex::new(Vec::new()));
         let availability_error = Arc::new(Mutex::new(None));
-        let executor_handle = executor.handle().clone();
+        let runtime_handle = runtime.handle();
         let session = Arc::new(Self {
+            requests,
             commands: commands.clone(),
+            control: Arc::clone(&control),
+            request_cancellation_signal: Arc::clone(&request_cancellation_signal),
             connected_relays: AtomicUsize::new(0),
             subscribers: Arc::clone(&subscribers),
+            event_sinks: Arc::clone(&event_sinks),
             availability_error: Arc::clone(&availability_error),
-            executor,
+            availability_signal: Arc::new(tokio::sync::Notify::new()),
+            runtime,
             current_relays: Mutex::new(relays.clone()),
         });
         if let Some(cancellation) = cancellation {
-            cancellation.bind(session.commands.clone());
+            cancellation.bind(Arc::clone(&control));
         }
         let weak = Arc::downgrade(&session);
-        let pool = Pool::new(session_pool_config(), SessionPoolSink(commands.clone())).map_err(
-            |error| Nip46Error::ThreadUnavailable {
-                component: "NIP-46 transport".to_string(),
-                reason: error.to_string(),
-            },
-        )?;
+        // A transport-pool build failure leaves the session unusable; #704
+        // removed the operation-level `ThreadUnavailable`, so it surfaces as
+        // the terminal connection-ended outcome.
+        let pool = Pool::new(session_pool_config(), SessionPoolSink(pool_events))
+            .map_err(|_| Nip46Error::Disconnected)?;
         let worker_pool = pool.clone();
-        let cancel_commands = commands.clone();
-        let spawn = executor_handle.spawn_with_cancel(
-            "NIP-46 session",
-            move || {
-                let _ = cancel_commands.send(WorkerMsg::Shutdown);
-            },
-            move || {
-                let mut worker = SessionWorker::new(
-                    worker_pool,
-                    client_keys,
-                    remote,
-                    weak,
-                    subscribers,
-                    availability_error,
-                );
-                worker.emit(Nip46ConnectionEvent::Connecting);
-                if let Err(error) = worker.open_relays(relays) {
-                    worker.record_availability_error(error);
-                    worker.emit(Nip46ConnectionEvent::Unavailable);
-                }
-                worker.run(inbox);
-            },
-        );
-        if let Err(error) = spawn {
-            pool.shutdown();
-            return Err(map_executor_error(error));
-        }
+        // #704: the session worker is an async task on the runtime; its whole
+        // lifetime it awaits bounded inboxes, holding no OS thread. Session
+        // teardown and external cancellation use an independent control signal,
+        // so a full data queue cannot delay shutdown.
+        runtime_handle.spawn(async move {
+            let mut worker = SessionWorker::new(
+                worker_pool,
+                client_keys,
+                remote,
+                weak,
+                subscribers,
+                event_sinks,
+                availability_error,
+            );
+            worker.emit(Nip46ConnectionEvent::Connecting);
+            if let Err(error) = worker.open_relays(relays) {
+                worker.record_availability_error(error);
+                worker.emit(Nip46ConnectionEvent::Unavailable);
+            }
+            worker
+                .run(
+                    inbox,
+                    request_inbox,
+                    pool_inbox,
+                    control,
+                    request_cancellation_signal,
+                )
+                .await;
+        });
         drop(pool);
         Ok(session)
     }
 
-    /// Handle to the underlying executor, regardless of ownership. Callers
-    /// that only need to spawn tasks (as opposed to deciding shutdown
-    /// semantics) go through this accessor.
-    fn executor(&self) -> &nmp_executor::Executor {
-        self.executor.handle()
+    /// The runtime handle this session spawns its async tasks (result-map,
+    /// switch-relays) on.
+    fn runtime_handle(&self) -> tokio::runtime::Handle {
+        self.runtime.handle()
     }
 
     fn is_available(&self) -> bool {
@@ -1037,7 +1294,7 @@ impl Session {
     }
 
     fn emit(&self, event: Nip46ConnectionEvent) {
-        emit_to(&self.subscribers, event);
+        emit_to(&self.subscribers, &self.event_sinks, event);
     }
 
     fn wait_available(&self, timeout: Duration) -> Result<(), Nip46Error> {
@@ -1072,6 +1329,54 @@ impl Session {
         }
     }
 
+    /// #704: fire the await-able availability edge so any task parked in
+    /// [`Self::wait_available_async`] re-checks. Called by the worker at every
+    /// availability-state transition. `notify_waiters()` wakes only currently
+    /// armed waiters and stores no permit, which is why `wait_available_async`
+    /// arms (`enable`s) its waiter BEFORE re-reading the state.
+    fn signal_availability_change(&self) {
+        self.availability_signal.notify_waiters();
+    }
+
+    /// Async twin of [`Self::wait_available`] with identical outcomes: `Ok` once
+    /// a relay is connected, the recorded [`Nip46Error`] on an availability
+    /// error, [`Nip46Error::Timeout`] on the deadline. Holds no OS thread while
+    /// parked — it awaits the [`availability_signal`](Self) rather than blocking
+    /// a std channel `recv_timeout`, so it can run as a task on the engine's
+    /// shared adapter runtime.
+    async fn wait_available_async(&self, timeout: Duration) -> Result<(), Nip46Error> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.is_available() {
+                return Ok(());
+            }
+            if let Some(error) = self.availability_error() {
+                return Err(error);
+            }
+            // Arm the waiter BEFORE the re-check so a transition that fires
+            // `notify_waiters()` between the check and the await is not lost
+            // (`notify_waiters` stores no permit for a not-yet-armed waiter).
+            let mut notified = std::pin::pin!(self.availability_signal.notified());
+            notified.as_mut().enable();
+            if self.is_available() {
+                return Ok(());
+            }
+            if let Some(error) = self.availability_error() {
+                return Err(error);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(Nip46Error::Timeout);
+            }
+            if tokio::time::timeout(remaining, notified.as_mut())
+                .await
+                .is_err()
+            {
+                return Err(Nip46Error::Timeout);
+            }
+        }
+    }
+
     fn availability_error(&self) -> Option<Nip46Error> {
         self.availability_error
             .lock()
@@ -1081,71 +1386,84 @@ impl Session {
 
     fn accept_invitation(&self, expected_secret: &str) -> Receiver<Result<PublicKey, Nip46Error>> {
         let (tx, rx) = mpsc::channel();
-        if self
-            .commands
-            .send(WorkerMsg::AcceptInvitation {
-                expected_secret: expected_secret.to_string(),
-                reply: tx.clone(),
-            })
-            .is_err()
-        {
-            let _ = tx.send(Err(Nip46Error::Disconnected));
-        }
+        let commands = self.commands.clone();
+        let expected_secret = expected_secret.to_string();
+        let failure = tx.clone();
+        self.runtime_handle().spawn(async move {
+            if commands
+                .send(WorkerMsg::AcceptInvitation {
+                    expected_secret,
+                    reply: tx,
+                })
+                .await
+                .is_err()
+            {
+                let _ = failure.send(Err(Nip46Error::Disconnected));
+            }
+        });
         rx
     }
 
     fn request_switch_relays(self: &Arc<Self>) {
         let op = request_string(self, "switch_relays", Vec::new());
         let session = Arc::downgrade(self);
-        let cancel_commands = self.commands.clone();
-        let _ = self.executor().spawn_with_cancel(
-            "NIP-46 switch-relays",
-            move || {
-                let _ = cancel_commands.send(WorkerMsg::Shutdown);
-            },
-            move || {
-                let Ok(result) = op.wait(SWITCH_RELAYS_TIMEOUT) else {
+        // #704: the switch-relays wait is an async task on the session runtime;
+        // it holds no OS thread while the remote round-trip is outstanding.
+        // Dropping the task (session teardown) fires the op's cancel hook.
+        self.runtime_handle().spawn(async move {
+            let Ok(result) = tokio::time::timeout(SWITCH_RELAYS_TIMEOUT, op.recv_async()).await
+            else {
+                return;
+            };
+            let Ok(result) = result else {
+                return;
+            };
+            if result == "null" {
+                return;
+            }
+            let Ok(relays) = serde_json::from_str::<Vec<String>>(&result) else {
+                return;
+            };
+            let mut parsed = Vec::new();
+            for relay in relays {
+                let Ok(relay) = RelayUrl::parse(&relay) else {
                     return;
                 };
-                if result == "null" {
-                    return;
-                }
-                let Ok(relays) = serde_json::from_str::<Vec<String>>(&result) else {
-                    return;
-                };
-                let mut parsed = Vec::new();
-                for relay in relays {
-                    let Ok(relay) = RelayUrl::parse(&relay) else {
+                if !parsed.contains(&relay) {
+                    parsed.push(relay);
+                    if parsed.len() > MAX_NIP46_RELAYS {
                         return;
-                    };
-                    if !parsed.contains(&relay) {
-                        parsed.push(relay);
-                        if parsed.len() > MAX_NIP46_RELAYS {
-                            return;
-                        }
                     }
                 }
-                if !parsed.is_empty() {
-                    let Some(session) = session.upgrade() else {
-                        return;
-                    };
-                    let _ = session.commands.send(WorkerMsg::ReplaceRelays(parsed));
-                }
-            },
-        );
+            }
+            if !parsed.is_empty() {
+                let Some(session) = session.upgrade() else {
+                    return;
+                };
+                let _ = session
+                    .commands
+                    .send(WorkerMsg::ReplaceRelays(parsed))
+                    .await;
+            }
+        });
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = self.commands.send(WorkerMsg::Shutdown);
+        self.control.shutdown();
         self.subscribers
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .clear();
-        if let SessionExecutor::Owned(executor) = &self.executor {
-            executor.shutdown();
-        }
+        self.event_sinks
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clear();
+        // #704: the session only borrows a runtime `Handle` (the process-wide
+        // shared standalone runtime, or the engine's), so dropping the session
+        // never shuts a runtime down — the worker task observes the independent
+        // control signal above and exits on its own.
     }
 }
 
@@ -1155,6 +1473,7 @@ struct SessionWorker {
     remote: Option<PublicKey>,
     session: std::sync::Weak<Session>,
     subscribers: Arc<Mutex<Vec<Sender<Nip46ConnectionEvent>>>>,
+    event_sinks: Arc<Mutex<Vec<EventSink>>>,
     availability_error: Arc<Mutex<Option<Nip46Error>>>,
     handles: HashMap<u32, (nmp_transport::RelayHandle, RelayUrl)>,
     configured: HashMap<RelayUrl, nmp_transport::RelayHandle>,
@@ -1170,6 +1489,7 @@ impl SessionWorker {
         remote: Option<PublicKey>,
         session: std::sync::Weak<Session>,
         subscribers: Arc<Mutex<Vec<Sender<Nip46ConnectionEvent>>>>,
+        event_sinks: Arc<Mutex<Vec<EventSink>>>,
         availability_error: Arc<Mutex<Option<Nip46Error>>>,
     ) -> Self {
         static NEXT_SUB: AtomicU64 = AtomicU64::new(1);
@@ -1179,6 +1499,7 @@ impl SessionWorker {
             remote,
             session,
             subscribers,
+            event_sinks,
             availability_error,
             handles: HashMap::new(),
             configured: HashMap::new(),
@@ -1191,27 +1512,82 @@ impl SessionWorker {
         }
     }
 
-    fn run(&mut self, inbox: Receiver<WorkerMsg>) {
-        while let Ok(message) = inbox.recv() {
-            match message {
-                WorkerMsg::Pool(event) => self.on_pool(event),
-                WorkerMsg::Request {
-                    id,
-                    method,
-                    params,
-                    reply,
-                } => self.on_request(id, method, params, reply),
-                WorkerMsg::AcceptInvitation {
-                    expected_secret,
-                    reply,
-                } => self.invitation = Some((expected_secret, reply)),
-                WorkerMsg::ReplaceRelays(relays) => self.replace_relays(relays),
-                WorkerMsg::CancelRequest(id) => {
-                    self.pending.remove(&id);
+    async fn run(
+        &mut self,
+        mut commands: tokio_mpsc::Receiver<WorkerMsg>,
+        mut requests: tokio_mpsc::Receiver<RequestMsg>,
+        mut pool_events: tokio_mpsc::Receiver<PoolEvent>,
+        control: Arc<SessionControl>,
+        request_cancellation_signal: Arc<tokio::sync::Notify>,
+    ) {
+        loop {
+            if control.is_shutdown() {
+                break;
+            }
+            tokio::select! {
+                biased;
+                _ = control.signal.notified() => {
+                    if control.is_shutdown() {
+                        break;
+                    }
                 }
-                WorkerMsg::Shutdown => break,
+                _ = request_cancellation_signal.notified() => {
+                    self.prune_cancelled_requests();
+                }
+                message = commands.recv() => {
+                    let Some(message) = message else {
+                        break;
+                    };
+                    match message {
+                        WorkerMsg::AcceptInvitation {
+                            expected_secret,
+                            reply,
+                        } => self.invitation = Some((expected_secret, reply)),
+                        WorkerMsg::ReplaceRelays(relays) => self.replace_relays(relays),
+                    }
+                }
+                request = requests.recv(), if self.pending.len() < MAX_PENDING_REQUESTS => {
+                    let Some(RequestMsg {
+                            id,
+                            method,
+                            params,
+                            reply,
+                            cancellation,
+                        }) = request else {
+                            break;
+                        };
+                    self.on_request(id, method, params, reply, cancellation);
+                }
+                event = pool_events.recv() => {
+                    let Some(event) = event else {
+                        break;
+                    };
+                    self.on_pool(event);
+                }
             }
         }
+        // Close both bounded inboxes before `Drop` joins the transport pool.
+        // Any pool translator blocked on a full event channel wakes with
+        // `SendError`, so shutdown cannot deadlock behind backpressure.
+        commands.close();
+        requests.close();
+        pool_events.close();
+        // Teardown lives in `Drop` so it runs on both a clean control break
+        // AND an aborted task — dropping a standalone `Owned` runtime aborts the
+        // worker future at its `.await`, and the drop guard is the only thing
+        // that still fires the pool/pending/subscriber cleanup then (#704).
+    }
+
+    fn prune_cancelled_requests(&mut self) {
+        self.pending
+            .retain(|_, pending| !pending.cancellation.is_cancelled());
+    }
+
+    fn emit(&self, event: Nip46ConnectionEvent) {
+        emit_to(&self.subscribers, &self.event_sinks, event);
+    }
+
+    fn teardown(&mut self) {
         for (_, pending) in self.pending.drain() {
             let _ = pending.reply.resolve(Err(SignerError::Disconnected));
         }
@@ -1222,11 +1598,11 @@ impl SessionWorker {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .clear();
+        self.event_sinks
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clear();
         self.pool.shutdown();
-    }
-
-    fn emit(&self, event: Nip46ConnectionEvent) {
-        emit_to(&self.subscribers, event);
     }
 
     fn record_availability_error(&self, error: Nip46Error) {
@@ -1234,6 +1610,11 @@ impl SessionWorker {
             .availability_error
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = Some(error);
+        // #704: wake an async connect parked in `wait_available_async` so it
+        // observes the recorded error instead of running out its deadline.
+        if let Some(session) = self.session.upgrade() {
+            session.signal_availability_change();
+        }
     }
 
     fn open_relays(&mut self, relays: Vec<RelayUrl>) -> Result<(), Nip46Error> {
@@ -1257,11 +1638,11 @@ impl SessionWorker {
             }
             let handle = match ensure_open(&self.pool, &relay) {
                 Ok(handle) => handle,
-                Err(RelayOpenError::ThreadUnavailable(error)) => {
-                    thread_refusal.get_or_insert(Nip46Error::ThreadUnavailable {
-                        component: error.role.to_string(),
-                        reason: error.reason,
-                    });
+                Err(RelayOpenError::ThreadUnavailable(_error)) => {
+                    // #704: a transport relay-worker spawn failure leaves this
+                    // relay unusable; surfaced as the terminal connection-ended
+                    // outcome rather than the removed `ThreadUnavailable`.
+                    thread_refusal.get_or_insert(Nip46Error::Disconnected);
                     continue;
                 }
                 Err(_) => continue,
@@ -1365,6 +1746,10 @@ impl SessionWorker {
                 }
                 if was_empty {
                     self.emit(Nip46ConnectionEvent::Available);
+                    // #704: fire the async availability edge too.
+                    if let Some(session) = self.session.upgrade() {
+                        session.signal_availability_change();
+                    }
                 }
             }
             PoolEvent::Disconnected { handle, .. } => {
@@ -1386,6 +1771,10 @@ impl SessionWorker {
                         let _ = pending.reply.resolve(Err(SignerError::Disconnected));
                     }
                     self.emit(Nip46ConnectionEvent::Unavailable);
+                    // #704: fire the async availability edge too.
+                    if let Some(session) = self.session.upgrade() {
+                        session.signal_availability_change();
+                    }
                 }
             }
             PoolEvent::Frame { handle, frame, .. } => {
@@ -1519,12 +1908,12 @@ impl SessionWorker {
         method: String,
         params: Vec<String>,
         reply: PendingSignerSender<String>,
+        cancellation: Arc<RequestCancellation>,
     ) {
-        if self.handles.is_empty() {
-            let _ = reply.resolve(Err(SignerError::Unavailable));
+        if cancellation.is_cancelled() {
             return;
         }
-        if self.pending.len() >= MAX_PENDING_REQUESTS {
+        if self.handles.is_empty() {
             let _ = reply.resolve(Err(SignerError::Unavailable));
             return;
         }
@@ -1565,6 +1954,7 @@ impl SessionWorker {
             PendingRequest {
                 frame: frame.clone(),
                 reply,
+                cancellation,
             },
         );
         for (handle, _) in self.handles.values() {
@@ -1573,30 +1963,44 @@ impl SessionWorker {
     }
 }
 
+impl Drop for SessionWorker {
+    fn drop(&mut self) {
+        self.teardown();
+    }
+}
+
 fn request_string(session: &Arc<Session>, method: &str, params: Vec<String>) -> SignerOp<String> {
     let id = Keys::generate().public_key().to_hex();
-    let commands = session.commands.clone();
-    let cancel_commands = commands.clone();
-    let cancel_id = id.clone();
+    let requests = session.requests.clone();
+    let cancellation = Arc::new(RequestCancellation::new(Arc::clone(
+        &session.request_cancellation_signal,
+    )));
+    let cancel_hook = Arc::clone(&cancellation);
     let (reply, operation) = SignerOp::pending_channel_with_cancel(move || {
-        let _ = cancel_commands.send(WorkerMsg::CancelRequest(cancel_id));
+        cancel_hook.cancel();
     });
-    if session
-        .commands
-        .send(WorkerMsg::Request {
-            id,
-            method: method.to_string(),
-            params,
-            reply,
-        })
-        .is_err()
-    {
-        return SignerOp::err(SignerError::Disconnected);
-    }
+    let message = RequestMsg {
+        id,
+        method: method.to_string(),
+        params,
+        reply,
+        cancellation: Arc::clone(&cancellation),
+    };
+    session.runtime_handle().spawn(async move {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {}
+            result = requests.send(message) => {
+                if let Err(tokio_mpsc::error::SendError(RequestMsg { reply, .. })) = result {
+                    let _ = reply.resolve(Err(SignerError::Disconnected));
+                }
+            }
+        }
+    });
     operation
 }
 
-fn map_string<T, F>(executor: &nmp_executor::Executor, op: SignerOp<String>, map: F) -> SignerOp<T>
+fn map_string<T, F>(runtime: &tokio::runtime::Handle, op: SignerOp<String>, map: F) -> SignerOp<T>
 where
     T: Send + 'static,
     F: FnOnce(String) -> Result<T, SignerError> + Send + 'static,
@@ -1605,27 +2009,23 @@ where
         SignerOp::Ready(Ok(value)) => SignerOp::Ready(map(value)),
         SignerOp::Ready(Err(error)) => SignerOp::Ready(Err(error)),
         SignerOp::Pending(pending) => {
-            let (cancel, cancelled) = pending_signer_cancellation();
-            let mapped_cancel = cancel.clone();
+            // #704: cancellation is bound into the op's door; the mapped op's
+            // cancel hook cancels the inner op, which wakes its `.await` to a
+            // disconnected end and runs its adapter cancel hook once. The map
+            // runs as an async task on the session runtime — no OS thread is
+            // held while the inner round-trip is outstanding.
+            let inner_canceller = pending.canceller();
+            let mapped_cancel = inner_canceller.clone();
             let (completion, mapped) = SignerOp::pending_channel_with_cancel(move || {
                 mapped_cancel.cancel();
             });
-            let failure = completion.clone();
-            let spawned = executor.spawn_with_cancel(
-                "NIP-46 result-map",
-                move || cancel.cancel(),
-                move || {
-                    let result = match pending.recv_or_cancel(cancelled) {
-                        Some(Ok(value)) => map(value),
-                        Some(Err(error)) => Err(error),
-                        None => Err(SignerError::Disconnected),
-                    };
-                    let _ = completion.resolve(result);
-                },
-            );
-            if spawned.is_err() {
-                let _ = failure.resolve(Err(SignerError::Unavailable));
-            }
+            runtime.spawn(async move {
+                let result = match pending.await {
+                    Ok(value) => map(value),
+                    Err(error) => Err(error),
+                };
+                let _ = completion.resolve(result);
+            });
             mapped
         }
     }
@@ -1640,46 +2040,34 @@ fn map_connect_recv(error: RecvTimeoutError) -> Nip46Error {
 
 fn emit_to(
     subscribers: &Arc<Mutex<Vec<Sender<Nip46ConnectionEvent>>>>,
+    sinks: &Arc<Mutex<Vec<EventSink>>>,
     event: Nip46ConnectionEvent,
 ) {
+    // #704: connection-event observers are invoked inline (no forwarder
+    // thread). The sink contract is a lightweight non-blocking notification.
+    let installed: Vec<EventSink> = sinks.lock().map(|guard| guard.clone()).unwrap_or_default();
+    for sink in &installed {
+        sink(event.clone());
+    }
     if let Ok(mut subscribers) = subscribers.lock() {
         subscribers.retain(|subscriber| subscriber.send(event.clone()).is_ok());
     }
 }
 
+/// #704: install a connection-event observer. The per-session executor is
+/// gone, so this no longer spawns a blocking forwarder thread — the sink is
+/// registered and invoked inline by `emit`. Any event emitted after this call
+/// (including the terminal `Connected`) reaches the sink; infallible.
 fn forward_events(
     session: &Arc<Session>,
     event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
 ) -> Result<(), Nip46Error> {
-    let events = session.subscribe();
-    let cancel_commands = session.commands.clone();
     session
-        .executor()
-        .spawn_with_cancel(
-            "NIP-46 event forwarder",
-            move || {
-                let _ = cancel_commands.send(WorkerMsg::Shutdown);
-            },
-            move || {
-                while let Ok(event) = events.recv() {
-                    event_sink(event);
-                }
-            },
-        )
-        .map_err(map_executor_error)
-}
-
-fn map_executor_error(error: nmp_executor::ExecutorError) -> Nip46Error {
-    match error {
-        nmp_executor::ExecutorError::Saturated(error) => Nip46Error::ThreadUnavailable {
-            reason: error.to_string(),
-            component: error.component,
-        },
-        nmp_executor::ExecutorError::Spawn(error) => Nip46Error::ThreadUnavailable {
-            component: "NIP-46 native task".to_string(),
-            reason: error.to_string(),
-        },
-    }
+        .event_sinks
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push(event_sink);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1690,6 +2078,227 @@ mod tests {
     fn session_transport_worker_budget_equals_the_protocol_relay_ceiling() {
         assert_eq!(session_pool_config().max_relays, MAX_NIP46_RELAYS);
         assert_eq!(MAX_NIP46_RELAYS, 8);
+        assert_eq!(
+            session_pool_config().event_sink_queue_capacity,
+            POOL_EVENT_QUEUE_CAPACITY
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn nip46_queue_overload_is_finite_backpressured_and_control_still_progresses() {
+        fn invitation_message() -> WorkerMsg {
+            let (reply, _receiver) = mpsc::channel();
+            WorkerMsg::AcceptInvitation {
+                expected_secret: "bounded".to_string(),
+                reply,
+            }
+        }
+
+        fn request_message(worker_signal: &Arc<tokio::sync::Notify>) -> RequestMsg {
+            let (reply, operation) = SignerOp::pending_channel();
+            drop(operation);
+            RequestMsg {
+                id: Keys::generate().public_key().to_hex(),
+                method: "sign_event".to_string(),
+                params: Vec::new(),
+                reply,
+                cancellation: Arc::new(RequestCancellation::new(Arc::clone(worker_signal))),
+            }
+        }
+
+        let worker_signal = Arc::new(tokio::sync::Notify::new());
+        let (requests, mut request_inbox) =
+            tokio_mpsc::channel::<RequestMsg>(REQUEST_QUEUE_CAPACITY);
+        assert_eq!(requests.max_capacity(), REQUEST_QUEUE_CAPACITY);
+        for _ in 0..REQUEST_QUEUE_CAPACITY {
+            requests.try_send(request_message(&worker_signal)).unwrap();
+        }
+        assert_eq!(requests.capacity(), 0);
+        assert!(matches!(
+            requests.try_send(request_message(&worker_signal)),
+            Err(tokio_mpsc::error::TrySendError::Full(_))
+        ));
+
+        let mut backpressured_request = Box::pin(requests.send(request_message(&worker_signal)));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut backpressured_request)
+                .await
+                .is_err(),
+            "an app request suspends outside the finite request queue instead of expanding it"
+        );
+
+        let (commands, mut command_inbox) =
+            tokio_mpsc::channel::<WorkerMsg>(CONTROL_QUEUE_CAPACITY);
+        assert_eq!(commands.max_capacity(), CONTROL_QUEUE_CAPACITY);
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            commands.send(invitation_message()),
+        )
+        .await
+        .expect("control traffic progresses while request admission is saturated")
+        .unwrap();
+        command_inbox.recv().await.unwrap();
+
+        let control = Arc::new(SessionControl::new());
+        let observed_control = Arc::clone(&control);
+        let control_wait = tokio::spawn(async move {
+            loop {
+                if observed_control.is_shutdown() {
+                    return;
+                }
+                observed_control.signal.notified().await;
+            }
+        });
+        tokio::task::yield_now().await;
+        control.shutdown();
+        tokio::time::timeout(Duration::from_millis(100), control_wait)
+            .await
+            .expect("shutdown progresses independently of the saturated command queue")
+            .unwrap();
+
+        request_inbox.recv().await.unwrap();
+        tokio::time::timeout(Duration::from_millis(100), backpressured_request)
+            .await
+            .expect("one drained request slot admits the suspended producer")
+            .unwrap();
+
+        for _ in 0..CONTROL_QUEUE_CAPACITY {
+            commands.try_send(invitation_message()).unwrap();
+        }
+        assert_eq!(commands.capacity(), 0);
+        assert!(matches!(
+            commands.try_send(invitation_message()),
+            Err(tokio_mpsc::error::TrySendError::Full(_))
+        ));
+
+        let (pool_events, mut pool_inbox) =
+            tokio_mpsc::channel::<PoolEvent>(POOL_EVENT_QUEUE_CAPACITY);
+        assert_eq!(pool_events.max_capacity(), POOL_EVENT_QUEUE_CAPACITY);
+        for _ in 0..POOL_EVENT_QUEUE_CAPACITY {
+            pool_events.try_send(PoolEvent::WorkerRetired).unwrap();
+        }
+        assert_eq!(pool_events.capacity(), 0);
+        assert!(matches!(
+            pool_events.try_send(PoolEvent::WorkerRetired),
+            Err(tokio_mpsc::error::TrySendError::Full(_))
+        ));
+        let mut backpressured_event = Box::pin(pool_events.send(PoolEvent::WorkerRetired));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut backpressured_event)
+                .await
+                .is_err(),
+            "the pool producer suspends outside the finite event queue"
+        );
+        pool_inbox.recv().await.unwrap();
+        tokio::time::timeout(Duration::from_millis(100), backpressured_event)
+            .await
+            .expect("one drained event slot admits the suspended producer")
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pending_rpc_cap_keeps_control_live_and_admits_after_exact_cancellation() {
+        let (pool_tx, _pool_rx) = mpsc::channel();
+        let pool = Pool::new(PoolConfig::default(), pool_tx).expect("test pool construction");
+        let worker_signal = Arc::new(tokio::sync::Notify::new());
+        let mut worker = SessionWorker::new(
+            pool,
+            Keys::generate(),
+            None,
+            std::sync::Weak::<Session>::new(),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(None)),
+        );
+
+        let mut retained_operations = Vec::new();
+        let mut released_cancellation = None;
+        for index in 0..MAX_PENDING_REQUESTS {
+            let (reply, operation) = SignerOp::pending_channel();
+            retained_operations.push(operation);
+            let cancellation = Arc::new(RequestCancellation::new(Arc::clone(&worker_signal)));
+            if index == 0 {
+                released_cancellation = Some(Arc::clone(&cancellation));
+            }
+            worker.pending.insert(
+                format!("pending-{index}"),
+                PendingRequest {
+                    frame: String::new(),
+                    reply,
+                    cancellation,
+                },
+            );
+        }
+        assert_eq!(worker.pending.len(), MAX_PENDING_REQUESTS);
+
+        let (requests, request_inbox) = tokio_mpsc::channel(REQUEST_QUEUE_CAPACITY);
+        let (request_reply, request_operation) = SignerOp::pending_channel();
+        requests
+            .send(RequestMsg {
+                id: "admitted-after-cancel".to_string(),
+                method: "sign_event".to_string(),
+                params: Vec::new(),
+                reply: request_reply,
+                cancellation: Arc::new(RequestCancellation::new(Arc::clone(&worker_signal))),
+            })
+            .await
+            .unwrap();
+
+        let (commands, command_inbox) = tokio_mpsc::channel(CONTROL_QUEUE_CAPACITY);
+        let (invitation_reply, invitation_result) = mpsc::channel();
+        commands
+            .send(WorkerMsg::AcceptInvitation {
+                expected_secret: "control-progress".to_string(),
+                reply: invitation_reply,
+            })
+            .await
+            .unwrap();
+        let (_pool_events, pool_inbox) = tokio_mpsc::channel(POOL_EVENT_QUEUE_CAPACITY);
+        let control = Arc::new(SessionControl::new());
+        let task_control = Arc::clone(&control);
+        let task_signal = Arc::clone(&worker_signal);
+        let worker_task = tokio::spawn(async move {
+            worker
+                .run(
+                    command_inbox,
+                    request_inbox,
+                    pool_inbox,
+                    task_control,
+                    task_signal,
+                )
+                .await;
+            (worker.pending.len(), worker.invitation.is_some())
+        });
+
+        tokio::task::yield_now().await;
+        released_cancellation
+            .expect("one exact pending request is cancellable")
+            .cancel();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(100), request_operation.recv_async())
+                .await
+                .expect("freeing one pending slot admits exactly one queued request"),
+            Err(SignerError::Unavailable),
+            "the admitted request reaches ordinary signer availability semantics, not saturation"
+        );
+
+        control.shutdown();
+        let (pending, invitation_was_installed) =
+            tokio::time::timeout(Duration::from_millis(100), worker_task)
+                .await
+                .expect("independent shutdown completes")
+                .unwrap();
+        assert_eq!(pending, MAX_PENDING_REQUESTS - 1);
+        assert!(
+            invitation_was_installed,
+            "control traffic is serviced while the pending RPC envelope is full"
+        );
+        assert_eq!(
+            invitation_result.recv_timeout(Duration::from_millis(100)),
+            Ok(Err(Nip46Error::Disconnected)),
+            "teardown resolves the installed control operation"
+        );
+        drop(retained_operations);
     }
 
     /// #571 secrecy falsifier: `{:?}` on `Nip46SessionCheckpoint` must never
@@ -1721,15 +2330,24 @@ mod tests {
     fn injected_initial_relay_worker_refusal_reaches_the_waiting_caller_typed() {
         let (pool_tx, _pool_rx) = mpsc::channel();
         let pool = Pool::new(PoolConfig::default(), pool_tx).expect("test pool construction");
-        let (commands, _inbox) = mpsc::channel();
+        let (requests, _request_inbox) = tokio_mpsc::channel(REQUEST_QUEUE_CAPACITY);
+        let (commands, _inbox) = tokio_mpsc::channel(CONTROL_QUEUE_CAPACITY);
+        let control = Arc::new(SessionControl::new());
+        let request_cancellation_signal = Arc::new(tokio::sync::Notify::new());
         let subscribers = Arc::new(Mutex::new(Vec::new()));
+        let event_sinks = Arc::new(Mutex::new(Vec::new()));
         let availability_error = Arc::new(Mutex::new(None));
         let session = Arc::new(Session {
+            requests,
             commands,
+            control,
+            request_cancellation_signal,
             connected_relays: AtomicUsize::new(0),
             subscribers: Arc::clone(&subscribers),
+            event_sinks: Arc::clone(&event_sinks),
             availability_error: Arc::clone(&availability_error),
-            executor: SessionExecutor::Owned(nmp_executor::Executor::new(4).unwrap()),
+            availability_signal: Arc::new(tokio::sync::Notify::new()),
+            runtime: SessionRuntime(standalone_runtime().unwrap()),
             current_relays: Mutex::new(Vec::new()),
         });
         let mut worker = SessionWorker::new(
@@ -1738,6 +2356,7 @@ mod tests {
             None,
             Arc::downgrade(&session),
             subscribers,
+            event_sinks,
             availability_error,
         );
         let error = worker
@@ -1754,85 +2373,23 @@ mod tests {
             )
             .unwrap_err();
         worker.record_availability_error(error.clone());
-        assert_eq!(
-            error,
-            Nip46Error::ThreadUnavailable {
-                component: "relay worker".to_string(),
-                reason: "injected NIP-46 relay pressure".to_string(),
-            }
-        );
+        // #704 deleted `Nip46Error::ThreadUnavailable`; a transport relay-worker
+        // spawn failure that leaves every requested relay unusable now surfaces
+        // as the terminal connection-ended outcome. The real semantic — a
+        // relay-open infra failure reaches the waiting caller typed, not as an
+        // empty document — is preserved.
+        assert_eq!(error, Nip46Error::Disconnected);
         assert_eq!(session.wait_available(Duration::from_secs(1)), Err(error));
         assert!(worker.configured.is_empty());
         worker.pool.shutdown();
     }
 
-    #[test]
-    fn borrowed_engine_executor_survives_session_teardown() {
-        let executor = nmp_executor::Executor::new(2).unwrap();
-        let session = Session::spawn(
-            Vec::new(),
-            Keys::generate(),
-            None,
-            None,
-            SessionExecutor::Shared(executor.clone()),
-        )
-        .unwrap();
-
-        drop(session);
-        executor.wait_for_idle();
-        assert!(executor.census().accepting);
-
-        let reservation = executor.reserve("post-session engine work").unwrap();
-        drop(reservation);
-        executor.shutdown();
-    }
-
-    #[test]
-    fn every_forwardable_engine_session_owns_two_slots() {
-        let executor = nmp_executor::Executor::new(5).unwrap();
-        let mut sessions = Vec::new();
-        for _ in 0..2 {
-            let session = Session::spawn(
-                Vec::new(),
-                Keys::generate(),
-                None,
-                None,
-                SessionExecutor::Shared(executor.clone()),
-            )
-            .unwrap();
-            forward_events(&session, Arc::new(|_| {})).unwrap();
-            sessions.push(session);
-        }
-        assert_eq!(executor.census().admitted, 4);
-
-        let third = Session::spawn(
-            Vec::new(),
-            Keys::generate(),
-            None,
-            None,
-            SessionExecutor::Shared(executor.clone()),
-        )
-        .unwrap();
-        // #680 removed the global `ExecutorSaturated` variant; a full internal
-        // adapter pool now surfaces the class-specific `ThreadUnavailable`
-        // refusal. Real semantic preserved: two engine sessions occupy four of
-        // five slots, so the third forwarder is refused.
-        let refusal = forward_events(&third, Arc::new(|_| {})).unwrap_err();
-        assert!(
-            matches!(
-                &refusal,
-                Nip46Error::ThreadUnavailable { component, .. }
-                    if component == "NIP-46 event forwarder"
-            ),
-            "unexpected refusal: {refusal:?}"
-        );
-
-        drop(third);
-        drop(sessions);
-        executor.wait_for_idle();
-        assert_eq!(executor.census().admitted, 0);
-        executor.shutdown();
-    }
+    // #704: `borrowed_engine_executor_survives_session_teardown` and
+    // `every_forwardable_engine_session_owns_two_slots` were deleted. They
+    // asserted per-session `nmp-executor` census/reservation/capacity-refusal
+    // behavior (admitted slot counts, `Saturated`-style refusal of the third
+    // forwarder), which no longer exists: sessions run async tasks on a runtime
+    // and `forward_events` never refuses. No admission remains to assert.
 
     #[test]
     fn one_usable_initial_relay_keeps_a_later_spawn_refusal_nonterminal() {
@@ -1843,6 +2400,7 @@ mod tests {
             Keys::generate(),
             None,
             std::sync::Weak::new(),
+            Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(None)),
         );
@@ -1885,6 +2443,7 @@ mod tests {
             None,
             std::sync::Weak::new(),
             Arc::clone(&subscribers),
+            Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(None)),
         );
         let relay = RelayUrl::parse("wss://relay.example").unwrap();

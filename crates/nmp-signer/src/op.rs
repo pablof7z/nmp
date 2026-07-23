@@ -1,14 +1,85 @@
 //! The pollable thunk (§3.3, HARVEST `nmp-signer-iface::op`).
+//!
+//! #704: the completion door is a hand-rolled `Mutex`+`Condvar`+`Waker`
+//! primitive (no channel crate, no runtime). It serves BOTH a blocking
+//! consumer (`recv`/`recv_timeout`/`wait`, for direct-Rust callers) and an
+//! async consumer (`poll_recv`/`Future`, for the engine's shared runtime) over
+//! the same one-shot slot. A `Future` needs no runtime, so `nmp-signer` stays
+//! runtime-free while the awaiting engine holds NO OS thread while a signer
+//! round-trip is outstanding. The cancellation door is bound INTO the primitive
+//! (`Canceller`) so both consumers wake on cancel; dropping an unresolved op (or
+//! its awaiting future) runs the adapter cancel hook exactly once.
 
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::task::{Context, Poll, Waker};
+use std::time::{Duration, Instant};
 
 #[doc(hidden)]
 pub type PendingCancel = Box<dyn FnOnce() + Send + 'static>;
 
-type PendingSignerSlot<T> = Mutex<Option<Sender<Result<T, SignerError>>>>;
+enum DoorLifecycle<T> {
+    /// No sender has claimed the result and the consumer is still present.
+    Open,
+    /// A sender claimed the result. `None` means the consumer already took it.
+    Resolved(Option<Result<T, SignerError>>),
+    /// Cancellation won before any sender claimed the result.
+    CancelledUnresolved,
+    /// Cancellation won and a later sender claim was truthfully refused.
+    CancelledResolved,
+    /// The consumer was dropped before any sender claimed the result.
+    ReceiverGoneUnresolved,
+    /// The consumer is gone and the one sender claim has already been spent.
+    ReceiverGoneResolved,
+}
+
+struct DoorState<T> {
+    /// The result-slot and consumer lifecycle as one legal state.
+    lifecycle: DoorLifecycle<T>,
+    /// A parked async consumer's waker (at most one; the op is single-consumer).
+    waker: Option<Waker>,
+}
+
+/// The shared one-shot completion slot behind a [`PendingSignerSender`] /
+/// [`PendingSignerOp`] pair.
+struct Door<T> {
+    state: Mutex<DoorState<T>>,
+    changed: Condvar,
+    /// Live sender clones; the last drop without a resolve disconnects the op.
+    senders: AtomicUsize,
+}
+
+impl<T> Door<T> {
+    fn wake(state: &mut DoorState<T>) -> Option<Waker> {
+        state.waker.take()
+    }
+
+    fn cancel(state: &mut DoorState<T>) {
+        let previous = std::mem::replace(&mut state.lifecycle, DoorLifecycle::Open);
+        state.lifecycle = match previous {
+            DoorLifecycle::Open => DoorLifecycle::CancelledUnresolved,
+            DoorLifecycle::Resolved(_) => DoorLifecycle::CancelledResolved,
+            DoorLifecycle::CancelledUnresolved => DoorLifecycle::CancelledUnresolved,
+            DoorLifecycle::CancelledResolved => DoorLifecycle::CancelledResolved,
+            DoorLifecycle::ReceiverGoneUnresolved => DoorLifecycle::ReceiverGoneUnresolved,
+            DoorLifecycle::ReceiverGoneResolved => DoorLifecycle::ReceiverGoneResolved,
+        };
+    }
+
+    fn mark_receiver_gone(state: &mut DoorState<T>) {
+        let previous = std::mem::replace(&mut state.lifecycle, DoorLifecycle::Open);
+        state.lifecycle = match previous {
+            DoorLifecycle::Open
+            | DoorLifecycle::CancelledUnresolved
+            | DoorLifecycle::ReceiverGoneUnresolved => DoorLifecycle::ReceiverGoneUnresolved,
+            DoorLifecycle::Resolved(_)
+            | DoorLifecycle::CancelledResolved
+            | DoorLifecycle::ReceiverGoneResolved => DoorLifecycle::ReceiverGoneResolved,
+        };
+    }
+}
 
 /// NMP-owned completion door for one asynchronous signer operation.
 ///
@@ -16,13 +87,40 @@ type PendingSignerSlot<T> = Mutex<Option<Sender<Result<T, SignerError>>>>;
 /// the result, and every later call receives a typed `AlreadyResolved` error.
 /// No channel implementation type crosses the public signer boundary.
 pub struct PendingSignerSender<T: Send + 'static> {
-    sender: Arc<PendingSignerSlot<T>>,
+    door: Arc<Door<T>>,
 }
 
 impl<T: Send + 'static> Clone for PendingSignerSender<T> {
     fn clone(&self) -> Self {
+        self.door.senders.fetch_add(1, Ordering::AcqRel);
         Self {
-            sender: Arc::clone(&self.sender),
+            door: Arc::clone(&self.door),
+        }
+    }
+}
+
+impl<T: Send + 'static> Drop for PendingSignerSender<T> {
+    fn drop(&mut self) {
+        if self.door.senders.fetch_sub(1, Ordering::AcqRel) == 1 {
+            // Last sender gone; if it never resolved, wake the consumer to a
+            // `Disconnected` end.
+            let waker = {
+                let mut state = self.door.state.lock().unwrap();
+                match state.lifecycle {
+                    DoorLifecycle::Resolved(_)
+                    | DoorLifecycle::CancelledResolved
+                    | DoorLifecycle::ReceiverGoneResolved => None,
+                    DoorLifecycle::Open
+                    | DoorLifecycle::CancelledUnresolved
+                    | DoorLifecycle::ReceiverGoneUnresolved => {
+                        self.door.changed.notify_all();
+                        Door::wake(&mut state)
+                    }
+                }
+            };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
         }
     }
 }
@@ -33,17 +131,33 @@ impl<T: Send + 'static> PendingSignerSender<T> {
         &self,
         result: Result<T, SignerError>,
     ) -> Result<(), PendingSignerResolveError<T>> {
-        let Some(sender) = self
-            .sender
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .take()
-        else {
-            return Err(PendingSignerResolveError::AlreadyResolved(result));
+        let waker = {
+            let mut state = self.door.state.lock().unwrap();
+            match state.lifecycle {
+                DoorLifecycle::Open => {
+                    state.lifecycle = DoorLifecycle::Resolved(Some(result));
+                }
+                DoorLifecycle::CancelledUnresolved => {
+                    state.lifecycle = DoorLifecycle::CancelledResolved;
+                    return Err(PendingSignerResolveError::ReceiverDropped(result));
+                }
+                DoorLifecycle::ReceiverGoneUnresolved => {
+                    state.lifecycle = DoorLifecycle::ReceiverGoneResolved;
+                    return Err(PendingSignerResolveError::ReceiverDropped(result));
+                }
+                DoorLifecycle::Resolved(_)
+                | DoorLifecycle::CancelledResolved
+                | DoorLifecycle::ReceiverGoneResolved => {
+                    return Err(PendingSignerResolveError::AlreadyResolved(result));
+                }
+            }
+            self.door.changed.notify_all();
+            Door::wake(&mut state)
         };
-        sender
-            .send(result)
-            .map_err(|error| PendingSignerResolveError::ReceiverDropped(error.0))
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        Ok(())
     }
 }
 
@@ -56,129 +170,201 @@ pub enum PendingSignerResolveError<T: Send + 'static> {
     ReceiverDropped(Result<T, SignerError>),
 }
 
+/// A cloneable handle that cancels one [`PendingSignerOp`] (#704). Firing it
+/// wakes both a blocking and an async consumer to a "cancelled" (no-result)
+/// end, and runs the adapter cancel hook once when the op is consumed/dropped.
+/// Cancellation is bound into the door itself, so no separate channel exists.
 #[doc(hidden)]
 #[derive(Clone)]
-pub struct PendingSignerCancel(Sender<()>);
-
-#[doc(hidden)]
-pub struct PendingSignerCancelled(Receiver<()>);
-
-#[doc(hidden)]
-pub fn pending_signer_cancellation() -> (PendingSignerCancel, PendingSignerCancelled) {
-    let (cancel, cancelled) = crossbeam_channel::bounded(1);
-    (
-        PendingSignerCancel(cancel),
-        PendingSignerCancelled(cancelled),
-    )
+pub struct Canceller<T: Send + 'static> {
+    door: Arc<Door<T>>,
 }
 
-impl PendingSignerCancel {
+impl<T: Send + 'static> Canceller<T> {
     #[doc(hidden)]
     pub fn cancel(&self) {
-        let _ = self.0.try_send(());
+        let waker = {
+            let mut state = self.door.state.lock().unwrap();
+            Door::cancel(&mut state);
+            self.door.changed.notify_all();
+            Door::wake(&mut state)
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
     }
+}
+
+enum PendingSignerLifecycle {
+    Pending(Option<PendingCancel>),
+    Finished,
+}
+
+#[derive(Clone, Copy)]
+enum PendingFinish {
+    CancelAdapter,
+    SuppressCancel,
 }
 
 /// One cancellable asynchronous signer result.
 ///
-/// Dropping an unfinished value invokes the adapter-owned cancellation hook.
-/// This matters for direct Rust callers: abandoning or timing out a remote
-/// RPC must release its bounded correlation slot even when the signer never
-/// sends a response.
+/// Dropping an unfinished value (including its awaiting future) invokes the
+/// adapter-owned cancellation hook exactly once, releasing the bounded
+/// correlation slot even when the signer never responds.
 pub struct PendingSignerOp<T: Send + 'static> {
-    receiver: Option<Receiver<Result<T, SignerError>>>,
-    cancel: Option<PendingCancel>,
+    door: Arc<Door<T>>,
+    lifecycle: PendingSignerLifecycle,
 }
 
 impl<T: Send + 'static> PendingSignerOp<T> {
-    fn new(receiver: Receiver<Result<T, SignerError>>, cancel: Option<PendingCancel>) -> Self {
+    fn new(door: Arc<Door<T>>, cancel: Option<PendingCancel>) -> Self {
         Self {
-            receiver: Some(receiver),
-            cancel,
+            door,
+            lifecycle: PendingSignerLifecycle::Pending(cancel),
         }
     }
 
-    /// Block until the adapter resolves this operation.
-    pub fn recv(mut self) -> Result<T, SignerError> {
-        let result = self
-            .receiver
-            .take()
-            .expect("pending signer receiver is consumed exactly once")
-            .recv()
-            .unwrap_or(Err(SignerError::Disconnected));
-        self.cancel = None;
-        result
-    }
-
-    fn recv_timeout(mut self, timeout: Duration) -> Result<T, SignerError> {
-        match self
-            .receiver
-            .as_ref()
-            .expect("pending signer receiver is consumed exactly once")
-            .recv_timeout(timeout)
-        {
-            Ok(result) => {
-                self.receiver = None;
-                self.cancel = None;
-                result
-            }
-            Err(RecvTimeoutError::Timeout) => Err(SignerError::Timeout),
-            Err(RecvTimeoutError::Disconnected) => {
-                self.receiver = None;
-                self.cancel = None;
-                Err(SignerError::Disconnected)
-            }
-        }
-    }
-
-    fn poll(&mut self) -> Option<Result<T, SignerError>> {
-        match self
-            .receiver
-            .as_ref()
-            .expect("pending signer receiver is consumed exactly once")
-            .try_recv()
-        {
-            Ok(result) => {
-                self.receiver = None;
-                self.cancel = None;
-                Some(result)
-            }
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => {
-                self.receiver = None;
-                self.cancel = None;
-                Some(Err(SignerError::Disconnected))
-            }
-        }
-    }
-
+    /// A cancellation handle for this operation (#704). Cancelling ends a
+    /// blocking or async consumer with no result and runs the cancel hook.
     #[doc(hidden)]
-    pub fn recv_or_cancel(
-        mut self,
-        cancelled: PendingSignerCancelled,
-    ) -> Option<Result<T, SignerError>> {
-        let outcome = crossbeam_channel::select_biased! {
-            recv(cancelled.0) -> _ => None,
-            recv(self.receiver.as_ref().expect("pending signer receiver is consumed exactly once")) -> result => {
-                Some(result.unwrap_or(Err(SignerError::Disconnected)))
-            }
-        };
-        self.receiver = None;
-        if outcome.is_some() {
-            self.cancel = None;
-        } else if let Some(cancel) = self.cancel.take() {
-            cancel();
+    #[must_use]
+    pub fn canceller(&self) -> Canceller<T> {
+        Canceller {
+            door: Arc::clone(&self.door),
         }
-        outcome
+    }
+
+    /// Drain a terminal outcome from the locked state, or `None` if still open.
+    fn take_terminal(
+        state: &mut DoorState<T>,
+        senders: usize,
+    ) -> Option<(Result<T, SignerError>, PendingFinish)> {
+        match &mut state.lifecycle {
+            DoorLifecycle::CancelledUnresolved | DoorLifecycle::CancelledResolved => {
+                Some((Err(SignerError::Disconnected), PendingFinish::CancelAdapter))
+            }
+            DoorLifecycle::Resolved(value) => Some((
+                value.take().unwrap_or(Err(SignerError::Disconnected)),
+                PendingFinish::SuppressCancel,
+            )),
+            DoorLifecycle::Open if senders == 0 => Some((
+                Err(SignerError::Disconnected),
+                PendingFinish::SuppressCancel,
+            )),
+            DoorLifecycle::ReceiverGoneUnresolved | DoorLifecycle::ReceiverGoneResolved => Some((
+                Err(SignerError::Disconnected),
+                PendingFinish::SuppressCancel,
+            )),
+            DoorLifecycle::Open => None,
+        }
+    }
+
+    fn finish(&mut self, disposition: PendingFinish) {
+        let previous = std::mem::replace(&mut self.lifecycle, PendingSignerLifecycle::Finished);
+        let PendingSignerLifecycle::Pending(cancel) = previous else {
+            return;
+        };
+        if matches!(disposition, PendingFinish::CancelAdapter) {
+            if let Some(cancel) = cancel {
+                cancel();
+            }
+        }
+    }
+
+    /// Block until the adapter resolves this operation (or it is cancelled /
+    /// disconnected).
+    pub fn recv(mut self) -> Result<T, SignerError> {
+        let mut state = self.door.state.lock().unwrap();
+        loop {
+            let senders = self.door.senders.load(Ordering::Acquire);
+            if let Some((outcome, disposition)) = Self::take_terminal(&mut state, senders) {
+                drop(state);
+                self.finish(disposition);
+                return outcome;
+            }
+            state = self.door.changed.wait(state).unwrap();
+        }
+    }
+
+    /// Block at most `timeout` for the result (`Timeout` on elapse).
+    pub fn recv_timeout(mut self, timeout: Duration) -> Result<T, SignerError> {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.door.state.lock().unwrap();
+        loop {
+            let senders = self.door.senders.load(Ordering::Acquire);
+            if let Some((outcome, disposition)) = Self::take_terminal(&mut state, senders) {
+                drop(state);
+                self.finish(disposition);
+                return outcome;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                drop(state);
+                self.finish(PendingFinish::CancelAdapter);
+                return Err(SignerError::Timeout);
+            }
+            let (next, wait) = self.door.changed.wait_timeout(state, remaining).unwrap();
+            state = next;
+            if wait.timed_out()
+                && Self::take_terminal(&mut state, self.door.senders.load(Ordering::Acquire))
+                    .is_none()
+            {
+                drop(state);
+                self.finish(PendingFinish::CancelAdapter);
+                return Err(SignerError::Timeout);
+            }
+        }
+    }
+
+    /// Non-blocking poll of the completion slot (`None` while pending).
+    fn try_poll(&mut self) -> Option<Result<T, SignerError>> {
+        let mut state = self.door.state.lock().unwrap();
+        let senders = self.door.senders.load(Ordering::Acquire);
+        let terminal = Self::take_terminal(&mut state, senders);
+        if let Some((_, disposition)) = terminal.as_ref() {
+            let disposition = *disposition;
+            drop(state);
+            self.finish(disposition);
+        }
+        terminal.map(|(outcome, _)| outcome)
+    }
+
+    /// Waker-aware poll (#704): the engine awaits this on its shared runtime,
+    /// holding no OS thread while the signer round-trip is outstanding.
+    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<T, SignerError>> {
+        let mut state = self.door.state.lock().unwrap();
+        let senders = self.door.senders.load(Ordering::Acquire);
+        if let Some((outcome, disposition)) = Self::take_terminal(&mut state, senders) {
+            state.waker = None;
+            drop(state);
+            self.finish(disposition);
+            return Poll::Ready(outcome);
+        }
+        state.waker = Some(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
+/// Awaiting the pending op resolves it on the shared runtime with no thread
+/// held; dropping the future before completion fires the cancel hook.
+impl<T: Send + 'static> Future for PendingSignerOp<T> {
+    type Output = Result<T, SignerError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.poll_recv(cx)
     }
 }
 
 impl<T: Send + 'static> Drop for PendingSignerOp<T> {
     fn drop(&mut self) {
-        if self.receiver.is_some() {
-            if let Some(cancel) = self.cancel.take() {
-                cancel();
-            }
+        // Mark the consumer gone so a racing `resolve` returns `ReceiverDropped`
+        // rather than dropping the result silently.
+        if let Ok(mut state) = self.door.state.lock() {
+            Door::mark_receiver_gone(&mut state);
+        }
+        let previous = std::mem::replace(&mut self.lifecycle, PendingSignerLifecycle::Finished);
+        if let PendingSignerLifecycle::Pending(Some(cancel)) = previous {
+            cancel();
         }
     }
 }
@@ -186,8 +372,9 @@ impl<T: Send + 'static> Drop for PendingSignerOp<T> {
 /// An op that may complete synchronously (`Ready`) or later (`Pending`).
 /// `Pending` carries an NMP-owned asynchronous operation that yields exactly
 /// one result when the operation completes — callers may poll it
-/// (non-blocking, via [`SignerOp::poll`]) or blocks on it (via
-/// [`SignerOp::wait`]); no tokio is ever pulled into the engine (D8).
+/// (non-blocking, via [`SignerOp::poll`]), block on it (via
+/// [`SignerOp::wait`]), or await it. The async runtime remains an engine-owned
+/// implementation detail and never crosses this public door (D8).
 ///
 /// `LocalKeySigner` resolves synchronously (`Ready`). `Nip46Signer` uses
 /// `Pending` for an in-flight remote round-trip; the engine's recv loop drives
@@ -233,13 +420,29 @@ impl<T: Send + 'static> SignerOp<T> {
     fn pending_channel_from_cancel(
         cancel: Option<PendingCancel>,
     ) -> (PendingSignerSender<T>, Self) {
-        let (sender, receiver) = crossbeam_channel::bounded(1);
+        let door = Arc::new(Door {
+            state: Mutex::new(DoorState {
+                lifecycle: DoorLifecycle::Open,
+                waker: None,
+            }),
+            changed: Condvar::new(),
+            senders: AtomicUsize::new(1),
+        });
         (
-            PendingSignerSender {
-                sender: Arc::new(Mutex::new(Some(sender))),
-            },
-            Self::Pending(PendingSignerOp::new(receiver, cancel)),
+            PendingSignerSender { door: door.clone() },
+            Self::Pending(PendingSignerOp::new(door, cancel)),
         )
+    }
+
+    /// Await the result on the caller's async runtime (#704), holding no OS
+    /// thread. `Ready` resolves immediately; `Pending` awaits the completion
+    /// door. Dropping the returned future before completion runs the adapter
+    /// cancel hook.
+    pub async fn recv_async(self) -> Result<T, SignerError> {
+        match self {
+            Self::Ready(r) => r,
+            Self::Pending(pending) => pending.await,
+        }
     }
 
     /// Block the current thread for up to `timeout` waiting for the result.
@@ -267,7 +470,7 @@ impl<T: Send + 'static> SignerOp<T> {
                 }
             }
             Self::Pending(pending) => {
-                let result = pending.poll();
+                let result = pending.try_poll();
                 if result.is_some() {
                     *self = Self::Ready(Err(SignerError::Unavailable));
                 }
@@ -365,6 +568,50 @@ mod tests {
 
         assert_eq!(op.wait(Duration::from_millis(1)), Err(SignerError::Timeout));
         assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cancel_before_resolve_runs_hook_and_spends_the_resolution_slot() {
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let cancelled_for_op = Arc::clone(&cancelled);
+        let (sender, operation) = SignerOp::<u8>::pending_channel_with_cancel(move || {
+            cancelled_for_op.fetch_add(1, Ordering::SeqCst);
+        });
+        let SignerOp::Pending(pending) = operation else {
+            unreachable!()
+        };
+        pending.canceller().cancel();
+
+        assert_eq!(pending.recv(), Err(SignerError::Disconnected));
+        assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            sender.resolve(Ok(7)),
+            Err(PendingSignerResolveError::ReceiverDropped(Ok(7)))
+        ));
+        assert!(matches!(
+            sender.resolve(Ok(8)),
+            Err(PendingSignerResolveError::AlreadyResolved(Ok(8)))
+        ));
+    }
+
+    #[test]
+    fn dropped_consumer_runs_hook_and_spends_the_resolution_slot() {
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let cancelled_for_op = Arc::clone(&cancelled);
+        let (sender, operation) = SignerOp::<u8>::pending_channel_with_cancel(move || {
+            cancelled_for_op.fetch_add(1, Ordering::SeqCst);
+        });
+
+        drop(operation);
+        assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            sender.resolve(Ok(7)),
+            Err(PendingSignerResolveError::ReceiverDropped(Ok(7)))
+        ));
+        assert!(matches!(
+            sender.resolve(Ok(8)),
+            Err(PendingSignerResolveError::AlreadyResolved(Ok(8)))
+        ));
     }
 
     #[test]

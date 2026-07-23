@@ -1,5 +1,5 @@
-//! The async edge (plan §2 position 2). `EngineThread` spawns THREE dedicated
-//! OS threads:
+//! The async edge (plan §2 position 2). `EngineThread` owns two dedicated OS
+//! threads plus one fixed two-worker async runtime:
 //!
 //! - the **engine thread**, which owns `core::EngineCore` and runs a
 //!   deadline-armed blocking recv loop (D8: the existing blocking
@@ -17,9 +17,10 @@
 //!   `nmp_transport::PoolEvent`s (the pool's OWN `mio` worker threads push
 //!   these) and forwards each as a `core::EngineMsg` onto the engine
 //!   thread's inbox;
-//! - the **AUTH-release bridge**, which forwards only destructor-free
-//!   executor `ReleaseId`s. Rich session/terminal state remains in the
-//!   engine-thread registry and is never owned or dropped by the reaper.
+//! - the **adapter runtime**, whose fixed workers host waker-driven NIP-11,
+//!   signer, AUTH, and platform-adapter tasks. Logical concurrency changes
+//!   task count, not runtime-thread count; private subsystem bounds control
+//!   physical network/body/queue work.
 //!
 //! `Handle` is the cheap, `Clone + Send` value the app holds: it sends
 //! command `EngineMsg`s in (wrapped in the runtime-private [`Cmd`] envelope)
@@ -86,10 +87,7 @@ use crossbeam_channel as cb;
 use nmp_grammar::ConcreteFilter;
 use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{RelayDirectory, SubId, WireDelta, WireOp, WireReq};
-use nmp_signer::{
-    pending_signer_cancellation, PendingSignerCancel, PendingSignerCancelled, PendingSignerOp,
-    SignerOp, SigningCapability,
-};
+use nmp_signer::{PendingSignerOp, SignerOp, SigningCapability};
 use nmp_store::EventStore;
 use nostr::{
     ClientMessage, Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayMessage, RelayUrl,
@@ -140,9 +138,11 @@ struct EnginePoolSink {
 struct EnginePoolRuntime {
     pool: Pool,
     stop: cb::Sender<()>,
-    native_tasks: nmp_executor::Executor,
+    /// #704: the engine-owned multi-thread tokio runtime that hosts every
+    /// adapter task (signer/AUTH completion awaits, NIP-11 fetches, NIP-46
+    /// sessions, follow-action). Replaces the deleted blocking-adapter executor.
+    runtime: Arc<tokio::runtime::Runtime>,
     relay_information: RelayInformationService,
-    auth_release_sender: Sender<nmp_executor::ReleaseId>,
     max_auth_capabilities: usize,
 }
 
@@ -801,18 +801,20 @@ enum Cmd {
         reply: Sender<bool>,
     },
     AuthTaskCompleted(auth::AuthTaskCompletion),
-    AuthTaskReleased(nmp_executor::ReleaseId),
+    AuthTaskReleased(auth::AuthTaskReleaseToken),
     /// Sign one exact event through the active account's registered
     /// capability without entering the write/store/outbox reducer.
     SignEvent {
         unsigned: UnsignedEvent,
-        reservation: nmp_executor::Reservation,
         completion: SignEventCompletion,
         reply: Sender<Result<SignEventRegistration, SignEventError>>,
     },
     CancelSignEvent(u64),
     SignEventFinished(u64),
-    ExemptSignEventDrain(nmp_executor::TaskId),
+    /// #704: exempt the exact in-flight sign-event operation whose per-op
+    /// completion thread is calling `Engine::join()` reentrantly, keyed by that
+    /// operation's id (read from a completion-thread-local).
+    ExemptSignEventDrain(u64),
     /// Register a new diagnostics observer (M5 plan §1.2 step 4). The reply
     /// carries the id (used only by `Cmd::UnobserveDiagnostics` to withdraw
     /// later) and a mailbox already primed with the CURRENT snapshot — an
@@ -834,10 +836,15 @@ enum Cmd {
 /// own public key. `Effect::RequestSign` resolves the exact pubkey frozen in
 /// the accepted template; mutable active-account state can never redirect
 /// already-accepted work.
+/// #704: an idempotent cancel action for one outstanding remote-signer write
+/// wait. It wraps the op's `Canceller`; firing it wakes the awaiting async task
+/// to a disconnected end and runs the adapter cancel hook once.
+type PendingWriteCancel = Box<dyn Fn() + Send>;
+
 #[derive(Default)]
 struct SignerRegistry {
     signers: HashMap<PublicKey, RegisteredSigner>,
-    pending_writes: RefCell<HashMap<(ReceiptId, u64), PendingSignerCancel>>,
+    pending_writes: RefCell<HashMap<(ReceiptId, u64), PendingWriteCancel>>,
 }
 
 /// Typed outcome vocabulary for the governed sign-only operation. This is
@@ -851,44 +858,53 @@ pub enum SignEventError {
     SignerUnavailable { reason: String },
     SignerRejected { reason: String },
     InvalidSignerOutput { reason: String },
-    ThreadUnavailable { component: String, reason: String },
     EngineClosed,
     Cancelled,
 }
 
 type SignEventCompletion = Box<dyn FnOnce(Result<SignedEvent, SignEventError>) + Send + 'static>;
 
-const SIGN_EVENT_OPEN: u8 = 0;
-const SIGN_EVENT_CANCELLED: u8 = 1;
-const SIGN_EVENT_RESOLVED: u8 = 2;
+#[repr(u8)]
+#[derive(Clone, Copy)]
+enum SignEventState {
+    Open,
+    Cancelled,
+    Resolved,
+}
+
+thread_local! {
+    /// #704: set on a per-operation sign-event completion thread to the exact
+    /// operation id it is running. `EngineThread::join()` reads it so a
+    /// completion closure that calls `join()` reentrantly exempts only its own
+    /// operation from the shutdown drain (replacing the executor `TaskId`
+    /// mechanism, which is gone).
+    static SIGN_EVENT_COMPLETION_OP: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
+}
 
 /// One linearization point shared by caller cancellation, engine shutdown,
-/// executor shutdown, and signer completion. Only the admitted worker owns
-/// the foreign completion; cancellation merely claims `Open -> Cancelled`,
-/// wakes that worker, and releases an optional adapter RPC.
+/// runtime shutdown, and signer completion. Cancellation claims `Open ->
+/// Cancelled` and fires the bound cancel action (the pending op's canceller for
+/// a remote signer; a no-op for a ready local signer).
 struct SignEventTerminal {
     state: AtomicU8,
-    cancel: PendingSignerCancel,
+    cancel: Box<dyn Fn() + Send + Sync>,
 }
 
 impl SignEventTerminal {
-    fn new() -> (Arc<Self>, PendingSignerCancelled) {
-        let (cancel, cancelled) = pending_signer_cancellation();
-        (
-            Arc::new(Self {
-                state: AtomicU8::new(SIGN_EVENT_OPEN),
-                cancel,
-            }),
-            cancelled,
-        )
+    fn new(cancel: Box<dyn Fn() + Send + Sync>) -> Arc<Self> {
+        Arc::new(Self {
+            state: AtomicU8::new(SignEventState::Open as u8),
+            cancel,
+        })
     }
 
     fn cancel(&self) -> bool {
         if self
             .state
             .compare_exchange(
-                SIGN_EVENT_OPEN,
-                SIGN_EVENT_CANCELLED,
+                SignEventState::Open as u8,
+                SignEventState::Cancelled as u8,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
@@ -896,15 +912,15 @@ impl SignEventTerminal {
         {
             return false;
         }
-        self.cancel.cancel();
+        (self.cancel)();
         true
     }
 
     fn resolve(&self) -> bool {
         self.state
             .compare_exchange(
-                SIGN_EVENT_OPEN,
-                SIGN_EVENT_RESOLVED,
+                SignEventState::Open as u8,
+                SignEventState::Resolved as u8,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
@@ -919,7 +935,84 @@ struct SignEventRegistration {
 
 struct ActiveSignEvent {
     terminal: Arc<SignEventTerminal>,
-    task_id: nmp_executor::TaskId,
+}
+
+/// #704: run one foreign sign-event `completion` closure on a FRESH dedicated
+/// OS thread spawned for that single in-flight app operation. The closure may
+/// block indefinitely and may call `Engine::join()` reentrantly (the
+/// reentrant-join tests) — running it on the shared runtime would stall the
+/// fixed workers, and a reentrant `join()` from a worker would deadlock tokio.
+/// The thread advertises its operation id via `SIGN_EVENT_COMPLETION_OP` so
+/// `join()` can exempt exactly this operation, and posts `SignEventFinished`
+/// via a drop guard on the way out (panic-safe).
+#[allow(clippy::too_many_arguments)]
+fn spawn_sign_event_completion(
+    inbox: Sender<Cmd>,
+    operation_id: u64,
+    terminal: Arc<SignEventTerminal>,
+    unsigned: UnsignedEvent,
+    expected_id: EventId,
+    signer_result: Option<Result<SignedEvent, nmp_signer::SignerError>>,
+    completion: SignEventCompletion,
+) {
+    let thread_inbox = inbox.clone();
+    let spawned = thread::Builder::new()
+        .name("nmp-sign-event-completion".to_string())
+        .spawn(move || {
+            nmp_executor::run_counted_thread(move || {
+                SIGN_EVENT_COMPLETION_OP.with(|op| op.set(Some(operation_id)));
+                let _finished = SignEventFinishedGuard {
+                    inbox: thread_inbox,
+                    operation_id,
+                };
+                let result = match signer_result {
+                    Some(result) if terminal.resolve() => result
+                        .map_err(signer_error)
+                        .and_then(|signed| validate_signer_output(&unsigned, expected_id, signed)),
+                    Some(_) | None => Err(SignEventError::Cancelled),
+                };
+                completion(result);
+            });
+        });
+    if spawned.is_err() {
+        // OS thread exhaustion (astronomically rare): the failed spawn dropped
+        // the completion closure without calling it, so the caller observes a
+        // disconnected result. Clear the operation from the shutdown drain.
+        let _ = inbox.send(Cmd::SignEventFinished(operation_id));
+    }
+}
+
+/// #704: owns the foreign sign-event `completion` while the async signing wait
+/// is outstanding. When the awaiting task resolves it sets `signer_result` and
+/// drops; when the task's future is instead dropped (runtime shutdown /
+/// cancellation) `signer_result` stays `None`. Either way `Drop` runs the
+/// completion exactly once on a fresh per-op OS thread (delivering a signed
+/// event, a signer error, or `Cancelled`), never leaving the foreign closure
+/// uncalled.
+struct SignEventCompletionDispatch {
+    inbox: Sender<Cmd>,
+    operation_id: u64,
+    terminal: Arc<SignEventTerminal>,
+    unsigned: UnsignedEvent,
+    expected_id: EventId,
+    completion: Option<SignEventCompletion>,
+    signer_result: Option<Result<SignedEvent, nmp_signer::SignerError>>,
+}
+
+impl Drop for SignEventCompletionDispatch {
+    fn drop(&mut self) {
+        if let Some(completion) = self.completion.take() {
+            spawn_sign_event_completion(
+                self.inbox.clone(),
+                self.operation_id,
+                Arc::clone(&self.terminal),
+                self.unsigned.clone(),
+                self.expected_id,
+                self.signer_result.take(),
+                completion,
+            );
+        }
+    }
 }
 
 struct SignEventFinishedGuard {
@@ -942,9 +1035,6 @@ impl std::fmt::Display for SignEventError {
             Self::SignerRejected { reason } => write!(f, "signer rejected request: {reason}"),
             Self::InvalidSignerOutput { reason } => {
                 write!(f, "signer returned invalid output: {reason}")
-            }
-            Self::ThreadUnavailable { component, reason } => {
-                write!(f, "{component} thread unavailable: {reason}")
             }
             Self::EngineClosed => f.write_str("engine already shut down"),
             Self::Cancelled => f.write_str("sign operation cancelled"),
@@ -1023,13 +1113,13 @@ impl SignerRegistry {
         self.signers.len()
     }
 
-    fn track_pending_write(&self, id: ReceiptId, generation: u64, cancel: PendingSignerCancel) {
+    fn track_pending_write(&self, id: ReceiptId, generation: u64, cancel: PendingWriteCancel) {
         if let Some(stale) = self
             .pending_writes
             .borrow_mut()
             .insert((id, generation), cancel)
         {
-            stale.cancel();
+            stale();
         }
     }
 
@@ -1046,14 +1136,14 @@ impl SignerRegistry {
             .collect::<Vec<_>>();
         for key in keys {
             if let Some(cancel) = pending.remove(&key) {
-                cancel.cancel();
+                cancel();
             }
         }
     }
 
     fn cancel_all_pending_writes(&self) {
         for (_, cancel) in self.pending_writes.borrow_mut().drain() {
-            cancel.cancel();
+            cancel();
         }
     }
 
@@ -1146,9 +1236,11 @@ impl SignerRegistry {
 pub struct EngineThread {
     engine_join: Option<JoinHandle<()>>,
     bridge_join: Option<JoinHandle<()>>,
-    auth_release_bridge_join: Option<JoinHandle<()>>,
     drain_inbox: Sender<Cmd>,
-    native_tasks: nmp_executor::Executor,
+    /// #704: the engine-owned adapter runtime. Shut down from the join thread
+    /// (never a worker) after the reducer stops spawning; dropping the last
+    /// `Arc` aborts remaining adapter tasks, firing their Drop guards.
+    runtime: Arc<tokio::runtime::Runtime>,
     #[cfg(test)]
     runtime_threads: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -1220,22 +1312,17 @@ fn pool_build_error(error: nmp_transport::PoolBuildError) -> EngineThreadError {
 
 pub const DEFAULT_MAX_AUTH_CAPABILITIES: usize = 64;
 
-/// Fixed internal capacity of the engine's blocking-adapter pool (#680). This
-/// pool hosts ONLY transient blocking foreign/reactor adapters — NIP-11
-/// flights, remote-signer result waiters, the sign-event drain, AUTH foreign
-/// calls, and the follow-action worker. Observations never touch it (they are
-/// pure-waker async since #680), and engine-associated NIP-46 sessions run on
-/// their own session-owned executors, so this ceiling is generous for the
-/// remaining transient work and is deliberately NOT app-configurable, NOT
-/// CPU-derived, and NOT surfaced (there is no census/idle/capacity field
-/// anywhere in the SDK). Residual saturation surfaces as an adapter-specific
-/// `ThreadUnavailable`, never a global native-task ceiling.
-pub const ADAPTER_POOL_CAPACITY: usize = 32;
+/// #704: fixed worker-thread count of the ONE engine-owned adapter runtime.
+/// Two workers (not one — a single worker makes any accidental blocking call a
+/// total outage; not more — the adapter work is µs-scale and every task yields
+/// at each `.await`). Every adapter operation is an async task that holds no
+/// OS thread while waiting; there is NO admission capacity, census, or
+/// per-operation `ThreadUnavailable` anywhere in the SDK.
+const ADAPTER_RUNTIME_WORKERS: usize = 2;
 
 /// Finite admission limit for live AUTH policy/signer registrations. Unlike
 /// legacy zero-valued relay settings, zero AUTH capabilities intentionally
-/// admits none. The blocking-adapter pool it accompanies is sized by the
-/// fixed internal [`ADAPTER_POOL_CAPACITY`], never by config.
+/// admits none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeConfig {
     pub max_auth_capabilities: usize,
@@ -1250,7 +1337,8 @@ impl Default for RuntimeConfig {
 }
 
 impl EngineThread {
-    /// Spawn the engine thread and its two bridge threads. `store`/`directory`
+    /// Spawn the engine thread, pool bridge, and fixed adapter runtime.
+    /// `store`/`directory`
     /// are constructed by the CALLER but moved whole into the engine
     /// thread's closure and built into `EngineCore` there — they never cross
     /// back out, which is what lets `EngineCore` itself stay `!Send`-friendly
@@ -1292,12 +1380,22 @@ impl EngineThread {
         S: EventStore + Send + 'static,
         D: RelayDirectory + Send + 'static,
     {
-        let native_tasks = nmp_executor::Executor::new(ADAPTER_POOL_CAPACITY).map_err(|error| {
-            EngineThreadError::ThreadUnavailable {
-                component: "blocking-adapter pool".to_string(),
+        // #704: the ONE engine-owned adapter runtime. A fixed 2-worker
+        // multi-thread tokio runtime hosts every adapter task; each worker
+        // thread start bumps the process-wide OS-thread counter. Build failure
+        // is an engine-start infrastructure error.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(ADAPTER_RUNTIME_WORKERS)
+            .enable_all()
+            .thread_name("nmp-adapter")
+            .on_thread_start(nmp_executor::note_thread_spawn)
+            .on_thread_stop(nmp_executor::note_thread_exit)
+            .build()
+            .map(Arc::new)
+            .map_err(|error| EngineThreadError::ThreadUnavailable {
+                component: "adapter runtime".to_string(),
                 reason: error.to_string(),
-            }
-        })?;
+            })?;
         // One limit owns both compilation and connection admission. Legacy
         // zero values select the finite default; conflicting mechanism-test
         // inputs fail closed to the smaller non-zero ceiling.
@@ -1320,9 +1418,8 @@ impl EngineThread {
         pool_config.allowed_local_hosts = Arc::clone(&allowed_local_hosts);
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
-        let (auth_release_tx, auth_release_rx) = mpsc::channel::<nmp_executor::ReleaseId>();
         let relay_information = RelayInformationService::new_with_admission(
-            native_tasks.clone(),
+            runtime.handle().clone(),
             Arc::clone(&allowed_local_hosts),
         );
         #[cfg(test)]
@@ -1347,7 +1444,6 @@ impl EngineThread {
         ) {
             Ok(pool) => pool,
             Err(error) => {
-                native_tasks.shutdown();
                 return Err(pool_build_error(error));
             }
         };
@@ -1358,59 +1454,24 @@ impl EngineThread {
         let bridge_join = match thread::Builder::new()
             .name("nmp-engine-pool-bridge".to_string())
             .spawn(move || {
-                #[cfg(test)]
-                let _thread_count = RuntimeThreadCountGuard::enter(bridge_runtime_threads);
-                pool_bridge_loop(
-                    &pool_evt_rx,
-                    &pool_stop_rx,
-                    &bridge_inbox,
-                    max_engine_batch,
-                    max_engine_batch_bytes,
-                    max_engine_batch_wait,
-                )
+                nmp_executor::run_counted_thread(move || {
+                    #[cfg(test)]
+                    let _thread_count = RuntimeThreadCountGuard::enter(bridge_runtime_threads);
+                    pool_bridge_loop(
+                        &pool_evt_rx,
+                        &pool_stop_rx,
+                        &bridge_inbox,
+                        max_engine_batch,
+                        max_engine_batch_bytes,
+                        max_engine_batch_wait,
+                    )
+                })
             }) {
-            Ok(join) => {
-                nmp_executor::note_thread_spawn();
-                join
-            }
+            Ok(join) => join,
             Err(error) => {
                 pool.shutdown();
-                native_tasks.shutdown();
                 return Err(EngineThreadError::ThreadUnavailable {
                     component: "engine pool bridge".to_string(),
-                    reason: error.to_string(),
-                });
-            }
-        };
-
-        let auth_release_inbox = cmd_tx.clone();
-        #[cfg(test)]
-        let auth_release_runtime_threads = Arc::clone(&runtime_threads);
-        let auth_release_bridge_join = match thread::Builder::new()
-            .name("nmp-engine-auth-release-bridge".to_string())
-            .spawn(move || {
-                #[cfg(test)]
-                let _thread_count = RuntimeThreadCountGuard::enter(auth_release_runtime_threads);
-                while let Ok(release_id) = auth_release_rx.recv() {
-                    if auth_release_inbox
-                        .send(Cmd::AuthTaskReleased(release_id))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }) {
-            Ok(join) => {
-                nmp_executor::note_thread_spawn();
-                join
-            }
-            Err(error) => {
-                drop(pool_stop_tx);
-                pool.shutdown();
-                let _ = bridge_join.join();
-                native_tasks.shutdown();
-                return Err(EngineThreadError::ThreadUnavailable {
-                    component: "engine AUTH release bridge".to_string(),
                     reason: error.to_string(),
                 });
             }
@@ -1419,7 +1480,7 @@ impl EngineThread {
         let self_inbox = cmd_tx.clone();
         let engine_pool = pool.clone();
         let engine_stop = pool_stop_tx.clone();
-        let engine_native_tasks = native_tasks.clone();
+        let engine_runtime = Arc::clone(&runtime);
         let engine_relay_information = relay_information.clone();
         #[cfg(test)]
         let engine_runtime_threads = Arc::clone(&runtime_threads);
@@ -1427,35 +1488,31 @@ impl EngineThread {
             match thread::Builder::new()
                 .name("nmp-engine".to_string())
                 .spawn(move || {
-                    #[cfg(test)]
-                    let _thread_count = RuntimeThreadCountGuard::enter(engine_runtime_threads);
-                    engine_loop(
-                        store,
-                        directory,
-                        cap,
-                        admission,
-                        EnginePoolRuntime {
-                            pool: engine_pool,
-                            stop: engine_stop,
-                            native_tasks: engine_native_tasks,
-                            relay_information: engine_relay_information,
-                            auth_release_sender: auth_release_tx,
-                            max_auth_capabilities: runtime_config.max_auth_capabilities,
-                        },
-                        &cmd_rx,
-                        &self_inbox,
-                    )
+                    nmp_executor::run_counted_thread(move || {
+                        #[cfg(test)]
+                        let _thread_count = RuntimeThreadCountGuard::enter(engine_runtime_threads);
+                        engine_loop(
+                            store,
+                            directory,
+                            cap,
+                            admission,
+                            EnginePoolRuntime {
+                                pool: engine_pool,
+                                stop: engine_stop,
+                                runtime: engine_runtime,
+                                relay_information: engine_relay_information,
+                                max_auth_capabilities: runtime_config.max_auth_capabilities,
+                            },
+                            &cmd_rx,
+                            &self_inbox,
+                        )
+                    })
                 }) {
-                Ok(join) => {
-                    nmp_executor::note_thread_spawn();
-                    join
-                }
+                Ok(join) => join,
                 Err(error) => {
                     drop(pool_stop_tx);
                     pool.shutdown();
                     let _ = bridge_join.join();
-                    let _ = auth_release_bridge_join.join();
-                    native_tasks.shutdown();
                     return Err(EngineThreadError::ThreadUnavailable {
                         component: "engine runtime".to_string(),
                         reason: error.to_string(),
@@ -1464,54 +1521,69 @@ impl EngineThread {
             };
         drop(pool);
 
-        let handle_native_tasks = native_tasks.clone();
         Ok((
             Self {
                 engine_join: Some(engine_join),
                 bridge_join: Some(bridge_join),
-                auth_release_bridge_join: Some(auth_release_bridge_join),
                 drain_inbox: cmd_tx.clone(),
-                native_tasks,
+                runtime,
                 #[cfg(test)]
                 runtime_threads,
             },
             Handle {
                 inbox: cmd_tx,
-                native_tasks: handle_native_tasks,
                 relay_information,
             },
         ))
     }
 
-    /// Block until the engine and both bridge threads have exited. Only
+    /// #704: the engine-owned adapter runtime handle. Protocol adapters
+    /// (NIP-02 follow-action, NIP-46 connect handshakes) spawn their async
+    /// tasks here instead of reserving a slot on the deleted blocking-adapter
+    /// executor. Exposed on [`EngineThread`] (not the narrow app-facing
+    /// [`Handle`]) so it stays hidden mechanism, never an app scheduling verb.
+    #[must_use]
+    pub fn adapter_runtime(&self) -> tokio::runtime::Handle {
+        self.runtime.handle().clone()
+    }
+
+    /// Block until the engine and pool-bridge threads have exited. Only
     /// returns once a [`Handle::shutdown`] has actually been observed by the
     /// engine thread (which then tears down its `Pool` clone, allowing the
     /// pool bridge to disconnect) — callers that never shut down any `Handle`
     /// block here forever, matching `Pool::shutdown`'s own join discipline.
     ///
-    /// When called from a completion running on this engine's own native-task
-    /// executor, the runtime exempts only that exact callback from its drain.
-    /// The joins above remain synchronous; the final executor shutdown is the
-    /// existing two-phase self-shutdown, whose reaper joins the callback and
-    /// releases its slot immediately after this call lets it return.
+    /// #704: when called from a per-operation sign-event completion thread that
+    /// is calling `join()` reentrantly, the reducer exempts only that exact
+    /// operation from the shutdown drain (read from the completion-thread-local
+    /// `SIGN_EVENT_COMPLETION_OP`). The adapter runtime is then shut down from
+    /// THIS join thread (never a worker) by dropping the last `Arc` after the
+    /// reducer thread has exited — remaining adapter task futures are dropped,
+    /// firing their Drop guards (delivering `Cancelled`/`Disconnected` to any
+    /// foreign completion exactly once).
     pub fn join(mut self) {
-        if let Some(task_id) = self.native_tasks.current_task_id() {
-            let _ = self.drain_inbox.send(Cmd::ExemptSignEventDrain(task_id));
+        if let Some(op_id) = SIGN_EVENT_COMPLETION_OP.with(|op| op.get()) {
+            let _ = self.drain_inbox.send(Cmd::ExemptSignEventDrain(op_id));
         }
         if let Some(h) = self.engine_join.take() {
-            let _ = h.join();
-        }
-        if let Some(h) = self.auth_release_bridge_join.take() {
             let _ = h.join();
         }
         if let Some(h) = self.bridge_join.take() {
             let _ = h.join();
         }
-        self.native_tasks.shutdown();
-    }
-
-    pub fn native_tasks(&self) -> nmp_executor::Executor {
-        self.native_tasks.clone()
+        // The reducer thread has exited (its runtime `Arc` clone dropped), so
+        // this is the last `Arc`. Shut the adapter runtime down on a FRESH
+        // dedicated OS thread and join it: dropping a `tokio::runtime::Runtime`
+        // panics if done inside another runtime's context (e.g. an app or a
+        // `#[tokio::test]` that owns the calling thread), and `join()` may be
+        // called from exactly there. On the fresh thread the drop is legal and
+        // fires every parked adapter task's Drop guard, delivering
+        // `Cancelled`/`Disconnected` to each foreign completion exactly once.
+        let runtime = self.runtime;
+        let _ = thread::Builder::new()
+            .name("nmp-adapter-shutdown".to_string())
+            .spawn(move || drop(runtime))
+            .map(|handle| handle.join());
     }
 }
 
@@ -1636,7 +1708,6 @@ mod reentrant_shutdown_tests {
     #[test]
     fn external_shutdown_first_then_callback_owned_join_exempts_exact_origin() {
         let (engine, handle) = runtime();
-        let executor = engine.native_tasks();
         let keys = Keys::generate();
         handle
             .add_signer(LocalKeySigner::new(keys.clone()))
@@ -1670,15 +1741,11 @@ mod reentrant_shutdown_tests {
         returned_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("callback-owned join must exempt itself after shutdown already began");
-        executor.shutdown();
-        assert_eq!(executor.census().admitted, 0);
-        assert_eq!(executor.census().running, 0);
     }
 
     #[test]
     fn callback_handle_shutdown_does_not_weaken_external_join_drain() {
         let (engine, handle) = runtime();
-        let executor = engine.native_tasks();
         let keys = Keys::generate();
         handle
             .add_signer(LocalKeySigner::new(keys.clone()))
@@ -1721,15 +1788,11 @@ mod reentrant_shutdown_tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("external shutdown must return after callback completion");
         shutdown.join().expect("shutdown thread");
-        executor.shutdown();
-        assert_eq!(executor.census().admitted, 0);
-        assert_eq!(executor.census().running, 0);
     }
 
     #[test]
     fn panicking_callback_still_finishes_external_shutdown_drain() {
         let (engine, handle) = runtime();
-        let executor = engine.native_tasks();
         let keys = Keys::generate();
         handle
             .add_signer(LocalKeySigner::new(keys.clone()))
@@ -1772,15 +1835,11 @@ mod reentrant_shutdown_tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("panic-safe Finished guard must release the shutdown drain");
         shutdown.join().expect("shutdown thread");
-        executor.shutdown();
-        assert_eq!(executor.census().admitted, 0);
-        assert_eq!(executor.census().running, 0);
     }
 
     #[test]
     fn callback_owned_join_exempts_only_itself_and_drains_another_callback() {
         let (engine, handle) = runtime();
-        let executor = engine.native_tasks();
         let keys = Keys::generate();
         handle
             .add_signer(LocalKeySigner::new(keys.clone()))
@@ -1826,9 +1885,6 @@ mod reentrant_shutdown_tests {
         returned_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("callback-owned join must return after the other callback completes");
-        executor.shutdown();
-        assert_eq!(executor.census().admitted, 0);
-        assert_eq!(executor.census().running, 0);
     }
 }
 
@@ -2566,15 +2622,19 @@ mod relay_worker_reconciliation_tests {
         let mut preambles = Preambles::new();
         let registry = SignerRegistry::default();
         let (self_inbox, _inbox_rx) = mpsc::channel();
-        let native_tasks = nmp_executor::Executor::new(1).unwrap();
-        let relay_information = RelayInformationService::new(native_tasks.clone());
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let relay_information = RelayInformationService::new(rt.handle().clone());
         let nip11_decisions = RefCell::new(Nip11DecisionState::default());
         let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let dispatch_runtime = DispatchRuntime {
             self_inbox: &self_inbox,
             relay_information: &relay_information,
-            native_tasks: &native_tasks,
+            runtime: rt.handle(),
             nip11_decisions: &nip11_decisions,
             auth_policies: &auth_policies,
             auth_tasks: &auth_tasks,
@@ -2604,11 +2664,6 @@ mod relay_worker_reconciliation_tests {
                 if delta.ops.iter().any(|(candidate, ops)| candidate == &session
                     && ops.iter().any(|op| matches!(op, WireOp::Req(..))))
         )));
-        preflight_query_relay_workers(&first, &pool)
-            .expect("protected worker is acquired before the subscribe reply");
-        let first_transport = pool
-            .live_session_handle(&session)
-            .expect("preflight opens the protected worker");
         dispatch_core_effects(
             &mut core,
             first,
@@ -2620,6 +2675,9 @@ mod relay_worker_reconciliation_tests {
             &registry,
             dispatch_runtime,
         );
+        let first_transport = pool
+            .live_session_handle(&session)
+            .expect("ordinary effect dispatch opens the protected worker");
         assert_eq!(pool.live_session_handle(&session), Some(first_transport));
         assert!(!preambles.contains_key(&session));
 
@@ -2678,158 +2736,6 @@ mod relay_worker_reconciliation_tests {
         assert!(pool.live_session_handle(&session).is_none());
 
         pool.shutdown();
-        native_tasks.shutdown();
-    }
-
-    #[test]
-    fn protected_initial_subscribe_spawn_refusal_rolls_back_every_owned_layer() {
-        let signer = Keys::generate().public_key();
-        let first_relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
-        let refused_relay = RelayUrl::parse("ws://127.0.0.1:10").unwrap();
-        let access = AccessContext::Nip42(signer);
-        let first_session = RelaySessionKey::new(first_relay.clone(), access);
-        let refused_session = RelaySessionKey::new(refused_relay.clone(), access);
-        let query = LiveQuery(
-            Demand::new(
-                Filter {
-                    kinds: Some(BTreeSet::from([1])),
-                    ..Filter::default()
-                },
-                SourceAuthority::Pinned(BTreeSet::from([
-                    first_relay.clone(),
-                    refused_relay.clone(),
-                ])),
-                access,
-            )
-            .unwrap(),
-        );
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 2);
-        let (pool_tx, _pool_rx) = mpsc::channel();
-        let mut config = PoolConfig::default();
-        config.max_relays = 2;
-        let pool = Pool::new(config, pool_tx).expect("test pool construction");
-        let mut rows = HashMap::new();
-        let mut histories = HashMap::new();
-        let mut diagnostics = HashMap::new();
-        let mut preambles = Preambles::new();
-        let registry = SignerRegistry::default();
-        let (self_inbox, _inbox_rx) = mpsc::channel();
-        let native_tasks = nmp_executor::Executor::new(1).unwrap();
-        let relay_information = RelayInformationService::new(native_tasks.clone());
-        let nip11_decisions = RefCell::new(Nip11DecisionState::default());
-        let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
-        let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
-        let dispatch_runtime = DispatchRuntime {
-            self_inbox: &self_inbox,
-            relay_information: &relay_information,
-            native_tasks: &native_tasks,
-            nip11_decisions: &nip11_decisions,
-            auth_policies: &auth_policies,
-            auth_tasks: &auth_tasks,
-        };
-
-        let effects = core.handle(EngineMsg::Subscribe(query, Box::new(NullRowSink)));
-        let id = effects
-            .iter()
-            .find_map(|effect| match effect {
-                Effect::EmitRows(id, ..) => Some(*id),
-                _ => None,
-            })
-            .expect("initial protected target exists until preflight resolves");
-        let (rows_tx, _rows_rx) = rows_channel();
-        rows.insert(id, rows_tx);
-
-        let mut opened = None;
-        let mut attempts = 0usize;
-        let refusal = preflight_query_relay_workers_with(
-            &effects,
-            |session| pool.live_session_handle(session).is_some(),
-            |session| {
-                attempts += 1;
-                if opened.is_none() {
-                    let handle = pool.ensure_session(session).unwrap();
-                    opened = Some((session.clone(), handle));
-                    Ok(Some(handle))
-                } else {
-                    Err(EngineThreadError::ThreadUnavailable {
-                        component: "relay worker".to_string(),
-                        reason: "injected protected subscribe refusal".to_string(),
-                    })
-                }
-            },
-            |handle| {
-                let _ = pool.close(handle);
-            },
-        )
-        .unwrap_err();
-        assert_eq!(attempts, 2, "both deduplicated sessions were preflighted");
-        assert!(matches!(
-            refusal,
-            EngineThreadError::ThreadUnavailable { component, reason }
-                if component == "relay worker"
-                    && reason == "injected protected subscribe refusal"
-        ));
-        // The landed preflight rolls back every worker it just opened when a
-        // later session's spawn is refused (same discipline as the history
-        // preflight): the refused subscribe leaves no live protected worker
-        // behind.
-        assert!(pool
-            .live_session_handle(&opened.as_ref().unwrap().0)
-            .is_none());
-
-        rows.remove(&id);
-        let withdraw = core.handle(EngineMsg::Unsubscribe(id));
-        dispatch_core_effects(
-            &mut core,
-            withdraw,
-            &pool,
-            &mut rows,
-            &mut histories,
-            &mut diagnostics,
-            &mut preambles,
-            &registry,
-            dispatch_runtime,
-        );
-
-        assert!(!rows.contains_key(&id));
-        assert_eq!(core.required_relay_workers(), Some(BTreeSet::new()));
-        assert!(pool.live_session_handle(&first_session).is_none());
-        assert!(pool.live_session_handle(&refused_session).is_none());
-        assert!(preambles.is_empty());
-        let snapshot = core.diagnostics_snapshot();
-        assert!(snapshot.relays.is_empty());
-        assert!(snapshot.auth_sessions.is_empty());
-
-        let late = core.handle(EngineMsg::RelayOpenFailed(
-            refused_session.clone(),
-            "late unowned failure".to_string(),
-        ));
-        assert!(late.is_empty());
-        assert!(core.diagnostics_snapshot().transport_degraded.is_none());
-
-        assert!(
-            preflight_query_relay_workers_with(&effects, |_| false, |_| Ok(None), |_| {}).is_ok(),
-            "capacity refusal remains ordinary local shortfall"
-        );
-        let duplicate_edges = [
-            Effect::EnsureRelay(first_session.clone()),
-            Effect::EnsureRelay(first_session.clone()),
-        ];
-        let mut duplicate_attempts = 0usize;
-        preflight_query_relay_workers_with(
-            &duplicate_edges,
-            |_| false,
-            |_| {
-                duplicate_attempts += 1;
-                Ok(None)
-            },
-            |_| {},
-        )
-        .unwrap();
-        assert_eq!(duplicate_attempts, 1, "EnsureRelay edges are deduplicated");
-
-        pool.shutdown();
-        native_tasks.shutdown();
     }
 
     #[test]
@@ -2848,15 +2754,19 @@ mod relay_worker_reconciliation_tests {
         let mut preambles = Preambles::new();
         let registry = SignerRegistry::default();
         let (self_inbox, inbox_rx) = mpsc::channel();
-        let native_tasks = nmp_executor::Executor::new(1).unwrap();
-        let relay_information = RelayInformationService::new(native_tasks.clone());
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let relay_information = RelayInformationService::new(rt.handle().clone());
         let nip11_decisions = RefCell::new(Nip11DecisionState::default());
         let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let dispatch_runtime = DispatchRuntime {
             self_inbox: &self_inbox,
             relay_information: &relay_information,
-            native_tasks: &native_tasks,
+            runtime: rt.handle(),
             nip11_decisions: &nip11_decisions,
             auth_policies: &auth_policies,
             auth_tasks: &auth_tasks,
@@ -2935,7 +2845,6 @@ mod relay_worker_reconciliation_tests {
         );
 
         pool.shutdown();
-        native_tasks.shutdown();
     }
 
     #[test]
@@ -2952,15 +2861,19 @@ mod relay_worker_reconciliation_tests {
             .expect("engine construction");
             let runtime_threads = Arc::clone(&engine.runtime_threads);
             let deadline = Instant::now() + Duration::from_secs(5);
-            while runtime_threads.load(std::sync::atomic::Ordering::SeqCst) != 3
+            // #704: the auth-release bridge is gone (the adapter executor was
+            // replaced by the tokio runtime, whose workers are NOT counted by
+            // this reducer/bridge guard). One engine now owns exactly the
+            // reducer thread + the pool-bridge thread.
+            while runtime_threads.load(std::sync::atomic::Ordering::SeqCst) != 2
                 && Instant::now() < deadline
             {
                 thread::yield_now();
             }
             assert_eq!(
                 runtime_threads.load(std::sync::atomic::Ordering::SeqCst),
-                3,
-                "one engine must own exactly its engine and two bridge threads"
+                2,
+                "one engine must own exactly its reducer and pool-bridge threads"
             );
             handle.shutdown();
             engine.join();
@@ -2997,15 +2910,19 @@ mod relay_worker_reconciliation_tests {
         let mut preambles = Preambles::new();
         let registry = SignerRegistry::default();
         let (self_inbox, _inbox_rx) = mpsc::channel();
-        let native_tasks = nmp_executor::Executor::new(1).unwrap();
-        let relay_information = RelayInformationService::new(native_tasks.clone());
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let relay_information = RelayInformationService::new(rt.handle().clone());
         let nip11_decisions = RefCell::new(Nip11DecisionState::default());
         let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let dispatch_runtime = DispatchRuntime {
             self_inbox: &self_inbox,
             relay_information: &relay_information,
-            native_tasks: &native_tasks,
+            runtime: rt.handle(),
             nip11_decisions: &nip11_decisions,
             auth_policies: &auth_policies,
             auth_tasks: &auth_tasks,
@@ -3078,7 +2995,6 @@ mod relay_worker_reconciliation_tests {
         );
 
         pool.shutdown();
-        native_tasks.shutdown();
     }
 
     /// Exact read reconciliation must not evict a worker owned only by a
@@ -3142,15 +3058,19 @@ mod relay_worker_reconciliation_tests {
         let mut preambles = Preambles::new();
         let registry = SignerRegistry::default();
         let (self_inbox, _inbox_rx) = mpsc::channel();
-        let native_tasks = nmp_executor::Executor::new(1).unwrap();
-        let relay_information = RelayInformationService::new(native_tasks.clone());
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let relay_information = RelayInformationService::new(rt.handle().clone());
         let nip11_decisions = RefCell::new(Nip11DecisionState::default());
         let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let dispatch_runtime = DispatchRuntime {
             self_inbox: &self_inbox,
             relay_information: &relay_information,
-            native_tasks: &native_tasks,
+            runtime: rt.handle(),
             nip11_decisions: &nip11_decisions,
             auth_policies: &auth_policies,
             auth_tasks: &auth_tasks,
@@ -3186,7 +3106,6 @@ mod relay_worker_reconciliation_tests {
         );
 
         pool.shutdown();
-        native_tasks.shutdown();
     }
 }
 
@@ -3351,7 +3270,6 @@ mod auth_registry_admission_tests {
     #[test]
     fn shutdown_drain_rejects_cancel_hook_handle_reentry_and_releases_executor() {
         let (engine, handle) = runtime(2);
-        let executor = engine.native_tasks();
         let keys = Keys::generate();
         let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
         let session =
@@ -3403,8 +3321,6 @@ mod auth_registry_admission_tests {
             hook_result_rx.recv().unwrap(),
             Err(AddAuthPolicyError::EngineShuttingDown)
         );
-        assert_eq!(executor.census().admitted, 0);
-        assert_eq!(executor.census().running, 0);
     }
 
     #[test]
@@ -3603,7 +3519,7 @@ type Preambles = HashMap<RelaySessionKey, HashMap<SubId, String>>;
 struct DispatchRuntime<'a> {
     self_inbox: &'a Sender<Cmd>,
     relay_information: &'a RelayInformationService,
-    native_tasks: &'a nmp_executor::Executor,
+    runtime: &'a tokio::runtime::Handle,
     nip11_decisions: &'a RefCell<Nip11DecisionState>,
     auth_policies: &'a RefCell<auth::AuthPolicyRegistry>,
     auth_tasks: &'a RefCell<auth::AuthTaskRegistry>,
@@ -3730,12 +3646,12 @@ fn engine_loop<S, D>(
     let EnginePoolRuntime {
         pool,
         stop: pool_stop_tx,
-        native_tasks,
+        runtime,
         relay_information,
-        auth_release_sender,
         max_auth_capabilities,
     } = pool_runtime;
-    let native_tasks = &native_tasks;
+    let runtime_handle = runtime.handle().clone();
+    let runtime_handle = &runtime_handle;
     let mut core = EngineCore::new(store, Box::new(directory), cap).with_relay_admission(admission);
     let mut row_channels: HashMap<HandleId, RowsSender> = HashMap::new();
     let mut history_channels: HashMap<HistorySessionId, LatestSender<HistoryMsg>> = HashMap::new();
@@ -3744,9 +3660,7 @@ fn engine_loop<S, D>(
     let mut preambles: Preambles = Preambles::new();
     let mut registry = SignerRegistry::default();
     let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
-    let auth_tasks = RefCell::new(auth::AuthTaskRegistry::with_release_sender(
-        auth_release_sender,
-    ));
+    let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
     let mut auth_instances = auth::AuthCapabilityInstances::default();
     let mut active_pubkey = None;
     let mut next_sign_event_id = 1u64;
@@ -3755,7 +3669,7 @@ fn engine_loop<S, D>(
     let dispatch_runtime = DispatchRuntime {
         self_inbox,
         relay_information: &relay_information,
-        native_tasks,
+        runtime: runtime_handle,
         nip11_decisions: &nip11_decisions,
         auth_policies: &auth_policies,
         auth_tasks: &auth_tasks,
@@ -3862,11 +3776,9 @@ fn engine_loop<S, D>(
                 Cmd::SubscribeHistory { reply, .. } => {
                     let _ = reply.send(Err(EngineThreadError::EngineShuttingDown));
                 }
-                Cmd::RequestRows { reply, .. } => {
-                    let _ = reply.send(Err(HistoryAdvanceError::TransportUnavailable {
-                        reason: "engine is shutting down".to_string(),
-                    }));
-                }
+                // Dropping this reply makes `Handle::request_rows` return
+                // `None`, which the facade truthfully maps to `EngineClosed`.
+                Cmd::RequestRows { .. } => {}
                 Cmd::PublishTracked { reply, .. } => {
                     let _ = reply.send(Err(PublishError::EngineShuttingDown));
                 }
@@ -3943,8 +3855,8 @@ fn engine_loop<S, D>(
                         active.terminal.cancel();
                     }
                 }
-                Cmd::ExemptSignEventDrain(task_id) => {
-                    sign_event_cancellations.retain(|_, active| active.task_id != task_id);
+                Cmd::ExemptSignEventDrain(op_id) => {
+                    sign_event_cancellations.remove(&op_id);
                 }
                 Cmd::Engine(_)
                 | Cmd::RelayInformationFetched { .. }
@@ -3970,8 +3882,8 @@ fn engine_loop<S, D>(
                     break;
                 }
             }
-            Cmd::ExemptSignEventDrain(task_id) => {
-                sign_event_cancellations.retain(|_, active| active.task_id != task_id);
+            Cmd::ExemptSignEventDrain(op_id) => {
+                sign_event_cancellations.remove(&op_id);
             }
             Cmd::RelayInformationFetched {
                 url,
@@ -4294,14 +4206,13 @@ fn engine_loop<S, D>(
                     auth::launch_auth_task(
                         task,
                         &mut auth_tasks.borrow_mut(),
-                        native_tasks,
+                        runtime_handle,
                         self_inbox,
                     );
                 }
             }
             Cmd::SignEvent {
                 unsigned,
-                reservation,
                 completion,
                 reply,
             } => {
@@ -4327,42 +4238,38 @@ fn engine_loop<S, D>(
                     continue;
                 };
 
-                let (terminal, cancelled) = SignEventTerminal::new();
-                let shutdown_terminal = Arc::clone(&terminal);
-                let task_id = reservation.task_id();
-                let starter = match reservation.start_with_cancel(move || {
-                    shutdown_terminal.cancel();
-                }) {
-                    Ok(starter) => starter,
-                    Err(error) => {
-                        let error = match error {
-                            nmp_executor::SpawnError::ThreadUnavailable { component, error } => {
-                                SignEventError::ThreadUnavailable {
-                                    component,
-                                    reason: error.to_string(),
-                                }
-                            }
-                            nmp_executor::SpawnError::ExecutorShutDown { .. } => {
-                                SignEventError::EngineClosed
-                            }
-                        };
-                        let _ = reply.send(Err(error));
-                        continue;
-                    }
-                };
-
                 let operation_id = next_sign_event_id;
                 next_sign_event_id = next_sign_event_id.wrapping_add(1).max(1);
-                let signer_result = match signer_op {
-                    SignerOp::Ready(result) => SignEventSignerResult::Ready(Box::new(result)),
-                    SignerOp::Pending(pending) => SignEventSignerResult::Pending(pending),
+
+                // #704: the SIGNING WAIT holds no thread. A ready local signer
+                // has its result now; a pending remote signer is awaited by an
+                // async task on the adapter runtime. Cancellation fires the
+                // pending op's canceller (a no-op for a ready result); the
+                // foreign `completion` — which may block and may call
+                // `Engine::join()` reentrantly — always runs on a FRESH per-op
+                // OS thread, never the runtime or the reducer.
+                let (cancel_action, signer_source): (
+                    Box<dyn Fn() + Send + Sync>,
+                    SignEventSignerResult,
+                ) = match signer_op {
+                    SignerOp::Ready(result) => (
+                        Box::new(|| {}),
+                        SignEventSignerResult::Ready(Box::new(result)),
+                    ),
+                    SignerOp::Pending(pending) => {
+                        let canceller = pending.canceller();
+                        (
+                            Box::new(move || canceller.cancel()),
+                            SignEventSignerResult::Pending(pending),
+                        )
+                    }
                 };
+                let terminal = SignEventTerminal::new(cancel_action);
 
                 sign_event_cancellations.insert(
                     operation_id,
                     ActiveSignEvent {
                         terminal: Arc::clone(&terminal),
-                        task_id,
                     },
                 );
                 if reply
@@ -4378,27 +4285,40 @@ fn engine_loop<S, D>(
                 }
 
                 let inbox = self_inbox.clone();
-                starter.run(move || {
-                    let _finished = SignEventFinishedGuard {
-                        inbox,
-                        operation_id,
-                    };
-                    let signer_result = match signer_result {
-                        SignEventSignerResult::Ready(result) => Some(*result),
-                        SignEventSignerResult::Pending(pending) => {
-                            pending.recv_or_cancel(cancelled)
-                        }
-                    };
-                    let result = match signer_result {
-                        Some(result) if terminal.resolve() => {
-                            result.map_err(signer_error).and_then(|signed| {
-                                validate_signer_output(&unsigned, expected_id, signed)
-                            })
-                        }
-                        Some(_) | None => Err(SignEventError::Cancelled),
-                    };
-                    completion(result);
-                });
+                match signer_source {
+                    SignEventSignerResult::Ready(result) => {
+                        spawn_sign_event_completion(
+                            inbox,
+                            operation_id,
+                            terminal,
+                            unsigned,
+                            expected_id,
+                            Some(*result),
+                            completion,
+                        );
+                    }
+                    SignEventSignerResult::Pending(pending) => {
+                        // The signing wait is async; the (possibly-blocking)
+                        // foreign completion is delivered on a per-op thread
+                        // whether the await resolves OR the task's future is
+                        // dropped at runtime shutdown (the dispatch Drop guard).
+                        let dispatch = SignEventCompletionDispatch {
+                            inbox,
+                            operation_id,
+                            terminal,
+                            unsigned,
+                            expected_id,
+                            completion: Some(completion),
+                            signer_result: None,
+                        };
+                        runtime_handle.spawn(async move {
+                            let mut dispatch = dispatch;
+                            let result = pending.await;
+                            dispatch.signer_result = Some(result);
+                            // drop(dispatch) here spawns the completion thread.
+                        });
+                    }
+                }
             }
             Cmd::CancelSignEvent(id) => {
                 if let Some(active) = sign_event_cancellations.remove(&id) {
@@ -4535,23 +4455,6 @@ fn engine_loop<S, D>(
                     .expect("Subscribe must yield a fresh EmitRows for its own handle");
                 let (rows_tx, rows_rx) = rows_channel();
                 row_channels.insert(id, rows_tx);
-                if let Err(error) = preflight_query_relay_workers(&effects, &pool) {
-                    row_channels.remove(&id);
-                    let withdraw = core.handle(EngineMsg::Unsubscribe(id));
-                    dispatch_core_effects(
-                        &mut core,
-                        withdraw,
-                        &pool,
-                        &mut row_channels,
-                        &mut history_channels,
-                        &mut diag_channels,
-                        &mut preambles,
-                        &registry,
-                        dispatch_runtime,
-                    );
-                    let _ = reply.send(Err(error));
-                    continue;
-                }
                 if reply.send(Ok((id, rows_rx))).is_err() {
                     // Caller already gave up on `subscribe()` -- withdraw
                     // immediately rather than leak a live demand atom nobody
@@ -4613,23 +4516,6 @@ fn engine_loop<S, D>(
                 };
                 let (history_tx, history_rx) = latest_channel();
                 history_channels.insert(id, history_tx);
-                if let Err(error) = preflight_query_relay_workers(&effects, &pool) {
-                    history_channels.remove(&id);
-                    let withdraw = core.handle(EngineMsg::UnsubscribeHistory(id));
-                    dispatch_core_effects(
-                        &mut core,
-                        withdraw,
-                        &pool,
-                        &mut row_channels,
-                        &mut history_channels,
-                        &mut diag_channels,
-                        &mut preambles,
-                        &registry,
-                        dispatch_runtime,
-                    );
-                    let _ = reply.send(Err(error));
-                    continue;
-                }
                 if reply
                     .send(Ok((id, HistoryReceiver::new(history_rx))))
                     .is_err()
@@ -4674,26 +4560,6 @@ fn engine_loop<S, D>(
                     _ => None,
                 });
                 if result.as_ref().is_some_and(Result::is_ok) {
-                    // Preflight the staged advance's (possibly empty) relay
-                    // workers before it becomes observable.
-                    if let Err(error) = preflight_query_relay_workers(&effects, &pool) {
-                        let rollback = core.handle(EngineMsg::RollbackHistoryLoad(id));
-                        dispatch_core_effects(
-                            &mut core,
-                            rollback,
-                            &pool,
-                            &mut row_channels,
-                            &mut history_channels,
-                            &mut diag_channels,
-                            &mut preambles,
-                            &registry,
-                            dispatch_runtime,
-                        );
-                        let _ = reply.send(Err(HistoryAdvanceError::TransportUnavailable {
-                            reason: error.to_string(),
-                        }));
-                        continue;
-                    }
                     if reply.send(Ok(())).is_err() {
                         let rollback = core.handle(EngineMsg::RollbackHistoryLoad(id));
                         dispatch_core_effects(
@@ -4722,35 +4588,6 @@ fn engine_loop<S, D>(
                                 Effect::HistoryLoadResult(session, Ok(())) if *session == id
                             )
                         });
-                        if restaged && preflight_query_relay_workers(&committed, &pool).is_err() {
-                            // The continuation advance's workers are
-                            // unavailable. Frames already delivered stand; roll
-                            // the staged continuation back and stop growing.
-                            let rollback = core.handle(EngineMsg::RollbackHistoryLoad(id));
-                            dispatch_core_effects(
-                                &mut core,
-                                committed,
-                                &pool,
-                                &mut row_channels,
-                                &mut history_channels,
-                                &mut diag_channels,
-                                &mut preambles,
-                                &registry,
-                                dispatch_runtime,
-                            );
-                            dispatch_core_effects(
-                                &mut core,
-                                rollback,
-                                &pool,
-                                &mut row_channels,
-                                &mut history_channels,
-                                &mut diag_channels,
-                                &mut preambles,
-                                &registry,
-                                dispatch_runtime,
-                            );
-                            break;
-                        }
                         dispatch_core_effects(
                             &mut core,
                             committed,
@@ -5081,82 +4918,6 @@ fn dispatch_core_effects<S: EventStore>(
     );
 }
 
-/// Acquire the relay worker threads needed by one new query before its
-/// synchronous handle crosses the supported facade. Capacity refusal remains
-/// ordinary local shortfall, but an OS spawn refusal is returned as the typed
-/// construction error #442 requires. Successful opens are idempotently reused
-/// by ordinary effect dispatch.
-fn preflight_query_relay_workers(effects: &[Effect], pool: &Pool) -> Result<(), EngineThreadError> {
-    preflight_query_relay_workers_with(
-        effects,
-        |session| pool.live_session_handle(session).is_some(),
-        |session| match pool.ensure_session(session) {
-            Ok(handle) => Ok(Some(handle)),
-            Err(nmp_transport::RelayOpenError::ThreadUnavailable(error)) => {
-                Err(EngineThreadError::ThreadUnavailable {
-                    component: error.role.to_string(),
-                    reason: error.reason,
-                })
-            }
-            // Capacity/unavailable remains ordinary local shortfall. It is
-            // represented by acquisition evidence, not construction failure.
-            Err(_) => Ok(None),
-        },
-        |handle| {
-            let _ = pool.close(handle);
-        },
-    )
-}
-
-fn preflight_query_relay_workers_with(
-    effects: &[Effect],
-    mut is_live: impl FnMut(&RelaySessionKey) -> bool,
-    mut ensure_session: impl FnMut(
-        &RelaySessionKey,
-    ) -> Result<Option<nmp_transport::RelayHandle>, EngineThreadError>,
-    mut close: impl FnMut(nmp_transport::RelayHandle),
-) -> Result<(), EngineThreadError> {
-    let mut sessions = BTreeSet::new();
-    for effect in effects {
-        match effect {
-            Effect::Wire(delta) => {
-                for (session, ops) in &delta.ops {
-                    if ops.iter().any(|op| matches!(op, WireOp::Req(..))) {
-                        sessions.insert(session.clone());
-                    }
-                }
-            }
-            // A PROTECTED session's REQs stay parked until AUTH readiness,
-            // so its acquisition edge is `Effect::EnsureRelay`, never a
-            // `WireOp::Req` (#8 U4): the worker must exist before the relay
-            // can deliver the challenge that makes readiness possible, and a
-            // spawn refusal for it is the same typed construction failure as
-            // for an ordinary REQ session.
-            Effect::EnsureRelay(session) => {
-                sessions.insert(session.clone());
-            }
-            Effect::PreflightHistoryRelays(planned) => sessions.extend(planned.iter().cloned()),
-            _ => {}
-        }
-    }
-
-    let mut opened = Vec::new();
-    for session in sessions {
-        let was_live = is_live(&session);
-        match ensure_session(&session) {
-            Ok(Some(handle)) if !was_live => opened.push(handle),
-            Ok(_) => {}
-            Err(error) => {
-                for handle in opened {
-                    close(handle);
-                }
-                return Err(error);
-            }
-        }
-    }
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)]
 fn dispatch_relay_open_failure(
     core: &mut EngineCore<impl EventStore>,
@@ -5235,83 +4996,6 @@ fn dispatch_relay_open_failure(
                 // retry owner left to notify.
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod history_preflight_tests {
-    use std::cell::RefCell;
-
-    use nmp_grammar::{AccessContext, SourceAuthority};
-    use nmp_transport::RelayHandle;
-
-    use super::*;
-
-    #[test]
-    fn partial_history_preflight_failure_closes_every_worker_it_opened() {
-        let first = RelayUrl::parse("wss://a-history-preflight.example").unwrap();
-        let second = RelayUrl::parse("wss://b-history-preflight.example").unwrap();
-        let filter = ConcreteFilter::default();
-        let delta = WireDelta {
-            ops: vec![
-                (
-                    RelaySessionKey::public(first.clone()),
-                    vec![WireOp::Req(
-                        SubId::for_wire(
-                            first.clone(),
-                            &filter,
-                            &SourceAuthority::Public,
-                            AccessContext::Public,
-                        ),
-                        filter.clone(),
-                    )],
-                ),
-                (
-                    RelaySessionKey::public(second.clone()),
-                    vec![WireOp::Req(
-                        SubId::for_wire(
-                            second.clone(),
-                            &filter,
-                            &SourceAuthority::Public,
-                            AccessContext::Public,
-                        ),
-                        filter,
-                    )],
-                ),
-            ],
-        };
-        let effects = vec![Effect::Wire(delta)];
-        let closed = RefCell::new(Vec::new());
-        let result = preflight_query_relay_workers_with(
-            &effects,
-            |_| false,
-            |session| {
-                if session.relay == first {
-                    Ok(Some(RelayHandle {
-                        slot: 7,
-                        generation: 1,
-                    }))
-                } else {
-                    Err(EngineThreadError::ThreadUnavailable {
-                        component: "relay worker".to_string(),
-                        reason: "injected refusal".to_string(),
-                    })
-                }
-            },
-            |handle| closed.borrow_mut().push(handle),
-        );
-
-        assert!(matches!(
-            result,
-            Err(EngineThreadError::ThreadUnavailable { .. })
-        ));
-        assert_eq!(
-            closed.into_inner(),
-            vec![RelayHandle {
-                slot: 7,
-                generation: 1
-            }]
-        );
     }
 }
 
@@ -5409,7 +5093,6 @@ fn dispatch_effect(
             crate::ingest_attribution::committed_observation_effect(phase_started.elapsed());
         }
         Effect::Wire(delta) => apply_wire_delta(&delta, pool, preambles),
-        Effect::PreflightHistoryRelays(_) => {}
         Effect::Replay(session, reqs) => apply_replay(&session, reqs, pool, preambles),
         Effect::ReleaseInitialRead(handle) => {
             let _ = pool.release_initial_read(handle);
@@ -5495,36 +5178,24 @@ fn dispatch_effect(
                         )));
                 }
                 SignerOp::Pending(pending) => {
-                    // A single blocking recv on a fresh thread, then exactly
-                    // one forwarded message -- D8-compliant (no poll loop),
-                    // and keeps the engine thread itself from ever blocking
-                    // on a remote signer round-trip.
+                    // #704: the remote-signer round-trip is awaited by an async
+                    // task on the adapter runtime — no OS thread is held while
+                    // it is outstanding. Write-cancel / account-switch fires the
+                    // op's canceller (tracked below); dropping the task's future
+                    // at runtime shutdown also runs the op's Drop cancel hook.
                     let inbox = runtime.self_inbox.clone();
-                    let (cancel, cancelled) = pending_signer_cancellation();
-                    let shutdown_cancel = cancel.clone();
-                    let result = runtime.native_tasks.spawn_with_cancel(
-                        "engine-signer-waiter",
-                        move || shutdown_cancel.cancel(),
-                        move || {
-                            let result = pending
-                                .recv_or_cancel(cancelled)
-                                .unwrap_or(Err(nmp_signer::SignerError::Disconnected));
-                            let _ = inbox.send(Cmd::Engine(EngineMsg::SignerCompleted(
-                                id, generation, result,
-                            )));
-                        },
+                    let canceller = pending.canceller();
+                    registry.track_pending_write(
+                        id,
+                        generation,
+                        Box::new(move || canceller.cancel()),
                     );
-                    if result.is_ok() {
-                        registry.track_pending_write(id, generation, cancel);
-                    } else {
-                        let _ = runtime
-                            .self_inbox
-                            .send(Cmd::Engine(EngineMsg::SignerCompleted(
-                                id,
-                                generation,
-                                Err(nmp_signer::SignerError::Unavailable),
-                            )));
-                    }
+                    runtime.runtime.spawn(async move {
+                        let result = pending.await;
+                        let _ = inbox.send(Cmd::Engine(EngineMsg::SignerCompleted(
+                            id, generation, result,
+                        )));
+                    });
                 }
             },
             None => {
@@ -5551,7 +5222,7 @@ fn dispatch_effect(
                 registry,
                 &runtime.auth_policies.borrow(),
                 &mut runtime.auth_tasks.borrow_mut(),
-                runtime.native_tasks,
+                runtime.runtime,
                 runtime.self_inbox,
                 &mut bind,
             );
@@ -5877,7 +5548,6 @@ impl DiagnosticsHandle {
 #[derive(Clone)]
 pub struct Handle {
     inbox: Sender<Cmd>,
-    native_tasks: nmp_executor::Executor,
     relay_information: RelayInformationService,
 }
 
@@ -6046,10 +5716,12 @@ impl Handle {
 
     /// Open a live subscription. Blocks (briefly — one engine-thread round
     /// trip, never network-bound) until `EngineCore` has assigned the
-    /// `HandleId` and the row channel is registered, then returns both. An
-    /// OS refusal to create an initially required relay worker rolls the
-    /// subscription back and returns [`EngineThreadError::ThreadUnavailable`]
-    /// before a handle escapes.
+    /// `HandleId` and the row channel is registered, then returns both. #704
+    /// (review): a relay whose initially-required connection worker cannot be
+    /// opened — including a rare OS thread-spawn refusal — is NOT a subscription
+    /// failure; that relay is reported as unavailable in acquisition evidence
+    /// and the subscription proceeds on its other sources. An unwindowed
+    /// subscription therefore never returns a construction error here.
     ///
     /// # Panics
     /// If the engine thread has already shut down. Calling `subscribe`
@@ -6102,8 +5774,8 @@ impl Handle {
     /// (#485). Monotonic, idempotent, and clamped to the window's declared
     /// `max_rows`. Returns `None` when the engine thread is gone (the facade
     /// maps this to `EngineClosed`); `Some(Ok(()))` when the advance was
-    /// accepted (or was a no-op / `AtBound` beat); `Some(Err(_))` for a staged
-    /// advance the store or transport could not serve.
+    /// accepted (or was a no-op / `AtBound` beat); `Some(Err(_))` when the
+    /// canonical store could not stage the advance.
     pub fn request_rows(
         &self,
         handle: HistoryHandle,
@@ -6207,10 +5879,9 @@ impl Handle {
     }
 
     /// Ask the currently active registered signer to sign one exact event,
-    /// without accepting a write or touching the canonical store/outbox.
-    /// Admission reserves a finite native-task slot before the signer is
-    /// invoked; a pending remote operation is cancellable through the
-    /// returned handle and engine shutdown.
+    /// without accepting a write or touching the canonical store/outbox. A
+    /// pending remote operation is cancellable through the returned handle and
+    /// engine shutdown; #704 removed the admission slot — nothing is refused.
     pub fn sign_event(
         &self,
         unsigned: UnsignedEvent,
@@ -6231,17 +5902,10 @@ impl Handle {
         unsigned: UnsignedEvent,
         completion: impl FnOnce(Result<SignedEvent, SignEventError>) + Send + 'static,
     ) -> Result<SignEventCancel, SignEventError> {
-        let reservation = self.native_tasks.reserve("sign-event").map_err(|error| {
-            SignEventError::ThreadUnavailable {
-                reason: error.to_string(),
-                component: error.component,
-            }
-        })?;
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox
             .send(Cmd::SignEvent {
                 unsigned,
-                reservation,
                 completion: Box::new(completion),
                 reply: reply_tx,
             })

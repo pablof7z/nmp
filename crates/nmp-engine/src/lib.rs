@@ -30,7 +30,7 @@ pub mod runtime;
 /// falsifier instrumentation). Covers the executor's transient-adapter threads
 /// and the engine runtime/bridge threads; the thread-scaling falsifier asserts
 /// the delta across opening many observations is 0.
-pub use nmp_executor::nmp_threads_spawned;
+pub use nmp_executor::{nmp_threads_live, nmp_threads_spawned};
 
 pub use runtime::{
     AddAuthPolicyError, AuthPolicy, AuthPolicyDecision, AuthPolicyError, AuthPolicyOp,

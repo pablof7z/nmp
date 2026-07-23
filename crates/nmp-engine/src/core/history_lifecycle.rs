@@ -323,13 +323,6 @@ impl<S: EventStore> EngineCore<S> {
             }
         };
         debug_assert!(added <= needed);
-        let preflight_relays = self
-            .histories
-            .get(&id)
-            .filter(|state| state.acquisition.contributes_wire())
-            .map(|_| shadow_plan.reqs.keys().cloned().collect())
-            .unwrap_or_default();
-        effects.push(Effect::PreflightHistoryRelays(preflight_relays));
         effects.push(Effect::HistoryLoadResult(id, Ok(())));
         effects
     }
@@ -337,9 +330,8 @@ impl<S: EventStore> EngineCore<S> {
     /// Stage a single `AtBound { max }` frame beat: the window is already at
     /// its declared ceiling, so `request_rows` cannot grow it, but the caller
     /// still gets one delivered fact. It rides the same staged commit path as
-    /// a real advance (empty relay preflight, no opened handles, no target
-    /// change) so it conflates identically and rolls back cleanly if the
-    /// runtime never accepts it.
+    /// a real advance (no opened handles and no target change) so it conflates
+    /// identically and rolls back cleanly if the runtime never accepts it.
     pub(super) fn stage_history_atbound(
         &mut self,
         id: HistorySessionId,
@@ -366,10 +358,7 @@ impl<S: EventStore> EngineCore<S> {
             added_row_ids: Vec::new(),
             staged_batches: vec![batch],
         });
-        vec![
-            Effect::PreflightHistoryRelays(BTreeSet::new()),
-            Effect::HistoryLoadResult(id, Ok(())),
-        ]
+        vec![Effect::HistoryLoadResult(id, Ok(()))]
     }
 
     pub(super) fn on_commit_history_load(&mut self, id: HistorySessionId) -> Vec<Effect> {

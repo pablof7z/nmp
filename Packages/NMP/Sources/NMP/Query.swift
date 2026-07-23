@@ -77,7 +77,7 @@ public struct NMPQuery: AsyncSequence, Sendable {
     ///
     /// Throws only the synchronous refusals: `NMPRequestRowsError`
     /// (`.unwindowed` on a query opened without a window, `.engineClosed`,
-    /// `.storeUnavailable`, `.transportUnavailable(reason:)`).
+    /// `.storeUnavailable`).
     public func requestRows(atLeast: UInt64) throws {
         do {
             try handle.requestRows(atLeast: atLeast)

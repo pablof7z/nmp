@@ -199,9 +199,14 @@ pub nmp::EngineError::AuthCapabilityInstanceExhausted
 pub nmp::EngineError::AuthCapabilityRegistryFull
 pub nmp::EngineError::AuthCapabilityRegistryFull::limit: usize
 pub nmp::EngineError::EngineClosed
+pub nmp::EngineError::EngineStartFailed
+pub nmp::EngineError::EngineStartFailed::component: alloc::string::String
+pub nmp::EngineError::EngineStartFailed::reason: alloc::string::String
 pub nmp::EngineError::InvalidRelayUrl
 pub nmp::EngineError::InvalidRelayUrl::url: alloc::string::String
 pub nmp::EngineError::InvalidSecretKey
+pub nmp::EngineError::ObservationUnavailable
+pub nmp::EngineError::ObservationUnavailable::reason: alloc::string::String
 pub nmp::EngineError::ReceiptCorrelationIdExhausted
 pub nmp::EngineError::SignerMissingPublicKey
 pub nmp::EngineError::StoreOpenFailed
@@ -210,9 +215,6 @@ pub nmp::EngineError::StoreResetFailed
 pub nmp::EngineError::StoreResetFailed::reason: alloc::string::String
 pub nmp::EngineError::StoreStillOpen
 pub nmp::EngineError::StoreStillOpen::path: alloc::string::String
-pub nmp::EngineError::ThreadUnavailable
-pub nmp::EngineError::ThreadUnavailable::component: alloc::string::String
-pub nmp::EngineError::ThreadUnavailable::reason: alloc::string::String
 pub nmp::EngineError::WindowInitialExceedsMax
 pub nmp::EngineError::WindowInitialExceedsMax::initial: usize
 pub nmp::EngineError::WindowInitialExceedsMax::max: usize
@@ -263,10 +265,6 @@ pub nmp::RelayInformationError::InvalidDocument::reason: alloc::string::String
 pub nmp::RelayInformationError::ResponseTooLarge
 pub nmp::RelayInformationError::ResponseTooLarge::limit_bytes: u64
 pub nmp::RelayInformationError::ServiceClosed
-pub nmp::RelayInformationError::ThreadUnavailable
-pub nmp::RelayInformationError::ThreadUnavailable::reason: alloc::string::String
-pub nmp::RelayInformationError::WaiterSaturated
-pub nmp::RelayInformationError::WaiterSaturated::capacity: usize
 impl core::clone::Clone for nmp::RelayInformationError
 pub fn nmp::RelayInformationError::clone(&self) -> nmp::RelayInformationError
 impl core::cmp::Eq for nmp::RelayInformationError
@@ -325,11 +323,9 @@ impl core::marker::Unpin for nmp::RelayInformationRequestError
 impl core::marker::UnsafeUnpin for nmp::RelayInformationRequestError
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::RelayInformationRequestError
 impl core::panic::unwind_safe::UnwindSafe for nmp::RelayInformationRequestError
-#[non_exhaustive] pub enum nmp::RequestRowsError
+pub enum nmp::RequestRowsError
 pub nmp::RequestRowsError::EngineClosed
 pub nmp::RequestRowsError::StoreUnavailable
-pub nmp::RequestRowsError::TransportUnavailable
-pub nmp::RequestRowsError::TransportUnavailable::reason: alloc::string::String
 pub nmp::RequestRowsError::Unwindowed
 impl core::clone::Clone for nmp::RequestRowsError
 pub fn nmp::RequestRowsError::clone(&self) -> nmp::RequestRowsError
@@ -21045,55 +21041,6 @@ reexport nmp::Nip46Error => nmp_signer::nip46::Nip46Error
                         "struct_field": {
                           "resolved_path": {
                             "args": null,
-                            "path": "String",
-                            "resolved_item": {
-                              "path": "alloc::string::String"
-                            }
-                          }
-                        }
-                      },
-                      "name": "component",
-                      "visibility": "default"
-                    },
-                    {
-                      "attrs": [],
-                      "inner": {
-                        "struct_field": {
-                          "resolved_path": {
-                            "args": null,
-                            "path": "String",
-                            "resolved_item": {
-                              "path": "alloc::string::String"
-                            }
-                          }
-                        }
-                      },
-                      "name": "reason",
-                      "visibility": "default"
-                    }
-                  ],
-                  "has_stripped_fields": false
-                }
-              }
-            }
-          },
-          "name": "ThreadUnavailable",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": {
-                "struct": {
-                  "fields": [
-                    {
-                      "attrs": [],
-                      "inner": {
-                        "struct_field": {
-                          "resolved_path": {
-                            "args": null,
                             "path": "nostr::PublicKey",
                             "resolved_item": {
                               "definition": {
@@ -23106,6 +23053,72 @@ reexport nmp::Nip46Invitation => nmp_signer::nip46::Nip46Invitation
                                                                     }
                                                                   },
                                                                   "name": "pending_channel_with_cancel",
+                                                                  "visibility": "public"
+                                                                },
+                                                                {
+                                                                  "attrs": [],
+                                                                  "inner": {
+                                                                    "function": {
+                                                                      "default_unstable": null,
+                                                                      "generics": {
+                                                                        "params": [],
+                                                                        "where_predicates": []
+                                                                      },
+                                                                      "has_body": true,
+                                                                      "header": {
+                                                                        "abi": "Rust",
+                                                                        "is_async": true,
+                                                                        "is_const": false,
+                                                                        "is_unsafe": false
+                                                                      },
+                                                                      "sig": {
+                                                                        "inputs": [
+                                                                          [
+                                                                            "self",
+                                                                            {
+                                                                              "generic": "Self"
+                                                                            }
+                                                                          ]
+                                                                        ],
+                                                                        "is_c_variadic": false,
+                                                                        "output": {
+                                                                          "resolved_path": {
+                                                                            "args": {
+                                                                              "angle_bracketed": {
+                                                                                "args": [
+                                                                                  {
+                                                                                    "type": {
+                                                                                      "generic": "T"
+                                                                                    }
+                                                                                  },
+                                                                                  {
+                                                                                    "type": {
+                                                                                      "resolved_path": {
+                                                                                        "args": null,
+                                                                                        "path": "SignerError",
+                                                                                        "resolved_item": {
+                                                                                          "definition": {
+                                                                                            "previously_defined": "nmp_signer::op::SignerError"
+                                                                                          },
+                                                                                          "path": "nmp_signer::op::SignerError"
+                                                                                        }
+                                                                                      }
+                                                                                    }
+                                                                                  }
+                                                                                ],
+                                                                                "constraints": []
+                                                                              }
+                                                                            },
+                                                                            "path": "Result",
+                                                                            "resolved_item": {
+                                                                              "path": "core::result::Result"
+                                                                            }
+                                                                          }
+                                                                        }
+                                                                      }
+                                                                    }
+                                                                  },
+                                                                  "name": "recv_async",
                                                                   "visibility": "public"
                                                                 },
                                                                 {
@@ -26159,55 +26172,6 @@ reexport nmp::SignEventError => nmp_engine::runtime::SignEventError
             }
           },
           "name": "InvalidSignerOutput",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": {
-                "struct": {
-                  "fields": [
-                    {
-                      "attrs": [],
-                      "inner": {
-                        "struct_field": {
-                          "resolved_path": {
-                            "args": null,
-                            "path": "String",
-                            "resolved_item": {
-                              "path": "alloc::string::String"
-                            }
-                          }
-                        }
-                      },
-                      "name": "component",
-                      "visibility": "default"
-                    },
-                    {
-                      "attrs": [],
-                      "inner": {
-                        "struct_field": {
-                          "resolved_path": {
-                            "args": null,
-                            "path": "String",
-                            "resolved_item": {
-                              "path": "alloc::string::String"
-                            }
-                          }
-                        }
-                      },
-                      "name": "reason",
-                      "visibility": "default"
-                    }
-                  ],
-                  "has_stripped_fields": false
-                }
-              }
-            }
-          },
-          "name": "ThreadUnavailable",
           "visibility": "default"
         },
         {

@@ -72,8 +72,8 @@ enum class RelayInformationFreshness {
  * evidence, and by `NMPError.RelayInformationUnavailable` when acquisition
  * fails before any last-good document exists. */
 sealed interface RelayInformationErrorKind {
-    data class WaiterSaturated(val capacity: ULong) : RelayInformationErrorKind
-    data class ThreadUnavailable(val reason: String) : RelayInformationErrorKind
+    // #704: `WaiterSaturated`/`ThreadUnavailable` were removed -- the async
+    // NIP-11 fetch has no waiter/thread admission refusal to report.
     data object ServiceClosed : RelayInformationErrorKind
     data object CredentialedRelayUrl : RelayInformationErrorKind
     data class Http(val reason: String) : RelayInformationErrorKind
@@ -83,8 +83,6 @@ sealed interface RelayInformationErrorKind {
     companion object {
         internal fun from(ffi: FfiRelayInformationErrorKind): RelayInformationErrorKind =
             when (ffi) {
-                is FfiRelayInformationErrorKind.WaiterSaturated -> WaiterSaturated(ffi.capacity)
-                is FfiRelayInformationErrorKind.ThreadUnavailable -> ThreadUnavailable(ffi.reason)
                 FfiRelayInformationErrorKind.ServiceClosed -> ServiceClosed
                 FfiRelayInformationErrorKind.CredentialedRelayUrl -> CredentialedRelayUrl
                 is FfiRelayInformationErrorKind.Http -> Http(ffi.reason)
@@ -99,10 +97,6 @@ sealed interface RelayInformationErrorKind {
  * only want a message rather than a branch on the typed kind. */
 fun RelayInformationErrorKind.describe(): String =
     when (this) {
-        is RelayInformationErrorKind.WaiterSaturated ->
-            "NIP-11 acquisition refused: per-relay waiter capacity $capacity is full"
-        is RelayInformationErrorKind.ThreadUnavailable ->
-            "NIP-11 acquisition thread unavailable: $reason"
         RelayInformationErrorKind.ServiceClosed -> "NIP-11 acquisition service is closed"
         RelayInformationErrorKind.CredentialedRelayUrl ->
             "NIP-11 acquisition refuses relay URL userinfo"
