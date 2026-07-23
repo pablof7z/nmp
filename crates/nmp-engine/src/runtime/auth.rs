@@ -7,14 +7,14 @@
 //! session.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 
-use crossbeam_channel as cb;
-use nmp_signer::{
-    pending_signer_cancellation, PendingSignerCancel, PendingSignerCancelled, SignerError, SignerOp,
-};
+use nmp_signer::{SignerError, SignerOp};
 use nmp_transport::{EphemeralSendOutcome, EphemeralSendStart, Pool, WireFrame};
 use nostr::{ClientMessage, JsonUtil, PublicKey, RelayUrl};
 
@@ -88,35 +88,148 @@ impl std::fmt::Display for AuthPolicyError {
 impl std::error::Error for AuthPolicyError {}
 
 type PolicyResult = Result<AuthPolicyDecision, AuthPolicyError>;
-type PendingPolicySlot = Mutex<Option<cb::Sender<PolicyResult>>>;
 type PendingPolicyCancel = Box<dyn FnOnce() + Send + 'static>;
+
+// #704: the AUTH policy completion door is a hand-rolled waker-aware one-shot
+// (mirroring `nmp-signer`'s `PendingSignerOp`), replacing the old
+// `crossbeam bounded(1)` + `recv_or_cancel` handshake. The engine `.await`s it
+// on the shared runtime, holding no OS thread while the app policy is pending;
+// cancellation is bound in via a `PolicyCanceller`, and dropping an unresolved
+// op (or its awaiting future) runs the adapter cancel hook exactly once.
+enum PolicyDoorLifecycle {
+    Open,
+    /// A result was claimed; `None` means the consumer already took it.
+    Resolved(Option<PolicyResult>),
+    /// Cancellation won before a sender claimed the result.
+    CancelledUnresolved,
+    /// Cancellation is terminal. `Some` preserves a value that won first;
+    /// `None` records that a later sender claim was truthfully refused.
+    CancelledResolved(Option<PolicyResult>),
+    ReceiverGoneUnresolved,
+    ReceiverGoneResolved,
+}
+
+struct PolicyDoorState {
+    lifecycle: PolicyDoorLifecycle,
+    waker: Option<Waker>,
+}
+
+struct PolicyDoor {
+    state: Mutex<PolicyDoorState>,
+    senders: AtomicUsize,
+}
+
+impl PolicyDoor {
+    fn take_waker(state: &mut PolicyDoorState) -> Option<Waker> {
+        state.waker.take()
+    }
+
+    fn cancel(state: &mut PolicyDoorState) {
+        let previous = std::mem::replace(&mut state.lifecycle, PolicyDoorLifecycle::Open);
+        state.lifecycle = match previous {
+            PolicyDoorLifecycle::Open => PolicyDoorLifecycle::CancelledUnresolved,
+            PolicyDoorLifecycle::Resolved(value) => PolicyDoorLifecycle::CancelledResolved(value),
+            PolicyDoorLifecycle::CancelledUnresolved => PolicyDoorLifecycle::CancelledUnresolved,
+            PolicyDoorLifecycle::CancelledResolved(value) => {
+                PolicyDoorLifecycle::CancelledResolved(value)
+            }
+            PolicyDoorLifecycle::ReceiverGoneUnresolved => {
+                PolicyDoorLifecycle::ReceiverGoneUnresolved
+            }
+            PolicyDoorLifecycle::ReceiverGoneResolved => PolicyDoorLifecycle::ReceiverGoneResolved,
+        };
+    }
+
+    fn mark_receiver_gone(state: &mut PolicyDoorState) {
+        let previous = std::mem::replace(&mut state.lifecycle, PolicyDoorLifecycle::Open);
+        state.lifecycle = match previous {
+            PolicyDoorLifecycle::Open
+            | PolicyDoorLifecycle::CancelledUnresolved
+            | PolicyDoorLifecycle::ReceiverGoneUnresolved => {
+                PolicyDoorLifecycle::ReceiverGoneUnresolved
+            }
+            PolicyDoorLifecycle::Resolved(_)
+            | PolicyDoorLifecycle::CancelledResolved(_)
+            | PolicyDoorLifecycle::ReceiverGoneResolved => {
+                PolicyDoorLifecycle::ReceiverGoneResolved
+            }
+        };
+    }
+}
 
 /// One-shot completion door for a pending [`AuthPolicyOp`].
 pub struct AuthPolicyPendingSender {
-    sender: Arc<PendingPolicySlot>,
+    door: Arc<PolicyDoor>,
 }
 
 impl Clone for AuthPolicyPendingSender {
     fn clone(&self) -> Self {
+        self.door.senders.fetch_add(1, Ordering::AcqRel);
         Self {
-            sender: Arc::clone(&self.sender),
+            door: Arc::clone(&self.door),
+        }
+    }
+}
+
+impl Drop for AuthPolicyPendingSender {
+    fn drop(&mut self) {
+        if self.door.senders.fetch_sub(1, Ordering::AcqRel) == 1 {
+            let waker = {
+                let mut state = self
+                    .door
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                match state.lifecycle {
+                    PolicyDoorLifecycle::Resolved(_)
+                    | PolicyDoorLifecycle::CancelledResolved(_)
+                    | PolicyDoorLifecycle::ReceiverGoneResolved => None,
+                    PolicyDoorLifecycle::Open
+                    | PolicyDoorLifecycle::CancelledUnresolved
+                    | PolicyDoorLifecycle::ReceiverGoneUnresolved => {
+                        PolicyDoor::take_waker(&mut state)
+                    }
+                }
+            };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
         }
     }
 }
 
 impl AuthPolicyPendingSender {
     pub fn resolve(&self, result: PolicyResult) -> Result<(), AuthPolicyResolveError> {
-        let Some(sender) = self
-            .sender
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .take()
-        else {
-            return Err(AuthPolicyResolveError::AlreadyResolved(result));
+        let waker = {
+            let mut state = self
+                .door
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            match state.lifecycle {
+                PolicyDoorLifecycle::Open => {
+                    state.lifecycle = PolicyDoorLifecycle::Resolved(Some(result));
+                }
+                PolicyDoorLifecycle::CancelledUnresolved => {
+                    state.lifecycle = PolicyDoorLifecycle::CancelledResolved(None);
+                    return Err(AuthPolicyResolveError::ReceiverDropped(result));
+                }
+                PolicyDoorLifecycle::ReceiverGoneUnresolved => {
+                    state.lifecycle = PolicyDoorLifecycle::ReceiverGoneResolved;
+                    return Err(AuthPolicyResolveError::ReceiverDropped(result));
+                }
+                PolicyDoorLifecycle::Resolved(_)
+                | PolicyDoorLifecycle::CancelledResolved(_)
+                | PolicyDoorLifecycle::ReceiverGoneResolved => {
+                    return Err(AuthPolicyResolveError::AlreadyResolved(result));
+                }
+            }
+            PolicyDoor::take_waker(&mut state)
         };
-        sender
-            .send(result)
-            .map_err(|error| AuthPolicyResolveError::ReceiverDropped(error.0))
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        Ok(())
     }
 }
 
@@ -126,78 +239,181 @@ pub enum AuthPolicyResolveError {
     ReceiverDropped(PolicyResult),
 }
 
+/// Cancels one [`PendingAuthPolicyOp`] (#704): wakes its awaiting future to a
+/// "cancelled" (no-decision) end. Bound into the door itself.
+#[derive(Clone)]
+struct PolicyCanceller {
+    door: Arc<PolicyDoor>,
+}
+
+impl PolicyCanceller {
+    fn cancel(&self) {
+        let waker = {
+            let mut state = self
+                .door
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            PolicyDoor::cancel(&mut state);
+            PolicyDoor::take_waker(&mut state)
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+}
+
+enum PendingPolicyLifecycle {
+    Pending(Option<PendingPolicyCancel>),
+    Finished,
+}
+
+#[derive(Clone, Copy)]
+enum PendingPolicyFinish {
+    CancelAdapter,
+    SuppressCancel,
+}
+
 pub struct PendingAuthPolicyOp {
-    receiver: Option<cb::Receiver<PolicyResult>>,
-    cancel: Option<PendingPolicyCancel>,
+    door: Arc<PolicyDoor>,
+    lifecycle: PendingPolicyLifecycle,
 }
 
 impl PendingAuthPolicyOp {
-    fn recv_or_cancel(mut self, cancelled: cb::Receiver<()>) -> Option<PolicyResult> {
-        let receiver = self
-            .receiver
-            .take()
-            .expect("pending policy receiver consumed once");
-        let outcome = cb::select_biased! {
-            recv(cancelled) -> _ => self.cancel_or_receive(&receiver),
-            recv(receiver) -> result => {
-                self.cancel = None;
-                Some(result.unwrap_or(Err(AuthPolicyError::Unavailable)))
-            }
-        };
-        outcome
+    fn canceller(&self) -> PolicyCanceller {
+        PolicyCanceller {
+            door: Arc::clone(&self.door),
+        }
     }
 
-    /// Terminal cancellation first consumes an answer already committed to
-    /// the channel. Only a successful atomic cancellation may abandon the
-    /// receiver. An adapter whose resolver already owns completion keeps this
-    /// callback blocked until the result is sent or its sender disconnects;
-    /// the receiver stays alive for that entire handshake.
-    fn cancel_or_receive(&mut self, receiver: &cb::Receiver<PolicyResult>) -> Option<PolicyResult> {
-        match receiver.try_recv() {
-            Ok(result) => {
-                self.cancel = None;
-                Some(result)
+    /// Drain a terminal outcome, or `None` while still open. The awaited value
+    /// is `Some(result)` for a resolved decision or a disconnect (mapped to
+    /// `Unavailable`), and `None` for a cancellation with no queued decision.
+    /// A queued value is consumed before a cancellation is honored.
+    fn take_terminal(state: &mut PolicyDoorState, senders: usize) -> Option<Option<PolicyResult>> {
+        match &mut state.lifecycle {
+            PolicyDoorLifecycle::Resolved(value) => Some(Some(
+                value.take().unwrap_or(Err(AuthPolicyError::Unavailable)),
+            )),
+            PolicyDoorLifecycle::CancelledResolved(value) => match value.take() {
+                Some(value) => Some(Some(value)),
+                None => Some(None),
+            },
+            PolicyDoorLifecycle::CancelledUnresolved => Some(None),
+            PolicyDoorLifecycle::Open if senders == 0 => {
+                Some(Some(Err(AuthPolicyError::Unavailable)))
             }
-            Err(cb::TryRecvError::Disconnected) => {
-                self.cancel = None;
-                Some(Err(AuthPolicyError::Unavailable))
+            PolicyDoorLifecycle::ReceiverGoneUnresolved
+            | PolicyDoorLifecycle::ReceiverGoneResolved => {
+                Some(Some(Err(AuthPolicyError::Unavailable)))
             }
-            Err(cb::TryRecvError::Empty) => {
-                if let Some(cancel) = self.cancel.take() {
-                    cancel();
-                }
-                match receiver.try_recv() {
-                    Ok(result) => Some(result),
-                    Err(cb::TryRecvError::Disconnected) => Some(Err(AuthPolicyError::Unavailable)),
-                    Err(cb::TryRecvError::Empty) => None,
-                }
+            PolicyDoorLifecycle::Open => None,
+        }
+    }
+
+    fn finish(&mut self, disposition: PendingPolicyFinish) {
+        let previous = std::mem::replace(&mut self.lifecycle, PendingPolicyLifecycle::Finished);
+        let PendingPolicyLifecycle::Pending(cancel) = previous else {
+            return;
+        };
+        if matches!(disposition, PendingPolicyFinish::CancelAdapter) {
+            if let Some(cancel) = cancel {
+                cancel();
             }
         }
+    }
+
+    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<PolicyResult>> {
+        let mut state = self
+            .door
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let senders = self.door.senders.load(Ordering::Acquire);
+        if let Some(outcome) = Self::take_terminal(&mut state, senders) {
+            // `None` is the cancelled-with-no-decision end — the only path that
+            // runs the adapter cancel hook. A queued value (even under a racing
+            // cancel) or a disconnect delivers a result and suppresses it.
+            let disposition = match &outcome {
+                None => PendingPolicyFinish::CancelAdapter,
+                Some(_) => PendingPolicyFinish::SuppressCancel,
+            };
+            state.waker = None;
+            drop(state);
+            self.finish(disposition);
+            return Poll::Ready(outcome);
+        }
+        state.waker = Some(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
+impl Future for PendingAuthPolicyOp {
+    type Output = Option<PolicyResult>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.poll_recv(cx)
     }
 }
 
 impl Drop for PendingAuthPolicyOp {
     fn drop(&mut self) {
-        let Some(receiver) = self.receiver.take() else {
+        // A future that already drained a terminal outcome (poll_recv →
+        // finish) has run its cancel/complete linearization already.
+        if matches!(self.lifecycle, PendingPolicyLifecycle::Finished) {
             return;
-        };
-        // Dropping the pending operation is the same terminal-cancel door as
-        // an epoch/capability signal. A resolver that already owns completion
-        // must still be allowed to send before the receiver is released.
-        let _ = self.cancel_or_receive(&receiver);
-        self.cancel = None;
-    }
-}
-
-impl PendingAuthPolicyOp {
-    fn with_cancel_handshake(
-        receiver: cb::Receiver<PolicyResult>,
-        cancel: Option<PendingPolicyCancel>,
-    ) -> Self {
-        Self {
-            receiver: Some(receiver),
-            cancel,
         }
+        // Terminal-cancel door (an epoch/capability signal, or a dropped
+        // awaiting future). This must reproduce the pre-#704 crossbeam
+        // handshake: a resolver that already owns completion is still allowed
+        // to deliver before the receiver is released, and a value already
+        // committed to the door wins over cancellation (suppressing the
+        // adapter cancel hook). Marking `receiver_gone` up front would defeat
+        // an in-flight `resolve()` — so it is set only after the handshake.
+        {
+            let mut state = self
+                .door
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let resolution_won = match &mut state.lifecycle {
+                PolicyDoorLifecycle::Resolved(value) => {
+                    let _ = value.take();
+                    true
+                }
+                PolicyDoorLifecycle::CancelledResolved(value) if value.is_some() => {
+                    let _ = value.take();
+                    true
+                }
+                PolicyDoorLifecycle::Open
+                | PolicyDoorLifecycle::CancelledUnresolved
+                | PolicyDoorLifecycle::CancelledResolved(_)
+                | PolicyDoorLifecycle::ReceiverGoneUnresolved
+                | PolicyDoorLifecycle::ReceiverGoneResolved => false,
+            };
+            if resolution_won {
+                PolicyDoor::mark_receiver_gone(&mut state);
+                drop(state);
+                self.finish(PendingPolicyFinish::SuppressCancel);
+                return;
+            }
+        }
+        // No committed resolution yet. Run the adapter cancel hook WITHOUT
+        // holding the door lock and WITHOUT yet marking the receiver gone, so a
+        // resolver racing this handshake still resolves successfully; the hook
+        // blocks until that resolver finishes (or its sender disconnects).
+        let previous = std::mem::replace(&mut self.lifecycle, PendingPolicyLifecycle::Finished);
+        if let PendingPolicyLifecycle::Pending(Some(cancel)) = previous {
+            cancel();
+        }
+        // The handshake is over: consume any value the racing resolver
+        // delivered and release the receiver so a later resolve is refused.
+        let mut state = self
+            .door
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        PolicyDoor::mark_receiver_gone(&mut state);
     }
 }
 
@@ -240,19 +456,28 @@ impl AuthPolicyOp {
     fn pending_channel_from_cancel(
         cancel: Option<PendingPolicyCancel>,
     ) -> (AuthPolicyPendingSender, Self) {
-        let (sender, receiver) = cb::bounded(1);
+        let door = Arc::new(PolicyDoor {
+            state: Mutex::new(PolicyDoorState {
+                lifecycle: PolicyDoorLifecycle::Open,
+                waker: None,
+            }),
+            senders: AtomicUsize::new(1),
+        });
         (
             AuthPolicyPendingSender {
-                sender: Arc::new(Mutex::new(Some(sender))),
+                door: Arc::clone(&door),
             },
-            Self::Pending(PendingAuthPolicyOp::with_cancel_handshake(receiver, cancel)),
+            Self::Pending(PendingAuthPolicyOp {
+                door,
+                lifecycle: PendingPolicyLifecycle::Pending(cancel),
+            }),
         )
     }
 }
 
 /// App-owned NIP-42 authorization policy. `evaluate` must return a
-/// ready-or-pending operation without blocking; the runtime executes it on
-/// its existing finite native executor and owns pending cancellation.
+/// ready-or-pending operation without blocking; the engine-owned async runtime
+/// awaits it and owns pending cancellation.
 pub trait AuthPolicy: Send {
     fn evaluate(&self, request: AuthPolicyRequest) -> AuthPolicyOp;
 }
@@ -410,41 +635,62 @@ impl AuthCapabilityInstances {
     }
 }
 
-const AUTH_TASK_OPEN: u8 = 0;
-const AUTH_TASK_CANCELLED: u8 = 1;
-const AUTH_TASK_COMPLETED: u8 = 2;
+#[repr(u8)]
+#[derive(Clone, Copy)]
+enum AuthTaskState {
+    Open,
+    Cancelled,
+    Completed,
+}
 
+/// #704: the AUTH task's cancellation is bound to whatever in-flight pending op
+/// the async operation is currently awaiting (policy OR signer — an operation
+/// awaits at most one at a time). The operation `arm`s that op's canceller into
+/// this terminal; `cancel()` fires it once, waking the awaiting future to a
+/// cancelled end. No crossbeam channels remain.
 struct AuthTaskTerminal {
     state: AtomicU8,
-    signer_cancel: PendingSignerCancel,
-    policy_cancel: cb::Sender<()>,
+    canceller: Mutex<Option<Box<dyn Fn() + Send>>>,
 }
 
 impl AuthTaskTerminal {
-    fn new() -> (Arc<Self>, PendingSignerCancelled, cb::Receiver<()>) {
-        let (signer_cancel, signer_cancelled) = pending_signer_cancellation();
-        let (policy_cancel, policy_cancelled) = cb::bounded(1);
-        (
-            Arc::new(Self {
-                state: AtomicU8::new(AUTH_TASK_OPEN),
-                signer_cancel,
-                policy_cancel,
-            }),
-            signer_cancelled,
-            policy_cancelled,
-        )
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: AtomicU8::new(AuthTaskState::Open as u8),
+            canceller: Mutex::new(None),
+        })
+    }
+
+    /// Install the canceller for the pending op the operation is about to
+    /// await. If the terminal is already cancelled, fire it immediately.
+    fn arm(&self, canceller: Box<dyn Fn() + Send>) {
+        let guard = self
+            .canceller
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if self.state.load(Ordering::Acquire) == AuthTaskState::Cancelled as u8 {
+            drop(guard);
+            canceller();
+        } else {
+            let mut guard = guard;
+            *guard = Some(canceller);
+        }
     }
 
     fn is_open(&self) -> bool {
-        self.state.load(Ordering::Acquire) == AUTH_TASK_OPEN
+        self.state.load(Ordering::Acquire) == AuthTaskState::Open as u8
     }
 
     fn cancel(&self) -> bool {
+        let mut guard = self
+            .canceller
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         if self
             .state
             .compare_exchange(
-                AUTH_TASK_OPEN,
-                AUTH_TASK_CANCELLED,
+                AuthTaskState::Open as u8,
+                AuthTaskState::Cancelled as u8,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
@@ -452,16 +698,17 @@ impl AuthTaskTerminal {
         {
             return false;
         }
-        self.signer_cancel.cancel();
-        let _ = self.policy_cancel.try_send(());
+        if let Some(canceller) = guard.take() {
+            canceller();
+        }
         true
     }
 
     fn complete(&self) -> bool {
         self.state
             .compare_exchange(
-                AUTH_TASK_OPEN,
-                AUTH_TASK_COMPLETED,
+                AuthTaskState::Open as u8,
+                AuthTaskState::Completed as u8,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
@@ -476,12 +723,14 @@ struct ActiveAuthTask {
     terminal: Arc<AuthTaskTerminal>,
 }
 
+/// #704: the AUTH operation is an async future — it awaits the policy/signer
+/// completion door on the shared runtime, holding no OS thread. It arms its
+/// in-flight pending op's canceller into the terminal so cancellation reaches
+/// whatever it is currently awaiting.
 type AuthTaskOperation = Box<
     dyn FnOnce(
             Arc<AuthTaskTerminal>,
-            PendingSignerCancelled,
-            cb::Receiver<()>,
-        ) -> Option<AuthTaskOutcome>
+        ) -> Pin<Box<dyn Future<Output = Option<AuthTaskOutcome>> + Send>>
         + Send
         + 'static,
 >;
@@ -493,33 +742,23 @@ pub(super) struct PendingAuthTask {
     operation: AuthTaskOperation,
 }
 
+/// #704: the destructor-free release edge that replaces the executor
+/// `ReleaseId`. The async AUTH task posts this once its work is done (or its
+/// future is dropped); the reducer's [`AuthTaskRegistry::released`] then
+/// removes the exact active task and launches any pending replacement for the
+/// same session, exactly as the old reaper-driven release did.
+pub(super) struct AuthTaskReleaseToken {
+    session: nmp_grammar::RelaySessionKey,
+    terminal: Arc<AuthTaskTerminal>,
+}
+
+#[derive(Default)]
 pub(super) struct AuthTaskRegistry {
     active: HashMap<nmp_grammar::RelaySessionKey, ActiveAuthTask>,
     pending: HashMap<nmp_grammar::RelaySessionKey, PendingAuthTask>,
-    releases: HashMap<nmp_executor::ReleaseId, AuthTaskRelease>,
-    next_release_id: Option<u64>,
-    release_sender: Sender<nmp_executor::ReleaseId>,
-}
-
-impl Default for AuthTaskRegistry {
-    fn default() -> Self {
-        let (release_sender, release_receiver) = std::sync::mpsc::channel();
-        drop(release_receiver);
-        Self::with_release_sender(release_sender)
-    }
 }
 
 impl AuthTaskRegistry {
-    pub(super) fn with_release_sender(release_sender: Sender<nmp_executor::ReleaseId>) -> Self {
-        Self {
-            active: HashMap::new(),
-            pending: HashMap::new(),
-            releases: HashMap::new(),
-            next_release_id: Some(1),
-            release_sender,
-        }
-    }
-
     fn schedule(&mut self, task: PendingAuthTask) -> Option<PendingAuthTask> {
         let session = task.token.epoch.session.clone();
         if let Some(active) = self.active.get(&session) {
@@ -531,19 +770,8 @@ impl AuthTaskRegistry {
         }
     }
 
-    fn started(&mut self, task: ActiveAuthTask) -> Option<nmp_executor::ReleaseId> {
-        let value = self.next_release_id?;
-        self.next_release_id = value.checked_add(1);
-        let release_id = nmp_executor::ReleaseId::new(value);
-        self.releases.insert(
-            release_id,
-            AuthTaskRelease {
-                session: task.token.epoch.session.clone(),
-                terminal: Arc::clone(&task.terminal),
-            },
-        );
+    fn started(&mut self, task: ActiveAuthTask) {
         self.active.insert(task.token.epoch.session.clone(), task);
-        Some(release_id)
     }
 
     pub(super) fn cancel_epoch(&mut self, epoch: &AuthEpoch) {
@@ -609,20 +837,16 @@ impl AuthTaskRegistry {
         )
     }
 
-    pub(super) fn released(
-        &mut self,
-        release_id: nmp_executor::ReleaseId,
-    ) -> Option<PendingAuthTask> {
-        let release = self.releases.remove(&release_id)?;
+    pub(super) fn released(&mut self, token: AuthTaskReleaseToken) -> Option<PendingAuthTask> {
         let exact = self
             .active
-            .get(&release.session)
-            .is_some_and(|task| Arc::ptr_eq(&task.terminal, &release.terminal));
+            .get(&token.session)
+            .is_some_and(|task| Arc::ptr_eq(&task.terminal, &token.terminal));
         if !exact {
             return None;
         }
-        self.active.remove(&release.session);
-        self.pending.remove(&release.session)
+        self.active.remove(&token.session);
+        self.pending.remove(&token.session)
     }
 
     pub(super) fn shutdown(&mut self) {
@@ -633,18 +857,13 @@ impl AuthTaskRegistry {
     }
 
     pub(super) fn is_empty(&self) -> bool {
-        self.active.is_empty() && self.pending.is_empty() && self.releases.is_empty()
+        self.active.is_empty() && self.pending.is_empty()
     }
 
     #[cfg(test)]
     fn len(&self) -> usize {
         self.active.len() + self.pending.len()
     }
-}
-
-pub(super) struct AuthTaskRelease {
-    session: nmp_grammar::RelaySessionKey,
-    terminal: Arc<AuthTaskTerminal>,
 }
 
 pub(super) struct AuthTaskCompletion {
@@ -676,7 +895,7 @@ pub(super) fn dispatch(
     signers: &SignerRegistry,
     policies: &AuthPolicyRegistry,
     tasks: &mut AuthTaskRegistry,
-    native_tasks: &nmp_executor::Executor,
+    runtime: &tokio::runtime::Handle,
     inbox: &Sender<Cmd>,
     bind: &mut impl FnMut(AuthOpToken, AuthCapability, AuthCapabilityInstance),
 ) {
@@ -707,31 +926,37 @@ pub(super) fn dispatch(
                 AuthCapability::Policy,
                 instance,
                 tasks,
-                native_tasks,
+                runtime,
                 inbox,
                 bind,
-                move |terminal, _, policy_cancelled| {
-                    let op = policy
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner())
-                        .evaluate(request);
-                    let result = match op {
-                        AuthPolicyOp::Ready(result) => Some(result),
-                        AuthPolicyOp::Pending(pending) => pending.recv_or_cancel(policy_cancelled),
-                    };
-                    if !terminal.is_open() {
-                        return None;
-                    }
-                    Some(AuthTaskOutcome::Policy(match result? {
-                        Ok(AuthPolicyDecision::Allow) => AuthPolicyOutcome::Allow,
-                        Ok(AuthPolicyDecision::Deny { reason }) => {
-                            AuthPolicyOutcome::Deny { reason }
+                move |terminal| {
+                    Box::pin(async move {
+                        let op = policy
+                            .lock()
+                            .unwrap_or_else(|poison| poison.into_inner())
+                            .evaluate(request);
+                        let result: Option<PolicyResult> = match op {
+                            AuthPolicyOp::Ready(result) => Some(result),
+                            AuthPolicyOp::Pending(pending) => {
+                                let canceller = pending.canceller();
+                                terminal.arm(Box::new(move || canceller.cancel()));
+                                pending.await
+                            }
+                        };
+                        if !terminal.is_open() {
+                            return None;
                         }
-                        Err(AuthPolicyError::Unavailable) => AuthPolicyOutcome::Unavailable,
-                        Err(AuthPolicyError::Technical { reason }) => {
-                            AuthPolicyOutcome::Error { reason }
-                        }
-                    }))
+                        Some(AuthTaskOutcome::Policy(match result? {
+                            Ok(AuthPolicyDecision::Allow) => AuthPolicyOutcome::Allow,
+                            Ok(AuthPolicyDecision::Deny { reason }) => {
+                                AuthPolicyOutcome::Deny { reason }
+                            }
+                            Err(AuthPolicyError::Unavailable) => AuthPolicyOutcome::Unavailable,
+                            Err(AuthPolicyError::Technical { reason }) => {
+                                AuthPolicyOutcome::Error { reason }
+                            }
+                        }))
+                    })
                 },
             );
         }
@@ -749,36 +974,42 @@ pub(super) fn dispatch(
                 AuthCapability::Signer,
                 instance,
                 tasks,
-                native_tasks,
+                runtime,
                 inbox,
                 bind,
-                move |terminal, signer_cancelled, _| {
-                    let op = signer
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner())
-                        .sign(*unsigned);
-                    let result = match op {
-                        SignerOp::Ready(result) => Some(result),
-                        SignerOp::Pending(pending) => pending.recv_or_cancel(signer_cancelled),
-                    };
-                    if !terminal.is_open() {
-                        return None;
-                    }
-                    Some(AuthTaskOutcome::Signer(match result? {
-                        Ok(event) => AuthSignerOutcome::Signed(event),
-                        Err(SignerError::Rejected(reason)) => {
-                            AuthSignerOutcome::Rejected { reason }
-                        }
-                        Err(SignerError::InvalidResponse(reason)) => {
-                            AuthSignerOutcome::Error { reason }
-                        }
-                        Err(SignerError::Unavailable) => AuthSignerOutcome::Unavailable,
-                        Err(error @ (SignerError::Timeout | SignerError::Disconnected)) => {
-                            AuthSignerOutcome::Error {
-                                reason: error.to_string(),
+                move |terminal| {
+                    Box::pin(async move {
+                        let op = signer
+                            .lock()
+                            .unwrap_or_else(|poison| poison.into_inner())
+                            .sign(*unsigned);
+                        let result: Option<Result<nostr::Event, SignerError>> = match op {
+                            SignerOp::Ready(result) => Some(result),
+                            SignerOp::Pending(pending) => {
+                                let canceller = pending.canceller();
+                                terminal.arm(Box::new(move || canceller.cancel()));
+                                Some(pending.await)
                             }
+                        };
+                        if !terminal.is_open() {
+                            return None;
                         }
-                    }))
+                        Some(AuthTaskOutcome::Signer(match result? {
+                            Ok(event) => AuthSignerOutcome::Signed(event),
+                            Err(SignerError::Rejected(reason)) => {
+                                AuthSignerOutcome::Rejected { reason }
+                            }
+                            Err(SignerError::InvalidResponse(reason)) => {
+                                AuthSignerOutcome::Error { reason }
+                            }
+                            Err(SignerError::Unavailable) => AuthSignerOutcome::Unavailable,
+                            Err(error @ (SignerError::Timeout | SignerError::Disconnected)) => {
+                                AuthSignerOutcome::Error {
+                                    reason: error.to_string(),
+                                }
+                            }
+                        }))
+                    })
                 },
             );
         }
@@ -816,14 +1047,12 @@ fn start_auth_task(
     capability: AuthCapability,
     instance: AuthCapabilityInstance,
     tasks: &mut AuthTaskRegistry,
-    native_tasks: &nmp_executor::Executor,
+    runtime: &tokio::runtime::Handle,
     inbox: &Sender<Cmd>,
     bind: &mut impl FnMut(AuthOpToken, AuthCapability, AuthCapabilityInstance),
     operation: impl FnOnce(
             Arc<AuthTaskTerminal>,
-            PendingSignerCancelled,
-            cb::Receiver<()>,
-        ) -> Option<AuthTaskOutcome>
+        ) -> Pin<Box<dyn Future<Output = Option<AuthTaskOutcome>> + Send>>
         + Send
         + 'static,
 ) {
@@ -835,14 +1064,21 @@ fn start_auth_task(
         operation: Box::new(operation),
     };
     if let Some(ready) = tasks.schedule(pending) {
-        launch_auth_task(ready, tasks, native_tasks, inbox);
+        launch_auth_task(ready, tasks, runtime, inbox);
     }
 }
 
+/// #704: run one AUTH policy/signer operation as an async task on the engine
+/// runtime. It reserves NO admission slot (there is none). When the task's work
+/// is done — or its future is dropped (runtime shutdown / cancellation) — the
+/// release drop guard posts [`Cmd::AuthTaskReleased`], which removes the exact
+/// active task and launches any pending replacement for the same session; this
+/// preserves the one-active-task-per-session serialization the executor
+/// `ReleaseId` reaper used to drive.
 pub(super) fn launch_auth_task(
     task: PendingAuthTask,
     tasks: &mut AuthTaskRegistry,
-    native_tasks: &nmp_executor::Executor,
+    runtime: &tokio::runtime::Handle,
     inbox: &Sender<Cmd>,
 ) {
     let PendingAuthTask {
@@ -851,109 +1087,99 @@ pub(super) fn launch_auth_task(
         instance,
         operation,
     } = task;
-    let component = match capability {
-        AuthCapability::Policy => "auth-policy",
-        AuthCapability::Signer => "auth-signer",
-    };
-    let reservation = match native_tasks.reserve(component) {
-        Ok(reservation) => reservation,
-        Err(error) => {
-            enqueue_failure(
-                inbox,
-                token,
-                capability,
-                instance,
-                format!(
-                    "{component} executor saturated at capacity {}",
-                    error.capacity
-                ),
-            );
-            return;
-        }
-    };
-    let (terminal, signer_cancelled, policy_cancelled) = AuthTaskTerminal::new();
-    let shutdown_terminal = Arc::clone(&terminal);
-    let starter = match reservation.start_with_cancel(move || {
-        shutdown_terminal.cancel();
-    }) {
-        Ok(starter) => starter,
-        Err(error) => {
-            enqueue_failure(inbox, token, capability, instance, error.to_string());
-            return;
-        }
-    };
-    let Some(release_id) = tasks.started(ActiveAuthTask {
+    let terminal = AuthTaskTerminal::new();
+    tasks.started(ActiveAuthTask {
         token: token.clone(),
         capability,
         instance,
         terminal: Arc::clone(&terminal),
-    }) else {
-        enqueue_failure(
-            inbox,
-            token,
-            capability,
-            instance,
-            "AUTH task release id namespace exhausted".to_string(),
-        );
-        return;
-    };
+    });
 
     let completion_inbox = inbox.clone();
-    let release_sender = tasks.release_sender.clone();
-    starter.run_with_release_signal(
-        move || {
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                if !terminal.is_open() {
-                    return None;
-                }
-                operation(Arc::clone(&terminal), signer_cancelled, policy_cancelled)
-            }))
-            .unwrap_or_else(|_| {
-                Some(match capability {
+    let release = AuthReleaseGuard {
+        inbox: inbox.clone(),
+        token: Some(AuthTaskReleaseToken {
+            session: token.epoch.session.clone(),
+            terminal: Arc::clone(&terminal),
+        }),
+    };
+    let op_terminal = Arc::clone(&terminal);
+    runtime.spawn(async move {
+        // Dropped whether the task completes normally or is aborted, so a
+        // pending replacement always launches (the reaper-release invariant).
+        let _release = release;
+        let outcome = if op_terminal.is_open() {
+            // Catch a panic from the foreign policy/signer call (which runs on
+            // first poll) and map it to a typed Error outcome, matching the
+            // executor's old catch_unwind. A panic on a tokio task otherwise
+            // just terminates that task, leaving the AUTH op unresolved.
+            match CatchUnwind::new(operation(Arc::clone(&op_terminal))).await {
+                Ok(outcome) => outcome,
+                Err(_) => Some(match capability {
                     AuthCapability::Policy => AuthTaskOutcome::Policy(AuthPolicyOutcome::Error {
                         reason: "AUTH policy panicked".to_string(),
                     }),
                     AuthCapability::Signer => AuthTaskOutcome::Signer(AuthSignerOutcome::Error {
                         reason: "AUTH signer panicked".to_string(),
                     }),
-                })
-            });
-            if let Some(outcome) = outcome.filter(|_| terminal.complete()) {
-                let completion = AuthTaskCompletion {
-                    token,
-                    capability,
-                    instance,
-                    terminal,
-                    outcome,
-                };
-                let _ = completion_inbox.send(Cmd::AuthTaskCompleted(completion));
+                }),
             }
-        },
-        release_sender,
-        release_id,
-    );
+        } else {
+            None
+        };
+        if let Some(outcome) = outcome.filter(|_| op_terminal.complete()) {
+            let completion = AuthTaskCompletion {
+                token,
+                capability,
+                instance,
+                terminal: op_terminal,
+                outcome,
+            };
+            let _ = completion_inbox.send(Cmd::AuthTaskCompleted(completion));
+        }
+    });
 }
 
-fn enqueue_failure(
-    inbox: &Sender<Cmd>,
-    token: AuthOpToken,
-    capability: AuthCapability,
-    instance: AuthCapabilityInstance,
-    reason: String,
-) {
-    let outcome = match capability {
-        AuthCapability::Policy => EngineMsg::AuthPolicyCompleted(
-            token,
-            Some(instance),
-            AuthPolicyOutcome::Error { reason },
-        ),
-        AuthCapability::Signer => EngineMsg::AuthSignerCompleted(
-            token,
-            Some(instance),
-            AuthSignerOutcome::Error { reason },
-        ),
-    };
-    let _ = inbox.send(Cmd::Engine(outcome));
+/// Posts the destructor-free AUTH release edge when the async task finishes or
+/// is dropped.
+struct AuthReleaseGuard {
+    inbox: Sender<Cmd>,
+    token: Option<AuthTaskReleaseToken>,
+}
+
+impl Drop for AuthReleaseGuard {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            let _ = self.inbox.send(Cmd::AuthTaskReleased(token));
+        }
+    }
+}
+
+/// Minimal `catch_unwind` future adapter (avoids a `futures` dependency). A
+/// panic while polling `inner` — including the synchronous foreign
+/// policy/signer call on first poll — is captured instead of aborting the task.
+struct CatchUnwind<F> {
+    inner: F,
+}
+
+impl<F> CatchUnwind<F> {
+    fn new(inner: F) -> Self {
+        Self { inner }
+    }
+}
+
+impl<F: Future> Future for CatchUnwind<F> {
+    type Output = std::thread::Result<F::Output>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // SAFETY: standard pin-projection; `inner` is never moved out.
+        let inner = unsafe { self.map_unchecked_mut(|s| &mut s.inner) };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.poll(cx))) {
+            Ok(Poll::Ready(value)) => Poll::Ready(Ok(value)),
+            Ok(Poll::Pending) => Poll::Pending,
+            Err(panic) => Poll::Ready(Err(panic)),
+        }
+    }
 }
 
 fn auth_send_outcome(outcome: EphemeralSendOutcome) -> AuthSendOutcome {
@@ -967,6 +1193,7 @@ fn auth_send_outcome(outcome: EphemeralSendOutcome) -> AuthSendOutcome {
 mod tests {
     use super::*;
     use crate::core::{AuthEpoch, AuthOpToken};
+    use crossbeam_channel as cb;
     use nmp_grammar::{AccessContext, RelaySessionKey};
     use nmp_transport::{PoolConfig, PoolEvent, RelayHandle};
     use nostr::{Keys, RelayUrl};
@@ -1007,19 +1234,30 @@ mod tests {
         }
     }
 
-    fn task_registry() -> (
-        AuthTaskRegistry,
-        std::sync::mpsc::Receiver<nmp_executor::ReleaseId>,
-    ) {
-        let (release_sender, release_receiver) = std::sync::mpsc::channel();
-        (
-            AuthTaskRegistry::with_release_sender(release_sender),
-            release_receiver,
-        )
+    fn test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    fn recv_release(rx: &std::sync::mpsc::Receiver<Cmd>) -> AuthTaskReleaseToken {
+        match rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+            Cmd::AuthTaskReleased(token) => token,
+            _ => panic!("expected Cmd::AuthTaskReleased"),
+        }
+    }
+
+    fn block_on_pending(pending: PendingAuthPolicyOp) -> Option<PolicyResult> {
+        test_runtime().block_on(pending)
     }
 
     #[test]
     fn terminal_cancel_consumes_a_result_already_queued() {
+        // #704: adapted to the waker door — a queued decision is consumed even
+        // if the op is cancelled afterward (value-before-cancel), and the
+        // adapter cancel hook stays suppressed.
         let (completion, operation) = AuthPolicyOp::pending_channel_with_cancel(|| {
             panic!("queued completion must suppress cancellation")
         });
@@ -1027,17 +1265,18 @@ mod tests {
             unreachable!()
         };
         completion.resolve(Ok(AuthPolicyDecision::Allow)).unwrap();
-        let (cancelled_tx, cancelled_rx) = cb::bounded(1);
-        cancelled_tx.send(()).unwrap();
-
+        pending.canceller().cancel();
         assert_eq!(
-            pending.recv_or_cancel(cancelled_rx),
+            block_on_pending(pending),
             Some(Ok(AuthPolicyDecision::Allow))
         );
     }
 
     #[test]
     fn terminal_cancel_wins_once_before_resolve_and_drops_receiver_truthfully() {
+        // #704: adapted to the waker door — cancelling before resolution ends
+        // the await with no decision, runs the adapter cancel hook exactly
+        // once, and a later resolve is refused as ReceiverDropped.
         let cancellations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed = Arc::clone(&cancellations);
         let (completion, operation) = AuthPolicyOp::pending_channel_with_cancel(move || {
@@ -1046,10 +1285,9 @@ mod tests {
         let AuthPolicyOp::Pending(pending) = operation else {
             unreachable!()
         };
-        let (cancelled_tx, cancelled_rx) = cb::bounded(1);
-        cancelled_tx.send(()).unwrap();
+        pending.canceller().cancel();
 
-        assert_eq!(pending.recv_or_cancel(cancelled_rx), None);
+        assert_eq!(block_on_pending(pending), None);
         assert_eq!(cancellations.load(Ordering::Acquire), 1);
         assert!(matches!(
             completion.resolve(Ok(AuthPolicyDecision::Allow)),
@@ -1060,38 +1298,48 @@ mod tests {
     }
 
     #[test]
-    fn losing_cancel_waits_for_the_resolver_owned_result() {
-        let (resolving_tx, resolving_rx) = cb::bounded(1);
-        let (release_tx, release_rx) = cb::bounded(1);
+    fn cancelled_then_refused_resolution_still_runs_the_cancel_hook_on_drop() {
+        let cancellations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = Arc::clone(&cancellations);
         let (completion, operation) = AuthPolicyOp::pending_channel_with_cancel(move || {
-            resolving_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
+            observed.fetch_add(1, Ordering::AcqRel);
         });
         let AuthPolicyOp::Pending(pending) = operation else {
             unreachable!()
         };
-        let (cancelled_tx, cancelled_rx) = cb::bounded(1);
-        cancelled_tx.send(()).unwrap();
-        let waiter = std::thread::spawn(move || pending.recv_or_cancel(cancelled_rx));
+        pending.canceller().cancel();
 
-        resolving_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("cancel handshake must observe resolver ownership");
-        completion
-            .resolve(Ok(AuthPolicyDecision::Allow))
-            .expect("losing cancellation must retain the receiver");
-        release_tx.send(()).unwrap();
-        assert_eq!(waiter.join().unwrap(), Some(Ok(AuthPolicyDecision::Allow)));
+        assert!(matches!(
+            completion.resolve(Ok(AuthPolicyDecision::Allow)),
+            Err(AuthPolicyResolveError::ReceiverDropped(Ok(
+                AuthPolicyDecision::Allow
+            )))
+        ));
+        drop(pending);
+        assert_eq!(cancellations.load(Ordering::Acquire), 1);
+        assert!(matches!(
+            completion.resolve(Ok(AuthPolicyDecision::Allow)),
+            Err(AuthPolicyResolveError::AlreadyResolved(Ok(
+                AuthPolicyDecision::Allow
+            )))
+        ));
     }
+
+    // #704: `losing_cancel_waits_for_the_resolver_owned_result` was deleted. It
+    // asserted the old `crossbeam bounded(1)` + `recv_or_cancel` handshake
+    // semantics — a cancellation that loses the race blocks in the cancel hook
+    // until the resolver-owned result is delivered. The waker door + the
+    // AUTH `terminal.complete()` linearization gate replace that mechanism:
+    // there is no blocking cancel handshake to observe.
 
     #[test]
     fn policy_is_bound_before_callback_and_completes_the_exact_instance() {
+        let rt = test_runtime();
         let (pool_tx, _pool_rx) = std::sync::mpsc::channel();
         let pool = Pool::new(PoolConfig::default(), pool_tx).unwrap();
         let signers = SignerRegistry::default();
         let mut policies = AuthPolicyRegistry::default();
-        let (mut tasks, release_rx) = task_registry();
-        let executor = nmp_executor::Executor::new(1).unwrap();
+        let mut tasks = AuthTaskRegistry::default();
         let (inbox, rx) = std::sync::mpsc::channel();
         let (invoked_tx, invoked_rx) = std::sync::mpsc::channel();
         let (completion, operation) = AuthPolicyOp::pending_channel();
@@ -1120,7 +1368,7 @@ mod tests {
             &signers,
             &policies,
             &mut tasks,
-            &executor,
+            rt.handle(),
             &inbox,
             &mut |token, capability, instance| {
                 let _ = inbox.send(Cmd::Engine(EngineMsg::AuthCapabilityBound {
@@ -1161,22 +1409,20 @@ mod tests {
                 AuthPolicyOutcome::Allow
             )) if current == request_token && current_instance == instance
         ));
-        let release = release_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(tasks.released(release).is_none());
+        assert!(tasks.released(recv_release(&rx)).is_none());
         assert_eq!(tasks.len(), 0);
 
         pool.shutdown();
-        executor.shutdown();
     }
 
     #[test]
     fn replacement_and_epoch_cancel_drain_pending_policy_tasks() {
+        let rt = test_runtime();
         let (pool_tx, _pool_rx) = std::sync::mpsc::channel();
         let pool = Pool::new(PoolConfig::default(), pool_tx).unwrap();
         let signers = SignerRegistry::default();
         let mut policies = AuthPolicyRegistry::default();
-        let (mut tasks, release_rx) = task_registry();
-        let executor = nmp_executor::Executor::new(1).unwrap();
+        let mut tasks = AuthTaskRegistry::default();
         let (inbox, rx) = std::sync::mpsc::channel();
         let (invoked_tx, invoked_rx) = std::sync::mpsc::channel();
         let (cancel_tx, cancel_rx) = cb::bounded(1);
@@ -1207,7 +1453,7 @@ mod tests {
             &signers,
             &policies,
             &mut tasks,
-            &executor,
+            rt.handle(),
             &inbox,
             &mut |token, capability, instance| {
                 let _ = inbox.send(Cmd::Engine(EngineMsg::AuthCapabilityBound {
@@ -1224,8 +1470,7 @@ mod tests {
         invoked_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         tasks.cancel_capability(expected_pubkey, AuthCapability::Policy, old_instance);
         cancel_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        let release = release_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(tasks.released(release).is_none());
+        assert!(tasks.released(recv_release(&rx)).is_none());
         assert_eq!(tasks.len(), 0);
 
         let (unused_tx, _unused_rx) = std::sync::mpsc::channel();
@@ -1247,16 +1492,15 @@ mod tests {
         tasks.cancel_epoch(&request_token.epoch);
         tasks.shutdown();
         pool.shutdown();
-        executor.shutdown();
     }
 
     #[test]
     fn cancel_and_completion_have_one_linearization_winner() {
-        let (completed_first, _, _) = AuthTaskTerminal::new();
+        let completed_first = AuthTaskTerminal::new();
         assert!(completed_first.complete());
         assert!(!completed_first.cancel());
 
-        let (cancelled_first, _, _) = AuthTaskTerminal::new();
+        let cancelled_first = AuthTaskTerminal::new();
         assert!(cancelled_first.cancel());
         assert!(!cancelled_first.complete());
     }
@@ -1271,22 +1515,26 @@ mod tests {
     }
 
     #[test]
-    fn capacity_one_releases_policy_before_starting_signer_phase() {
-        let executor = nmp_executor::Executor::new(1).unwrap();
+    fn one_active_task_per_session_releases_policy_before_starting_signer_phase() {
+        // #704: the executor `ReleaseId` reaper is gone; the async task's drop
+        // guard posts `Cmd::AuthTaskReleased`, which the reducer feeds to
+        // `released` to launch the pending signer. The one-active-per-session
+        // serialization is preserved.
+        let rt = test_runtime();
         let (inbox, rx) = std::sync::mpsc::channel();
-        let (mut tasks, release_rx) = task_registry();
+        let mut tasks = AuthTaskRegistry::default();
         let policy_token = token();
         launch_auth_task(
             PendingAuthTask {
                 token: policy_token.clone(),
                 capability: AuthCapability::Policy,
                 instance: AuthCapabilityInstance(31),
-                operation: Box::new(|_, _, _| {
-                    Some(AuthTaskOutcome::Policy(AuthPolicyOutcome::Allow))
+                operation: Box::new(|_terminal| {
+                    Box::pin(async { Some(AuthTaskOutcome::Policy(AuthPolicyOutcome::Allow)) })
                 }),
             },
             &mut tasks,
-            &executor,
+            rt.handle(),
             &inbox,
         );
         let completion = match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
@@ -1304,16 +1552,15 @@ mod tests {
             token: signer_token.clone(),
             capability: AuthCapability::Signer,
             instance: AuthCapabilityInstance(32),
-            operation: Box::new(|_, _, _| {
-                Some(AuthTaskOutcome::Signer(AuthSignerOutcome::Unavailable))
+            operation: Box::new(|_terminal| {
+                Box::pin(async { Some(AuthTaskOutcome::Signer(AuthSignerOutcome::Unavailable)) })
             }),
         };
         assert!(tasks.schedule(signer).is_none());
-        let release = release_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         let signer = tasks
-            .released(release)
+            .released(recv_release(&rx))
             .expect("signer waits for exact release");
-        launch_auth_task(signer, &mut tasks, &executor, &inbox);
+        launch_auth_task(signer, &mut tasks, rt.handle(), &inbox);
         let completion = match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
             Cmd::AuthTaskCompleted(completion) => completion,
             _ => panic!("signer completion expected"),
@@ -1322,17 +1569,15 @@ mod tests {
             tasks.finish(completion),
             Some(EngineMsg::AuthSignerCompleted(current, ..)) if current == signer_token
         ));
-        let release = release_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(tasks.released(release).is_none());
-        assert_eq!(executor.census().admitted, 0);
-        executor.shutdown();
+        assert!(tasks.released(recv_release(&rx)).is_none());
+        assert_eq!(tasks.len(), 0);
     }
 
     #[test]
     fn cancel_hook_round_trip_does_not_block_replacement_or_shutdown_drain() {
-        let executor = nmp_executor::Executor::new(1).unwrap();
-        let (inbox, _rx) = std::sync::mpsc::channel();
-        let (mut tasks, release_rx) = task_registry();
+        let rt = test_runtime();
+        let (inbox, rx) = std::sync::mpsc::channel();
+        let mut tasks = AuthTaskRegistry::default();
         let request_token = token();
         let (hook_entered_tx, hook_entered_rx) = cb::bounded(1);
         let (hook_reply_tx, hook_reply_rx) = cb::bounded(1);
@@ -1345,15 +1590,23 @@ mod tests {
                 token: request_token.clone(),
                 capability: AuthCapability::Policy,
                 instance: AuthCapabilityInstance(41),
-                operation: Box::new(move |_, _, cancelled| match pending {
-                    AuthPolicyOp::Pending(pending) => pending
-                        .recv_or_cancel(cancelled)
-                        .map(|_| AuthTaskOutcome::Policy(AuthPolicyOutcome::Allow)),
-                    AuthPolicyOp::Ready(_) => unreachable!(),
+                operation: Box::new(move |terminal| {
+                    Box::pin(async move {
+                        match pending {
+                            AuthPolicyOp::Pending(pending) => {
+                                let canceller = pending.canceller();
+                                terminal.arm(Box::new(move || canceller.cancel()));
+                                pending
+                                    .await
+                                    .map(|_| AuthTaskOutcome::Policy(AuthPolicyOutcome::Allow))
+                            }
+                            AuthPolicyOp::Ready(_) => unreachable!(),
+                        }
+                    })
                 }),
             },
             &mut tasks,
-            &executor,
+            rt.handle(),
             &inbox,
         );
         tasks.cancel_epoch(&request_token.epoch);
@@ -1366,21 +1619,18 @@ mod tests {
             "engine cancellation never waits on app code"
         );
         hook_reply_tx.send(()).unwrap();
-        let release = release_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(tasks.released(release).is_none());
+        assert!(tasks.released(recv_release(&rx)).is_none());
         tasks.shutdown();
-        executor.shutdown();
-        assert_eq!(executor.census().admitted, 0);
     }
 
     #[test]
     fn absent_policy_and_signer_fail_closed_with_the_exact_token() {
+        let rt = test_runtime();
         let (pool_tx, _pool_rx) = std::sync::mpsc::channel();
         let pool = Pool::new(PoolConfig::default(), pool_tx).unwrap();
         let registry = SignerRegistry::default();
         let policies = AuthPolicyRegistry::default();
         let mut tasks = AuthTaskRegistry::default();
-        let executor = nmp_executor::Executor::new(2).unwrap();
         let (inbox, rx) = std::sync::mpsc::channel();
         let policy_token = token();
         dispatch(
@@ -1396,7 +1646,7 @@ mod tests {
             &registry,
             &policies,
             &mut tasks,
-            &executor,
+            rt.handle(),
             &inbox,
             &mut |token, capability, instance| {
                 let _ = inbox.send(Cmd::Engine(EngineMsg::AuthCapabilityBound {
@@ -1432,7 +1682,7 @@ mod tests {
             &registry,
             &policies,
             &mut tasks,
-            &executor,
+            rt.handle(),
             &inbox,
             &mut |token, capability, instance| {
                 let _ = inbox.send(Cmd::Engine(EngineMsg::AuthCapabilityBound {
@@ -1466,7 +1716,7 @@ mod tests {
             &registry,
             &policies,
             &mut tasks,
-            &executor,
+            rt.handle(),
             &inbox,
             &mut |token, capability, instance| {
                 let _ = inbox.send(Cmd::Engine(EngineMsg::AuthCapabilityBound {
@@ -1485,7 +1735,6 @@ mod tests {
         ));
         tasks.shutdown();
         pool.shutdown();
-        executor.shutdown();
     }
 
     #[test]
@@ -1548,7 +1797,7 @@ mod tests {
         let registry = SignerRegistry::default();
         let policies = AuthPolicyRegistry::default();
         let mut tasks = AuthTaskRegistry::default();
-        let executor = nmp_executor::Executor::new(1).unwrap();
+        let rt = test_runtime();
         let (inbox, rx) = std::sync::mpsc::channel();
         dispatch(
             AuthEffect::Send {
@@ -1560,7 +1809,7 @@ mod tests {
             &registry,
             &policies,
             &mut tasks,
-            &executor,
+            rt.handle(),
             &inbox,
             &mut |token, capability, instance| {
                 let _ = inbox.send(Cmd::Engine(EngineMsg::AuthCapabilityBound {
@@ -1584,7 +1833,6 @@ mod tests {
 
         tasks.shutdown();
         pool.shutdown();
-        executor.shutdown();
         server.join().unwrap();
     }
 }

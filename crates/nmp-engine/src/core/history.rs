@@ -130,17 +130,13 @@ pub enum WindowLoad {
 /// declarative (`at_least: usize`), so there is no opaque token to mismatch.
 /// `LoadInProgress`/`AtBound`/`NoBoundary` are gone too: an in-flight advance
 /// simply raises the target, and being at the bound is a frame fact. What
-/// remains is the two ways a staged advance can be rolled back before it ever
-/// becomes observable. The facade maps these into its public
-/// `RequestRowsError`.
+/// remains is canonical-store failure while staging an advance. The facade
+/// maps it into its public `RequestRowsError`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HistoryAdvanceError {
     /// The canonical store could not read or resolve the advance; the staged
     /// load was rolled back with exact prior-projection restoration.
     StoreUnavailable,
-    /// No planned relay worker could be acquired for the advance; the staged
-    /// load was rolled back with exact prior-projection restoration.
-    TransportUnavailable { reason: String },
 }
 
 impl std::fmt::Display for HistoryAdvanceError {
@@ -148,9 +144,6 @@ impl std::fmt::Display for HistoryAdvanceError {
         match self {
             Self::StoreUnavailable => {
                 f.write_str("window advance could not read or resolve the canonical store")
-            }
-            Self::TransportUnavailable { reason } => {
-                write!(f, "window advance transport unavailable: {reason}")
             }
         }
     }

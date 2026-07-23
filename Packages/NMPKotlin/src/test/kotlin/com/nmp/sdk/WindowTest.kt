@@ -101,10 +101,6 @@ class WindowTest {
             NMPRequestRowsError.StoreUnavailable,
             NMPRequestRowsError.from(FfiRequestRowsException.StoreUnavailable()),
         )
-        assertEquals(
-            NMPRequestRowsError.TransportUnavailable("offline"),
-            NMPRequestRowsError.from(FfiRequestRowsException.TransportUnavailable("offline")),
-        )
     }
 
     @Test

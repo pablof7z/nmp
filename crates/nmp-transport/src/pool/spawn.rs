@@ -13,15 +13,14 @@ pub(super) struct SystemThreadSpawner;
 
 impl ThreadSpawner for SystemThreadSpawner {
     fn spawn(&self, builder: Builder, task: ThreadTask) -> io::Result<JoinHandle<()>> {
-        let handle = builder.spawn(task);
-        if handle.is_ok() {
-            // #680: count every real transport OS thread (translator, relay
-            // reaper, per-relay workers, verifier workers) into the whole-engine
-            // NMP-thread counter so the thread-scaling falsifier's instrumentation
-            // has no blind spot. Injected test spawners do not bump it.
-            nmp_executor::note_thread_spawn();
-        }
-        handle
+        // #680/#704: count every real transport OS thread (translator, relay
+        // reaper, per-relay workers, verifier workers) into the whole-engine
+        // instrumentation so the thread-scaling and teardown falsifiers have no
+        // blind spot. Counting happens INSIDE the thread body (spawn + exit
+        // paired on the same thread) so the live gauge cannot race and returns
+        // to baseline when a pool is dropped. Injected test spawners do not
+        // bump it.
+        builder.spawn(move || nmp_executor::run_counted_thread(task))
     }
 }
 

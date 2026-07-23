@@ -48,8 +48,17 @@ sealed class NMPError(message: String) : Exception(message) {
     data class StoreOpenFailed(val reason: String) : NMPError("store open failed: $reason")
     data class StoreResetFailed(val reason: String) : NMPError("store reset failed: $reason")
     data class StoreStillOpen(val path: String) : NMPError("persistent store is still open: $path")
-    data class ThreadUnavailable(val component: String, val reason: String) :
-        NMPError("$component thread unavailable: $reason")
+    /** The engine could not be constructed (`NmpEngine` creation): a genuine
+     * engine-start infrastructure failure. Never raised by an ordinary
+     * operation (#704). */
+    data class EngineStartFailed(val component: String, val reason: String) :
+        NMPError("engine could not start ($component): $reason")
+    /** A windowed `observe` could not open its canonical history projection
+     * because the store degraded during setup. This is the case's sole
+     * production meaning; relay connection/worker failure remains ordinary
+     * acquisition evidence in the observation stream (#704). */
+    data class ObservationUnavailable(val reason: String) :
+        NMPError("observation could not be established: $reason")
     /** A second `next()`/`signed()` was awaited on an observation stream or
      * handle while a previous one was still in flight (#680). The streams are
      * single-consumer: await the next pull only after the previous one has
@@ -117,9 +126,6 @@ sealed class NMPError(message: String) : Exception(message) {
     data class RelayInformationUnavailable(val kind: RelayInformationErrorKind) :
         NMPError("relay information unavailable: ${kind.describe()}")
 
-    data class RelayInformationWaitersSaturated(val capacity: ULong) :
-        NMPError("relay information refused: per-relay waiter capacity $capacity is full")
-
     /** #591: [WriteIntent.correlation]/`reattachReceipt`'s correlation
      * overload was given a token that failed the bounded/non-empty
      * validation. */
@@ -149,7 +155,8 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.StoreOpenFailed -> StoreOpenFailed(ffi.reason)
                 is FfiException.StoreResetFailed -> StoreResetFailed(ffi.reason)
                 is FfiException.StoreStillOpen -> StoreStillOpen(ffi.path)
-                is FfiException.ThreadUnavailable -> ThreadUnavailable(ffi.component, ffi.reason)
+                is FfiException.EngineStartFailed -> EngineStartFailed(ffi.component, ffi.reason)
+                is FfiException.ObservationUnavailable -> ObservationUnavailable(ffi.reason)
                 is FfiException.ConcurrentNext -> ConcurrentNext
                 is FfiException.FactStreamLagged -> FactStreamLagged(ffi.receiptId)
                 is FfiException.ReceiptReplayUnavailable ->
@@ -168,8 +175,6 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.IntentAlreadyConsumed -> IntentAlreadyConsumed
                 is FfiException.RelayInformationUnavailable ->
                     RelayInformationUnavailable(RelayInformationErrorKind.from(ffi.kind))
-                is FfiException.RelayInformationWaitersSaturated ->
-                    RelayInformationWaitersSaturated(ffi.capacity)
                 is FfiException.InvalidCorrelationToken ->
                     InvalidCorrelationToken(ffi.got, ffi.reason)
                 is FfiException.InvalidNip73Target -> InvalidNip73Target(ffi.reason)

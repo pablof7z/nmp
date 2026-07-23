@@ -144,10 +144,9 @@ pub struct WindowContents {
 /// The ways [`Subscription::request_rows`]/[`WindowHandle::request_rows`] can
 /// fail (#485). Growth is declarative — there is no opaque continuation token
 /// to mismatch and no generation to go stale — so the only failures are the
-/// structural one (this observation has no window) and the two ways a staged
-/// advance can be rolled back before it ever became observable.
+/// structural one (this observation has no window), engine teardown, and
+/// canonical-store failure before a staged advance became observable.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum RequestRowsError {
     /// This subscription observes the full live set; there is no window to
     /// grow. Only observations opened with a [`Window`] can `request_rows`.
@@ -157,9 +156,6 @@ pub enum RequestRowsError {
     /// The canonical store could not serve the advance (the staged load was
     /// rolled back with exact prior-projection restoration).
     StoreUnavailable,
-    /// No planned source could serve the advance (the staged load was rolled
-    /// back with exact prior-projection restoration).
-    TransportUnavailable { reason: String },
 }
 
 impl std::fmt::Display for RequestRowsError {
@@ -172,9 +168,6 @@ impl std::fmt::Display for RequestRowsError {
             Self::StoreUnavailable => {
                 f.write_str("window advance could not read or resolve the canonical store")
             }
-            Self::TransportUnavailable { reason } => {
-                write!(f, "window advance transport unavailable: {reason}")
-            }
         }
     }
 }
@@ -185,9 +178,6 @@ impl RequestRowsError {
     fn from_advance(error: HistoryAdvanceError) -> Self {
         match error {
             HistoryAdvanceError::StoreUnavailable => Self::StoreUnavailable,
-            HistoryAdvanceError::TransportUnavailable { reason } => {
-                Self::TransportUnavailable { reason }
-            }
         }
     }
 }

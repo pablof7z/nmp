@@ -90,18 +90,12 @@ sealed class NMPRequestRowsError(message: String) : Exception(message) {
     object StoreUnavailable :
         NMPRequestRowsError("window advance could not read or resolve the canonical store")
 
-    /** No planned source could serve the advance (staged load rolled back). */
-    data class TransportUnavailable(val reason: String) :
-        NMPRequestRowsError("window advance transport unavailable: $reason")
-
     companion object {
         internal fun from(ffi: FfiRequestRowsException): NMPRequestRowsError =
             when (ffi) {
                 is FfiRequestRowsException.Unwindowed -> Unwindowed
                 is FfiRequestRowsException.EngineClosed -> EngineClosed
                 is FfiRequestRowsException.StoreUnavailable -> StoreUnavailable
-                is FfiRequestRowsException.TransportUnavailable ->
-                    TransportUnavailable(ffi.reason)
             }
     }
 }

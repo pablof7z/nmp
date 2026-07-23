@@ -144,8 +144,16 @@ class RelayInformationTest {
             }
         }
 
+    /**
+     * #704: many concurrent NIP-11 fetches on one relay must NEVER be refused
+     * for internal capacity -- the async fetch has no waiter/thread admission
+     * bound. Every one of the 65 concurrent requests makes progress; none
+     * returns a capacity/waiter-saturation error (that wrapper case no longer
+     * exists). This falsifier replaced the old "typed waiter saturation" test,
+     * which asserted a refusal #704 removed.
+     */
     @Test
-    fun relayInformationWaiterSaturationRemainsTypedThroughWrapper() =
+    fun concurrentRelayInformationFetchesAreNeverCapacityRefused() =
         runBlocking {
             LocalNIP11Server(body = """{"name":"Shared"}""", gated = true).use { server ->
                 NMPEngine(NMPConfig(allowedLocalRelayHosts = listOf("localhost"))).use { engine ->
@@ -164,22 +172,13 @@ class RelayInformationTest {
                             }
                         }
 
-                    val refusal = requests.last().await()
-                    assertTrue(refusal is NMPError.RelayInformationWaitersSaturated)
-                    assertEquals(
-                        64uL,
-                        (refusal as NMPError.RelayInformationWaitersSaturated).capacity,
-                    )
                     server.releaseResponse()
 
                     val outcomes = requests.map { it.await() }
-                    assertEquals(64, outcomes.count { it == null })
-                    assertEquals(
-                        1,
-                        outcomes.count { it is NMPError.RelayInformationWaitersSaturated },
-                    )
+                    assertEquals(65, outcomes.size)
                     assertTrue(
-                        outcomes.all { it == null || it is NMPError.RelayInformationWaitersSaturated },
+                        outcomes.all { it == null },
+                        "no concurrent NIP-11 fetch may be refused: $outcomes",
                     )
                 }
             }

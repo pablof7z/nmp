@@ -30,8 +30,8 @@ public enum RelayInformationFreshness: Sendable, Equatable {
 /// evidence, and by `NMPError.relayInformationUnavailable` when acquisition
 /// fails before any last-good document exists.
 public enum RelayInformationErrorKind: Sendable, Equatable {
-    case waiterSaturated(capacity: UInt64)
-    case threadUnavailable(reason: String)
+    // #704: `waiterSaturated`/`threadUnavailable` were removed -- the async
+    // NIP-11 fetch has no waiter/thread admission refusal to report.
     case serviceClosed
     case credentialedRelayUrl
     case http(reason: String)
@@ -40,8 +40,6 @@ public enum RelayInformationErrorKind: Sendable, Equatable {
 
     init(_ ffi: FfiRelayInformationErrorKind) {
         switch ffi {
-        case .waiterSaturated(let capacity): self = .waiterSaturated(capacity: capacity)
-        case .threadUnavailable(let reason): self = .threadUnavailable(reason: reason)
         case .serviceClosed: self = .serviceClosed
         case .credentialedRelayUrl: self = .credentialedRelayUrl
         case .http(let reason): self = .http(reason: reason)
@@ -57,10 +55,6 @@ extension RelayInformationErrorKind: CustomStringConvertible {
     /// only want a message rather than a branch on the typed kind.
     public var description: String {
         switch self {
-        case .waiterSaturated(let capacity):
-            "NIP-11 acquisition refused: per-relay waiter capacity \(capacity) is full"
-        case .threadUnavailable(let reason):
-            "NIP-11 acquisition thread unavailable: \(reason)"
         case .serviceClosed:
             "NIP-11 acquisition service is closed"
         case .credentialedRelayUrl:

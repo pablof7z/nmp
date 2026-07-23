@@ -111,10 +111,23 @@ pub enum FfiError {
     StoreStillOpen {
         path: String,
     },
-    /// One named engine/native thread could not be created. The component
-    /// and safe OS reason survive Swift/Kotlin error translation unchanged.
-    ThreadUnavailable {
+    /// The engine could not be constructed (`NmpEngine::new`). A genuine
+    /// engine-start infrastructure failure -- the OS refused an engine-owned
+    /// thread, or the configured relay budget was unrepresentable. The
+    /// component and safe OS reason survive Swift/Kotlin translation unchanged.
+    /// Never raised by an ordinary operation (#704).
+    EngineStartFailed {
         component: String,
+        reason: String,
+    },
+    /// A windowed `observe` could not open its canonical store projection (the
+    /// store degraded while establishing the history session). This is the ONLY
+    /// thing it means (#704 review): a concrete store-projection failure, NEVER
+    /// a worker/thread/pool/runtime-busy, task-admission, spawn-failure, or
+    /// queue-full condition. A relay whose connection cannot be opened is NOT
+    /// this error -- it is ordinary acquisition evidence in the observation's
+    /// stream, and the observation still succeeds on its other sources.
+    ObservationUnavailable {
         reason: String,
     },
     /// A second `next()`/`signed()` was awaited on a stream/handle while a
@@ -196,18 +209,14 @@ pub enum FfiError {
     /// (recompose via `group_message_intent` again is the correct retry path,
     /// since NMP-owned event time must refresh).
     IntentAlreadyConsumed,
-    /// NIP-11 acquisition failed before any last-good document existed.
-    /// `RelayInformationWaitersSaturated`/`ThreadUnavailable` above already
-    /// carry the two acquisition discriminants with dedicated `FfiError`
-    /// shapes (#494); every other `nmp::RelayInformationError` variant carries
-    /// here instead of collapsing to a message string.
+    /// NIP-11 acquisition failed before any last-good document existed. Every
+    /// `nmp::RelayInformationError` variant carries here as a typed
+    /// `FfiRelayInformationErrorKind` instead of collapsing to a message
+    /// string (#494). (#704 removed the waiter/thread admission discriminants
+    /// that once had dedicated `FfiError` shapes -- the async NIP-11 fetch has
+    /// no admission refusal.)
     RelayInformationUnavailable {
         kind: FfiRelayInformationErrorKind,
-    },
-    /// A single relay's in-flight NIP-11 waiter set reached its finite
-    /// admission bound. The refused caller was not retained.
-    RelayInformationWaitersSaturated {
-        capacity: u64,
     },
     /// #591: `FfiWriteIntent.correlation` was `Some` but failed
     /// `nmp_grammar::CorrelationToken`'s `TryFrom<&str>` bounded/non-empty
@@ -228,7 +237,8 @@ pub enum FfiError {
 /// Exact failure returned by `NmpRowStream::request_rows`
 /// (`nmp::RequestRowsError` mirror). Growth is declarative -- there is no
 /// token to misuse and no generation to go stale, so the only failures left
-/// are the structural one (`Unwindowed`) and genuine advance failures.
+/// are the structural one (`Unwindowed`), engine teardown, and canonical-store
+/// failure while staging an advance.
 /// `AtBound` is deliberately NOT here: reaching the declared `max` is a FACT
 /// delivered in frames ([`FfiWindowLoad::AtBound`]), never a thrown error.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
@@ -240,11 +250,6 @@ pub enum FfiRequestRowsError {
     /// The canonical store could not serve the advance (the staged load was
     /// rolled back).
     StoreUnavailable,
-    /// No planned source could serve the advance (the staged load was rolled
-    /// back).
-    TransportUnavailable {
-        reason: String,
-    },
 }
 
 impl From<nmp::EngineError> for FfiError {
@@ -254,8 +259,11 @@ impl From<nmp::EngineError> for FfiError {
             nmp::EngineError::StoreOpenFailed { reason } => Self::StoreOpenFailed { reason },
             nmp::EngineError::StoreResetFailed { reason } => Self::StoreResetFailed { reason },
             nmp::EngineError::StoreStillOpen { path } => Self::StoreStillOpen { path },
-            nmp::EngineError::ThreadUnavailable { component, reason } => {
-                Self::ThreadUnavailable { component, reason }
+            nmp::EngineError::EngineStartFailed { component, reason } => {
+                Self::EngineStartFailed { component, reason }
+            }
+            nmp::EngineError::ObservationUnavailable { reason } => {
+                Self::ObservationUnavailable { reason }
             }
             nmp::EngineError::InvalidSecretKey => Self::InvalidSecretKey,
             nmp::EngineError::SignerMissingPublicKey => Self::InvalidSigner {
@@ -312,8 +320,11 @@ impl std::fmt::Display for FfiError {
             Self::StoreStillOpen { path } => {
                 write!(f, "persistent store is still open: {path}")
             }
-            Self::ThreadUnavailable { component, reason } => {
-                write!(f, "{component} thread unavailable: {reason}")
+            Self::EngineStartFailed { component, reason } => {
+                write!(f, "engine could not start ({component}): {reason}")
+            }
+            Self::ObservationUnavailable { reason } => {
+                write!(f, "observation could not be established: {reason}")
             }
             Self::ConcurrentNext => write!(
                 f,
@@ -363,10 +374,6 @@ impl std::fmt::Display for FfiError {
             Self::RelayInformationUnavailable { kind } => {
                 write!(f, "relay information unavailable: {kind:?}")
             }
-            Self::RelayInformationWaitersSaturated { capacity } => write!(
-                f,
-                "relay information refused: per-relay waiter capacity {capacity} is full"
-            ),
             Self::InvalidCorrelationToken { got, reason } => {
                 write!(f, "invalid correlation token {got:?}: {reason}")
             }
@@ -377,19 +384,11 @@ impl std::fmt::Display for FfiError {
 
 impl From<nmp::RelayInformationRequestError> for FfiError {
     fn from(error: nmp::RelayInformationRequestError) -> Self {
+        // #704: `WaiterSaturated`/`ThreadUnavailable` were deleted from the
+        // NIP-11 error — the async runtime has no waiter/thread admission
+        // refusal. Real acquisition failures keep their domain kinds.
         match error {
             nmp::RelayInformationRequestError::Engine(error) => error.into(),
-            nmp::RelayInformationRequestError::Acquisition(
-                nmp::RelayInformationError::WaiterSaturated { capacity },
-            ) => Self::RelayInformationWaitersSaturated {
-                capacity: capacity as u64,
-            },
-            nmp::RelayInformationRequestError::Acquisition(
-                nmp::RelayInformationError::ThreadUnavailable { reason },
-            ) => Self::ThreadUnavailable {
-                component: "NIP-11 acquisition".to_string(),
-                reason,
-            },
             nmp::RelayInformationRequestError::Acquisition(error) => {
                 Self::RelayInformationUnavailable {
                     kind: relay_information_error_kind(error),
@@ -408,14 +407,6 @@ pub fn relay_information_error_kind(
     error: nmp::RelayInformationError,
 ) -> FfiRelayInformationErrorKind {
     match error {
-        nmp::RelayInformationError::WaiterSaturated { capacity } => {
-            FfiRelayInformationErrorKind::WaiterSaturated {
-                capacity: capacity as u64,
-            }
-        }
-        nmp::RelayInformationError::ThreadUnavailable { reason } => {
-            FfiRelayInformationErrorKind::ThreadUnavailable { reason }
-        }
         nmp::RelayInformationError::ServiceClosed => FfiRelayInformationErrorKind::ServiceClosed,
         nmp::RelayInformationError::CredentialedRelayUrl => {
             FfiRelayInformationErrorKind::CredentialedRelayUrl
@@ -459,9 +450,6 @@ pub fn sign_event_start_error(error: nmp::SignEventError) -> FfiError {
     match error {
         nmp::SignEventError::NoActiveSigner => FfiError::NoActiveSigner,
         nmp::SignEventError::InvalidRequest { reason } => FfiError::InvalidSignRequest { reason },
-        nmp::SignEventError::ThreadUnavailable { component, reason } => {
-            FfiError::ThreadUnavailable { component, reason }
-        }
         nmp::SignEventError::EngineClosed => FfiError::EngineClosed,
         nmp::SignEventError::SignerUnavailable { reason }
         | nmp::SignEventError::SignerRejected { reason }
@@ -496,16 +484,6 @@ impl From<RequestRowsError> for FfiRequestRowsError {
             RequestRowsError::Unwindowed => Self::Unwindowed,
             RequestRowsError::EngineClosed => Self::EngineClosed,
             RequestRowsError::StoreUnavailable => Self::StoreUnavailable,
-            RequestRowsError::TransportUnavailable { reason } => {
-                Self::TransportUnavailable { reason }
-            }
-            // `nmp::RequestRowsError` is `#[non_exhaustive]`: a variant added
-            // upstream before this seam learns it must still cross typed --
-            // as an advance failure carrying the upstream Display -- never a
-            // panic across the FFI boundary.
-            other => Self::TransportUnavailable {
-                reason: other.to_string(),
-            },
         }
     }
 }
@@ -519,9 +497,6 @@ impl std::fmt::Display for FfiRequestRowsError {
             Self::EngineClosed => f.write_str("engine already shut down"),
             Self::StoreUnavailable => {
                 f.write_str("window advance could not read or resolve the canonical store")
-            }
-            Self::TransportUnavailable { reason } => {
-                write!(f, "window advance transport unavailable: {reason}")
             }
         }
     }
@@ -666,14 +641,6 @@ mod window_conversion_tests {
         assert_eq!(
             FfiRequestRowsError::from(RequestRowsError::StoreUnavailable),
             FfiRequestRowsError::StoreUnavailable
-        );
-        assert_eq!(
-            FfiRequestRowsError::from(RequestRowsError::TransportUnavailable {
-                reason: "offline".to_string(),
-            }),
-            FfiRequestRowsError::TransportUnavailable {
-                reason: "offline".to_string(),
-            }
         );
     }
 
@@ -2705,16 +2672,31 @@ mod tests {
     }
 }
 #[test]
-fn engine_thread_refusal_preserves_component_and_reason_across_ffi() {
-    let error = FfiError::from(nmp::EngineError::ThreadUnavailable {
+fn engine_start_failure_preserves_component_and_reason_across_ffi() {
+    let error = FfiError::from(nmp::EngineError::EngineStartFailed {
         component: "signature verifier".to_string(),
         reason: "Resource temporarily unavailable".to_string(),
     });
     assert_eq!(
         error,
-        FfiError::ThreadUnavailable {
+        FfiError::EngineStartFailed {
             component: "signature verifier".to_string(),
             reason: "Resource temporarily unavailable".to_string(),
+        }
+    );
+}
+
+#[test]
+fn observation_unavailable_maps_to_domain_error_across_ffi() {
+    // #704: an `observe` relay-worker/projection open failure crosses FFI as a
+    // domain outcome carrying no worker/pool/thread concept.
+    let error = FfiError::from(nmp::EngineError::ObservationUnavailable {
+        reason: "relay worker: Resource temporarily unavailable".to_string(),
+    });
+    assert_eq!(
+        error,
+        FfiError::ObservationUnavailable {
+            reason: "relay worker: Resource temporarily unavailable".to_string(),
         }
     );
 }

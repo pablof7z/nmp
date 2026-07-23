@@ -10,6 +10,9 @@ nostr.workspace = true
 nmp.workspace = true
 nmp-grammar.workspace = true
 nmp-ownership.workspace = true
+# #704: the follow observer/action workers are async tasks on the engine
+# runtime; the acquisition loop's per-snapshot deadline uses `tokio::time`.
+tokio = { version = "1", features = ["time"] }
 
 [dev-dependencies]
 tempfile = "3"

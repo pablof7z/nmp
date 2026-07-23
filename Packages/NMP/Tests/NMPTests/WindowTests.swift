@@ -226,10 +226,6 @@ final class WindowTests: XCTestCase {
         XCTAssertEqual(NMPRequestRowsError(.Unwindowed), .unwindowed)
         XCTAssertEqual(NMPRequestRowsError(.EngineClosed), .engineClosed)
         XCTAssertEqual(NMPRequestRowsError(.StoreUnavailable), .storeUnavailable)
-        XCTAssertEqual(
-            NMPRequestRowsError(.TransportUnavailable(reason: "offline")),
-            .transportUnavailable(reason: "offline")
-        )
     }
 
     func testEveryWindowLoadFactMapsWithoutCollapsing() {

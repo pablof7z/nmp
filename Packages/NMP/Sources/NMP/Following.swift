@@ -95,7 +95,6 @@ public enum NMPFollowActionFailure: Sendable, Hashable {
     case invalidGeneratedTag
     case engineClosed
     case receiptUnavailable
-    case threadUnavailable(component: String, reason: String)
 
     init(_ ffi: FfiFollowActionFailure) {
         switch ffi {
@@ -112,8 +111,6 @@ public enum NMPFollowActionFailure: Sendable, Hashable {
         case .invalidGeneratedTag: self = .invalidGeneratedTag
         case .engineClosed: self = .engineClosed
         case .receiptUnavailable: self = .receiptUnavailable
-        case .threadUnavailable(let component, let reason):
-            self = .threadUnavailable(component: component, reason: reason)
         }
     }
 }

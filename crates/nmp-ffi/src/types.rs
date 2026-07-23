@@ -52,8 +52,8 @@ pub struct FfiRelayInformationLimitations {
 /// throw in `convert::FfiError::RelayInformationUnavailable`).
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiRelayInformationErrorKind {
-    WaiterSaturated { capacity: u64 },
-    ThreadUnavailable { reason: String },
+    // #704: `WaiterSaturated`/`ThreadUnavailable` were removed -- the async
+    // NIP-11 fetch has no waiter/thread admission refusal to report.
     ServiceClosed,
     CredentialedRelayUrl,
     Http { reason: String },

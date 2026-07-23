@@ -523,7 +523,7 @@ fn future_event_time_never_inflates_coverage_or_freshness() {
 }
 
 #[test]
-fn satisfied_max_age_window_never_preflights_relays_when_it_grows() {
+fn satisfied_max_age_window_growth_stays_store_only() {
     let keys = Keys::generate();
     let relay = RelayUrl::parse("wss://fresh-window.example").unwrap();
     let mut store = MemoryStore::new();
@@ -556,6 +556,6 @@ fn satisfied_max_age_window_never_preflights_relays_when_it_grows() {
     let growth = core.handle(EngineMsg::RequestRows(id, 2));
     assert_eq!(reqs(&growth), 0);
     assert!(growth.iter().any(
-        |effect| matches!(effect, Effect::PreflightHistoryRelays(relays) if relays.is_empty())
+        |effect| matches!(effect, Effect::HistoryLoadResult(session, Ok(())) if *session == id)
     ));
 }

@@ -40,7 +40,7 @@
 - Engine construction/shutdown:
 - Query/content/signer ownership:
 - Background/resume:
-- Thread-admission refusal:
+- Engine-start / observation infra failure (`EngineStartFailed`, `ObservationUnavailable`):
 - Sign-out versus destructive reset:
 
 ## Verification

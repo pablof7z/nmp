@@ -1,6 +1,4 @@
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
@@ -23,19 +21,19 @@ enum FailRead {
 }
 
 #[derive(Clone, Default)]
-struct ReadFailureControl(Rc<RefCell<Option<FailRead>>>);
+struct ReadFailureControl(Arc<Mutex<Option<FailRead>>>);
 
 impl ReadFailureControl {
     fn fail_query(&self, message: &str) {
-        *self.0.borrow_mut() = Some(FailRead::Query(message.to_owned()));
+        *self.0.lock().unwrap() = Some(FailRead::Query(message.to_owned()));
     }
 
     fn fail_newest_before(&self, message: &str) {
-        *self.0.borrow_mut() = Some(FailRead::NewestBefore(message.to_owned()));
+        *self.0.lock().unwrap() = Some(FailRead::NewestBefore(message.to_owned()));
     }
 
     fn take_query_failure(&self) -> Option<PersistenceError> {
-        let mut failure = self.0.borrow_mut();
+        let mut failure = self.0.lock().unwrap();
         if matches!(failure.as_ref(), Some(FailRead::Query(_))) {
             let Some(FailRead::Query(message)) = failure.take() else {
                 unreachable!()
@@ -47,7 +45,7 @@ impl ReadFailureControl {
     }
 
     fn take_newest_before_failure(&self) -> Option<PersistenceError> {
-        let mut failure = self.0.borrow_mut();
+        let mut failure = self.0.lock().unwrap();
         if matches!(failure.as_ref(), Some(FailRead::NewestBefore(_))) {
             let Some(FailRead::NewestBefore(message)) = failure.take() else {
                 unreachable!()
@@ -211,6 +209,41 @@ impl EventStore for FailingReadStore {
     ) -> Result<u64, PersistenceError> {
         self.inner.accept_ephemeral(frozen_id, expected_pubkey)
     }
+}
+
+#[test]
+fn production_runtime_projection_failure_is_the_observation_refusal() {
+    let control = ReadFailureControl::default();
+    control.fail_query("canonical history projection failed");
+    let store = FailingReadStore::new(MemoryStore::new(), control);
+    let (engine, handle) = crate::runtime::EngineThread::spawn(
+        store,
+        FixtureDirectory::new(),
+        4,
+        nmp_transport::PoolConfig::default(),
+        RelayAdmissionPolicy::default(),
+    )
+    .expect("runtime starts before the injected canonical-store read failure");
+    let query = HistoryQuery::new(
+        LiveQuery::from_filter(Filter {
+            kinds: Some(BTreeSet::from([1])),
+            ..Filter::default()
+        }),
+        1,
+        2,
+    );
+
+    assert!(matches!(
+        handle.subscribe_history(query),
+        Err(crate::runtime::EngineThreadError::ThreadUnavailable {
+            component,
+            reason,
+        }) if component == "history projection"
+            && reason == "history session could not open its canonical projection"
+    ));
+
+    handle.shutdown();
+    engine.join();
 }
 
 #[derive(Clone, Default)]

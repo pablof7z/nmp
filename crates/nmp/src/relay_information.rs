@@ -43,8 +43,6 @@ impl RelayInformationFreshness {
 /// Typed failure of one bounded NIP-11 acquisition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelayInformationError {
-    WaiterSaturated { capacity: usize },
-    ThreadUnavailable { reason: String },
     ServiceClosed,
     CredentialedRelayUrl,
     Http { reason: String },
@@ -54,13 +52,9 @@ pub enum RelayInformationError {
 
 impl RelayInformationError {
     pub(crate) fn from_engine(value: nmp_engine::relay_information::RelayInformationError) -> Self {
+        // #704: `WaiterSaturated`/`ThreadUnavailable` were deleted — with the
+        // async runtime there is no waiter-capacity or thread-admission refusal.
         match value {
-            nmp_engine::relay_information::RelayInformationError::WaiterSaturated { capacity } => {
-                Self::WaiterSaturated { capacity }
-            }
-            nmp_engine::relay_information::RelayInformationError::ThreadUnavailable { reason } => {
-                Self::ThreadUnavailable { reason }
-            }
             nmp_engine::relay_information::RelayInformationError::ServiceClosed => {
                 Self::ServiceClosed
             }
@@ -83,13 +77,6 @@ impl RelayInformationError {
 impl std::fmt::Display for RelayInformationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::WaiterSaturated { capacity } => write!(
-                f,
-                "NIP-11 acquisition refused: per-relay waiter capacity {capacity} is full"
-            ),
-            Self::ThreadUnavailable { reason } => {
-                write!(f, "NIP-11 acquisition thread unavailable: {reason}")
-            }
             Self::ServiceClosed => f.write_str("NIP-11 acquisition service is closed"),
             Self::CredentialedRelayUrl => {
                 f.write_str("NIP-11 acquisition refuses relay URL userinfo")

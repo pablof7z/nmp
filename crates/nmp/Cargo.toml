@@ -23,7 +23,9 @@ nmp-store.workspace = true
 nmp-router.workspace = true
 nmp-resolver.workspace = true
 nmp-transport.workspace = true
-nmp-executor.workspace = true
+# #704: `Engine::adapter_runtime()` hands protocol adapters the engine-owned
+# runtime handle; only the `Handle` type crosses this facade boundary.
+tokio = { version = "1", features = ["rt"] }
 
 [dev-dependencies]
 nmp-engine = { workspace = true, features = ["test-instrumentation"] }

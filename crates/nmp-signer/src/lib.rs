@@ -33,6 +33,6 @@ pub use nip46::{
     Nip46Origin, Nip46SessionCheckpoint, Nip46Signer,
 };
 pub use op::{
-    pending_signer_cancellation, PendingSignerCancel, PendingSignerCancelled, PendingSignerOp,
-    PendingSignerResolveError, PendingSignerSender, SignerError, SignerOp,
+    Canceller, PendingSignerOp, PendingSignerResolveError, PendingSignerSender, SignerError,
+    SignerOp,
 };

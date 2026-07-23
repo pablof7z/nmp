@@ -38,7 +38,15 @@ public enum NMPError: Error, Sendable, Equatable {
     case storeOpenFailed(String)
     case storeResetFailed(String)
     case storeStillOpen(String)
-    case threadUnavailable(component: String, reason: String)
+    /// The engine could not be constructed (`NmpEngine.init`): a genuine
+    /// engine-start infrastructure failure. Never raised by an ordinary
+    /// operation (#704).
+    case engineStartFailed(component: String, reason: String)
+    /// A windowed `observe` could not open its canonical history projection
+    /// because the store degraded during setup. This is the case's sole
+    /// production meaning; relay connection/worker failure remains ordinary
+    /// acquisition evidence in the observation stream (#704).
+    case observationUnavailable(reason: String)
     /// #680: a second `next()` was awaited on an observation stream (or a
     /// `signed()` on a sign handle) while a previous one was still in flight.
     /// Every observation handle is single-consumer -- surface the misuse as a
@@ -87,8 +95,6 @@ public enum NMPError: Error, Sendable, Equatable {
     case intentAlreadyConsumed
     /// No last-good NIP-11 document exists and acquisition failed.
     case relayInformationUnavailable(RelayInformationErrorKind)
-    /// One relay's in-flight NIP-11 waiter set is at its finite bound.
-    case relayInformationWaitersSaturated(capacity: UInt64)
     /// #591: `WriteIntent.correlation`/`reattachReceipt(correlation:)` was
     /// given a token that failed `CorrelationToken`'s bounded/non-empty
     /// validation.
@@ -116,8 +122,10 @@ public enum NMPError: Error, Sendable, Equatable {
         case .StoreOpenFailed(let reason): self = .storeOpenFailed(reason)
         case .StoreResetFailed(let reason): self = .storeResetFailed(reason)
         case .StoreStillOpen(let path): self = .storeStillOpen(path)
-        case .ThreadUnavailable(let component, let reason):
-            self = .threadUnavailable(component: component, reason: reason)
+        case .EngineStartFailed(let component, let reason):
+            self = .engineStartFailed(component: component, reason: reason)
+        case .ObservationUnavailable(let reason):
+            self = .observationUnavailable(reason: reason)
         case .ConcurrentNext: self = .concurrentNext
         case .FactStreamLagged(let receiptId):
             self = .factStreamLagged(receiptId: receiptId)
@@ -137,8 +145,6 @@ public enum NMPError: Error, Sendable, Equatable {
         case .IntentAlreadyConsumed: self = .intentAlreadyConsumed
         case .RelayInformationUnavailable(let kind):
             self = .relayInformationUnavailable(RelayInformationErrorKind(kind))
-        case .RelayInformationWaitersSaturated(let capacity):
-            self = .relayInformationWaitersSaturated(capacity: capacity)
         case .InvalidCorrelationToken(let got, let reason):
             self = .invalidCorrelationToken(got: got, reason: reason)
         case .InvalidNip73Target(let reason):
