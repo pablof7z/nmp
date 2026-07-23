@@ -22,6 +22,16 @@ final class ControlledRelayHarness: @unchecked Sendable {
         let payload: Data
     }
 
+    private struct SnapshotWaiter {
+        let predicate: @Sendable (Snapshot) -> Bool
+        let continuation: CheckedContinuation<Snapshot?, Never>
+    }
+
+    private enum WaitRegistration {
+        case stored
+        case resume(Snapshot?)
+    }
+
     private enum HarnessError: Error {
         case listenerDidNotStart
     }
@@ -37,6 +47,7 @@ final class ControlledRelayHarness: @unchecked Sendable {
     private var closeIDs: [String] = []
     private var eventIDs: [String] = []
     private var peakWebSockets = 0
+    private var snapshotWaiters: [UUID: SnapshotWaiter] = [:]
 
     private(set) var relayURL = ""
 
@@ -60,7 +71,7 @@ final class ControlledRelayHarness: @unchecked Sendable {
     }
 
     func seed(_ event: NMPSignedEvent) {
-        lock.withLock {
+        mutate {
             seededEvents.append([
                 "id": event.id,
                 "pubkey": event.pubkey,
@@ -74,16 +85,43 @@ final class ControlledRelayHarness: @unchecked Sendable {
     }
 
     func snapshot() -> Snapshot {
-        lock.withLock {
-            Snapshot(
-                nip11Requests: nip11RequestCount,
-                requestSubscriptionIDs: requestIDs,
-                closedSubscriptionIDs: closeIDs,
-                acceptedEventIDs: eventIDs,
-                activeWebSockets: webSockets.count,
-                peakActiveWebSockets: peakWebSockets
-            )
+        lock.withLock { makeSnapshotLocked() }
+    }
+
+    /// Suspend on one exact harness mutation. Cancellation (including the
+    /// bounded timeout race in the test) removes and resumes only this
+    /// registration, so a timed-out waiter cannot leak into a later edge.
+    func nextSnapshot(
+        matching predicate: @escaping @Sendable (Snapshot) -> Bool
+    ) async -> Snapshot? {
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let registration = lock.withLock { () -> WaitRegistration in
+                    if Task.isCancelled {
+                        return .resume(nil)
+                    }
+                    let snapshot = makeSnapshotLocked()
+                    if predicate(snapshot) {
+                        return .resume(snapshot)
+                    }
+                    snapshotWaiters[id] = SnapshotWaiter(
+                        predicate: predicate,
+                        continuation: continuation
+                    )
+                    return .stored
+                }
+                if case .resume(let snapshot) = registration {
+                    continuation.resume(returning: snapshot)
+                }
+            }
+        } onCancel: {
+            self.cancelSnapshotWaiter(id)
         }
+    }
+
+    func snapshotWaiterCount() -> Int {
+        lock.withLock { snapshotWaiters.count }
     }
 
     func stop() {
@@ -144,7 +182,7 @@ final class ControlledRelayHarness: @unchecked Sendable {
                 "Content-Length: \(body.count)\r\n" +
                 "Connection: close\r\n\r\n").utf8
         )
-        lock.withLock {
+        mutate {
             nip11RequestCount += 1
         }
         connection.send(content: headers + body, completion: .contentProcessed { [weak self] _ in
@@ -176,7 +214,7 @@ final class ControlledRelayHarness: @unchecked Sendable {
                 "Connection: Upgrade\r\n" +
                 "Sec-WebSocket-Accept: \(accept)\r\n\r\n").utf8
         )
-        lock.withLock {
+        mutate {
             webSockets[ObjectIdentifier(connection)] = connection
             peakWebSockets = max(peakWebSockets, webSockets.count)
         }
@@ -236,7 +274,7 @@ final class ControlledRelayHarness: @unchecked Sendable {
             guard message.count >= 3, let subscriptionID = message[1] as? String else {
                 return
             }
-            let events = lock.withLock {
+            let events = mutate {
                 subscriptions[subscriptionID] = connection
                 requestIDs.append(subscriptionID)
                 return seededEvents
@@ -254,7 +292,7 @@ final class ControlledRelayHarness: @unchecked Sendable {
             guard message.count >= 2, let subscriptionID = message[1] as? String else {
                 return
             }
-            lock.withLock {
+            mutate {
                 subscriptions.removeValue(forKey: subscriptionID)
                 closeIDs.append(subscriptionID)
             }
@@ -264,7 +302,7 @@ final class ControlledRelayHarness: @unchecked Sendable {
                   let eventID = event["id"] as? String else {
                 return
             }
-            let subscribers = lock.withLock { () -> [(String, NWConnection)] in
+            let subscribers = mutate { () -> [(String, NWConnection)] in
                 eventIDs.append(eventID)
                 seededEvents.append(event)
                 return Array(subscriptions)
@@ -293,10 +331,50 @@ final class ControlledRelayHarness: @unchecked Sendable {
     }
 
     private func connectionEnded(_ connection: NWConnection) {
-        lock.withLock {
+        mutate {
             webSockets.removeValue(forKey: ObjectIdentifier(connection))
             subscriptions = subscriptions.filter { $0.value !== connection }
         }
+    }
+
+    private func makeSnapshotLocked() -> Snapshot {
+        Snapshot(
+            nip11Requests: nip11RequestCount,
+            requestSubscriptionIDs: requestIDs,
+            closedSubscriptionIDs: closeIDs,
+            acceptedEventIDs: eventIDs,
+            activeWebSockets: webSockets.count,
+            peakActiveWebSockets: peakWebSockets
+        )
+    }
+
+    /// Apply one state transition and resume every exact waiter whose
+    /// predicate becomes true from that transition. Continuations are
+    /// removed under the same lock and resumed after unlocking.
+    @discardableResult
+    private func mutate<Value>(_ body: () -> Value) -> Value {
+        let (result, snapshot, matched) = lock.withLock {
+            let result = body()
+            let snapshot = makeSnapshotLocked()
+            let matchingIDs = snapshotWaiters.compactMap { id, waiter in
+                waiter.predicate(snapshot) ? id : nil
+            }
+            let matched = matchingIDs.compactMap {
+                snapshotWaiters.removeValue(forKey: $0)
+            }
+            return (result, snapshot, matched)
+        }
+        matched.forEach {
+            $0.continuation.resume(returning: snapshot)
+        }
+        return result
+    }
+
+    private func cancelSnapshotWaiter(_ id: UUID) {
+        let waiter = lock.withLock {
+            snapshotWaiters.removeValue(forKey: id)
+        }
+        waiter?.continuation.resume(returning: nil)
     }
 
     private func sendJSON(_ object: [Any], on connection: NWConnection) {

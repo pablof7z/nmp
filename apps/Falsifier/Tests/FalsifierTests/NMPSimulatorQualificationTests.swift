@@ -338,6 +338,39 @@ final class NMPSimulatorQualificationTests: XCTestCase {
         try NMPEngine.resetPersistentStore(at: storePath)
     }
 
+    /// The qualification fixture itself follows NMP's edge-triggered
+    /// contract: one timeout cancels and removes each exact continuation.
+    /// A later mutation therefore cannot find or double-resume a stale
+    /// waiter left behind by a timed-out test assertion.
+    @MainActor
+    func testEventDrivenWaitersWithdrawExactlyOnTimeout() async throws {
+        let queryProbe = QueryProbe()
+        let missingBatch: RowBatch? = await boundedWait(timeout: .milliseconds(50)) {
+            await queryProbe.next { _ in false }
+        }
+        XCTAssertNil(missingBatch)
+        let queryWaiters = await queryProbe.waiterCount()
+        XCTAssertEqual(queryWaiters, 0)
+
+        let receiptProbe = ReceiptProbe()
+        let missingStatuses: [WriteStatus]? = await boundedWait(timeout: .milliseconds(50)) {
+            await receiptProbe.next { _ in false }
+        }
+        XCTAssertNil(missingStatuses)
+        let receiptWaiters = await receiptProbe.waiterCount()
+        XCTAssertEqual(receiptWaiters, 0)
+
+        let relay = try ControlledRelayHarness()
+        defer { relay.stop() }
+        let missingSnapshot: ControlledRelayHarness.Snapshot? = await boundedWait(
+            timeout: .milliseconds(50)
+        ) {
+            await relay.nextSnapshot { _ in false }
+        }
+        XCTAssertNil(missingSnapshot)
+        XCTAssertEqual(relay.snapshotWaiterCount(), 0)
+    }
+
     /// The typed-error half of the same platform delta: a malformed NIP-11
     /// body must fail through the same typed `NMPError` taxonomy on the
     /// simulator runtime as it does on the macOS host, never an invented
@@ -368,15 +401,9 @@ final class NMPSimulatorQualificationTests: XCTestCase {
         timeoutSeconds: UInt64,
         matching predicate: @escaping @Sendable (RowBatch) -> Bool
     ) async -> RowBatch? {
-        let deadline = ContinuousClock.now + .seconds(Int64(timeoutSeconds))
-        while ContinuousClock.now < deadline {
-            let batches = await probe.snapshot()
-            if let batch = batches.first(where: predicate) {
-                return batch
-            }
-            try? await Task.sleep(for: .milliseconds(20))
+        await boundedWait(timeout: .seconds(Int64(timeoutSeconds))) {
+            await probe.next(matching: predicate)
         }
-        return nil
     }
 
     @MainActor
@@ -385,15 +412,9 @@ final class NMPSimulatorQualificationTests: XCTestCase {
         timeoutSeconds: UInt64,
         matching predicate: @escaping @Sendable ([WriteStatus]) -> Bool
     ) async -> [WriteStatus]? {
-        let deadline = ContinuousClock.now + .seconds(Int64(timeoutSeconds))
-        while ContinuousClock.now < deadline {
-            let statuses = await probe.snapshot()
-            if predicate(statuses) {
-                return statuses
-            }
-            try? await Task.sleep(for: .milliseconds(20))
+        await boundedWait(timeout: .seconds(Int64(timeoutSeconds))) {
+            await probe.next(matching: predicate)
         }
-        return nil
     }
 
     @MainActor
@@ -402,15 +423,35 @@ final class NMPSimulatorQualificationTests: XCTestCase {
         timeoutSeconds: UInt64,
         matching predicate: @escaping @Sendable (ControlledRelayHarness.Snapshot) -> Bool
     ) async -> ControlledRelayHarness.Snapshot? {
-        let deadline = ContinuousClock.now + .seconds(Int64(timeoutSeconds))
-        while ContinuousClock.now < deadline {
-            let snapshot = relay.snapshot()
-            if predicate(snapshot) {
-                return snapshot
-            }
-            try? await Task.sleep(for: .milliseconds(20))
+        await boundedWait(timeout: .seconds(Int64(timeoutSeconds))) {
+            await relay.nextSnapshot(matching: predicate)
         }
-        return nil
+    }
+
+    /// Race one edge-triggered waiter against one real timeout task. The
+    /// losing child is cancelled before this scope returns; each probe's
+    /// cancellation handler removes and resumes its exact registered waiter.
+    @MainActor
+    private func boundedWait<Value: Sendable>(
+        timeout: Duration,
+        operation: @escaping @Sendable () async -> Value?
+    ) async -> Value? {
+        await withTaskGroup(of: Value?.self) { group in
+            group.addTask {
+                await operation()
+            }
+            group.addTask {
+                do {
+                    try await Task.sleep(for: timeout)
+                    return nil
+                } catch {
+                    return nil
+                }
+            }
+            let result = await group.next() ?? nil
+            group.cancelAll()
+            return result
+        }
     }
 }
 
@@ -424,16 +465,59 @@ private func isSameRelay(_ candidate: String, _ expected: String) -> Bool {
 }
 
 private actor QueryProbe {
+    private struct Waiter {
+        let predicate: @Sendable (RowBatch) -> Bool
+        let continuation: CheckedContinuation<RowBatch?, Never>
+    }
+
     private var batches: [RowBatch] = []
     private var failureMessage: String?
+    private var waiters: [UUID: Waiter] = [:]
 
     func consume(_ query: NMPQuery) async {
         do {
             for try await batch in query {
                 batches.append(batch)
+                let matching = waiters.compactMap { id, waiter in
+                    waiter.predicate(batch) ? id : nil
+                }
+                for id in matching {
+                    waiters.removeValue(forKey: id)?.continuation.resume(
+                        returning: batch
+                    )
+                }
             }
         } catch {
             failureMessage = String(describing: error)
+        }
+        finishWaiters()
+    }
+
+    func next(
+        matching predicate: @escaping @Sendable (RowBatch) -> Bool
+    ) async -> RowBatch? {
+        if let existing = batches.first(where: predicate) {
+            return existing
+        }
+
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(returning: nil)
+                } else if let existing = batches.first(where: predicate) {
+                    continuation.resume(returning: existing)
+                } else {
+                    waiters[id] = Waiter(
+                        predicate: predicate,
+                        continuation: continuation
+                    )
+                }
+            }
+        } onCancel: {
+            Task {
+                await self.cancelWaiter(id)
+            }
         }
     }
 
@@ -444,19 +528,77 @@ private actor QueryProbe {
     func failure() -> String? {
         failureMessage
     }
+
+    func waiterCount() -> Int {
+        waiters.count
+    }
+
+    private func cancelWaiter(_ id: UUID) {
+        waiters.removeValue(forKey: id)?.continuation.resume(returning: nil)
+    }
+
+    private func finishWaiters() {
+        let pending = Array(waiters.values)
+        waiters.removeAll()
+        pending.forEach { $0.continuation.resume(returning: nil) }
+    }
 }
 
 private actor ReceiptProbe {
+    private struct Waiter {
+        let predicate: @Sendable ([WriteStatus]) -> Bool
+        let continuation: CheckedContinuation<[WriteStatus]?, Never>
+    }
+
     private var statuses: [WriteStatus] = []
     private var failureMessage: String?
+    private var waiters: [UUID: Waiter] = [:]
 
     func consume(_ status: ReceiptStatus) async {
         do {
             for try await value in status {
                 statuses.append(value)
+                let snapshot = statuses
+                let matching = waiters.compactMap { id, waiter in
+                    waiter.predicate(snapshot) ? id : nil
+                }
+                for id in matching {
+                    waiters.removeValue(forKey: id)?.continuation.resume(
+                        returning: snapshot
+                    )
+                }
             }
         } catch {
             failureMessage = String(describing: error)
+        }
+        finishWaiters()
+    }
+
+    func next(
+        matching predicate: @escaping @Sendable ([WriteStatus]) -> Bool
+    ) async -> [WriteStatus]? {
+        if predicate(statuses) {
+            return statuses
+        }
+
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(returning: nil)
+                } else if predicate(statuses) {
+                    continuation.resume(returning: statuses)
+                } else {
+                    waiters[id] = Waiter(
+                        predicate: predicate,
+                        continuation: continuation
+                    )
+                }
+            }
+        } onCancel: {
+            Task {
+                await self.cancelWaiter(id)
+            }
         }
     }
 
@@ -466,5 +608,19 @@ private actor ReceiptProbe {
 
     func failure() -> String? {
         failureMessage
+    }
+
+    func waiterCount() -> Int {
+        waiters.count
+    }
+
+    private func cancelWaiter(_ id: UUID) {
+        waiters.removeValue(forKey: id)?.continuation.resume(returning: nil)
+    }
+
+    private func finishWaiters() {
+        let pending = Array(waiters.values)
+        waiters.removeAll()
+        pending.forEach { $0.continuation.resume(returning: nil) }
     }
 }
