@@ -44,6 +44,11 @@ public enum NMPError: Error, Sendable, Equatable {
     /// Every observation handle is single-consumer -- surface the misuse as a
     /// typed error, never a hang. No frame is lost or duplicated.
     case concurrentNext
+    /// A durable FIFO fact stream crossed its finite live-delivery bound
+    /// while the app was paused. No fact is claimed delivered and memory stays
+    /// bounded; when present, reattach `receiptId` to replay persisted facts.
+    case factStreamLagged(receiptId: UInt64?)
+    case receiptReplayUnavailable(receiptId: UInt64)
     /// #680: `NmpSignEventHandle.signed()` was awaited a second time -- the
     /// one-shot result was already delivered to the first await.
     case signEventAlreadyConsumed
@@ -114,6 +119,10 @@ public enum NMPError: Error, Sendable, Equatable {
         case .ThreadUnavailable(let component, let reason):
             self = .threadUnavailable(component: component, reason: reason)
         case .ConcurrentNext: self = .concurrentNext
+        case .FactStreamLagged(let receiptId):
+            self = .factStreamLagged(receiptId: receiptId)
+        case .ReceiptReplayUnavailable(let receiptId):
+            self = .receiptReplayUnavailable(receiptId: receiptId)
         case .InvalidSignature(let got): self = .invalidSignature(got)
         case .EngineClosed: self = .engineClosed
         case .InvalidNostrEntity(let reason): self = .invalidNostrEntity(reason)

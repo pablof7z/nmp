@@ -191,6 +191,30 @@ final class AsyncObservationHandlesTests: XCTestCase {
         query.cancel()
     }
 
+    /// A NORMAL `break` is teardown too. No explicit `Task.cancel()` and no
+    /// `query.cancel()` are allowed in this proof: the loop's iterator must
+    /// own withdrawal, so leaving scope cancels the native handle and releases
+    /// the sequence claim. A replacement iterator therefore reaches the
+    /// cancelled handle's terminal `nil` instead of being refused as a leaked
+    /// concurrent iterator.
+    func testNormalLoopBreakWithdrawsDemandAndReleasesIteratorClaim() async throws {
+        let engine = try NMPEngine(config: NMPConfig())
+        defer { engine.shutdown() }
+        let registration = try await engine.addAccount(secretKey: Self.testSecretKey)
+        try engine.setActiveAccount(registration.publicKey)
+        let query = try engine.observe(NMPFilter(kinds: [8_812]))
+
+        let delivered = try await Self.consumeOneThenBreak(query)
+        XCTAssertEqual(delivered, 1, "the loop exits normally after one delivered frame")
+
+        var replacement = query.makeAsyncIterator()
+        let terminal = try await replacement.next()
+        XCTAssertNil(
+            terminal,
+            "normal iterator scope exit cancelled native demand and released the claim"
+        )
+    }
+
     // MARK: - Item 4: multi-consumer contract
 
     /// The RECOMMENDED multi-consumer pattern: TWO INDEPENDENT observations
@@ -374,5 +398,16 @@ final class AsyncObservationHandlesTests: XCTestCase {
             group.cancelAll()
             return result
         }
+    }
+
+    /// Separate scope makes the iterator's destruction point deterministic.
+    /// There is deliberately no explicit cancellation in this helper.
+    static func consumeOneThenBreak(_ query: NMPQuery) async throws -> Int {
+        var delivered = 0
+        for try await _ in query {
+            delivered += 1
+            break
+        }
+        return delivered
     }
 }

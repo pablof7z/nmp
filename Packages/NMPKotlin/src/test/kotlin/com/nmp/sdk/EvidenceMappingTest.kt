@@ -96,6 +96,22 @@ class EvidenceMappingTest {
     }
 
     @Test
+    fun finiteFactDeliveryFailuresRemainTypedAtTheNativeBoundary() {
+        assertEquals(
+            NMPError.FactStreamLagged(42u),
+            NMPError.from(FfiException.FactStreamLagged(42u)),
+        )
+        assertEquals(
+            NMPError.FactStreamLagged(null),
+            NMPError.from(FfiException.FactStreamLagged(null)),
+        )
+        assertEquals(
+            NMPError.ReceiptReplayUnavailable(42u),
+            NMPError.from(FfiException.ReceiptReplayUnavailable(42u)),
+        )
+    }
+
+    @Test
     fun everyReceiptReattachmentVariantMapsWithoutCollapsingCorruptionIntoAbsence() {
         // #680: `FfiReceiptReattachment.Attached` now carries a live
         // `NmpReceiptStream` (exercised by the integration suite); the

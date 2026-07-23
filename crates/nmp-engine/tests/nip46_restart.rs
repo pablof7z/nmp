@@ -374,7 +374,7 @@ fn offline_accept_restart_real_bunker_reattach_publish_and_ack() {
     )
     .expect("test engine thread construction");
     let statuses = match handle.reattach_receipt(receipt_id) {
-        ReceiptReattachment::Attached(_id, statuses) => statuses,
+        ReceiptReattachment::Attached { statuses, .. } => statuses,
         _ => panic!("durable receipt must reattach after restart"),
     };
     assert_eq!(statuses.recv().unwrap(), WriteStatus::Accepted);
@@ -629,7 +629,7 @@ fn checkpoint_restore_reattaches_durable_write_without_repairing() {
     )
     .expect("test engine thread construction");
     let statuses = match handle.reattach_receipt(receipt_id) {
-        ReceiptReattachment::Attached(_id, statuses) => statuses,
+        ReceiptReattachment::Attached { statuses, .. } => statuses,
         _ => panic!("durable receipt must reattach after restart"),
     };
     assert_eq!(statuses.recv().unwrap(), WriteStatus::Accepted);

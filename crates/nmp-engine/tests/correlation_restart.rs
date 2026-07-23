@@ -33,8 +33,9 @@ use nostr::{
 struct Sink(Arc<Mutex<Vec<WriteStatus>>>);
 
 impl ReceiptSink for Sink {
-    fn on_status(&self, status: WriteStatus) {
+    fn on_status(&self, status: WriteStatus) -> bool {
         self.0.lock().unwrap().push(status);
+        true
     }
 }
 

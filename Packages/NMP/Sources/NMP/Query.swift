@@ -19,13 +19,14 @@ import NMPFFI
 /// The sequence is THROWING: it ends normally (`nil`) when the engine tears
 /// the subscription down, and surfaces `NMPError.concurrentNext` if two
 /// iterators pull the same handle at once (the handle is single-consumer,
-/// #680). Delivery is throttled through `FrameCoalescer` (#17) so a tight
-/// `for try await` loop during historical replay cannot peg the main thread.
+/// #680). The direct iterator cadence-limits complete snapshots (#17) so a
+/// tight `for try await` loop during historical replay cannot peg the main
+/// thread; values produced while it waits conflate in the native mailbox.
 ///
-/// Demand teardown is TERMINATION-TIED: dropping the iterating task (cancel /
-/// scope exit) drops the iterator, whose stream termination calls the handle's
-/// `cancel()` -- required because Swift task cancellation never reaches Rust
-/// (#680). `NmpRowStream.cancel()` also runs on the handle's own ARC `deinit`.
+/// Demand teardown is ITERATOR-OWNED: dropping the iterator on normal scope
+/// exit (including `break`) cancels the handle and releases its sequence claim.
+/// Task cancellation is forwarded synchronously to the native handle so a
+/// parked `next()` wakes; Swift cancellation does not cross UniFFI by itself.
 public struct NMPQuery: AsyncSequence, Sendable {
     public typealias Element = RowBatch
 
@@ -49,20 +50,19 @@ public struct NMPQuery: AsyncSequence, Sendable {
 
     public func makeAsyncIterator() -> Iterator {
         let accumulator = RowAccumulator()
-        let stream = nmpPullStream(
+        let core = NMPPullIteratorCore(
             handle: handle,
             iteratorGate: iteratorGate,
-            bufferingPolicy: .bufferingNewest(1),
             throttle: true
         ) { frame in accumulator.fold(frame) }
-        return Iterator(base: stream.makeAsyncIterator())
+        return Iterator(core: core)
     }
 
     public struct Iterator: AsyncIteratorProtocol {
-        var base: AsyncThrowingStream<RowBatch, Error>.AsyncIterator
+        let core: NMPPullIteratorCore<NmpRowStream, RowBatch>
 
         public mutating func next() async throws -> RowBatch? {
-            try await base.next()
+            try await core.next()
         }
     }
 

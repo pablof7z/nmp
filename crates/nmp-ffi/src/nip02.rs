@@ -3,7 +3,7 @@
 //! no contact-list parsing, replacement composition, readiness policy, or
 //! optimistic following boolean lives at the FFI boundary.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::convert::{write_status_to_ffi, FfiError, WriteStatusRef};
 use crate::types::FfiWriteStatus;
@@ -118,11 +118,15 @@ impl Drop for NmpFollowStream {
 #[derive(uniffi::Object)]
 pub struct NmpFollowActionStream {
     inner: nmp::AsyncFifoReceiver<FollowActionStatus>,
+    last_receipt_id: Mutex<Option<u64>>,
 }
 
 impl NmpFollowActionStream {
     pub(crate) fn new(inner: nmp::AsyncFifoReceiver<FollowActionStatus>) -> Arc<Self> {
-        Arc::new(Self { inner })
+        Arc::new(Self {
+            inner,
+            last_receipt_id: Mutex::new(None),
+        })
     }
 }
 
@@ -133,9 +137,17 @@ impl NmpFollowActionStream {
     /// [`FfiError::ConcurrentNext`].
     pub async fn next(&self) -> Result<Option<FfiFollowActionStatus>, FfiError> {
         match self.inner.next().await {
-            Ok(Some(status)) => Ok(Some(action_status_to_ffi(status))),
+            Ok(Some(status)) => {
+                if let FollowActionStatus::Receipt { receipt_id, .. } = &status {
+                    *self.last_receipt_id.lock().unwrap() = Some(*receipt_id);
+                }
+                Ok(Some(action_status_to_ffi(status)))
+            }
             Ok(None) => Ok(None),
-            Err(_) => Err(FfiError::ConcurrentNext),
+            Err(nmp::FifoNextError::ConcurrentNext) => Err(FfiError::ConcurrentNext),
+            Err(nmp::FifoNextError::Lagged) => Err(FfiError::FactStreamLagged {
+                receipt_id: *self.last_receipt_id.lock().unwrap(),
+            }),
         }
     }
 

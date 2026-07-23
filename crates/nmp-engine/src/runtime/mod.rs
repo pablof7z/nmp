@@ -115,7 +115,10 @@ use nmp_grammar::WriteIntent;
 
 use diagnostics_channel::{latest_channel, LatestSender};
 pub use diagnostics_channel::{AsyncLatestReceiver, ConcurrentNext, LatestReceiver};
-pub use fifo_channel::{fifo_channel, AsyncFifoReceiver, FifoReceiver, FifoSender};
+pub use fifo_channel::{
+    fifo_channel, AsyncFifoReceiver, FifoNextError, FifoReceiver, FifoRecvError,
+    FifoRecvTimeoutError, FifoSender, FifoTryRecvError, FACT_CHANNEL_CAPACITY,
+};
 use row_channel::{rows_channel, RowsSender};
 pub use row_channel::{AsyncRowsReceiver, RowsReceiver};
 
@@ -601,7 +604,13 @@ pub enum ReceiptReattachment {
     /// [`Handle::reattach_receipt`] this is simply the caller's own input
     /// echoed back; for [`Handle::reattach_by_correlation`] (#591) it is the
     /// id the token resolved to, which the caller could not otherwise learn.
-    Attached(ReceiptId, FifoReceiver<WriteStatus>),
+    Attached {
+        id: ReceiptId,
+        statuses: FifoReceiver<WriteStatus>,
+        /// Canonical durable-replay cursor for the next finite page. `None`
+        /// means this receiver is caught up and attached to live work.
+        next_cursor: Option<u64>,
+    },
     /// No retained receipt with this id (or token) exists.
     NotFound,
     /// The id is retained, but durable receipt or attempt evidence is corrupt
@@ -633,8 +642,8 @@ impl HistorySink for NullHistorySink {
 struct ChannelReceiptSink(FifoSender<WriteStatus>);
 
 impl ReceiptSink for ChannelReceiptSink {
-    fn on_status(&self, status: WriteStatus) {
-        self.0.send(status);
+    fn on_status(&self, status: WriteStatus) -> bool {
+        self.0.send(status)
     }
 }
 
@@ -724,8 +733,9 @@ enum Cmd {
     },
     ReattachReceipt {
         id: ReceiptId,
+        cursor: u64,
         sink: Box<dyn ReceiptSink>,
-        reply: Sender<ReattachOutcome>,
+        reply: Sender<(ReattachOutcome, Option<u64>)>,
     },
     /// #591: reattach by caller correlation token instead of a `ReceiptId`
     /// -- the door a client uses after a crash that happened before it
@@ -733,7 +743,7 @@ enum Cmd {
     ReattachByCorrelation {
         token: String,
         sink: Box<dyn ReceiptSink>,
-        reply: Sender<(ReattachOutcome, Option<ReceiptId>)>,
+        reply: Sender<(ReattachOutcome, Option<ReceiptId>, Option<u64>)>,
     },
     CancelWrite {
         id: ReceiptId,
@@ -2395,7 +2405,9 @@ mod relay_worker_reconciliation_tests {
     struct NullReceiptSink;
 
     impl ReceiptSink for NullReceiptSink {
-        fn on_status(&self, _status: WriteStatus) {}
+        fn on_status(&self, _status: WriteStatus) -> bool {
+            true
+        }
     }
 
     fn query(author: &str) -> LiveQuery {
@@ -3760,11 +3772,26 @@ fn engine_loop<S, D>(
                     let removed = registry.remove(&registration).is_some();
                     let _ = reply.send(removed);
                 }
-                Cmd::ReattachReceipt { id, sink, reply } => {
-                    let _ = reply.send(core.reattach_receipt(id, sink));
+                Cmd::ReattachReceipt {
+                    id,
+                    cursor,
+                    sink,
+                    reply,
+                } => {
+                    let _ = reply.send(core.reattach_receipt_page(
+                        id,
+                        sink,
+                        cursor,
+                        FACT_CHANNEL_CAPACITY,
+                    ));
                 }
                 Cmd::ReattachByCorrelation { token, sink, reply } => {
-                    let _ = reply.send(core.reattach_by_correlation(token, sink));
+                    let _ = reply.send(core.reattach_by_correlation_page(
+                        token,
+                        sink,
+                        0,
+                        FACT_CHANNEL_CAPACITY,
+                    ));
                 }
                 Cmd::ObserveDiagnostics { reply } => {
                     let id = next_diag_id;
@@ -4270,12 +4297,18 @@ fn engine_loop<S, D>(
             Cmd::UnobserveDiagnostics(id) => {
                 diag_channels.remove(&id);
             }
-            Cmd::ReattachReceipt { id, sink, reply } => {
-                let found = core.reattach_receipt(id, sink);
+            Cmd::ReattachReceipt {
+                id,
+                cursor,
+                sink,
+                reply,
+            } => {
+                let found = core.reattach_receipt_page(id, sink, cursor, FACT_CHANNEL_CAPACITY);
                 let _ = reply.send(found);
             }
             Cmd::ReattachByCorrelation { token, sink, reply } => {
-                let found = core.reattach_by_correlation(token, sink);
+                let found =
+                    core.reattach_by_correlation_page(token, sink, 0, FACT_CHANNEL_CAPACITY);
                 let _ = reply.send(found);
             }
             Cmd::CancelWrite { id, reply } => {
@@ -6102,11 +6135,18 @@ impl Handle {
     /// channel is primed with durable receipt/attempt facts. Missing and
     /// retained-but-unreadable evidence are distinct outcomes.
     pub fn reattach_receipt(&self, id: ReceiptId) -> ReceiptReattachment {
+        self.reattach_receipt_from(id, 0)
+    }
+
+    /// Continue deterministic durable replay from a prior page cursor. This
+    /// is delivery mechanism for receipt streams, not a second write noun.
+    pub fn reattach_receipt_from(&self, id: ReceiptId, cursor: u64) -> ReceiptReattachment {
         let (tx, rx) = fifo_channel();
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox
             .send(Cmd::ReattachReceipt {
                 id,
+                cursor,
                 sink: Box::new(ChannelReceiptSink(tx)),
                 reply: reply_tx,
             })
@@ -6115,9 +6155,15 @@ impl Handle {
             .recv()
             .expect("nmp-engine: engine dropped reattach reply")
         {
-            ReattachOutcome::Attached => ReceiptReattachment::Attached(id, rx),
-            ReattachOutcome::NotFound => ReceiptReattachment::NotFound,
-            ReattachOutcome::RetainedButUnreadable => ReceiptReattachment::RetainedButUnreadable,
+            (ReattachOutcome::Attached, next_cursor) => ReceiptReattachment::Attached {
+                id,
+                statuses: rx,
+                next_cursor,
+            },
+            (ReattachOutcome::NotFound, _) => ReceiptReattachment::NotFound,
+            (ReattachOutcome::RetainedButUnreadable, _) => {
+                ReceiptReattachment::RetainedButUnreadable
+            }
         }
     }
 
@@ -6142,14 +6188,18 @@ impl Handle {
             .recv()
             .expect("nmp-engine: engine dropped reattach reply")
         {
-            (ReattachOutcome::Attached, Some(id)) => ReceiptReattachment::Attached(id, rx),
-            (ReattachOutcome::Attached, None) => {
+            (ReattachOutcome::Attached, Some(id), next_cursor) => ReceiptReattachment::Attached {
+                id,
+                statuses: rx,
+                next_cursor,
+            },
+            (ReattachOutcome::Attached, None, _) => {
                 unreachable!(
                     "EngineCore::reattach_by_correlation always resolves an id when Attached"
                 )
             }
-            (ReattachOutcome::NotFound, _) => ReceiptReattachment::NotFound,
-            (ReattachOutcome::RetainedButUnreadable, _) => {
+            (ReattachOutcome::NotFound, _, _) => ReceiptReattachment::NotFound,
+            (ReattachOutcome::RetainedButUnreadable, _, _) => {
                 ReceiptReattachment::RetainedButUnreadable
             }
         }

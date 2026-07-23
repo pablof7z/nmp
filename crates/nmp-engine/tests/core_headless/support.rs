@@ -10,6 +10,7 @@
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -53,8 +54,24 @@ impl RowSink for CapturingSink {
 struct CapturingReceiptSink(Arc<Mutex<Vec<WriteStatus>>>);
 
 impl ReceiptSink for CapturingReceiptSink {
-    fn on_status(&self, status: WriteStatus) {
+    fn on_status(&self, status: WriteStatus) -> bool {
         self.0.lock().unwrap().push(status);
+        true
+    }
+}
+
+/// A real finite live-delivery sink used by the durable-retry pressure
+/// falsifier. `calls` proves the reducer prunes the observer on the first
+/// rejected send instead of retaining a permanently lagged sink forever.
+struct BoundedReceiptSink {
+    sender: nmp_engine::runtime::FifoSender<WriteStatus>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl ReceiptSink for BoundedReceiptSink {
+    fn on_status(&self, status: WriteStatus) -> bool {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.sender.send(status)
     }
 }
 
@@ -997,7 +1014,7 @@ fn publish_private<S: EventStore>(
     core: &mut EngineCore<S>,
     author: &Keys,
     relays: impl IntoIterator<Item = RelayUrl>,
-    sink: CapturingReceiptSink,
+    sink: impl ReceiptSink + 'static,
 ) -> (ReceiptId, nostr::Event, Vec<Effect>) {
     activate(core, author);
     let accepted = core.handle(EngineMsg::Publish(

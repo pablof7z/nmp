@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use nmp_engine::core::RelayAdmissionPolicy;
 use nmp_engine::core::RowDelta;
 use nmp_engine::outbox::WriteStatus;
-use nmp_engine::runtime::{EngineThread, FifoReceiver, RowsReceiver};
+use nmp_engine::runtime::{EngineThread, FifoReceiver, FifoRecvTimeoutError, RowsReceiver};
 use nmp_nip29::GroupTimelineEvidence;
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
@@ -53,8 +53,8 @@ fn wait_for_status(
         match rx.recv_timeout(remaining) {
             Ok(status) if pred(&status) => return Some(status),
             Ok(_) => {}
-            Err(RecvTimeoutError::Timeout) => return None,
-            Err(RecvTimeoutError::Disconnected) => return None,
+            Err(FifoRecvTimeoutError::Timeout | FifoRecvTimeoutError::Closed) => return None,
+            Err(FifoRecvTimeoutError::Lagged) => panic!("fixture receipt stream must not lag"),
         }
     }
 }

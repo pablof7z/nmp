@@ -11,13 +11,14 @@ import NMPFFI
 ///
 /// Each element is the CURRENT engine-global `DiagnosticsSnapshot` -- never a
 /// delta (every snapshot is already the full current picture). Delivery is
-/// throttled through `FrameCoalescer` (#17), same as `NMPQuery`: a slow
-/// consumer keeps only the newest complete snapshot.
+/// demand-driven and cadence-limited (#17), same as `NMPQuery`: a slow
+/// consumer adds no Swift queue and the native mailbox keeps only the newest
+/// complete snapshot.
 ///
 /// The sequence is THROWING (ends `nil` on withdrawal; surfaces
-/// `NMPError.concurrentNext` if two iterators pull one handle). Teardown is
-/// termination-tied: dropping the iterating task cancels the Rust handle
-/// (Swift task cancellation never reaches Rust, #680).
+/// `NMPError.concurrentNext` if two iterators pull one handle). The
+/// reference-owned iterator cancels the Rust handle on normal loop exit, and
+/// explicitly forwards Swift task cancellation to Rust (#680).
 public struct NMPDiagnostics: AsyncSequence, Sendable {
     public typealias Element = DiagnosticsSnapshot
 
@@ -29,20 +30,19 @@ public struct NMPDiagnostics: AsyncSequence, Sendable {
     }
 
     public func makeAsyncIterator() -> Iterator {
-        let stream = nmpPullStream(
+        let core = NMPPullIteratorCore(
             handle: handle,
             iteratorGate: iteratorGate,
-            bufferingPolicy: .bufferingNewest(1),
             throttle: true
         ) { snapshot in DiagnosticsSnapshot(snapshot) }
-        return Iterator(base: stream.makeAsyncIterator())
+        return Iterator(core: core)
     }
 
     public struct Iterator: AsyncIteratorProtocol {
-        var base: AsyncThrowingStream<DiagnosticsSnapshot, Error>.AsyncIterator
+        let core: NMPPullIteratorCore<NmpDiagnosticsStream, DiagnosticsSnapshot>
 
         public mutating func next() async throws -> DiagnosticsSnapshot? {
-            try await base.next()
+            try await core.next()
         }
     }
 

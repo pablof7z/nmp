@@ -33,10 +33,11 @@ facts in either mode.
 
 The Rust ordinary-row producer therefore holds one pending transition per event
 id in a single mailbox slot, while windowed queries and diagnostics hold one
-complete latest snapshot. Each platform bridge also uses a bounded newest-value
-buffer and may frame-coalesce bursts. Cancellation/drop withdraws observation
-according to the query refcount contract; it does not leave an unbounded
-producer queue.
+complete latest snapshot. Swift issues one native pull per app pull and owns no
+second delivery queue; its snapshot iterators cadence-limit returns without
+prefetching. Kotlin also pulls serially from the native handle. Cancellation or
+drop withdraws observation according to the query refcount contract; it does
+not leave an unbounded producer queue.
 
 This bounds delivery backlog, not the semantic cardinality of an unwindowed
 query result: the pending transition can still be proportional to the change
@@ -53,6 +54,16 @@ Write receipt transitions are persisted facts. Observer buffering may be
 bounded because a consumer can reattach and replay/inspect durable state. A
 receipt implementation must not rely on an unbounded in-memory channel or lose
 facts merely because no observer was attached.
+
+Receipt and follow-action live delivery uses a fixed-capacity FIFO of 32 facts.
+If a paused consumer falls behind, the producer retains the buffered prefix,
+disconnects that sink, and the consumer receives typed `FactStreamLagged`
+after draining it; later facts are never silently reported as delivered.
+Receipt reattachment traverses the canonical persisted history in deterministic
+pages of at most 32 delivery facts and attaches to live work only after the
+final page. The replay cursor bounds each delivery page, not the store's total
+retained attempt history: retention/GC for that durable history remains open
+under #46 and must not be confused with retry-concurrency limits.
 
 Diagnostics counters may aggregate, but exact current plan/filter/error facts
 must remain available. Aggregation policy is itself visible in diagnostics.
@@ -133,7 +144,9 @@ Required proofs include:
 
 - a burst into a slow Swift/Kotlin observer has bounded memory and eventually
   yields the latest exact local state;
-- receipt observers may detach/restart without losing durable transitions;
+- a paused receipt observer across more retry transitions than the live FIFO
+  can hold receives typed lag, retains a finite prefix, and can traverse the
+  canonical durable history through bounded pages without silent loss;
 - an oversized derived set either chunks exactly or reports shortfall;
 - relay fan-out caps never masquerade as complete acquisition;
 - a requested result limit is distinguishable from an engine-imposed limit;

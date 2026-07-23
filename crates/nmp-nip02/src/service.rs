@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
 use std::io;
-use std::sync::mpsc::{RecvError, RecvTimeoutError};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use nmp::{
     fifo_channel, AcquisitionEvidence, AsyncFifoReceiver, Engine, Event, EventId, FifoReceiver,
-    FifoSender, ObservationCancel, PublicKey, RowDelta, ShortfallFact, SourceStatus, Timestamp,
-    WriteStatus,
+    FifoRecvError, FifoRecvTimeoutError, FifoSender, ObservationCancel, PublicKey, RowDelta,
+    ShortfallFact, SourceStatus, Timestamp, WriteStatus,
 };
 
 use crate::demand::active_account_demand;
@@ -470,11 +470,14 @@ impl FollowActionRunner {
 }
 
 impl FollowAction {
-    pub fn recv(&self) -> Result<FollowActionStatus, RecvError> {
+    pub fn recv(&self) -> Result<FollowActionStatus, FifoRecvError> {
         self.statuses.recv()
     }
 
-    pub fn recv_timeout(&self, timeout: Duration) -> Result<FollowActionStatus, RecvTimeoutError> {
+    pub fn recv_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<FollowActionStatus, FifoRecvTimeoutError> {
         self.statuses.recv_timeout(timeout)
     }
 
@@ -734,7 +737,7 @@ mod tests {
                 reason: "injected NIP-02 action pressure".to_string(),
             })
         );
-        assert_eq!(action.recv(), Err(RecvError));
+        assert_eq!(action.recv(), Err(FifoRecvError::Closed));
     }
 
     #[test]

@@ -58,12 +58,12 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     pub(super) fn emit_write_status(
-        &self,
+        &mut self,
         id: ReceiptId,
         status: WriteStatus,
         effects: &mut Vec<Effect>,
     ) {
-        if let Some(pending) = self.pending.get(&id) {
+        if let Some(pending) = self.pending.get_mut(&id) {
             Self::notify(pending, status.clone());
         }
         effects.push(Effect::EmitReceipt(id, status));
@@ -955,13 +955,27 @@ impl<S: EventStore> EngineCore<S> {
         id: ReceiptId,
         sink: Box<dyn ReceiptSink>,
     ) -> ReattachOutcome {
+        self.reattach_receipt_page(id, sink, 0, usize::MAX).0
+    }
+
+    /// Reconstruct one deterministic page of a receipt's durable prefix.
+    /// `cursor` is the count of canonical replay facts already consumed.
+    /// Only the final page attaches the sink to live work; earlier page
+    /// senders close after their bounded prefix drains.
+    pub fn reattach_receipt_page(
+        &mut self,
+        id: ReceiptId,
+        sink: Box<dyn ReceiptSink>,
+        cursor: u64,
+        limit: usize,
+    ) -> (ReattachOutcome, Option<u64>) {
         if self.quarantined_auth_receipts.contains_key(&id) {
-            return ReattachOutcome::RetainedButUnreadable;
+            return (ReattachOutcome::RetainedButUnreadable, None);
         }
         let receipt = match self.resolver.store().reattach_receipt(id.0) {
             Ok(Some(receipt)) => receipt,
-            Ok(None) => return ReattachOutcome::NotFound,
-            Err(_) => return ReattachOutcome::RetainedButUnreadable,
+            Ok(None) => return (ReattachOutcome::NotFound, None),
+            Err(_) => return (ReattachOutcome::RetainedButUnreadable, None),
         };
         if self
             .pending
@@ -973,21 +987,21 @@ impl<S: EventStore> EngineCore<S> {
             // prefix would falsely imply that this observer is attached to
             // actionable live work, and registering it would leak later
             // signer facts from an obligation whose destination is unknown.
-            return ReattachOutcome::RetainedButUnreadable;
+            return (ReattachOutcome::RetainedButUnreadable, None);
         }
         let (attempts, details, lanes) = match receipt.intent_id {
             Some(intent_id) => {
                 let attempts = match self.resolver.store().recover_attempts(intent_id) {
                     Ok(attempts) => attempts,
-                    Err(_) => return ReattachOutcome::RetainedButUnreadable,
+                    Err(_) => return (ReattachOutcome::RetainedButUnreadable, None),
                 };
                 let details = match self.resolver.store().recover_attempt_details(intent_id) {
                     Ok(details) => details,
-                    Err(_) => return ReattachOutcome::RetainedButUnreadable,
+                    Err(_) => return (ReattachOutcome::RetainedButUnreadable, None),
                 };
                 let lanes = match self.resolver.store().recover_outbox_lanes(intent_id) {
                     Ok(lanes) => lanes,
-                    Err(_) => return ReattachOutcome::RetainedButUnreadable,
+                    Err(_) => return (ReattachOutcome::RetainedButUnreadable, None),
                 };
                 if self
                     .resolver
@@ -995,7 +1009,7 @@ impl<S: EventStore> EngineCore<S> {
                     .recover_route_revisions(intent_id)
                     .is_err()
                 {
-                    return ReattachOutcome::RetainedButUnreadable;
+                    return (ReattachOutcome::RetainedButUnreadable, None);
                 }
                 (attempts, details, lanes)
             }
@@ -1083,7 +1097,7 @@ impl<S: EventStore> EngineCore<S> {
                 replay.push(status);
             }
             if !details_by_attempt.is_empty() {
-                return ReattachOutcome::RetainedButUnreadable;
+                return (ReattachOutcome::RetainedButUnreadable, None);
             }
             for lane in lanes {
                 match lane.state {
@@ -1147,13 +1161,34 @@ impl<S: EventStore> EngineCore<S> {
                 replay.push(WriteStatus::RoutePersistenceBlocked(relay.clone()));
             }
         }
-        for status in replay {
-            sink.on_status(status);
+        let Ok(cursor) = usize::try_from(cursor) else {
+            return (ReattachOutcome::RetainedButUnreadable, None);
+        };
+        if cursor > replay.len() || limit == 0 {
+            return (ReattachOutcome::RetainedButUnreadable, None);
         }
-        if let Some(pending) = self.pending.get_mut(&id) {
-            pending.sinks.push(Rc::from(sink));
+        let end = cursor.saturating_add(limit).min(replay.len());
+        let replay_len = replay.len();
+        let mut delivered_end = cursor;
+        let mut live = true;
+        for status in replay.into_iter().skip(cursor).take(end - cursor) {
+            if !sink.on_status(status) {
+                live = false;
+                break;
+            }
+            delivered_end += 1;
         }
-        ReattachOutcome::Attached
+        // The cursor acknowledges delivery, not merely selection. A custom
+        // sink may refuse before `limit` (the runtime's fresh page channel
+        // cannot), and advancing past that refusal would silently skip the
+        // first undelivered durable fact on the caller's next page.
+        let next_cursor = (delivered_end < replay_len).then_some(delivered_end as u64);
+        if live && next_cursor.is_none() {
+            if let Some(pending) = self.pending.get_mut(&id) {
+                pending.sinks.push(Rc::from(sink));
+            }
+        }
+        (ReattachOutcome::Attached, next_cursor)
     }
 
     /// #591: recover a receipt id from a caller-generated correlation token
@@ -1171,13 +1206,25 @@ impl<S: EventStore> EngineCore<S> {
         token: String,
         sink: Box<dyn ReceiptSink>,
     ) -> (ReattachOutcome, Option<ReceiptId>) {
+        let (outcome, id, _) = self.reattach_by_correlation_page(token, sink, 0, usize::MAX);
+        (outcome, id)
+    }
+
+    pub fn reattach_by_correlation_page(
+        &mut self,
+        token: String,
+        sink: Box<dyn ReceiptSink>,
+        cursor: u64,
+        limit: usize,
+    ) -> (ReattachOutcome, Option<ReceiptId>, Option<u64>) {
         match self.resolver.store().lookup_correlation(&token) {
             Ok(Some(receipt_id)) => {
                 let id = ReceiptId(receipt_id);
-                (self.reattach_receipt(id, sink), Some(id))
+                let (outcome, next_cursor) = self.reattach_receipt_page(id, sink, cursor, limit);
+                (outcome, Some(id), next_cursor)
             }
-            Ok(None) => (ReattachOutcome::NotFound, None),
-            Err(_) => (ReattachOutcome::RetainedButUnreadable, None),
+            Ok(None) => (ReattachOutcome::NotFound, None, None),
+            Err(_) => (ReattachOutcome::RetainedButUnreadable, None, None),
         }
     }
 
@@ -1465,7 +1512,8 @@ impl<S: EventStore> EngineCore<S> {
         };
 
         let mut effects = Vec::new();
-        sink.on_status(WriteStatus::Accepted);
+        let sink = Rc::<dyn ReceiptSink>::from(sink);
+        let sink_live = sink.on_status(WriteStatus::Accepted);
         effects.push(Effect::EmitReceipt(id, WriteStatus::Accepted));
 
         self.pending.insert(
@@ -1474,7 +1522,7 @@ impl<S: EventStore> EngineCore<S> {
                 durability,
                 routing,
                 routing_valid: true,
-                sinks: vec![Rc::from(sink)],
+                sinks: if sink_live { vec![sink] } else { Vec::new() },
                 intent_id,
                 signing_pubkey,
                 frozen: frozen.clone(),
@@ -1640,7 +1688,7 @@ impl<S: EventStore> EngineCore<S> {
         id: ReceiptId,
     ) -> (Result<CancelWriteOutcome, CancelWriteError>, Vec<Effect>) {
         let mut effects = Vec::new();
-        let Some(pending) = self.pending.remove(&id) else {
+        let Some(mut pending) = self.pending.remove(&id) else {
             if let Some(quarantined) = self.quarantined_auth_receipts.get(&id).cloned() {
                 match self
                     .resolver
@@ -1836,7 +1884,7 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         self.forget_pending_indexes(id, &pending);
-        Self::notify(&pending, WriteStatus::Cancelled);
+        Self::notify(&mut pending, WriteStatus::Cancelled);
         effects.push(Effect::EmitReceipt(id, WriteStatus::Cancelled));
         effects.extend(self.schedule_ready(self.clock));
         (Ok(CancelWriteOutcome::Cancelled), effects)
@@ -1942,7 +1990,7 @@ impl<S: EventStore> EngineCore<S> {
             pending.frozen = event.clone();
         }
 
-        if let Some(pending) = self.pending.get(&id) {
+        if let Some(pending) = self.pending.get_mut(&id) {
             Self::notify(pending, WriteStatus::Signed(event.id));
             effects.push(Effect::EmitReceipt(id, WriteStatus::Signed(event.id)));
             if !pending.routing_valid {
@@ -1958,7 +2006,7 @@ impl<S: EventStore> EngineCore<S> {
         {
             Some(Ok(relays)) => relays,
             Some(Err(reason)) => {
-                if let Some(pending) = self.pending.remove(&id) {
+                if let Some(mut pending) = self.pending.remove(&id) {
                     // No lanes have been bootstrapped for this intent yet at
                     // this point in `on_signed` (that only happens further
                     // below, after routes resolve) -- `lane_relays` is
@@ -1967,7 +2015,7 @@ impl<S: EventStore> EngineCore<S> {
                     // (epic #507 finding E5).
                     self.forget_pending_indexes(id, &pending);
                     let status = WriteStatus::Failed(reason);
-                    Self::notify(&pending, status.clone());
+                    Self::notify(&mut pending, status.clone());
                     effects.push(Effect::EmitReceipt(id, status));
                 }
                 return;
@@ -2241,7 +2289,7 @@ impl<S: EventStore> EngineCore<S> {
             Ok(id) => id,
             Err(err) => return vec![Effect::PublishFailed(err)],
         };
-        sink.on_status(status.clone());
+        let _ = sink.on_status(status.clone());
         vec![Effect::EmitReceipt(id, status)]
     }
 
@@ -2251,7 +2299,7 @@ impl<S: EventStore> EngineCore<S> {
         reason: String,
         effects: &mut Vec<Effect>,
     ) {
-        let Some(pending) = self.pending.remove(&id) else {
+        let Some(mut pending) = self.pending.remove(&id) else {
             return;
         };
 
@@ -2300,7 +2348,7 @@ impl<S: EventStore> EngineCore<S> {
         // untouched and return early, so the indexes must stay untouched
         // for those (epic #507 finding E5).
         self.forget_pending_indexes(id, &pending);
-        Self::notify(&pending, WriteStatus::Failed(reason.clone()));
+        Self::notify(&mut pending, WriteStatus::Failed(reason.clone()));
         effects.push(Effect::EmitReceipt(id, WriteStatus::Failed(reason)));
     }
 
@@ -2703,9 +2751,7 @@ impl<S: EventStore> EngineCore<S> {
         self.next_unaccepted_receipt = next;
     }
 
-    pub(super) fn notify(pending: &PendingWrite, status: WriteStatus) {
-        for sink in &pending.sinks {
-            sink.on_status(status.clone());
-        }
+    pub(super) fn notify(pending: &mut PendingWrite, status: WriteStatus) {
+        pending.sinks.retain(|sink| sink.on_status(status.clone()));
     }
 }

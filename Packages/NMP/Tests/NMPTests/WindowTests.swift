@@ -9,7 +9,7 @@
 // native-task census, no `maxNativeTasks`, and no admission ceiling to assert.
 // The fold is proven directly on `RowAccumulator` (the exact per-frame mapping
 // the iterator runs); the coalescer over the pull loop is proven separately by
-// `FrameCoalescerTests`.
+// `PullIteratorCoreTests`.
 
 import NMPFFI
 import XCTest

@@ -2780,6 +2780,38 @@ enum Enum {
             ),
         },
         Variant {
+            name: "FactStreamLagged",
+            discr: None,
+            fields: [
+                Field {
+                    name: "receipt_id",
+                    type_: Optional {
+                        inner_type: UInt64,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "A finite FIFO fact stream retained its bounded prefix but the producer\nadvanced beyond that live-delivery window before the app drained it.\nThe stream disconnects loudly instead of dropping facts or growing\nmemory. `receipt_id` is present whenever the durable receipt is known;\nreattach that receipt to replay persisted facts.",
+            ),
+        },
+        Variant {
+            name: "ReceiptReplayUnavailable",
+            discr: None,
+            fields: [
+                Field {
+                    name: "receipt_id",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "A paged durable receipt replay could no longer reconstruct the next\npage from retained evidence. The receipt identity remains known and is\nnot collapsed into absence.",
+            ),
+        },
+        Variant {
             name: "InvalidSignature",
             discr: None,
             fields: [
@@ -4009,7 +4041,7 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "Result of looking up a stable retained receipt id. The `Attached` variant\ncarries the pull-based [`crate::facade::NmpReceiptStream`] that replays the\ndurable `WriteStatus` prefix and streams onward (#680).",
+        "Result of looking up a stable retained receipt id. The `Attached` variant\ncarries the pull-based [`crate::facade::NmpReceiptStream`] that traverses\ndurable `WriteStatus` facts in finite pages and streams onward (#680).",
     ),
 }
 
@@ -11689,7 +11721,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Publish a `nmp_nip29::compose_group_send`-composed intent (#115).\nTake-once: `intent` is consumed by this call (`FfiComposedWriteIntent\n::take`) -- a second call on the SAME handle fails closed with\n`FfiError::IntentAlreadyConsumed` rather than silently re-publishing\na stale template. Otherwise identical to [`Self::publish`]'s body\n(same receipt-stream drain-thread bridge); `write_intent_from_ffi`\nnever runs for this path -- the intent was already composed\ndirectly, never round-tripped through the raw `FfiWriteRouting`\nconversion (which withholds `PinnedHost` entirely).",
+                "Publish a `nmp_nip29::compose_group_send`-composed intent (#115).\nTake-once: `intent` is consumed by this call (`FfiComposedWriteIntent\n::take`) -- a second call on the SAME handle fails closed with\n`FfiError::IntentAlreadyConsumed` rather than silently re-publishing\na stale template. Otherwise identical to [`Self::publish`]'s body\n(same pull-based receipt stream); `write_intent_from_ffi`\nnever runs for this path -- the intent was already composed\ndirectly, never round-tripped through the raw `FfiWriteRouting`\nconversion (which withholds `PinnedHost` entirely).",
             ),
             throws: Some(
                 Enum {
@@ -11700,7 +11732,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_publish_composed",
             checksum: Some(
-                6809,
+                49494,
             ),
         },
         Method {
@@ -11819,7 +11851,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Attach to a retained receipt without collapsing corrupt durable\nevidence into the same result as an unknown id (#680). The `Attached`\nvariant carries an [`NmpReceiptStream`] that replays the durable\n`WriteStatus` prefix from the store and streams onward, delivered\npull-based via `async fn next()`.",
+                "Attach to a retained receipt without collapsing corrupt durable\nevidence into the same result as an unknown id (#680). The `Attached`\nvariant carries an [`NmpReceiptStream`] that transparently traverses\ndurable `WriteStatus` facts in finite pages and streams onward,\ndelivered pull-based via `async fn next()`.",
             ),
             throws: Some(
                 Enum {
@@ -11830,7 +11862,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_reattach_receipt",
             checksum: Some(
-                63799,
+                49194,
             ),
         },
         Method {
@@ -12672,13 +12704,13 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Stop delivering live status frames to this stream. The durable receipt\nitself is untouched (the write is not cancelled — use\n[`NmpEngine::cancel`] for that); a later [`NmpEngine::reattach_receipt`]\nreplays the durable prefix. Safe to call more than once.",
+                "Stop delivering live status frames to this stream. The durable receipt\nitself is untouched (the write is not cancelled — use\n[`NmpEngine::cancel`] for that); a later [`NmpEngine::reattach_receipt`]\ntraverses the durable history. Safe to call more than once.",
             ),
             throws: None,
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpreceiptstream_cancel",
             checksum: Some(
-                22187,
+                38089,
             ),
         },
         Method {
@@ -12804,7 +12836,7 @@ object Object {
     },
     ffi_init_callback: None,
     docstring: Some(
-        "The app-facing pull-based receipt stream (returned by [`NmpEngine::publish`]/\n[`NmpEngine::publish_composed`], and the `Attached` reattachment, #680). It\nexposes the stable store-issued receipt id via [`Self::id`] and streams\nevery `WriteStatus` this intent reaches via `async fn next()`. Receipt facts\nare durable: the persisted outbox/redb store is the source of truth, so a\ndropped stream can be reattached and its `WriteStatus` prefix replayed.",
+        "The app-facing pull-based receipt stream (returned by [`NmpEngine::publish`]/\n[`NmpEngine::publish_composed`], and the `Attached` reattachment, #680). It\nexposes the stable store-issued receipt id via [`Self::id`] and delivers\nordered `WriteStatus` facts via `async fn next()`. Live delivery is a finite\nFIFO that reports typed lag. Receipt facts are durable: the persisted\noutbox/redb store is the source of truth, so a dropped or lagged stream can\nbe reattached and traverse retained facts through finite pages.",
     ),
 }
 

@@ -11,9 +11,10 @@ use std::time::{Duration, Instant};
 
 use nmp::{
     AcquisitionEvidence, AuthPhase, Binding, CancelWriteOutcome, CorrelationToken,
-    DiagnosticsSnapshot, Durability, Engine, EngineConfig, FifoReceiver, Filter, Lane, LiveQuery,
-    ObservationCancel, ReceiptId, ReceiptReattachment, Row, RowDelta, ShortfallFact, SourceStatus,
-    Timestamp, UnsignedEvent, WriteIntent, WritePayload, WriteRouting, WriteStatus,
+    DiagnosticsSnapshot, Durability, Engine, EngineConfig, FifoReceiver, FifoRecvTimeoutError,
+    Filter, Lane, LiveQuery, ObservationCancel, ReceiptId, ReceiptReattachment, Row, RowDelta,
+    ShortfallFact, SourceStatus, Timestamp, UnsignedEvent, WriteIntent, WritePayload, WriteRouting,
+    WriteStatus,
 };
 use nmp_bdd::relays::{RelayConfig, ScriptedRelay};
 use nmp_ffi::convert::{write_status_to_ffi, WriteStatusRef};
@@ -327,17 +328,20 @@ fn normalize_url(value: &str, relay: &str) -> String {
 // bridged into `mpsc::Receiver`s. Both expose the same timed pull, so
 // `recv_before` is generic over this one trait (#680: receipts became FIFO).
 trait TimedRecv<T> {
-    fn recv_before_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError>;
+    fn recv_before_timeout(&self, timeout: Duration) -> Result<T, FifoRecvTimeoutError>;
 }
 
 impl<T> TimedRecv<T> for mpsc::Receiver<T> {
-    fn recv_before_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
-        self.recv_timeout(timeout)
+    fn recv_before_timeout(&self, timeout: Duration) -> Result<T, FifoRecvTimeoutError> {
+        self.recv_timeout(timeout).map_err(|error| match error {
+            RecvTimeoutError::Timeout => FifoRecvTimeoutError::Timeout,
+            RecvTimeoutError::Disconnected => FifoRecvTimeoutError::Closed,
+        })
     }
 }
 
 impl<T> TimedRecv<T> for FifoReceiver<T> {
-    fn recv_before_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
+    fn recv_before_timeout(&self, timeout: Duration) -> Result<T, FifoRecvTimeoutError> {
         self.recv_timeout(timeout)
     }
 }
@@ -350,7 +354,7 @@ fn recv_before<T, R: TimedRecv<T>>(rx: &R, deadline: Instant, what: &str) -> T {
         WAIT
     );
     rx.recv_before_timeout(remaining).unwrap_or_else(|error| {
-        panic!("{what} did not settle within the total {WAIT:?} bound: {error}")
+        panic!("{what} did not settle within the total {WAIT:?} bound: {error:?}")
     })
 }
 
@@ -1862,7 +1866,7 @@ async fn run_direct_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<
     let receipts = collect_direct_receipts_until_awaiting_auth(&receipt_rx, &relay_url);
     assert_eq!(
         receipt_rx.recv_timeout(Duration::from_secs(2)),
-        Err(RecvTimeoutError::Timeout),
+        Err(FifoRecvTimeoutError::Timeout),
         "a fail-closed AUTH park must emit no further direct status: no retry, no terminal"
     );
 
@@ -2079,7 +2083,7 @@ async fn run_direct_tampered(keys: &Keys) -> TamperedOutcome {
     );
     assert_eq!(
         rx.recv_timeout(WAIT),
-        Err(RecvTimeoutError::Disconnected),
+        Err(FifoRecvTimeoutError::Closed),
         "tampered direct publish must close after Failed; Timeout would leave later facts possible"
     );
     engine.shutdown();
@@ -2168,7 +2172,7 @@ enum NormReattach {
 
 fn direct_reattach_outcome(value: &ReceiptReattachment) -> NormReattach {
     match value {
-        ReceiptReattachment::Attached(..) => NormReattach::Attached,
+        ReceiptReattachment::Attached { .. } => NormReattach::Attached,
         ReceiptReattachment::NotFound => NormReattach::NotFound,
         ReceiptReattachment::RetainedButUnreadable => NormReattach::RetainedButUnreadable,
     }
@@ -2249,7 +2253,7 @@ async fn run_direct_reattach_live() -> ReattachProof {
         .expect("direct reattach call must succeed while the engine is open");
     let norm_outcome = direct_reattach_outcome(&outcome);
     let replay = match outcome {
-        ReceiptReattachment::Attached(_id, rx) => {
+        ReceiptReattachment::Attached { statuses: rx, .. } => {
             let deadline = Instant::now() + WAIT;
             vec![
                 normalize_direct_status(
@@ -2575,7 +2579,7 @@ fn run_direct_cancellation() -> CancellationProof {
     ));
     assert_eq!(
         tracked.statuses.recv_timeout(WAIT),
-        Err(RecvTimeoutError::Disconnected),
+        Err(FifoRecvTimeoutError::Closed),
         "direct receipt stream must close after cancellation"
     );
     engine.shutdown();
@@ -2696,7 +2700,7 @@ async fn run_direct_reattach_terminal(path: &std::path::Path) -> ReattachProof {
         .expect("direct reattach call must succeed while the engine is open");
     let norm_outcome = direct_reattach_outcome(&outcome);
     let replay = match outcome {
-        ReceiptReattachment::Attached(_id, rx) => {
+        ReceiptReattachment::Attached { statuses: rx, .. } => {
             let deadline = Instant::now() + WAIT;
             vec![normalize_direct_status(
                 recv_before(&rx, deadline, "direct terminal replay"),

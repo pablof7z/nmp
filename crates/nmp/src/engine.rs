@@ -560,6 +560,15 @@ impl Engine {
         self.with_handle(|handle| handle.reattach_receipt(id))
     }
 
+    #[doc(hidden)]
+    pub fn reattach_receipt_from(
+        &self,
+        id: ReceiptId,
+        cursor: u64,
+    ) -> Result<ReceiptReattachment, EngineError> {
+        self.with_handle(|handle| handle.reattach_receipt_from(id, cursor))
+    }
+
     /// #591: recover a receipt after a crash that happened BEFORE the app
     /// could durably persist the `ReceiptId` `publish_tracked` returned --
     /// looked up by the caller's own crash-safe correlation token instead.
@@ -1144,8 +1153,9 @@ mod tests {
         assert!(saw_cancelled);
         assert_eq!(engine.cancel(receipt.id), Ok(CancelWriteOutcome::Cancelled));
 
-        let ReceiptReattachment::Attached(_id, replay) =
-            engine.reattach_receipt(receipt.id).unwrap()
+        let ReceiptReattachment::Attached {
+            statuses: replay, ..
+        } = engine.reattach_receipt(receipt.id).unwrap()
         else {
             panic!("cancelled receipt must remain reattachable")
         };
@@ -1188,8 +1198,9 @@ mod tests {
         assert_eq!(receipt.statuses.recv().unwrap(), WriteStatus::Accepted);
         drop(receipt.statuses);
 
-        let ReceiptReattachment::Attached(_id, replay) =
-            engine.reattach_receipt(receipt_id).unwrap()
+        let ReceiptReattachment::Attached {
+            statuses: replay, ..
+        } = engine.reattach_receipt(receipt_id).unwrap()
         else {
             panic!("dropping the observer must not remove the receipt")
         };
@@ -2102,8 +2113,11 @@ mod tests {
                     panic!("override publish must not fail pre-routing: {reason}")
                 }
                 Ok(_) => {}
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(nmp_engine::runtime::FifoRecvTimeoutError::Timeout) => {}
+                Err(nmp_engine::runtime::FifoRecvTimeoutError::Closed) => break,
+                Err(nmp_engine::runtime::FifoRecvTimeoutError::Lagged) => {
+                    panic!("short identity-override receipt unexpectedly lagged")
+                }
             }
         }
         assert!(signed_as_b, "override publish must reach Signed as B");

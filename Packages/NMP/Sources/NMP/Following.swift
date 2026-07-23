@@ -155,19 +155,17 @@ public struct NMPFollowingObservation: AsyncSequence, Sendable {
     }
 
     public func makeAsyncIterator() -> Iterator {
-        let stream = nmpPullStream(
-            handle: handle,
-            iteratorGate: iteratorGate,
-            bufferingPolicy: .bufferingNewest(1)
-        ) { snapshot in NMPFollowingSnapshot(snapshot) }
-        return Iterator(base: stream.makeAsyncIterator())
+        let core = NMPPullIteratorCore(handle: handle, iteratorGate: iteratorGate) { snapshot in
+            NMPFollowingSnapshot(snapshot)
+        }
+        return Iterator(core: core)
     }
 
     public struct Iterator: AsyncIteratorProtocol {
-        var base: AsyncThrowingStream<NMPFollowingSnapshot, Error>.AsyncIterator
+        let core: NMPPullIteratorCore<NmpFollowStream, NMPFollowingSnapshot>
 
         public mutating func next() async throws -> NMPFollowingSnapshot? {
-            try await base.next()
+            try await core.next()
         }
     }
 
@@ -191,17 +189,17 @@ public struct NMPFollowAction: AsyncSequence, Sendable {
     }
 
     public func makeAsyncIterator() -> Iterator {
-        let stream = nmpPullStream(handle: handle, iteratorGate: iteratorGate) { status in
+        let core = NMPPullIteratorCore(handle: handle, iteratorGate: iteratorGate) { status in
             NMPFollowActionStatus(status)
         }
-        return Iterator(base: stream.makeAsyncIterator())
+        return Iterator(core: core)
     }
 
     public struct Iterator: AsyncIteratorProtocol {
-        var base: AsyncThrowingStream<NMPFollowActionStatus, Error>.AsyncIterator
+        let core: NMPPullIteratorCore<NmpFollowActionStream, NMPFollowActionStatus>
 
         public mutating func next() async throws -> NMPFollowActionStatus? {
-            try await base.next()
+            try await core.next()
         }
     }
 

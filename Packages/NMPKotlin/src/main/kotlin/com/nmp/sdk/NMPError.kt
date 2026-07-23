@@ -58,6 +58,17 @@ sealed class NMPError(message: String) : Exception(message) {
      * issue overlapping pulls, so this surfaces only when app code collects
      * one stream's `Flow` from two coroutines at once. */
     object ConcurrentNext : NMPError("a next() is already in flight on this single-consumer stream")
+    /** A durable FIFO fact stream crossed its finite live-delivery bound
+     * while the app was paused. Memory remains bounded and no missing fact is
+     * claimed delivered; when non-null, reattach [receiptId] to replay. */
+    data class FactStreamLagged(val receiptId: ULong?) :
+        NMPError(
+            receiptId?.let {
+                "the finite live fact stream fell behind; reattach receipt $it to replay"
+            } ?: "the finite live fact stream fell behind before a receipt was observable",
+        )
+    data class ReceiptReplayUnavailable(val receiptId: ULong) :
+        NMPError("retained evidence for receipt $receiptId became unavailable during replay")
     data class InvalidSignature(val got: String) : NMPError("invalid signature: $got")
     object EngineClosed : NMPError("engine already shut down")
     /** `decodeNostrEntity`'s input was not valid bech32, had an
@@ -140,6 +151,9 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.StoreStillOpen -> StoreStillOpen(ffi.path)
                 is FfiException.ThreadUnavailable -> ThreadUnavailable(ffi.component, ffi.reason)
                 is FfiException.ConcurrentNext -> ConcurrentNext
+                is FfiException.FactStreamLagged -> FactStreamLagged(ffi.receiptId)
+                is FfiException.ReceiptReplayUnavailable ->
+                    ReceiptReplayUnavailable(ffi.receiptId)
                 is FfiException.InvalidSignature -> InvalidSignature(ffi.got)
                 is FfiException.EngineClosed -> EngineClosed
                 is FfiException.InvalidNostrEntity -> InvalidNostrEntity(ffi.reason)

@@ -123,6 +123,20 @@ pub enum FfiError {
     /// has resolved. No frame is lost or duplicated — the offending call is
     /// rejected, not the stream.
     ConcurrentNext,
+    /// A finite FIFO fact stream retained its bounded prefix but the producer
+    /// advanced beyond that live-delivery window before the app drained it.
+    /// The stream disconnects loudly instead of dropping facts or growing
+    /// memory. `receipt_id` is present whenever the durable receipt is known;
+    /// reattach that receipt to replay persisted facts.
+    FactStreamLagged {
+        receipt_id: Option<u64>,
+    },
+    /// A paged durable receipt replay could no longer reconstruct the next
+    /// page from retained evidence. The receipt identity remains known and is
+    /// not collapsed into absence.
+    ReceiptReplayUnavailable {
+        receipt_id: u64,
+    },
     /// A `FfiWritePayload::Signed`'s `sig` did not parse as a valid 64-byte
     /// hex schnorr signature.
     InvalidSignature {
@@ -305,6 +319,20 @@ impl std::fmt::Display for FfiError {
                 f,
                 "a next()/signed() was awaited while a previous one was still in flight; \
                  observation streams are single-consumer"
+            ),
+            Self::FactStreamLagged { receipt_id } => match receipt_id {
+                Some(id) => write!(
+                    f,
+                    "the finite live fact stream fell behind; reattach receipt {id} to replay"
+                ),
+                None => write!(
+                    f,
+                    "the finite live fact stream fell behind before a receipt was observable"
+                ),
+            },
+            Self::ReceiptReplayUnavailable { receipt_id } => write!(
+                f,
+                "retained evidence for receipt {receipt_id} became unavailable during replay"
             ),
             Self::InvalidSignature { got } => write!(f, "invalid signature hex: {got:?}"),
             Self::EngineClosed => write!(f, "engine already shut down"),

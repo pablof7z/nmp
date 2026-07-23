@@ -10,9 +10,9 @@
 //! verify, `nmp-engine::core::EngineCore::on_publish`'s acceptance boundary,
 //! Unit A0/#56) so every entry point -- this facade, a direct-Rust app, any
 //! `from_parts`/raw-`EngineThread` caller -- inherits the same guarantees.
-//! `nmp-ffi` is now only: config/type mirroring across the FFI boundary, and
-//! the drain-thread bridge from `nmp`'s blocking `recv()` verbs to UniFFI's
-//! callback-interface observers (`convert`/`observer`).
+//! `nmp-ffi` is now only config/type mirroring plus native object handles over
+//! `nmp`'s async pull surfaces. Long-lived observations expose `next()` and
+//! `cancel()` directly; no drain-thread/callback-observer bridge remains.
 //!
 //! Directory: `nmp_router::LiveDirectory` (M5's self-bootstrapping outbox,
 //! now assembled inside `nmp::Engine::new`) is what backs every `NmpEngine`
@@ -23,7 +23,7 @@
 //! auto-discovery). `NmpEngineConfig` no longer accepts a pre-resolved
 //! write-relay map -- there is nothing for a caller to resolve up front.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::auth::{
     FfiAccountRegistration, FfiAuthPolicyAdapter, FfiAuthPolicyCallback, FfiAuthPolicyRegistration,
@@ -504,7 +504,7 @@ impl NmpEngine {
     /// ::take`) -- a second call on the SAME handle fails closed with
     /// `FfiError::IntentAlreadyConsumed` rather than silently re-publishing
     /// a stale template. Otherwise identical to [`Self::publish`]'s body
-    /// (same receipt-stream drain-thread bridge); `write_intent_from_ffi`
+    /// (same pull-based receipt stream); `write_intent_from_ffi`
     /// never runs for this path -- the intent was already composed
     /// directly, never round-tripped through the raw `FfiWriteRouting`
     /// conversion (which withholds `PinnedHost` entirely).
@@ -519,14 +519,23 @@ impl NmpEngine {
 
     /// Attach to a retained receipt without collapsing corrupt durable
     /// evidence into the same result as an unknown id (#680). The `Attached`
-    /// variant carries an [`NmpReceiptStream`] that replays the durable
-    /// `WriteStatus` prefix from the store and streams onward, delivered
-    /// pull-based via `async fn next()`.
+    /// variant carries an [`NmpReceiptStream`] that transparently traverses
+    /// durable `WriteStatus` facts in finite pages and streams onward,
+    /// delivered pull-based via `async fn next()`.
     pub fn reattach_receipt(&self, receipt_id: u64) -> Result<FfiReceiptReattachment, FfiError> {
         let result = self.engine.reattach_receipt(nmp::ReceiptId(receipt_id))?;
         Ok(match result {
-            ReceiptReattachment::Attached(id, statuses) => FfiReceiptReattachment::Attached {
-                stream: NmpReceiptStream::from_statuses(id, statuses),
+            ReceiptReattachment::Attached {
+                id,
+                statuses,
+                next_cursor,
+            } => FfiReceiptReattachment::Attached {
+                stream: NmpReceiptStream::from_reattachment(
+                    self.engine.clone(),
+                    id,
+                    statuses,
+                    next_cursor,
+                ),
             },
             ReceiptReattachment::NotFound => FfiReceiptReattachment::NotFound,
             ReceiptReattachment::RetainedButUnreadable => {
@@ -548,12 +557,21 @@ impl NmpEngine {
     ) -> Result<FfiCorrelationReattachment, FfiError> {
         let result = self.engine.reattach_by_correlation(correlation)?;
         let receipt_id = match &result {
-            ReceiptReattachment::Attached(id, _) => Some(id.0),
+            ReceiptReattachment::Attached { id, .. } => Some(id.0),
             ReceiptReattachment::NotFound | ReceiptReattachment::RetainedButUnreadable => None,
         };
         let outcome = match result {
-            ReceiptReattachment::Attached(id, statuses) => FfiReceiptReattachment::Attached {
-                stream: NmpReceiptStream::from_statuses(id, statuses),
+            ReceiptReattachment::Attached {
+                id,
+                statuses,
+                next_cursor,
+            } => FfiReceiptReattachment::Attached {
+                stream: NmpReceiptStream::from_reattachment(
+                    self.engine.clone(),
+                    id,
+                    statuses,
+                    next_cursor,
+                ),
             },
             ReceiptReattachment::NotFound => FfiReceiptReattachment::NotFound,
             ReceiptReattachment::RetainedButUnreadable => {
@@ -698,32 +716,95 @@ impl Drop for NmpDiagnosticsStream {
 
 /// The app-facing pull-based receipt stream (returned by [`NmpEngine::publish`]/
 /// [`NmpEngine::publish_composed`], and the `Attached` reattachment, #680). It
-/// exposes the stable store-issued receipt id via [`Self::id`] and streams
-/// every `WriteStatus` this intent reaches via `async fn next()`. Receipt facts
-/// are durable: the persisted outbox/redb store is the source of truth, so a
-/// dropped stream can be reattached and its `WriteStatus` prefix replayed.
+/// exposes the stable store-issued receipt id via [`Self::id`] and delivers
+/// ordered `WriteStatus` facts via `async fn next()`. Live delivery is a finite
+/// FIFO that reports typed lag. Receipt facts are durable: the persisted
+/// outbox/redb store is the source of truth, so a dropped or lagged stream can
+/// be reattached and traverse retained facts through finite pages.
 #[derive(uniffi::Object)]
 pub struct NmpReceiptStream {
     id: nmp::ReceiptId,
-    inner: nmp::AsyncFifoReceiver<nmp::WriteStatus>,
+    engine: Option<Arc<nmp::Engine>>,
+    delivery: Mutex<ReceiptDelivery>,
+    // Concurrency guard only, never lifecycle/ownership state: cancellation
+    // lives in `ReceiptDelivery`, and this flag is released by the RAII
+    // `ReceiptReadingGuard` on success, error, or future drop (gate 3).
+    reading: std::sync::atomic::AtomicBool,
+}
+
+enum ReceiptDelivery {
+    Active {
+        receiver: Arc<nmp::AsyncFifoReceiver<nmp::WriteStatus>>,
+        next_cursor: Option<u64>,
+    },
+    Cancelled,
 }
 
 impl NmpReceiptStream {
     fn new(receipt: nmp::ReceiptStream) -> Arc<Self> {
         Arc::new(Self {
             id: receipt.id,
-            inner: receipt.statuses.into_async(),
+            engine: None,
+            delivery: Mutex::new(ReceiptDelivery::Active {
+                receiver: Arc::new(receipt.statuses.into_async()),
+                next_cursor: None,
+            }),
+            reading: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
-    fn from_statuses(
+    fn from_reattachment(
+        engine: Arc<nmp::Engine>,
         id: nmp::ReceiptId,
         statuses: nmp::FifoReceiver<nmp::WriteStatus>,
+        next_cursor: Option<u64>,
     ) -> Arc<Self> {
         Arc::new(Self {
             id,
-            inner: statuses.into_async(),
+            engine: Some(engine),
+            delivery: Mutex::new(ReceiptDelivery::Active {
+                receiver: Arc::new(statuses.into_async()),
+                next_cursor,
+            }),
+            reading: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    fn current_receiver(
+        &self,
+    ) -> Option<(Arc<nmp::AsyncFifoReceiver<nmp::WriteStatus>>, Option<u64>)> {
+        let delivery = self.delivery.lock().unwrap();
+        match &*delivery {
+            ReceiptDelivery::Active {
+                receiver,
+                next_cursor,
+            } => Some((receiver.clone(), *next_cursor)),
+            ReceiptDelivery::Cancelled => None,
+        }
+    }
+
+    fn install_page(
+        &self,
+        prior: &Arc<nmp::AsyncFifoReceiver<nmp::WriteStatus>>,
+        statuses: nmp::FifoReceiver<nmp::WriteStatus>,
+        next_cursor: Option<u64>,
+    ) -> bool {
+        let replacement = Arc::new(statuses.into_async());
+        let mut delivery = self.delivery.lock().unwrap();
+        match &mut *delivery {
+            ReceiptDelivery::Active {
+                receiver,
+                next_cursor: cursor,
+            } if Arc::ptr_eq(receiver, prior) => {
+                *receiver = replacement;
+                *cursor = next_cursor;
+                true
+            }
+            ReceiptDelivery::Active { .. } | ReceiptDelivery::Cancelled => {
+                replacement.close();
+                false
+            }
+        }
     }
 }
 
@@ -740,25 +821,90 @@ impl NmpReceiptStream {
     /// resolved or the engine has shut down. [`FfiError::ConcurrentNext`] on an
     /// overlapping call.
     pub async fn next(&self) -> Result<Option<FfiWriteStatus>, FfiError> {
-        match self.inner.next().await {
-            Ok(Some(status)) => Ok(Some(write_status_to_ffi(WriteStatusRef(&status)))),
-            Ok(None) => Ok(None),
-            Err(_) => Err(FfiError::ConcurrentNext),
+        use std::sync::atomic::Ordering;
+
+        if self.reading.swap(true, Ordering::AcqRel) {
+            return Err(FfiError::ConcurrentNext);
+        }
+        let _reading = ReceiptReadingGuard(&self.reading);
+
+        loop {
+            let Some((receiver, next_cursor)) = self.current_receiver() else {
+                return Ok(None);
+            };
+            match receiver.next().await {
+                Ok(Some(status)) => {
+                    return Ok(Some(write_status_to_ffi(WriteStatusRef(&status))));
+                }
+                Err(nmp::FifoNextError::ConcurrentNext) => {
+                    return Err(FfiError::ConcurrentNext);
+                }
+                Err(nmp::FifoNextError::Lagged) => {
+                    return Err(FfiError::FactStreamLagged {
+                        receipt_id: Some(self.id.0),
+                    });
+                }
+                Ok(None) => {}
+            }
+
+            let Some(cursor) = next_cursor else {
+                return Ok(None);
+            };
+            let Some(engine) = &self.engine else {
+                return Err(FfiError::FactStreamLagged {
+                    receipt_id: Some(self.id.0),
+                });
+            };
+            match engine.reattach_receipt_from(self.id, cursor)? {
+                ReceiptReattachment::Attached {
+                    id,
+                    statuses,
+                    next_cursor,
+                } if id == self.id => {
+                    if !self.install_page(&receiver, statuses, next_cursor) {
+                        return Ok(None);
+                    }
+                }
+                ReceiptReattachment::Attached { .. }
+                | ReceiptReattachment::NotFound
+                | ReceiptReattachment::RetainedButUnreadable => {
+                    return Err(FfiError::ReceiptReplayUnavailable {
+                        receipt_id: self.id.0,
+                    });
+                }
+            }
         }
     }
 
     /// Stop delivering live status frames to this stream. The durable receipt
     /// itself is untouched (the write is not cancelled — use
     /// [`NmpEngine::cancel`] for that); a later [`NmpEngine::reattach_receipt`]
-    /// replays the durable prefix. Safe to call more than once.
+    /// traverses the durable history. Safe to call more than once.
     pub fn cancel(&self) {
-        self.inner.close();
+        let prior = {
+            let mut delivery = self.delivery.lock().unwrap();
+            match std::mem::replace(&mut *delivery, ReceiptDelivery::Cancelled) {
+                ReceiptDelivery::Active { receiver, .. } => Some(receiver),
+                ReceiptDelivery::Cancelled => None,
+            }
+        };
+        if let Some(receiver) = prior {
+            receiver.close();
+        }
     }
 }
 
 impl Drop for NmpReceiptStream {
     fn drop(&mut self) {
-        self.inner.close();
+        self.cancel();
+    }
+}
+
+struct ReceiptReadingGuard<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for ReceiptReadingGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
     }
 }
 

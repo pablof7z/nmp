@@ -54,7 +54,7 @@ use nostr_relay_builder::prelude::{
 
 fn expect_attached(result: ReceiptReattachment) -> FifoReceiver<WriteStatus> {
     match result {
-        ReceiptReattachment::Attached(_id, statuses) => statuses,
+        ReceiptReattachment::Attached { statuses, .. } => statuses,
         ReceiptReattachment::NotFound => panic!("known receipt was not found"),
         ReceiptReattachment::RetainedButUnreadable => {
             panic!("known receipt evidence was unreadable")
@@ -276,8 +276,11 @@ fn wait_for_status(
         match rx.recv_timeout(remaining) {
             Ok(status) if pred(&status) => return true,
             Ok(_) => {}
-            Err(RecvTimeoutError::Timeout) => return false,
-            Err(RecvTimeoutError::Disconnected) => return false,
+            Err(nmp_engine::runtime::FifoRecvTimeoutError::Timeout)
+            | Err(nmp_engine::runtime::FifoRecvTimeoutError::Closed) => return false,
+            Err(nmp_engine::runtime::FifoRecvTimeoutError::Lagged) => {
+                panic!("fixture receipt stream must not lag")
+            }
         }
     }
 }

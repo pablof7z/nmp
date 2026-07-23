@@ -6,16 +6,17 @@
 //! not subsume an earlier one (`Sent{relay}`, `AwaitingAuth`, per-attempt
 //! ordinals …), so they must not conflate.
 //!
-//! Retained cardinality is bounded *by construction*: a write reaches a finite
-//! set of `(relay, attempt, state)` transitions bounded by `max_relays` and the
-//! retry caps, and a follow action runs a finite lifecycle. The durable
-//! outbox/redb store remains the reattach source of truth (bounded-delivery.md
-//! §3), so correctness never depends on this in-memory queue — it is not an
-//! unbounded external firehose.
+//! Retained cardinality is bounded directly by [`FACT_CHANNEL_CAPACITY`].
+//! Durable retry has no attempt-count ceiling, so lifecycle cardinality cannot
+//! be used as a memory bound. If a consumer falls behind the finite queue, the
+//! channel keeps its already-buffered prefix, rejects further sends, then
+//! surfaces [`FifoNextError::Lagged`] after that prefix drains. Receipt callers
+//! can reattach to the durable outbox/redb source of truth; no fact is silently
+//! presented as delivered and no paused app can grow this queue without bound.
 //!
 //! Delivery works both ways over the same queue, mirroring the latest mailbox:
-//! blocking `recv`/`recv_timeout` (matching `std::sync::mpsc::Receiver`'s
-//! signatures, so direct-Rust drains are unchanged) and a waker-aware
+//! blocking `recv`/`recv_timeout` (with typed close/lag outcomes) and a
+//! waker-aware
 //! [`AsyncFifoReceiver::next`] with no blocked OS thread. Termination is the
 //! same two-cause enum: producer `Drop` (`ProducerGone` — drain then end) vs
 //! consumer [`FifoReceiver::close`] (`Cancelled` — end now, drop the backlog).
@@ -23,18 +24,16 @@
 use std::collections::VecDeque;
 use std::future::poll_fn;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{RecvError, RecvTimeoutError, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
-
-use super::diagnostics_channel::ConcurrentNext;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FifoState {
     Open,
     ProducerGone,
     Cancelled,
+    Lagged,
 }
 
 struct Queue<T> {
@@ -48,6 +47,37 @@ struct Inner<T> {
     cvar: Condvar,
 }
 
+/// Maximum retained live facts per receipt/follow-action observer. This is an
+/// internal delivery bound, not an app admission limit. Durable facts beyond
+/// it remain in the store and require replay.
+pub const FACT_CHANNEL_CAPACITY: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FifoRecvError {
+    Closed,
+    Lagged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FifoRecvTimeoutError {
+    Timeout,
+    Closed,
+    Lagged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FifoTryRecvError {
+    Empty,
+    Closed,
+    Lagged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FifoNextError {
+    ConcurrentNext,
+    Lagged,
+}
+
 /// The producer half. Dropping it ends the stream after the backlog drains.
 pub struct FifoSender<T> {
     inner: Arc<Inner<T>>,
@@ -59,7 +89,7 @@ pub struct FifoReceiver<T> {
     inner: Arc<Inner<T>>,
 }
 
-/// A fresh empty, open FIFO channel.
+/// A fresh empty, open FIFO channel with a fixed finite live-delivery bound.
 pub fn fifo_channel<T>() -> (FifoSender<T>, FifoReceiver<T>) {
     let inner = Arc::new(Inner {
         queue: Mutex::new(Queue {
@@ -78,21 +108,30 @@ pub fn fifo_channel<T>() -> (FifoSender<T>, FifoReceiver<T>) {
 }
 
 impl<T> FifoSender<T> {
-    /// Append a fact and wake the receiver. A no-op once the consumer has
-    /// cancelled (the backlog would never be read).
-    pub fn send(&self, value: T) {
-        let waker = {
+    /// Append a fact and wake the receiver. Returns `false` once the consumer
+    /// has cancelled or this finite queue has lagged. On the first overflow,
+    /// the already-buffered prefix is retained and the rejected value remains
+    /// available through its durable owner rather than being claimed live.
+    pub fn send(&self, value: T) -> bool {
+        let (accepted, waker) = {
             let mut queue = self.inner.queue.lock().unwrap();
-            if queue.state == FifoState::Cancelled {
-                return;
+            if queue.state != FifoState::Open {
+                return false;
             }
-            queue.items.push_back(value);
-            self.inner.cvar.notify_one();
-            queue.waker.take()
+            if queue.items.len() == FACT_CHANNEL_CAPACITY {
+                queue.state = FifoState::Lagged;
+                self.inner.cvar.notify_all();
+                (false, queue.waker.take())
+            } else {
+                queue.items.push_back(value);
+                self.inner.cvar.notify_one();
+                (true, queue.waker.take())
+            }
         };
         if let Some(waker) = waker {
             waker.wake();
         }
+        accepted
     }
 }
 
@@ -116,17 +155,20 @@ impl<T> FifoReceiver<T> {
     /// Block for the next fact in order, `Err(RecvError)` once the producer is
     /// gone and the backlog is drained, or the consumer has closed the channel.
     /// Signature matches `std::sync::mpsc::Receiver::recv`.
-    pub fn recv(&self) -> Result<T, RecvError> {
+    pub fn recv(&self) -> Result<T, FifoRecvError> {
         let mut queue = self.inner.queue.lock().unwrap();
         loop {
             if queue.state == FifoState::Cancelled {
-                return Err(RecvError);
+                return Err(FifoRecvError::Closed);
             }
             if let Some(value) = queue.items.pop_front() {
                 return Ok(value);
             }
-            if queue.state == FifoState::ProducerGone {
-                return Err(RecvError);
+            match queue.state {
+                FifoState::ProducerGone => return Err(FifoRecvError::Closed),
+                FifoState::Lagged => return Err(FifoRecvError::Lagged),
+                FifoState::Open => {}
+                FifoState::Cancelled => unreachable!("handled above"),
             }
             queue = self.inner.cvar.wait(queue).unwrap();
         }
@@ -134,7 +176,7 @@ impl<T> FifoReceiver<T> {
 
     /// Block at most `timeout` for the next fact. Signature matches
     /// `std::sync::mpsc::Receiver::recv_timeout`.
-    pub fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<T, FifoRecvTimeoutError> {
         let queue = self.inner.queue.lock().unwrap();
         let (mut queue, wait) = self
             .inner
@@ -144,52 +186,63 @@ impl<T> FifoReceiver<T> {
             })
             .unwrap();
         if queue.state == FifoState::Cancelled {
-            return Err(RecvTimeoutError::Disconnected);
+            return Err(FifoRecvTimeoutError::Closed);
         }
         if let Some(value) = queue.items.pop_front() {
             return Ok(value);
         }
-        if queue.state == FifoState::ProducerGone {
-            Err(RecvTimeoutError::Disconnected)
-        } else if wait.timed_out() {
-            Err(RecvTimeoutError::Timeout)
-        } else {
-            unreachable!("condvar wait ended without an item, close, or timeout")
+        match queue.state {
+            FifoState::ProducerGone => Err(FifoRecvTimeoutError::Closed),
+            FifoState::Lagged => Err(FifoRecvTimeoutError::Lagged),
+            FifoState::Open if wait.timed_out() => Err(FifoRecvTimeoutError::Timeout),
+            FifoState::Open => {
+                unreachable!("condvar wait ended without an item, close, lag, or timeout")
+            }
+            FifoState::Cancelled => unreachable!("handled above"),
         }
     }
 
     /// Return the next fact immediately if one is queued, distinguishing an
     /// empty open channel from a closed one like `mpsc::Receiver::try_recv`.
-    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+    pub fn try_recv(&self) -> Result<T, FifoTryRecvError> {
         let mut queue = self.inner.queue.lock().unwrap();
         if queue.state == FifoState::Cancelled {
-            return Err(TryRecvError::Disconnected);
+            return Err(FifoTryRecvError::Closed);
         }
         if let Some(value) = queue.items.pop_front() {
             return Ok(value);
         }
-        if queue.state == FifoState::ProducerGone {
-            Err(TryRecvError::Disconnected)
-        } else {
-            Err(TryRecvError::Empty)
+        match queue.state {
+            FifoState::ProducerGone => Err(FifoTryRecvError::Closed),
+            FifoState::Lagged => Err(FifoTryRecvError::Lagged),
+            FifoState::Open => Err(FifoTryRecvError::Empty),
+            FifoState::Cancelled => unreachable!("handled above"),
         }
     }
 
     /// Poll for the next fact without blocking a thread; registers `cx`'s waker
     /// when the queue is empty and open. `Ready(None)` on end-of-stream.
-    pub fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Option<T>> {
+    pub fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Result<Option<T>, FifoNextError>> {
         let mut queue = self.inner.queue.lock().unwrap();
         if queue.state == FifoState::Cancelled {
             queue.waker = None;
-            return Poll::Ready(None);
+            return Poll::Ready(Ok(None));
         }
         if let Some(value) = queue.items.pop_front() {
             queue.waker = None;
-            return Poll::Ready(Some(value));
+            return Poll::Ready(Ok(Some(value)));
         }
-        if queue.state == FifoState::ProducerGone {
-            queue.waker = None;
-            return Poll::Ready(None);
+        match queue.state {
+            FifoState::ProducerGone => {
+                queue.waker = None;
+                return Poll::Ready(Ok(None));
+            }
+            FifoState::Lagged => {
+                queue.waker = None;
+                return Poll::Ready(Err(FifoNextError::Lagged));
+            }
+            FifoState::Open => {}
+            FifoState::Cancelled => unreachable!("handled above"),
         }
         queue.waker = Some(cx.waker().clone());
         Poll::Pending
@@ -229,13 +282,13 @@ pub struct AsyncFifoReceiver<T> {
 
 impl<T> AsyncFifoReceiver<T> {
     /// Await the next fact in order, or `None` at end-of-stream.
-    /// [`ConcurrentNext`] on an overlapping call.
-    pub async fn next(&self) -> Result<Option<T>, ConcurrentNext> {
+    /// [`FifoNextError::ConcurrentNext`] on an overlapping call.
+    pub async fn next(&self) -> Result<Option<T>, FifoNextError> {
         if self.reading.swap(true, Ordering::AcqRel) {
-            return Err(ConcurrentNext);
+            return Err(FifoNextError::ConcurrentNext);
         }
         let _guard = ReadingGuard(&self.reading);
-        Ok(poll_fn(|cx| self.rx.poll_recv(cx)).await)
+        poll_fn(|cx| self.rx.poll_recv(cx)).await
     }
 
     /// Idempotent consumer-initiated close; wakes a parked `next()` to `None`.
@@ -266,7 +319,7 @@ mod tests {
             assert_eq!(rx.recv(), Ok(value));
         }
         drop(tx);
-        assert_eq!(rx.recv(), Err(RecvError));
+        assert_eq!(rx.recv(), Err(FifoRecvError::Closed));
     }
 
     #[tokio::test]
@@ -315,7 +368,29 @@ mod tests {
         let mut second = pin!(rx.next());
         assert_eq!(
             second.as_mut().poll(&mut cx),
-            Poll::Ready(Err(ConcurrentNext))
+            Poll::Ready(Err(FifoNextError::ConcurrentNext))
         );
+    }
+
+    #[tokio::test]
+    async fn paused_consumer_is_finitely_buffered_then_told_to_replay() {
+        let (tx, rx) = fifo_channel::<usize>();
+        for value in 0..FACT_CHANNEL_CAPACITY {
+            assert!(tx.send(value));
+        }
+        assert!(
+            !tx.send(FACT_CHANNEL_CAPACITY),
+            "the first fact beyond the finite live bound is rejected"
+        );
+        assert!(
+            !tx.send(FACT_CHANNEL_CAPACITY + 1),
+            "a lagged channel never resumes accepting an incomplete suffix"
+        );
+
+        let rx = rx.into_async();
+        for value in 0..FACT_CHANNEL_CAPACITY {
+            assert_eq!(rx.next().await, Ok(Some(value)));
+        }
+        assert_eq!(rx.next().await, Err(FifoNextError::Lagged));
     }
 }

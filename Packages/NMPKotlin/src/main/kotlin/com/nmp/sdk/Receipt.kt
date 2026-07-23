@@ -74,9 +74,10 @@ internal fun cancelWrite(engine: NmpEngineInterface, receiptId: ULong): WriteCan
  * stable store-issued id is read synchronously off the handle; the status
  * `Flow` is a cold pull loop over `next()` -- FIFO write facts, no folding
  * and no conflation (receipts are durable facts, not disposable snapshots).
- * Collection-scope teardown withdraws the LIVE stream via `handle.cancel()`;
- * the durable receipt itself is untouched (a later `reattachReceipt` replays
- * the durable prefix from the store). */
+ * The live FIFO is finite and reports [NMPError.FactStreamLagged] rather than
+ * growing or dropping silently; reattachment transparently traverses durable
+ * facts in finite pages. Collection-scope teardown withdraws the LIVE stream
+ * via `handle.cancel()`; the durable receipt itself is untouched. */
 private fun receiptFrom(stream: NmpReceiptStream): Receipt =
     Receipt(id = stream.id(), status = receiptStatusFlow(stream))
 

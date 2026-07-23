@@ -45,6 +45,21 @@ final class EvidenceMappingTests: XCTestCase {
         )
     }
 
+    func testFiniteFactDeliveryFailuresRemainTypedAtTheNativeBoundary() {
+        XCTAssertEqual(
+            NMPError(.FactStreamLagged(receiptId: 42)),
+            .factStreamLagged(receiptId: 42)
+        )
+        XCTAssertEqual(
+            NMPError(.FactStreamLagged(receiptId: nil)),
+            .factStreamLagged(receiptId: nil)
+        )
+        XCTAssertEqual(
+            NMPError(.ReceiptReplayUnavailable(receiptId: 42)),
+            .receiptReplayUnavailable(receiptId: 42)
+        )
+    }
+
     /// #680: `reattachReceipt` now maps the generated `FfiReceiptReattachment`
     /// directly -- `.attached` carries a live `NmpReceiptStream` (proven
     /// end-to-end by `WriteCancellationTests`), while an unknown id must stay
@@ -190,7 +205,7 @@ final class EvidenceMappingTests: XCTestCase {
     /// never a second `Added` for the same id. Drives `RowAccumulator`
     /// directly (the exact per-frame fold `NMPQuery`'s iterator now runs,
     /// #680) since the coalescer over the pull loop is proven separately by
-    /// `FrameCoalescerTests`.
+    /// `PullIteratorCoreTests`.
     func testRowAccumulatorSourcesGrewReplacesRowInPlaceWithoutDuplicating() throws {
         let accumulator = RowAccumulator()
         let emptyEvidence = FfiAcquisitionEvidence(sources: [], shortfall: [])

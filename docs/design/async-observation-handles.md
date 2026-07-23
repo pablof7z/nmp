@@ -50,8 +50,9 @@ deterministic cancellation/shutdown; isolation from slow foreign consumers.
   consumer cannot delay the engine reducer or another consumer.
 - **Receipt facts remain durable.** Receipts are not disposable frames: the
   persisted outbox/redb store is the source of truth; a detached consumer
-  reattaches and the durable `WriteStatus` prefix is replayed from the store.
-  Live buffering is bounded; correctness never depends on an unbounded queue.
+  reattaches and traverses durable `WriteStatus` facts through finite pages.
+  Live buffering is fixed-capacity and lag is typed; correctness never depends
+  on an unbounded queue.
 
 ## The waker-aware mailbox primitive
 
@@ -160,22 +161,25 @@ param, no reservation, no thread. `None` from `next()` is the terminal signal
 - Engine shutdown drops every producer `LatestSender`, closing every mailbox and
   waking every pending `next()` to `None`.
 - Swift iterator/task cancellation reaches `handle.cancel()` through the
-  backing `AsyncThrowingStream`'s `.cancelled` termination callback; a
-  producer-side `.finished` does not cancel a shared handle. Kotlin `Flow`
-  collection cancellation reaches the same call through `finally`. A
-  cancelled handle yields no further frames.
+  iterator-owned core's `deinit` and `withTaskCancellationHandler`; normal
+  loop exit (`break`) therefore withdraws demand even though Swift never
+  creates a producer task or continuation. Kotlin `Flow` collection
+  cancellation reaches the same call through `finally`. A cancelled handle
+  yields no further frames.
 
 ## Native SDK wrappers
 
-- **Swift:** each handle wraps as an `AsyncSequence` backed by one
-  `AsyncThrowingStream` pump whose loop awaits `handle.next()` and maps `nil` →
-  end of sequence. An enum-backed, lock-protected iterator claim admits only
-  one live pump for the shared native handle; a competing iterator finishes
-  with typed `NMPError.concurrentNext` before it can race or cancel the owner.
-  Task/iterator cancellation calls `handle.cancel()` only from the
-  continuation's `.cancelled` termination. Current-state streams retain
-  `FrameCoalescer` plus `.bufferingNewest(1)` as wrapper-side delivery-cadence
-  policy; engine-mailbox conflation alone does not throttle a fast replay loop.
+- **Swift:** each handle wraps as a direct `AsyncSequence`: one app
+  `Iterator.next()` performs exactly one native `handle.next()`. The
+  reference-owned iterator core has an enum lifecycle and shares an
+  enum-backed, lock-protected claim, so only one iterator owns the handle; a
+  competitor receives typed `NMPError.concurrentNext` before touching native
+  state. The core's `deinit` cancels the handle and releases the claim, which
+  covers normal `break`; `withTaskCancellationHandler` covers task
+  cancellation. There is no producer task, continuation, prefetch, or second
+  Swift queue. Current-state streams cadence-limit returned snapshots to about
+  one per 16 ms without pulling ahead, leaving conflation in the one native
+  mailbox.
 - **Kotlin:** each handle wraps as a `Flow` built with `flow { while(true){ val v
   = handle.next() ?: break; emit(v) } }`, with `handle.cancel()` in a
   `finally`/`onCompletion`. Ordinary observation flows are cold and open one
@@ -233,27 +237,30 @@ implementation:
    Supported consumption is through the SDK wrappers on real dispatchers/executors
    so app collector code never runs on the engine reducer thread.
 3. **Receipts & follow-actions are FIFO fact streams, not latest-wins.** They
-   use a distinct waker-aware **FIFO** channel (`fifo_channel`), not the
-   conflating `latest_channel`. Its retained cardinality is bounded *by
-   construction* — a receipt reaches a finite set of `(relay, attempt, state)`
-   transitions bounded by `max_relays` and the retry caps — and the durable
-   outbox/redb store remains the reattach source of truth, so correctness never
-   depends on the in-memory queue (bounded-delivery.md §3). It is not an
-   unbounded external firehose.
+   use a distinct waker-aware **fixed-capacity FIFO** (`fifo_channel`, capacity
+   32), not the conflating `latest_channel`. Retry concurrency is bounded, but
+   retry *count* is not; the earlier claim that retry caps made a receipt's
+   history finite was false. When a paused consumer fills the live FIFO, the
+   sender retains the already-buffered prefix, rejects later sends, is pruned
+   from the producer, and the consumer receives typed `FactStreamLagged` after
+   draining that prefix. Receipt reattachment reconstructs deterministic
+   durable pages of at most 32 facts and only attaches the final page to live
+   work. Persisted attempt-history retention/GC remains the separate #46
+   concern; the live delivery edge neither grows without bound nor claims a
+   dropped fact was delivered (bounded-delivery.md §3).
 4. **`sign_event`** stays a handle (`NmpSignEventHandle`) and gains
    `async fn signed() -> FfiSignedEvent` (one-shot; a second call is a typed
    misuse), replacing the `SignEventObserver` callback. Explicit `cancel()` is
    retained because Swift task cancellation never reaches Rust.
 5. **Platform cancellation asymmetry (verified against generated 0.29
-   bindings).** Swift: cancelling a `Task` awaiting `next()` neither reaches Rust
-   nor interrupts the await, so the `AsyncSequence` wrapper's
-   `AsyncThrowingStream` termination callback forwards only consumer
-   `.cancelled` to `handle.cancel()` — mandatory for liveness, not hygiene.
-   Producer-side `.finished`, including a typed competing-iterator refusal,
-   must not cancel the accepted pull. Kotlin: cancelling the collecting
-   coroutine drops the in-flight Rust future; the single-reader guard is
-   released on the future's `Drop` (RAII `ReadingGuard`), so a timed-out
-   `next()` cannot brick the handle.
+   bindings).** Swift cancellation does not automatically reach Rust, so the
+   direct iterator core wraps each native pull in
+   `withTaskCancellationHandler` and explicitly calls `handle.cancel()`. Its
+   reference-owned `deinit` covers normal loop exit, including `break`; a
+   denied competing iterator never owns and therefore never cancels the
+   accepted handle. Kotlin cancellation drops the in-flight Rust future; the
+   single-reader guard is released on the future's `Drop` (RAII
+   `ReadingGuard`), so a timed-out `next()` cannot brick the handle.
 6. **NIP-46 session-lifetime workers move to session-owned threads.** Permanent
    slot occupants (session worker + event forwarder, session-lifetime) behind one
    fixed counter would be a miniature of the very defect — an unrelated
@@ -263,18 +270,21 @@ implementation:
    session count) instead of the shared pool. The remaining internal pool then
    hosts only genuinely *transient* blocking adapters (NIP-11 flights, AUTH
    foreign calls, remote-signer result waiters) — one honest class.
-7. **Swift `FrameCoalescer` is retained as wrapper-side throttle policy** so the
-   #17 replay-jank falsifier does not regress: engine-mailbox conflation only
-   folds while the consumer is busy, but a tight `for await` pull loop during
-   historical replay could otherwise deliver per-emit.
-8. **Swift iterator ownership is claimed before starting a pump.** Creating one
-   independent background pump per iterator and relying only on Rust's
-   in-flight guard is not sufficient: after delivering a frame, pump A can
-   prefetch again while pump B owns the accepted pull; when A's consumer exits,
-   its teardown can cancel B into a silent `nil`. Every Swift sequence therefore
-   shares an enum-backed `NMPPullIteratorGate`; exactly one live iterator starts
-   a pump, and a competitor receives `NMPError.concurrentNext` without touching
-   the handle. The start-barrier falsifier repeats this race deterministically.
+7. **Swift cadence control does not require a queue.** Snapshot iterators delay
+   delivery, when necessary, to about one frame per 16 ms, then issue the next
+   native pull only when the app asks again. The engine mailbox can therefore
+   conflate replay bursts while Swift owns no `FrameCoalescer`, continuation,
+   or buffered frame. The cadence falsifier proves spacing and the direct-pull
+   falsifier proves no prefetch.
+8. **Swift iterator ownership is reference-owned and teardown-complete.**
+   Merely guarding overlapping Rust pulls does not cover a normal
+   `for try await` loop break: an eager background pump could stay parked,
+   retaining both native demand and the Swift iterator claim. Every sequence
+   therefore shares an enum-backed `NMPPullIteratorGate`, while the accepted
+   iterator retains one `NMPPullIteratorCore`. Dropping the iterator cancels
+   native demand and releases the claim exactly once; a competitor receives
+   `NMPError.concurrentNext` without touching the handle. The normal-break,
+   drop, direct-pull, and competing-iterator falsifiers cover these paths.
 
 ### Known residual (documented, not silently accepted)
 
@@ -291,8 +301,10 @@ safe. Recorded in known-gaps for a later peek/commit hardening.
 
 ## Falsifiers
 
-See `crates/*/tests` and the SDK test suites. The 11 acceptance tests in #680
+See `crates/*/tests` and the SDK test suites. The acceptance tests in #680
 (thread-scaling ≥1000 handles, real 64+ composition, slow 10k-change consumer,
-cancellation races, receipt detach/reattach, shutdown with pending `next()`,
-Swift/Kotlin/SDK parity, 29er reproduction, symbol audit) fail under the old
-one-thread-per-observer design and pass under this one.
+cancellation races, normal Swift loop exit, finite FIFO lag under 40 durable
+retry cycles, paged receipt replay, receipt detach/reattach, shutdown with
+pending `next()`, Swift/Kotlin/SDK parity, 29er reproduction, symbol audit)
+fail under the old one-thread-per-observer/unbounded-fact-delivery design and
+pass under this one.

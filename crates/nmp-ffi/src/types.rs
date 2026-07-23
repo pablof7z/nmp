@@ -863,8 +863,8 @@ impl std::fmt::Display for FfiCancelWriteError {
 impl std::error::Error for FfiCancelWriteError {}
 
 /// Result of looking up a stable retained receipt id. The `Attached` variant
-/// carries the pull-based [`crate::facade::NmpReceiptStream`] that replays the
-/// durable `WriteStatus` prefix and streams onward (#680).
+/// carries the pull-based [`crate::facade::NmpReceiptStream`] that traverses
+/// durable `WriteStatus` facts in finite pages and streams onward (#680).
 #[derive(uniffi::Enum)]
 pub enum FfiReceiptReattachment {
     Attached {

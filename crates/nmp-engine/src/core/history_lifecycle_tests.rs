@@ -35,8 +35,9 @@ mod history_mutation_tests {
     struct CapturingReceiptSink(Arc<Mutex<Vec<WriteStatus>>>);
 
     impl ReceiptSink for CapturingReceiptSink {
-        fn on_status(&self, status: WriteStatus) {
+        fn on_status(&self, status: WriteStatus) -> bool {
             self.0.lock().unwrap().push(status);
+            true
         }
     }
 

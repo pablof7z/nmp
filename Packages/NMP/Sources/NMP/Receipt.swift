@@ -1,12 +1,16 @@
 // The write noun's receipt stream, pulled from `NmpReceiptStream` (#680).
-// Receipts are durable FIFO facts (not disposable snapshots): the persisted
-// outbox/redb store is the source of truth, so there is no coalescing here.
+// Receipts are durable FIFO facts (not disposable snapshots): live delivery
+// has a finite FIFO and typed lag, while persisted outbox/redb evidence is
+// replayed in deterministic pages. There is no coalescing here.
 
 import NMPFFI
 
-/// The stream of every `WriteStatus` a single `publish` call's write reaches
-/// (ledger #9 -- enqueue is not converged), pulled in order from the durable
-/// receipt handle (#680). It finishes (`nil`) when the engine has nothing
+/// The ordered `WriteStatus` facts a single `publish` call's write reaches
+/// (ledger #9 -- enqueue is not converged), pulled from its durable receipt
+/// handle (#680). Live delivery is finite: a paused consumer that falls
+/// behind receives `NMPError.factStreamLagged` and can reattach the named
+/// receipt to replay the canonical persisted history. It finishes (`nil`) when
+/// the engine has nothing
 /// further to report for this intent (e.g. an `Ephemeral` intent may finish
 /// immediately after `.sent`, a `Durable` one only after every relay has
 /// reached a terminal state or given up). Iterate with `for try await`; the
@@ -23,23 +27,23 @@ public struct ReceiptStatus: AsyncSequence, Sendable {
     }
 
     public func makeAsyncIterator() -> Iterator {
-        let stream = nmpPullStream(handle: handle, iteratorGate: iteratorGate) { status in
+        let core = NMPPullIteratorCore(handle: handle, iteratorGate: iteratorGate) { status in
             WriteStatus(status)
         }
-        return Iterator(base: stream.makeAsyncIterator())
+        return Iterator(core: core)
     }
 
     public struct Iterator: AsyncIteratorProtocol {
-        var base: AsyncThrowingStream<WriteStatus, Error>.AsyncIterator
+        let core: NMPPullIteratorCore<NmpReceiptStream, WriteStatus>
 
         public mutating func next() async throws -> WriteStatus? {
-            try await base.next()
+            try await core.next()
         }
     }
 
     /// Stop delivering live status frames to this stream. The durable receipt
     /// is untouched (use `NMPEngine.cancel(receiptId:)` to cancel the write);
-    /// a later `reattachReceipt` replays the durable prefix. Idempotent.
+    /// a later `reattachReceipt` traverses the durable history. Idempotent.
     public func cancel() {
         handle.cancel()
     }
@@ -144,9 +148,10 @@ extension NMPEngine {
     }
 
     /// Attach a fresh pull stream to retained receipt facts (#680): the
-    /// `.attached` result carries a new `NmpReceiptStream` that replays the
-    /// durable `WriteStatus` prefix from the store and streams onward. Corrupt
-    /// durable evidence is reported distinctly and never treated as absence.
+    /// `.attached` result carries a new `NmpReceiptStream` that transparently
+    /// traverses the durable `WriteStatus` history in finite pages and then
+    /// streams onward. Corrupt or disappearing durable evidence is reported
+    /// distinctly and never treated as absence.
     public func reattachReceipt(id: UInt64) throws -> ReceiptReattachment {
         let result = try nmpRethrowing {
             try ffi.reattachReceipt(receiptId: id)

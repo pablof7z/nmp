@@ -153,7 +153,10 @@ pub use nmp_engine::runtime::{
 // documented product surface keeps its previous shape: `publish` returns a
 // receipt stream you drain, not a new documented type family.
 #[doc(hidden)]
-pub use nmp_engine::runtime::{AsyncFifoReceiver, FifoReceiver};
+pub use nmp_engine::runtime::{
+    AsyncFifoReceiver, FifoNextError, FifoReceiver, FifoRecvError, FifoRecvTimeoutError,
+    FifoTryRecvError, FACT_CHANNEL_CAPACITY,
+};
 // Producer-side FIFO mechanism, used only by protocol modules (e.g. nmp-nip02's
 // follow-action worker) to feed a receipt/status stream — not app product
 // surface, so doc-hidden and kept out of the facade snapshot.
