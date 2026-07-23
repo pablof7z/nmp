@@ -48,6 +48,7 @@ mod write_tests;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
+use std::sync::Arc;
 
 #[cfg(test)]
 use std::cell::Cell;
@@ -812,7 +813,7 @@ struct PendingWrite {
     routing_valid: bool,
     /// Zero or more observers. Recovery owns the obligation even before an
     /// app reattaches, and multiple observers may follow the same receipt.
-    sinks: Vec<Rc<dyn ReceiptSink>>,
+    sinks: Vec<RegisteredReceiptSink>,
     /// Store-allocated durable intent id. `None` only for Ephemeral's
     /// receipt-only path, which never owns a pending row.
     intent_id: Option<IntentId>,
@@ -858,6 +859,27 @@ struct PendingWrite {
     /// kept so a permanent removal from `pending` can walk exactly this set
     /// to clean the reverse index rather than scanning it.
     lane_relays: BTreeSet<RelayUrl>,
+}
+
+/// Runtime-private identity for one live receipt observer. Pointer identity
+/// avoids a counter, capacity, or wraparound policy for a mechanism the app
+/// never sees.
+#[derive(Clone)]
+pub(crate) struct ReceiptSinkRegistration(Arc<()>);
+
+impl ReceiptSinkRegistration {
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(()))
+    }
+
+    fn is_same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+struct RegisteredReceiptSink {
+    registration: Option<ReceiptSinkRegistration>,
+    sink: Rc<dyn ReceiptSink>,
 }
 
 /// A live, EngineCore-owned negentropy reconciliation in progress for

@@ -40,6 +40,7 @@ struct Queue<T> {
     items: VecDeque<T>,
     state: FifoState,
     waker: Option<Waker>,
+    close_hook: Option<Box<dyn FnOnce() + Send + 'static>>,
 }
 
 struct Inner<T> {
@@ -96,6 +97,7 @@ pub fn fifo_channel<T>() -> (FifoSender<T>, FifoReceiver<T>) {
             items: VecDeque::new(),
             state: FifoState::Open,
             waker: None,
+            close_hook: None,
         }),
         cvar: Condvar::new(),
     });
@@ -251,15 +253,37 @@ impl<T> FifoReceiver<T> {
     /// Consumer-initiated idempotent close: drops the backlog, ends the stream
     /// now, and wakes a blocked thread or parked async reader.
     pub fn close(&self) {
-        let waker = {
+        let (waker, close_hook) = {
             let mut queue = self.inner.queue.lock().unwrap();
             queue.state = FifoState::Cancelled;
             queue.items.clear();
             self.inner.cvar.notify_all();
-            queue.waker.take()
+            (queue.waker.take(), queue.close_hook.take())
         };
         if let Some(waker) = waker {
             waker.wake();
+        }
+        if let Some(close_hook) = close_hook {
+            close_hook();
+        }
+    }
+
+    /// Install one consumer-lifecycle callback. Receipt streams use this to
+    /// withdraw their exact reducer-side observer on close/drop; ordinary
+    /// FIFO users leave it unset.
+    pub(crate) fn set_close_hook(&self, close_hook: impl FnOnce() + Send + 'static) {
+        let close_hook = {
+            let mut queue = self.inner.queue.lock().unwrap();
+            if queue.state == FifoState::Cancelled {
+                Some(Box::new(close_hook) as Box<dyn FnOnce() + Send + 'static>)
+            } else {
+                debug_assert!(queue.close_hook.is_none());
+                queue.close_hook = Some(Box::new(close_hook));
+                None
+            }
+        };
+        if let Some(close_hook) = close_hook {
+            close_hook();
         }
     }
 
@@ -269,6 +293,12 @@ impl<T> FifoReceiver<T> {
             rx: self,
             reading: AtomicBool::new(false),
         }
+    }
+}
+
+impl<T> Drop for FifoReceiver<T> {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -352,6 +382,28 @@ mod tests {
         let rx = rx.into_async();
         rx.close();
         assert_eq!(rx.next().await, Ok(None));
+    }
+
+    #[test]
+    fn close_hook_runs_exactly_once_on_close_or_drop() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (_tx, rx) = fifo_channel::<u32>();
+        let hook_calls = Arc::clone(&calls);
+        rx.set_close_hook(move || {
+            hook_calls.fetch_add(1, Ordering::SeqCst);
+        });
+        rx.close();
+        rx.close();
+        drop(rx);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let (_tx, dropped) = fifo_channel::<u32>();
+        let hook_calls = Arc::clone(&calls);
+        dropped.set_close_hook(move || {
+            hook_calls.fetch_add(1, Ordering::SeqCst);
+        });
+        drop(dropped);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]

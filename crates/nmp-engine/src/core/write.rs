@@ -1034,6 +1034,17 @@ impl<S: EventStore> EngineCore<S> {
         cursor: Option<ReceiptReplayCursor>,
         limit: usize,
     ) -> (ReattachOutcome, Option<ReceiptReplayCursor>) {
+        self.reattach_receipt_page_registered(id, sink, cursor, limit, None)
+    }
+
+    pub(crate) fn reattach_receipt_page_registered(
+        &mut self,
+        id: ReceiptId,
+        sink: Box<dyn ReceiptSink>,
+        cursor: Option<ReceiptReplayCursor>,
+        limit: usize,
+        registration: Option<ReceiptSinkRegistration>,
+    ) -> (ReattachOutcome, Option<ReceiptReplayCursor>) {
         let mut cursor = match cursor {
             Some(cursor) if cursor.state.receipt_id == id => cursor,
             Some(_) => return (ReattachOutcome::RetainedButUnreadable, None),
@@ -1311,10 +1322,53 @@ impl<S: EventStore> EngineCore<S> {
         let next_cursor = (unseen || !live || page_full).then_some(cursor);
         if live && !unseen && !page_full {
             if let Some(pending) = self.pending.get_mut(&id) {
-                pending.sinks.push(Rc::from(sink));
+                pending.sinks.push(RegisteredReceiptSink {
+                    registration,
+                    sink: Rc::from(sink),
+                });
             }
         }
         (ReattachOutcome::Attached, next_cursor)
+    }
+
+    pub(crate) fn register_initial_receipt_sink(
+        &mut self,
+        id: ReceiptId,
+        registration: ReceiptSinkRegistration,
+    ) -> bool {
+        let Some(pending) = self.pending.get_mut(&id) else {
+            return false;
+        };
+        let Some(sink) = pending
+            .sinks
+            .iter_mut()
+            .find(|sink| sink.registration.is_none())
+        else {
+            return false;
+        };
+        sink.registration = Some(registration);
+        true
+    }
+
+    pub(crate) fn detach_receipt_sink(
+        &mut self,
+        id: ReceiptId,
+        registration: &ReceiptSinkRegistration,
+    ) {
+        if let Some(pending) = self.pending.get_mut(&id) {
+            pending.sinks.retain(|sink| {
+                sink.registration
+                    .as_ref()
+                    .is_none_or(|candidate| !candidate.is_same(registration))
+            });
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn receipt_sink_count(&self, id: ReceiptId) -> usize {
+        self.pending
+            .get(&id)
+            .map_or(0, |pending| pending.sinks.len())
     }
 
     /// #591: recover a receipt id from a caller-generated correlation token
@@ -1347,10 +1401,26 @@ impl<S: EventStore> EngineCore<S> {
         Option<ReceiptId>,
         Option<ReceiptReplayCursor>,
     ) {
+        self.reattach_by_correlation_page_registered(token, sink, cursor, limit, None)
+    }
+
+    pub(crate) fn reattach_by_correlation_page_registered(
+        &mut self,
+        token: String,
+        sink: Box<dyn ReceiptSink>,
+        cursor: Option<ReceiptReplayCursor>,
+        limit: usize,
+        registration: Option<ReceiptSinkRegistration>,
+    ) -> (
+        ReattachOutcome,
+        Option<ReceiptId>,
+        Option<ReceiptReplayCursor>,
+    ) {
         match self.resolver.store().lookup_correlation(&token) {
             Ok(Some(receipt_id)) => {
                 let id = ReceiptId(receipt_id);
-                let (outcome, next_cursor) = self.reattach_receipt_page(id, sink, cursor, limit);
+                let (outcome, next_cursor) =
+                    self.reattach_receipt_page_registered(id, sink, cursor, limit, registration);
                 (outcome, Some(id), next_cursor)
             }
             Ok(None) => (ReattachOutcome::NotFound, None, None),
@@ -1652,7 +1722,14 @@ impl<S: EventStore> EngineCore<S> {
                 durability,
                 routing,
                 routing_valid: true,
-                sinks: if sink_live { vec![sink] } else { Vec::new() },
+                sinks: if sink_live {
+                    vec![RegisteredReceiptSink {
+                        registration: None,
+                        sink,
+                    }]
+                } else {
+                    Vec::new()
+                },
                 intent_id,
                 signing_pubkey,
                 frozen: frozen.clone(),
@@ -2882,6 +2959,8 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     pub(super) fn notify(pending: &mut PendingWrite, status: WriteStatus) {
-        pending.sinks.retain(|sink| sink.on_status(status.clone()));
+        pending
+            .sinks
+            .retain(|sink| sink.sink.on_status(status.clone()));
     }
 }

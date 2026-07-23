@@ -71,6 +71,11 @@ check is required before the sink atomically joins live work, closing the
 replay-to-live race. The replay cursor bounds each delivery page, not the
 store's total retained attempt history: retention/GC for that durable history
 remains open under #46 and must not be confused with retry-concurrency limits.
+Every live receipt observer also owns a private registration identity. Closing
+or dropping its consumer FIFO sends an exact detach command and removes that
+registration from the pending write immediately; pruning cannot depend on a
+future status, because a receipt parked at `AwaitingCapability` may never emit
+again.
 
 Diagnostics counters may aggregate, but exact current plan/filter/error facts
 must remain available. Aggregation policy is itself visible in diagnostics.

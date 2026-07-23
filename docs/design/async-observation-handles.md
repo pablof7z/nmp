@@ -250,7 +250,10 @@ implementation:
    unseen and are delivered exactly once. A caught-up check after a full page
    atomically attaches live work. Persisted attempt-history retention/GC
    remains the separate #46 concern; the live delivery edge neither grows
-   without bound nor claims a dropped fact was delivered
+   without bound nor claims a dropped fact was delivered. Each live receipt
+   sink has a private identity tied to the consumer FIFO's close/drop hook;
+   cancellation sends an exact detach command, so a pending write cannot
+   accumulate dead sinks while parked without another status
    (bounded-delivery.md §3).
 4. **`sign_event`** stays a handle (`NmpSignEventHandle`) and gains
    `async fn signed() -> FfiSignedEvent` (one-shot; a second call is a typed
@@ -308,7 +311,9 @@ safe. Recorded in known-gaps for a later peek/commit hardening.
 See `crates/*/tests` and the SDK test suites. The acceptance tests in #680
 (thread-scaling ≥1000 handles, real 64+ composition, slow 10k-change consumer,
 cancellation races, normal Swift loop exit, finite FIFO lag under 40 durable
-retry cycles, paged receipt replay, receipt detach/reattach, shutdown with
-pending `next()`, Swift/Kotlin/SDK parity, 29er reproduction, symbol audit)
+retry cycles, paged receipt replay, receipt detach/reattach, 128 alternating
+close/drop reattachments while permanently parked at `AwaitingCapability`,
+shutdown with pending `next()`, Swift/Kotlin/SDK parity, 29er reproduction,
+symbol audit)
 fail under the old one-thread-per-observer/unbounded-fact-delivery design and
 pass under this one.
