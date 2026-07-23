@@ -863,9 +863,13 @@ pub enum SignEventError {
 
 type SignEventCompletion = Box<dyn FnOnce(Result<SignedEvent, SignEventError>) + Send + 'static>;
 
-const SIGN_EVENT_OPEN: u8 = 0;
-const SIGN_EVENT_CANCELLED: u8 = 1;
-const SIGN_EVENT_RESOLVED: u8 = 2;
+#[repr(u8)]
+#[derive(Clone, Copy)]
+enum SignEventState {
+    Open,
+    Cancelled,
+    Resolved,
+}
 
 thread_local! {
     /// #704: set on a per-operation sign-event completion thread to the exact
@@ -889,7 +893,7 @@ struct SignEventTerminal {
 impl SignEventTerminal {
     fn new(cancel: Box<dyn Fn() + Send + Sync>) -> Arc<Self> {
         Arc::new(Self {
-            state: AtomicU8::new(SIGN_EVENT_OPEN),
+            state: AtomicU8::new(SignEventState::Open as u8),
             cancel,
         })
     }
@@ -898,8 +902,8 @@ impl SignEventTerminal {
         if self
             .state
             .compare_exchange(
-                SIGN_EVENT_OPEN,
-                SIGN_EVENT_CANCELLED,
+                SignEventState::Open as u8,
+                SignEventState::Cancelled as u8,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
@@ -914,8 +918,8 @@ impl SignEventTerminal {
     fn resolve(&self) -> bool {
         self.state
             .compare_exchange(
-                SIGN_EVENT_OPEN,
-                SIGN_EVENT_RESOLVED,
+                SignEventState::Open as u8,
+                SignEventState::Resolved as u8,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )

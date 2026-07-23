@@ -180,10 +180,22 @@ folded into the plan above.
    runtime's fixed workers (default 2). The `auth-release-bridge` and the 32-slot
    adapter executor are deleted.
 
+4. **Completion ownership is enum-shaped, not a cluster of lifecycle booleans.**
+   The signer and AUTH one-shot doors encode open, resolved, cancelled, and
+   receiver-gone states—including whether the single resolver claim was spent—
+   as closed enums. Pending-operation handles likewise encode `Pending(cancel)`
+   versus `Finished`, so `Drop` cannot infer ownership from a nearby `done`
+   boolean. The lock-free AUTH-task and sign-event terminals use `repr(u8)`
+   enums as the only values written through their atomics, rather than unrelated
+   numeric lifecycle constants. Targeted proofs pin the two formerly ambiguous
+   edges: cancellation or consumer drop runs the adapter hook exactly once, a
+   late resolver receives typed `ReceiverDropped`, and every later resolver
+   receives `AlreadyResolved`.
+
 ### Primitive, runtime, shutdown (must-fix)
 
 - **Completion door:** a hand-rolled primitive in `nmp-signer` (no new runtime
-  dep): `Mutex<{value, waker, closed}>` + `Condvar`. Blocking `recv`/
+  dep): `Mutex<{lifecycle enum, waker}>` + `Condvar`. Blocking `recv`/
   `recv_timeout` via `Condvar` (direct-Rust); async `poll_recv`/`Future` via a
   stored `Waker` (the engine's `.await`). Preserves the typed
   `AlreadyResolved`/`ReceiverDropped` semantics, the **cancel-first bias** of

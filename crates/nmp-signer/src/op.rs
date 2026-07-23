@@ -20,17 +20,26 @@ use std::time::{Duration, Instant};
 #[doc(hidden)]
 pub type PendingCancel = Box<dyn FnOnce() + Send + 'static>;
 
+enum DoorLifecycle<T> {
+    /// No sender has claimed the result and the consumer is still present.
+    Open,
+    /// A sender claimed the result. `None` means the consumer already took it.
+    Resolved(Option<Result<T, SignerError>>),
+    /// Cancellation won before any sender claimed the result.
+    CancelledUnresolved,
+    /// Cancellation won and a later sender claim was truthfully refused.
+    CancelledResolved,
+    /// The consumer was dropped before any sender claimed the result.
+    ReceiverGoneUnresolved,
+    /// The consumer is gone and the one sender claim has already been spent.
+    ReceiverGoneResolved,
+}
+
 struct DoorState<T> {
-    /// The one result, present once a sender resolves, taken once by a consumer.
-    value: Option<Result<T, SignerError>>,
+    /// The result-slot and consumer lifecycle as one legal state.
+    lifecycle: DoorLifecycle<T>,
     /// A parked async consumer's waker (at most one; the op is single-consumer).
     waker: Option<Waker>,
-    /// A sender clone has claimed the one result slot.
-    resolved: bool,
-    /// The consumer (`PendingSignerOp`) was dropped before resolution.
-    receiver_gone: bool,
-    /// A `Canceller` fired: the consumer ends now with no result.
-    cancelled: bool,
 }
 
 /// The shared one-shot completion slot behind a [`PendingSignerSender`] /
@@ -45,6 +54,30 @@ struct Door<T> {
 impl<T> Door<T> {
     fn wake(state: &mut DoorState<T>) -> Option<Waker> {
         state.waker.take()
+    }
+
+    fn cancel(state: &mut DoorState<T>) {
+        let previous = std::mem::replace(&mut state.lifecycle, DoorLifecycle::Open);
+        state.lifecycle = match previous {
+            DoorLifecycle::Open => DoorLifecycle::CancelledUnresolved,
+            DoorLifecycle::Resolved(_) => DoorLifecycle::CancelledResolved,
+            DoorLifecycle::CancelledUnresolved => DoorLifecycle::CancelledUnresolved,
+            DoorLifecycle::CancelledResolved => DoorLifecycle::CancelledResolved,
+            DoorLifecycle::ReceiverGoneUnresolved => DoorLifecycle::ReceiverGoneUnresolved,
+            DoorLifecycle::ReceiverGoneResolved => DoorLifecycle::ReceiverGoneResolved,
+        };
+    }
+
+    fn mark_receiver_gone(state: &mut DoorState<T>) {
+        let previous = std::mem::replace(&mut state.lifecycle, DoorLifecycle::Open);
+        state.lifecycle = match previous {
+            DoorLifecycle::Open
+            | DoorLifecycle::CancelledUnresolved
+            | DoorLifecycle::ReceiverGoneUnresolved => DoorLifecycle::ReceiverGoneUnresolved,
+            DoorLifecycle::Resolved(_)
+            | DoorLifecycle::CancelledResolved
+            | DoorLifecycle::ReceiverGoneResolved => DoorLifecycle::ReceiverGoneResolved,
+        };
     }
 }
 
@@ -73,11 +106,16 @@ impl<T: Send + 'static> Drop for PendingSignerSender<T> {
             // `Disconnected` end.
             let waker = {
                 let mut state = self.door.state.lock().unwrap();
-                if state.resolved {
-                    None
-                } else {
-                    self.door.changed.notify_all();
-                    Door::wake(&mut state)
+                match state.lifecycle {
+                    DoorLifecycle::Resolved(_)
+                    | DoorLifecycle::CancelledResolved
+                    | DoorLifecycle::ReceiverGoneResolved => None,
+                    DoorLifecycle::Open
+                    | DoorLifecycle::CancelledUnresolved
+                    | DoorLifecycle::ReceiverGoneUnresolved => {
+                        self.door.changed.notify_all();
+                        Door::wake(&mut state)
+                    }
                 }
             };
             if let Some(waker) = waker {
@@ -95,14 +133,24 @@ impl<T: Send + 'static> PendingSignerSender<T> {
     ) -> Result<(), PendingSignerResolveError<T>> {
         let waker = {
             let mut state = self.door.state.lock().unwrap();
-            if state.resolved {
-                return Err(PendingSignerResolveError::AlreadyResolved(result));
+            match state.lifecycle {
+                DoorLifecycle::Open => {
+                    state.lifecycle = DoorLifecycle::Resolved(Some(result));
+                }
+                DoorLifecycle::CancelledUnresolved => {
+                    state.lifecycle = DoorLifecycle::CancelledResolved;
+                    return Err(PendingSignerResolveError::ReceiverDropped(result));
+                }
+                DoorLifecycle::ReceiverGoneUnresolved => {
+                    state.lifecycle = DoorLifecycle::ReceiverGoneResolved;
+                    return Err(PendingSignerResolveError::ReceiverDropped(result));
+                }
+                DoorLifecycle::Resolved(_)
+                | DoorLifecycle::CancelledResolved
+                | DoorLifecycle::ReceiverGoneResolved => {
+                    return Err(PendingSignerResolveError::AlreadyResolved(result));
+                }
             }
-            state.resolved = true;
-            if state.receiver_gone || state.cancelled {
-                return Err(PendingSignerResolveError::ReceiverDropped(result));
-            }
-            state.value = Some(result);
             self.door.changed.notify_all();
             Door::wake(&mut state)
         };
@@ -137,7 +185,7 @@ impl<T: Send + 'static> Canceller<T> {
     pub fn cancel(&self) {
         let waker = {
             let mut state = self.door.state.lock().unwrap();
-            state.cancelled = true;
+            Door::cancel(&mut state);
             self.door.changed.notify_all();
             Door::wake(&mut state)
         };
@@ -147,6 +195,17 @@ impl<T: Send + 'static> Canceller<T> {
     }
 }
 
+enum PendingSignerLifecycle {
+    Pending(Option<PendingCancel>),
+    Finished,
+}
+
+#[derive(Clone, Copy)]
+enum PendingFinish {
+    CancelAdapter,
+    SuppressCancel,
+}
+
 /// One cancellable asynchronous signer result.
 ///
 /// Dropping an unfinished value (including its awaiting future) invokes the
@@ -154,18 +213,14 @@ impl<T: Send + 'static> Canceller<T> {
 /// correlation slot even when the signer never responds.
 pub struct PendingSignerOp<T: Send + 'static> {
     door: Arc<Door<T>>,
-    cancel: Option<PendingCancel>,
-    /// Set once a terminal outcome (value / disconnected / cancelled) is
-    /// observed, so `Drop` does not fire the cancel hook redundantly.
-    done: bool,
+    lifecycle: PendingSignerLifecycle,
 }
 
 impl<T: Send + 'static> PendingSignerOp<T> {
     fn new(door: Arc<Door<T>>, cancel: Option<PendingCancel>) -> Self {
         Self {
             door,
-            cancel,
-            done: false,
+            lifecycle: PendingSignerLifecycle::Pending(cancel),
         }
     }
 
@@ -180,29 +235,39 @@ impl<T: Send + 'static> PendingSignerOp<T> {
     }
 
     /// Drain a terminal outcome from the locked state, or `None` if still open.
-    fn take_terminal(state: &mut DoorState<T>, senders: usize) -> Option<Result<T, SignerError>> {
-        if state.cancelled {
-            return Some(Err(SignerError::Disconnected));
+    fn take_terminal(
+        state: &mut DoorState<T>,
+        senders: usize,
+    ) -> Option<(Result<T, SignerError>, PendingFinish)> {
+        match &mut state.lifecycle {
+            DoorLifecycle::CancelledUnresolved | DoorLifecycle::CancelledResolved => {
+                Some((Err(SignerError::Disconnected), PendingFinish::CancelAdapter))
+            }
+            DoorLifecycle::Resolved(value) => Some((
+                value.take().unwrap_or(Err(SignerError::Disconnected)),
+                PendingFinish::SuppressCancel,
+            )),
+            DoorLifecycle::Open if senders == 0 => Some((
+                Err(SignerError::Disconnected),
+                PendingFinish::SuppressCancel,
+            )),
+            DoorLifecycle::ReceiverGoneUnresolved | DoorLifecycle::ReceiverGoneResolved => Some((
+                Err(SignerError::Disconnected),
+                PendingFinish::SuppressCancel,
+            )),
+            DoorLifecycle::Open => None,
         }
-        if let Some(value) = state.value.take() {
-            return Some(value);
-        }
-        if state.resolved || senders == 0 {
-            // Resolved-but-taken cannot recur (single consumer); senders gone
-            // without a value is a disconnect.
-            return Some(Err(SignerError::Disconnected));
-        }
-        None
     }
 
-    fn finish(&mut self, cancelled_path: bool) {
-        self.done = true;
-        if cancelled_path {
-            if let Some(cancel) = self.cancel.take() {
+    fn finish(&mut self, disposition: PendingFinish) {
+        let previous = std::mem::replace(&mut self.lifecycle, PendingSignerLifecycle::Finished);
+        let PendingSignerLifecycle::Pending(cancel) = previous else {
+            return;
+        };
+        if matches!(disposition, PendingFinish::CancelAdapter) {
+            if let Some(cancel) = cancel {
                 cancel();
             }
-        } else {
-            self.cancel = None;
         }
     }
 
@@ -212,10 +277,9 @@ impl<T: Send + 'static> PendingSignerOp<T> {
         let mut state = self.door.state.lock().unwrap();
         loop {
             let senders = self.door.senders.load(Ordering::Acquire);
-            if let Some(outcome) = Self::take_terminal(&mut state, senders) {
-                let cancelled = state.cancelled && self.door.senders.load(Ordering::Acquire) != 0;
+            if let Some((outcome, disposition)) = Self::take_terminal(&mut state, senders) {
                 drop(state);
-                self.finish(cancelled);
+                self.finish(disposition);
                 return outcome;
             }
             state = self.door.changed.wait(state).unwrap();
@@ -228,16 +292,15 @@ impl<T: Send + 'static> PendingSignerOp<T> {
         let mut state = self.door.state.lock().unwrap();
         loop {
             let senders = self.door.senders.load(Ordering::Acquire);
-            if let Some(outcome) = Self::take_terminal(&mut state, senders) {
-                let cancelled = state.cancelled;
+            if let Some((outcome, disposition)) = Self::take_terminal(&mut state, senders) {
                 drop(state);
-                self.finish(cancelled);
+                self.finish(disposition);
                 return outcome;
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 drop(state);
-                self.finish(true);
+                self.finish(PendingFinish::CancelAdapter);
                 return Err(SignerError::Timeout);
             }
             let (next, wait) = self.door.changed.wait_timeout(state, remaining).unwrap();
@@ -247,7 +310,7 @@ impl<T: Send + 'static> PendingSignerOp<T> {
                     .is_none()
             {
                 drop(state);
-                self.finish(true);
+                self.finish(PendingFinish::CancelAdapter);
                 return Err(SignerError::Timeout);
             }
         }
@@ -257,13 +320,13 @@ impl<T: Send + 'static> PendingSignerOp<T> {
     fn try_poll(&mut self) -> Option<Result<T, SignerError>> {
         let mut state = self.door.state.lock().unwrap();
         let senders = self.door.senders.load(Ordering::Acquire);
-        let outcome = Self::take_terminal(&mut state, senders);
-        if outcome.is_some() {
-            let cancelled = state.cancelled;
+        let terminal = Self::take_terminal(&mut state, senders);
+        if let Some((_, disposition)) = terminal.as_ref() {
+            let disposition = *disposition;
             drop(state);
-            self.finish(cancelled);
+            self.finish(disposition);
         }
-        outcome
+        terminal.map(|(outcome, _)| outcome)
     }
 
     /// Waker-aware poll (#704): the engine awaits this on its shared runtime,
@@ -271,11 +334,10 @@ impl<T: Send + 'static> PendingSignerOp<T> {
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<T, SignerError>> {
         let mut state = self.door.state.lock().unwrap();
         let senders = self.door.senders.load(Ordering::Acquire);
-        if let Some(outcome) = Self::take_terminal(&mut state, senders) {
-            let cancelled = state.cancelled;
+        if let Some((outcome, disposition)) = Self::take_terminal(&mut state, senders) {
             state.waker = None;
             drop(state);
-            self.finish(cancelled);
+            self.finish(disposition);
             return Poll::Ready(outcome);
         }
         state.waker = Some(cx.waker().clone());
@@ -298,12 +360,11 @@ impl<T: Send + 'static> Drop for PendingSignerOp<T> {
         // Mark the consumer gone so a racing `resolve` returns `ReceiverDropped`
         // rather than dropping the result silently.
         if let Ok(mut state) = self.door.state.lock() {
-            state.receiver_gone = true;
+            Door::mark_receiver_gone(&mut state);
         }
-        if !self.done {
-            if let Some(cancel) = self.cancel.take() {
-                cancel();
-            }
+        let previous = std::mem::replace(&mut self.lifecycle, PendingSignerLifecycle::Finished);
+        if let PendingSignerLifecycle::Pending(Some(cancel)) = previous {
+            cancel();
         }
     }
 }
@@ -360,11 +421,8 @@ impl<T: Send + 'static> SignerOp<T> {
     ) -> (PendingSignerSender<T>, Self) {
         let door = Arc::new(Door {
             state: Mutex::new(DoorState {
-                value: None,
+                lifecycle: DoorLifecycle::Open,
                 waker: None,
-                resolved: false,
-                receiver_gone: false,
-                cancelled: false,
             }),
             changed: Condvar::new(),
             senders: AtomicUsize::new(1),
@@ -509,6 +567,50 @@ mod tests {
 
         assert_eq!(op.wait(Duration::from_millis(1)), Err(SignerError::Timeout));
         assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cancel_before_resolve_runs_hook_and_spends_the_resolution_slot() {
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let cancelled_for_op = Arc::clone(&cancelled);
+        let (sender, operation) = SignerOp::<u8>::pending_channel_with_cancel(move || {
+            cancelled_for_op.fetch_add(1, Ordering::SeqCst);
+        });
+        let SignerOp::Pending(pending) = operation else {
+            unreachable!()
+        };
+        pending.canceller().cancel();
+
+        assert_eq!(pending.recv(), Err(SignerError::Disconnected));
+        assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            sender.resolve(Ok(7)),
+            Err(PendingSignerResolveError::ReceiverDropped(Ok(7)))
+        ));
+        assert!(matches!(
+            sender.resolve(Ok(8)),
+            Err(PendingSignerResolveError::AlreadyResolved(Ok(8)))
+        ));
+    }
+
+    #[test]
+    fn dropped_consumer_runs_hook_and_spends_the_resolution_slot() {
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let cancelled_for_op = Arc::clone(&cancelled);
+        let (sender, operation) = SignerOp::<u8>::pending_channel_with_cancel(move || {
+            cancelled_for_op.fetch_add(1, Ordering::SeqCst);
+        });
+
+        drop(operation);
+        assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            sender.resolve(Ok(7)),
+            Err(PendingSignerResolveError::ReceiverDropped(Ok(7)))
+        ));
+        assert!(matches!(
+            sender.resolve(Ok(8)),
+            Err(PendingSignerResolveError::AlreadyResolved(Ok(8)))
+        ));
     }
 
     #[test]

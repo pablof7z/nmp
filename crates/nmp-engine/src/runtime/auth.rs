@@ -96,12 +96,22 @@ type PendingPolicyCancel = Box<dyn FnOnce() + Send + 'static>;
 // on the shared runtime, holding no OS thread while the app policy is pending;
 // cancellation is bound in via a `PolicyCanceller`, and dropping an unresolved
 // op (or its awaiting future) runs the adapter cancel hook exactly once.
+enum PolicyDoorLifecycle {
+    Open,
+    /// A result was claimed; `None` means the consumer already took it.
+    Resolved(Option<PolicyResult>),
+    /// Cancellation won before a sender claimed the result.
+    CancelledUnresolved,
+    /// Cancellation is terminal. `Some` preserves a value that won first;
+    /// `None` records that a later sender claim was truthfully refused.
+    CancelledResolved(Option<PolicyResult>),
+    ReceiverGoneUnresolved,
+    ReceiverGoneResolved,
+}
+
 struct PolicyDoorState {
-    value: Option<PolicyResult>,
+    lifecycle: PolicyDoorLifecycle,
     waker: Option<Waker>,
-    resolved: bool,
-    receiver_gone: bool,
-    cancelled: bool,
 }
 
 struct PolicyDoor {
@@ -112,6 +122,38 @@ struct PolicyDoor {
 impl PolicyDoor {
     fn take_waker(state: &mut PolicyDoorState) -> Option<Waker> {
         state.waker.take()
+    }
+
+    fn cancel(state: &mut PolicyDoorState) {
+        let previous = std::mem::replace(&mut state.lifecycle, PolicyDoorLifecycle::Open);
+        state.lifecycle = match previous {
+            PolicyDoorLifecycle::Open => PolicyDoorLifecycle::CancelledUnresolved,
+            PolicyDoorLifecycle::Resolved(value) => PolicyDoorLifecycle::CancelledResolved(value),
+            PolicyDoorLifecycle::CancelledUnresolved => PolicyDoorLifecycle::CancelledUnresolved,
+            PolicyDoorLifecycle::CancelledResolved(value) => {
+                PolicyDoorLifecycle::CancelledResolved(value)
+            }
+            PolicyDoorLifecycle::ReceiverGoneUnresolved => {
+                PolicyDoorLifecycle::ReceiverGoneUnresolved
+            }
+            PolicyDoorLifecycle::ReceiverGoneResolved => PolicyDoorLifecycle::ReceiverGoneResolved,
+        };
+    }
+
+    fn mark_receiver_gone(state: &mut PolicyDoorState) {
+        let previous = std::mem::replace(&mut state.lifecycle, PolicyDoorLifecycle::Open);
+        state.lifecycle = match previous {
+            PolicyDoorLifecycle::Open
+            | PolicyDoorLifecycle::CancelledUnresolved
+            | PolicyDoorLifecycle::ReceiverGoneUnresolved => {
+                PolicyDoorLifecycle::ReceiverGoneUnresolved
+            }
+            PolicyDoorLifecycle::Resolved(_)
+            | PolicyDoorLifecycle::CancelledResolved(_)
+            | PolicyDoorLifecycle::ReceiverGoneResolved => {
+                PolicyDoorLifecycle::ReceiverGoneResolved
+            }
+        };
     }
 }
 
@@ -138,10 +180,15 @@ impl Drop for AuthPolicyPendingSender {
                     .state
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner());
-                if state.resolved {
-                    None
-                } else {
-                    PolicyDoor::take_waker(&mut state)
+                match state.lifecycle {
+                    PolicyDoorLifecycle::Resolved(_)
+                    | PolicyDoorLifecycle::CancelledResolved(_)
+                    | PolicyDoorLifecycle::ReceiverGoneResolved => None,
+                    PolicyDoorLifecycle::Open
+                    | PolicyDoorLifecycle::CancelledUnresolved
+                    | PolicyDoorLifecycle::ReceiverGoneUnresolved => {
+                        PolicyDoor::take_waker(&mut state)
+                    }
                 }
             };
             if let Some(waker) = waker {
@@ -159,14 +206,24 @@ impl AuthPolicyPendingSender {
                 .state
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            if state.resolved {
-                return Err(AuthPolicyResolveError::AlreadyResolved(result));
+            match state.lifecycle {
+                PolicyDoorLifecycle::Open => {
+                    state.lifecycle = PolicyDoorLifecycle::Resolved(Some(result));
+                }
+                PolicyDoorLifecycle::CancelledUnresolved => {
+                    state.lifecycle = PolicyDoorLifecycle::CancelledResolved(None);
+                    return Err(AuthPolicyResolveError::ReceiverDropped(result));
+                }
+                PolicyDoorLifecycle::ReceiverGoneUnresolved => {
+                    state.lifecycle = PolicyDoorLifecycle::ReceiverGoneResolved;
+                    return Err(AuthPolicyResolveError::ReceiverDropped(result));
+                }
+                PolicyDoorLifecycle::Resolved(_)
+                | PolicyDoorLifecycle::CancelledResolved(_)
+                | PolicyDoorLifecycle::ReceiverGoneResolved => {
+                    return Err(AuthPolicyResolveError::AlreadyResolved(result));
+                }
             }
-            state.resolved = true;
-            if state.receiver_gone || state.cancelled {
-                return Err(AuthPolicyResolveError::ReceiverDropped(result));
-            }
-            state.value = Some(result);
             PolicyDoor::take_waker(&mut state)
         };
         if let Some(waker) = waker {
@@ -197,7 +254,7 @@ impl PolicyCanceller {
                 .state
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            state.cancelled = true;
+            PolicyDoor::cancel(&mut state);
             PolicyDoor::take_waker(&mut state)
         };
         if let Some(waker) = waker {
@@ -206,10 +263,20 @@ impl PolicyCanceller {
     }
 }
 
+enum PendingPolicyLifecycle {
+    Pending(Option<PendingPolicyCancel>),
+    Finished,
+}
+
+#[derive(Clone, Copy)]
+enum PendingPolicyFinish {
+    CancelAdapter,
+    SuppressCancel,
+}
+
 pub struct PendingAuthPolicyOp {
     door: Arc<PolicyDoor>,
-    cancel: Option<PendingPolicyCancel>,
-    done: bool,
+    lifecycle: PendingPolicyLifecycle,
 }
 
 impl PendingAuthPolicyOp {
@@ -224,26 +291,35 @@ impl PendingAuthPolicyOp {
     /// `Unavailable`), and `None` for a cancellation with no queued decision.
     /// A queued value is consumed before a cancellation is honored.
     fn take_terminal(state: &mut PolicyDoorState, senders: usize) -> Option<Option<PolicyResult>> {
-        if let Some(value) = state.value.take() {
-            return Some(Some(value));
+        match &mut state.lifecycle {
+            PolicyDoorLifecycle::Resolved(value) => Some(Some(
+                value.take().unwrap_or(Err(AuthPolicyError::Unavailable)),
+            )),
+            PolicyDoorLifecycle::CancelledResolved(value) => match value.take() {
+                Some(value) => Some(Some(value)),
+                None => Some(None),
+            },
+            PolicyDoorLifecycle::CancelledUnresolved => Some(None),
+            PolicyDoorLifecycle::Open if senders == 0 => {
+                Some(Some(Err(AuthPolicyError::Unavailable)))
+            }
+            PolicyDoorLifecycle::ReceiverGoneUnresolved
+            | PolicyDoorLifecycle::ReceiverGoneResolved => {
+                Some(Some(Err(AuthPolicyError::Unavailable)))
+            }
+            PolicyDoorLifecycle::Open => None,
         }
-        if state.cancelled {
-            return Some(None);
-        }
-        if state.resolved || senders == 0 {
-            return Some(Some(Err(AuthPolicyError::Unavailable)));
-        }
-        None
     }
 
-    fn finish(&mut self, cancelled_path: bool) {
-        self.done = true;
-        if cancelled_path {
-            if let Some(cancel) = self.cancel.take() {
+    fn finish(&mut self, disposition: PendingPolicyFinish) {
+        let previous = std::mem::replace(&mut self.lifecycle, PendingPolicyLifecycle::Finished);
+        let PendingPolicyLifecycle::Pending(cancel) = previous else {
+            return;
+        };
+        if matches!(disposition, PendingPolicyFinish::CancelAdapter) {
+            if let Some(cancel) = cancel {
                 cancel();
             }
-        } else {
-            self.cancel = None;
         }
     }
 
@@ -258,10 +334,13 @@ impl PendingAuthPolicyOp {
             // `None` is the cancelled-with-no-decision end — the only path that
             // runs the adapter cancel hook. A queued value (even under a racing
             // cancel) or a disconnect delivers a result and suppresses it.
-            let cancelled_path = outcome.is_none();
+            let disposition = match &outcome {
+                None => PendingPolicyFinish::CancelAdapter,
+                Some(_) => PendingPolicyFinish::SuppressCancel,
+            };
             state.waker = None;
             drop(state);
-            self.finish(cancelled_path);
+            self.finish(disposition);
             return Poll::Ready(outcome);
         }
         state.waker = Some(cx.waker().clone());
@@ -281,7 +360,7 @@ impl Drop for PendingAuthPolicyOp {
     fn drop(&mut self) {
         // A future that already drained a terminal outcome (poll_recv →
         // finish) has run its cancel/complete linearization already.
-        if self.done {
+        if matches!(self.lifecycle, PendingPolicyLifecycle::Finished) {
             return;
         }
         // Terminal-cancel door (an epoch/capability signal, or a dropped
@@ -297,10 +376,25 @@ impl Drop for PendingAuthPolicyOp {
                 .state
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            if state.value.take().is_some() || state.resolved {
-                // A resolution already won: consume it, never cancel.
-                state.receiver_gone = true;
-                self.cancel = None;
+            let resolution_won = match &mut state.lifecycle {
+                PolicyDoorLifecycle::Resolved(value) => {
+                    let _ = value.take();
+                    true
+                }
+                PolicyDoorLifecycle::CancelledResolved(value) if value.is_some() => {
+                    let _ = value.take();
+                    true
+                }
+                PolicyDoorLifecycle::Open
+                | PolicyDoorLifecycle::CancelledUnresolved
+                | PolicyDoorLifecycle::CancelledResolved(_)
+                | PolicyDoorLifecycle::ReceiverGoneUnresolved
+                | PolicyDoorLifecycle::ReceiverGoneResolved => false,
+            };
+            if resolution_won {
+                PolicyDoor::mark_receiver_gone(&mut state);
+                drop(state);
+                self.finish(PendingPolicyFinish::SuppressCancel);
                 return;
             }
         }
@@ -308,7 +402,8 @@ impl Drop for PendingAuthPolicyOp {
         // holding the door lock and WITHOUT yet marking the receiver gone, so a
         // resolver racing this handshake still resolves successfully; the hook
         // blocks until that resolver finishes (or its sender disconnects).
-        if let Some(cancel) = self.cancel.take() {
+        let previous = std::mem::replace(&mut self.lifecycle, PendingPolicyLifecycle::Finished);
+        if let PendingPolicyLifecycle::Pending(Some(cancel)) = previous {
             cancel();
         }
         // The handshake is over: consume any value the racing resolver
@@ -318,8 +413,7 @@ impl Drop for PendingAuthPolicyOp {
             .state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let _ = state.value.take();
-        state.receiver_gone = true;
+        PolicyDoor::mark_receiver_gone(&mut state);
     }
 }
 
@@ -364,11 +458,8 @@ impl AuthPolicyOp {
     ) -> (AuthPolicyPendingSender, Self) {
         let door = Arc::new(PolicyDoor {
             state: Mutex::new(PolicyDoorState {
-                value: None,
+                lifecycle: PolicyDoorLifecycle::Open,
                 waker: None,
-                resolved: false,
-                receiver_gone: false,
-                cancelled: false,
             }),
             senders: AtomicUsize::new(1),
         });
@@ -378,16 +469,15 @@ impl AuthPolicyOp {
             },
             Self::Pending(PendingAuthPolicyOp {
                 door,
-                cancel,
-                done: false,
+                lifecycle: PendingPolicyLifecycle::Pending(cancel),
             }),
         )
     }
 }
 
 /// App-owned NIP-42 authorization policy. `evaluate` must return a
-/// ready-or-pending operation without blocking; the runtime executes it on
-/// its existing finite native executor and owns pending cancellation.
+/// ready-or-pending operation without blocking; the engine-owned async runtime
+/// awaits it and owns pending cancellation.
 pub trait AuthPolicy: Send {
     fn evaluate(&self, request: AuthPolicyRequest) -> AuthPolicyOp;
 }
@@ -545,9 +635,13 @@ impl AuthCapabilityInstances {
     }
 }
 
-const AUTH_TASK_OPEN: u8 = 0;
-const AUTH_TASK_CANCELLED: u8 = 1;
-const AUTH_TASK_COMPLETED: u8 = 2;
+#[repr(u8)]
+#[derive(Clone, Copy)]
+enum AuthTaskState {
+    Open,
+    Cancelled,
+    Completed,
+}
 
 /// #704: the AUTH task's cancellation is bound to whatever in-flight pending op
 /// the async operation is currently awaiting (policy OR signer — an operation
@@ -562,7 +656,7 @@ struct AuthTaskTerminal {
 impl AuthTaskTerminal {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            state: AtomicU8::new(AUTH_TASK_OPEN),
+            state: AtomicU8::new(AuthTaskState::Open as u8),
             canceller: Mutex::new(None),
         })
     }
@@ -574,7 +668,7 @@ impl AuthTaskTerminal {
             .canceller
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if self.state.load(Ordering::Acquire) == AUTH_TASK_CANCELLED {
+        if self.state.load(Ordering::Acquire) == AuthTaskState::Cancelled as u8 {
             drop(guard);
             canceller();
         } else {
@@ -584,7 +678,7 @@ impl AuthTaskTerminal {
     }
 
     fn is_open(&self) -> bool {
-        self.state.load(Ordering::Acquire) == AUTH_TASK_OPEN
+        self.state.load(Ordering::Acquire) == AuthTaskState::Open as u8
     }
 
     fn cancel(&self) -> bool {
@@ -595,8 +689,8 @@ impl AuthTaskTerminal {
         if self
             .state
             .compare_exchange(
-                AUTH_TASK_OPEN,
-                AUTH_TASK_CANCELLED,
+                AuthTaskState::Open as u8,
+                AuthTaskState::Cancelled as u8,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
@@ -613,8 +707,8 @@ impl AuthTaskTerminal {
     fn complete(&self) -> bool {
         self.state
             .compare_exchange(
-                AUTH_TASK_OPEN,
-                AUTH_TASK_COMPLETED,
+                AuthTaskState::Open as u8,
+                AuthTaskState::Completed as u8,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
@@ -1198,6 +1292,34 @@ mod tests {
         assert!(matches!(
             completion.resolve(Ok(AuthPolicyDecision::Allow)),
             Err(AuthPolicyResolveError::ReceiverDropped(Ok(
+                AuthPolicyDecision::Allow
+            )))
+        ));
+    }
+
+    #[test]
+    fn cancelled_then_refused_resolution_still_runs_the_cancel_hook_on_drop() {
+        let cancellations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = Arc::clone(&cancellations);
+        let (completion, operation) = AuthPolicyOp::pending_channel_with_cancel(move || {
+            observed.fetch_add(1, Ordering::AcqRel);
+        });
+        let AuthPolicyOp::Pending(pending) = operation else {
+            unreachable!()
+        };
+        pending.canceller().cancel();
+
+        assert!(matches!(
+            completion.resolve(Ok(AuthPolicyDecision::Allow)),
+            Err(AuthPolicyResolveError::ReceiverDropped(Ok(
+                AuthPolicyDecision::Allow
+            )))
+        ));
+        drop(pending);
+        assert_eq!(cancellations.load(Ordering::Acquire), 1);
+        assert!(matches!(
+            completion.resolve(Ok(AuthPolicyDecision::Allow)),
+            Err(AuthPolicyResolveError::AlreadyResolved(Ok(
                 AuthPolicyDecision::Allow
             )))
         ));

@@ -36,17 +36,15 @@ pub enum EngineError {
     /// engine-start (`Engine::new`) failure only — it never surfaces from an
     /// ordinary operation (#704).
     EngineStartFailed { component: String, reason: String },
-    /// A windowed [`Engine::observe`](crate::Engine::observe) could not open its
-    /// canonical store projection — the on-disk/in-memory store degraded while
-    /// establishing the history session, so no rows could ever be served. This
-    /// is the ONLY thing this variant means (#704 review): it is a concrete
-    /// store-projection failure, NEVER a worker/thread/pool/runtime-busy,
-    /// task-admission, spawn-failure, or queue-full condition. A relay whose
-    /// connection cannot be opened (including a rare OS thread-spawn refusal for
-    /// a transport worker) is NOT this error — it is reported as ordinary
-    /// acquisition evidence in the observation's own stream, and the observation
-    /// still succeeds on its other sources. An unwindowed `observe` cannot raise
-    /// this at all; the engine-closed case is [`Self::EngineClosed`].
+    /// [`Engine::observe`](crate::Engine::observe) could not establish the
+    /// resources required for its initial session: either a required relay
+    /// transport worker could not be spawned during preflight, or a windowed
+    /// observation could not open its canonical history projection. This is a
+    /// concrete OS/store failure, never a worker-pool-busy, task-admission,
+    /// permit, or queue-full condition. Preflight rolls back every partial
+    /// owner before returning it; later relay loss remains ordinary acquisition
+    /// evidence in the stream. The engine-closed case is
+    /// [`Self::EngineClosed`].
     ObservationUnavailable { reason: String },
     /// [`Engine::add_account`](crate::Engine::add_account)'s secret key did
     /// not parse as a valid nostr key (hex or bech32 `nsec`).
@@ -144,13 +142,13 @@ impl EngineError {
     }
 
     /// Map an engine-thread failure raised while establishing an OBSERVATION
-    /// (`observe`) to a domain outcome. The only reachable failure is a windowed
-    /// observation whose canonical store projection could not be opened (store
-    /// degradation), surfaced as [`Self::ObservationUnavailable`] — never a
-    /// worker/pool/thread/admission concept (#704 review: a relay-worker open
-    /// refusal is acquisition evidence, not this error). `RelayBudgetOverflow`
-    /// is a construction-only fault and cannot reach here; `EngineShuttingDown`
-    /// is the closed-engine fact. Both are folded in defensively rather than
+    /// (`observe`) to a domain outcome. Reachable construction sites are the
+    /// relay-worker preflight in `runtime::engine_loop` and the canonical
+    /// history-projection open there; both surface as
+    /// [`Self::ObservationUnavailable`] after rolling back partial ownership.
+    /// Neither is scheduler admission or capacity. `RelayBudgetOverflow` is a
+    /// construction-only fault and cannot reach here; `EngineShuttingDown` is
+    /// the closed-engine fact. Both are folded in defensively rather than
     /// panicking.
     pub(crate) fn from_observe_error(error: nmp_engine::runtime::EngineThreadError) -> Self {
         match error {
