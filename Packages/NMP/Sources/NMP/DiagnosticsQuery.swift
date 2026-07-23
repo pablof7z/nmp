@@ -22,6 +22,7 @@ public struct NMPDiagnostics: AsyncSequence, Sendable {
     public typealias Element = DiagnosticsSnapshot
 
     private let handle: NmpDiagnosticsStream
+    private let iteratorGate = NMPPullIteratorGate()
 
     init(engine: NmpEngineProtocol) throws {
         self.handle = try nmpRethrowing { try engine.observeDiagnostics() }
@@ -30,6 +31,7 @@ public struct NMPDiagnostics: AsyncSequence, Sendable {
     public func makeAsyncIterator() -> Iterator {
         let stream = nmpPullStream(
             handle: handle,
+            iteratorGate: iteratorGate,
             bufferingPolicy: .bufferingNewest(1),
             throttle: true
         ) { snapshot in DiagnosticsSnapshot(snapshot) }

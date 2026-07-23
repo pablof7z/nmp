@@ -221,26 +221,29 @@ final class AsyncObservationHandlesTests: XCTestCase {
     /// It holds ONE `NmpRowStream` handle; every `makeAsyncIterator()` pumps
     /// that SAME handle. Two CONCURRENT iterators over one `NMPQuery` therefore
     /// race the single Rust handle, and the contract is LOUD and deterministic:
-    /// the losing pull surfaces a TYPED `NMPError.concurrentNext` -- never a
-    /// hang, never a silently dropped/duplicated frame. (Independent consumers
-    /// must instead open INDEPENDENT observations -- see the test above.)
+    /// the losing iterator surfaces a TYPED `NMPError.concurrentNext` before a
+    /// second pump can race or cancel the accepted pull -- never a hang, never
+    /// a silently dropped/duplicated frame. (Independent consumers must instead
+    /// open INDEPENDENT observations -- see the test above.)
     ///
     /// The load-bearing assertions: NEITHER iterator hangs, and any error that
     /// surfaces is EXACTLY `concurrentNext` (never some other error, never
-    /// silent loss). Acceptable outcomes are {one batch, one concurrentNext}
-    /// (the expected race result) or {both batches} (if the two pulls happened
-    /// to serialize) -- both are contractful; anything else fails.
+    /// silent loss). A start barrier keeps both iterator claims live before
+    /// either pull begins, so the exact outcome is deterministic: one batch
+    /// and one typed refusal.
     func testTwoConcurrentIteratorsOverOneNMPQueryAreLoudNeverHung() async throws {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
         let registration = try await engine.addAccount(secretKey: Self.testSecretKey)
         try engine.setActiveAccount(registration.publicKey)
         let query = try engine.observe(NMPFilter(kinds: [8_831]))
+        let startBarrier = StartBarrier(participants: 2)
 
         func pullOne() -> Task<Pull, Never> {
             Task {
+                var iterator = query.makeAsyncIterator()
+                await startBarrier.arriveAndWait()
                 do {
-                    var iterator = query.makeAsyncIterator()
                     return try await iterator.next() != nil ? .batch : .endedNil
                 } catch let error as NMPError where error == .concurrentNext {
                     return .concurrentNext
@@ -276,10 +279,8 @@ final class AsyncObservationHandlesTests: XCTestCase {
         let concurrentNexts = outcomes.filter { if case .concurrentNext = $0 { return true } else { return false } }.count
         // Record the exact result for the report.
         print("ITEM4_SWIFT_ONE_QUERY_TWO_ITERATORS batches=\(batches) concurrentNext=\(concurrentNexts)")
-        XCTAssertTrue(
-            (batches == 1 && concurrentNexts == 1) || batches == 2,
-            "contractful outcomes only: {batch, concurrentNext} or {batch, batch}; got batches=\(batches) concurrentNext=\(concurrentNexts)"
-        )
+        XCTAssertEqual(batches, 1, "exactly one iterator owns the native pull handle")
+        XCTAssertEqual(concurrentNexts, 1, "the competing iterator is refused loudly and typed")
     }
 
     // MARK: - Fixtures / helpers
@@ -295,6 +296,29 @@ final class AsyncObservationHandlesTests: XCTestCase {
         case concurrentNext
         case otherError(String)
         case endedNil
+    }
+
+    actor StartBarrier {
+        private let participants: Int
+        private var arrivals = 0
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        init(participants: Int) {
+            self.participants = participants
+        }
+
+        func arriveAndWait() async {
+            arrivals += 1
+            if arrivals == participants {
+                let ready = waiters
+                waiters.removeAll()
+                for waiter in ready { waiter.resume() }
+                return
+            }
+            await withCheckedContinuation { continuation in
+                waiters.append(continuation)
+            }
+        }
     }
 
     /// Await a `Task`'s completion, but bounded by a hard timeout so a bricked

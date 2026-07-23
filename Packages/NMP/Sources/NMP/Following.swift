@@ -146,6 +146,7 @@ public struct NMPFollowingObservation: AsyncSequence, Sendable {
     public typealias Element = NMPFollowingSnapshot
 
     private let handle: NmpFollowStream
+    private let iteratorGate = NMPPullIteratorGate()
 
     init(engine: NmpEngineProtocol, target: String) throws {
         self.handle = try nmpRethrowing {
@@ -156,6 +157,7 @@ public struct NMPFollowingObservation: AsyncSequence, Sendable {
     public func makeAsyncIterator() -> Iterator {
         let stream = nmpPullStream(
             handle: handle,
+            iteratorGate: iteratorGate,
             bufferingPolicy: .bufferingNewest(1)
         ) { snapshot in NMPFollowingSnapshot(snapshot) }
         return Iterator(base: stream.makeAsyncIterator())
@@ -182,13 +184,14 @@ public struct NMPFollowAction: AsyncSequence, Sendable {
     public typealias Element = NMPFollowActionStatus
 
     private let handle: NmpFollowActionStream
+    private let iteratorGate = NMPPullIteratorGate()
 
     init(handle: NmpFollowActionStream) {
         self.handle = handle
     }
 
     public func makeAsyncIterator() -> Iterator {
-        let stream = nmpPullStream(handle: handle) { status in
+        let stream = nmpPullStream(handle: handle, iteratorGate: iteratorGate) { status in
             NMPFollowActionStatus(status)
         }
         return Iterator(base: stream.makeAsyncIterator())

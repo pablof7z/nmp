@@ -30,6 +30,7 @@ public struct NMPQuery: AsyncSequence, Sendable {
     public typealias Element = RowBatch
 
     private let handle: NmpRowStream
+    private let iteratorGate = NMPPullIteratorGate()
 
     init(engine: NmpEngineProtocol, filter: FfiFilter, window: FfiWindow?) throws {
         self.handle = try nmpRethrowing {
@@ -50,6 +51,7 @@ public struct NMPQuery: AsyncSequence, Sendable {
         let accumulator = RowAccumulator()
         let stream = nmpPullStream(
             handle: handle,
+            iteratorGate: iteratorGate,
             bufferingPolicy: .bufferingNewest(1),
             throttle: true
         ) { frame in accumulator.fold(frame) }

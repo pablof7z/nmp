@@ -16,13 +16,16 @@ public struct ReceiptStatus: AsyncSequence, Sendable {
     public typealias Element = WriteStatus
 
     private let handle: NmpReceiptStream
+    private let iteratorGate = NMPPullIteratorGate()
 
     init(handle: NmpReceiptStream) {
         self.handle = handle
     }
 
     public func makeAsyncIterator() -> Iterator {
-        let stream = nmpPullStream(handle: handle) { status in WriteStatus(status) }
+        let stream = nmpPullStream(handle: handle, iteratorGate: iteratorGate) { status in
+            WriteStatus(status)
+        }
         return Iterator(base: stream.makeAsyncIterator())
     }
 

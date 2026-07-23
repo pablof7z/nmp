@@ -59,16 +59,18 @@ deterministic cancellation/shutdown; isolation from slow foreign consumers.
 one primitive under `RowsReceiver`, `HistoryReceiver`, and diagnostics. It gains
 async wakeup **directly** (not a second queue, no polling, no timer):
 
-- `Slot<T>` gains `waker: Option<Waker>` beside `value`/`closed`.
-- `LatestSender::update`/`send` and `LatestSender::Drop` take the waker out and
-  `wake()` it after releasing the slot lock (in addition to `Condvar::notify`).
+- `Slot<T>` gains `waker: Option<Waker>` beside `value`/`state`.
+- `LatestSender::update`/`send`, `LatestSender::Drop`, and
+  `LatestReceiver::close` take the waker out and `wake()` it after releasing
+  the slot lock (in addition to `Condvar::notify`).
 - `LatestReceiver::poll_recv(cx) -> Poll<Option<T>>`: returns `Ready(Some(v))`
-  if a value is pending, `Ready(None)` if closed, else registers `cx.waker()`
-  and returns `Pending`.
+  if a value is pending, `Ready(None)` if the producer is gone with no pending
+  value or the consumer cancelled, else registers `cx.waker()` and returns
+  `Pending`.
 - `LatestReceiver::close()`: consumer-initiated idempotent close — sets
-  `closed`, wakes any pending waker and all condvar waiters. This is what
-  `cancel()` uses to wake a pending `next()` *immediately*, before the engine
-  teardown has dropped the producer.
+  `Cancelled`, discards the pending value, and wakes any pending waker and all
+  condvar waiters. This is what `cancel()` uses to wake a pending `next()`
+  *immediately*, before the engine teardown has dropped the producer.
 - Blocking `recv`/`recv_timeout`/`try_recv` are unchanged and layered over the
   same slot — direct-Rust consumers keep them; async is additive, not the
   center.
@@ -114,16 +116,14 @@ Bool-Lifecycle gate), not a `closed` bool:
 
 `next()` pending, an arriving frame, `cancel()`/`close()`, sender `Drop`
 (engine shutdown), and the guard release may interleave. Correctness rests on
-the single `Slot` mutex: every state transition (`value` set, `closed` set,
+the single `Slot` mutex: every state transition (`value` set, `state` changed,
 `waker` registered/taken) happens under it, so there is exactly one owner of the
-pending value and the terminal `closed` flag. A wake can never be lost (the
+pending value and the terminal state. A wake can never be lost (the
 waker is registered before `Pending` is returned and taken under the same lock
-that sets `value`/`closed`); a terminal `None` can never be lost (poll re-checks
-`closed` after taking `value`); no post-cancel frame is delivered (`close()`
-sets `closed`, and poll returns `value` only if present *then* checks closed —
-after `close()` a fresh `next()` sees `closed` once the slot value is drained;
-cancellation semantics: cancel wakes and future `next()` yields `None`). No spin
-loop, no timer.
+that sets `value`/`state`); a terminal `None` can never be lost (poll re-checks
+the state on every wake); no post-cancel frame is delivered (`close()` changes
+the state and discards the slot under the same lock, and later producer updates
+are no-ops). No spin loop, no timer.
 
 ## Handle surface (UniFFI 0.29 async objects)
 
@@ -159,22 +159,30 @@ param, no reservation, no thread. `None` from `next()` is the terminal signal
   calls `cancel()` — closing the Rust handle. (Swift ARC / Kotlin `Cleaner`.)
 - Engine shutdown drops every producer `LatestSender`, closing every mailbox and
   waking every pending `next()` to `None`.
-- Swift `AsyncSequence.makeAsyncIterator` cancellation (task cancel) → the
-  iterator's `cancel()`; Kotlin `Flow` collection cancellation → the same. A
-  cancelled/closed handle yields no further frames.
+- Swift iterator/task cancellation reaches `handle.cancel()` through the
+  backing `AsyncThrowingStream`'s `.cancelled` termination callback; a
+  producer-side `.finished` does not cancel a shared handle. Kotlin `Flow`
+  collection cancellation reaches the same call through `finally`. A
+  cancelled handle yields no further frames.
 
 ## Native SDK wrappers
 
-- **Swift:** each handle wraps as an `AsyncSequence` whose `next()` is
-  `await handle.next()`, mapping `nil` → end of sequence. Task cancellation
-  calls `handle.cancel()` via `withTaskCancellationHandler`. The producer-side
-  `FrameCoalescer` and `AsyncStream(.bufferingNewest(1))` are **removed** —
-  conflation now lives in the engine mailbox, so the wrapper is a thin pull
-  adapter.
+- **Swift:** each handle wraps as an `AsyncSequence` backed by one
+  `AsyncThrowingStream` pump whose loop awaits `handle.next()` and maps `nil` →
+  end of sequence. An enum-backed, lock-protected iterator claim admits only
+  one live pump for the shared native handle; a competing iterator finishes
+  with typed `NMPError.concurrentNext` before it can race or cancel the owner.
+  Task/iterator cancellation calls `handle.cancel()` only from the
+  continuation's `.cancelled` termination. Current-state streams retain
+  `FrameCoalescer` plus `.bufferingNewest(1)` as wrapper-side delivery-cadence
+  policy; engine-mailbox conflation alone does not throttle a fast replay loop.
 - **Kotlin:** each handle wraps as a `Flow` built with `flow { while(true){ val v
   = handle.next() ?: break; emit(v) } }`, with `handle.cancel()` in a
-  `finally`/`onCompletion`. `.conflate()` is removed for the same reason (engine
-  conflates). Cancellation of the collecting coroutine cancels the Rust handle.
+  `finally`/`onCompletion`. Ordinary observation flows are cold and open one
+  independent native handle per collection; the windowed handle's frames flow
+  is explicitly single-collection. `.conflate()` is removed because the engine
+  mailbox already folds intermediate state. Cancellation of the collecting
+  coroutine cancels its Rust handle.
 
 ## The rescoped blocking-adapter pool
 
@@ -238,11 +246,14 @@ implementation:
    retained because Swift task cancellation never reaches Rust.
 5. **Platform cancellation asymmetry (verified against generated 0.29
    bindings).** Swift: cancelling a `Task` awaiting `next()` neither reaches Rust
-   nor interrupts the await, so the `AsyncSequence` wrapper installs
-   `withTaskCancellationHandler { handle.cancel() }` — mandatory for liveness,
-   not hygiene. Kotlin: cancelling the collecting coroutine drops the in-flight
-   Rust future; the single-reader guard is released on the future's `Drop` (RAII
-   `ReadingGuard`), so a timed-out `next()` cannot brick the handle.
+   nor interrupts the await, so the `AsyncSequence` wrapper's
+   `AsyncThrowingStream` termination callback forwards only consumer
+   `.cancelled` to `handle.cancel()` — mandatory for liveness, not hygiene.
+   Producer-side `.finished`, including a typed competing-iterator refusal,
+   must not cancel the accepted pull. Kotlin: cancelling the collecting
+   coroutine drops the in-flight Rust future; the single-reader guard is
+   released on the future's `Drop` (RAII `ReadingGuard`), so a timed-out
+   `next()` cannot brick the handle.
 6. **NIP-46 session-lifetime workers move to session-owned threads.** Permanent
    slot occupants (session worker + event forwarder, session-lifetime) behind one
    fixed counter would be a miniature of the very defect — an unrelated
@@ -256,6 +267,14 @@ implementation:
    #17 replay-jank falsifier does not regress: engine-mailbox conflation only
    folds while the consumer is busy, but a tight `for await` pull loop during
    historical replay could otherwise deliver per-emit.
+8. **Swift iterator ownership is claimed before starting a pump.** Creating one
+   independent background pump per iterator and relying only on Rust's
+   in-flight guard is not sufficient: after delivering a frame, pump A can
+   prefetch again while pump B owns the accepted pull; when A's consumer exits,
+   its teardown can cancel B into a silent `nil`. Every Swift sequence therefore
+   shares an enum-backed `NMPPullIteratorGate`; exactly one live iterator starts
+   a pump, and a competitor receives `NMPError.concurrentNext` without touching
+   the handle. The start-barrier falsifier repeats this race deterministically.
 
 ### Known residual (documented, not silently accepted)
 
