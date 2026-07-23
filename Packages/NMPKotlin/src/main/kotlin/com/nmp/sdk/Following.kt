@@ -23,21 +23,15 @@
 // guessed here.
 package com.nmp.sdk
 
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.channels.awaitClose
-import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.callbackFlow
-import kotlinx.coroutines.flow.conflate
-import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.flow
 import uniffi.nmp_ffi.FfiFollowActionFailure
 import uniffi.nmp_ffi.FfiFollowActionStatus
 import uniffi.nmp_ffi.FfiFollowAvailability
 import uniffi.nmp_ffi.FfiFollowRelationship
 import uniffi.nmp_ffi.FfiFollowSnapshot
-import uniffi.nmp_ffi.FollowActionObserver
-import uniffi.nmp_ffi.FollowObserver
 import uniffi.nmp_ffi.NmpEngineInterface
+import uniffi.nmp_ffi.NmpFollowActionStream
 
 /** The active account's relationship to a `target` pubkey, as NMP's own
  * kind:3 projection sees it right now (`FfiFollowRelationship` mirror). */
@@ -105,10 +99,10 @@ data class FollowingSnapshot(
 
         /** The pre-acquisition placeholder a caller may render before the
          * first real snapshot arrives (mirrors
-         * `NMPFollowingSnapshot.initial(target:)`). Kotlin's `callbackFlow`
+         * `NMPFollowingSnapshot.initial(target:)`). Kotlin's cold `Flow`
          * -- unlike Swift's synchronously-constructed `struct` -- has no
          * value at all until the flow is collected and the engine has
-         * pushed one, so a caller that wants an immediate placeholder value
+         * delivered one, so a caller that wants an immediate placeholder value
          * (e.g. to seed a `MutableStateFlow` before `collect` starts) uses
          * this explicitly; `observeFollowing` itself only ever emits real,
          * engine-sourced snapshots. */
@@ -154,8 +148,6 @@ sealed class FollowActionFailure {
 
     data class ThreadUnavailable(val component: String, val reason: String) : FollowActionFailure()
 
-    data class ExecutorSaturated(val component: String, val capacity: ULong) : FollowActionFailure()
-
     companion object {
         fun from(ffi: FfiFollowActionFailure): FollowActionFailure =
             when (ffi) {
@@ -173,8 +165,6 @@ sealed class FollowActionFailure {
                 is FfiFollowActionFailure.EngineClosed -> EngineClosed
                 is FfiFollowActionFailure.ReceiptUnavailable -> ReceiptUnavailable
                 is FfiFollowActionFailure.ThreadUnavailable -> ThreadUnavailable(ffi.component, ffi.reason)
-                is FfiFollowActionFailure.ExecutorSaturated ->
-                    ExecutorSaturated(ffi.component, ffi.capacity)
             }
     }
 }
@@ -216,49 +206,42 @@ data class FollowAction(val status: Flow<FollowActionStatus>)
  * NMP's protocol projection, not an app-maintained boolean.
  *
  * Each element is the full current [FollowingSnapshot] -- latest-wins,
- * never a growing backlog: `.conflate()` gives the same "latest-wins"
- * delivery discipline as Swift's `AsyncStream(bufferingPolicy:
- * .bufferingNewest(1))`, same as `observeQuery`'s own finding in
- * `Query.kt`. Demand teardown is collection-scope-tied via `awaitClose`,
- * identical reasoning to that file's header. */
+ * never a growing backlog: the engine's latest-state mailbox conflates
+ * intermediate snapshots for a slow collector (#680), so the wrapper is a
+ * thin pull loop over `NmpFollowStream.next()`. Demand teardown is
+ * collection-scope-tied via `handle.cancel()` in a `finally`, identical
+ * reasoning to `Query.kt`'s header. */
 fun observeFollowing(engine: NmpEngineInterface, target: String): Flow<FollowingSnapshot> =
-    callbackFlow {
-        val observer =
-            object : FollowObserver {
-                override fun onSnapshot(snapshot: FfiFollowSnapshot) {
-                    trySendBlocking(FollowingSnapshot.from(snapshot))
-                }
-
-                override fun onClosed() {
-                    close()
-                }
+    flow {
+        val handle = nmpRethrowing { engine.observeFollowing(target) }
+        try {
+            while (true) {
+                val snapshot = nmpRethrowingAsync { handle.next() } ?: break
+                emit(FollowingSnapshot.from(snapshot))
             }
-
-        val handle = nmpRethrowing { engine.observeFollowing(target, observer) }
-
-        awaitClose { handle.cancel() }
-    }.conflate()
-
-/** Shared bridge for the `follow`/`unfollow` action status stream. Unlike
- * [observeFollowing]'s conflated relationship stream, this mirrors
- * `Receipt.kt`'s `ReceiptBridge` shape instead: every status matters (the
- * caller is watching a one-shot action run to completion, not a live
- * projection it may fall behind on), so this is an unbounded `Channel`, the
- * same delivery discipline as Swift's un-throttled `AsyncStream` for
- * `NMPFollowAction.status`. */
-private class FollowActionBridge {
-    val channel = Channel<FollowActionStatus>(Channel.UNLIMITED)
-    val observer =
-        object : FollowActionObserver {
-            override fun onStatus(status: FfiFollowActionStatus) {
-                channel.trySendBlocking(FollowActionStatus.from(status))
-            }
-
-            override fun onClosed() {
-                channel.close()
-            }
+        } finally {
+            handle.cancel()
         }
-}
+    }
+
+/** Shared pull loop for the `follow`/`unfollow` action status stream. Unlike
+ * [observeFollowing]'s conflated relationship stream, this is a FIFO fact
+ * stream (`NmpFollowActionStream`): every status matters (the caller is
+ * watching a one-shot action run to completion, not a live projection it may
+ * fall behind on), and the engine's FIFO channel delivers each transition in
+ * order. Teardown is collection-scope-tied via `handle.cancel()`. */
+private fun followActionFlow(open: () -> NmpFollowActionStream): Flow<FollowActionStatus> =
+    flow {
+        val handle = open()
+        try {
+            while (true) {
+                val status = nmpRethrowingAsync { handle.next() } ?: break
+                emit(FollowActionStatus.from(status))
+            }
+        } finally {
+            handle.cancel()
+        }
+    }
 
 /** Ask NMP to follow [target] (mirrors `NMPEngine.follow`). This is the
  * complete NIP-02 action: it waits for the module's source-evidence policy,
@@ -268,16 +251,10 @@ private class FollowActionBridge {
  * never throws (an invalid [target] surfaces as
  * `FollowActionStatus.Failed(FollowActionFailure.InvalidTarget)` on the
  * stream, not as a synchronous exception). */
-fun follow(engine: NmpEngineInterface, target: String): FollowAction {
-    val bridge = FollowActionBridge()
-    engine.follow(target, bridge.observer)
-    return FollowAction(bridge.channel.receiveAsFlow())
-}
+fun follow(engine: NmpEngineInterface, target: String): FollowAction =
+    FollowAction(followActionFlow { engine.follow(target) })
 
 /** The inverse of [follow], with the same acquisition, compare-and-swap,
  * signer, routing, and receipt guarantees (mirrors `NMPEngine.unfollow`). */
-fun unfollow(engine: NmpEngineInterface, target: String): FollowAction {
-    val bridge = FollowActionBridge()
-    engine.unfollow(target, bridge.observer)
-    return FollowAction(bridge.channel.receiveAsFlow())
-}
+fun unfollow(engine: NmpEngineInterface, target: String): FollowAction =
+    FollowAction(followActionFlow { engine.unfollow(target) })

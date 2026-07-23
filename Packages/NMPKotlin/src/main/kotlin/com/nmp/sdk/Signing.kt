@@ -1,19 +1,10 @@
 package com.nmp.sdk
 
-import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.suspendCancellableCoroutine
 import uniffi.nmp_ffi.FfiSignEventFailure
 import uniffi.nmp_ffi.FfiSignedEvent
 import uniffi.nmp_ffi.FfiSignEventRequest
 import uniffi.nmp_ffi.NmpEngineInterface
-import uniffi.nmp_ffi.SignEventObserver
-
-private enum class SignEventTerminal {
-    OPEN,
-    COMPLETED,
-    CANCELLED,
-}
 
 /** Immutable sign-only event body; NMP freezes its author from active identity. */
 data class NMPUnsignedEvent(
@@ -46,67 +37,44 @@ data class NMPSignedEvent(
     )
 }
 
+/** Sign one exact event through the active signer (#680). The engine returns
+ * a one-shot [uniffi.nmp_ffi.NmpSignEventHandle] synchronously; awaiting its
+ * `signed()` yields the fully-verified event or a typed
+ * [FfiSignEventFailure]. There is no `suspendCancellableCoroutine` state
+ * machine anymore: the pull IS the await. `handle.cancel()` runs in a
+ * `finally` so that cancelling the calling coroutine (which drops the
+ * in-flight Rust future) also withdraws the Rust operation -- Kotlin
+ * coroutine cancellation never reaches Rust on its own. `cancel()` is
+ * idempotent and safe after completion, so the unconditional `finally` is
+ * correct on the success and failure paths too. */
 internal suspend fun signEvent(
     engine: NmpEngineInterface,
     event: NMPUnsignedEvent,
-): NMPSignedEvent = signEvent(event) { request, observer ->
-    val handle = nmpRethrowing { engine.signEvent(request, observer) }
-    val cancel: () -> Unit = { handle.cancel() }
-    cancel
+): NMPSignedEvent {
+    val handle = nmpRethrowing { engine.signEvent(event.toFfi()) }
+    try {
+        return NMPSignedEvent(handle.signed())
+    } catch (failure: FfiSignEventFailure) {
+        throw mapSignEventFailure(failure)
+    } finally {
+        handle.cancel()
+    }
 }
 
-internal suspend fun signEvent(
-    event: NMPUnsignedEvent,
-    start: (FfiSignEventRequest, SignEventObserver) -> (() -> Unit),
-): NMPSignedEvent =
-    suspendCancellableCoroutine { continuation ->
-        val cancelOperation = AtomicReference<(() -> Unit)?>(null)
-        val terminal = AtomicReference(SignEventTerminal.OPEN)
-
-        fun complete(result: Result<NMPSignedEvent>) {
-            if (terminal.compareAndSet(SignEventTerminal.OPEN, SignEventTerminal.COMPLETED)) {
-                cancelOperation.set(null)
-                continuation.resumeWith(result)
-            }
-        }
-
-        val observer =
-            object : SignEventObserver {
-                override fun onSigned(event: FfiSignedEvent) {
-                    complete(Result.success(NMPSignedEvent(event)))
-                }
-
-                override fun onFailed(failure: FfiSignEventFailure) {
-                    val error =
-                        when (failure) {
-                            is FfiSignEventFailure.SignerUnavailable ->
-                                NMPError.SignerUnavailable(failure.reason)
-                            is FfiSignEventFailure.SignerRejected ->
-                                NMPError.SignerRejected(failure.reason)
-                            is FfiSignEventFailure.InvalidSignerOutput ->
-                                NMPError.InvalidSignerOutput(failure.reason)
-                            is FfiSignEventFailure.Cancelled ->
-                                CancellationException("sign operation cancelled")
-                        }
-                    complete(Result.failure(error))
-                }
-            }
-
-        continuation.invokeOnCancellation {
-            if (terminal.compareAndSet(SignEventTerminal.OPEN, SignEventTerminal.CANCELLED)) {
-                cancelOperation.getAndSet(null)?.invoke()
-            }
-        }
-
-        try {
-            val cancel = start(event.toFfi(), observer)
-            cancelOperation.set(cancel)
-            when (terminal.get()) {
-                SignEventTerminal.OPEN -> Unit
-                SignEventTerminal.COMPLETED -> cancelOperation.set(null)
-                SignEventTerminal.CANCELLED -> cancelOperation.getAndSet(null)?.invoke()
-            }
-        } catch (error: Throwable) {
-            complete(Result.failure(error))
-        }
+/** Translate the generated one-shot sign failure into the ergonomic surface.
+ * `Cancelled` becomes a coroutine [CancellationException] (the operation was
+ * withdrawn, not a signer fault); `AlreadyConsumed` is caller misuse -- a
+ * second await on a one-shot handle -- surfaced as [IllegalStateException]. */
+private fun mapSignEventFailure(failure: FfiSignEventFailure): Throwable =
+    when (failure) {
+        is FfiSignEventFailure.SignerUnavailable ->
+            NMPError.SignerUnavailable(failure.reason)
+        is FfiSignEventFailure.SignerRejected ->
+            NMPError.SignerRejected(failure.reason)
+        is FfiSignEventFailure.InvalidSignerOutput ->
+            NMPError.InvalidSignerOutput(failure.reason)
+        is FfiSignEventFailure.Cancelled ->
+            CancellationException("sign operation cancelled")
+        is FfiSignEventFailure.AlreadyConsumed ->
+            IllegalStateException("sign event handle already consumed")
     }

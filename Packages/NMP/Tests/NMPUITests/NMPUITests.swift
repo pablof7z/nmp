@@ -221,23 +221,24 @@ final class NMPUITests: XCTestCase {
         XCTAssertNil(second?.descending(into: "event:c"))
     }
 
-    func testLiveFactoryDisappearReturnsNativeTaskCensusToBaseline() throws {
+    func testLiveFactoryAppearAndDisappearIsCleanWithoutNativeTaskCensus() throws {
+        // #680 removed the native-task census and idle barrier: a live
+        // observation no longer reserves a native task, so there is no census
+        // to return to a baseline. The surviving invariant is that a
+        // visible-reference observation appears, disappears, and re-appears
+        // cleanly (the underlying async handle is opened and cancelled without
+        // bricking the observation or the engine).
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
-        let baseline = engine.nativeTaskCensus()
         let observation = NMPVisibleReferenceObservation(
             target: .profile(pubkey: pubkey),
             factory: .live(engine: engine)
         )
 
         observation.appear()
-        XCTAssertEqual(engine.nativeTaskCensus().admitted, baseline.admitted + 1)
-
         observation.disappear()
-        engine.awaitNativeTasksIdle()
-        let after = engine.nativeTaskCensus()
-        XCTAssertEqual(after.admitted, baseline.admitted)
-        XCTAssertEqual(after.running, baseline.running)
+        observation.appear()
+        observation.disappear()
     }
 
     func testAvatarFallbackColorIsStable() {

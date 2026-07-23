@@ -1,17 +1,65 @@
-// The write noun's receipt stream, mirroring the `NMPQuery` bridge pattern
-// (M4 plan §4c) but for `ReceiptObserver`/`WriteStatus` instead of
-// `RowObserver`/`RowDelta`.
+// The write noun's receipt stream, pulled from `NmpReceiptStream` (#680).
+// Receipts are durable FIFO facts (not disposable snapshots): live delivery
+// has a finite FIFO and typed lag, while persisted outbox/redb evidence is
+// replayed in deterministic pages. There is no coalescing here.
 
 import NMPFFI
 
-/// The stream of every state a single `publish` call's write reaches
-/// (ledger #9 -- enqueue is not converged). `status` finishes when the
-/// engine has nothing further to report for this intent (e.g. an
-/// `Ephemeral` intent may finish immediately after `.sent`, a `Durable` one
-/// only after every relay has reached a terminal state or given up).
+/// The ordered `WriteStatus` facts a single `publish` call's write reaches
+/// (ledger #9 -- enqueue is not converged), pulled from its durable receipt
+/// handle (#680). Live delivery is finite: a paused consumer that falls
+/// behind receives `NMPError.factStreamLagged` and can reattach the named
+/// receipt to replay the canonical persisted history. It finishes (`nil`) when
+/// the engine has nothing
+/// further to report for this intent (e.g. an `Ephemeral` intent may finish
+/// immediately after `.sent`, a `Durable` one only after every relay has
+/// reached a terminal state or given up). Iterate with `for try await`; the
+/// handle is single-consumer, so a second concurrent iterator surfaces
+/// `NMPError.concurrentNext` rather than hanging.
+public struct ReceiptStatus: AsyncSequence, Sendable {
+    public typealias Element = WriteStatus
+
+    private let handle: NmpReceiptStream
+    private let iteratorGate = NMPPullIteratorGate()
+
+    init(handle: NmpReceiptStream) {
+        self.handle = handle
+    }
+
+    public func makeAsyncIterator() -> Iterator {
+        let core = NMPPullIteratorCore(handle: handle, iteratorGate: iteratorGate) { status in
+            WriteStatus(status)
+        }
+        return Iterator(core: core)
+    }
+
+    public struct Iterator: AsyncIteratorProtocol {
+        let core: NMPPullIteratorCore<NmpReceiptStream, WriteStatus>
+
+        public mutating func next() async throws -> WriteStatus? {
+            try await core.next()
+        }
+    }
+
+    /// Stop delivering live status frames to this stream. The durable receipt
+    /// is untouched (use `NMPEngine.cancel(receiptId:)` to cancel the write);
+    /// a later `reattachReceipt` traverses the durable history. Idempotent.
+    public func cancel() {
+        handle.cancel()
+    }
+}
+
+/// One accepted write and its live status stream. `id` is the stable
+/// store-issued receipt id, usable for `reattachReceipt`/`cancel` even after
+/// `status` is dropped.
 public struct Receipt: Sendable {
     public let id: UInt64
-    public let status: AsyncStream<WriteStatus>
+    public let status: ReceiptStatus
+
+    init(handle: NmpReceiptStream) {
+        self.id = handle.id()
+        self.status = ReceiptStatus(handle: handle)
+    }
 }
 
 public enum ReceiptReattachment: Sendable {
@@ -51,42 +99,6 @@ public enum NMPWriteCancellationError: Error, Sendable, Equatable {
     }
 }
 
-/// Drains a publish's status updates into an `AsyncStream`. Not exposed
-/// publicly -- an implementation detail of `NMPEngine.publish`.
-private final class ReceiptBridge: ReceiptObserver, @unchecked Sendable {
-    private let continuation: AsyncStream<WriteStatus>.Continuation
-
-    init(continuation: AsyncStream<WriteStatus>.Continuation) {
-        self.continuation = continuation
-    }
-
-    func onStatus(status: FfiWriteStatus) {
-        continuation.yield(WriteStatus(status))
-    }
-
-    func onClosed() {
-        // The receipt `Sender` was dropped (intent resolved / engine shut
-        // down) -- finish the stream so a consumer awaiting it is never left
-        // hanging, mirroring `RowBridge`/`DiagnosticsBridge`.
-        continuation.finish()
-    }
-}
-
-func mapReceiptReattachment(
-    _ result: FfiReceiptReattachment,
-    id: UInt64,
-    status: AsyncStream<WriteStatus>
-) -> ReceiptReattachment {
-    switch result {
-    case .attached:
-        return .attached(Receipt(id: id, status: status))
-    case .notFound:
-        return .notFound
-    case .retainedButUnreadable:
-        return .retainedButUnreadable
-    }
-}
-
 extension NMPEngine {
     /// Cancel an accepted unsigned write. Returns the durable terminal fact;
     /// repeated cancellation returns `.cancelled` idempotently.
@@ -105,13 +117,10 @@ extension NMPEngine {
     /// that (M4 plan §9 -- `publish` is a one-shot enqueue call, the
     /// STREAM is where convergence is observed).
     public func publish(_ intent: WriteIntent) async throws -> Receipt {
-        var continuation: AsyncStream<WriteStatus>.Continuation!
-        let stream = AsyncStream<WriteStatus> { continuation = $0 }
-        let bridge = ReceiptBridge(continuation: continuation)
-        let id = try nmpRethrowing {
-            try ffi.publish(intent: intent.toFfi(), observer: bridge)
+        let handle = try nmpRethrowing {
+            try ffi.publish(intent: intent.toFfi())
         }
-        return Receipt(id: id, status: stream)
+        return Receipt(handle: handle)
     }
 
     /// Publish a `GroupSendIntent` from `groupMessageIntent` (#156). Take-once:
@@ -121,41 +130,40 @@ extension NMPEngine {
     /// `groupMessageIntent` again for a retry). Otherwise identical to
     /// `publish(_:)`'s receipt-stream bridge.
     public func publishComposed(_ intent: GroupSendIntent) async throws -> Receipt {
-        var continuation: AsyncStream<WriteStatus>.Continuation!
-        let stream = AsyncStream<WriteStatus> { continuation = $0 }
-        let bridge = ReceiptBridge(continuation: continuation)
-        let id = try nmpRethrowing {
-            try ffi.publishComposed(intent: intent.ffi, observer: bridge)
+        let handle = try nmpRethrowing {
+            try ffi.publishComposed(intent: intent.ffi)
         }
-        return Receipt(id: id, status: stream)
+        return Receipt(handle: handle)
     }
 
     /// Publish a `CommentIntent` from `commentIntent` (#572). Take-once --
     /// see `publishComposed(_ intent: GroupSendIntent)`'s own doc; identical
-    /// contract, just for the NIP-22 composed intent.
+    /// contract, just for the NIP-22 composed intent, delivered pull-based
+    /// over `Receipt.status` (#680).
     public func publishComposed(_ intent: CommentIntent) async throws -> Receipt {
-        var continuation: AsyncStream<WriteStatus>.Continuation!
-        let stream = AsyncStream<WriteStatus> { continuation = $0 }
-        let bridge = ReceiptBridge(continuation: continuation)
-        let id = try nmpRethrowing {
-            try ffi.publishComposed(intent: intent.ffi, observer: bridge)
+        let handle = try nmpRethrowing {
+            try ffi.publishComposed(intent: intent.ffi)
         }
-        return Receipt(id: id, status: stream)
+        return Receipt(handle: handle)
     }
 
-    /// Attach a new observer to retained receipt facts. Corrupt durable
-    /// evidence is reported distinctly and never treated as absence.
+    /// Attach a fresh pull stream to retained receipt facts (#680): the
+    /// `.attached` result carries a new `NmpReceiptStream` that transparently
+    /// traverses the durable `WriteStatus` history in finite pages and then
+    /// streams onward. Corrupt or disappearing durable evidence is reported
+    /// distinctly and never treated as absence.
     public func reattachReceipt(id: UInt64) throws -> ReceiptReattachment {
-        var continuation: AsyncStream<WriteStatus>.Continuation!
-        let stream = AsyncStream<WriteStatus> { continuation = $0 }
-        let bridge = ReceiptBridge(continuation: continuation)
         let result = try nmpRethrowing {
-            try ffi.reattachReceipt(receiptId: id, observer: bridge)
+            try ffi.reattachReceipt(receiptId: id)
         }
-        if result != .attached {
-            continuation.finish()
+        switch result {
+        case .attached(let stream):
+            return .attached(Receipt(handle: stream))
+        case .notFound:
+            return .notFound
+        case .retainedButUnreadable:
+            return .retainedButUnreadable
         }
-        return mapReceiptReattachment(result, id: id, status: stream)
     }
 
     /// #591: recover a receipt after a crash that happened BEFORE the app
@@ -163,29 +171,18 @@ extension NMPEngine {
     /// returned -- looked up by the caller's own crash-safe correlation
     /// token instead. Otherwise identical to `reattachReceipt(id:)`.
     public func reattachReceipt(correlation: String) throws -> ReceiptReattachment {
-        var continuation: AsyncStream<WriteStatus>.Continuation!
-        let stream = AsyncStream<WriteStatus> { continuation = $0 }
-        let bridge = ReceiptBridge(continuation: continuation)
         let result = try nmpRethrowing {
-            try ffi.reattachByCorrelation(correlation: correlation, observer: bridge)
+            try ffi.reattachByCorrelation(correlation: correlation)
         }
-        if result.outcome != .attached {
-            continuation.finish()
+        // The resolved receipt id (#591) rides along on the attached stream
+        // handle itself (`Receipt.id`); a token-only caller learns it there.
+        switch result.outcome {
+        case .attached(let stream):
+            return .attached(Receipt(handle: stream))
+        case .notFound:
+            return .notFound
+        case .retainedButUnreadable:
+            return .retainedButUnreadable
         }
-        guard let id = result.receiptId else {
-            // `outcome` is `.notFound`/`.retainedButUnreadable` -- no id was
-            // ever resolved, so there is nothing to build a `Receipt` from.
-            switch result.outcome {
-            case .attached:
-                preconditionFailure(
-                    "FfiCorrelationReattachment.receiptId must be present when outcome is .attached"
-                )
-            case .notFound:
-                return .notFound
-            case .retainedButUnreadable:
-                return .retainedButUnreadable
-            }
-        }
-        return mapReceiptReattachment(result.outcome, id: id, status: stream)
     }
 }

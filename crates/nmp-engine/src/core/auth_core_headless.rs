@@ -15,7 +15,9 @@ const SIGNER: AuthCapabilityInstance = AuthCapabilityInstance(42);
 struct DiscardReceipt;
 
 impl ReceiptSink for DiscardReceipt {
-    fn on_status(&self, _: WriteStatus) {}
+    fn on_status(&self, _: WriteStatus) -> bool {
+        true
+    }
 }
 
 struct Fixture {

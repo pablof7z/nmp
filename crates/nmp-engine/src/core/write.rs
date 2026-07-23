@@ -5,6 +5,68 @@
 
 use super::*;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReceiptReplayFactKey {
+    ReceiptStatus,
+    AwaitingCapability,
+    Attempt {
+        relay: RelayUrl,
+        key: ReceiptAttemptReplayKey,
+    },
+    Lane {
+        relay: RelayUrl,
+        revision: u64,
+    },
+    PersistenceBlocked(RelayUrl),
+    RoutePersistenceBlocked(RelayUrl),
+}
+
+impl ReceiptReplayCursor {
+    fn contains(&self, key: &ReceiptReplayFactKey, status: &WriteStatus) -> bool {
+        match key {
+            ReceiptReplayFactKey::ReceiptStatus => {
+                self.state.receipt_status.as_ref() == Some(status)
+            }
+            ReceiptReplayFactKey::AwaitingCapability => self.state.awaiting_capability,
+            ReceiptReplayFactKey::Attempt { relay, key } => self
+                .state
+                .attempts
+                .get(relay)
+                .is_some_and(|delivered| delivered >= key),
+            ReceiptReplayFactKey::Lane { relay, revision } => self
+                .state
+                .lane_revisions
+                .get(relay)
+                .is_some_and(|delivered| delivered >= revision),
+            ReceiptReplayFactKey::PersistenceBlocked(relay) => {
+                self.state.persistence_blocked.contains(relay)
+            }
+            ReceiptReplayFactKey::RoutePersistenceBlocked(relay) => {
+                self.state.route_persistence_blocked.contains(relay)
+            }
+        }
+    }
+
+    fn advance(&mut self, key: ReceiptReplayFactKey, status: WriteStatus) {
+        match key {
+            ReceiptReplayFactKey::ReceiptStatus => self.state.receipt_status = Some(status),
+            ReceiptReplayFactKey::AwaitingCapability => self.state.awaiting_capability = true,
+            ReceiptReplayFactKey::Attempt { relay, key } => {
+                self.state.attempts.insert(relay, key);
+            }
+            ReceiptReplayFactKey::Lane { relay, revision } => {
+                self.state.lane_revisions.insert(relay, revision);
+            }
+            ReceiptReplayFactKey::PersistenceBlocked(relay) => {
+                self.state.persistence_blocked.insert(relay);
+            }
+            ReceiptReplayFactKey::RoutePersistenceBlocked(relay) => {
+                self.state.route_persistence_blocked.insert(relay);
+            }
+        }
+    }
+}
+
 impl<S: EventStore> EngineCore<S> {
     /// Record an ingest/read persistence failure (issue #122) without
     /// panicking: latch the first error message (read-only degrade) and push
@@ -58,12 +120,12 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     pub(super) fn emit_write_status(
-        &self,
+        &mut self,
         id: ReceiptId,
         status: WriteStatus,
         effects: &mut Vec<Effect>,
     ) {
-        if let Some(pending) = self.pending.get(&id) {
+        if let Some(pending) = self.pending.get_mut(&id) {
             Self::notify(pending, status.clone());
         }
         effects.push(Effect::EmitReceipt(id, status));
@@ -955,13 +1017,46 @@ impl<S: EventStore> EngineCore<S> {
         id: ReceiptId,
         sink: Box<dyn ReceiptSink>,
     ) -> ReattachOutcome {
+        self.reattach_receipt_page(id, sink, None, usize::MAX).0
+    }
+
+    /// Reconstruct one finite page of a receipt's durable prefix.
+    ///
+    /// The opaque cursor records fact identity independently for each relay
+    /// lane, so a newly persisted fact on an earlier-sorted relay cannot
+    /// shift another relay's continuation. Only the final page attaches the
+    /// sink to live work, atomically with observing that no durable fact is
+    /// currently unseen.
+    pub fn reattach_receipt_page(
+        &mut self,
+        id: ReceiptId,
+        sink: Box<dyn ReceiptSink>,
+        cursor: Option<ReceiptReplayCursor>,
+        limit: usize,
+    ) -> (ReattachOutcome, Option<ReceiptReplayCursor>) {
+        self.reattach_receipt_page_registered(id, sink, cursor, limit, None)
+    }
+
+    pub(crate) fn reattach_receipt_page_registered(
+        &mut self,
+        id: ReceiptId,
+        sink: Box<dyn ReceiptSink>,
+        cursor: Option<ReceiptReplayCursor>,
+        limit: usize,
+        registration: Option<ReceiptSinkRegistration>,
+    ) -> (ReattachOutcome, Option<ReceiptReplayCursor>) {
+        let mut cursor = match cursor {
+            Some(cursor) if cursor.state.receipt_id == id => cursor,
+            Some(_) => return (ReattachOutcome::RetainedButUnreadable, None),
+            None => ReceiptReplayCursor::new(id),
+        };
         if self.quarantined_auth_receipts.contains_key(&id) {
-            return ReattachOutcome::RetainedButUnreadable;
+            return (ReattachOutcome::RetainedButUnreadable, None);
         }
         let receipt = match self.resolver.store().reattach_receipt(id.0) {
             Ok(Some(receipt)) => receipt,
-            Ok(None) => return ReattachOutcome::NotFound,
-            Err(_) => return ReattachOutcome::RetainedButUnreadable,
+            Ok(None) => return (ReattachOutcome::NotFound, None),
+            Err(_) => return (ReattachOutcome::RetainedButUnreadable, None),
         };
         if self
             .pending
@@ -973,21 +1068,21 @@ impl<S: EventStore> EngineCore<S> {
             // prefix would falsely imply that this observer is attached to
             // actionable live work, and registering it would leak later
             // signer facts from an obligation whose destination is unknown.
-            return ReattachOutcome::RetainedButUnreadable;
+            return (ReattachOutcome::RetainedButUnreadable, None);
         }
         let (attempts, details, lanes) = match receipt.intent_id {
             Some(intent_id) => {
                 let attempts = match self.resolver.store().recover_attempts(intent_id) {
                     Ok(attempts) => attempts,
-                    Err(_) => return ReattachOutcome::RetainedButUnreadable,
+                    Err(_) => return (ReattachOutcome::RetainedButUnreadable, None),
                 };
                 let details = match self.resolver.store().recover_attempt_details(intent_id) {
                     Ok(details) => details,
-                    Err(_) => return ReattachOutcome::RetainedButUnreadable,
+                    Err(_) => return (ReattachOutcome::RetainedButUnreadable, None),
                 };
                 let lanes = match self.resolver.store().recover_outbox_lanes(intent_id) {
                     Ok(lanes) => lanes,
-                    Err(_) => return ReattachOutcome::RetainedButUnreadable,
+                    Err(_) => return (ReattachOutcome::RetainedButUnreadable, None),
                 };
                 if self
                     .resolver
@@ -995,23 +1090,26 @@ impl<S: EventStore> EngineCore<S> {
                     .recover_route_revisions(intent_id)
                     .is_err()
                 {
-                    return ReattachOutcome::RetainedButUnreadable;
+                    return (ReattachOutcome::RetainedButUnreadable, None);
                 }
                 (attempts, details, lanes)
             }
             None => (Vec::new(), Vec::new(), Vec::new()),
         };
         let status = Self::retained_receipt_status(&receipt);
-        let mut replay = vec![status];
+        let mut replay = vec![(ReceiptReplayFactKey::ReceiptStatus, status)];
         if receipt.state == ReceiptState::Accepted
             && self
                 .pending
                 .get(&id)
                 .is_some_and(|pending| !pending.already_signed)
         {
-            replay.push(WriteStatus::AwaitingCapability {
-                pubkey: receipt.expected_pubkey,
-            });
+            replay.push((
+                ReceiptReplayFactKey::AwaitingCapability,
+                WriteStatus::AwaitingCapability {
+                    pubkey: receipt.expected_pubkey,
+                },
+            ));
         }
         if receipt.intent_id.is_some() {
             let mut details_by_attempt = details
@@ -1022,6 +1120,15 @@ impl<S: EventStore> EngineCore<S> {
             let mut awaiting_auth = BTreeSet::new();
             let mut retry_eligible = BTreeSet::new();
             for attempt in attempts {
+                let replay_relay = attempt.relay.clone();
+                let replay_ordinal = attempt.ordinal;
+                let replay_key = |phase| ReceiptReplayFactKey::Attempt {
+                    relay: replay_relay.clone(),
+                    key: ReceiptAttemptReplayKey {
+                        ordinal: replay_ordinal,
+                        phase,
+                    },
+                };
                 if let Some(detail) =
                     details_by_attempt.remove(&(attempt.relay.clone(), attempt.ordinal))
                 {
@@ -1029,41 +1136,56 @@ impl<S: EventStore> EngineCore<S> {
                         match handoff.result {
                             HandoffEvidence::NotHandedOff => {
                                 awaiting_relay.insert((attempt.relay.clone(), attempt.ordinal));
-                                replay.push(WriteStatus::AwaitingRelay {
-                                    relay: attempt.relay.clone(),
-                                });
+                                replay.push((
+                                    replay_key(ReceiptAttemptReplayPhase::Handoff),
+                                    WriteStatus::AwaitingRelay {
+                                        relay: attempt.relay.clone(),
+                                    },
+                                ));
                             }
-                            HandoffEvidence::Written => replay.push(WriteStatus::Sent {
-                                relay: attempt.relay.clone(),
-                                attempt: attempt.ordinal,
-                                written_at: handoff.at,
-                            }),
-                            HandoffEvidence::Ambiguous => {
-                                replay.push(WriteStatus::HandoffAmbiguous {
+                            HandoffEvidence::Written => replay.push((
+                                replay_key(ReceiptAttemptReplayPhase::Handoff),
+                                WriteStatus::Sent {
                                     relay: attempt.relay.clone(),
                                     attempt: attempt.ordinal,
-                                    observed_at: handoff.at,
-                                });
+                                    written_at: handoff.at,
+                                },
+                            )),
+                            HandoffEvidence::Ambiguous => {
+                                replay.push((
+                                    replay_key(ReceiptAttemptReplayPhase::Handoff),
+                                    WriteStatus::HandoffAmbiguous {
+                                        relay: attempt.relay.clone(),
+                                        attempt: attempt.ordinal,
+                                        observed_at: handoff.at,
+                                    },
+                                ));
                             }
                         }
                     }
                     if let Some(transient) = detail.transient {
                         if transient.cause == TransientCause::AuthRequired {
                             awaiting_auth.insert((attempt.relay.clone(), attempt.ordinal));
-                            replay.push(WriteStatus::AwaitingAuth {
-                                relay: attempt.relay.clone(),
-                            });
+                            replay.push((
+                                replay_key(ReceiptAttemptReplayPhase::Transient),
+                                WriteStatus::AwaitingAuth {
+                                    relay: attempt.relay.clone(),
+                                },
+                            ));
                         } else {
                             retry_eligible.insert((
                                 attempt.relay.clone(),
                                 attempt.ordinal,
                                 transient.eligible_at,
                             ));
-                            replay.push(WriteStatus::RetryEligible {
-                                relay: attempt.relay.clone(),
-                                attempt: attempt.ordinal,
-                                eligible_at: transient.eligible_at,
-                            });
+                            replay.push((
+                                replay_key(ReceiptAttemptReplayPhase::Transient),
+                                WriteStatus::RetryEligible {
+                                    relay: attempt.relay.clone(),
+                                    attempt: attempt.ordinal,
+                                    eligible_at: transient.eligible_at,
+                                },
+                            ));
                         }
                     }
                 }
@@ -1080,28 +1202,38 @@ impl<S: EventStore> EngineCore<S> {
                     AttemptOutcome::GaveUp => WriteStatus::GaveUp(attempt.relay),
                     AttemptOutcome::OutcomeUnknown => WriteStatus::OutcomeUnknown(attempt.relay),
                 };
-                replay.push(status);
+                replay.push((replay_key(ReceiptAttemptReplayPhase::Outcome), status));
             }
             if !details_by_attempt.is_empty() {
-                return ReattachOutcome::RetainedButUnreadable;
+                return (ReattachOutcome::RetainedButUnreadable, None);
             }
             for lane in lanes {
+                let replay_key = ReceiptReplayFactKey::Lane {
+                    relay: lane.key.relay.clone(),
+                    revision: lane.revision,
+                };
                 match lane.state {
                     LaneState::WaitingConnection
                         if !awaiting_relay
                             .contains(&(lane.key.relay.clone(), lane.last_ordinal)) =>
                     {
-                        replay.push(WriteStatus::AwaitingRelay {
-                            relay: lane.key.relay,
-                        });
+                        replay.push((
+                            replay_key,
+                            WriteStatus::AwaitingRelay {
+                                relay: lane.key.relay,
+                            },
+                        ));
                     }
                     LaneState::WaitingAuth
                         if !awaiting_auth
                             .contains(&(lane.key.relay.clone(), lane.last_ordinal)) =>
                     {
-                        replay.push(WriteStatus::AwaitingAuth {
-                            relay: lane.key.relay,
-                        });
+                        replay.push((
+                            replay_key,
+                            WriteStatus::AwaitingAuth {
+                                relay: lane.key.relay,
+                            },
+                        ));
                     }
                     LaneState::Eligible { since }
                         if lane.last_ordinal > 0
@@ -1111,11 +1243,14 @@ impl<S: EventStore> EngineCore<S> {
                                 since,
                             )) =>
                     {
-                        replay.push(WriteStatus::RetryEligible {
-                            relay: lane.key.relay,
-                            attempt: lane.last_ordinal,
-                            eligible_at: since,
-                        });
+                        replay.push((
+                            replay_key,
+                            WriteStatus::RetryEligible {
+                                relay: lane.key.relay,
+                                attempt: lane.last_ordinal,
+                                eligible_at: since,
+                            },
+                        ));
                     }
                     LaneState::Transient {
                         ordinal,
@@ -1129,11 +1264,14 @@ impl<S: EventStore> EngineCore<S> {
                             eligible_at,
                         )) =>
                     {
-                        replay.push(WriteStatus::RetryEligible {
-                            relay: lane.key.relay,
-                            attempt: ordinal,
-                            eligible_at,
-                        });
+                        replay.push((
+                            replay_key,
+                            WriteStatus::RetryEligible {
+                                relay: lane.key.relay,
+                                attempt: ordinal,
+                                eligible_at,
+                            },
+                        ));
                     }
                     _ => {}
                 }
@@ -1141,19 +1279,96 @@ impl<S: EventStore> EngineCore<S> {
         }
         if let Some(pending) = self.pending.get(&id) {
             for relay in &pending.unstarted_relays {
-                replay.push(WriteStatus::PersistenceBlocked(relay.clone()));
+                replay.push((
+                    ReceiptReplayFactKey::PersistenceBlocked(relay.clone()),
+                    WriteStatus::PersistenceBlocked(relay.clone()),
+                ));
             }
             for relay in &pending.route_blocked_relays {
-                replay.push(WriteStatus::RoutePersistenceBlocked(relay.clone()));
+                replay.push((
+                    ReceiptReplayFactKey::RoutePersistenceBlocked(relay.clone()),
+                    WriteStatus::RoutePersistenceBlocked(relay.clone()),
+                ));
             }
         }
-        for status in replay {
-            sink.on_status(status);
+        if limit == 0 {
+            return (ReattachOutcome::RetainedButUnreadable, None);
         }
+        let mut live = true;
+        let mut delivered = 0usize;
+        let page = replay
+            .iter()
+            .filter(|(key, status)| !cursor.contains(key, status))
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        for (key, status) in page {
+            if !sink.on_status(status.clone()) {
+                live = false;
+                break;
+            }
+            cursor.advance(key, status);
+            delivered += 1;
+        }
+
+        // Re-check the complete current evidence against the advanced,
+        // identity-stable cursor. This detects unseen facts on every relay,
+        // including facts that sort before a different relay's prior page.
+        // The cursor acknowledges only sink-accepted facts.
+        let unseen = replay
+            .iter()
+            .any(|(key, status)| !cursor.contains(key, status));
+        let page_full = delivered == limit;
+        let next_cursor = (unseen || !live || page_full).then_some(cursor);
+        if live && !unseen && !page_full {
+            if let Some(pending) = self.pending.get_mut(&id) {
+                pending.sinks.push(RegisteredReceiptSink {
+                    registration,
+                    sink: Rc::from(sink),
+                });
+            }
+        }
+        (ReattachOutcome::Attached, next_cursor)
+    }
+
+    pub(crate) fn register_initial_receipt_sink(
+        &mut self,
+        id: ReceiptId,
+        registration: ReceiptSinkRegistration,
+    ) -> bool {
+        let Some(pending) = self.pending.get_mut(&id) else {
+            return false;
+        };
+        let Some(sink) = pending
+            .sinks
+            .iter_mut()
+            .find(|sink| sink.registration.is_none())
+        else {
+            return false;
+        };
+        sink.registration = Some(registration);
+        true
+    }
+
+    pub(crate) fn detach_receipt_sink(
+        &mut self,
+        id: ReceiptId,
+        registration: &ReceiptSinkRegistration,
+    ) {
         if let Some(pending) = self.pending.get_mut(&id) {
-            pending.sinks.push(Rc::from(sink));
+            pending.sinks.retain(|sink| {
+                sink.registration
+                    .as_ref()
+                    .is_none_or(|candidate| !candidate.is_same(registration))
+            });
         }
-        ReattachOutcome::Attached
+    }
+
+    #[cfg(test)]
+    pub(crate) fn receipt_sink_count(&self, id: ReceiptId) -> usize {
+        self.pending
+            .get(&id)
+            .map_or(0, |pending| pending.sinks.len())
     }
 
     /// #591: recover a receipt id from a caller-generated correlation token
@@ -1171,13 +1386,45 @@ impl<S: EventStore> EngineCore<S> {
         token: String,
         sink: Box<dyn ReceiptSink>,
     ) -> (ReattachOutcome, Option<ReceiptId>) {
+        let (outcome, id, _) = self.reattach_by_correlation_page(token, sink, None, usize::MAX);
+        (outcome, id)
+    }
+
+    pub fn reattach_by_correlation_page(
+        &mut self,
+        token: String,
+        sink: Box<dyn ReceiptSink>,
+        cursor: Option<ReceiptReplayCursor>,
+        limit: usize,
+    ) -> (
+        ReattachOutcome,
+        Option<ReceiptId>,
+        Option<ReceiptReplayCursor>,
+    ) {
+        self.reattach_by_correlation_page_registered(token, sink, cursor, limit, None)
+    }
+
+    pub(crate) fn reattach_by_correlation_page_registered(
+        &mut self,
+        token: String,
+        sink: Box<dyn ReceiptSink>,
+        cursor: Option<ReceiptReplayCursor>,
+        limit: usize,
+        registration: Option<ReceiptSinkRegistration>,
+    ) -> (
+        ReattachOutcome,
+        Option<ReceiptId>,
+        Option<ReceiptReplayCursor>,
+    ) {
         match self.resolver.store().lookup_correlation(&token) {
             Ok(Some(receipt_id)) => {
                 let id = ReceiptId(receipt_id);
-                (self.reattach_receipt(id, sink), Some(id))
+                let (outcome, next_cursor) =
+                    self.reattach_receipt_page_registered(id, sink, cursor, limit, registration);
+                (outcome, Some(id), next_cursor)
             }
-            Ok(None) => (ReattachOutcome::NotFound, None),
-            Err(_) => (ReattachOutcome::RetainedButUnreadable, None),
+            Ok(None) => (ReattachOutcome::NotFound, None, None),
+            Err(_) => (ReattachOutcome::RetainedButUnreadable, None, None),
         }
     }
 
@@ -1465,7 +1712,8 @@ impl<S: EventStore> EngineCore<S> {
         };
 
         let mut effects = Vec::new();
-        sink.on_status(WriteStatus::Accepted);
+        let sink = Rc::<dyn ReceiptSink>::from(sink);
+        let sink_live = sink.on_status(WriteStatus::Accepted);
         effects.push(Effect::EmitReceipt(id, WriteStatus::Accepted));
 
         self.pending.insert(
@@ -1474,7 +1722,14 @@ impl<S: EventStore> EngineCore<S> {
                 durability,
                 routing,
                 routing_valid: true,
-                sinks: vec![Rc::from(sink)],
+                sinks: if sink_live {
+                    vec![RegisteredReceiptSink {
+                        registration: None,
+                        sink,
+                    }]
+                } else {
+                    Vec::new()
+                },
                 intent_id,
                 signing_pubkey,
                 frozen: frozen.clone(),
@@ -1640,7 +1895,7 @@ impl<S: EventStore> EngineCore<S> {
         id: ReceiptId,
     ) -> (Result<CancelWriteOutcome, CancelWriteError>, Vec<Effect>) {
         let mut effects = Vec::new();
-        let Some(pending) = self.pending.remove(&id) else {
+        let Some(mut pending) = self.pending.remove(&id) else {
             if let Some(quarantined) = self.quarantined_auth_receipts.get(&id).cloned() {
                 match self
                     .resolver
@@ -1836,7 +2091,7 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         self.forget_pending_indexes(id, &pending);
-        Self::notify(&pending, WriteStatus::Cancelled);
+        Self::notify(&mut pending, WriteStatus::Cancelled);
         effects.push(Effect::EmitReceipt(id, WriteStatus::Cancelled));
         effects.extend(self.schedule_ready(self.clock));
         (Ok(CancelWriteOutcome::Cancelled), effects)
@@ -1942,7 +2197,7 @@ impl<S: EventStore> EngineCore<S> {
             pending.frozen = event.clone();
         }
 
-        if let Some(pending) = self.pending.get(&id) {
+        if let Some(pending) = self.pending.get_mut(&id) {
             Self::notify(pending, WriteStatus::Signed(event.id));
             effects.push(Effect::EmitReceipt(id, WriteStatus::Signed(event.id)));
             if !pending.routing_valid {
@@ -1958,7 +2213,7 @@ impl<S: EventStore> EngineCore<S> {
         {
             Some(Ok(relays)) => relays,
             Some(Err(reason)) => {
-                if let Some(pending) = self.pending.remove(&id) {
+                if let Some(mut pending) = self.pending.remove(&id) {
                     // No lanes have been bootstrapped for this intent yet at
                     // this point in `on_signed` (that only happens further
                     // below, after routes resolve) -- `lane_relays` is
@@ -1967,7 +2222,7 @@ impl<S: EventStore> EngineCore<S> {
                     // (epic #507 finding E5).
                     self.forget_pending_indexes(id, &pending);
                     let status = WriteStatus::Failed(reason);
-                    Self::notify(&pending, status.clone());
+                    Self::notify(&mut pending, status.clone());
                     effects.push(Effect::EmitReceipt(id, status));
                 }
                 return;
@@ -2241,7 +2496,7 @@ impl<S: EventStore> EngineCore<S> {
             Ok(id) => id,
             Err(err) => return vec![Effect::PublishFailed(err)],
         };
-        sink.on_status(status.clone());
+        let _ = sink.on_status(status.clone());
         vec![Effect::EmitReceipt(id, status)]
     }
 
@@ -2251,7 +2506,7 @@ impl<S: EventStore> EngineCore<S> {
         reason: String,
         effects: &mut Vec<Effect>,
     ) {
-        let Some(pending) = self.pending.remove(&id) else {
+        let Some(mut pending) = self.pending.remove(&id) else {
             return;
         };
 
@@ -2300,7 +2555,7 @@ impl<S: EventStore> EngineCore<S> {
         // untouched and return early, so the indexes must stay untouched
         // for those (epic #507 finding E5).
         self.forget_pending_indexes(id, &pending);
-        Self::notify(&pending, WriteStatus::Failed(reason.clone()));
+        Self::notify(&mut pending, WriteStatus::Failed(reason.clone()));
         effects.push(Effect::EmitReceipt(id, WriteStatus::Failed(reason)));
     }
 
@@ -2703,9 +2958,9 @@ impl<S: EventStore> EngineCore<S> {
         self.next_unaccepted_receipt = next;
     }
 
-    pub(super) fn notify(pending: &PendingWrite, status: WriteStatus) {
-        for sink in &pending.sinks {
-            sink.on_status(status.clone());
-        }
+    pub(super) fn notify(pending: &mut PendingWrite, status: WriteStatus) {
+        pending
+            .sinks
+            .retain(|sink| sink.sink.on_status(status.clone()));
     }
 }

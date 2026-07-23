@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use nmp_engine::core::{RelayAdmissionPolicy, RowDelta};
 use nmp_engine::outbox::WriteStatus;
-use nmp_engine::runtime::{EngineThread, ReceiptReattachment, RowsReceiver};
+use nmp_engine::runtime::{EngineThread, FifoReceiver, ReceiptReattachment, RowsReceiver};
 use nmp_grammar::{Binding, Durability, Filter, WriteIntent, WritePayload, WriteRouting};
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
@@ -260,7 +260,7 @@ fn spawn_write_relay() -> (RelayUrl, mpsc::Receiver<Event>) {
 }
 
 fn wait_for_status(
-    statuses: &mpsc::Receiver<WriteStatus>,
+    statuses: &FifoReceiver<WriteStatus>,
     predicate: impl Fn(&WriteStatus) -> bool,
 ) -> WriteStatus {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -374,7 +374,7 @@ fn offline_accept_restart_real_bunker_reattach_publish_and_ack() {
     )
     .expect("test engine thread construction");
     let statuses = match handle.reattach_receipt(receipt_id) {
-        ReceiptReattachment::Attached(_id, statuses) => statuses,
+        ReceiptReattachment::Attached { statuses, .. } => statuses,
         _ => panic!("durable receipt must reattach after restart"),
     };
     assert_eq!(statuses.recv().unwrap(), WriteStatus::Accepted);
@@ -629,7 +629,7 @@ fn checkpoint_restore_reattaches_durable_write_without_repairing() {
     )
     .expect("test engine thread construction");
     let statuses = match handle.reattach_receipt(receipt_id) {
-        ReceiptReattachment::Attached(_id, statuses) => statuses,
+        ReceiptReattachment::Attached { statuses, .. } => statuses,
         _ => panic!("durable receipt must reattach after restart"),
     };
     assert_eq!(statuses.recv().unwrap(), WriteStatus::Accepted);

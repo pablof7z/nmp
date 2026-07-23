@@ -25,10 +25,15 @@ public final class NMPQuerySnapshot {
 
     public init(_ query: NMPQuery) {
         consumeTask = Task { [weak self] in
-            for await batch in query {
-                guard !Task.isCancelled else { return }
-                self?.rows = batch.rows
-                self?.evidence = batch.evidence
+            do {
+                for try await batch in query {
+                    guard !Task.isCancelled else { return }
+                    self?.rows = batch.rows
+                    self?.evidence = batch.evidence
+                }
+            } catch {
+                // The query ended (withdrawal / single-consumer misuse); stop
+                // updating. NMP surfaces no capacity error here (#680).
             }
         }
     }
@@ -54,9 +59,13 @@ public final class NMPDiagnosticsSnapshotObserver {
 
     public init(_ diagnostics: NMPDiagnostics) {
         consumeTask = Task { [weak self] in
-            for await snapshot in diagnostics {
-                guard !Task.isCancelled else { return }
-                self?.snapshot = snapshot
+            do {
+                for try await snapshot in diagnostics {
+                    guard !Task.isCancelled else { return }
+                    self?.snapshot = snapshot
+                }
+            } catch {
+                // The diagnostics stream ended; stop updating (#680).
             }
         }
     }

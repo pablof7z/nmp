@@ -65,6 +65,7 @@
 
 mod auth;
 mod diagnostics_channel;
+mod fifo_channel;
 mod row_channel;
 
 pub use auth::{
@@ -100,10 +101,13 @@ use nmp_transport::{
     WireFrame,
 };
 
+#[doc(hidden)]
+pub use crate::core::ReceiptReplayCursor;
 use crate::core::{
     self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg,
     HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, HistorySink, PublishError,
-    ReattachOutcome, ReceiptId, RelayAdmissionPolicy, Row, RowDelta, RowSink,
+    ReattachOutcome, ReceiptId, ReceiptSinkRegistration, RelayAdmissionPolicy, Row, RowDelta,
+    RowSink,
 };
 use crate::outbox::{CancelWriteError, CancelWriteOutcome, ReceiptSink, WriteStatus};
 use crate::relay_information::{
@@ -112,10 +116,14 @@ use crate::relay_information::{
 };
 use nmp_grammar::WriteIntent;
 
-pub use diagnostics_channel::LatestReceiver;
 use diagnostics_channel::{latest_channel, LatestSender};
-pub use row_channel::RowsReceiver;
+pub use diagnostics_channel::{AsyncLatestReceiver, ConcurrentNext, LatestReceiver};
+pub use fifo_channel::{
+    fifo_channel, AsyncFifoReceiver, FifoNextError, FifoReceiver, FifoRecvError,
+    FifoRecvTimeoutError, FifoSender, FifoTryRecvError, FACT_CHANNEL_CAPACITY,
+};
 use row_channel::{rows_channel, RowsSender};
+pub use row_channel::{AsyncRowsReceiver, RowsReceiver};
 
 /// NIP-11 may refine a capability decision, but a slow/unavailable HTTP
 /// endpoint must not hold the WebSocket protocol path hostage. This is a
@@ -193,6 +201,17 @@ impl HistoryReceiver {
         Ok(Self::reconcile(&mut delivered, batch))
     }
 
+    /// Convert to the `Send + Sync` async pull surface (#680). The
+    /// receiver-side `delivered` reconcile map moves behind a `Mutex`; the
+    /// single-reader guard on the async receiver means `next()` never contends
+    /// it with itself.
+    pub fn into_async(self) -> AsyncHistoryReceiver {
+        AsyncHistoryReceiver {
+            batches: AsyncLatestReceiver::new(self.batches),
+            delivered: Mutex::new(self.delivered.into_inner()),
+        }
+    }
+
     fn reconcile(delivered: &mut BTreeMap<EventId, Row>, mut batch: HistoryBatch) -> HistoryBatch {
         #[cfg(feature = "bench-instrumentation")]
         let reconcile_started = std::time::Instant::now();
@@ -227,6 +246,34 @@ impl HistoryReceiver {
         #[cfg(feature = "bench-instrumentation")]
         crate::ingest_attribution::history_receiver_reconcile(reconcile_started.elapsed());
         batch
+    }
+}
+
+/// The async single-consumer half of a bounded, latest-wins history stream
+/// (#680). `Send + Sync`: the receiver-side reconcile map is behind a `Mutex`,
+/// and the single-reader guard on [`AsyncLatestReceiver`] serialises `next()`.
+pub struct AsyncHistoryReceiver {
+    batches: AsyncLatestReceiver<HistoryBatch>,
+    delivered: Mutex<BTreeMap<EventId, Row>>,
+}
+
+impl AsyncHistoryReceiver {
+    /// Await the next bounded latest snapshot with exact deltas rebased against
+    /// this receiver's last delivered frame, or `None` once the producer is
+    /// gone / the consumer cancelled. [`ConcurrentNext`] on an overlapping call.
+    pub async fn next(&self) -> Result<Option<HistoryBatch>, ConcurrentNext> {
+        match self.batches.next().await? {
+            Some(batch) => {
+                let mut delivered = self.delivered.lock().unwrap();
+                Ok(Some(HistoryReceiver::reconcile(&mut delivered, batch)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Idempotent consumer-initiated close; wakes a parked `next()` to `None`.
+    pub fn close(&self) {
+        self.batches.close();
     }
 }
 
@@ -549,7 +596,7 @@ pub struct HistoryHandle(HistorySessionId);
 /// call [`Handle::reattach_receipt`] without replaying acceptance.
 pub struct ReceiptStream {
     pub id: ReceiptId,
-    pub statuses: Receiver<WriteStatus>,
+    pub statuses: FifoReceiver<WriteStatus>,
 }
 
 /// Result of looking up retained receipt facts by stable id (or, #591, by a
@@ -560,7 +607,14 @@ pub enum ReceiptReattachment {
     /// [`Handle::reattach_receipt`] this is simply the caller's own input
     /// echoed back; for [`Handle::reattach_by_correlation`] (#591) it is the
     /// id the token resolved to, which the caller could not otherwise learn.
-    Attached(ReceiptId, Receiver<WriteStatus>),
+    Attached {
+        id: ReceiptId,
+        statuses: FifoReceiver<WriteStatus>,
+        /// Identity-stable durable-replay continuation for the next finite
+        /// page. `None` means this receiver is caught up and attached to
+        /// live work.
+        next_cursor: Option<ReceiptReplayCursor>,
+    },
     /// No retained receipt with this id (or token) exists.
     NotFound,
     /// The id is retained, but durable receipt or attempt evidence is corrupt
@@ -589,12 +643,23 @@ impl HistorySink for NullHistorySink {
 /// caller's channel. This IS the receipt delivery path (see the module doc):
 /// `Effect::EmitReceipt` carries the identical value and is not separately
 /// redelivered.
-struct ChannelReceiptSink(Sender<WriteStatus>);
+struct ChannelReceiptSink(FifoSender<WriteStatus>);
 
 impl ReceiptSink for ChannelReceiptSink {
-    fn on_status(&self, status: WriteStatus) {
-        let _ = self.0.send(status);
+    fn on_status(&self, status: WriteStatus) -> bool {
+        self.0.send(status)
     }
+}
+
+fn arm_receipt_sink_close(
+    receiver: &FifoReceiver<WriteStatus>,
+    inbox: Sender<Cmd>,
+    id: ReceiptId,
+    registration: ReceiptSinkRegistration,
+) {
+    receiver.set_close_hook(move || {
+        let _ = inbox.send(Cmd::DetachReceiptSink { id, registration });
+    });
 }
 
 fn publish_result(effects: &[Effect]) -> Result<ReceiptId, PublishError> {
@@ -679,12 +744,15 @@ enum Cmd {
     PublishTracked {
         intent: WriteIntent,
         sink: Box<dyn ReceiptSink>,
+        registration: ReceiptSinkRegistration,
         reply: Sender<Result<ReceiptId, PublishError>>,
     },
     ReattachReceipt {
         id: ReceiptId,
+        cursor: Option<ReceiptReplayCursor>,
         sink: Box<dyn ReceiptSink>,
-        reply: Sender<ReattachOutcome>,
+        registration: ReceiptSinkRegistration,
+        reply: Sender<(ReattachOutcome, Option<ReceiptReplayCursor>)>,
     },
     /// #591: reattach by caller correlation token instead of a `ReceiptId`
     /// -- the door a client uses after a crash that happened before it
@@ -692,7 +760,21 @@ enum Cmd {
     ReattachByCorrelation {
         token: String,
         sink: Box<dyn ReceiptSink>,
-        reply: Sender<(ReattachOutcome, Option<ReceiptId>)>,
+        registration: ReceiptSinkRegistration,
+        reply: Sender<(
+            ReattachOutcome,
+            Option<ReceiptId>,
+            Option<ReceiptReplayCursor>,
+        )>,
+    },
+    DetachReceiptSink {
+        id: ReceiptId,
+        registration: ReceiptSinkRegistration,
+    },
+    #[cfg(test)]
+    ReceiptSinkCount {
+        id: ReceiptId,
+        reply: Sender<usize>,
     },
     CancelWrite {
         id: ReceiptId,
@@ -769,7 +851,6 @@ pub enum SignEventError {
     SignerUnavailable { reason: String },
     SignerRejected { reason: String },
     InvalidSignerOutput { reason: String },
-    ExecutorSaturated { capacity: usize },
     ThreadUnavailable { component: String, reason: String },
     EngineClosed,
     Cancelled,
@@ -861,12 +942,6 @@ impl std::fmt::Display for SignEventError {
             Self::SignerRejected { reason } => write!(f, "signer rejected request: {reason}"),
             Self::InvalidSignerOutput { reason } => {
                 write!(f, "signer returned invalid output: {reason}")
-            }
-            Self::ExecutorSaturated { capacity } => {
-                write!(
-                    f,
-                    "sign-event refused: native task executor is at capacity {capacity}"
-                )
             }
             Self::ThreadUnavailable { component, reason } => {
                 write!(f, "{component} thread unavailable: {reason}")
@@ -1145,19 +1220,30 @@ fn pool_build_error(error: nmp_transport::PoolBuildError) -> EngineThreadError {
 
 pub const DEFAULT_MAX_AUTH_CAPABILITIES: usize = 64;
 
-/// Finite admission limits for engine-owned native work and live AUTH
-/// policy/signer registrations. Unlike legacy zero-valued relay/task
-/// settings, zero AUTH capabilities intentionally admits none.
+/// Fixed internal capacity of the engine's blocking-adapter pool (#680). This
+/// pool hosts ONLY transient blocking foreign/reactor adapters — NIP-11
+/// flights, remote-signer result waiters, the sign-event drain, AUTH foreign
+/// calls, and the follow-action worker. Observations never touch it (they are
+/// pure-waker async since #680), and engine-associated NIP-46 sessions run on
+/// their own session-owned executors, so this ceiling is generous for the
+/// remaining transient work and is deliberately NOT app-configurable, NOT
+/// CPU-derived, and NOT surfaced (there is no census/idle/capacity field
+/// anywhere in the SDK). Residual saturation surfaces as an adapter-specific
+/// `ThreadUnavailable`, never a global native-task ceiling.
+pub const ADAPTER_POOL_CAPACITY: usize = 32;
+
+/// Finite admission limit for live AUTH policy/signer registrations. Unlike
+/// legacy zero-valued relay settings, zero AUTH capabilities intentionally
+/// admits none. The blocking-adapter pool it accompanies is sized by the
+/// fixed internal [`ADAPTER_POOL_CAPACITY`], never by config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeConfig {
-    pub max_native_tasks: usize,
     pub max_auth_capabilities: usize,
 }
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            max_native_tasks: nmp_executor::DEFAULT_MAX_TASKS,
             max_auth_capabilities: DEFAULT_MAX_AUTH_CAPABILITIES,
         }
     }
@@ -1194,31 +1280,6 @@ impl EngineThread {
         )
     }
 
-    pub fn spawn_with_native_task_limit<S, D>(
-        store: S,
-        directory: D,
-        cap: usize,
-        pool_config: PoolConfig,
-        admission: RelayAdmissionPolicy,
-        max_native_tasks: usize,
-    ) -> Result<(Self, Handle), EngineThreadError>
-    where
-        S: EventStore + Send + 'static,
-        D: RelayDirectory + Send + 'static,
-    {
-        Self::spawn_with_runtime_config(
-            store,
-            directory,
-            cap,
-            pool_config,
-            admission,
-            RuntimeConfig {
-                max_native_tasks,
-                ..RuntimeConfig::default()
-            },
-        )
-    }
-
     pub fn spawn_with_runtime_config<S, D>(
         store: S,
         directory: D,
@@ -1231,13 +1292,12 @@ impl EngineThread {
         S: EventStore + Send + 'static,
         D: RelayDirectory + Send + 'static,
     {
-        let native_tasks =
-            nmp_executor::Executor::new(runtime_config.max_native_tasks).map_err(|error| {
-                EngineThreadError::ThreadUnavailable {
-                    component: "native task executor".to_string(),
-                    reason: error.to_string(),
-                }
-            })?;
+        let native_tasks = nmp_executor::Executor::new(ADAPTER_POOL_CAPACITY).map_err(|error| {
+            EngineThreadError::ThreadUnavailable {
+                component: "blocking-adapter pool".to_string(),
+                reason: error.to_string(),
+            }
+        })?;
         // One limit owns both compilation and connection admission. Legacy
         // zero values select the finite default; conflicting mechanism-test
         // inputs fail closed to the smaller non-zero ceiling.
@@ -1309,7 +1369,10 @@ impl EngineThread {
                     max_engine_batch_wait,
                 )
             }) {
-            Ok(join) => join,
+            Ok(join) => {
+                nmp_executor::note_thread_spawn();
+                join
+            }
             Err(error) => {
                 pool.shutdown();
                 native_tasks.shutdown();
@@ -1337,7 +1400,10 @@ impl EngineThread {
                     }
                 }
             }) {
-            Ok(join) => join,
+            Ok(join) => {
+                nmp_executor::note_thread_spawn();
+                join
+            }
             Err(error) => {
                 drop(pool_stop_tx);
                 pool.shutdown();
@@ -1380,7 +1446,10 @@ impl EngineThread {
                         &self_inbox,
                     )
                 }) {
-                Ok(join) => join,
+                Ok(join) => {
+                    nmp_executor::note_thread_spawn();
+                    join
+                }
                 Err(error) => {
                     drop(pool_stop_tx);
                     pool.shutdown();
@@ -1447,6 +1516,93 @@ impl EngineThread {
 }
 
 #[cfg(test)]
+mod receipt_sink_lifecycle_tests {
+    use super::*;
+    use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
+    use nmp_router::FixtureDirectory;
+    use nmp_store::MemoryStore;
+    use nostr::{Keys, Kind, UnsignedEvent};
+
+    fn parked_write(handle: &Handle, keys: &Keys) -> ReceiptStream {
+        handle.set_active_account(Some(keys.public_key()));
+        handle
+            .publish_tracked(WriteIntent {
+                payload: WritePayload::Unsigned(UnsignedEvent::new(
+                    keys.public_key(),
+                    Timestamp::now(),
+                    Kind::TextNote,
+                    vec![],
+                    "parked receipt sink lifecycle",
+                )),
+                durability: Durability::Durable,
+                routing: WriteRouting::AuthorOutbox,
+                identity_override: None,
+                correlation: None,
+            })
+            .expect("parked write is accepted")
+    }
+
+    /// A receipt without its signer may never emit another live status. Stream
+    /// cancel/drop must therefore remove its exact observer immediately,
+    /// without relying on a later `notify` call to prune a closed mailbox.
+    #[test]
+    fn parked_awaiting_capability_reattach_cancel_does_not_retain_sinks() {
+        let (thread, handle) = EngineThread::spawn(
+            MemoryStore::new(),
+            FixtureDirectory::new(),
+            10,
+            PoolConfig::default(),
+            RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+        )
+        .expect("test engine thread construction");
+        let tracked = parked_write(&handle, &Keys::generate());
+        let id = tracked.id;
+        assert_eq!(handle.receipt_sink_count(id), 1);
+
+        tracked.statuses.close();
+        assert_eq!(
+            handle.receipt_sink_count(id),
+            0,
+            "closing the original publish stream withdraws its observer"
+        );
+
+        for iteration in 0..128 {
+            let statuses = match handle.reattach_receipt(id) {
+                ReceiptReattachment::Attached {
+                    statuses,
+                    next_cursor: None,
+                    ..
+                } => statuses,
+                ReceiptReattachment::Attached { .. } => {
+                    panic!("two retained facts fit in one replay page")
+                }
+                ReceiptReattachment::NotFound | ReceiptReattachment::RetainedButUnreadable => {
+                    panic!("parked retained receipt remains readable")
+                }
+            };
+            assert_eq!(
+                handle.receipt_sink_count(id),
+                1,
+                "each fresh reattachment owns exactly one live observer"
+            );
+            if iteration % 2 == 0 {
+                statuses.close();
+            } else {
+                drop(statuses);
+            }
+            assert_eq!(
+                handle.receipt_sink_count(id),
+                0,
+                "cancel/drop detaches before the next engine command"
+            );
+        }
+
+        handle.shutdown();
+        thread.join();
+    }
+}
+
+#[cfg(test)]
 mod reentrant_shutdown_tests {
     use super::*;
     use nmp_router::FixtureDirectory;
@@ -1455,13 +1611,14 @@ mod reentrant_shutdown_tests {
     use nostr::{Keys, Kind};
 
     fn runtime() -> (EngineThread, Handle) {
-        EngineThread::spawn_with_native_task_limit(
+        // #680 removed the configurable native-task limit; the blocking-adapter
+        // pool is a fixed internal capacity, so spawn takes no limit argument.
+        EngineThread::spawn(
             MemoryStore::new(),
             FixtureDirectory::new(),
             1,
             PoolConfig::default(),
             RelayAdmissionPolicy::default(),
-            2,
         )
         .expect("engine construction")
     }
@@ -2366,7 +2523,9 @@ mod relay_worker_reconciliation_tests {
     struct NullReceiptSink;
 
     impl ReceiptSink for NullReceiptSink {
-        fn on_status(&self, _status: WriteStatus) {}
+        fn on_status(&self, _status: WriteStatus) -> bool {
+            true
+        }
     }
 
     fn query(author: &str) -> LiveQuery {
@@ -3111,7 +3270,6 @@ mod auth_registry_admission_tests {
             PoolConfig::default(),
             RelayAdmissionPolicy::default(),
             RuntimeConfig {
-                max_native_tasks: 1,
                 max_auth_capabilities: limit,
             },
         )
@@ -3732,11 +3890,41 @@ fn engine_loop<S, D>(
                     let removed = registry.remove(&registration).is_some();
                     let _ = reply.send(removed);
                 }
-                Cmd::ReattachReceipt { id, sink, reply } => {
-                    let _ = reply.send(core.reattach_receipt(id, sink));
+                Cmd::ReattachReceipt {
+                    id,
+                    cursor,
+                    sink,
+                    registration,
+                    reply,
+                } => {
+                    let _ = reply.send(core.reattach_receipt_page_registered(
+                        id,
+                        sink,
+                        cursor,
+                        FACT_CHANNEL_CAPACITY,
+                        Some(registration),
+                    ));
                 }
-                Cmd::ReattachByCorrelation { token, sink, reply } => {
-                    let _ = reply.send(core.reattach_by_correlation(token, sink));
+                Cmd::ReattachByCorrelation {
+                    token,
+                    sink,
+                    registration,
+                    reply,
+                } => {
+                    let _ = reply.send(core.reattach_by_correlation_page_registered(
+                        token,
+                        sink,
+                        None,
+                        FACT_CHANNEL_CAPACITY,
+                        Some(registration),
+                    ));
+                }
+                Cmd::DetachReceiptSink { id, registration } => {
+                    core.detach_receipt_sink(id, &registration);
+                }
+                #[cfg(test)]
+                Cmd::ReceiptSinkCount { id, reply } => {
+                    let _ = reply.send(core.receipt_sink_count(id));
                 }
                 Cmd::ObserveDiagnostics { reply } => {
                     let id = next_diag_id;
@@ -4242,13 +4430,43 @@ fn engine_loop<S, D>(
             Cmd::UnobserveDiagnostics(id) => {
                 diag_channels.remove(&id);
             }
-            Cmd::ReattachReceipt { id, sink, reply } => {
-                let found = core.reattach_receipt(id, sink);
+            Cmd::ReattachReceipt {
+                id,
+                cursor,
+                sink,
+                registration,
+                reply,
+            } => {
+                let found = core.reattach_receipt_page_registered(
+                    id,
+                    sink,
+                    cursor,
+                    FACT_CHANNEL_CAPACITY,
+                    Some(registration),
+                );
                 let _ = reply.send(found);
             }
-            Cmd::ReattachByCorrelation { token, sink, reply } => {
-                let found = core.reattach_by_correlation(token, sink);
+            Cmd::ReattachByCorrelation {
+                token,
+                sink,
+                registration,
+                reply,
+            } => {
+                let found = core.reattach_by_correlation_page_registered(
+                    token,
+                    sink,
+                    None,
+                    FACT_CHANNEL_CAPACITY,
+                    Some(registration),
+                );
                 let _ = reply.send(found);
+            }
+            Cmd::DetachReceiptSink { id, registration } => {
+                core.detach_receipt_sink(id, &registration);
+            }
+            #[cfg(test)]
+            Cmd::ReceiptSinkCount { id, reply } => {
+                let _ = reply.send(core.receipt_sink_count(id));
             }
             Cmd::CancelWrite { id, reply } => {
                 let (result, effects) = core.cancel_write(id);
@@ -4271,12 +4489,23 @@ fn engine_loop<S, D>(
             Cmd::PublishTracked {
                 intent,
                 sink,
+                registration,
                 reply,
             } => {
                 let mut effects = core.handle(EngineMsg::Tick(Timestamp::now()));
                 let publish_effects = core.handle(EngineMsg::Publish(intent, sink));
                 let result = publish_result(&publish_effects);
-                let _ = reply.send(result);
+                if let Ok(id) = result {
+                    // A write may have reached a terminal state synchronously
+                    // (for example, an already-signed ephemeral handoff), in
+                    // which case no live sink remains to register.
+                    let _ = core.register_initial_receipt_sink(id, registration.clone());
+                }
+                if reply.send(result).is_err() {
+                    if let Ok(id) = result {
+                        core.detach_receipt_sink(id, &registration);
+                    }
+                }
                 effects.extend(publish_effects);
                 dispatch_core_effects(
                     &mut core,
@@ -6003,8 +6232,9 @@ impl Handle {
         completion: impl FnOnce(Result<SignedEvent, SignEventError>) + Send + 'static,
     ) -> Result<SignEventCancel, SignEventError> {
         let reservation = self.native_tasks.reserve("sign-event").map_err(|error| {
-            SignEventError::ExecutorSaturated {
-                capacity: error.capacity,
+            SignEventError::ThreadUnavailable {
+                reason: error.to_string(),
+                component: error.component,
             }
         })?;
         let (reply_tx, reply_rx) = mpsc::channel();
@@ -6044,7 +6274,7 @@ impl Handle {
     /// no durable delivery obligation or query-visible pending row. If no
     /// pre-acceptance correlation id remains, this returns a typed error and
     /// creates no receipt stream.
-    pub fn publish(&self, intent: WriteIntent) -> Result<Receiver<WriteStatus>, PublishError> {
+    pub fn publish(&self, intent: WriteIntent) -> Result<FifoReceiver<WriteStatus>, PublishError> {
         self.publish_tracked(intent).map(|receipt| receipt.statuses)
     }
 
@@ -6053,19 +6283,22 @@ impl Handle {
     /// never for signing, routing, network I/O, or ACKs. Correlation-id
     /// exhaustion is returned before any stream or identity is fabricated.
     pub fn publish_tracked(&self, intent: WriteIntent) -> Result<ReceiptStream, PublishError> {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = fifo_channel();
+        let registration = ReceiptSinkRegistration::new();
         let sink: Box<dyn ReceiptSink> = Box::new(ChannelReceiptSink(tx));
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox
             .send(Cmd::PublishTracked {
                 intent,
                 sink,
+                registration: registration.clone(),
                 reply: reply_tx,
             })
             .expect("nmp-engine: publish called after shutdown");
         let id = reply_rx
             .recv()
             .expect("nmp-engine: engine dropped publish receipt reply")?;
+        arm_receipt_sink_close(&rx, self.inbox.clone(), id, registration);
         Ok(ReceiptStream { id, statuses: rx })
     }
 
@@ -6073,12 +6306,35 @@ impl Handle {
     /// channel is primed with durable receipt/attempt facts. Missing and
     /// retained-but-unreadable evidence are distinct outcomes.
     pub fn reattach_receipt(&self, id: ReceiptId) -> ReceiptReattachment {
-        let (tx, rx) = mpsc::channel();
+        self.reattach_receipt_page(id, None)
+    }
+
+    /// Continue durable replay from an identity-stable prior-page cursor.
+    /// This is delivery mechanism for receipt streams, not a second write
+    /// noun.
+    pub fn reattach_receipt_from(
+        &self,
+        id: ReceiptId,
+        cursor: ReceiptReplayCursor,
+    ) -> ReceiptReattachment {
+        self.reattach_receipt_page(id, Some(cursor))
+    }
+
+    fn reattach_receipt_page(
+        &self,
+        id: ReceiptId,
+        cursor: Option<ReceiptReplayCursor>,
+    ) -> ReceiptReattachment {
+        let (tx, rx) = fifo_channel();
+        let registration = ReceiptSinkRegistration::new();
+        arm_receipt_sink_close(&rx, self.inbox.clone(), id, registration.clone());
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox
             .send(Cmd::ReattachReceipt {
                 id,
+                cursor,
                 sink: Box::new(ChannelReceiptSink(tx)),
+                registration,
                 reply: reply_tx,
             })
             .expect("nmp-engine: reattach called after shutdown");
@@ -6086,9 +6342,15 @@ impl Handle {
             .recv()
             .expect("nmp-engine: engine dropped reattach reply")
         {
-            ReattachOutcome::Attached => ReceiptReattachment::Attached(id, rx),
-            ReattachOutcome::NotFound => ReceiptReattachment::NotFound,
-            ReattachOutcome::RetainedButUnreadable => ReceiptReattachment::RetainedButUnreadable,
+            (ReattachOutcome::Attached, next_cursor) => ReceiptReattachment::Attached {
+                id,
+                statuses: rx,
+                next_cursor,
+            },
+            (ReattachOutcome::NotFound, _) => ReceiptReattachment::NotFound,
+            (ReattachOutcome::RetainedButUnreadable, _) => {
+                ReceiptReattachment::RetainedButUnreadable
+            }
         }
     }
 
@@ -6100,12 +6362,14 @@ impl Handle {
     /// resolved id the caller could not otherwise learn rides along on
     /// `Attached`.
     pub fn reattach_by_correlation(&self, token: String) -> ReceiptReattachment {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = fifo_channel();
+        let registration = ReceiptSinkRegistration::new();
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox
             .send(Cmd::ReattachByCorrelation {
                 token,
                 sink: Box::new(ChannelReceiptSink(tx)),
+                registration: registration.clone(),
                 reply: reply_tx,
             })
             .expect("nmp-engine: reattach called after shutdown");
@@ -6113,14 +6377,21 @@ impl Handle {
             .recv()
             .expect("nmp-engine: engine dropped reattach reply")
         {
-            (ReattachOutcome::Attached, Some(id)) => ReceiptReattachment::Attached(id, rx),
-            (ReattachOutcome::Attached, None) => {
+            (ReattachOutcome::Attached, Some(id), next_cursor) => {
+                arm_receipt_sink_close(&rx, self.inbox.clone(), id, registration);
+                ReceiptReattachment::Attached {
+                    id,
+                    statuses: rx,
+                    next_cursor,
+                }
+            }
+            (ReattachOutcome::Attached, None, _) => {
                 unreachable!(
                     "EngineCore::reattach_by_correlation always resolves an id when Attached"
                 )
             }
-            (ReattachOutcome::NotFound, _) => ReceiptReattachment::NotFound,
-            (ReattachOutcome::RetainedButUnreadable, _) => {
+            (ReattachOutcome::NotFound, _, _) => ReceiptReattachment::NotFound,
+            (ReattachOutcome::RetainedButUnreadable, _, _) => {
                 ReceiptReattachment::RetainedButUnreadable
             }
         }
@@ -6173,6 +6444,20 @@ impl Handle {
             },
             rx,
         )
+    }
+
+    #[cfg(test)]
+    fn receipt_sink_count(&self, id: ReceiptId) -> usize {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::ReceiptSinkCount {
+                id,
+                reply: reply_tx,
+            })
+            .expect("nmp-engine: receipt sink census called after shutdown");
+        reply_rx
+            .recv()
+            .expect("nmp-engine: engine dropped receipt sink census reply")
     }
 
     /// Stop the engine thread (and, transitively, its bridge threads — see

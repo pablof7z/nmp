@@ -82,8 +82,6 @@ public struct NMPConfig: Sendable {
     /// demand and the transport worker set with the same effective value.
     /// Legacy zero is normalized to the finite default, never uncapped.
     public var maxRelays: UInt32
-    /// Finite zero-queue native observer/action/waiter ceiling.
-    public var maxNativeTasks: UInt32
     /// Shared ceiling for live local-account signer and AUTH-policy
     /// registrations. Zero deliberately admits none.
     public var maxAuthCapabilities: UInt32
@@ -95,7 +93,6 @@ public struct NMPConfig: Sendable {
         fallbackRelays: [String] = [],
         allowedLocalRelayHosts: [String] = [],
         maxRelays: UInt32 = 10,
-        maxNativeTasks: UInt32 = 12,
         maxAuthCapabilities: UInt32 = 64
     ) {
         self.storePath = storePath
@@ -104,7 +101,6 @@ public struct NMPConfig: Sendable {
         self.fallbackRelays = fallbackRelays
         self.allowedLocalRelayHosts = allowedLocalRelayHosts
         self.maxRelays = maxRelays
-        self.maxNativeTasks = maxNativeTasks
         self.maxAuthCapabilities = maxAuthCapabilities
     }
 
@@ -116,7 +112,6 @@ public struct NMPConfig: Sendable {
             fallbackRelays: fallbackRelays,
             allowedLocalRelayHosts: allowedLocalRelayHosts,
             maxRelays: maxRelays,
-            maxNativeTasks: maxNativeTasks,
             maxAuthCapabilities: maxAuthCapabilities
         )
     }
@@ -344,14 +339,6 @@ public final class NMPEngine: Sendable {
     /// No secret or signer capability crosses this boundary.
     public func activeAccount() throws -> String? {
         try nmpRethrowing { try ffi.activeAccount() }
-    }
-
-    func nativeTaskCensus() -> FfiNativeTaskCensus {
-        ffi.nativeTaskCensus()
-    }
-
-    func awaitNativeTasksIdle() {
-        ffi.awaitNativeTasksIdle()
     }
 
     /// Remove the configured plaintext checkpoint. The live signer remains in

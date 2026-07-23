@@ -12,6 +12,10 @@ bench-instrumentation = []
 blake3.workspace = true
 nostr.workspace = true
 nmp-grammar.workspace = true
+# #680 falsifier instrumentation only: every production transport thread is
+# counted through `nmp_executor::note_thread_spawn` so the whole-engine
+# NMP-thread counter is comprehensive (no uninstrumented thread source).
+nmp-executor.workspace = true
 # HARVEST target (M3 plan §4 "Transport pool"): the old repo's `mio`-driven
 # worker-thread pool, kept as the interior async edge so the app never sees
 # an imposed runtime (§2). Versions mirror the old repo's pinned stack.

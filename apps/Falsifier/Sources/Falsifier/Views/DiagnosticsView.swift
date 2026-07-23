@@ -85,7 +85,7 @@ struct DiagnosticsView: View {
     private func observe() async {
         do {
             let diagnostics = try model.engine.observeDiagnostics()
-            for await s in diagnostics {
+            for try await s in diagnostics {
                 snapshot = s
             }
         } catch {

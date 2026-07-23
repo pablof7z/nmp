@@ -2772,24 +2772,43 @@ enum Enum {
             ),
         },
         Variant {
-            name: "ExecutorSaturated",
+            name: "ConcurrentNext",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "A second `next()`/`signed()` was awaited on a stream/handle while a\nprevious one was still in flight. Observation streams are\nsingle-consumer (#680): await the next pull only after the previous one\nhas resolved. No frame is lost or duplicated — the offending call is\nrejected, not the stream.",
+            ),
+        },
+        Variant {
+            name: "FactStreamLagged",
             discr: None,
             fields: [
                 Field {
-                    name: "component",
-                    type_: String,
+                    name: "receipt_id",
+                    type_: Optional {
+                        inner_type: UInt64,
+                    },
                     default: None,
                     docstring: None,
                 },
+            ],
+            docstring: Some(
+                "A finite FIFO fact stream retained its bounded prefix but the producer\nadvanced beyond that live-delivery window before the app drained it.\nThe stream disconnects loudly instead of dropping facts or growing\nmemory. `receipt_id` is present whenever the durable receipt is known;\nreattach that receipt to replay persisted facts.",
+            ),
+        },
+        Variant {
+            name: "ReceiptReplayUnavailable",
+            discr: None,
+            fields: [
                 Field {
-                    name: "capacity",
+                    name: "receipt_id",
                     type_: UInt64,
                     default: None,
                     docstring: None,
                 },
             ],
             docstring: Some(
-                "The finite native executor had no immediately-startable slot. The\nassociated stream or operation was not accepted.",
+                "A paged durable receipt replay could no longer reconstruct the next\npage from retained evidence. The receipt identity remains known and is\nnot collapsed into absence.",
             ),
         },
         Variant {
@@ -2922,7 +2941,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "NIP-11 acquisition failed before any last-good document existed.\n`ExecutorSaturated`/`RelayInformationWaitersSaturated`/\n`ThreadUnavailable` above already carry these three acquisition\ndiscriminants with full fidelity (#494); every other\n`nmp::RelayInformationError` variant carries here instead of\ncollapsing to a message string.",
+                "NIP-11 acquisition failed before any last-good document existed.\n`RelayInformationWaitersSaturated`/`ThreadUnavailable` above already\ncarry the two acquisition discriminants with dedicated `FfiError`\nshapes (#494); every other `nmp::RelayInformationError` variant carries\nhere instead of collapsing to a message string.",
             ),
         },
         Variant {
@@ -3090,25 +3109,6 @@ enum Enum {
                 Field {
                     name: "reason",
                     type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "ExecutorSaturated",
-            discr: None,
-            fields: [
-                Field {
-                    name: "component",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "capacity",
-                    type_: UInt64,
                     default: None,
                     docstring: None,
                 },
@@ -3763,25 +3763,6 @@ enum Enum {
             docstring: None,
         },
         Variant {
-            name: "ExecutorSaturated",
-            discr: None,
-            fields: [
-                Field {
-                    name: "component",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "capacity",
-                    type_: UInt64,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
             name: "SignerMissingPublicKey",
             discr: None,
             fields: [],
@@ -4030,7 +4011,18 @@ enum Enum {
         Variant {
             name: "Attached",
             discr: None,
-            fields: [],
+            fields: [
+                Field {
+                    name: "stream",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "NmpReceiptStream",
+                        imp: Struct,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
             docstring: None,
         },
         Variant {
@@ -4049,7 +4041,7 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "Result of looking up a stable retained receipt id.",
+        "Result of looking up a stable retained receipt id. The `Attached` variant\ncarries the pull-based [`crate::facade::NmpReceiptStream`] that traverses\ndurable `WriteStatus` facts in finite pages and streams onward (#680).",
     ),
 }
 
@@ -4211,19 +4203,6 @@ enum Enum {
     discr_type: None,
     variants: [
         Variant {
-            name: "ExecutorSaturated",
-            discr: None,
-            fields: [
-                Field {
-                    name: "capacity",
-                    type_: UInt64,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
             name: "WaiterSaturated",
             discr: None,
             fields: [
@@ -4381,7 +4360,7 @@ enum Enum {
     },
     non_exhaustive: false,
     docstring: Some(
-        "Exact failure returned by `NmpQueryHandle::request_rows`\n(`nmp::RequestRowsError` mirror). Growth is declarative -- there is no\ntoken to misuse and no generation to go stale, so the only failures left\nare the structural one (`Unwindowed`) and genuine advance failures.\n`AtBound` is deliberately NOT here: reaching the declared `max` is a FACT\ndelivered in frames ([`FfiWindowLoad::AtBound`]), never a thrown error.",
+        "Exact failure returned by `NmpRowStream::request_rows`\n(`nmp::RequestRowsError` mirror). Growth is declarative -- there is no\ntoken to misuse and no generation to go stale, so the only failures left\nare the structural one (`Unwindowed`) and genuine advance failures.\n`AtBound` is deliberately NOT here: reaching the declared `max` is a FACT\ndelivered in frames ([`FfiWindowLoad::AtBound`]), never a thrown error.",
     ),
 }
 
@@ -4627,11 +4606,21 @@ enum Enum {
             fields: [],
             docstring: None,
         },
+        Variant {
+            name: "AlreadyConsumed",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "`NmpSignEventHandle::signed()` is one-shot: this is returned when\n`signed()` is awaited a second time (sequentially or concurrently) —\nthe single result was already delivered to the first await (#680).",
+            ),
+        },
     ],
-    shape: Enum,
+    shape: Error {
+        flat: false,
+    },
     non_exhaustive: false,
     docstring: Some(
-        "Failures that may resolve after a sign-only operation was accepted.",
+        "Failures that may resolve after a sign-only operation was accepted. Thrown\nfrom [`crate::facade::NmpSignEventHandle::signed`] (#680).",
     ),
 }
 
@@ -4760,7 +4749,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "Bounded newest-first window: starts with `initial` canonical rows,\ngrows only by explicit `NmpQueryHandle::request_rows`, never above\n`max`.",
+                "Bounded newest-first window: starts with `initial` canonical rows,\ngrows only by explicit `NmpRowStream::request_rows`, never above\n`max`.",
             ),
         },
     ],
@@ -5252,7 +5241,7 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "The receipt STREAM (`nmp::WriteStatus` mirror; ledger #9 — enqueue is\nnot converged, the app's `ReceiptObserver` may see many of these per\npublish).",
+        "The receipt STREAM (`nmp::WriteStatus` mirror; ledger #9 — enqueue is\nnot converged, the app's `NmpReceiptStream` may yield many of these per\npublish).",
     ),
 }
 
@@ -6276,41 +6265,6 @@ record Record {
         },
     ],
     docstring: None,
-}
-
-record Record {
-    name: "FfiNativeTaskCensus",
-    module_path: "nmp_ffi",
-    remote: false,
-    fields: [
-        Field {
-            name: "capacity",
-            type_: UInt64,
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "admitted",
-            type_: UInt64,
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "running",
-            type_: UInt64,
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "accepting",
-            type_: Boolean,
-            default: None,
-            docstring: None,
-        },
-    ],
-    docstring: Some(
-        "Exact, lock-protected executor accounting for deterministic lifecycle and\nsaturation falsifiers. `admitted` includes a reservation during its brief\npre-handoff window; `running` counts OS task handles not yet joined.",
-    ),
 }
 
 record Record {
@@ -7365,20 +7319,6 @@ record Record {
             ),
             docstring: Some(
                 "The one whole-engine relay ceiling. It bounds the complete compiled\ndemand and the transport worker set with the same effective value.\nLegacy zero is normalized to the finite default, never uncapped.\n\nThe `default =` literal below MUST stay equal to\n[`DEFAULT_MAX_RELAYS`] (uniffi record defaults accept only a literal,\nnever a const path) — the const is the single Rust-side knob; the\nliteral is its foreign-binding mirror.",
-            ),
-        },
-        Field {
-            name: "max_native_tasks",
-            type_: UInt32,
-            default: Some(
-                UInt(
-                    12,
-                    Decimal,
-                    UInt32,
-                ),
-            ),
-            docstring: Some(
-                "Maximum immediately-running native observer/action/waiter tasks.\nZero selects the finite default; saturation never queues an accepted\nstream behind a long-lived drain.",
             ),
         },
         Field {
@@ -10242,7 +10182,7 @@ object Object {
 }
 
 object Object {
-    name: "NmpDiagnosticsHandle",
+    name: "NmpDiagnosticsStream",
     imp: Struct,
     module_path: "nmp_ffi",
     remote: false,
@@ -10250,20 +10190,20 @@ object Object {
     methods: [
         Method {
             name: "cancel",
-            object_name: "NmpDiagnosticsHandle",
+            object_name: "NmpDiagnosticsStream",
             object_module_path: "nmp_ffi",
             is_async: false,
             object_impl: Struct,
             arguments: [],
             return_type: None,
             ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nmpdiagnosticshandle_cancel",
+                name: "uniffi_nmp_ffi_fn_method_nmpdiagnosticsstream_cancel",
                 is_async: false,
                 arguments: [
                     FfiArgument {
                         name: "ptr",
                         type_: RustArcPtr(
-                            "NmpDiagnosticsHandle",
+                            "NmpDiagnosticsStream",
                         ),
                     },
                 ],
@@ -10272,45 +10212,92 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Withdraw this diagnostics observer now, rather than waiting for\n`Drop`. Safe to call more than once; safe to never call at all.",
+                "Withdraw this diagnostics observer now, rather than waiting for `Drop`.\nSafe to call more than once; safe to never call at all.",
             ),
             throws: None,
             takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpdiagnosticshandle_cancel",
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpdiagnosticsstream_cancel",
             checksum: Some(
-                27481,
+                6173,
+            ),
+        },
+        Method {
+            name: "next",
+            object_name: "NmpDiagnosticsStream",
+            object_module_path: "nmp_ffi",
+            is_async: true,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Optional {
+                    inner_type: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiDiagnosticsSnapshot",
+                    },
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpdiagnosticsstream_next",
+                is_async: true,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpDiagnosticsStream",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    Handle,
+                ),
+                has_rust_call_status_arg: false,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Await the next [`FfiDiagnosticsSnapshot`] — the current snapshot on the\nfirst call, a fresh one on every coverage change afterward, or `None`\nonce the stream is withdrawn. [`FfiError::ConcurrentNext`] on an\noverlapping call.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpdiagnosticsstream_next",
+            checksum: Some(
+                31299,
             ),
         },
     ],
     uniffi_traits: [],
     trait_impls: [],
     ffi_func_clone: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_clone_nmpdiagnosticshandle",
+        name: "uniffi_nmp_ffi_fn_clone_nmpdiagnosticsstream",
         is_async: false,
         arguments: [
             FfiArgument {
                 name: "ptr",
                 type_: RustArcPtr(
-                    "NmpDiagnosticsHandle",
+                    "NmpDiagnosticsStream",
                 ),
             },
         ],
         return_type: Some(
             RustArcPtr(
-                "NmpDiagnosticsHandle",
+                "NmpDiagnosticsStream",
             ),
         ),
         has_rust_call_status_arg: true,
         is_object_free_function: false,
     },
     ffi_func_free: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_free_nmpdiagnosticshandle",
+        name: "uniffi_nmp_ffi_fn_free_nmpdiagnosticsstream",
         is_async: false,
         arguments: [
             FfiArgument {
                 name: "ptr",
                 type_: RustArcPtr(
-                    "NmpDiagnosticsHandle",
+                    "NmpDiagnosticsStream",
                 ),
             },
         ],
@@ -10320,7 +10307,7 @@ object Object {
     },
     ffi_init_callback: None,
     docstring: Some(
-        "The app-facing handle to a live diagnostics stream (returned by\n[`NmpEngine::observe_diagnostics`]). Same discipline as [`NmpQueryHandle`]\n-- holds ONLY the opaque [`nmp::ObservationCancel`] token\n(`DiagnosticsSubscription::cancel_handle`), the SAME type\n[`NmpQueryHandle`] holds.",
+        "The app-facing pull-based handle to a live diagnostics stream (returned by\n[`NmpEngine::observe_diagnostics`], #680). Same discipline as\n[`NmpRowStream`] — await [`Self::next`], `Drop`/[`Self::cancel`] withdraw.",
     ),
 }
 
@@ -10572,39 +10559,6 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_add_auth_policy",
             checksum: Some(
                 57420,
-            ),
-        },
-        Method {
-            name: "await_native_tasks_idle",
-            object_name: "NmpEngine",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [],
-            return_type: None,
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nmpengine_await_native_tasks_idle",
-                is_async: false,
-                arguments: [
-                    FfiArgument {
-                        name: "ptr",
-                        type_: RustArcPtr(
-                            "NmpEngine",
-                        ),
-                    },
-                ],
-                return_type: None,
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: Some(
-                "Event-driven barrier for lifecycle tests and hosts that require proof\nall cancelled native callbacks have returned before releasing state.",
-            ),
-            throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_await_native_tasks_idle",
-            checksum: Some(
-                47867,
             ),
         },
         Method {
@@ -11002,18 +10956,14 @@ object Object {
                     optional: false,
                     default: None,
                 },
-                Argument {
-                    name: "observer",
-                    type_: CallbackInterface {
-                        module_path: "nmp_ffi",
-                        name: "FollowActionObserver",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
             ],
-            return_type: None,
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "NmpFollowActionStream",
+                    imp: Struct,
+                },
+            ),
             ffi_func: FfiFunction {
                 name: "uniffi_nmp_ffi_fn_method_nmpengine_follow",
                 is_async: false,
@@ -11030,23 +10980,23 @@ object Object {
                             None,
                         ),
                     },
-                    FfiArgument {
-                        name: "observer",
-                        type_: UInt64,
-                    },
                 ],
-                return_type: None,
+                return_type: Some(
+                    RustArcPtr(
+                        "NmpFollowActionStream",
+                    ),
+                ),
                 has_rust_call_status_arg: true,
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Ask NMP to follow `target`. This is the complete NIP-02 action: it\nwaits for the module's source-evidence policy, preserves the exact\nkind:3 base, atomically guards that base, signs, routes, and streams\nthe durable receipt. The native button owns none of those steps.",
+                "Ask NMP to follow `target`. This is the complete NIP-02 action: it\nwaits for the module's source-evidence policy, preserves the exact\nkind:3 base, atomically guards that base, signs, routes, and streams\nthe durable receipt. The native button owns none of those steps; it\nonly awaits [`NmpFollowActionStream::next`].",
             ),
             throws: None,
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_follow",
             checksum: Some(
-                33567,
+                20611,
             ),
         },
         Method {
@@ -11168,51 +11118,6 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_group_message_intent",
             checksum: Some(
                 50602,
-            ),
-        },
-        Method {
-            name: "native_task_census",
-            object_name: "NmpEngine",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [],
-            return_type: Some(
-                Record {
-                    module_path: "nmp_ffi",
-                    name: "FfiNativeTaskCensus",
-                },
-            ),
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nmpengine_native_task_census",
-                is_async: false,
-                arguments: [
-                    FfiArgument {
-                        name: "ptr",
-                        type_: RustArcPtr(
-                            "NmpEngine",
-                        ),
-                    },
-                ],
-                return_type: Some(
-                    RustBuffer(
-                        Some(
-                            ExternalFfiMetadata {
-                                name: "FfiNativeTaskCensus",
-                                module_path: "nmp_ffi",
-                            },
-                        ),
-                    ),
-                ),
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: None,
-            throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_native_task_census",
-            checksum: Some(
-                14452,
             ),
         },
         Method {
@@ -11437,21 +11342,11 @@ object Object {
                     optional: false,
                     default: None,
                 },
-                Argument {
-                    name: "observer",
-                    type_: CallbackInterface {
-                        module_path: "nmp_ffi",
-                        name: "RowObserver",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
             ],
             return_type: Some(
                 Object {
                     module_path: "nmp_ffi",
-                    name: "NmpQueryHandle",
+                    name: "NmpRowStream",
                     imp: Struct,
                 },
             ),
@@ -11482,21 +11377,17 @@ object Object {
                             None,
                         ),
                     },
-                    FfiArgument {
-                        name: "observer",
-                        type_: UInt64,
-                    },
                 ],
                 return_type: Some(
                     RustArcPtr(
-                        "NmpQueryHandle",
+                        "NmpRowStream",
                     ),
                 ),
                 has_rust_call_status_arg: true,
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Open a live subscription. `observer` is driven from a dedicated drain\nthread (M4 plan §4b) -- never the engine thread itself. The returned\n[`NmpQueryHandle`]'s `Drop` withdraws the subscription (deinit-tied\ndemand drop, plan §4c); call [`NmpQueryHandle::cancel`] for an\nexplicit early teardown instead of waiting on Swift's own `deinit`\ntiming.\n\n`window` selects the observation's delivery policy (#485). `None` is\ntoday's unbounded observation: exact deltas are rebased when a slow\nobserver skips intermediate reducer emits, and the full set is never\nredelivered. `Some(FfiWindow::Expandable { initial, max })` is a\nbounded newest-first window: each frame carries the complete\ncurrent row set + growth fact in `FfiFrame::window` (deltas stay\nempty on the wire) and grows only via\n[`NmpQueryHandle::request_rows`], never above `max`. Zero bounds and\n`initial > max` fail closed here with a typed [`FfiError`]; a\nwindowed selection that already declares a NIP-01 `limit` fails with\n[`FfiError::WindowSelectionHasLimit`].",
+                "Open a live subscription (#680). Delivery is pull-based: await\n[`NmpRowStream::next`], which parks a waker on the engine-owned mailbox\nrather than blocking a dedicated OS thread — opening one costs no native\nthread. `None` from `next()` is the terminal signal (cancel / engine\nshutdown / producer drop). The returned [`NmpRowStream`]'s `Drop`\nwithdraws the subscription; call [`NmpRowStream::cancel`] for an\nexplicit early teardown.\n\n`window` selects the observation's delivery policy (#485). `None` is\ntoday's unbounded observation: exact deltas are rebased when a slow\nconsumer skips intermediate reducer emits, and the full set is never\nredelivered. `Some(FfiWindow::Expandable { initial, max })` is a\nbounded newest-first window: each frame carries the complete\ncurrent row set + growth fact in `FfiFrame::window` (deltas stay\nempty on the wire) and grows only via\n[`NmpRowStream::request_rows`], never above `max`. Zero bounds and\n`initial > max` fail closed here with a typed [`FfiError`]; a\nwindowed selection that already declares a NIP-01 `limit` fails with\n[`FfiError::WindowSelectionHasLimit`].",
             ),
             throws: Some(
                 Enum {
@@ -11507,7 +11398,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_observe",
             checksum: Some(
-                58546,
+                50158,
             ),
         },
         Method {
@@ -11539,21 +11430,11 @@ object Object {
                     optional: false,
                     default: None,
                 },
-                Argument {
-                    name: "observer",
-                    type_: CallbackInterface {
-                        module_path: "nmp_ffi",
-                        name: "RowObserver",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
             ],
             return_type: Some(
                 Object {
                     module_path: "nmp_ffi",
-                    name: "NmpQueryHandle",
+                    name: "NmpRowStream",
                     imp: Struct,
                 },
             ),
@@ -11584,21 +11465,17 @@ object Object {
                             None,
                         ),
                     },
-                    FfiArgument {
-                        name: "observer",
-                        type_: UInt64,
-                    },
                 ],
                 return_type: Some(
                     RustArcPtr(
-                        "NmpQueryHandle",
+                        "NmpRowStream",
                     ),
                 ),
                 has_rust_call_status_arg: true,
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Open a live subscription over an explicit [`FfiDemand`] (#107) --\nthe constructor an app reaches for once [`Self::observe`]'s bare\n`FfiFilter` (which always takes `Demand::from_filter`'s static\ndefault) isn't enough: declaring `Pinned` wire authority, a non-\ndefault `AccessContext`, or a non-`Agnostic` `CacheMode`. Same\ndrain-thread/cancel-handle/window shape as `observe` in every other\nrespect (see that method's doc for the `window` policy).",
+                "Open a live subscription over an explicit [`FfiDemand`] (#107) --\nthe constructor an app reaches for once [`Self::observe`]'s bare\n`FfiFilter` (which always takes `Demand::from_filter`'s static\ndefault) isn't enough: declaring `Pinned` wire authority, a non-\ndefault `AccessContext`, or a non-`Agnostic` `CacheMode`. Same\npull-based/cancel/window shape as `observe` in every other respect\n(see that method's doc for the `window` policy).",
             ),
             throws: Some(
                 Enum {
@@ -11609,7 +11486,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_observe_demand",
             checksum: Some(
-                18534,
+                62514,
             ),
         },
         Method {
@@ -11618,22 +11495,11 @@ object Object {
             object_module_path: "nmp_ffi",
             is_async: false,
             object_impl: Struct,
-            arguments: [
-                Argument {
-                    name: "observer",
-                    type_: CallbackInterface {
-                        module_path: "nmp_ffi",
-                        name: "DiagnosticsObserver",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-            ],
+            arguments: [],
             return_type: Some(
                 Object {
                     module_path: "nmp_ffi",
-                    name: "NmpDiagnosticsHandle",
+                    name: "NmpDiagnosticsStream",
                     imp: Struct,
                 },
             ),
@@ -11647,21 +11513,17 @@ object Object {
                             "NmpEngine",
                         ),
                     },
-                    FfiArgument {
-                        name: "observer",
-                        type_: UInt64,
-                    },
                 ],
                 return_type: Some(
                     RustArcPtr(
-                        "NmpDiagnosticsHandle",
+                        "NmpDiagnosticsStream",
                     ),
                 ),
                 has_rust_call_status_arg: true,
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Open a live diagnostics stream (M5 plan §1.2 step 5) -- \"the\nacceptance test rendered on screen, permanently.\" `observer` is\ndriven from a dedicated drain thread, mirroring [`Self::observe`];\nthe returned [`NmpDiagnosticsHandle`]'s `Drop` withdraws the\nobserver (deinit-tied teardown, same discipline as\n[`NmpQueryHandle`]). Delivers the CURRENT snapshot immediately, then\na fresh one on every recompile/EOSE-driven coverage change --\npushed reactively, never polled.",
+                "Open a live diagnostics stream (#680) -- \"the acceptance test rendered\non screen, permanently.\" Delivery is pull-based: await\n[`NmpDiagnosticsStream::next`], which parks a waker on the engine's\nlatest-state diagnostics mailbox — no dedicated drain thread. The\nreturned stream's `Drop` withdraws the observer; call\n[`NmpDiagnosticsStream::cancel`] for an explicit early teardown. The\nfirst `next()` yields the CURRENT snapshot immediately, then a fresh one\non every recompile/EOSE-driven coverage change. `None` is the terminal\nsignal (cancel / engine shutdown).",
             ),
             throws: Some(
                 Enum {
@@ -11672,7 +11534,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_observe_diagnostics",
             checksum: Some(
-                22841,
+                284,
             ),
         },
         Method {
@@ -11689,21 +11551,11 @@ object Object {
                     optional: false,
                     default: None,
                 },
-                Argument {
-                    name: "observer",
-                    type_: CallbackInterface {
-                        module_path: "nmp_ffi",
-                        name: "FollowObserver",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
             ],
             return_type: Some(
                 Object {
                     module_path: "nmp_ffi",
-                    name: "NmpFollowHandle",
+                    name: "NmpFollowStream",
                     imp: Struct,
                 },
             ),
@@ -11723,21 +11575,17 @@ object Object {
                             None,
                         ),
                     },
-                    FfiArgument {
-                        name: "observer",
-                        type_: UInt64,
-                    },
                 ],
                 return_type: Some(
                     RustArcPtr(
-                        "NmpFollowHandle",
+                        "NmpFollowStream",
                     ),
                 ),
                 has_rust_call_status_arg: true,
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Observe the active account's relationship to `target` through the\nNMP-owned NIP-02 resource. The returned handle only owns demand\ncancellation; contact-list semantics and acquisition state stay in\nRust and arrive as closed snapshots.",
+                "Observe the active account's relationship to `target` through the\nNMP-owned NIP-02 resource (#680). Awaiting [`NmpFollowStream::next`]\ncosts no NMP-owned OS thread: the relationship snapshot is folded inline\nover the engine's waker-driven async row mailbox. Contact-list\nsemantics and acquisition state stay in Rust and arrive as complete\nself-contained snapshots.",
             ),
             throws: Some(
                 Enum {
@@ -11748,7 +11596,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_observe_following",
             checksum: Some(
-                25912,
+                13924,
             ),
         },
         Method {
@@ -11768,19 +11616,13 @@ object Object {
                     optional: false,
                     default: None,
                 },
-                Argument {
-                    name: "observer",
-                    type_: CallbackInterface {
-                        module_path: "nmp_ffi",
-                        name: "ReceiptObserver",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
             ],
             return_type: Some(
-                UInt64,
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "NmpReceiptStream",
+                    imp: Struct,
+                },
             ),
             ffi_func: FfiFunction {
                 name: "uniffi_nmp_ffi_fn_method_nmpengine_publish",
@@ -11803,19 +11645,17 @@ object Object {
                             ),
                         ),
                     },
-                    FfiArgument {
-                        name: "observer",
-                        type_: UInt64,
-                    },
                 ],
                 return_type: Some(
-                    UInt64,
+                    RustArcPtr(
+                        "NmpReceiptStream",
+                    ),
                 ),
                 has_rust_call_status_arg: true,
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Enqueue a write. `observer` streams every `WriteStatus` this intent\never reaches (ledger #9 -- enqueue is not converged; the first value\nis never a terminal for a durable/at-most-once intent). A\ncaller-supplied `Signed` payload that fails verification is no\nlonger a synchronous error here (that guarantee moved to\n`nmp-engine::core::EngineCore::on_publish`'s acceptance boundary,\nUnit A0/#56, so it holds for every entry point, not only this one) --\nit surfaces as `WriteStatus::Failed`, the FIRST and only status\n`observer` receives, with no preceding `Accepted`.\nExhaustion of the pre-acceptance correlation namespace instead returns\na typed `FfiError` synchronously: no receipt id or stream exists.",
+                "Enqueue a write (#680). The returned [`NmpReceiptStream`] exposes the\nstable receipt id ([`NmpReceiptStream::id`]) and streams every\n`WriteStatus` this intent ever reaches (ledger #9 -- enqueue is not\nconverged; the first value is never a terminal for a durable/\nat-most-once intent) via `async fn next()`. A caller-supplied `Signed`\npayload that fails verification is no longer a synchronous error here\n(that guarantee moved to `nmp-engine::core::EngineCore::on_publish`'s\nacceptance boundary, Unit A0/#56, so it holds for every entry point) --\nit surfaces as `WriteStatus::Failed`, the FIRST and only status the\nstream delivers, with no preceding `Accepted`. Exhaustion of the\npre-acceptance correlation namespace instead returns a typed `FfiError`\nsynchronously: no receipt id or stream exists.",
             ),
             throws: Some(
                 Enum {
@@ -11826,7 +11666,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_publish",
             checksum: Some(
-                52186,
+                14085,
             ),
         },
         Method {
@@ -11847,19 +11687,13 @@ object Object {
                     optional: false,
                     default: None,
                 },
-                Argument {
-                    name: "observer",
-                    type_: CallbackInterface {
-                        module_path: "nmp_ffi",
-                        name: "ReceiptObserver",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
             ],
             return_type: Some(
-                UInt64,
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "NmpReceiptStream",
+                    imp: Struct,
+                },
             ),
             ffi_func: FfiFunction {
                 name: "uniffi_nmp_ffi_fn_method_nmpengine_publish_composed",
@@ -11877,19 +11711,17 @@ object Object {
                             "FfiComposedWriteIntent",
                         ),
                     },
-                    FfiArgument {
-                        name: "observer",
-                        type_: UInt64,
-                    },
                 ],
                 return_type: Some(
-                    UInt64,
+                    RustArcPtr(
+                        "NmpReceiptStream",
+                    ),
                 ),
                 has_rust_call_status_arg: true,
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Publish a `nmp_nip29::compose_group_send`-composed intent (#115).\nTake-once: `intent` is consumed by this call (`FfiComposedWriteIntent\n::take`) -- a second call on the SAME handle fails closed with\n`FfiError::IntentAlreadyConsumed` rather than silently re-publishing\na stale template. Otherwise identical to [`Self::publish`]'s body\n(same receipt-stream drain-thread bridge); `write_intent_from_ffi`\nnever runs for this path -- the intent was already composed\ndirectly, never round-tripped through the raw `FfiWriteRouting`\nconversion (which withholds `PinnedHost` entirely).",
+                "Publish a `nmp_nip29::compose_group_send`-composed intent (#115).\nTake-once: `intent` is consumed by this call (`FfiComposedWriteIntent\n::take`) -- a second call on the SAME handle fails closed with\n`FfiError::IntentAlreadyConsumed` rather than silently re-publishing\na stale template. Otherwise identical to [`Self::publish`]'s body\n(same pull-based receipt stream); `write_intent_from_ffi`\nnever runs for this path -- the intent was already composed\ndirectly, never round-tripped through the raw `FfiWriteRouting`\nconversion (which withholds `PinnedHost` entirely).",
             ),
             throws: Some(
                 Enum {
@@ -11900,7 +11732,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_publish_composed",
             checksum: Some(
-                4438,
+                49494,
             ),
         },
         Method {
@@ -11913,16 +11745,6 @@ object Object {
                 Argument {
                     name: "correlation",
                     type_: String,
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-                Argument {
-                    name: "observer",
-                    type_: CallbackInterface {
-                        module_path: "nmp_ffi",
-                        name: "ReceiptObserver",
-                    },
                     by_ref: false,
                     optional: false,
                     default: None,
@@ -11950,10 +11772,6 @@ object Object {
                             None,
                         ),
                     },
-                    FfiArgument {
-                        name: "observer",
-                        type_: UInt64,
-                    },
                 ],
                 return_type: Some(
                     RustBuffer(
@@ -11980,7 +11798,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_reattach_by_correlation",
             checksum: Some(
-                29977,
+                11491,
             ),
         },
         Method {
@@ -11993,16 +11811,6 @@ object Object {
                 Argument {
                     name: "receipt_id",
                     type_: UInt64,
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-                Argument {
-                    name: "observer",
-                    type_: CallbackInterface {
-                        module_path: "nmp_ffi",
-                        name: "ReceiptObserver",
-                    },
                     by_ref: false,
                     optional: false,
                     default: None,
@@ -12028,10 +11836,6 @@ object Object {
                         name: "receipt_id",
                         type_: UInt64,
                     },
-                    FfiArgument {
-                        name: "observer",
-                        type_: UInt64,
-                    },
                 ],
                 return_type: Some(
                     RustBuffer(
@@ -12047,7 +11851,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Attach to a retained receipt without collapsing corrupt durable\nevidence into the same result as an unknown id.",
+                "Attach to a retained receipt without collapsing corrupt durable\nevidence into the same result as an unknown id (#680). The `Attached`\nvariant carries an [`NmpReceiptStream`] that transparently traverses\ndurable `WriteStatus` facts in finite pages and streams onward,\ndelivered pull-based via `async fn next()`.",
             ),
             throws: Some(
                 Enum {
@@ -12058,7 +11862,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_reattach_receipt",
             checksum: Some(
-                39241,
+                49194,
             ),
         },
         Method {
@@ -12460,16 +12264,6 @@ object Object {
                     optional: false,
                     default: None,
                 },
-                Argument {
-                    name: "observer",
-                    type_: CallbackInterface {
-                        module_path: "nmp_ffi",
-                        name: "SignEventObserver",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
             ],
             return_type: Some(
                 Object {
@@ -12499,10 +12293,6 @@ object Object {
                             ),
                         ),
                     },
-                    FfiArgument {
-                        name: "observer",
-                        type_: UInt64,
-                    },
                 ],
                 return_type: Some(
                     RustArcPtr(
@@ -12513,7 +12303,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Sign one exact event through the active account without accepting a\nwrite, persisting a row/receipt, planning relays, or publishing. The\nreturned handle cancels only this signer operation; completion fires\nexactly once through `observer`.",
+                "Sign one exact event through the active account without accepting a\nwrite, persisting a row/receipt, planning relays, or publishing. The\nreturned [`NmpSignEventHandle`] delivers the outcome once through its\n`async fn signed()`; [`NmpSignEventHandle::cancel`] cancels only this\nsigner operation.",
             ),
             throws: Some(
                 Enum {
@@ -12524,7 +12314,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_sign_event",
             checksum: Some(
-                7136,
+                26885,
             ),
         },
         Method {
@@ -12541,18 +12331,14 @@ object Object {
                     optional: false,
                     default: None,
                 },
-                Argument {
-                    name: "observer",
-                    type_: CallbackInterface {
-                        module_path: "nmp_ffi",
-                        name: "FollowActionObserver",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
             ],
-            return_type: None,
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "NmpFollowActionStream",
+                    imp: Struct,
+                },
+            ),
             ffi_func: FfiFunction {
                 name: "uniffi_nmp_ffi_fn_method_nmpengine_unfollow",
                 is_async: false,
@@ -12569,12 +12355,12 @@ object Object {
                             None,
                         ),
                     },
-                    FfiArgument {
-                        name: "observer",
-                        type_: UInt64,
-                    },
                 ],
-                return_type: None,
+                return_type: Some(
+                    RustArcPtr(
+                        "NmpFollowActionStream",
+                    ),
+                ),
                 has_rust_call_status_arg: true,
                 is_object_free_function: false,
             },
@@ -12585,7 +12371,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_unfollow",
             checksum: Some(
-                15069,
+                25680,
             ),
         },
     ],
@@ -12632,7 +12418,7 @@ object Object {
 }
 
 object Object {
-    name: "NmpFollowHandle",
+    name: "NmpFollowActionStream",
     imp: Struct,
     module_path: "nmp_ffi",
     remote: false,
@@ -12640,20 +12426,20 @@ object Object {
     methods: [
         Method {
             name: "cancel",
-            object_name: "NmpFollowHandle",
+            object_name: "NmpFollowActionStream",
             object_module_path: "nmp_ffi",
             is_async: false,
             object_impl: Struct,
             arguments: [],
             return_type: None,
             ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nmpfollowhandle_cancel",
+                name: "uniffi_nmp_ffi_fn_method_nmpfollowactionstream_cancel",
                 is_async: false,
                 arguments: [
                     FfiArgument {
                         name: "ptr",
                         type_: RustArcPtr(
-                            "NmpFollowHandle",
+                            "NmpFollowActionStream",
                         ),
                     },
                 ],
@@ -12664,41 +12450,88 @@ object Object {
             docstring: None,
             throws: None,
             takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpfollowhandle_cancel",
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpfollowactionstream_cancel",
             checksum: Some(
-                7443,
+                42492,
+            ),
+        },
+        Method {
+            name: "next",
+            object_name: "NmpFollowActionStream",
+            object_module_path: "nmp_ffi",
+            is_async: true,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Optional {
+                    inner_type: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiFollowActionStatus",
+                    },
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpfollowactionstream_next",
+                is_async: true,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpFollowActionStream",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    Handle,
+                ),
+                has_rust_call_status_arg: false,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Await the next follow-action status in order, or `None` at the end of\nthe action's lifecycle. A second concurrent `next()` is\n[`FfiError::ConcurrentNext`].",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpfollowactionstream_next",
+            checksum: Some(
+                29011,
             ),
         },
     ],
     uniffi_traits: [],
     trait_impls: [],
     ffi_func_clone: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_clone_nmpfollowhandle",
+        name: "uniffi_nmp_ffi_fn_clone_nmpfollowactionstream",
         is_async: false,
         arguments: [
             FfiArgument {
                 name: "ptr",
                 type_: RustArcPtr(
-                    "NmpFollowHandle",
+                    "NmpFollowActionStream",
                 ),
             },
         ],
         return_type: Some(
             RustArcPtr(
-                "NmpFollowHandle",
+                "NmpFollowActionStream",
             ),
         ),
         has_rust_call_status_arg: true,
         is_object_free_function: false,
     },
     ffi_func_free: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_free_nmpfollowhandle",
+        name: "uniffi_nmp_ffi_fn_free_nmpfollowactionstream",
         is_async: false,
         arguments: [
             FfiArgument {
                 name: "ptr",
                 type_: RustArcPtr(
-                    "NmpFollowHandle",
+                    "NmpFollowActionStream",
                 ),
             },
         ],
@@ -12708,12 +12541,12 @@ object Object {
     },
     ffi_init_callback: None,
     docstring: Some(
-        "Deinit-tied cancellation for one following relationship observation.",
+        "Pull-based follow/unfollow action stream (#680). The action worker (one\ntransient thread per user action on the engine's internal blocking-adapter\npool) pushes each [`FollowActionStatus`] into a waker-aware FIFO; this\nhandle awaits them in order. `None` is the terminal signal. `Drop`/`cancel`\nclose the stream.",
     ),
 }
 
 object Object {
-    name: "NmpQueryHandle",
+    name: "NmpFollowStream",
     imp: Struct,
     module_path: "nmp_ffi",
     remote: false,
@@ -12721,20 +12554,148 @@ object Object {
     methods: [
         Method {
             name: "cancel",
-            object_name: "NmpQueryHandle",
+            object_name: "NmpFollowStream",
             object_module_path: "nmp_ffi",
             is_async: false,
             object_impl: Struct,
             arguments: [],
             return_type: None,
             ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nmpqueryhandle_cancel",
+                name: "uniffi_nmp_ffi_fn_method_nmpfollowstream_cancel",
                 is_async: false,
                 arguments: [
                     FfiArgument {
                         name: "ptr",
                         type_: RustArcPtr(
-                            "NmpQueryHandle",
+                            "NmpFollowStream",
+                        ),
+                    },
+                ],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpfollowstream_cancel",
+            checksum: Some(
+                47567,
+            ),
+        },
+        Method {
+            name: "next",
+            object_name: "NmpFollowStream",
+            object_module_path: "nmp_ffi",
+            is_async: true,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Optional {
+                    inner_type: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiFollowSnapshot",
+                    },
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpfollowstream_next",
+                is_async: true,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpFollowStream",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    Handle,
+                ),
+                has_rust_call_status_arg: false,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Await the next relationship snapshot, or `None` once the observation is\nwithdrawn. A second concurrent `next()` is [`FfiError::ConcurrentNext`].",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpfollowstream_next",
+            checksum: Some(
+                52991,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_nmpfollowstream",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "NmpFollowStream",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "NmpFollowStream",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_nmpfollowstream",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "NmpFollowStream",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "Pull-based following-relationship observation handle (#680). Each `next()`\nawaits the engine's waker-driven async row mailbox and folds a complete\nself-contained relationship snapshot inline — no NMP-owned OS thread per\nobservation. `None` is the terminal signal (the demand was withdrawn or the\nengine shut down). `Drop`/`cancel` withdraw the observation.",
+    ),
+}
+
+object Object {
+    name: "NmpReceiptStream",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [],
+    methods: [
+        Method {
+            name: "cancel",
+            object_name: "NmpReceiptStream",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpreceiptstream_cancel",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpReceiptStream",
                         ),
                     },
                 ],
@@ -12743,18 +12704,232 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Withdraw the subscription now, rather than waiting for `Drop` (a\nSwift `deinit` can be delayed by ARC in ways an app may want to\npreempt explicitly). Safe to call more than once, and safe to never\ncall at all (in which case `Drop` is what withdraws it).",
+                "Stop delivering live status frames to this stream. The durable receipt\nitself is untouched (the write is not cancelled — use\n[`NmpEngine::cancel`] for that); a later [`NmpEngine::reattach_receipt`]\ntraverses the durable history. Safe to call more than once.",
             ),
             throws: None,
             takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpqueryhandle_cancel",
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpreceiptstream_cancel",
             checksum: Some(
-                62345,
+                38089,
+            ),
+        },
+        Method {
+            name: "id",
+            object_name: "NmpReceiptStream",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                UInt64,
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpreceiptstream_id",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpReceiptStream",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    UInt64,
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "The stable store-issued receipt id, needed for process-later\nreattachment ([`NmpEngine::reattach_receipt`]) and explicit cancellation\n([`NmpEngine::cancel`]).",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpreceiptstream_id",
+            checksum: Some(
+                32002,
+            ),
+        },
+        Method {
+            name: "next",
+            object_name: "NmpReceiptStream",
+            object_module_path: "nmp_ffi",
+            is_async: true,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Optional {
+                    inner_type: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiWriteStatus",
+                    },
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpreceiptstream_next",
+                is_async: true,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpReceiptStream",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    Handle,
+                ),
+                has_rust_call_status_arg: false,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Await the next `WriteStatus`, or `None` once the intent has fully\nresolved or the engine has shut down. [`FfiError::ConcurrentNext`] on an\noverlapping call.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpreceiptstream_next",
+            checksum: Some(
+                20726,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_nmpreceiptstream",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "NmpReceiptStream",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "NmpReceiptStream",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_nmpreceiptstream",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "NmpReceiptStream",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "The app-facing pull-based receipt stream (returned by [`NmpEngine::publish`]/\n[`NmpEngine::publish_composed`], and the `Attached` reattachment, #680). It\nexposes the stable store-issued receipt id via [`Self::id`] and delivers\nordered `WriteStatus` facts via `async fn next()`. Live delivery is a finite\nFIFO that reports typed lag. Receipt facts are durable: the persisted\noutbox/redb store is the source of truth, so a dropped or lagged stream can\nbe reattached and traverse retained facts through finite pages.",
+    ),
+}
+
+object Object {
+    name: "NmpRowStream",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [],
+    methods: [
+        Method {
+            name: "cancel",
+            object_name: "NmpRowStream",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmprowstream_cancel",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpRowStream",
+                        ),
+                    },
+                ],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Withdraw the subscription now, rather than waiting for `Drop` (a Swift\n`deinit` can be delayed by ARC in ways an app may want to preempt).\nWakes any parked `next()` to `None`. Safe to call more than once, and\nsafe to never call at all.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmprowstream_cancel",
+            checksum: Some(
+                798,
+            ),
+        },
+        Method {
+            name: "next",
+            object_name: "NmpRowStream",
+            object_module_path: "nmp_ffi",
+            is_async: true,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Optional {
+                    inner_type: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiFrame",
+                    },
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmprowstream_next",
+                is_async: true,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpRowStream",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    Handle,
+                ),
+                has_rust_call_status_arg: false,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Await the next observation [`FfiFrame`], or `None` once the engine has\ntorn the subscription down (cancel / shutdown / producer drop).\n[`FfiError::ConcurrentNext`] if a `next()` is already in flight — the\nstream is single-consumer.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmprowstream_next",
+            checksum: Some(
+                63150,
             ),
         },
         Method {
             name: "request_rows",
-            object_name: "NmpQueryHandle",
+            object_name: "NmpRowStream",
             object_module_path: "nmp_ffi",
             is_async: false,
             object_impl: Struct,
@@ -12769,13 +12944,13 @@ object Object {
             ],
             return_type: None,
             ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nmpqueryhandle_request_rows",
+                name: "uniffi_nmp_ffi_fn_method_nmprowstream_request_rows",
                 is_async: false,
                 arguments: [
                     FfiArgument {
                         name: "ptr",
                         type_: RustArcPtr(
-                            "NmpQueryHandle",
+                            "NmpRowStream",
                         ),
                     },
                     FfiArgument {
@@ -12797,41 +12972,41 @@ object Object {
                 },
             ),
             takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpqueryhandle_request_rows",
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmprowstream_request_rows",
             checksum: Some(
-                58535,
+                635,
             ),
         },
     ],
     uniffi_traits: [],
     trait_impls: [],
     ffi_func_clone: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_clone_nmpqueryhandle",
+        name: "uniffi_nmp_ffi_fn_clone_nmprowstream",
         is_async: false,
         arguments: [
             FfiArgument {
                 name: "ptr",
                 type_: RustArcPtr(
-                    "NmpQueryHandle",
+                    "NmpRowStream",
                 ),
             },
         ],
         return_type: Some(
             RustArcPtr(
-                "NmpQueryHandle",
+                "NmpRowStream",
             ),
         ),
         has_rust_call_status_arg: true,
         is_object_free_function: false,
     },
     ffi_func_free: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_free_nmpqueryhandle",
+        name: "uniffi_nmp_ffi_fn_free_nmprowstream",
         is_async: false,
         arguments: [
             FfiArgument {
                 name: "ptr",
                 type_: RustArcPtr(
-                    "NmpQueryHandle",
+                    "NmpRowStream",
                 ),
             },
         ],
@@ -12841,7 +13016,7 @@ object Object {
     },
     ffi_init_callback: None,
     docstring: Some(
-        "The app-facing handle to a live subscription (returned by\n[`NmpEngine::observe`]). `Drop` withdraws the subscription -- the SDK\nnever requires an app-owned container or lifecycle hook to make this\nhappen (plan §7's kill test). Holds ONLY two opaque capabilities: the\n[`nmp::ObservationCancel`] token (`Subscription::cancel_handle`) and,\nfor windowed observations, the [`nmp::WindowHandle`] growth capability\n-- no `Handle`/`QueryHandle` (the raw imperative engine-control\ncapability) ever reaches this crate. The receiving half of the\nsubscription is owned entirely by [`NmpEngine::observe`]'s drain thread,\nsince `recv()` blocks; `cancel()`/`Drop` here and the drain thread's own\nteardown converge on the token's single withdrawal guard (see that\ntype's doc).",
+        "The app-facing pull-based handle to a live subscription (returned by\n[`NmpEngine::observe`], #680). Await [`Self::next`] for the next\n[`FfiFrame`], or `None` once the observation ends; `Drop`/[`Self::cancel`]\nwithdraw it. Holds ONLY the `Send + Sync` [`nmp::AsyncSubscription`] — no\ndedicated drain thread and no raw engine-control capability ever reaches\nthis crate. Awaiting `next()` reserves no native thread and no runtime; the\nengine mailbox wakes the parked future.",
     ),
 }
 
@@ -12875,12 +13050,59 @@ object Object {
                 has_rust_call_status_arg: true,
                 is_object_free_function: false,
             },
-            docstring: None,
+            docstring: Some(
+                "Cancel this sign-only operation. Idempotent; safe after completion.",
+            ),
             throws: None,
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpsigneventhandle_cancel",
             checksum: Some(
-                36811,
+                41545,
+            ),
+        },
+        Method {
+            name: "signed",
+            object_name: "NmpSignEventHandle",
+            object_module_path: "nmp_ffi",
+            is_async: true,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiSignedEvent",
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpsigneventhandle_signed",
+                is_async: true,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpSignEventHandle",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    Handle,
+                ),
+                has_rust_call_status_arg: false,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Await the one-shot outcome: the fully-verified signed event, or a typed\n[`FfiSignEventFailure`]. This is one-shot — a second await (sequential or\nconcurrent) returns [`FfiSignEventFailure::AlreadyConsumed`], because the\nsingle result was already delivered to the first await.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiSignEventFailure",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpsigneventhandle_signed",
+            checksum: Some(
+                17190,
             ),
         },
     ],
@@ -12922,93 +13144,7 @@ object Object {
     },
     ffi_init_callback: None,
     docstring: Some(
-        "Scoped cancellation handle for one sign-only operation. It owns no\nsigner registration and cannot affect accepted durable writes.",
-    ),
-}
-
-callback CallbackInterface {
-    name: "DiagnosticsObserver",
-    module_path: "nmp_ffi",
-    methods: [
-        Method {
-            name: "on_snapshot",
-            object_name: "DiagnosticsObserver",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [
-                Argument {
-                    name: "snapshot",
-                    type_: Record {
-                        module_path: "nmp_ffi",
-                        name: "FfiDiagnosticsSnapshot",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-            ],
-            return_type: None,
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_diagnosticsobserver_on_snapshot",
-                is_async: false,
-                arguments: [],
-                return_type: None,
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: None,
-            throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_diagnosticsobserver_on_snapshot",
-            checksum: Some(
-                62870,
-            ),
-        },
-        Method {
-            name: "on_closed",
-            object_name: "DiagnosticsObserver",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [],
-            return_type: None,
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_diagnosticsobserver_on_closed",
-                is_async: false,
-                arguments: [],
-                return_type: None,
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: None,
-            throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_diagnosticsobserver_on_closed",
-            checksum: Some(
-                55210,
-            ),
-        },
-    ],
-    ffi_init_callback: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_init_callback_vtable_diagnosticsobserver",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "vtable",
-                type_: Reference(
-                    Struct(
-                        "VTableCallbackInterfaceDiagnosticsObserver",
-                    ),
-                ),
-            },
-        ],
-        return_type: None,
-        has_rust_call_status_arg: false,
-        is_object_free_function: false,
-    },
-    docstring: Some(
-        "Drains a live diagnostics stream (`nmp::Engine::observe_diagnostics`'s\n`DiagnosticsSubscription`, M5 plan §1.2 step 5). `on_snapshot` fires once\nper delivered snapshot, in order, on a dedicated drain thread — never on\nthe engine thread itself. Because the underlying mailbox is latest-wins\n(see `nmp::DiagnosticsSubscription::recv`'s doc), a slow Swift-side\nconsumer may observe fewer snapshots than were actually produced, but\nnever a stale one out of order. `on_closed` fires exactly once, when the\nobserver is cancelled or the engine shuts down.",
+        "Scoped one-shot sign-only handle (#680). It owns no signer registration and\ncannot affect accepted durable writes. Await [`Self::signed`] once for the\nverified event (or a typed failure); [`Self::cancel`] cancels only this\nsigner operation.",
     ),
 }
 
@@ -13109,174 +13245,6 @@ callback CallbackInterface {
                 type_: Reference(
                     Struct(
                         "VTableCallbackInterfaceFfiAuthPolicyCallback",
-                    ),
-                ),
-            },
-        ],
-        return_type: None,
-        has_rust_call_status_arg: false,
-        is_object_free_function: false,
-    },
-    docstring: None,
-}
-
-callback CallbackInterface {
-    name: "FollowActionObserver",
-    module_path: "nmp_ffi",
-    methods: [
-        Method {
-            name: "on_status",
-            object_name: "FollowActionObserver",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [
-                Argument {
-                    name: "status",
-                    type_: Enum {
-                        module_path: "nmp_ffi",
-                        name: "FfiFollowActionStatus",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-            ],
-            return_type: None,
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_followactionobserver_on_status",
-                is_async: false,
-                arguments: [],
-                return_type: None,
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: None,
-            throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_followactionobserver_on_status",
-            checksum: Some(
-                20290,
-            ),
-        },
-        Method {
-            name: "on_closed",
-            object_name: "FollowActionObserver",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [],
-            return_type: None,
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_followactionobserver_on_closed",
-                is_async: false,
-                arguments: [],
-                return_type: None,
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: None,
-            throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_followactionobserver_on_closed",
-            checksum: Some(
-                65442,
-            ),
-        },
-    ],
-    ffi_init_callback: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_init_callback_vtable_followactionobserver",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "vtable",
-                type_: Reference(
-                    Struct(
-                        "VTableCallbackInterfaceFollowActionObserver",
-                    ),
-                ),
-            },
-        ],
-        return_type: None,
-        has_rust_call_status_arg: false,
-        is_object_free_function: false,
-    },
-    docstring: None,
-}
-
-callback CallbackInterface {
-    name: "FollowObserver",
-    module_path: "nmp_ffi",
-    methods: [
-        Method {
-            name: "on_snapshot",
-            object_name: "FollowObserver",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [
-                Argument {
-                    name: "snapshot",
-                    type_: Record {
-                        module_path: "nmp_ffi",
-                        name: "FfiFollowSnapshot",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-            ],
-            return_type: None,
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_followobserver_on_snapshot",
-                is_async: false,
-                arguments: [],
-                return_type: None,
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: None,
-            throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_followobserver_on_snapshot",
-            checksum: Some(
-                37686,
-            ),
-        },
-        Method {
-            name: "on_closed",
-            object_name: "FollowObserver",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [],
-            return_type: None,
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_followobserver_on_closed",
-                is_async: false,
-                arguments: [],
-                return_type: None,
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: None,
-            throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_followobserver_on_closed",
-            checksum: Some(
-                24807,
-            ),
-        },
-    ],
-    ffi_init_callback: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_init_callback_vtable_followobserver",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "vtable",
-                type_: Reference(
-                    Struct(
-                        "VTableCallbackInterfaceFollowObserver",
                     ),
                 ),
             },
@@ -13439,273 +13407,4 @@ callback CallbackInterface {
         is_object_free_function: false,
     },
     docstring: None,
-}
-
-callback CallbackInterface {
-    name: "ReceiptObserver",
-    module_path: "nmp_ffi",
-    methods: [
-        Method {
-            name: "on_status",
-            object_name: "ReceiptObserver",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [
-                Argument {
-                    name: "status",
-                    type_: Enum {
-                        module_path: "nmp_ffi",
-                        name: "FfiWriteStatus",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-            ],
-            return_type: None,
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_receiptobserver_on_status",
-                is_async: false,
-                arguments: [],
-                return_type: None,
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: None,
-            throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_receiptobserver_on_status",
-            checksum: Some(
-                47507,
-            ),
-        },
-        Method {
-            name: "on_closed",
-            object_name: "ReceiptObserver",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [],
-            return_type: None,
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_receiptobserver_on_closed",
-                is_async: false,
-                arguments: [],
-                return_type: None,
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: None,
-            throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_receiptobserver_on_closed",
-            checksum: Some(
-                38112,
-            ),
-        },
-    ],
-    ffi_init_callback: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_init_callback_vtable_receiptobserver",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "vtable",
-                type_: Reference(
-                    Struct(
-                        "VTableCallbackInterfaceReceiptObserver",
-                    ),
-                ),
-            },
-        ],
-        return_type: None,
-        has_rust_call_status_arg: false,
-        is_object_free_function: false,
-    },
-    docstring: Some(
-        "Drains a publish's `Receiver<WriteStatus>` (ledger #9: enqueue is not\nconverged -- this may be called many times per publish, ending only when\nthe intent reaches every relay's terminal, or never at all for an\n`Ephemeral` intent, mirroring `Handle::publish`'s own receiver).\n`on_closed` fires exactly once, when the receipt's `Sender` is dropped\n(the intent has resolved or the engine has shut down) -- after which no\nfurther `on_status` call will ever occur, mirroring `RowObserver` and\n`DiagnosticsObserver`.",
-    ),
-}
-
-callback CallbackInterface {
-    name: "RowObserver",
-    module_path: "nmp_ffi",
-    methods: [
-        Method {
-            name: "on_frame",
-            object_name: "RowObserver",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [
-                Argument {
-                    name: "frame",
-                    type_: Record {
-                        module_path: "nmp_ffi",
-                        name: "FfiFrame",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-            ],
-            return_type: None,
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_rowobserver_on_frame",
-                is_async: false,
-                arguments: [],
-                return_type: None,
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: None,
-            throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_rowobserver_on_frame",
-            checksum: Some(
-                46105,
-            ),
-        },
-        Method {
-            name: "on_closed",
-            object_name: "RowObserver",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [],
-            return_type: None,
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_rowobserver_on_closed",
-                is_async: false,
-                arguments: [],
-                return_type: None,
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: None,
-            throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_rowobserver_on_closed",
-            checksum: Some(
-                36135,
-            ),
-        },
-    ],
-    ffi_init_callback: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_init_callback_vtable_rowobserver",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "vtable",
-                type_: Reference(
-                    Struct(
-                        "VTableCallbackInterfaceRowObserver",
-                    ),
-                ),
-            },
-        ],
-        return_type: None,
-        has_rust_call_status_arg: false,
-        is_object_free_function: false,
-    },
-    docstring: Some(
-        "Drains a live subscription's frames (M4 §4b) -- the ONE observer both\nobservation modes share (#485): unbounded frames carry the exact delta\ntransition, windowed frames carry the complete bounded row set plus its\ngrowth fact (see [`FfiFrame`]'s doc for why delivery derives from\nboundedness and rows never cross the wire twice). `on_frame` is called\nonce per delivered frame, in order, on a dedicated drain thread — never\non the engine thread itself, so a slow native consumer cannot stall\n`EngineCore`'s own recv loop. Both delivery modes conflate under\nbackpressure: windowed frames keep the latest complete snapshot and\nunbounded frames compose one exact transition rebased onto the last\ndelivered state, so a slow consumer sees fewer intermediate frames but\nits next frame still reaches newest state. `on_closed` fires exactly once, when the engine\nhas torn the subscription down (cancel, or the frame channel's `Sender`\nwas dropped for any other reason) — after which no further `on_frame`\ncall will ever occur. `frame.evidence` is the query's scoped per-source\nacquisition evidence (`docs/design/scoped-evidence-49-12-plan.md` §4) --\nnever a collapsed completeness verdict.",
-    ),
-}
-
-callback CallbackInterface {
-    name: "SignEventObserver",
-    module_path: "nmp_ffi",
-    methods: [
-        Method {
-            name: "on_signed",
-            object_name: "SignEventObserver",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [
-                Argument {
-                    name: "event",
-                    type_: Record {
-                        module_path: "nmp_ffi",
-                        name: "FfiSignedEvent",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-            ],
-            return_type: None,
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_signeventobserver_on_signed",
-                is_async: false,
-                arguments: [],
-                return_type: None,
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: None,
-            throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_signeventobserver_on_signed",
-            checksum: Some(
-                65091,
-            ),
-        },
-        Method {
-            name: "on_failed",
-            object_name: "SignEventObserver",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [
-                Argument {
-                    name: "failure",
-                    type_: Enum {
-                        module_path: "nmp_ffi",
-                        name: "FfiSignEventFailure",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-            ],
-            return_type: None,
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_signeventobserver_on_failed",
-                is_async: false,
-                arguments: [],
-                return_type: None,
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: None,
-            throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_signeventobserver_on_failed",
-            checksum: Some(
-                24830,
-            ),
-        },
-    ],
-    ffi_init_callback: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_init_callback_vtable_signeventobserver",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "vtable",
-                type_: Reference(
-                    Struct(
-                        "VTableCallbackInterfaceSignEventObserver",
-                    ),
-                ),
-            },
-        ],
-        return_type: None,
-        has_rust_call_status_arg: false,
-        is_object_free_function: false,
-    },
-    docstring: Some(
-        "Exactly-once completion callback for one governed sign-only operation.\nSuccess carries a fully verified event; failure is terminal. Cancellation\nuses the same terminal callback so native async continuations cannot hang.",
-    ),
 }

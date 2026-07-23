@@ -117,11 +117,25 @@ pub enum FfiError {
         component: String,
         reason: String,
     },
-    /// The finite native executor had no immediately-startable slot. The
-    /// associated stream or operation was not accepted.
-    ExecutorSaturated {
-        component: String,
-        capacity: u64,
+    /// A second `next()`/`signed()` was awaited on a stream/handle while a
+    /// previous one was still in flight. Observation streams are
+    /// single-consumer (#680): await the next pull only after the previous one
+    /// has resolved. No frame is lost or duplicated — the offending call is
+    /// rejected, not the stream.
+    ConcurrentNext,
+    /// A finite FIFO fact stream retained its bounded prefix but the producer
+    /// advanced beyond that live-delivery window before the app drained it.
+    /// The stream disconnects loudly instead of dropping facts or growing
+    /// memory. `receipt_id` is present whenever the durable receipt is known;
+    /// reattach that receipt to replay persisted facts.
+    FactStreamLagged {
+        receipt_id: Option<u64>,
+    },
+    /// A paged durable receipt replay could no longer reconstruct the next
+    /// page from retained evidence. The receipt identity remains known and is
+    /// not collapsed into absence.
+    ReceiptReplayUnavailable {
+        receipt_id: u64,
     },
     /// A `FfiWritePayload::Signed`'s `sig` did not parse as a valid 64-byte
     /// hex schnorr signature.
@@ -183,11 +197,10 @@ pub enum FfiError {
     /// since NMP-owned event time must refresh).
     IntentAlreadyConsumed,
     /// NIP-11 acquisition failed before any last-good document existed.
-    /// `ExecutorSaturated`/`RelayInformationWaitersSaturated`/
-    /// `ThreadUnavailable` above already carry these three acquisition
-    /// discriminants with full fidelity (#494); every other
-    /// `nmp::RelayInformationError` variant carries here instead of
-    /// collapsing to a message string.
+    /// `RelayInformationWaitersSaturated`/`ThreadUnavailable` above already
+    /// carry the two acquisition discriminants with dedicated `FfiError`
+    /// shapes (#494); every other `nmp::RelayInformationError` variant carries
+    /// here instead of collapsing to a message string.
     RelayInformationUnavailable {
         kind: FfiRelayInformationErrorKind,
     },
@@ -212,7 +225,7 @@ pub enum FfiError {
     },
 }
 
-/// Exact failure returned by `NmpQueryHandle::request_rows`
+/// Exact failure returned by `NmpRowStream::request_rows`
 /// (`nmp::RequestRowsError` mirror). Growth is declarative -- there is no
 /// token to misuse and no generation to go stale, so the only failures left
 /// are the structural one (`Unwindowed`) and genuine advance failures.
@@ -244,13 +257,6 @@ impl From<nmp::EngineError> for FfiError {
             nmp::EngineError::ThreadUnavailable { component, reason } => {
                 Self::ThreadUnavailable { component, reason }
             }
-            nmp::EngineError::ExecutorSaturated {
-                component,
-                capacity,
-            } => Self::ExecutorSaturated {
-                component,
-                capacity: capacity as u64,
-            },
             nmp::EngineError::InvalidSecretKey => Self::InvalidSecretKey,
             nmp::EngineError::SignerMissingPublicKey => Self::InvalidSigner {
                 reason: "signer has no public key".to_string(),
@@ -309,12 +315,24 @@ impl std::fmt::Display for FfiError {
             Self::ThreadUnavailable { component, reason } => {
                 write!(f, "{component} thread unavailable: {reason}")
             }
-            Self::ExecutorSaturated {
-                component,
-                capacity,
-            } => write!(
+            Self::ConcurrentNext => write!(
                 f,
-                "{component} refused: native task executor is at capacity {capacity}"
+                "a next()/signed() was awaited while a previous one was still in flight; \
+                 observation streams are single-consumer"
+            ),
+            Self::FactStreamLagged { receipt_id } => match receipt_id {
+                Some(id) => write!(
+                    f,
+                    "the finite live fact stream fell behind; reattach receipt {id} to replay"
+                ),
+                None => write!(
+                    f,
+                    "the finite live fact stream fell behind before a receipt was observable"
+                ),
+            },
+            Self::ReceiptReplayUnavailable { receipt_id } => write!(
+                f,
+                "retained evidence for receipt {receipt_id} became unavailable during replay"
             ),
             Self::InvalidSignature { got } => write!(f, "invalid signature hex: {got:?}"),
             Self::EngineClosed => write!(f, "engine already shut down"),
@@ -362,12 +380,6 @@ impl From<nmp::RelayInformationRequestError> for FfiError {
         match error {
             nmp::RelayInformationRequestError::Engine(error) => error.into(),
             nmp::RelayInformationRequestError::Acquisition(
-                nmp::RelayInformationError::ExecutorSaturated { capacity },
-            ) => Self::ExecutorSaturated {
-                component: "NIP-11 acquisition".to_string(),
-                capacity: capacity as u64,
-            },
-            nmp::RelayInformationRequestError::Acquisition(
                 nmp::RelayInformationError::WaiterSaturated { capacity },
             ) => Self::RelayInformationWaitersSaturated {
                 capacity: capacity as u64,
@@ -396,11 +408,6 @@ pub fn relay_information_error_kind(
     error: nmp::RelayInformationError,
 ) -> FfiRelayInformationErrorKind {
     match error {
-        nmp::RelayInformationError::ExecutorSaturated { capacity } => {
-            FfiRelayInformationErrorKind::ExecutorSaturated {
-                capacity: capacity as u64,
-            }
-        }
         nmp::RelayInformationError::WaiterSaturated { capacity } => {
             FfiRelayInformationErrorKind::WaiterSaturated {
                 capacity: capacity as u64,
@@ -452,10 +459,6 @@ pub fn sign_event_start_error(error: nmp::SignEventError) -> FfiError {
     match error {
         nmp::SignEventError::NoActiveSigner => FfiError::NoActiveSigner,
         nmp::SignEventError::InvalidRequest { reason } => FfiError::InvalidSignRequest { reason },
-        nmp::SignEventError::ExecutorSaturated { capacity } => FfiError::ExecutorSaturated {
-            component: "sign-event".to_string(),
-            capacity: capacity as u64,
-        },
         nmp::SignEventError::ThreadUnavailable { component, reason } => {
             FfiError::ThreadUnavailable { component, reason }
         }
@@ -1117,7 +1120,7 @@ fn shortfall_fact_to_ffi(f: ShortfallFact) -> FfiShortfallFact {
 }
 
 /// `nmp::AcquisitionEvidence -> FfiAcquisitionEvidence` (the scoped,
-/// per-query surface every `FfiFrame`/`RowObserver::on_frame` carries --
+/// per-query surface every `FfiFrame` from `NmpRowStream::next` carries --
 /// ratified codex-nova names, see `types.rs`'s own doc). Replaces the
 /// deleted query-level collapse: every source's facts map faithfully, never
 /// rolled up into a verdict.

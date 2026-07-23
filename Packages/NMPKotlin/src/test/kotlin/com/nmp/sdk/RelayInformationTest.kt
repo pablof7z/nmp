@@ -9,13 +9,8 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.async
-import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -145,33 +140,6 @@ class RelayInformationTest {
                                 .reason.isNotEmpty(),
                         )
                     }
-                }
-            }
-        }
-
-    @Test
-    fun relayInformationExecutorSaturationRemainsTypedThroughWrapper() =
-        runBlocking {
-            NMPEngine(NMPConfig(maxNativeTasks = 1u)).use { engine ->
-                val firstSnapshot = CompletableDeferred<Unit>()
-                val held = launch {
-                    engine.observeDiagnostics().collect {
-                        firstSnapshot.complete(Unit)
-                        awaitCancellation()
-                    }
-                }
-                firstSnapshot.await()
-                try {
-                    engine.relayInformation(
-                        "ws://localhost:9",
-                        RelayInformationCachePolicy.Refresh,
-                    )
-                    fail("a full shared executor must refuse before HTTP")
-                } catch (error: NMPError.ExecutorSaturated) {
-                    assertEquals("NIP-11 acquisition", error.component)
-                    assertEquals(1uL, error.capacity)
-                } finally {
-                    held.cancelAndJoin()
                 }
             }
         }

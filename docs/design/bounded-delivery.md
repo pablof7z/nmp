@@ -33,10 +33,11 @@ facts in either mode.
 
 The Rust ordinary-row producer therefore holds one pending transition per event
 id in a single mailbox slot, while windowed queries and diagnostics hold one
-complete latest snapshot. Each platform bridge also uses a bounded newest-value
-buffer and may frame-coalesce bursts. Cancellation/drop withdraws observation
-according to the query refcount contract; it does not leave an unbounded
-producer queue.
+complete latest snapshot. Swift issues one native pull per app pull and owns no
+second delivery queue; its snapshot iterators cadence-limit returns without
+prefetching. Kotlin also pulls serially from the native handle. Cancellation or
+drop withdraws observation according to the query refcount contract; it does
+not leave an unbounded producer queue.
 
 This bounds delivery backlog, not the semantic cardinality of an unwindowed
 query result: the pending transition can still be proportional to the change
@@ -53,6 +54,28 @@ Write receipt transitions are persisted facts. Observer buffering may be
 bounded because a consumer can reattach and replay/inspect durable state. A
 receipt implementation must not rely on an unbounded in-memory channel or lose
 facts merely because no observer was attached.
+
+Receipt and follow-action live delivery uses a fixed-capacity FIFO of 32 facts.
+If a paused consumer falls behind, the producer retains the buffered prefix,
+disconnects that sink, and the consumer receives typed `FactStreamLagged`
+after draining it; later facts are never silently reported as delivered.
+Receipt reattachment traverses the canonical persisted history in deterministic
+pages of at most 32 delivery facts. Its opaque continuation records the
+identity of consumed facts independently per receipt lane (including each
+relay's attempt ordinal and phase), rather than storing a numeric offset into a
+vector reconstructed from mutable durable state. A durable fact added between
+pages is therefore delivered exactly once even when its deterministic display
+order precedes facts already consumed from another relay. Continuation state is
+bounded by relay fan-out, not retry history. After a full page, one caught-up
+check is required before the sink atomically joins live work, closing the
+replay-to-live race. The replay cursor bounds each delivery page, not the
+store's total retained attempt history: retention/GC for that durable history
+remains open under #46 and must not be confused with retry-concurrency limits.
+Every live receipt observer also owns a private registration identity. Closing
+or dropping its consumer FIFO sends an exact detach command and removes that
+registration from the pending write immediately; pruning cannot depend on a
+future status, because a receipt parked at `AwaitingCapability` may never emit
+again.
 
 Diagnostics counters may aggregate, but exact current plan/filter/error facts
 must remain available. Aggregation policy is itself visible in diagnostics.
@@ -104,10 +127,15 @@ Fairness policy must prevent one relay, query, or outbox lane from permanently
 starving unrelated work. The precise algorithm is provisional; starvation and
 queue pressure must be measurable.
 
-Blocking native receiver drains use the zero-queue admission mechanism in
-`native-task-executor.md`. They never enter a conventional worker queue:
-capacity or OS-thread refusal is known before stream/write ownership transfers,
-and one admitted task preserves its receiver's FIFO order.
+Observation delivery is pull-based: a foreign consumer awaits `next()` on an
+observation handle, which parks a waker on the engine-owned bounded mailbox
+rather than blocking a dedicated OS thread (`async-observation-handles.md`,
+#680). Live observations therefore do not consume a native thread each and
+there is no app-visible native-task ceiling. Genuinely-blocking *transient*
+foreign/reactor adapters (NIP-11 flights, remote-signer/AUTH waiters, the
+follow-action worker) run on a fixed-capacity internal pool that ordinary
+observations never touch; engine-associated NIP-46 sessions own their own
+executor.
 
 ## 7. Diagnostics
 
@@ -128,13 +156,17 @@ Required proofs include:
 
 - a burst into a slow Swift/Kotlin observer has bounded memory and eventually
   yields the latest exact local state;
-- receipt observers may detach/restart without losing durable transitions;
+- a paused receipt observer across more retry transitions than the live FIFO
+  can hold receives typed lag, retains a finite prefix, and can traverse the
+  canonical durable history through bounded pages without silent loss;
 - an oversized derived set either chunks exactly or reports shortfall;
 - relay fan-out caps never masquerade as complete acquisition;
 - a requested result limit is distinguishable from an engine-imposed limit;
 - an overwhelming relay cannot grow memory unboundedly and leaves a diagnostic
   reason when disconnected;
 - scheduler load remains bounded and fair without polling;
-- native task saturation refuses before ownership transfer, and cancellation
-  returns the join-backed census to its exact baseline without a timeout;
+- opening thousands of live observations creates O(1) engine threads, not one
+  per observation, and no operation is refused for a native-task-capacity reason
+  (#680); a parked `next()` wakes deterministically on value, close, cancel, or
+  shutdown;
 - no test can obtain silent first-N truncation at any limit boundary.

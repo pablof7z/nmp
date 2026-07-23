@@ -127,10 +127,6 @@ pub enum Nip46Error {
         component: String,
         reason: String,
     },
-    ExecutorSaturated {
-        component: String,
-        capacity: usize,
-    },
     /// A restored/imported session's live `get_public_key` answer did not
     /// match the checkpoint's expected identity (#571). The signer is never
     /// returned/attached in this case -- restore fails closed rather than
@@ -165,13 +161,6 @@ impl fmt::Display for Nip46Error {
             Self::ThreadUnavailable { component, reason } => {
                 write!(f, "{component} thread unavailable: {reason}")
             }
-            Self::ExecutorSaturated {
-                component,
-                capacity,
-            } => write!(
-                f,
-                "{component} refused: native task executor is at capacity {capacity}"
-            ),
             Self::RestoredIdentityMismatch { expected, actual } => write!(
                 f,
                 "restored NIP-46 session answered as {actual} but the checkpoint expected {expected}"
@@ -697,20 +686,31 @@ impl Nip46Signer {
         )
     }
 
+    /// #680: engine-associated restore path. Like [`Self::from_parts`] but
+    /// with an observer event sink and external cancellation, and — like the
+    /// bunker/invitation connect paths — a *session-owned* executor (bounded
+    /// by app-identity session count), never the shared engine adapter pool,
+    /// so restoring a session can never refuse an unrelated engine operation.
     #[doc(hidden)]
-    pub fn from_parts_with_executor_and_cancellation(
+    pub fn from_parts_observed_with_cancellation(
         parts: Nip46SessionCheckpoint,
         timeout: Duration,
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: &Nip46Cancellation,
-        executor: nmp_executor::Executor,
     ) -> Result<Self, Nip46Error> {
+        let executor =
+            nmp_executor::Executor::new(nmp_executor::DEFAULT_MAX_TASKS).map_err(|error| {
+                Nip46Error::ThreadUnavailable {
+                    component: "NIP-46 native task executor".to_string(),
+                    reason: error.to_string(),
+                }
+            })?;
         Self::from_parts_inner(
             parts,
             timeout,
             event_sink,
             Some(cancellation),
-            SessionExecutor::Shared(executor),
+            SessionExecutor::Owned(executor),
         )
     }
 
@@ -1671,9 +1671,9 @@ fn forward_events(
 
 fn map_executor_error(error: nmp_executor::ExecutorError) -> Nip46Error {
     match error {
-        nmp_executor::ExecutorError::Saturated(error) => Nip46Error::ExecutorSaturated {
+        nmp_executor::ExecutorError::Saturated(error) => Nip46Error::ThreadUnavailable {
+            reason: error.to_string(),
             component: error.component,
-            capacity: error.capacity,
         },
         nmp_executor::ExecutorError::Spawn(error) => Nip46Error::ThreadUnavailable {
             component: "NIP-46 native task".to_string(),
@@ -1813,13 +1813,18 @@ mod tests {
             SessionExecutor::Shared(executor.clone()),
         )
         .unwrap();
+        // #680 removed the global `ExecutorSaturated` variant; a full internal
+        // adapter pool now surfaces the class-specific `ThreadUnavailable`
+        // refusal. Real semantic preserved: two engine sessions occupy four of
+        // five slots, so the third forwarder is refused.
         let refusal = forward_events(&third, Arc::new(|_| {})).unwrap_err();
-        assert_eq!(
-            refusal,
-            Nip46Error::ExecutorSaturated {
-                component: "NIP-46 event forwarder".to_string(),
-                capacity: 5,
-            }
+        assert!(
+            matches!(
+                &refusal,
+                Nip46Error::ThreadUnavailable { component, .. }
+                    if component == "NIP-46 event forwarder"
+            ),
+            "unexpected refusal: {refusal:?}"
         );
 
         drop(third);

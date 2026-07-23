@@ -24,12 +24,16 @@ final class NIP22Tests: XCTestCase {
         }
     }
 
-    private static func collect(_ stream: AsyncStream<WriteStatus>, count: Int) async -> [WriteStatus] {
+    private static func collect(_ stream: ReceiptStatus, count: Int) async -> [WriteStatus] {
         var statuses: [WriteStatus] = []
-        for await status in stream {
-            statuses.append(status)
-            if statuses.count >= count { break }
-        }
+        // #680: a receipt is a throwing `AsyncSequence`; a throw here is
+        // terminal teardown, so end collection with what we have.
+        do {
+            for try await status in stream {
+                statuses.append(status)
+                if statuses.count >= count { break }
+            }
+        } catch {}
         return statuses
     }
 
@@ -288,11 +292,13 @@ final class NIP22Tests: XCTestCase {
     private static func firstRow(from query: NMPQuery, timeoutSeconds: UInt64) async -> Row? {
         await withTaskGroup(of: Row?.self) { group in
             group.addTask {
-                for await batch in query {
-                    if let row = batch.rows.first {
-                        return row
+                do {
+                    for try await batch in query {
+                        if let row = batch.rows.first {
+                            return row
+                        }
                     }
-                }
+                } catch {}
                 return nil
             }
             group.addTask {

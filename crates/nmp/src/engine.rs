@@ -22,13 +22,14 @@
 //! calls `shutdown` too, so a dropped-without-`shutdown` `Engine` still
 //! tears down `EngineThread` cleanly rather than detaching it.
 
-use std::sync::mpsc::Receiver;
+use nmp_engine::runtime::FifoReceiver;
 use std::sync::{Arc, Mutex};
 
 use nmp_engine::core::ReceiptId;
 use nmp_engine::outbox::WriteStatus;
 use nmp_engine::runtime::{
-    EngineThread, Handle, ReceiptReattachment, ReceiptStream, RuntimeConfig, SignEventError,
+    EngineThread, Handle, HistoryHandle, HistoryReceiver, QueryHandle, ReceiptReattachment,
+    ReceiptReplayCursor, ReceiptStream, RowsReceiver, RuntimeConfig, SignEventError,
     SignEventOperation, SignerRegistration,
 };
 use nmp_grammar::WriteIntent;
@@ -44,7 +45,9 @@ use crate::error::EngineError;
 use crate::relay_information::{
     RelayInformationCachePolicy, RelayInformationError, RelayInformationSnapshot,
 };
-use crate::subscription::{DiagnosticsSubscription, Subscription, Window};
+use crate::subscription::{
+    AsyncDiagnosticsSubscription, AsyncSubscription, DiagnosticsSubscription, Subscription, Window,
+};
 
 /// The open state: the `Handle` verbs are driven through, plus the
 /// `EngineThread` `shutdown` eventually joins. Not `Clone` (`EngineThread`
@@ -292,7 +295,6 @@ impl Engine {
         };
 
         let runtime_config = RuntimeConfig {
-            max_native_tasks: config.max_native_tasks,
             max_auth_capabilities: config.max_auth_capabilities,
         };
         let (engine_thread, handle) = match &config.store_path {
@@ -392,9 +394,14 @@ impl Engine {
         }
     }
 
-    /// Reserve an immediately-startable native task slot before accepting
-    /// the stream or operation it will own. This is intentionally hidden
-    /// mechanism used by protocol/native adapters, not an app scheduling API.
+    /// Reserve a slot on the engine's fixed internal blocking-adapter pool
+    /// before accepting the transient blocking work it will own (the NIP-02
+    /// follow observer/action worker). This is intentionally hidden mechanism
+    /// used by protocol adapters, not an app scheduling API — the pool has no
+    /// app-visible capacity, census, or idle barrier, and observations never
+    /// touch it (they are pure-waker async since #680). A residual refusal at
+    /// the fixed ceiling surfaces as [`EngineError::ThreadUnavailable`], never
+    /// a global native-task ceiling.
     #[doc(hidden)]
     pub fn reserve_native_task(
         &self,
@@ -402,25 +409,10 @@ impl Engine {
     ) -> Result<nmp_executor::Reservation, EngineError> {
         let component = component.into();
         self.with_handle(|_| self.native_tasks.reserve(component))?
-            .map_err(|error| EngineError::ExecutorSaturated {
+            .map_err(|error| EngineError::ThreadUnavailable {
+                reason: error.to_string(),
                 component: error.component,
-                capacity: error.capacity,
             })
-    }
-
-    #[doc(hidden)]
-    pub fn native_task_census(&self) -> nmp_executor::Census {
-        self.native_tasks.census()
-    }
-
-    #[doc(hidden)]
-    pub fn wait_for_native_tasks_idle(&self) {
-        self.native_tasks.wait_for_idle();
-    }
-
-    #[doc(hidden)]
-    pub fn native_task_executor(&self) -> nmp_executor::Executor {
-        self.native_tasks.clone()
     }
 
     #[doc(hidden)]
@@ -454,12 +446,48 @@ impl Engine {
         query: LiveQuery,
         window: Option<Window>,
     ) -> Result<Subscription, EngineError> {
+        self.subscribe_observation(query, window, Subscription::new, Subscription::new_windowed)
+    }
+
+    /// The pull-based async twin of [`Self::observe`] (#680): returns an
+    /// [`AsyncSubscription`] whose `next()` is awaited rather than blocked on.
+    /// Identical demand, validation, windowing, and withdrawal semantics — only
+    /// the delivery wakeup differs (a waker, not a dedicated OS thread). This is
+    /// what the FFI/SDK observation handles are built on, so opening one costs
+    /// no native thread. Doc-hidden: it is the FFI/SDK delivery mechanism, not
+    /// the documented direct-Rust product noun (which is blocking [`Self::observe`]).
+    #[doc(hidden)]
+    pub fn observe_async(
+        &self,
+        query: LiveQuery,
+        window: Option<Window>,
+    ) -> Result<AsyncSubscription, EngineError> {
+        self.subscribe_observation(
+            query,
+            window,
+            AsyncSubscription::new,
+            AsyncSubscription::new_windowed,
+        )
+    }
+
+    /// Shared validation + engine-subscribe for both the blocking and async
+    /// observation surfaces (#680). The two closures select which wrapper
+    /// (blocking `Subscription` vs `AsyncSubscription`) receives the raw engine
+    /// handle + receiver, so the window/limit validation lives in exactly one
+    /// place.
+    fn subscribe_observation<T>(
+        &self,
+        query: LiveQuery,
+        window: Option<Window>,
+        unbounded: impl FnOnce(Handle, QueryHandle, RowsReceiver) -> T,
+        windowed: impl FnOnce(Handle, HistoryHandle, HistoryReceiver) -> T,
+    ) -> Result<T, EngineError> {
         match window {
             None => self
                 .with_handle(|handle| {
-                    handle.subscribe(query).map(|(query_handle, rows)| {
-                        Subscription::new(handle.clone(), query_handle, rows)
-                    })
+                    handle
+                        .subscribe(query)
+                        .map(|(query_handle, rows)| unbounded(handle.clone(), query_handle, rows))
                 })?
                 .map_err(EngineError::from_thread_error),
             Some(Window::Expandable { initial, max }) => {
@@ -478,7 +506,7 @@ impl Engine {
                     handle
                         .subscribe_history(history_query)
                         .map(|(history_handle, batches)| {
-                            Subscription::new_windowed(handle.clone(), history_handle, batches)
+                            windowed(handle.clone(), history_handle, batches)
                         })
                 })?
                 .map_err(EngineError::from_thread_error)
@@ -510,7 +538,7 @@ impl Engine {
     /// write. An override whose key has no registered signing capability
     /// parks durably as `WriteStatus::AwaitingCapability` until that exact
     /// key's signer attaches.
-    pub fn publish(&self, intent: WriteIntent) -> Result<Receiver<WriteStatus>, EngineError> {
+    pub fn publish(&self, intent: WriteIntent) -> Result<FifoReceiver<WriteStatus>, EngineError> {
         self.with_handle(|handle| handle.publish(intent))?
             .map_err(EngineError::from_publish_error)
     }
@@ -530,6 +558,15 @@ impl Engine {
     /// retained obligations with unreadable evidence are distinct outcomes.
     pub fn reattach_receipt(&self, id: ReceiptId) -> Result<ReceiptReattachment, EngineError> {
         self.with_handle(|handle| handle.reattach_receipt(id))
+    }
+
+    #[doc(hidden)]
+    pub fn reattach_receipt_from(
+        &self,
+        id: ReceiptId,
+        cursor: ReceiptReplayCursor,
+    ) -> Result<ReceiptReattachment, EngineError> {
+        self.with_handle(|handle| handle.reattach_receipt_from(id, cursor))
     }
 
     /// #591: recover a receipt after a crash that happened BEFORE the app
@@ -767,6 +804,16 @@ impl Engine {
         self.with_handle(|handle| {
             let (diag_handle, snapshots) = handle.observe_diagnostics();
             DiagnosticsSubscription::new(diag_handle, snapshots)
+        })
+    }
+
+    /// The pull-based async twin of [`Self::observe_diagnostics`] (#680).
+    /// Doc-hidden FFI/SDK delivery mechanism (see [`Self::observe_async`]).
+    #[doc(hidden)]
+    pub fn observe_diagnostics_async(&self) -> Result<AsyncDiagnosticsSubscription, EngineError> {
+        self.with_handle(|handle| {
+            let (diag_handle, snapshots) = handle.observe_diagnostics();
+            AsyncDiagnosticsSubscription::new(diag_handle, snapshots)
         })
     }
 
@@ -1106,8 +1153,9 @@ mod tests {
         assert!(saw_cancelled);
         assert_eq!(engine.cancel(receipt.id), Ok(CancelWriteOutcome::Cancelled));
 
-        let ReceiptReattachment::Attached(_id, replay) =
-            engine.reattach_receipt(receipt.id).unwrap()
+        let ReceiptReattachment::Attached {
+            statuses: replay, ..
+        } = engine.reattach_receipt(receipt.id).unwrap()
         else {
             panic!("cancelled receipt must remain reattachable")
         };
@@ -1150,8 +1198,9 @@ mod tests {
         assert_eq!(receipt.statuses.recv().unwrap(), WriteStatus::Accepted);
         drop(receipt.statuses);
 
-        let ReceiptReattachment::Attached(_id, replay) =
-            engine.reattach_receipt(receipt_id).unwrap()
+        let ReceiptReattachment::Attached {
+            statuses: replay, ..
+        } = engine.reattach_receipt(receipt_id).unwrap()
         else {
             panic!("dropping the observer must not remove the receipt")
         };
@@ -1406,12 +1455,8 @@ mod tests {
     }
 
     #[test]
-    fn sign_event_cap_one_admits_then_invokes_the_signer_exactly_once() {
-        let engine = Engine::new(EngineConfig {
-            max_native_tasks: 1,
-            ..EngineConfig::default()
-        })
-        .expect("engine must build");
+    fn sign_event_admits_then_invokes_the_signer_exactly_once() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
         let keys = Keys::generate();
         let calls = Arc::new(AtomicUsize::new(0));
         engine
@@ -1434,9 +1479,6 @@ mod tests {
             .expect("local signer must complete");
         assert_eq!(signed.pubkey, keys.public_key());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        engine.wait_for_native_tasks_idle();
-        assert_eq!(engine.native_task_census().admitted, 0);
-        assert_eq!(engine.native_task_census().running, 0);
         engine.shutdown();
     }
 
@@ -1464,12 +1506,8 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_a_write_releases_its_pending_signer_task() {
-        let engine = Engine::new(EngineConfig {
-            max_native_tasks: 1,
-            ..EngineConfig::default()
-        })
-        .expect("engine must build");
+    fn cancelling_a_write_cancels_its_pending_signer() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
         let keys = Keys::generate();
         let cancellations = Arc::new(AtomicUsize::new(0));
         engine
@@ -1498,43 +1536,39 @@ mod tests {
                 .expect("write must be accepted")
         };
 
-        let first = publish("cancel releases slot");
+        // #680 removed the native-task census, so the write's pending signer
+        // cancellation is observed directly through the `cancellations` counter
+        // (bounded poll) rather than the admitted-slot census. The real semantic
+        // preserved: cancelling a write cancels its pending signer, and a second
+        // write can be published and cancelled the same way.
+        let wait_for_cancellations = |target: usize| {
+            for _ in 0..500 {
+                if cancellations.load(Ordering::SeqCst) >= target {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            panic!(
+                "expected {target} signer cancellations, saw {}",
+                cancellations.load(Ordering::SeqCst)
+            );
+        };
+
+        let first = publish("cancel cancels the pending signer");
         assert_eq!(first.statuses.recv().unwrap(), WriteStatus::Accepted);
-        for _ in 0..100 {
-            if engine.native_task_census().admitted == 1 {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert_eq!(engine.native_task_census().admitted, 1);
-
         assert_eq!(engine.cancel(first.id), Ok(CancelWriteOutcome::Cancelled));
-        engine.wait_for_native_tasks_idle();
-        assert_eq!(cancellations.load(Ordering::SeqCst), 1);
-        assert_eq!(engine.native_task_census().admitted, 0);
+        wait_for_cancellations(1);
 
-        let second = publish("released slot is reusable");
+        let second = publish("a second write cancels the same way");
         assert_eq!(second.statuses.recv().unwrap(), WriteStatus::Accepted);
-        for _ in 0..100 {
-            if engine.native_task_census().admitted == 1 {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert_eq!(engine.native_task_census().admitted, 1);
         assert_eq!(engine.cancel(second.id), Ok(CancelWriteOutcome::Cancelled));
-        engine.wait_for_native_tasks_idle();
-        assert_eq!(cancellations.load(Ordering::SeqCst), 2);
+        wait_for_cancellations(2);
         engine.shutdown();
     }
 
     #[test]
-    fn sign_event_is_bounded_and_cancellation_is_session_scoped() {
-        let engine = Engine::new(EngineConfig {
-            max_native_tasks: 1,
-            ..EngineConfig::default()
-        })
-        .expect("engine must build");
+    fn sign_event_cancellation_is_session_scoped() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
         let keys = nostr::Keys::generate();
         let cancellations = Arc::new(AtomicUsize::new(0));
         engine
@@ -1551,23 +1585,19 @@ mod tests {
             content: "pending".to_string(),
         };
 
-        let operation = engine.sign_event(request).expect("one slot is available");
-        assert_eq!(engine.native_task_census().admitted, 1);
+        let operation = engine.sign_event(request).expect("sign event is admitted");
         operation.cancel_handle().cancel();
+        // The cancel hook runs inside `recv_or_cancel` before the operation
+        // resolves, so `cancellations == 1` is deterministic once `recv()`
+        // observes `Cancelled` (no removed native-task idle barrier needed).
         assert_eq!(operation.recv(), Err(SignEventError::Cancelled));
-        engine.wait_for_native_tasks_idle();
         assert_eq!(cancellations.load(Ordering::SeqCst), 1);
-        assert_eq!(engine.native_task_census().admitted, 0);
         engine.shutdown();
     }
 
     #[test]
     fn shutdown_cancels_and_joins_an_accepted_sign_event() {
-        let engine = Engine::new(EngineConfig {
-            max_native_tasks: 1,
-            ..EngineConfig::default()
-        })
-        .expect("engine must build");
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
         let keys = Keys::generate();
         let cancellations = Arc::new(AtomicUsize::new(0));
         engine
@@ -1589,17 +1619,11 @@ mod tests {
         engine.shutdown();
         assert_eq!(operation.recv(), Err(SignEventError::Cancelled));
         assert_eq!(cancellations.load(Ordering::SeqCst), 1);
-        assert_eq!(engine.native_task_census().admitted, 0);
-        assert_eq!(engine.native_task_census().running, 0);
     }
 
     #[test]
     fn sign_event_cancellation_without_adapter_hook_drops_retained_producer_and_joins() {
-        let engine = Engine::new(EngineConfig {
-            max_native_tasks: 1,
-            ..EngineConfig::default()
-        })
-        .expect("engine must build");
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
         let keys = Keys::generate();
         let (producer, operation) = nmp_signer::SignerOp::pending_channel();
         engine
@@ -1619,10 +1643,11 @@ mod tests {
             .expect("operation must be accepted");
 
         operation.cancel_handle().cancel();
+        // `recv_or_cancel` sets `receiver = None` before the completion resolves
+        // the operation, so once `recv()` observes `Cancelled` the worker
+        // receiver is already dropped — deterministic without the removed
+        // native-task idle barrier (#680).
         assert_eq!(operation.recv(), Err(SignEventError::Cancelled));
-        engine.wait_for_native_tasks_idle();
-        assert_eq!(engine.native_task_census().admitted, 0);
-        assert_eq!(engine.native_task_census().running, 0);
         assert!(
             matches!(
                 producer.resolve(Err(nmp_signer::SignerError::Unavailable)),
@@ -1635,11 +1660,7 @@ mod tests {
 
     #[test]
     fn sign_event_shutdown_without_adapter_hook_drops_retained_producer_and_joins() {
-        let engine = Engine::new(EngineConfig {
-            max_native_tasks: 1,
-            ..EngineConfig::default()
-        })
-        .expect("engine must build");
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
         let keys = Keys::generate();
         let (producer, operation) = nmp_signer::SignerOp::pending_channel();
         engine
@@ -1660,8 +1681,6 @@ mod tests {
 
         engine.shutdown();
         assert_eq!(operation.recv(), Err(SignEventError::Cancelled));
-        assert_eq!(engine.native_task_census().admitted, 0);
-        assert_eq!(engine.native_task_census().running, 0);
         assert!(
             matches!(
                 producer.resolve(Err(nmp_signer::SignerError::Unavailable)),
@@ -1673,11 +1692,7 @@ mod tests {
 
     #[test]
     fn sign_event_cancellation_claim_beats_hook_that_simultaneously_completes() {
-        let engine = Engine::new(EngineConfig {
-            max_native_tasks: 1,
-            ..EngineConfig::default()
-        })
-        .expect("engine must build");
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
         let keys = Keys::generate();
         let cancellations = Arc::new(AtomicUsize::new(0));
         engine
@@ -1697,37 +1712,18 @@ mod tests {
             .expect("operation must be accepted");
 
         operation.cancel_handle().cancel();
+        // `recv_or_cancel` fires the cancel hook before the completion resolves
+        // the operation, so once `recv()` observes `Cancelled` the hook has run
+        // exactly once — no native-task idle barrier is needed (removed in #680).
         assert_eq!(operation.recv(), Err(SignEventError::Cancelled));
-        engine.wait_for_native_tasks_idle();
         assert_eq!(cancellations.load(Ordering::SeqCst), 1);
-        assert_eq!(engine.native_task_census().admitted, 0);
-        assert_eq!(engine.native_task_census().running, 0);
         engine.shutdown();
     }
 
-    #[test]
-    fn sign_event_capacity_refusal_happens_before_signer_invocation() {
-        let engine = Engine::new(EngineConfig {
-            max_native_tasks: 1,
-            ..EngineConfig::default()
-        })
-        .expect("engine must build");
-        let secret = format!("{:064x}", 23u8);
-        let author = engine.add_account(&secret).unwrap().public_key();
-        engine.set_active_account(Some(author)).unwrap();
-        let _held = engine.reserve_native_task("test-capacity").unwrap();
-        let request = SignEventRequest {
-            created_at: nostr::Timestamp::from(4),
-            kind: nostr::Kind::TextNote,
-            tags: Vec::new(),
-            content: "refused".to_string(),
-        };
-        match engine.sign_event(request) {
-            Err(error) => assert_eq!(error, SignEventError::ExecutorSaturated { capacity: 1 }),
-            Ok(_) => panic!("capacity must refuse before signer invocation"),
-        }
-        engine.shutdown();
-    }
+    // #680 deleted `sign_event_capacity_refusal_happens_before_signer_invocation`:
+    // it asserted the removed global native-task capacity refusal
+    // (`SignEventError::ExecutorSaturated` + `max_native_tasks`). Sign-event
+    // admission no longer surfaces a configurable capacity ceiling.
     use nmp_grammar::{Durability, WritePayload, WriteRouting};
     use nostr::ToBech32;
 
@@ -2117,8 +2113,11 @@ mod tests {
                     panic!("override publish must not fail pre-routing: {reason}")
                 }
                 Ok(_) => {}
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(nmp_engine::runtime::FifoRecvTimeoutError::Timeout) => {}
+                Err(nmp_engine::runtime::FifoRecvTimeoutError::Closed) => break,
+                Err(nmp_engine::runtime::FifoRecvTimeoutError::Lagged) => {
+                    panic!("short identity-override receipt unexpectedly lagged")
+                }
             }
         }
         assert!(signed_as_b, "override publish must reach Signed as B");
@@ -2587,9 +2586,9 @@ mod tests {
                 RelayInformationError::ServiceClosed
             ))
         ));
-        assert_eq!(engine.native_task_census().admitted, 0);
-        assert_eq!(engine.native_task_census().running, 0);
-        assert!(!engine.native_task_census().accepting);
+        // #680 removed the native-task census surface; the real semantic here
+        // is that shutdown drained the live acquisition (ServiceClosed above)
+        // without blocking, and the subscription is closed.
         assert!(subscription.recv().is_err());
 
         // These retained owners remain safe after exact-zero teardown.

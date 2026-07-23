@@ -1,5 +1,22 @@
 # Finite native task ownership
 
+> **SUPERSEDED for the observation-delivery path by
+> [`async-observation-handles.md`](async-observation-handles.md) (#680).**
+> Observers no longer own an OS thread or an executor slot: query, window,
+> diagnostics, receipt, follow, and follow-action delivery are pull-based
+> waker-driven async handles that cost **zero** NMP-owned threads. The
+> app-visible native-task capacity surface (`max_native_tasks`/`maxNativeTasks`,
+> `native_task_census`/`FfiNativeTaskCensus`, `await_native_tasks_idle`, and the
+> `ExecutorSaturated`/`executorSaturated` refusal) has been **removed**. What
+> remains of `nmp-executor` is a fixed-capacity *internal* blocking-adapter pool
+> (`ADAPTER_POOL_CAPACITY`, not app-configurable, not CPU-derived, not surfaced)
+> hosting only transient blocking foreign/reactor adapters — NIP-11 flights,
+> remote-signer result waiters, the sign-event drain, AUTH foreign calls, and
+> the follow-action worker. Engine-associated NIP-46 sessions run on their own
+> session-owned executors. Residual saturation surfaces as the adapter-specific
+> `ThreadUnavailable`, never a global native-task ceiling. The text below is the
+> historical #442/#446 record.
+
 Issue #446 closes the remaining per-stream/per-operation OS-thread growth left
 after #442 bounded transport and verifier ownership.
 

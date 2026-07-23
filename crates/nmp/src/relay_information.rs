@@ -43,7 +43,6 @@ impl RelayInformationFreshness {
 /// Typed failure of one bounded NIP-11 acquisition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelayInformationError {
-    ExecutorSaturated { capacity: usize },
     WaiterSaturated { capacity: usize },
     ThreadUnavailable { reason: String },
     ServiceClosed,
@@ -56,9 +55,6 @@ pub enum RelayInformationError {
 impl RelayInformationError {
     pub(crate) fn from_engine(value: nmp_engine::relay_information::RelayInformationError) -> Self {
         match value {
-            nmp_engine::relay_information::RelayInformationError::ExecutorSaturated {
-                capacity,
-            } => Self::ExecutorSaturated { capacity },
             nmp_engine::relay_information::RelayInformationError::WaiterSaturated { capacity } => {
                 Self::WaiterSaturated { capacity }
             }
@@ -87,10 +83,6 @@ impl RelayInformationError {
 impl std::fmt::Display for RelayInformationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ExecutorSaturated { capacity } => write!(
-                f,
-                "NIP-11 acquisition refused: native task capacity {capacity} is full"
-            ),
             Self::WaiterSaturated { capacity } => write!(
                 f,
                 "NIP-11 acquisition refused: per-relay waiter capacity {capacity} is full"

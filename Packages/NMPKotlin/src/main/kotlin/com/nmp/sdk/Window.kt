@@ -7,27 +7,29 @@
 // Delivery mode is DERIVED from boundedness, never a knob:
 // - Unbounded observations have no ceiling, so redelivering the full row
 //   set on every change is the O(rows^2) class -- they stream exact rebased
-//   deltas (Query.kt) and each element is the bridge-accumulated snapshot.
+//   deltas (Query.kt) and each element is the accumulated snapshot.
 // - Windowed observations are bounded by `max`, so a full snapshot per
-//   frame is cheap AND makes every frame self-contained -- a conflated
-//   latest-state flow can drop intermediate frames with zero information
-//   loss, which a delta stream never could.
+//   frame is cheap AND makes every frame self-contained -- the engine's
+//   latest-state mailbox can conflate intermediate frames with zero
+//   information loss, which a delta stream never could.
+//
+// PULL MODEL (#680): [frames] is a thin pull adapter over the windowed
+// [NmpRowStream] -- it awaits `next()`, maps each authoritative frame to a
+// full [RowBatch], and withdraws the observation (`handle.cancel()`) in a
+// `finally` when collection ends. No callback observer, no drain thread, no
+// retain-before-collection bookkeeping (the engine mailbox holds the latest
+// snapshot until the first pull).
 
 package com.nmp.sdk
 
-import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.callbackFlow
-import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.flow
 import uniffi.nmp_ffi.FfiFrame
 import uniffi.nmp_ffi.FfiRequestRowsException
 import uniffi.nmp_ffi.FfiWindow
 import uniffi.nmp_ffi.FfiWindowLoad
-import uniffi.nmp_ffi.NmpQueryHandle
-import uniffi.nmp_ffi.RowObserver
+import uniffi.nmp_ffi.NmpRowStream
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.locks.ReentrantLock
-import kotlin.concurrent.withLock
 
 /** Window policy on the read noun. Exactly one policy exists today; future
  * policies are new variants of this class, never new observe verbs. */
@@ -104,33 +106,35 @@ sealed class NMPRequestRowsError(message: String) : Exception(message) {
     }
 }
 
-/** One windowed observation. [frames] is a single-collector, conflated
+/** One windowed observation. [frames] is a single-collector, cold
  * latest-state `Flow`: every delivered [RowBatch] is a full authoritative
  * snapshot of the bounded window (with its [RowBatch.load] growth fact), so
  * a slow collector loses nothing by skipping intermediate frames and never
- * accumulates a backlog. Ending collection, calling [cancel], or shutting
- * down the engine withdraws the same observation (the identical
- * collection-scope teardown discipline as the unbounded `observe` flows --
- * see Query.kt's header finding for why `awaitClose`, not a GC `Cleaner`,
- * is the correct JVM mapping). */
+ * accumulates a backlog (the engine's latest-state mailbox conflates them).
+ * Ending collection, calling [cancel], or shutting down the engine withdraws
+ * the same observation (the identical collection-scope teardown discipline
+ * as the unbounded `observe` flows -- see Query.kt's header for why the
+ * `finally`, not a GC `Cleaner`, is the correct JVM mapping). */
 class NMPQuery internal constructor(
-    subscribe: (RowObserver) -> NmpQueryHandle,
+    private val handle: NmpRowStream,
 ) {
-    private val bridge = WindowBridge()
-    private val handle: NmpQueryHandle = subscribe(bridge)
+    private val collectionClaimed = AtomicBoolean(false)
     private val cancelled = AtomicBoolean(false)
 
     val frames: Flow<RowBatch> =
-        callbackFlow {
-            bridge.attach(
-                emit = { trySend(it) },
-                finish = { close() },
-            )
-            awaitClose {
-                bridge.detach()
+        flow {
+            check(collectionClaimed.compareAndSet(false, true)) {
+                "a windowed observation's frames Flow may be collected only once"
+            }
+            try {
+                while (true) {
+                    val frame = nmpRethrowingAsync { handle.next() } ?: break
+                    emit(windowRowBatch(frame))
+                }
+            } finally {
                 this@NMPQuery.cancel()
             }
-        }.conflate()
+        }
 
     /** Monotonically raise the window's row target to at least [atLeast],
      * clamped to the window's declared `max`. Declarative and idempotent:
@@ -149,91 +153,33 @@ class NMPQuery internal constructor(
         }
     }
 
-    /** Withdraw the complete windowed observation now. Idempotent. */
+    /** Withdraw the complete windowed observation now. Idempotent. Wakes any
+     * parked [frames] pull to its terminal `null`, completing the flow. */
     fun cancel() {
         if (cancelled.compareAndSet(false, true)) {
             handle.cancel()
-            bridge.finish()
         }
     }
 }
 
-/** The windowed-observation `RowObserver`. Windowed frames are authoritative
- * snapshots: row state is REPLACED wholesale from `frame.window.rows` --
- * there is no delta folding here (the wire ships windowed frames with empty
- * `deltas`; rows never cross the FFI twice). Only the latest full state is
- * retained before a collector attaches, which is exact because every frame
- * is self-contained. */
-internal class WindowBridge : RowObserver {
-    private val lock = ReentrantLock()
-    private var latest: RowBatch? = null
-    private var emit: ((RowBatch) -> Unit)? = null
-    private var finishSink: (() -> Unit)? = null
-    private var collectionClaimed = false
-    private var closed = false
-
-    override fun onFrame(frame: FfiFrame) {
-        val contents =
-            checkNotNull(frame.window) {
-                "windowed observation delivered a frame without window contents"
-            }
-        val outgoing =
-            lock.withLock {
-                if (closed) return
-                val mapped =
-                    RowBatch(
-                        rows = contents.rows.map { Row.from(it) },
-                        evidence = AcquisitionEvidence.from(frame.evidence),
-                        load = WindowLoad.from(contents.load),
-                    )
-                val sink = emit
-                if (sink == null) {
-                    latest = mapped
-                    null
-                } else {
-                    sink to mapped
-                }
-            }
-        outgoing?.first?.invoke(outgoing.second)
-    }
-
-    override fun onClosed() = finish()
-
-    fun attach(emit: (RowBatch) -> Unit, finish: () -> Unit) {
-        val alreadyClosed =
-            lock.withLock {
-                check(!collectionClaimed) {
-                    "a windowed observation's frames Flow may be collected only once"
-                }
-                collectionClaimed = true
-                this.emit = emit
-                this.finishSink = finish
-                val pending = latest
-                latest = null
-                // `emit` is the callbackFlow's non-blocking `trySend` seam.
-                // Sending while holding the bridge lock prevents onClosed
-                // from winning the attach race and discarding this latest
-                // already-produced authoritative frame.
-                pending?.let(emit)
-                closed
-            }
-        if (alreadyClosed) finish()
-    }
-
-    fun detach() {
-        lock.withLock {
-            emit = null
-            finishSink = null
+/**
+ * Map one windowed [FfiFrame] to its full authoritative [RowBatch].
+ * Extracted as a pure function so the wholesale-replace + load-fact mapping
+ * is unit-testable without driving a live [NmpRowStream].
+ *
+ * Windowed frames are authoritative snapshots: row state is REPLACED
+ * wholesale from `frame.window.rows` -- there is no delta folding here (the
+ * wire ships windowed frames with empty `deltas`; rows never cross the FFI
+ * twice), so even a contradictory wire delta is ignored on this arm.
+ */
+internal fun windowRowBatch(frame: FfiFrame): RowBatch {
+    val contents =
+        checkNotNull(frame.window) {
+            "windowed observation delivered a frame without window contents"
         }
-    }
-
-    fun finish() {
-        val closer =
-            lock.withLock {
-                if (closed) return
-                closed = true
-                finishSink
-            }
-        closer?.invoke()
-    }
+    return RowBatch(
+        rows = contents.rows.map { Row.from(it) },
+        evidence = AcquisitionEvidence.from(frame.evidence),
+        load = WindowLoad.from(contents.load),
+    )
 }

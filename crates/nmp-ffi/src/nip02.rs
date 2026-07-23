@@ -3,13 +3,13 @@
 //! no contact-list parsing, replacement composition, readiness policy, or
 //! optimistic following boolean lives at the FFI boundary.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use crate::convert::{write_status_to_ffi, WriteStatusRef};
+use crate::convert::{write_status_to_ffi, FfiError, WriteStatusRef};
 use crate::types::FfiWriteStatus;
 use nmp_nip02::{
-    ComposeFollowError, FollowActionFailure, FollowActionStatus, FollowAvailability,
-    FollowRelationship, FollowSnapshot,
+    AsyncFollowObservation, ComposeFollowError, FollowActionFailure, FollowActionStatus,
+    FollowAvailability, FollowRelationship, FollowSnapshot,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -54,7 +54,6 @@ pub enum FfiFollowActionFailure {
     EngineClosed,
     ReceiptUnavailable,
     ThreadUnavailable { component: String, reason: String },
-    ExecutorSaturated { component: String, capacity: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -72,34 +71,94 @@ pub enum FfiFollowActionStatus {
     },
 }
 
-#[uniffi::export(callback_interface)]
-pub trait FollowObserver: Send + Sync {
-    fn on_snapshot(&self, snapshot: FfiFollowSnapshot);
-    fn on_closed(&self);
-}
-
-#[uniffi::export(callback_interface)]
-pub trait FollowActionObserver: Send + Sync {
-    fn on_status(&self, status: FfiFollowActionStatus);
-    fn on_closed(&self);
-}
-
-/// Deinit-tied cancellation for one following relationship observation.
+/// Pull-based following-relationship observation handle (#680). Each `next()`
+/// awaits the engine's waker-driven async row mailbox and folds a complete
+/// self-contained relationship snapshot inline — no NMP-owned OS thread per
+/// observation. `None` is the terminal signal (the demand was withdrawn or the
+/// engine shut down). `Drop`/`cancel` withdraw the observation.
 #[derive(uniffi::Object)]
-pub struct NmpFollowHandle {
-    pub(crate) cancel: nmp::ObservationCancel,
+pub struct NmpFollowStream {
+    inner: AsyncFollowObservation,
 }
 
-#[uniffi::export]
-impl NmpFollowHandle {
-    pub fn cancel(&self) {
-        self.cancel.cancel();
+impl NmpFollowStream {
+    pub(crate) fn new(inner: AsyncFollowObservation) -> Arc<Self> {
+        Arc::new(Self { inner })
     }
 }
 
-impl Drop for NmpFollowHandle {
+#[uniffi::export]
+impl NmpFollowStream {
+    /// Await the next relationship snapshot, or `None` once the observation is
+    /// withdrawn. A second concurrent `next()` is [`FfiError::ConcurrentNext`].
+    pub async fn next(&self) -> Result<Option<FfiFollowSnapshot>, FfiError> {
+        match self.inner.next().await {
+            Ok(Some(snapshot)) => Ok(Some(snapshot_to_ffi(snapshot))),
+            Ok(None) => Ok(None),
+            Err(_) => Err(FfiError::ConcurrentNext),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.inner.cancel();
+    }
+}
+
+impl Drop for NmpFollowStream {
     fn drop(&mut self) {
-        self.cancel.cancel();
+        self.inner.cancel();
+    }
+}
+
+/// Pull-based follow/unfollow action stream (#680). The action worker (one
+/// transient thread per user action on the engine's internal blocking-adapter
+/// pool) pushes each [`FollowActionStatus`] into a waker-aware FIFO; this
+/// handle awaits them in order. `None` is the terminal signal. `Drop`/`cancel`
+/// close the stream.
+#[derive(uniffi::Object)]
+pub struct NmpFollowActionStream {
+    inner: nmp::AsyncFifoReceiver<FollowActionStatus>,
+    last_receipt_id: Mutex<Option<u64>>,
+}
+
+impl NmpFollowActionStream {
+    pub(crate) fn new(inner: nmp::AsyncFifoReceiver<FollowActionStatus>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            last_receipt_id: Mutex::new(None),
+        })
+    }
+}
+
+#[uniffi::export]
+impl NmpFollowActionStream {
+    /// Await the next follow-action status in order, or `None` at the end of
+    /// the action's lifecycle. A second concurrent `next()` is
+    /// [`FfiError::ConcurrentNext`].
+    pub async fn next(&self) -> Result<Option<FfiFollowActionStatus>, FfiError> {
+        match self.inner.next().await {
+            Ok(Some(status)) => {
+                if let FollowActionStatus::Receipt { receipt_id, .. } = &status {
+                    *self.last_receipt_id.lock().unwrap() = Some(*receipt_id);
+                }
+                Ok(Some(action_status_to_ffi(status)))
+            }
+            Ok(None) => Ok(None),
+            Err(nmp::FifoNextError::ConcurrentNext) => Err(FfiError::ConcurrentNext),
+            Err(nmp::FifoNextError::Lagged) => Err(FfiError::FactStreamLagged {
+                receipt_id: *self.last_receipt_id.lock().unwrap(),
+            }),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.inner.close();
+    }
+}
+
+impl Drop for NmpFollowActionStream {
+    fn drop(&mut self) {
+        self.inner.close();
     }
 }
 
@@ -126,6 +185,7 @@ pub(crate) fn snapshot_to_ffi(snapshot: FollowSnapshot) -> FfiFollowSnapshot {
 
 fn failure_to_ffi(failure: FollowActionFailure) -> FfiFollowActionFailure {
     match failure {
+        FollowActionFailure::InvalidTarget { got } => FfiFollowActionFailure::InvalidTarget { got },
         FollowActionFailure::SignedOut => FfiFollowActionFailure::SignedOut,
         FollowActionFailure::AccountChanged => FfiFollowActionFailure::AccountChanged,
         FollowActionFailure::AcquisitionTimedOut => FfiFollowActionFailure::AcquisitionTimedOut,
@@ -143,13 +203,6 @@ fn failure_to_ffi(failure: FollowActionFailure) -> FfiFollowActionFailure {
         FollowActionFailure::ThreadUnavailable { component, reason } => {
             FfiFollowActionFailure::ThreadUnavailable { component, reason }
         }
-        FollowActionFailure::ExecutorSaturated {
-            component,
-            capacity,
-        } => FfiFollowActionFailure::ExecutorSaturated {
-            component,
-            capacity: capacity as u64,
-        },
     }
 }
 
@@ -165,10 +218,6 @@ pub(crate) fn action_status_to_ffi(status: FollowActionStatus) -> FfiFollowActio
             failure: failure_to_ffi(failure),
         },
     }
-}
-
-pub(crate) fn handle(cancel: nmp::ObservationCancel) -> Arc<NmpFollowHandle> {
-    Arc::new(NmpFollowHandle { cancel })
 }
 
 #[cfg(test)]

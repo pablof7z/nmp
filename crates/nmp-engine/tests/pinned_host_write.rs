@@ -8,13 +8,13 @@
 //! bridged by explicit hex/id round-trip).
 
 use std::net::{SocketAddr, TcpListener};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
 use nmp_engine::core::RelayAdmissionPolicy;
 use nmp_engine::core::RowDelta;
 use nmp_engine::outbox::WriteStatus;
-use nmp_engine::runtime::{EngineThread, RowsReceiver};
+use nmp_engine::runtime::{EngineThread, FifoReceiver, FifoRecvTimeoutError, RowsReceiver};
 use nmp_nip29::GroupTimelineEvidence;
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
@@ -40,7 +40,7 @@ fn spawn_relay(port: u16) -> LocalRelay {
 }
 
 fn wait_for_status(
-    rx: &Receiver<WriteStatus>,
+    rx: &FifoReceiver<WriteStatus>,
     timeout: Duration,
     pred: impl Fn(&WriteStatus) -> bool,
 ) -> Option<WriteStatus> {
@@ -53,8 +53,8 @@ fn wait_for_status(
         match rx.recv_timeout(remaining) {
             Ok(status) if pred(&status) => return Some(status),
             Ok(_) => {}
-            Err(RecvTimeoutError::Timeout) => return None,
-            Err(RecvTimeoutError::Disconnected) => return None,
+            Err(FifoRecvTimeoutError::Timeout | FifoRecvTimeoutError::Closed) => return None,
+            Err(FifoRecvTimeoutError::Lagged) => panic!("fixture receipt stream must not lag"),
         }
     }
 }
