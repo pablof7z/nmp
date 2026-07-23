@@ -10,23 +10,21 @@ import XCTest
 @testable import NMP
 
 final class DiagnosticsTests: XCTestCase {
-    func testNativeExecutorSaturationIsTypedAndCancellationReturnsExactBaseline() throws {
-        let engine = try NMPEngine(config: NMPConfig(maxNativeTasks: 1))
+    /// #680: opening many diagnostics observations no longer touches any
+    /// native-task capacity -- there is no admission ceiling, no census, and
+    /// no `executorSaturated`. Dozens of concurrent diagnostics streams on one
+    /// engine all open, and cancelling them leaves nothing to reconcile.
+    func testManyDiagnosticsObservationsOpenWithoutACapacityCeiling() throws {
+        let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
 
-        let held = try engine.observeDiagnostics()
-        XCTAssertEqual(engine.nativeTaskCensus().admitted, 1)
-        XCTAssertThrowsError(try engine.observeDiagnostics()) { error in
-            XCTAssertEqual(
-                error as? NMPError,
-                .executorSaturated(component: "diagnostics-observer", capacity: 1)
-            )
+        var held: [NMPDiagnostics] = []
+        for _ in 0..<64 {
+            held.append(try engine.observeDiagnostics())
         }
-
-        held.cancel()
-        engine.awaitNativeTasksIdle()
-        XCTAssertEqual(engine.nativeTaskCensus().admitted, 0)
-        XCTAssertEqual(engine.nativeTaskCensus().running, 0)
+        for diagnostics in held {
+            diagnostics.cancel()
+        }
     }
 
     /// #442: construction/shutdown is an exact join barrier. Repeating the
@@ -100,8 +98,12 @@ final class DiagnosticsTests: XCTestCase {
     ) async -> DiagnosticsSnapshot? {
         await withTaskGroup(of: DiagnosticsSnapshot?.self) { group in
             group.addTask {
-                for await snapshot in diagnostics {
-                    return snapshot
+                do {
+                    for try await snapshot in diagnostics {
+                        return snapshot
+                    }
+                } catch {
+                    return nil
                 }
                 return nil
             }

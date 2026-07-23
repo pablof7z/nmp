@@ -4,7 +4,6 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
-import kotlinx.coroutines.flow.emptyFlow
 import uniffi.nmp_ffi.FfiAccessContext
 import uniffi.nmp_ffi.FfiAcquisitionEvidence
 import uniffi.nmp_ffi.FfiAuthPhase
@@ -97,20 +96,39 @@ class EvidenceMappingTest {
     }
 
     @Test
+    fun finiteFactDeliveryFailuresRemainTypedAtTheNativeBoundary() {
+        assertEquals(
+            NMPError.FactStreamLagged(42u),
+            NMPError.from(FfiException.FactStreamLagged(42u)),
+        )
+        assertEquals(
+            NMPError.FactStreamLagged(null),
+            NMPError.from(FfiException.FactStreamLagged(null)),
+        )
+        assertEquals(
+            NMPError.ReceiptReplayUnavailable(42u),
+            NMPError.from(FfiException.ReceiptReplayUnavailable(42u)),
+        )
+    }
+
+    @Test
     fun everyReceiptReattachmentVariantMapsWithoutCollapsingCorruptionIntoAbsence() {
-        val attached = mapReceiptReattachment(FfiReceiptReattachment.ATTACHED, 42uL, emptyFlow())
-        assertEquals(42uL, (attached as ReceiptReattachment.Attached).receipt.id)
-        assertTrue(
-            mapReceiptReattachment(FfiReceiptReattachment.NOT_FOUND, 42uL, emptyFlow()) ===
-                ReceiptReattachment.NotFound,
-        )
-        assertTrue(
-            mapReceiptReattachment(
-                FfiReceiptReattachment.RETAINED_BUT_UNREADABLE,
-                42uL,
-                emptyFlow(),
-            ) === ReceiptReattachment.RetainedButUnreadable,
-        )
+        // #680: `FfiReceiptReattachment.Attached` now carries a live
+        // `NmpReceiptStream` (exercised by the integration suite); the
+        // corruption-vs-absence distinction this test guards lives entirely in
+        // the two non-stream terminals, which must stay DISTINCT objects --
+        // retained-but-unreadable is never collapsed into not-found. The
+        // `attach` mapper must not run for either terminal.
+        val unusedAttach: (uniffi.nmp_ffi.NmpReceiptStream) -> Receipt =
+            { error("attach must not run for a non-Attached reattachment") }
+
+        val notFound = mapReceiptReattachment(FfiReceiptReattachment.NotFound, unusedAttach)
+        val unreadable =
+            mapReceiptReattachment(FfiReceiptReattachment.RetainedButUnreadable, unusedAttach)
+
+        assertTrue(notFound === ReceiptReattachment.NotFound)
+        assertTrue(unreadable === ReceiptReattachment.RetainedButUnreadable)
+        assertTrue(notFound !== unreadable)
     }
 
     @Test

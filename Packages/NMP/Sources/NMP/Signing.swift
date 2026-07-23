@@ -53,134 +53,44 @@ public struct NMPSignedEvent: Sendable, Hashable {
     }
 }
 
-final class SignEventBridge: SignEventObserver, @unchecked Sendable {
-    private enum TerminalState {
-        case open
-        case cancelled
-        case completed
-    }
-
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<NMPSignedEvent, Error>?
-    private var cancelOperation: (() -> Void)?
-    private var terminalState = TerminalState.open
-
-    @discardableResult
-    func installContinuation(
-        _ continuation: CheckedContinuation<NMPSignedEvent, Error>
-    ) -> Bool {
-        lock.lock()
-        switch terminalState {
-        case .open:
-            self.continuation = continuation
-            lock.unlock()
-            return true
-        case .cancelled:
-            lock.unlock()
-            continuation.resume(throwing: CancellationError())
-            return false
-        case .completed:
-            lock.unlock()
-            return false
-        }
-    }
-
-    func installCancellation(_ cancelOperation: @escaping () -> Void) {
-        lock.lock()
-        switch terminalState {
-        case .open:
-            self.cancelOperation = cancelOperation
-            lock.unlock()
-        case .cancelled:
-            lock.unlock()
-            cancelOperation()
-        case .completed:
-            lock.unlock()
-        }
-    }
-
-    func failToStart(_ error: Error) {
-        finish(.failure(error))
-    }
-
-    func requestCancellation() {
-        lock.lock()
-        guard case .open = terminalState else {
-            lock.unlock()
-            return
-        }
-        terminalState = .cancelled
-        let continuation = continuation
-        self.continuation = nil
-        let cancelOperation = cancelOperation
-        self.cancelOperation = nil
-        lock.unlock()
-        continuation?.resume(throwing: CancellationError())
-        cancelOperation?()
-    }
-
-    func onSigned(event: FfiSignedEvent) {
-        finish(.success(NMPSignedEvent(event)))
-    }
-
-    func onFailed(failure: FfiSignEventFailure) {
-        switch failure {
-        case .signerUnavailable(let reason):
-            finish(.failure(NMPError.signerUnavailable(reason)))
-        case .signerRejected(let reason):
-            finish(.failure(NMPError.signerRejected(reason)))
-        case .invalidSignerOutput(let reason):
-            finish(.failure(NMPError.invalidSignerOutput(reason)))
-        case .cancelled:
-            finish(.failure(CancellationError()))
-        }
-    }
-
-    private func finish(_ result: Result<NMPSignedEvent, Error>) {
-        lock.lock()
-        guard terminalState == .open else {
-            lock.unlock()
-            return
-        }
-        terminalState = .completed
-        let continuation = continuation
-        self.continuation = nil
-        self.cancelOperation = nil
-        lock.unlock()
-        continuation?.resume(with: result)
-    }
-}
-
-func performSignEvent(
-    _ event: NMPUnsignedEvent,
-    start: (FfiSignEventRequest, SignEventObserver) throws -> (() -> Void)
-) async throws -> NMPSignedEvent {
-    let bridge = SignEventBridge()
-    return try await withTaskCancellationHandler {
-        try await withCheckedThrowingContinuation { continuation in
-            guard bridge.installContinuation(continuation) else {
-                return
-            }
-            do {
-                bridge.installCancellation(try start(event.toFfi(), bridge))
-            } catch {
-                bridge.failToStart(error)
-            }
-        }
-    } onCancel: {
-        bridge.requestCancellation()
+/// Translate the one-shot sign-only outcome's typed failure (#680). A signer
+/// refusal is a typed `NMPError`; an engine-side `.Cancelled` becomes a Swift
+/// `CancellationError` so `try await` cancellation reads naturally.
+func mapSignEventFailure(_ failure: FfiSignEventFailure) -> Error {
+    switch failure {
+    case .SignerUnavailable(let reason): return NMPError.signerUnavailable(reason)
+    case .SignerRejected(let reason): return NMPError.signerRejected(reason)
+    case .InvalidSignerOutput(let reason): return NMPError.invalidSignerOutput(reason)
+    case .Cancelled: return CancellationError()
+    case .AlreadyConsumed: return NMPError.signEventAlreadyConsumed
     }
 }
 
 extension NMPEngine {
     /// Sign one exact event with the active signer without creating a write
-    /// intent, pending row, receipt, relay plan, or publication.
+    /// intent, pending row, receipt, relay plan, or publication (#680).
+    ///
+    /// `NmpEngine.signEvent` synchronously returns a one-shot
+    /// `NmpSignEventHandle`; awaiting `handle.signed()` delivers the verified
+    /// event or a typed failure. Task cancellation is wired through
+    /// `withTaskCancellationHandler` to `handle.cancel()` -- MANDATORY because
+    /// Swift task cancellation never reaches Rust and never interrupts the
+    /// in-flight `await` (#680); the cancel wakes `signed()` to a `.Cancelled`
+    /// failure, surfaced here as `CancellationError`.
     public func signEvent(_ event: NMPUnsignedEvent) async throws -> NMPSignedEvent {
-        try await performSignEvent(event) { request, observer in
-            let handle = try nmpRethrowing {
-                try ffi.signEvent(event: request, observer: observer)
+        let handle = try nmpRethrowing {
+            try ffi.signEvent(event: event.toFfi())
+        }
+        return try await withTaskCancellationHandler {
+            do {
+                return NMPSignedEvent(try await handle.signed())
+            } catch let failure as FfiSignEventFailure {
+                throw mapSignEventFailure(failure)
+            } catch let error as FfiError {
+                throw NMPError(error)
             }
-            return { handle.cancel() }
+        } onCancel: {
+            handle.cancel()
         }
     }
 }

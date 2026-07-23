@@ -10,8 +10,10 @@
 //! (and, for the verify, `nmp-engine::core::EngineCore::on_publish`'s
 //! acceptance boundary) so this crate inherits it rather than re-deriving
 //! it (see [`facade`]'s doc). What genuinely stays FFI-boundary work: type
-//! mirroring (`convert`/`types`) and the drain-thread bridge from `nmp`'s
-//! blocking `recv()` verbs to UniFFI's callback-interface observers.
+//! mirroring (`convert`/`types`) and the pull-based async UniFFI object
+//! handles (`NmpRowStream`/`NmpDiagnosticsStream`/`NmpReceiptStream`/…) whose
+//! `next()` awaits `nmp`'s waker-driven async observation surface (#680) —
+//! costing zero NMP-owned OS threads per observation.
 //!
 //! Module layout mirrors the plan's §2 sketch:
 //! - [`auth`] -- opaque account/policy registrations and the completion-only
@@ -19,8 +21,9 @@
 //! - [`types`] -- the FFI mirror records/enums (`FfiFilter`/`FfiBinding`/…).
 //! - [`convert`] -- `FfiFilter <-> nmp_grammar::Filter` and the
 //!   `nostr::Event`/`nmp` value mirrors, plus the shared [`FfiError`](convert::FfiError).
-//! - [`observer`] -- the `RowObserver`/`ReceiptObserver` foreign traits.
-//! - [`facade`] -- `NmpEngine`/`NmpQueryHandle`, the exported objects.
+//! - [`facade`] -- `NmpEngine` plus the pull-based async stream objects
+//!   (`NmpRowStream`/`NmpDiagnosticsStream`/`NmpReceiptStream`/
+//!   `NmpSignEventHandle`), the exported objects.
 //! - [`entity`] -- the bech32 nostr-entity DECODE codec (#116), the one
 //!   exported free function that needs no `NmpEngine` instance at all: no
 //!   engine, no network, no signing.
@@ -55,7 +58,6 @@ pub mod facade;
 pub mod nip02;
 pub mod nip22;
 pub mod nip29;
-pub mod observer;
 pub mod reference;
 pub mod signer;
 pub mod types;

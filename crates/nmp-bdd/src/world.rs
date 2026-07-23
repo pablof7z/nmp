@@ -174,7 +174,7 @@ impl FeedState {
 /// only ever names "the receipt", singular -- one implicit publish in
 /// flight per scenario).
 struct ReceiptState {
-    rx: std::sync::mpsc::Receiver<WriteStatus>,
+    rx: nmp_engine::runtime::FifoReceiver<WriteStatus>,
     seen: Vec<WriteStatus>,
 }
 

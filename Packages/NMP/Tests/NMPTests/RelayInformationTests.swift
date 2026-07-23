@@ -151,27 +151,6 @@ final class RelayInformationTests: XCTestCase {
         }
     }
 
-    func testRelayInformationExecutorSaturationRemainsTypedThroughWrapper() async throws {
-        let engine = try NMPEngine(config: NMPConfig(maxNativeTasks: 1))
-        defer { engine.shutdown() }
-        let held = try engine.observeDiagnostics()
-        defer { held.cancel() }
-        XCTAssertEqual(engine.nativeTaskCensus().admitted, 1)
-
-        do {
-            _ = try await engine.relayInformation(
-                for: "ws://localhost:9",
-                policy: .refresh
-            )
-            XCTFail("a full shared executor must refuse before HTTP")
-        } catch let error as NMPError {
-            XCTAssertEqual(
-                error,
-                .executorSaturated(component: "NIP-11 acquisition", capacity: 1)
-            )
-        }
-    }
-
     func testRelayInformationWaiterSaturationRemainsTypedThroughWrapper() async throws {
         let server = try LocalNIP11Server(
             body: #"{"name":"Shared"}"#,

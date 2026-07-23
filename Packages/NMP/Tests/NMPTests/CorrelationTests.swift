@@ -12,12 +12,16 @@ final class CorrelationTests: XCTestCase {
 
     private let author = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 
-    private static func collect(_ stream: AsyncStream<WriteStatus>, count: Int) async -> [WriteStatus] {
+    private static func collect(_ stream: ReceiptStatus, count: Int) async -> [WriteStatus] {
         var statuses: [WriteStatus] = []
-        for await status in stream {
-            statuses.append(status)
-            if statuses.count >= count { break }
-        }
+        // #680: a receipt is a throwing `AsyncSequence`; a throw here is
+        // terminal teardown, so end collection with what we have.
+        do {
+            for try await status in stream {
+                statuses.append(status)
+                if statuses.count >= count { break }
+            }
+        } catch {}
         return statuses
     }
 

@@ -96,7 +96,6 @@ public enum NMPFollowActionFailure: Sendable, Hashable {
     case engineClosed
     case receiptUnavailable
     case threadUnavailable(component: String, reason: String)
-    case executorSaturated(component: String, capacity: UInt64)
 
     init(_ ffi: FfiFollowActionFailure) {
         switch ffi {
@@ -115,8 +114,6 @@ public enum NMPFollowActionFailure: Sendable, Hashable {
         case .receiptUnavailable: self = .receiptUnavailable
         case .threadUnavailable(let component, let reason):
             self = .threadUnavailable(component: component, reason: reason)
-        case .executorSaturated(let component, let capacity):
-            self = .executorSaturated(component: component, capacity: capacity)
         }
     }
 }
@@ -141,44 +138,34 @@ public enum NMPFollowActionStatus: Sendable, Hashable {
     }
 }
 
-/// Live relationship state over NMP's ordinary reactive kind:3 demand.
-/// Latest-wins and deinit-tied, just like `NMPQuery`.
+/// Live relationship state over NMP's ordinary reactive kind:3 demand
+/// (#680). A pull-based `AsyncSequence` over `NmpFollowStream` -- each
+/// snapshot is the complete self-contained relationship state (latest-wins),
+/// so no coalescer is needed. Termination-tied teardown like `NMPQuery`.
 public struct NMPFollowingObservation: AsyncSequence, Sendable {
     public typealias Element = NMPFollowingSnapshot
 
-    private let handle: NmpFollowHandle
-    private let stream: AsyncStream<NMPFollowingSnapshot>
+    private let handle: NmpFollowStream
+    private let iteratorGate = NMPPullIteratorGate()
 
     init(engine: NmpEngineProtocol, target: String) throws {
-        var continuation: AsyncStream<NMPFollowingSnapshot>.Continuation!
-        let stream = AsyncStream<NMPFollowingSnapshot>(bufferingPolicy: .bufferingNewest(1)) {
-            continuation = $0
-        }
-        let bridge = FollowingBridge(continuation: continuation)
         self.handle = try nmpRethrowing {
-            try engine.observeFollowing(target: target, observer: bridge)
+            try engine.observeFollowing(target: target)
         }
-        self.stream = stream
     }
 
     public func makeAsyncIterator() -> Iterator {
-        Iterator(handle: handle, base: stream.makeAsyncIterator())
+        let core = NMPPullIteratorCore(handle: handle, iteratorGate: iteratorGate) { snapshot in
+            NMPFollowingSnapshot(snapshot)
+        }
+        return Iterator(core: core)
     }
 
     public struct Iterator: AsyncIteratorProtocol {
-        private let handle: NmpFollowHandle
-        private var base: AsyncStream<NMPFollowingSnapshot>.AsyncIterator
+        let core: NMPPullIteratorCore<NmpFollowStream, NMPFollowingSnapshot>
 
-        init(
-            handle: NmpFollowHandle,
-            base: AsyncStream<NMPFollowingSnapshot>.AsyncIterator
-        ) {
-            self.handle = handle
-            self.base = base
-        }
-
-        public mutating func next() async -> NMPFollowingSnapshot? {
-            await base.next()
+        public mutating func next() async throws -> NMPFollowingSnapshot? {
+            try await core.next()
         }
     }
 
@@ -187,39 +174,37 @@ public struct NMPFollowingObservation: AsyncSequence, Sendable {
     }
 }
 
-private final class FollowingBridge: FollowObserver, @unchecked Sendable {
-    private let continuation: AsyncStream<NMPFollowingSnapshot>.Continuation
+/// The NMP-owned follow/unfollow action as a pull-based `AsyncSequence` over
+/// `NmpFollowActionStream` (#680). Statuses are FIFO facts (acquisition,
+/// no-op, atomic conflict, signing, routing, relay receipt), so they are
+/// delivered un-coalesced and un-buffered-drop, in order.
+public struct NMPFollowAction: AsyncSequence, Sendable {
+    public typealias Element = NMPFollowActionStatus
 
-    init(continuation: AsyncStream<NMPFollowingSnapshot>.Continuation) {
-        self.continuation = continuation
+    private let handle: NmpFollowActionStream
+    private let iteratorGate = NMPPullIteratorGate()
+
+    init(handle: NmpFollowActionStream) {
+        self.handle = handle
     }
 
-    func onSnapshot(snapshot: FfiFollowSnapshot) {
-        continuation.yield(NMPFollowingSnapshot(snapshot))
+    public func makeAsyncIterator() -> Iterator {
+        let core = NMPPullIteratorCore(handle: handle, iteratorGate: iteratorGate) { status in
+            NMPFollowActionStatus(status)
+        }
+        return Iterator(core: core)
     }
 
-    func onClosed() {
-        continuation.finish()
-    }
-}
+    public struct Iterator: AsyncIteratorProtocol {
+        let core: NMPPullIteratorCore<NmpFollowActionStream, NMPFollowActionStatus>
 
-public struct NMPFollowAction: Sendable {
-    public let status: AsyncStream<NMPFollowActionStatus>
-}
-
-private final class FollowActionBridge: FollowActionObserver, @unchecked Sendable {
-    private let continuation: AsyncStream<NMPFollowActionStatus>.Continuation
-
-    init(continuation: AsyncStream<NMPFollowActionStatus>.Continuation) {
-        self.continuation = continuation
+        public mutating func next() async throws -> NMPFollowActionStatus? {
+            try await core.next()
+        }
     }
 
-    func onStatus(status: FfiFollowActionStatus) {
-        continuation.yield(NMPFollowActionStatus(status))
-    }
-
-    func onClosed() {
-        continuation.finish()
+    public func cancel() {
+        handle.cancel()
     }
 }
 
@@ -234,23 +219,11 @@ extension NMPEngine {
     /// stream covering acquisition, no-op, atomic conflict, signing,
     /// routing, and relay receipt states.
     public func follow(_ target: String) -> NMPFollowAction {
-        followingAction(target: target, follows: true)
+        NMPFollowAction(handle: ffi.follow(target: target))
     }
 
     public func unfollow(_ target: String) -> NMPFollowAction {
-        followingAction(target: target, follows: false)
-    }
-
-    private func followingAction(target: String, follows: Bool) -> NMPFollowAction {
-        var continuation: AsyncStream<NMPFollowActionStatus>.Continuation!
-        let stream = AsyncStream<NMPFollowActionStatus> { continuation = $0 }
-        let bridge = FollowActionBridge(continuation: continuation)
-        if follows {
-            ffi.follow(target: target, observer: bridge)
-        } else {
-            ffi.unfollow(target: target, observer: bridge)
-        }
-        return NMPFollowAction(status: stream)
+        NMPFollowAction(handle: ffi.unfollow(target: target))
     }
 }
 
@@ -276,10 +249,15 @@ public final class NMPFollowing: ObservableObject {
         self.snapshot = .initial(target: target)
         let observation = try engine.observeFollowing(target)
         observationTask = Task { [weak self] in
-            for await snapshot in observation {
-                guard !Task.isCancelled else { return }
-                self?.snapshot = snapshot
-                self?.finishWhenCanonicalStateMatches(snapshot)
+            do {
+                for try await snapshot in observation {
+                    guard !Task.isCancelled else { return }
+                    self?.snapshot = snapshot
+                    self?.finishWhenCanonicalStateMatches(snapshot)
+                }
+            } catch {
+                // The observation ended (withdrawal / single-consumer misuse);
+                // stop updating. NMP surfaces no capacity error here (#680).
             }
         }
     }
@@ -341,9 +319,14 @@ public final class NMPFollowing: ObservableObject {
         self.actionStatus = .acquiring
         actionTask?.cancel()
         actionTask = Task { [weak self] in
-            for await status in action.status {
-                guard !Task.isCancelled else { return }
-                self?.accept(status)
+            do {
+                for try await status in action {
+                    guard !Task.isCancelled else { return }
+                    self?.accept(status)
+                }
+            } catch {
+                // The action stream ended abnormally; leave the last delivered
+                // status in place (no capacity error exists to surface, #680).
             }
         }
     }

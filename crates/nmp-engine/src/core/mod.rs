@@ -48,6 +48,7 @@ mod write_tests;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
+use std::sync::Arc;
 
 #[cfg(test)]
 use std::cell::Cell;
@@ -208,6 +209,59 @@ pub(crate) use attribution::wire_sub_id_string;
 /// `SignerCompleted`.
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub struct ReceiptId(pub u64);
+
+/// Opaque, identity-stable continuation for finite receipt replay pages
+/// (#680). This is delivery mechanism, not a third app noun: callers can
+/// only return it to the same receipt's continuation door.
+///
+/// State is bounded by the receipt's finite relay fan-out, not by retry
+/// history. Each relay keeps one durable attempt-fact high-water mark and
+/// one current-lane revision; receipt and pending-state projections keep
+/// constant-size/set markers over those same bounded relays.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiptReplayCursor {
+    state: Box<ReceiptReplayCursorState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReceiptReplayCursorState {
+    receipt_id: ReceiptId,
+    receipt_status: Option<WriteStatus>,
+    awaiting_capability: bool,
+    attempts: BTreeMap<RelayUrl, ReceiptAttemptReplayKey>,
+    lane_revisions: BTreeMap<RelayUrl, u64>,
+    persistence_blocked: BTreeSet<RelayUrl>,
+    route_persistence_blocked: BTreeSet<RelayUrl>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ReceiptAttemptReplayKey {
+    ordinal: u64,
+    phase: ReceiptAttemptReplayPhase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ReceiptAttemptReplayPhase {
+    Handoff,
+    Transient,
+    Outcome,
+}
+
+impl ReceiptReplayCursor {
+    fn new(receipt_id: ReceiptId) -> Self {
+        Self {
+            state: Box::new(ReceiptReplayCursorState {
+                receipt_id,
+                receipt_status: None,
+                awaiting_capability: false,
+                attempts: BTreeMap::new(),
+                lane_revisions: BTreeMap::new(),
+                persistence_blocked: BTreeSet::new(),
+                route_persistence_blocked: BTreeSet::new(),
+            }),
+        }
+    }
+}
 
 /// A publish failure that occurs before any receipt identity can exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -759,7 +813,7 @@ struct PendingWrite {
     routing_valid: bool,
     /// Zero or more observers. Recovery owns the obligation even before an
     /// app reattaches, and multiple observers may follow the same receipt.
-    sinks: Vec<Rc<dyn ReceiptSink>>,
+    sinks: Vec<RegisteredReceiptSink>,
     /// Store-allocated durable intent id. `None` only for Ephemeral's
     /// receipt-only path, which never owns a pending row.
     intent_id: Option<IntentId>,
@@ -805,6 +859,27 @@ struct PendingWrite {
     /// kept so a permanent removal from `pending` can walk exactly this set
     /// to clean the reverse index rather than scanning it.
     lane_relays: BTreeSet<RelayUrl>,
+}
+
+/// Runtime-private identity for one live receipt observer. Pointer identity
+/// avoids a counter, capacity, or wraparound policy for a mechanism the app
+/// never sees.
+#[derive(Clone)]
+pub(crate) struct ReceiptSinkRegistration(Arc<()>);
+
+impl ReceiptSinkRegistration {
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(()))
+    }
+
+    fn is_same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+struct RegisteredReceiptSink {
+    registration: Option<ReceiptSinkRegistration>,
+    sink: Rc<dyn ReceiptSink>,
 }
 
 /// A live, EngineCore-owned negentropy reconciliation in progress for

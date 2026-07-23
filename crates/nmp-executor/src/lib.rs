@@ -1,11 +1,23 @@
-//! A finite, zero-queue owner for NMP's blocking native bridge tasks.
+//! A finite, zero-queue owner for NMP's transient blocking foreign/reactor
+//! adapters (#680-rescoped).
+//!
+//! Since #680 this pool no longer owns observation delivery — query, window,
+//! diagnostics, receipt, follow, and follow-action streams are pull-based
+//! waker-driven async handles that reserve **no** thread here. What remains is
+//! one honest resource class: genuinely-blocking transient adapters bounded by
+//! writes/sessions/fetches, never by observation count — NIP-11 HTTP/DNS
+//! flights, remote-signer result waiters and the sign-event drain, AUTH foreign
+//! capability calls, and the follow-action worker. (Engine-associated NIP-46
+//! sessions run on their own session-owned executors, not this shared pool.)
 //!
 //! These tasks drain one blocking receiver for their whole lifetime. Putting
-//! them behind a conventional fixed worker pool would accept later streams
-//! into a queue that cannot run while earlier drains remain live. This owner
-//! therefore reserves one of a finite number of immediately-startable slots
-//! before a caller accepts the corresponding stream or operation. Saturation
-//! is synchronous and typed; accepted tasks are never queued or truncated.
+//! them behind a conventional fixed worker pool would accept later work into a
+//! queue that cannot run while earlier drains remain live. This owner therefore
+//! reserves one of a finite number of immediately-startable slots before a
+//! caller accepts the corresponding operation. The capacity is a fixed internal
+//! constant chosen by the engine runtime (`ADAPTER_POOL_CAPACITY`), never an
+//! app-configurable, CPU-derived, or SDK-surfaced knob. Saturation is
+//! synchronous and typed; accepted tasks are never queued or truncated.
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -23,6 +35,29 @@ use std::thread::{self, JoinHandle};
 /// with a measured need can raise it explicitly; it is never inferred from
 /// CPUs.
 pub const DEFAULT_MAX_TASKS: usize = 12;
+
+/// Process-wide monotonic count of real OS threads NMP has spawned through the
+/// executor's default spawn path (#680 falsifier instrumentation). Bridges/
+/// infra that call [`note_thread_spawn`] also bump it. It exists so a test can
+/// prove the async observation architecture creates NO thread per observation:
+/// opening N observation handles must leave this delta at 0, not O(N). Only the
+/// default (real-thread) spawn closures bump it; injected test spawns do not.
+static NMP_THREADS_SPAWNED: AtomicU64 = AtomicU64::new(0);
+
+/// Record that one real NMP-owned OS thread was just created. Called by the
+/// executor's default spawn path and by other NMP infra thread spawn sites
+/// (engine runtime/bridges) so [`nmp_threads_spawned`] counts them all.
+pub fn note_thread_spawn() {
+    NMP_THREADS_SPAWNED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The monotonic count of real NMP-owned OS threads spawned so far this process
+/// (see [`note_thread_spawn`]). The #680 thread-scaling falsifier asserts the
+/// delta across opening many observations is 0.
+#[must_use]
+pub fn nmp_threads_spawned() -> u64 {
+    NMP_THREADS_SPAWNED.load(Ordering::Relaxed)
+}
 
 static NEXT_EXECUTOR_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
@@ -173,7 +208,13 @@ pub struct Executor {
 
 impl Executor {
     pub fn new(capacity: usize) -> Result<Self, BuildError> {
-        Self::new_with_reaper_spawn(capacity, |builder, task| builder.spawn(task))
+        Self::new_with_reaper_spawn(capacity, |builder, task| {
+            let handle = builder.spawn(task);
+            if handle.is_ok() {
+                note_thread_spawn();
+            }
+            handle
+        })
     }
 
     fn new_with_reaper_spawn(
@@ -426,7 +467,13 @@ impl Reservation {
         self,
         cancel: impl Fn() + Send + Sync + 'static,
     ) -> Result<StartedTask, SpawnError> {
-        self.start_with_cancel_and_spawn(cancel, |builder, task| builder.spawn(task))
+        self.start_with_cancel_and_spawn(cancel, |builder, task| {
+            let handle = builder.spawn(task);
+            if handle.is_ok() {
+                note_thread_spawn();
+            }
+            handle
+        })
     }
 
     fn start_with_cancel_and_spawn(

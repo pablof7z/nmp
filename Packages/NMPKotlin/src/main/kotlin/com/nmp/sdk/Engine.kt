@@ -39,8 +39,6 @@ data class NMPConfig(
      * demand and the transport worker set with the same effective value.
      * Legacy zero is normalized to the finite default, never uncapped. */
     val maxRelays: UInt = 10u,
-    /** Finite zero-queue native observer/action/waiter ceiling. */
-    val maxNativeTasks: UInt = 12u,
     /** Finite shared ceiling for live signer and AUTH-policy registrations. Zero admits none. */
     val maxAuthCapabilities: UInt = 64u,
 ) {
@@ -52,7 +50,6 @@ data class NMPConfig(
             fallbackRelays = fallbackRelays,
             allowedLocalRelayHosts = allowedLocalRelayHosts,
             maxRelays = maxRelays,
-            maxNativeTasks = maxNativeTasks,
             maxAuthCapabilities = maxAuthCapabilities,
         )
 }
@@ -227,10 +224,6 @@ class NMPEngine(
     suspend fun signEvent(event: NMPUnsignedEvent): NMPSignedEvent =
         com.nmp.sdk.signEvent(ffi, event)
 
-    internal fun nativeTaskCensus() = ffi.nativeTaskCensus()
-
-    internal fun awaitNativeTasksIdle() = ffi.awaitNativeTasksIdle()
-
     /** Remove the plaintext checkpoint. The live signer remains until close. */
     fun clearPersistedAccount() {
         synchronized(checkpointLock) {
@@ -268,17 +261,13 @@ class NMPEngine(
      * [NMPError.WindowInitialExceedsMax] /
      * [NMPError.WindowSelectionHasLimit] on an invalid window. */
     fun observe(filter: NMPFilter, window: Window): NMPQuery =
-        NMPQuery { observer ->
-            nmpRethrowing { ffi.observe(filter.toFfi(), window.toFfi(), observer) }
-        }
+        NMPQuery(nmpRethrowing { ffi.observe(filter.toFfi(), window.toFfi()) })
 
     /** The explicit-`NMPDemand` windowed overload (#107 x #485): same
      * bounded snapshot/growth discipline as the `NMPFilter` overload, for
      * demands that declare wire authority, access context, or cache mode. */
     fun observe(demand: NMPDemand, window: Window): NMPQuery =
-        NMPQuery { observer ->
-            nmpRethrowing { ffi.observeDemand(demand.toFfi(), window.toFfi(), observer) }
-        }
+        NMPQuery(nmpRethrowing { ffi.observeDemand(demand.toFfi(), window.toFfi()) })
 
     // MARK: - Diagnostics (M5) -- "the acceptance test rendered on screen,
     // permanently": per-relay wire-sub count, the exact wire filters sent,

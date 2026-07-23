@@ -188,5 +188,8 @@ pub struct Receipt {
 
 /// Sink the app-facing `Handle` registers for a `Publish`'s status stream.
 pub trait ReceiptSink: Send {
-    fn on_status(&self, status: WriteStatus);
+    /// Deliver one live fact. `false` means this observer has cancelled or
+    /// crossed its finite live-delivery bound and must no longer be retained.
+    /// Durable receipt ownership is unaffected; the caller can reattach.
+    fn on_status(&self, status: WriteStatus) -> bool;
 }

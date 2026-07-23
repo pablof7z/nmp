@@ -50,8 +50,25 @@ sealed class NMPError(message: String) : Exception(message) {
     data class StoreStillOpen(val path: String) : NMPError("persistent store is still open: $path")
     data class ThreadUnavailable(val component: String, val reason: String) :
         NMPError("$component thread unavailable: $reason")
-    data class ExecutorSaturated(val component: String, val capacity: ULong) :
-        NMPError("$component refused: native task executor is at capacity $capacity")
+    /** A second `next()`/`signed()` was awaited on an observation stream or
+     * handle while a previous one was still in flight (#680). The streams are
+     * single-consumer: await the next pull only after the previous one has
+     * resolved. No frame is lost or duplicated -- only the offending call is
+     * rejected. In practice the SDK's own `Flow`/`suspend` wrappers never
+     * issue overlapping pulls, so this surfaces only when app code collects
+     * one stream's `Flow` from two coroutines at once. */
+    object ConcurrentNext : NMPError("a next() is already in flight on this single-consumer stream")
+    /** A durable FIFO fact stream crossed its finite live-delivery bound
+     * while the app was paused. Memory remains bounded and no missing fact is
+     * claimed delivered; when non-null, reattach [receiptId] to replay. */
+    data class FactStreamLagged(val receiptId: ULong?) :
+        NMPError(
+            receiptId?.let {
+                "the finite live fact stream fell behind; reattach receipt $it to replay"
+            } ?: "the finite live fact stream fell behind before a receipt was observable",
+        )
+    data class ReceiptReplayUnavailable(val receiptId: ULong) :
+        NMPError("retained evidence for receipt $receiptId became unavailable during replay")
     data class InvalidSignature(val got: String) : NMPError("invalid signature: $got")
     object EngineClosed : NMPError("engine already shut down")
     /** `decodeNostrEntity`'s input was not valid bech32, had an
@@ -133,7 +150,10 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.StoreResetFailed -> StoreResetFailed(ffi.reason)
                 is FfiException.StoreStillOpen -> StoreStillOpen(ffi.path)
                 is FfiException.ThreadUnavailable -> ThreadUnavailable(ffi.component, ffi.reason)
-                is FfiException.ExecutorSaturated -> ExecutorSaturated(ffi.component, ffi.capacity)
+                is FfiException.ConcurrentNext -> ConcurrentNext
+                is FfiException.FactStreamLagged -> FactStreamLagged(ffi.receiptId)
+                is FfiException.ReceiptReplayUnavailable ->
+                    ReceiptReplayUnavailable(ffi.receiptId)
                 is FfiException.InvalidSignature -> InvalidSignature(ffi.got)
                 is FfiException.EngineClosed -> EngineClosed
                 is FfiException.InvalidNostrEntity -> InvalidNostrEntity(ffi.reason)

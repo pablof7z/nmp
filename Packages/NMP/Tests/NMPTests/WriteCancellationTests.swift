@@ -8,10 +8,14 @@ final class WriteCancellationTests: XCTestCase {
 
     private let author = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 
-    private static func collect(_ stream: AsyncStream<WriteStatus>) async -> [WriteStatus] {
+    private static func collect(_ stream: ReceiptStatus) async -> [WriteStatus] {
         var statuses: [WriteStatus] = []
-        for await status in stream {
-            statuses.append(status)
+        do {
+            for try await status in stream {
+                statuses.append(status)
+            }
+        } catch {
+            // The receipt stream ended; return whatever durable prefix arrived.
         }
         return statuses
     }

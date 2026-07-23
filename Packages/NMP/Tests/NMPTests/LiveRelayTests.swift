@@ -155,10 +155,14 @@ final class LiveRelayTests: XCTestCase {
     private static func firstNonEmptyBatch(from query: NMPQuery, timeoutSeconds: UInt64) async -> [Row]? {
         await withTaskGroup(of: [Row]?.self) { group in
             group.addTask {
-                for await batch in query {
-                    if !batch.rows.isEmpty {
-                        return batch.rows
+                do {
+                    for try await batch in query {
+                        if !batch.rows.isEmpty {
+                            return batch.rows
+                        }
                     }
+                } catch {
+                    return nil
                 }
                 return nil
             }
@@ -184,13 +188,17 @@ final class LiveRelayTests: XCTestCase {
     ) async -> DiagnosticsSnapshot? {
         await withTaskGroup(of: DiagnosticsSnapshot?.self) { group in
             group.addTask {
-                for await snapshot in diagnostics {
-                    let hasKind1 = snapshot.relays.contains { relay in
-                        relay.eventsByKind.contains { $0.kind == 1 && $0.count > 0 }
+                do {
+                    for try await snapshot in diagnostics {
+                        let hasKind1 = snapshot.relays.contains { relay in
+                            relay.eventsByKind.contains { $0.kind == 1 && $0.count > 0 }
+                        }
+                        if hasKind1 {
+                            return snapshot
+                        }
                     }
-                    if hasKind1 {
-                        return snapshot
-                    }
+                } catch {
+                    return nil
                 }
                 return nil
             }

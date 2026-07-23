@@ -45,7 +45,7 @@ final class FollowingTests: XCTestCase {
         await withTaskGroup(of: NMPFollowingSnapshot?.self) { group in
             group.addTask {
                 var iterator = observation.makeAsyncIterator()
-                return await iterator.next()
+                return (try? await iterator.next()) ?? nil
             }
             group.addTask {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
@@ -65,9 +65,13 @@ final class FollowingTests: XCTestCase {
         await withTaskGroup(of: [NMPFollowActionStatus].self) { group in
             group.addTask {
                 var result: [NMPFollowActionStatus] = []
-                for await status in action.status {
-                    result.append(status)
-                    if result.count == count { break }
+                do {
+                    for try await status in action {
+                        result.append(status)
+                        if result.count == count { break }
+                    }
+                } catch {
+                    // Action stream ended abnormally; return what arrived.
                 }
                 return result
             }

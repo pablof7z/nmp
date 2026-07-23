@@ -22,68 +22,42 @@ class WindowTest {
 
     @Test
     fun windowedFramesReplaceStateWholesaleAndCarryLoadFacts() {
-        val bridge = WindowBridge()
-        val delivered = mutableListOf<RowBatch>()
-        bridge.attach(emit = delivered::add, finish = {})
-
         val a = ffiRow("a", 300uL)
         val b = ffiRow("b", 200uL)
         val c = ffiRow("c", 400uL)
 
-        bridge.onFrame(windowedFrame(rows = listOf(a, b)))
-        // A windowed frame is authoritative: the row set changes entirely
-        // while `deltas` stays empty (the wire drops them for windowed
-        // observations) -- a delta-folding bridge would still show [a, b].
-        bridge.onFrame(
-            windowedFrame(rows = listOf(c, a), load = FfiWindowLoad.Returned(1uL)),
-        )
-        // Even a contradictory wire delta must be ignored on the windowed
-        // arm: rows come from `frame.window.rows` alone, never a fold.
-        bridge.onFrame(
-            windowedFrame(
-                rows = listOf(c),
-                load = FfiWindowLoad.AtBound(2uL),
-                deltas = listOf(FfiRowDelta.Removed("c")),
-            ),
-        )
+        // A windowed frame is authoritative: `windowRowBatch` maps rows from
+        // `frame.window.rows` alone, never a fold, so the row set changes
+        // entirely while `deltas` stays empty -- and even a CONTRADICTORY wire
+        // delta must be ignored on this arm.
+        val first = windowRowBatch(windowedFrame(rows = listOf(a, b)))
+        val second =
+            windowRowBatch(
+                windowedFrame(rows = listOf(c, a), load = FfiWindowLoad.Returned(1uL)),
+            )
+        val third =
+            windowRowBatch(
+                windowedFrame(
+                    rows = listOf(c),
+                    load = FfiWindowLoad.AtBound(2uL),
+                    deltas = listOf(FfiRowDelta.Removed("c")),
+                ),
+            )
 
-        assertEquals(3, delivered.size)
-        assertEquals(listOf("a", "b"), delivered[0].rows.map(Row::id))
-        assertEquals(WindowLoad.Idle, delivered[0].load)
-        assertEquals(listOf("c", "a"), delivered[1].rows.map(Row::id))
-        assertEquals(WindowLoad.Returned(1uL), delivered[1].load)
-        assertEquals(listOf("c"), delivered[2].rows.map(Row::id))
+        assertEquals(listOf("a", "b"), first.rows.map(Row::id))
+        assertEquals(WindowLoad.Idle, first.load)
+        assertEquals(listOf("c", "a"), second.rows.map(Row::id))
+        assertEquals(WindowLoad.Returned(1uL), second.load)
+        assertEquals(listOf("c"), third.rows.map(Row::id))
         // AtBound arrives as a FACT in the frame, never a thrown error.
-        assertEquals(WindowLoad.AtBound(2uL), delivered[2].load)
-        bridge.finish()
-    }
-
-    @Test
-    fun bridgeRetainsOnlyTheLatestBoundedStateBeforeCollectionStarts() {
-        val bridge = WindowBridge()
-        val a = ffiRow("a", 300uL)
-        val b = ffiRow("b", 200uL)
-        bridge.onFrame(windowedFrame(rows = listOf(a)))
-        bridge.onFrame(
-            windowedFrame(rows = listOf(a, b), load = FfiWindowLoad.Returned(1uL)),
-        )
-
-        val delivered = mutableListOf<RowBatch>()
-        bridge.attach(emit = delivered::add, finish = {})
-
-        // Snapshot frames are self-contained, so retaining exactly the
-        // latest one before a collector attaches loses no information.
-        assertEquals(1, delivered.size)
-        assertEquals(listOf("a", "b"), delivered.single().rows.map(Row::id))
-        assertEquals(WindowLoad.Returned(1uL), delivered.single().load)
-        bridge.finish()
+        assertEquals(WindowLoad.AtBound(2uL), third.load)
     }
 
     @Test
     fun unboundedObservationsStillFoldEveryDeltaInOrder() {
         // The unbounded arm of the one frame vocabulary keeps today's exact
         // fold semantics: `applyRowDelta` is the same accumulator step the
-        // `observeQuery` bridge runs per `frame.deltas` element.
+        // `observeQuery` pull loop runs per `frame.deltas` element.
         val order = mutableListOf<String>()
         val byId = mutableMapOf<String, Row>()
         val a = ffiRow("a", 300uL)
@@ -134,8 +108,12 @@ class WindowTest {
     }
 
     @Test
-    fun validationAndExplicitCancellationReturnNativeTaskBaseline() = runBlocking {
-        val engine = NMPEngine(NMPConfig(maxNativeTasks = 1u))
+    fun validationAndExplicitCancellationTearDownWindowedObservation() = runBlocking {
+        // #680: opening a windowed observation costs no native-task admission
+        // and there is no capacity config -- the only failures here are the
+        // typed window-validation errors, and explicit `cancel()` deterministically
+        // completes the collecting coroutine.
+        val engine = NMPEngine(NMPConfig())
         try {
             val demand = windowDemand(7_779u)
             assertFailsWith<NMPError.WindowZeroRows> {
@@ -162,13 +140,11 @@ class WindowTest {
             val batch = withTimeout(5_000) { first.await() }
             assertEquals(emptyList(), batch.rows)
             assertEquals(WindowLoad.Idle, batch.load)
-            assertEquals(1uL, engine.nativeTaskCensus().admitted)
 
+            // Explicit cancel wakes the parked `next()` to its terminal null,
+            // completing the flow -- the collecting coroutine joins promptly.
             query.cancel()
             withTimeout(5_000) { collection.join() }
-            engine.awaitNativeTasksIdle()
-            assertEquals(0uL, engine.nativeTaskCensus().admitted)
-            assertEquals(0uL, engine.nativeTaskCensus().running)
         } finally {
             engine.shutdown()
         }

@@ -26,15 +26,13 @@ class ContentTest {
     }
 
     @Test
-    fun parsingAndPlanningOpenNoNativeTasks() {
-        NMPEngine(NMPConfig()).use { engine ->
-            val baseline = engine.nativeTaskCensus()
-            val document = parseNostrContent("nostr:$npub nostr:$note")
-            document.references.forEach { referenceDemandPlan(it.target) }
-
-            val after = engine.nativeTaskCensus()
-            assertEquals(baseline.admitted, after.admitted)
-            assertEquals(baseline.running, after.running)
-        }
+    fun parsingAndPlanningAreEngineFree() {
+        // #680 removed the native-task census: parsing content and lowering
+        // its references to demand plans are pure, engine-free value
+        // operations, so there is no longer a census to read before/after.
+        // The surviving invariant is that they succeed without any engine.
+        val document = parseNostrContent("nostr:$npub nostr:$note")
+        val plans = document.references.map { referenceDemandPlan(it.target) }
+        assertEquals(document.references.size, plans.size)
     }
 }

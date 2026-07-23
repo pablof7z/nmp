@@ -192,7 +192,7 @@ final class DetachPersistedAccountTests: XCTestCase {
             )
         )
         var sawAccepted = false
-        for await status in receipt.status {
+        for try await status in receipt.status {
             if status == .accepted {
                 sawAccepted = true
                 break
@@ -217,7 +217,7 @@ final class DetachPersistedAccountTests: XCTestCase {
         XCTAssertNil(try reopened.activeAccount())
         let query = try reopened.observe(NMPFilter(kinds: [cachedKind]))
         var iterator = query.makeAsyncIterator()
-        let first = await iterator.next()
+        let first = try await iterator.next()
         XCTAssertEqual(
             first?.rows.map(\.content),
             ["cached before detach"],

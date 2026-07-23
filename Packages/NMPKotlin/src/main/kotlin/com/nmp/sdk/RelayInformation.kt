@@ -72,7 +72,6 @@ enum class RelayInformationFreshness {
  * evidence, and by `NMPError.RelayInformationUnavailable` when acquisition
  * fails before any last-good document exists. */
 sealed interface RelayInformationErrorKind {
-    data class ExecutorSaturated(val capacity: ULong) : RelayInformationErrorKind
     data class WaiterSaturated(val capacity: ULong) : RelayInformationErrorKind
     data class ThreadUnavailable(val reason: String) : RelayInformationErrorKind
     data object ServiceClosed : RelayInformationErrorKind
@@ -84,7 +83,6 @@ sealed interface RelayInformationErrorKind {
     companion object {
         internal fun from(ffi: FfiRelayInformationErrorKind): RelayInformationErrorKind =
             when (ffi) {
-                is FfiRelayInformationErrorKind.ExecutorSaturated -> ExecutorSaturated(ffi.capacity)
                 is FfiRelayInformationErrorKind.WaiterSaturated -> WaiterSaturated(ffi.capacity)
                 is FfiRelayInformationErrorKind.ThreadUnavailable -> ThreadUnavailable(ffi.reason)
                 FfiRelayInformationErrorKind.ServiceClosed -> ServiceClosed
@@ -101,8 +99,6 @@ sealed interface RelayInformationErrorKind {
  * only want a message rather than a branch on the typed kind. */
 fun RelayInformationErrorKind.describe(): String =
     when (this) {
-        is RelayInformationErrorKind.ExecutorSaturated ->
-            "NIP-11 acquisition refused: native task capacity $capacity is full"
         is RelayInformationErrorKind.WaiterSaturated ->
             "NIP-11 acquisition refused: per-relay waiter capacity $capacity is full"
         is RelayInformationErrorKind.ThreadUnavailable ->

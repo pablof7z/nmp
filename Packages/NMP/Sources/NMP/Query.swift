@@ -1,89 +1,68 @@
-// The Rust-channel -> Swift-`AsyncSequence` bridge (M4 plan §4c). This is
-// the heart of the ergonomic layer: the ONLY place `NMP` holds a foreign-
-// trait conformance, and the ONLY place a callback thread's mutation
-// touches shared state.
+// The pull-based Rust-handle -> Swift-`AsyncSequence` adapter (#680). This is
+// the ONLY place `NMP` folds observation frames into delivered state.
 
 import Foundation
 import NMPFFI
 
 /// A live, detachable query (`nmp_engine`'s read noun). `NMPQuery` is the
-/// PRIMARY read handle -- iterate it directly with `for await`; there is no
-/// container or provider object required around it (M4 plan §7's canary).
+/// PRIMARY read handle -- iterate it directly with `for try await`; there is
+/// no container or provider object required around it (M4 plan §7's canary).
 ///
 /// Each element is the full current snapshot (`RowBatch`), never a bare
 /// delta. How that snapshot is produced derives from the observation's
 /// boundedness (#485): an UNBOUNDED query is delivered as exact rebased
-/// deltas that the bridge folds into its accumulated state (intermediate
-/// reducer emits may conflate; redelivering the full set per change is the
-/// known O(rows²) class); a WINDOWED query
-/// is delivered as authoritative bounded snapshots that replace the state
-/// wholesale, each carrying the window's `WindowLoad` growth fact.
+/// deltas that the iterator folds into its accumulated state (the engine
+/// mailbox conflates intermediate reducer emits for a slow consumer); a
+/// WINDOWED query is delivered as authoritative bounded snapshots that
+/// replace the state wholesale, each carrying the window's `WindowLoad` fact.
 ///
-/// Demand teardown is DEINIT-TIED: once the last strong reference to the
-/// underlying subscription handle is released (the query goes out of scope,
-/// or its iteration `Task` is cancelled and drops its iterator), the Rust
-/// side's `Drop` unsubscribes automatically. No `cancel()` call is required
-/// of the app -- `NmpQueryHandle.cancel()` exists only for an app that wants
-/// to tear down explicitly before Swift's own ARC would get to it.
+/// The sequence is THROWING: it ends normally (`nil`) when the engine tears
+/// the subscription down, and surfaces `NMPError.concurrentNext` if two
+/// iterators pull the same handle at once (the handle is single-consumer,
+/// #680). The direct iterator cadence-limits complete snapshots (#17) so a
+/// tight `for try await` loop during historical replay cannot peg the main
+/// thread; values produced while it waits conflate in the native mailbox.
+///
+/// Demand teardown is ITERATOR-OWNED: dropping the iterator on normal scope
+/// exit (including `break`) cancels the handle and releases its sequence claim.
+/// Task cancellation is forwarded synchronously to the native handle so a
+/// parked `next()` wakes; Swift cancellation does not cross UniFFI by itself.
 public struct NMPQuery: AsyncSequence, Sendable {
     public typealias Element = RowBatch
 
-    private let handle: NmpQueryHandle
-    private let stream: AsyncStream<RowBatch>
+    private let handle: NmpRowStream
+    private let iteratorGate = NMPPullIteratorGate()
 
     init(engine: NmpEngineProtocol, filter: FfiFilter, window: FfiWindow?) throws {
-        try self.init(engine: engine) { engine, observer in
-            try engine.observe(query: filter, window: window, observer: observer)
+        self.handle = try nmpRethrowing {
+            try engine.observe(query: filter, window: window)
         }
     }
 
-    /// #107: the explicit-`FfiDemand` entry point -- same bridge/coalescing
+    /// #107: the explicit-`FfiDemand` entry point -- same handle/coalescing
     /// shape as the `FfiFilter` initializer above, just a different
     /// `NmpEngineProtocol` verb underneath.
     init(engine: NmpEngineProtocol, demand: FfiDemand, window: FfiWindow?) throws {
-        try self.init(engine: engine) { engine, observer in
-            try engine.observeDemand(query: demand, window: window, observer: observer)
+        self.handle = try nmpRethrowing {
+            try engine.observeDemand(query: demand, window: window)
         }
-    }
-
-    /// Shared bridge/coalescing setup: `subscribe` is the ONE difference
-    /// between the `FfiFilter` and `FfiDemand` entry points (which
-    /// `NmpEngineProtocol` verb actually opens the subscription).
-    private init(
-        engine: NmpEngineProtocol,
-        subscribe: (NmpEngineProtocol, RowObserver) throws -> NmpQueryHandle
-    ) throws {
-        var continuation: AsyncStream<RowBatch>.Continuation!
-        // `.bufferingNewest(1)`: belt-and-suspenders alongside `RowBridge`'s
-        // own frame coalescing below -- if a consumer ever falls behind the
-        // ~60Hz delivery cadence, only the latest coalesced snapshot sits in
-        // the stream's buffer, so the backlog can never grow (#17).
-        let stream = AsyncStream<RowBatch>(bufferingPolicy: .bufferingNewest(1)) {
-            continuation = $0
-        }
-        let bridge = RowBridge(continuation: continuation)
-        self.handle = try nmpRethrowing { try subscribe(engine, bridge) }
-        self.stream = stream
     }
 
     public func makeAsyncIterator() -> Iterator {
-        Iterator(handle: handle, base: stream.makeAsyncIterator())
+        let accumulator = RowAccumulator()
+        let core = NMPPullIteratorCore(
+            handle: handle,
+            iteratorGate: iteratorGate,
+            throttle: true
+        ) { frame in accumulator.fold(frame) }
+        return Iterator(core: core)
     }
 
     public struct Iterator: AsyncIteratorProtocol {
-        // Held for the iterator's lifetime so the subscription survives at
-        // least as long as anything is actually consuming it; released (and
-        // therefore unsubscribed) when the iterator itself is discarded.
-        private let handle: NmpQueryHandle
-        private var base: AsyncStream<RowBatch>.AsyncIterator
+        let core: NMPPullIteratorCore<NmpRowStream, RowBatch>
 
-        init(handle: NmpQueryHandle, base: AsyncStream<RowBatch>.AsyncIterator) {
-            self.handle = handle
-            self.base = base
-        }
-
-        public mutating func next() async -> RowBatch? {
-            await base.next()
+        public mutating func next() async throws -> RowBatch? {
+            try await core.next()
         }
     }
 
@@ -115,72 +94,48 @@ public struct NMPQuery: AsyncSequence, Sendable {
     }
 }
 
-/// Drains a live subscription's frames into an `AsyncStream` (M4 plan §4c).
-/// Not part of the module's PUBLIC API -- an implementation detail of
-/// `NMPQuery`. `internal` (not `private`) only so `@testable import NMP`
-/// can drive `onFrame` directly for the accumulation/replacement falsifiers
-/// (#105's `SourcesGrew` replace-in-place proof; #485's windowed-snapshot
-/// replacement proof); no other consumer outside this package can ever see
-/// it.
+/// The unbounded/windowed delta-fold accumulator, moved out of the deleted
+/// `RowObserver` bridge and into the iterator's per-frame mapping (#680).
+/// `internal` (not `private`) so `@testable import NMP` can drive `fold`
+/// directly for the accumulation/replacement falsifiers (#105's `SourcesGrew`
+/// replace-in-place proof; #485's windowed-snapshot replacement proof).
 ///
-/// ONE observer, two frame shapes, chosen by the engine from the
-/// observation's boundedness (#485):
+/// ONE fold, two frame shapes, chosen by the engine from the observation's
+/// boundedness (#485):
 ///
 /// - `frame.window == nil` (unbounded): `frame.deltas` is the exact
-///   transition rebased onto the last delivered Rust frame. Intermediate
-///   reducer emits may be skipped, but folding every delivered transition
-///   keeps the accumulated state exact.
+///   transition rebased onto the last delivered Rust frame. Folding every
+///   delivered transition keeps the accumulated state exact.
 /// - `frame.window != nil` (windowed): `frame.window!.rows` is the complete
 ///   authoritative bounded set and REPLACES the state wholesale -- windowed
-///   frames conflate to latest-state on the Rust side, so no per-frame
-///   delta stream exists to fold, and the wire deliberately ships each row
-///   once (`frame.deltas` is always empty here).
+///   frames conflate to latest-state on the Rust side, so `frame.deltas` is
+///   always empty here.
 ///
-/// DELIVERY into the stream is coalesced through `FrameCoalescer`
-/// (#17/docs/known-gaps.md): during historical replay `onFrame` can fire
-/// far faster than any consumer can re-render, so only the latest snapshot
-/// is actually yielded, at most once per ~60Hz tick -- the retained state
-/// itself is always fully caught up, only the *delivery* of intermediate
-/// states is dropped.
-final class RowBridge: RowObserver, @unchecked Sendable {
-    private let continuation: AsyncStream<RowBatch>.Continuation
-    private let lock = NSLock()
+/// Only ever touched from the single pump task that owns its stream, so no
+/// lock is needed (the old bridge locked because a callback thread raced the
+/// consumer; there is no callback thread anymore).
+final class RowAccumulator: @unchecked Sendable {
     // Insertion-ordered accumulation for the unbounded mode: `order` tracks
     // arrival order, `byId` the current value for each still-live row. For
-    // the windowed mode both are simply replaced from each authoritative
-    // frame (canonical newest-first order). NMP does mechanics only
-    // (retain what the engine says is live) -- ordering/rendering policy
-    // is an app concern (feed doctrine), not this bridge's.
+    // the windowed mode both are replaced from each authoritative frame
+    // (canonical newest-first order). NMP does mechanics only (retain what the
+    // engine says is live) -- ordering/rendering policy is an app concern.
     private var order: [String] = []
     private var byId: [String: Row] = [:]
-    // Captures `continuation` only (not `self`) -- avoids a retain cycle
-    // between this bridge and its own coalescer.
-    private lazy var coalescer = FrameCoalescer<RowBatch> { [continuation = self.continuation] batch in
-        continuation.yield(batch)
-    }
 
-    init(continuation: AsyncStream<RowBatch>.Continuation) {
-        self.continuation = continuation
-    }
-
-    func onFrame(frame: FfiFrame) {
-        lock.lock()
+    func fold(_ frame: FfiFrame) -> RowBatch {
         if let window = frame.window {
-            // #485: an authoritative bounded snapshot -- replace, never
-            // fold. `frame.deltas` is empty by contract for windowed
-            // frames (rows never cross the FFI twice).
+            // #485: an authoritative bounded snapshot -- replace, never fold.
+            // `frame.deltas` is empty by contract for windowed frames (rows
+            // never cross the FFI twice).
             let rows = window.rows.map(Row.init)
             order = rows.map(\.id)
             byId = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
-            lock.unlock()
-            coalescer.push(
-                RowBatch(
-                    rows: rows,
-                    evidence: AcquisitionEvidence(frame.evidence),
-                    load: WindowLoad(window.load)
-                )
+            return RowBatch(
+                rows: rows,
+                evidence: AcquisitionEvidence(frame.evidence),
+                load: WindowLoad(window.load)
             )
-            return
         }
         for delta in frame.deltas {
             switch delta {
@@ -191,9 +146,9 @@ final class RowBridge: RowObserver, @unchecked Sendable {
                 }
                 byId[row.id] = row
             case .sourcesGrew(let id, let sources):
-                // #105: the SAME row already matched; only its
-                // relay-provenance set grew. Replace it in place -- `order`
-                // is untouched, this is never an insertion.
+                // #105: the SAME row already matched; only its relay-provenance
+                // set grew. Replace it in place -- `order` is untouched, this is
+                // never an insertion.
                 if let existing = byId[id] {
                     byId[id] = existing.withSources(sources)
                 }
@@ -204,21 +159,10 @@ final class RowBridge: RowObserver, @unchecked Sendable {
             }
         }
         let snapshot = order.compactMap { byId[$0] }
-        lock.unlock()
-        coalescer.push(
-            RowBatch(
-                rows: snapshot,
-                evidence: AcquisitionEvidence(frame.evidence),
-                load: nil
-            )
+        return RowBatch(
+            rows: snapshot,
+            evidence: AcquisitionEvidence(frame.evidence),
+            load: nil
         )
-    }
-
-    func onClosed() {
-        // Deliver whatever accumulated state is still pending before
-        // finishing, so a burst that lands right as the subscription closes
-        // is never silently dropped.
-        coalescer.flushNow()
-        continuation.finish()
     }
 }

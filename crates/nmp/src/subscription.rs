@@ -33,6 +33,7 @@ use std::time::Duration;
 
 use nmp_engine::core::{AcquisitionEvidence, HistoryAdvanceError, Row, RowDelta, WindowLoad};
 use nmp_engine::runtime::{
+    AsyncHistoryReceiver, AsyncLatestReceiver, AsyncRowsReceiver, ConcurrentNext,
     DiagnosticsHandle, Handle, HistoryHandle, HistoryReceiver, LatestReceiver, QueryHandle,
     RowsReceiver,
 };
@@ -411,6 +412,182 @@ impl DiagnosticsSubscription {
 
 impl Drop for DiagnosticsSubscription {
     fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pull-based async observation surface (#680)
+//
+// The async twins of [`Subscription`]/[`DiagnosticsSubscription`]. Instead of a
+// blocking `recv()` a foreign (or direct-Rust) consumer awaits `next()`, which
+// parks a waker on the same engine-owned mailbox rather than blocking a
+// dedicated OS thread. These are `Send + Sync` so a UniFFI object handle can
+// hold one; the blocking twins above stay `!Sync` single-consumer values for
+// direct-Rust drains. Delivery semantics, conflation, and the one-withdrawal
+// [`ObservationCancel`] guard are identical — only the wakeup mechanism differs.
+// ---------------------------------------------------------------------------
+
+/// A live observation delivered by awaiting [`Self::next`] (#680). `Drop`
+/// withdraws it and wakes any parked `next()` to `None`; [`Self::cancel`] is
+/// the explicit early teardown. One type serves both the unbounded delta
+/// stream and a bounded [`Window`]; [`Self::window_handle`] is `Some` iff
+/// windowed.
+pub struct AsyncSubscription {
+    cancel: ObservationCancel,
+    delivery: AsyncDelivery,
+    window: Option<WindowHandle>,
+}
+
+enum AsyncDelivery {
+    Unbounded(AsyncRowsReceiver),
+    Windowed(AsyncHistoryReceiver),
+}
+
+impl AsyncSubscription {
+    pub(crate) fn new(handle: Handle, query_handle: QueryHandle, rows: RowsReceiver) -> Self {
+        Self {
+            cancel: ObservationCancel::new(move || handle.unsubscribe(query_handle)),
+            delivery: AsyncDelivery::Unbounded(rows.into_async()),
+            window: None,
+        }
+    }
+
+    pub(crate) fn new_windowed(
+        engine: Handle,
+        handle: HistoryHandle,
+        batches: HistoryReceiver,
+    ) -> Self {
+        let cancel_engine = engine.clone();
+        let cancel = ObservationCancel::new(move || cancel_engine.unsubscribe_history(handle));
+        let window = WindowHandle {
+            cancel: cancel.clone(),
+            engine,
+            handle,
+        };
+        Self {
+            cancel,
+            delivery: AsyncDelivery::Windowed(batches.into_async()),
+            window: Some(window),
+        }
+    }
+
+    /// Await the next observation [`Frame`], or `None` once the engine has torn
+    /// the subscription down (shutdown / cancel / producer drop). Unbounded: the
+    /// exact rebased transition to the newest state. Windowed: the newest
+    /// self-contained bounded state. Intermediate reducer emits may be conflated
+    /// in either mode. Returns [`ConcurrentNext`] if a `next()` is already in
+    /// flight — the stream is single-consumer.
+    pub async fn next(&self) -> Result<Option<Frame>, ConcurrentNext> {
+        match &self.delivery {
+            AsyncDelivery::Unbounded(rows) => {
+                Ok(rows.next().await?.map(|(deltas, evidence)| Frame {
+                    deltas,
+                    window: None,
+                    evidence,
+                }))
+            }
+            AsyncDelivery::Windowed(batches) => Ok(batches.next().await?.map(|batch| Frame {
+                deltas: batch.deltas,
+                window: Some(WindowContents {
+                    rows: batch.rows,
+                    load: batch.load,
+                }),
+                evidence: batch.evidence,
+            })),
+        }
+    }
+
+    /// Windowed observations only: raise the window's row target (see
+    /// [`Subscription::request_rows`]).
+    pub fn request_rows(&self, at_least: usize) -> Result<(), RequestRowsError> {
+        match &self.window {
+            Some(handle) => handle.request_rows(at_least),
+            None => Err(RequestRowsError::Unwindowed),
+        }
+    }
+
+    /// A cloneable growth/cancel capability for a windowed observation; `None`
+    /// for unbounded observations.
+    #[must_use]
+    pub fn window_handle(&self) -> Option<WindowHandle> {
+        self.window.clone()
+    }
+
+    /// Withdraw the subscription now: close the mailbox (waking a parked
+    /// `next()` to `None` with no post-cancel frame) and withdraw the engine
+    /// demand. Idempotent, and idempotent against `Drop`.
+    pub fn cancel(&self) {
+        self.close_delivery();
+        self.cancel.cancel();
+    }
+
+    /// The opaque cancellation capability (see [`ObservationCancel`]).
+    pub fn cancel_handle(&self) -> ObservationCancel {
+        self.cancel.clone()
+    }
+
+    fn close_delivery(&self) {
+        match &self.delivery {
+            AsyncDelivery::Unbounded(rows) => rows.close(),
+            AsyncDelivery::Windowed(batches) => batches.close(),
+        }
+    }
+}
+
+impl Drop for AsyncSubscription {
+    fn drop(&mut self) {
+        self.close_delivery();
+        self.cancel.cancel();
+    }
+}
+
+/// A live diagnostics stream delivered by awaiting [`Self::next`] (#680). Same
+/// `Drop`/cancel discipline as [`AsyncSubscription`].
+pub struct AsyncDiagnosticsSubscription {
+    cancel: ObservationCancel,
+    snapshots: AsyncLatestReceiver<nmp_engine::core::DiagnosticsSnapshot>,
+}
+
+impl AsyncDiagnosticsSubscription {
+    pub(crate) fn new(
+        diag_handle: DiagnosticsHandle,
+        snapshots: LatestReceiver<nmp_engine::core::DiagnosticsSnapshot>,
+    ) -> Self {
+        Self {
+            cancel: ObservationCancel::new(move || diag_handle.cancel()),
+            snapshots: snapshots.into_async(),
+        }
+    }
+
+    /// Await the next [`DiagnosticsSnapshot`] — the current snapshot on the
+    /// first call, then a fresh one on every coverage change. `None` once the
+    /// stream is withdrawn. [`ConcurrentNext`] if a `next()` is already in
+    /// flight.
+    pub async fn next(&self) -> Result<Option<DiagnosticsSnapshot>, ConcurrentNext> {
+        Ok(self
+            .snapshots
+            .next()
+            .await?
+            .map(DiagnosticsSnapshot::from_engine))
+    }
+
+    /// Withdraw this diagnostics observer now (idempotent, idempotent against
+    /// `Drop`).
+    pub fn cancel(&self) {
+        self.snapshots.close();
+        self.cancel.cancel();
+    }
+
+    /// The opaque cancellation capability (see [`ObservationCancel`]).
+    pub fn cancel_handle(&self) -> ObservationCancel {
+        self.cancel.clone()
+    }
+}
+
+impl Drop for AsyncDiagnosticsSubscription {
+    fn drop(&mut self) {
+        self.snapshots.close();
         self.cancel.cancel();
     }
 }

@@ -133,11 +133,10 @@ final class NMPSimulatorQualificationTests: XCTestCase {
         XCTAssertEqual(value.document.limitation.maxLimit, 500)
         XCTAssertEqual(value.document.limitation.authRequired, true)
 
+        // #680 removed the native-task census/idle-barrier: NIP-11 fetches no
+        // longer run on an app-visible native-task pool, so there is nothing to
+        // assert an exact zero baseline against. Shutdown remains the teardown.
         engine.shutdown()
-        engine.awaitNativeTasksIdle()
-        let census = engine.nativeTaskCensus()
-        XCTAssertEqual(census.admitted, 0, "shutdown must leave no admitted native task")
-        XCTAssertEqual(census.running, 0, "shutdown must leave no running native task")
     }
 
     /// The typed-error half of the same platform delta: a malformed NIP-11
@@ -158,10 +157,9 @@ final class NMPSimulatorQualificationTests: XCTestCase {
             }
         }
 
+        // #680 removed the native-task census/idle-barrier: NIP-11 fetches no
+        // longer run on an app-visible native-task pool, so there is nothing to
+        // assert an exact zero baseline against. Shutdown remains the teardown.
         engine.shutdown()
-        engine.awaitNativeTasksIdle()
-        let census = engine.nativeTaskCensus()
-        XCTAssertEqual(census.admitted, 0, "shutdown must leave no admitted native task")
-        XCTAssertEqual(census.running, 0, "shutdown must leave no running native task")
     }
 }
