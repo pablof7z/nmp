@@ -155,7 +155,7 @@ pub use nmp_engine::runtime::{
 #[doc(hidden)]
 pub use nmp_engine::runtime::{
     AsyncFifoReceiver, FifoNextError, FifoReceiver, FifoRecvError, FifoRecvTimeoutError,
-    FifoTryRecvError, FACT_CHANNEL_CAPACITY,
+    FifoTryRecvError, ReceiptReplayCursor, FACT_CHANNEL_CAPACITY,
 };
 // Producer-side FIFO mechanism, used only by protocol modules (e.g. nmp-nip02's
 // follow-action worker) to feed a receipt/status stream — not app product

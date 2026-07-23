@@ -5,6 +5,68 @@
 
 use super::*;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReceiptReplayFactKey {
+    ReceiptStatus,
+    AwaitingCapability,
+    Attempt {
+        relay: RelayUrl,
+        key: ReceiptAttemptReplayKey,
+    },
+    Lane {
+        relay: RelayUrl,
+        revision: u64,
+    },
+    PersistenceBlocked(RelayUrl),
+    RoutePersistenceBlocked(RelayUrl),
+}
+
+impl ReceiptReplayCursor {
+    fn contains(&self, key: &ReceiptReplayFactKey, status: &WriteStatus) -> bool {
+        match key {
+            ReceiptReplayFactKey::ReceiptStatus => {
+                self.state.receipt_status.as_ref() == Some(status)
+            }
+            ReceiptReplayFactKey::AwaitingCapability => self.state.awaiting_capability,
+            ReceiptReplayFactKey::Attempt { relay, key } => self
+                .state
+                .attempts
+                .get(relay)
+                .is_some_and(|delivered| delivered >= key),
+            ReceiptReplayFactKey::Lane { relay, revision } => self
+                .state
+                .lane_revisions
+                .get(relay)
+                .is_some_and(|delivered| delivered >= revision),
+            ReceiptReplayFactKey::PersistenceBlocked(relay) => {
+                self.state.persistence_blocked.contains(relay)
+            }
+            ReceiptReplayFactKey::RoutePersistenceBlocked(relay) => {
+                self.state.route_persistence_blocked.contains(relay)
+            }
+        }
+    }
+
+    fn advance(&mut self, key: ReceiptReplayFactKey, status: WriteStatus) {
+        match key {
+            ReceiptReplayFactKey::ReceiptStatus => self.state.receipt_status = Some(status),
+            ReceiptReplayFactKey::AwaitingCapability => self.state.awaiting_capability = true,
+            ReceiptReplayFactKey::Attempt { relay, key } => {
+                self.state.attempts.insert(relay, key);
+            }
+            ReceiptReplayFactKey::Lane { relay, revision } => {
+                self.state.lane_revisions.insert(relay, revision);
+            }
+            ReceiptReplayFactKey::PersistenceBlocked(relay) => {
+                self.state.persistence_blocked.insert(relay);
+            }
+            ReceiptReplayFactKey::RoutePersistenceBlocked(relay) => {
+                self.state.route_persistence_blocked.insert(relay);
+            }
+        }
+    }
+}
+
 impl<S: EventStore> EngineCore<S> {
     /// Record an ingest/read persistence failure (issue #122) without
     /// panicking: latch the first error message (read-only degrade) and push
@@ -955,20 +1017,28 @@ impl<S: EventStore> EngineCore<S> {
         id: ReceiptId,
         sink: Box<dyn ReceiptSink>,
     ) -> ReattachOutcome {
-        self.reattach_receipt_page(id, sink, 0, usize::MAX).0
+        self.reattach_receipt_page(id, sink, None, usize::MAX).0
     }
 
-    /// Reconstruct one deterministic page of a receipt's durable prefix.
-    /// `cursor` is the count of canonical replay facts already consumed.
-    /// Only the final page attaches the sink to live work; earlier page
-    /// senders close after their bounded prefix drains.
+    /// Reconstruct one finite page of a receipt's durable prefix.
+    ///
+    /// The opaque cursor records fact identity independently for each relay
+    /// lane, so a newly persisted fact on an earlier-sorted relay cannot
+    /// shift another relay's continuation. Only the final page attaches the
+    /// sink to live work, atomically with observing that no durable fact is
+    /// currently unseen.
     pub fn reattach_receipt_page(
         &mut self,
         id: ReceiptId,
         sink: Box<dyn ReceiptSink>,
-        cursor: u64,
+        cursor: Option<ReceiptReplayCursor>,
         limit: usize,
-    ) -> (ReattachOutcome, Option<u64>) {
+    ) -> (ReattachOutcome, Option<ReceiptReplayCursor>) {
+        let mut cursor = match cursor {
+            Some(cursor) if cursor.state.receipt_id == id => cursor,
+            Some(_) => return (ReattachOutcome::RetainedButUnreadable, None),
+            None => ReceiptReplayCursor::new(id),
+        };
         if self.quarantined_auth_receipts.contains_key(&id) {
             return (ReattachOutcome::RetainedButUnreadable, None);
         }
@@ -1016,16 +1086,19 @@ impl<S: EventStore> EngineCore<S> {
             None => (Vec::new(), Vec::new(), Vec::new()),
         };
         let status = Self::retained_receipt_status(&receipt);
-        let mut replay = vec![status];
+        let mut replay = vec![(ReceiptReplayFactKey::ReceiptStatus, status)];
         if receipt.state == ReceiptState::Accepted
             && self
                 .pending
                 .get(&id)
                 .is_some_and(|pending| !pending.already_signed)
         {
-            replay.push(WriteStatus::AwaitingCapability {
-                pubkey: receipt.expected_pubkey,
-            });
+            replay.push((
+                ReceiptReplayFactKey::AwaitingCapability,
+                WriteStatus::AwaitingCapability {
+                    pubkey: receipt.expected_pubkey,
+                },
+            ));
         }
         if receipt.intent_id.is_some() {
             let mut details_by_attempt = details
@@ -1036,6 +1109,15 @@ impl<S: EventStore> EngineCore<S> {
             let mut awaiting_auth = BTreeSet::new();
             let mut retry_eligible = BTreeSet::new();
             for attempt in attempts {
+                let replay_relay = attempt.relay.clone();
+                let replay_ordinal = attempt.ordinal;
+                let replay_key = |phase| ReceiptReplayFactKey::Attempt {
+                    relay: replay_relay.clone(),
+                    key: ReceiptAttemptReplayKey {
+                        ordinal: replay_ordinal,
+                        phase,
+                    },
+                };
                 if let Some(detail) =
                     details_by_attempt.remove(&(attempt.relay.clone(), attempt.ordinal))
                 {
@@ -1043,41 +1125,56 @@ impl<S: EventStore> EngineCore<S> {
                         match handoff.result {
                             HandoffEvidence::NotHandedOff => {
                                 awaiting_relay.insert((attempt.relay.clone(), attempt.ordinal));
-                                replay.push(WriteStatus::AwaitingRelay {
-                                    relay: attempt.relay.clone(),
-                                });
+                                replay.push((
+                                    replay_key(ReceiptAttemptReplayPhase::Handoff),
+                                    WriteStatus::AwaitingRelay {
+                                        relay: attempt.relay.clone(),
+                                    },
+                                ));
                             }
-                            HandoffEvidence::Written => replay.push(WriteStatus::Sent {
-                                relay: attempt.relay.clone(),
-                                attempt: attempt.ordinal,
-                                written_at: handoff.at,
-                            }),
-                            HandoffEvidence::Ambiguous => {
-                                replay.push(WriteStatus::HandoffAmbiguous {
+                            HandoffEvidence::Written => replay.push((
+                                replay_key(ReceiptAttemptReplayPhase::Handoff),
+                                WriteStatus::Sent {
                                     relay: attempt.relay.clone(),
                                     attempt: attempt.ordinal,
-                                    observed_at: handoff.at,
-                                });
+                                    written_at: handoff.at,
+                                },
+                            )),
+                            HandoffEvidence::Ambiguous => {
+                                replay.push((
+                                    replay_key(ReceiptAttemptReplayPhase::Handoff),
+                                    WriteStatus::HandoffAmbiguous {
+                                        relay: attempt.relay.clone(),
+                                        attempt: attempt.ordinal,
+                                        observed_at: handoff.at,
+                                    },
+                                ));
                             }
                         }
                     }
                     if let Some(transient) = detail.transient {
                         if transient.cause == TransientCause::AuthRequired {
                             awaiting_auth.insert((attempt.relay.clone(), attempt.ordinal));
-                            replay.push(WriteStatus::AwaitingAuth {
-                                relay: attempt.relay.clone(),
-                            });
+                            replay.push((
+                                replay_key(ReceiptAttemptReplayPhase::Transient),
+                                WriteStatus::AwaitingAuth {
+                                    relay: attempt.relay.clone(),
+                                },
+                            ));
                         } else {
                             retry_eligible.insert((
                                 attempt.relay.clone(),
                                 attempt.ordinal,
                                 transient.eligible_at,
                             ));
-                            replay.push(WriteStatus::RetryEligible {
-                                relay: attempt.relay.clone(),
-                                attempt: attempt.ordinal,
-                                eligible_at: transient.eligible_at,
-                            });
+                            replay.push((
+                                replay_key(ReceiptAttemptReplayPhase::Transient),
+                                WriteStatus::RetryEligible {
+                                    relay: attempt.relay.clone(),
+                                    attempt: attempt.ordinal,
+                                    eligible_at: transient.eligible_at,
+                                },
+                            ));
                         }
                     }
                 }
@@ -1094,28 +1191,38 @@ impl<S: EventStore> EngineCore<S> {
                     AttemptOutcome::GaveUp => WriteStatus::GaveUp(attempt.relay),
                     AttemptOutcome::OutcomeUnknown => WriteStatus::OutcomeUnknown(attempt.relay),
                 };
-                replay.push(status);
+                replay.push((replay_key(ReceiptAttemptReplayPhase::Outcome), status));
             }
             if !details_by_attempt.is_empty() {
                 return (ReattachOutcome::RetainedButUnreadable, None);
             }
             for lane in lanes {
+                let replay_key = ReceiptReplayFactKey::Lane {
+                    relay: lane.key.relay.clone(),
+                    revision: lane.revision,
+                };
                 match lane.state {
                     LaneState::WaitingConnection
                         if !awaiting_relay
                             .contains(&(lane.key.relay.clone(), lane.last_ordinal)) =>
                     {
-                        replay.push(WriteStatus::AwaitingRelay {
-                            relay: lane.key.relay,
-                        });
+                        replay.push((
+                            replay_key,
+                            WriteStatus::AwaitingRelay {
+                                relay: lane.key.relay,
+                            },
+                        ));
                     }
                     LaneState::WaitingAuth
                         if !awaiting_auth
                             .contains(&(lane.key.relay.clone(), lane.last_ordinal)) =>
                     {
-                        replay.push(WriteStatus::AwaitingAuth {
-                            relay: lane.key.relay,
-                        });
+                        replay.push((
+                            replay_key,
+                            WriteStatus::AwaitingAuth {
+                                relay: lane.key.relay,
+                            },
+                        ));
                     }
                     LaneState::Eligible { since }
                         if lane.last_ordinal > 0
@@ -1125,11 +1232,14 @@ impl<S: EventStore> EngineCore<S> {
                                 since,
                             )) =>
                     {
-                        replay.push(WriteStatus::RetryEligible {
-                            relay: lane.key.relay,
-                            attempt: lane.last_ordinal,
-                            eligible_at: since,
-                        });
+                        replay.push((
+                            replay_key,
+                            WriteStatus::RetryEligible {
+                                relay: lane.key.relay,
+                                attempt: lane.last_ordinal,
+                                eligible_at: since,
+                            },
+                        ));
                     }
                     LaneState::Transient {
                         ordinal,
@@ -1143,11 +1253,14 @@ impl<S: EventStore> EngineCore<S> {
                             eligible_at,
                         )) =>
                     {
-                        replay.push(WriteStatus::RetryEligible {
-                            relay: lane.key.relay,
-                            attempt: ordinal,
-                            eligible_at,
-                        });
+                        replay.push((
+                            replay_key,
+                            WriteStatus::RetryEligible {
+                                relay: lane.key.relay,
+                                attempt: ordinal,
+                                eligible_at,
+                            },
+                        ));
                     }
                     _ => {}
                 }
@@ -1155,35 +1268,48 @@ impl<S: EventStore> EngineCore<S> {
         }
         if let Some(pending) = self.pending.get(&id) {
             for relay in &pending.unstarted_relays {
-                replay.push(WriteStatus::PersistenceBlocked(relay.clone()));
+                replay.push((
+                    ReceiptReplayFactKey::PersistenceBlocked(relay.clone()),
+                    WriteStatus::PersistenceBlocked(relay.clone()),
+                ));
             }
             for relay in &pending.route_blocked_relays {
-                replay.push(WriteStatus::RoutePersistenceBlocked(relay.clone()));
+                replay.push((
+                    ReceiptReplayFactKey::RoutePersistenceBlocked(relay.clone()),
+                    WriteStatus::RoutePersistenceBlocked(relay.clone()),
+                ));
             }
         }
-        let Ok(cursor) = usize::try_from(cursor) else {
-            return (ReattachOutcome::RetainedButUnreadable, None);
-        };
-        if cursor > replay.len() || limit == 0 {
+        if limit == 0 {
             return (ReattachOutcome::RetainedButUnreadable, None);
         }
-        let end = cursor.saturating_add(limit).min(replay.len());
-        let replay_len = replay.len();
-        let mut delivered_end = cursor;
         let mut live = true;
-        for status in replay.into_iter().skip(cursor).take(end - cursor) {
-            if !sink.on_status(status) {
+        let mut delivered = 0usize;
+        let page = replay
+            .iter()
+            .filter(|(key, status)| !cursor.contains(key, status))
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        for (key, status) in page {
+            if !sink.on_status(status.clone()) {
                 live = false;
                 break;
             }
-            delivered_end += 1;
+            cursor.advance(key, status);
+            delivered += 1;
         }
-        // The cursor acknowledges delivery, not merely selection. A custom
-        // sink may refuse before `limit` (the runtime's fresh page channel
-        // cannot), and advancing past that refusal would silently skip the
-        // first undelivered durable fact on the caller's next page.
-        let next_cursor = (delivered_end < replay_len).then_some(delivered_end as u64);
-        if live && next_cursor.is_none() {
+
+        // Re-check the complete current evidence against the advanced,
+        // identity-stable cursor. This detects unseen facts on every relay,
+        // including facts that sort before a different relay's prior page.
+        // The cursor acknowledges only sink-accepted facts.
+        let unseen = replay
+            .iter()
+            .any(|(key, status)| !cursor.contains(key, status));
+        let page_full = delivered == limit;
+        let next_cursor = (unseen || !live || page_full).then_some(cursor);
+        if live && !unseen && !page_full {
             if let Some(pending) = self.pending.get_mut(&id) {
                 pending.sinks.push(Rc::from(sink));
             }
@@ -1206,7 +1332,7 @@ impl<S: EventStore> EngineCore<S> {
         token: String,
         sink: Box<dyn ReceiptSink>,
     ) -> (ReattachOutcome, Option<ReceiptId>) {
-        let (outcome, id, _) = self.reattach_by_correlation_page(token, sink, 0, usize::MAX);
+        let (outcome, id, _) = self.reattach_by_correlation_page(token, sink, None, usize::MAX);
         (outcome, id)
     }
 
@@ -1214,9 +1340,13 @@ impl<S: EventStore> EngineCore<S> {
         &mut self,
         token: String,
         sink: Box<dyn ReceiptSink>,
-        cursor: u64,
+        cursor: Option<ReceiptReplayCursor>,
         limit: usize,
-    ) -> (ReattachOutcome, Option<ReceiptId>, Option<u64>) {
+    ) -> (
+        ReattachOutcome,
+        Option<ReceiptId>,
+        Option<ReceiptReplayCursor>,
+    ) {
         match self.resolver.store().lookup_correlation(&token) {
             Ok(Some(receipt_id)) => {
                 let id = ReceiptId(receipt_id);

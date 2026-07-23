@@ -209,6 +209,59 @@ pub(crate) use attribution::wire_sub_id_string;
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub struct ReceiptId(pub u64);
 
+/// Opaque, identity-stable continuation for finite receipt replay pages
+/// (#680). This is delivery mechanism, not a third app noun: callers can
+/// only return it to the same receipt's continuation door.
+///
+/// State is bounded by the receipt's finite relay fan-out, not by retry
+/// history. Each relay keeps one durable attempt-fact high-water mark and
+/// one current-lane revision; receipt and pending-state projections keep
+/// constant-size/set markers over those same bounded relays.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiptReplayCursor {
+    state: Box<ReceiptReplayCursorState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReceiptReplayCursorState {
+    receipt_id: ReceiptId,
+    receipt_status: Option<WriteStatus>,
+    awaiting_capability: bool,
+    attempts: BTreeMap<RelayUrl, ReceiptAttemptReplayKey>,
+    lane_revisions: BTreeMap<RelayUrl, u64>,
+    persistence_blocked: BTreeSet<RelayUrl>,
+    route_persistence_blocked: BTreeSet<RelayUrl>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ReceiptAttemptReplayKey {
+    ordinal: u64,
+    phase: ReceiptAttemptReplayPhase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ReceiptAttemptReplayPhase {
+    Handoff,
+    Transient,
+    Outcome,
+}
+
+impl ReceiptReplayCursor {
+    fn new(receipt_id: ReceiptId) -> Self {
+        Self {
+            state: Box::new(ReceiptReplayCursorState {
+                receipt_id,
+                receipt_status: None,
+                awaiting_capability: false,
+                attempts: BTreeMap::new(),
+                lane_revisions: BTreeMap::new(),
+                persistence_blocked: BTreeSet::new(),
+                route_persistence_blocked: BTreeSet::new(),
+            }),
+        }
+    }
+}
+
 /// A publish failure that occurs before any receipt identity can exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublishError {

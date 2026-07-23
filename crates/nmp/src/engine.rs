@@ -29,8 +29,8 @@ use nmp_engine::core::ReceiptId;
 use nmp_engine::outbox::WriteStatus;
 use nmp_engine::runtime::{
     EngineThread, Handle, HistoryHandle, HistoryReceiver, QueryHandle, ReceiptReattachment,
-    ReceiptStream, RowsReceiver, RuntimeConfig, SignEventError, SignEventOperation,
-    SignerRegistration,
+    ReceiptReplayCursor, ReceiptStream, RowsReceiver, RuntimeConfig, SignEventError,
+    SignEventOperation, SignerRegistration,
 };
 use nmp_grammar::WriteIntent;
 use nmp_resolver::LiveQuery;
@@ -564,7 +564,7 @@ impl Engine {
     pub fn reattach_receipt_from(
         &self,
         id: ReceiptId,
-        cursor: u64,
+        cursor: ReceiptReplayCursor,
     ) -> Result<ReceiptReattachment, EngineError> {
         self.with_handle(|handle| handle.reattach_receipt_from(id, cursor))
     }

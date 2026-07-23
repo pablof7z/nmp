@@ -244,10 +244,14 @@ implementation:
    sender retains the already-buffered prefix, rejects later sends, is pruned
    from the producer, and the consumer receives typed `FactStreamLagged` after
    draining that prefix. Receipt reattachment reconstructs deterministic
-   durable pages of at most 32 facts and only attaches the final page to live
-   work. Persisted attempt-history retention/GC remains the separate #46
-   concern; the live delivery edge neither grows without bound nor claims a
-   dropped fact was delivered (bounded-delivery.md §3).
+   durable pages of at most 32 facts using an identity-stable, per-lane
+   continuation bounded by relay fan-out. It does not use a count into the
+   mutable reconstructed history: durable facts added between pages remain
+   unseen and are delivered exactly once. A caught-up check after a full page
+   atomically attaches live work. Persisted attempt-history retention/GC
+   remains the separate #46 concern; the live delivery edge neither grows
+   without bound nor claims a dropped fact was delivered
+   (bounded-delivery.md §3).
 4. **`sign_event`** stays a handle (`NmpSignEventHandle`) and gains
    `async fn signed() -> FfiSignedEvent` (one-shot; a second call is a typed
    misuse), replacing the `SignEventObserver` callback. Explicit `cancel()` is

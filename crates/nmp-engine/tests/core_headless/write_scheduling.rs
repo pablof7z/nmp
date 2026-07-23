@@ -1042,7 +1042,7 @@ fn paused_receipt_across_repeated_durable_retries_is_bounded_and_loud() {
         "the missing suffix is explicit and requires durable replay"
     );
 
-    let mut cursor = 0;
+    let mut cursor = None;
     let mut replayed = Vec::new();
     loop {
         let (page_sender, page_receiver) = nmp_engine::runtime::fifo_channel();
@@ -1066,7 +1066,7 @@ fn paused_receipt_across_repeated_durable_retries_is_bounded_and_loud() {
         );
         replayed.extend(page);
         match next_cursor {
-            Some(next) => cursor = next,
+            Some(next) => cursor = Some(next),
             None => {
                 page_receiver.close();
                 break;
@@ -1091,14 +1091,180 @@ fn paused_receipt_across_repeated_durable_retries_is_bounded_and_loud() {
             sender: full_sender,
             calls: Arc::new(AtomicUsize::new(0)),
         }),
-        0,
+        None,
         nmp_engine::runtime::FACT_CHANNEL_CAPACITY,
     );
     assert!(outcome.is_attached());
-    assert_eq!(
-        refused_cursor,
-        Some(0),
+    assert!(
+        refused_cursor.is_some(),
         "a sink refusal cannot acknowledge or skip the first undelivered durable fact"
+    );
+}
+
+/// #680: a continuation is per durable fact identity, never a count into a
+/// replay vector rebuilt from mutable store state. Persisting a fact for an
+/// earlier-sorted relay between page pulls must neither skip that new fact nor
+/// shift a later relay's already-delivered facts back into the stream.
+#[test]
+fn live_receipt_mutation_between_pages_is_exactly_once() {
+    let author = Keys::generate();
+    let early = RelayUrl::parse("wss://a-early-page.example").unwrap();
+    let late = RelayUrl::parse("wss://z-late-page.example").unwrap();
+    let mut core = new_core(FixtureDirectory::new());
+    for (slot, relay) in [&early, &late].into_iter().enumerate() {
+        connect_signer(&mut core, slot as u32, relay, author.public_key());
+        authenticate_signer(&mut core, slot as u32, relay, &author);
+    }
+
+    let live = CapturingReceiptSink::default();
+    let (receipt, event, mut scheduled) =
+        publish_private(&mut core, &author, [early.clone(), late.clone()], live);
+    let early_correlation = scheduled
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::PublishEvent(candidate, _, correlation) if candidate.relay == early => {
+                Some(*correlation)
+            }
+            _ => None,
+        })
+        .expect("the earlier relay owns one persisted first attempt");
+
+    // Build more than one page entirely behind the later-sorted relay while
+    // the earlier relay's Started attempt has no replay status yet.
+    for attempt in 1..=20 {
+        mark_written(&mut core, &scheduled, &late);
+        let classified = core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot: 1,
+                generation: 1,
+            },
+            signer_session(&late, event.pubkey),
+            RelayFrame::from(RelayMessage::ok(
+                event.id,
+                false,
+                "rate-limited: mutable-page-proof",
+            )),
+        ));
+        assert!(classified.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(
+                _,
+                WriteStatus::RetryEligible {
+                    relay,
+                    attempt: got,
+                    ..
+                }
+            ) if relay == &late && *got == attempt
+        )));
+        let due = core
+            .next_deadline()
+            .expect("the later relay's retry remains scheduled");
+        scheduled = core.handle(EngineMsg::Tick(due));
+    }
+
+    let mut cursor = None;
+    let mut replayed = Vec::new();
+    let (first_sender, first_receiver) = nmp_engine::runtime::fifo_channel();
+    let (outcome, next_cursor) = core.reattach_receipt_page(
+        receipt,
+        Box::new(BoundedReceiptSink {
+            sender: first_sender,
+            calls: Arc::new(AtomicUsize::new(0)),
+        }),
+        cursor,
+        nmp_engine::runtime::FACT_CHANNEL_CAPACITY,
+    );
+    assert!(outcome.is_attached());
+    cursor = next_cursor;
+    while let Ok(status) = first_receiver.try_recv() {
+        replayed.push(status);
+    }
+    assert_eq!(
+        replayed.len(),
+        nmp_engine::runtime::FACT_CHANNEL_CAPACITY,
+        "the first page must cross into the later relay's durable history"
+    );
+
+    // This durable Sent fact sorts before every later-relay fact in the
+    // rebuilt evidence vector. A numeric offset skips it and repeats the
+    // shifted tail; the per-relay identity cursor must do neither.
+    core.handle(EngineMsg::EventHandoff(
+        early_correlation,
+        HandoffResult::Written,
+    ));
+
+    while let Some(page_cursor) = cursor {
+        let (page_sender, page_receiver) = nmp_engine::runtime::fifo_channel();
+        let (outcome, next_cursor) = core.reattach_receipt_page(
+            receipt,
+            Box::new(BoundedReceiptSink {
+                sender: page_sender,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Some(page_cursor),
+            nmp_engine::runtime::FACT_CHANNEL_CAPACITY,
+        );
+        assert!(outcome.is_attached());
+        while let Ok(status) = page_receiver.try_recv() {
+            replayed.push(status);
+        }
+        cursor = next_cursor;
+        if cursor.is_none() {
+            page_receiver.close();
+        }
+    }
+
+    assert_eq!(
+        replayed
+            .iter()
+            .filter(|status| matches!(
+                status,
+                WriteStatus::Sent {
+                    relay,
+                    attempt: 1,
+                    ..
+                } if relay == &early
+            ))
+            .count(),
+        1,
+        "the fact inserted before the old page boundary is delivered once"
+    );
+    for attempt in 1..=20 {
+        assert_eq!(
+            replayed
+                .iter()
+                .filter(|status| matches!(
+                    status,
+                    WriteStatus::Sent {
+                        relay,
+                        attempt: got,
+                        ..
+                    } if relay == &late && *got == attempt
+                ))
+                .count(),
+            1,
+            "later-relay Sent attempt {attempt} duplicated or disappeared"
+        );
+        assert_eq!(
+            replayed
+                .iter()
+                .filter(|status| matches!(
+                    status,
+                    WriteStatus::RetryEligible {
+                        relay,
+                        attempt: got,
+                        ..
+                    } if relay == &late && *got == attempt
+                ))
+                .count(),
+            1,
+            "later-relay RetryEligible attempt {attempt} duplicated or disappeared"
+        );
+    }
+    assert_eq!(
+        replayed.len(),
+        42,
+        "one receipt status, forty later-relay facts, and one live mutation are exact"
     );
 }
 

@@ -60,10 +60,17 @@ If a paused consumer falls behind, the producer retains the buffered prefix,
 disconnects that sink, and the consumer receives typed `FactStreamLagged`
 after draining it; later facts are never silently reported as delivered.
 Receipt reattachment traverses the canonical persisted history in deterministic
-pages of at most 32 delivery facts and attaches to live work only after the
-final page. The replay cursor bounds each delivery page, not the store's total
-retained attempt history: retention/GC for that durable history remains open
-under #46 and must not be confused with retry-concurrency limits.
+pages of at most 32 delivery facts. Its opaque continuation records the
+identity of consumed facts independently per receipt lane (including each
+relay's attempt ordinal and phase), rather than storing a numeric offset into a
+vector reconstructed from mutable durable state. A durable fact added between
+pages is therefore delivered exactly once even when its deterministic display
+order precedes facts already consumed from another relay. Continuation state is
+bounded by relay fan-out, not retry history. After a full page, one caught-up
+check is required before the sink atomically joins live work, closing the
+replay-to-live race. The replay cursor bounds each delivery page, not the
+store's total retained attempt history: retention/GC for that durable history
+remains open under #46 and must not be confused with retry-concurrency limits.
 
 Diagnostics counters may aggregate, but exact current plan/filter/error facts
 must remain available. Aggregation policy is itself visible in diagnostics.

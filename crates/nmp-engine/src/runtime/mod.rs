@@ -101,6 +101,8 @@ use nmp_transport::{
     WireFrame,
 };
 
+#[doc(hidden)]
+pub use crate::core::ReceiptReplayCursor;
 use crate::core::{
     self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg,
     HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, HistorySink, PublishError,
@@ -607,9 +609,10 @@ pub enum ReceiptReattachment {
     Attached {
         id: ReceiptId,
         statuses: FifoReceiver<WriteStatus>,
-        /// Canonical durable-replay cursor for the next finite page. `None`
-        /// means this receiver is caught up and attached to live work.
-        next_cursor: Option<u64>,
+        /// Identity-stable durable-replay continuation for the next finite
+        /// page. `None` means this receiver is caught up and attached to
+        /// live work.
+        next_cursor: Option<ReceiptReplayCursor>,
     },
     /// No retained receipt with this id (or token) exists.
     NotFound,
@@ -733,9 +736,9 @@ enum Cmd {
     },
     ReattachReceipt {
         id: ReceiptId,
-        cursor: u64,
+        cursor: Option<ReceiptReplayCursor>,
         sink: Box<dyn ReceiptSink>,
-        reply: Sender<(ReattachOutcome, Option<u64>)>,
+        reply: Sender<(ReattachOutcome, Option<ReceiptReplayCursor>)>,
     },
     /// #591: reattach by caller correlation token instead of a `ReceiptId`
     /// -- the door a client uses after a crash that happened before it
@@ -743,7 +746,11 @@ enum Cmd {
     ReattachByCorrelation {
         token: String,
         sink: Box<dyn ReceiptSink>,
-        reply: Sender<(ReattachOutcome, Option<ReceiptId>, Option<u64>)>,
+        reply: Sender<(
+            ReattachOutcome,
+            Option<ReceiptId>,
+            Option<ReceiptReplayCursor>,
+        )>,
     },
     CancelWrite {
         id: ReceiptId,
@@ -3789,7 +3796,7 @@ fn engine_loop<S, D>(
                     let _ = reply.send(core.reattach_by_correlation_page(
                         token,
                         sink,
-                        0,
+                        None,
                         FACT_CHANNEL_CAPACITY,
                     ));
                 }
@@ -4308,7 +4315,7 @@ fn engine_loop<S, D>(
             }
             Cmd::ReattachByCorrelation { token, sink, reply } => {
                 let found =
-                    core.reattach_by_correlation_page(token, sink, 0, FACT_CHANNEL_CAPACITY);
+                    core.reattach_by_correlation_page(token, sink, None, FACT_CHANNEL_CAPACITY);
                 let _ = reply.send(found);
             }
             Cmd::CancelWrite { id, reply } => {
@@ -6135,12 +6142,25 @@ impl Handle {
     /// channel is primed with durable receipt/attempt facts. Missing and
     /// retained-but-unreadable evidence are distinct outcomes.
     pub fn reattach_receipt(&self, id: ReceiptId) -> ReceiptReattachment {
-        self.reattach_receipt_from(id, 0)
+        self.reattach_receipt_page(id, None)
     }
 
-    /// Continue deterministic durable replay from a prior page cursor. This
-    /// is delivery mechanism for receipt streams, not a second write noun.
-    pub fn reattach_receipt_from(&self, id: ReceiptId, cursor: u64) -> ReceiptReattachment {
+    /// Continue durable replay from an identity-stable prior-page cursor.
+    /// This is delivery mechanism for receipt streams, not a second write
+    /// noun.
+    pub fn reattach_receipt_from(
+        &self,
+        id: ReceiptId,
+        cursor: ReceiptReplayCursor,
+    ) -> ReceiptReattachment {
+        self.reattach_receipt_page(id, Some(cursor))
+    }
+
+    fn reattach_receipt_page(
+        &self,
+        id: ReceiptId,
+        cursor: Option<ReceiptReplayCursor>,
+    ) -> ReceiptReattachment {
         let (tx, rx) = fifo_channel();
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox

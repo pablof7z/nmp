@@ -25396,7 +25396,32 @@ reexport nmp::ReceiptReattachment => nmp_engine::runtime::ReceiptReattachment
                                 "args": [
                                   {
                                     "type": {
-                                      "primitive": "u64"
+                                      "resolved_path": {
+                                        "args": null,
+                                        "path": "crate::core::ReceiptReplayCursor",
+                                        "resolved_item": {
+                                          "definition": {
+                                            "attrs": [],
+                                            "inner": {
+                                              "struct": {
+                                                "generics": {
+                                                  "params": [],
+                                                  "where_predicates": []
+                                                },
+                                                "kind": {
+                                                  "plain": {
+                                                    "fields": [],
+                                                    "has_stripped_fields": true
+                                                  }
+                                                }
+                                              }
+                                            },
+                                            "name": "ReceiptReplayCursor",
+                                            "visibility": "public"
+                                          },
+                                          "path": "nmp_engine::core::ReceiptReplayCursor"
+                                        }
+                                      }
                                     }
                                   }
                                 ],

@@ -735,7 +735,7 @@ pub struct NmpReceiptStream {
 enum ReceiptDelivery {
     Active {
         receiver: Arc<nmp::AsyncFifoReceiver<nmp::WriteStatus>>,
-        next_cursor: Option<u64>,
+        next_cursor: Option<nmp::ReceiptReplayCursor>,
     },
     Cancelled,
 }
@@ -757,7 +757,7 @@ impl NmpReceiptStream {
         engine: Arc<nmp::Engine>,
         id: nmp::ReceiptId,
         statuses: nmp::FifoReceiver<nmp::WriteStatus>,
-        next_cursor: Option<u64>,
+        next_cursor: Option<nmp::ReceiptReplayCursor>,
     ) -> Arc<Self> {
         Arc::new(Self {
             id,
@@ -772,13 +772,16 @@ impl NmpReceiptStream {
 
     fn current_receiver(
         &self,
-    ) -> Option<(Arc<nmp::AsyncFifoReceiver<nmp::WriteStatus>>, Option<u64>)> {
+    ) -> Option<(
+        Arc<nmp::AsyncFifoReceiver<nmp::WriteStatus>>,
+        Option<nmp::ReceiptReplayCursor>,
+    )> {
         let delivery = self.delivery.lock().unwrap();
         match &*delivery {
             ReceiptDelivery::Active {
                 receiver,
                 next_cursor,
-            } => Some((receiver.clone(), *next_cursor)),
+            } => Some((receiver.clone(), next_cursor.clone())),
             ReceiptDelivery::Cancelled => None,
         }
     }
@@ -787,7 +790,7 @@ impl NmpReceiptStream {
         &self,
         prior: &Arc<nmp::AsyncFifoReceiver<nmp::WriteStatus>>,
         statuses: nmp::FifoReceiver<nmp::WriteStatus>,
-        next_cursor: Option<u64>,
+        next_cursor: Option<nmp::ReceiptReplayCursor>,
     ) -> bool {
         let replacement = Arc::new(statuses.into_async());
         let mut delivery = self.delivery.lock().unwrap();
