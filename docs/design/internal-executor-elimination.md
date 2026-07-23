@@ -120,16 +120,20 @@ a single shared, bounded, async-admission scheduler — designed, not assumed.
 
 ## Acceptance (see #704 issue) mapped to this design
 
-1. Mixed load (1,000 obs + NIP-11 + AUTH + local/remote signing + follow +
-   receipts + NIP-46 + switching): nothing refuses (no admission exists).
+1. Mixed load: `mixed_load_704` holds 1,000 observations while NIP-11, local
+   signing, follow observation/action, and a durable receipt progress on one
+   engine. AUTH one-shot ownership, remote-signing waits, NIP-46
+   session/switching, and foreign-completion isolation have dedicated
+   overlapping falsifiers because they require distinct deterministic
+   transports; none exposes admission to refuse.
 2. Fairness: saturate NIP-11; signing/AUTH/follow/NIP-46 progress (tasks parked
    at await free the workers).
 3. Cancellable "admission": N concurrent operations >> worker count all run as
    async tasks, none waits on a permit, all cancel immediately (there is no
    permit — the strongest form of the requirement).
 4. NIP-46 scaling 1/10/50/100 over deterministic transports: no per-session
-   executor/pool; shared signer-transport threads bounded by the global cap,
-   proven and explained.
+   executor; the retained per-session transport envelope is bounded by
+   `MAX_NIP46_RELAYS`, measured, proven, and explained.
 5. Long waits hold no worker (they are parked futures).
 6. Shutdown determinism with queued/running/pending work.
 7. Surface audit: no capacity/thread terminology in public/generated SDK.

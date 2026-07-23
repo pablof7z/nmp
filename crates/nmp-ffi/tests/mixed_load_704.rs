@@ -45,7 +45,7 @@ const TEST_SECRET_KEY_HEX: &str =
 /// design refused at the 13th and spawned one OS thread per admitted
 /// observation; the thread-growth bound below is a small CONSTANT independent
 /// of this number, which is the whole point.
-const CONCURRENT_OBSERVATIONS: usize = 200;
+const CONCURRENT_OBSERVATIONS: usize = 1_000;
 
 /// Whole-engine OS-thread growth we tolerate for the entire mixed workload.
 /// It is a fixed constant (host-runtime lazy-thread slack), deliberately far
