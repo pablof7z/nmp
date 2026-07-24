@@ -131,11 +131,12 @@ Observation delivery is pull-based: a foreign consumer awaits `next()` on an
 observation handle, which parks a waker on the engine-owned bounded mailbox
 rather than blocking a dedicated OS thread (`async-observation-handles.md`,
 #680). Live observations therefore do not consume a native thread each and
-there is no app-visible native-task ceiling. Genuinely-blocking *transient*
-foreign/reactor adapters (NIP-11 flights, remote-signer/AUTH waiters, the
-follow-action worker) run on a fixed-capacity internal pool that ordinary
-observations never touch; engine-associated NIP-46 sessions own their own
-executor.
+there is no app-visible native-task ceiling. Logical NIP-11, signer, AUTH,
+follow-action, and NIP-46 work runs as async tasks on the shared runtime
+without holding a worker thread or scheduler permit (#704). Private physical
+bounds use cancellable backpressure: NIP-11 admits at most eight distinct
+network/body flights, while NIP-46 sessions retain finite transport queues and
+only the per-session transport workers required by distinct relay identity.
 
 ## 7. Diagnostics
 

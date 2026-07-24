@@ -461,6 +461,102 @@ fn derived_inner_limit_selects_newest_events_and_refills_after_retraction() {
     assert_eq!(h.demand(), BTreeSet::from([inner, outer_b, outer_c]));
 }
 
+/// #49/#714 promotion falsifier: the exact ratified nested-context shape.
+/// A current-pubkey NIP-51 user-list lookup uses ordinary user-list authority
+/// while the dependent group-content query is host-pinned and authenticated.
+/// Neither context may inherit or overwrite the other, including on identity
+/// reroot.
+#[test]
+fn derived_inner_and_outer_demands_keep_independent_source_and_access_contexts() {
+    let mut h = Harness::new();
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let pinned = nostr::RelayUrl::parse("wss://outer.example.com").unwrap();
+    h.set_active(Some(a.public_key()));
+
+    let inner = Demand::new(
+        Filter {
+            kinds: Some(BTreeSet::from([10_009u16])),
+            authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+            ..Filter::default()
+        },
+        SourceAuthority::AuthorOutboxes,
+        AccessContext::Public,
+    )
+    .unwrap();
+    let mut outer_tags = BTreeMap::new();
+    outer_tags.insert(
+        IndexedTagName::new('h').unwrap(),
+        Binding::Derived(Box::new(Derived {
+            inner,
+            project: Selector::Tag("h".to_string()),
+        })),
+    );
+    let outer = Demand::new(
+        Filter {
+            kinds: Some(BTreeSet::from([9u16])),
+            tags: outer_tags,
+            ..Filter::default()
+        },
+        SourceAuthority::Pinned(BTreeSet::from([pinned.clone()])),
+        AccessContext::Nip42(a.public_key()),
+    )
+    .unwrap();
+
+    let (_handle, opened) = h.subscribe(LiveQuery(outer));
+    let [DemandOp::Open(inner_atom)] = opened.ops.as_slice() else {
+        panic!("only the unresolved Derived inner atom should open first");
+    };
+    assert_eq!(inner_atom.source, SourceAuthority::AuthorOutboxes);
+    assert_eq!(inner_atom.access, AccessContext::Public);
+    assert_eq!(
+        inner_atom.filter,
+        cf_kinds_authors(&[10_009], &[&a.public_key().to_hex()])
+    );
+
+    let group_list = EventBuilder::new(Kind::from(10_009u16), "")
+        .tag(Tag::parse(["h", "group-a"]).unwrap())
+        .custom_created_at(Timestamp::from(100u64))
+        .sign_with_keys(&a)
+        .unwrap();
+    let delta = h.deliver(vec![group_list]);
+    let outer_atom = delta
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            DemandOp::Open(atom) if atom.filter.kinds == Some(BTreeSet::from([9u16])) => Some(atom),
+            _ => None,
+        })
+        .expect("projecting the contact list must open the outer content atom");
+    assert_eq!(
+        outer_atom.source,
+        SourceAuthority::Pinned(BTreeSet::from([pinned]))
+    );
+    assert_eq!(outer_atom.access, AccessContext::Nip42(a.public_key()));
+
+    let reroot = h.set_active(Some(b.public_key()));
+    assert!(
+        reroot.closed().iter().any(|atom| {
+            atom.filter.kinds == Some(BTreeSet::from([9u16]))
+                && matches!(atom.source, SourceAuthority::Pinned(_))
+                && atom.access == AccessContext::Nip42(a.public_key())
+        }),
+        "reroot must withdraw the dependent host/AUTH group atom"
+    );
+    let opened = reroot.opened();
+    assert_eq!(
+        opened.len(),
+        1,
+        "only the rerooted inner user-list atom can reopen before b's list arrives"
+    );
+    assert_eq!(
+        opened[0].filter,
+        cf_kinds_authors(&[10_009], &[&b.public_key().to_hex()])
+    );
+    assert_eq!(opened[0].source, SourceAuthority::AuthorOutboxes);
+    assert_eq!(opened[0].access, AccessContext::Public);
+}
+
 // ---- 1. depth1_myfollows_surgical_delta ---------------------------------
 
 #[test]

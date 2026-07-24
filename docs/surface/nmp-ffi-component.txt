@@ -9451,7 +9451,7 @@ object Object {
                     name: "inner",
                     type_: Record {
                         module_path: "nmp_ffi",
-                        name: "FfiFilter",
+                        name: "FfiDemand",
                     },
                     by_ref: false,
                     optional: false,
@@ -9477,7 +9477,7 @@ object Object {
                         type_: RustBuffer(
                             Some(
                                 ExternalFfiMetadata {
-                                    name: "FfiFilter",
+                                    name: "FfiDemand",
                                     module_path: "nmp_ffi",
                                 },
                             ),
@@ -9507,7 +9507,7 @@ object Object {
             throws: None,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_constructor_ffiderived_new",
             checksum: Some(
-                20106,
+                60159,
             ),
             self_type: Object {
                 module_path: "nmp_ffi",
@@ -9527,7 +9527,7 @@ object Object {
             return_type: Some(
                 Record {
                     module_path: "nmp_ffi",
-                    name: "FfiFilter",
+                    name: "FfiDemand",
                 },
             ),
             ffi_func: FfiFunction {
@@ -9545,7 +9545,7 @@ object Object {
                     RustBuffer(
                         Some(
                             ExternalFfiMetadata {
-                                name: "FfiFilter",
+                                name: "FfiDemand",
                                 module_path: "nmp_ffi",
                             },
                         ),
@@ -9559,7 +9559,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffiderived_inner",
             checksum: Some(
-                6331,
+                45575,
             ),
         },
         Method {
@@ -9646,7 +9646,7 @@ object Object {
     },
     ffi_init_callback: None,
     docstring: Some(
-        "A `Binding::Derived` payload mirror -- a UniFFI object (see [`FfiBinding`]'s\ndoc for why): Swift constructs one via `FfiDerived(inner:project:)` and\nreads it back via the `inner()`/`project()` getters.",
+        "A `Binding::Derived` payload mirror -- a UniFFI object (see [`FfiBinding`]'s\ndoc for why): Swift constructs one via `FfiDerived(inner:project:)` and\nreads it back via the `inner()`/`project()` getters. `inner` is a complete\n[`FfiDemand`], matching Rust's `nmp_grammar::Derived`: a nested query owns\nits source, access, cache, and freshness policy independently from the\nouter demand (#714).",
     ),
 }
 
@@ -12462,7 +12462,7 @@ object Object {
     },
     ffi_init_callback: None,
     docstring: Some(
-        "Pull-based follow/unfollow action stream (#680). The action worker (one\ntransient thread per user action on the engine's internal blocking-adapter\npool) pushes each [`FollowActionStatus`] into a waker-aware FIFO; this\nhandle awaits them in order. `None` is the terminal signal. `Drop`/`cancel`\nclose the stream.",
+        "Pull-based follow/unfollow action stream (#680/#704). The async action task\npushes each [`FollowActionStatus`] into a waker-aware FIFO without holding a\ndedicated worker thread; this handle awaits them in order. `None` is the\nterminal signal. `Drop`/`cancel` close the stream.",
     ),
 }
 

@@ -6,21 +6,24 @@ A query descriptor is a value, not a callback:
 
 ```text
 Demand = selection Filter + SourceAuthority + AccessContext + CacheMode
-Binding = Literal | Reactive(ActivePubkey) | Derived | SetOp
+Binding = Literal | Reactive(ActivePubkey) | Derived(inner: Demand) | SetOp
 Selector = Authors | Ids | Tag(name) | AddressCoord
 SetOp = Union | Intersect | Diff
 ```
 
 Filter fields are kinds, authors, ids, indexed single-character tags, since, until, and limit. `Selector::Tag(name)` projects already acquired rows locally and may use arbitrary tag names; that is different from the filter tag map's NIP-01 single-character keys.
 
-Direct Rust `Derived.inner` is a full `Demand`, so the inner query declares its own source/access context. Swift and Kotlin currently accept a bare `NMPFilter` for the derived inner value. Do not write cross-platform examples that hide this difference.
+`Derived.inner` is a full `Demand` on Rust, FFI, Swift, and Kotlin. The inner
+query declares source, access, cache, and freshness independently from the
+outer query; no platform implicitly inherits or reapplies defaults.
 
 ## Source and cache rules
 
 - `AuthorOutboxes` requires an authors binding.
 - `Pinned` requires a nonempty relay set and asks only those relays.
 - `CacheMode::Strict` matters only with pinned authority; it limits cached rows to provenance intersecting the pinned relay set.
-- `AccessContext` currently has only `Public`. It reserves descriptor identity for future AUTH work; it does not mean AUTH is implemented.
+- `AccessContext` is `Public` or `Nip42(expectedPublicKey)`. NIP-42 freezes the
+  expected identity in the demand; active-account changes cannot redirect it.
 
 ## Delivered state
 

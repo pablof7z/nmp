@@ -45,7 +45,7 @@ repository today?
 | Canonical Rust product facade | facade, FFI, demo, direct-vs-FFI parity, surface snapshots, and append-only governance are built; v2 remains provisional while the broader promoted contracts below are open | [#52](https://github.com/pablof7z/nmp/issues/52) |
 | Durable acceptance and pending row | crash-atomic acceptance/promotion/cancellation are built; runtime restart recovery, receipt reattachment, and durable attempt resumption remain | [#2](https://github.com/pablof7z/nmp/issues/2), [#3](https://github.com/pablof7z/nmp/issues/3) |
 | Signer lifecycle | frozen-pubkey selection, governed sign-only, remote NIP-46 reattachment, and local Primal handoff are built; per-write override, NIP-55 execution, platform vault restore, and permanent signer diagnostics remain | [#47](https://github.com/pablof7z/nmp/issues/47), [#51](https://github.com/pablof7z/nmp/issues/51) |
-| Query descriptor/evidence | query output now carries current-plan `AcquisitionEvidence` distinct from diagnostic intervals; descriptor identity is still filter-centric and lacks full source/access context | [#49](https://github.com/pablof7z/nmp/issues/49) |
+| Query descriptor/evidence | full `Demand` identity and current-plan `AcquisitionEvidence` are built across Rust/FFI/Swift/Kotlin; broader permanent diagnostics remain | [#49](https://github.com/pablof7z/nmp/issues/49), [#714](https://github.com/pablof7z/nmp/issues/714) |
 | Protocol modules | exact module ownership and immutable contextual publication are designed, not shipped; NIP-51 kind 10009 composition into NIP-29 remains queued | [#45](https://github.com/pablof7z/nmp/issues/45), [#63](https://github.com/pablof7z/nmp/issues/63) |
 | Bounded delivery | end-to-end queue, observer, ingress, and explicit-shortfall proof remains | [#46](https://github.com/pablof7z/nmp/issues/46) |
 | Diagnostics | raw connection, AUTH, retry, error, and limit evidence remains incomplete | [#51](https://github.com/pablof7z/nmp/issues/51) |
@@ -58,8 +58,8 @@ The umbrella ordering and design-signoff trail live in
 
 | Concept | Current repository surface | Provisional North Star |
 |---|---|---|
-| Query identity | `LiveQuery(Filter<Binding>)` | selection + source authority + access context |
-| Nested derived query | `Derived(inner: Filter)` has selection only | explicit inner demand with independent source/access context |
+| Query identity | `Demand(selection, source authority, access context, cache, freshness)` | same semantic descriptor; public spelling remains provisional |
+| Nested derived query | `Derived(inner: Demand)` across Rust/FFI/Swift/Kotlin | explicit inner demand with independent source/access/cache/freshness policy |
 | Query output | row deltas/current rows plus scoped `AcquisitionEvidence`; diagnostics retain exact intervals | richer descriptor-scoped cache/acquisition/shortfall evidence |
 | Current identity | `setActiveAccount` supplies the default; accepted work pins its author and resumes only through a matching local or NIP-46 capability | registered providers plus explicit per-write identity override |
 | Accepted write | crash-atomic obligation, receipt, and canonical pending row; restart recovery remains | recovered/reattached durable work with exact attempt evidence |

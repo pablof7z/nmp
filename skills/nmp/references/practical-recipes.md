@@ -20,9 +20,12 @@ The current Swift graph for followed authors is a derived contact-list query, pr
 
 ```swift
 let followed = NMPBinding.derived(
-    inner: NMPFilter(
-        kinds: [3],
-        authors: .reactive(.activePubkey)
+    inner: NMPDemand(
+        selection: NMPFilter(
+            kinds: [3],
+            authors: .reactive(.activePubkey)
+        ),
+        source: .authorOutboxes
     ),
     project: .tag("p")
 )
