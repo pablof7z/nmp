@@ -28,8 +28,14 @@ use crate::types::{Element, FieldSlot, ResolvedSet};
 ///   the binding, since an address coordinate is never a single-field
 ///   value.
 /// - `Element::Scalar` is written into exactly the one `slot` this binding
-///   is attached to.
-pub(crate) fn merge_element_into(cf: &mut ConcreteFilter, slot: &FieldSlot, el: &Element) {
+///   is attached to. Author/id destinations validate and canonicalize their
+///   protocol types here, where the destination semantics are known; an
+///   invalid scalar contributes no value.
+///
+/// Returns `true` iff the element contributed a value. Callers must treat a
+/// bound slot with zero contributing elements as matching nothing, never as
+/// an unconstrained filter.
+pub(crate) fn merge_element_into(cf: &mut ConcreteFilter, slot: &FieldSlot, el: &Element) -> bool {
     match el {
         Element::Coord { kind, author, d } => {
             cf.kinds.get_or_insert_with(BTreeSet::new).insert(*kind);
@@ -38,18 +44,28 @@ pub(crate) fn merge_element_into(cf: &mut ConcreteFilter, slot: &FieldSlot, el: 
                 .insert(author.clone());
             let d_tag = IndexedTagName::new('d').expect("'d' is an ASCII letter");
             cf.tags.entry(d_tag).or_default().insert(d.clone());
+            true
         }
         Element::Scalar(s) => match slot {
-            FieldSlot::Authors => {
-                cf.authors
-                    .get_or_insert_with(BTreeSet::new)
-                    .insert(s.clone());
-            }
-            FieldSlot::Ids => {
-                cf.ids.get_or_insert_with(BTreeSet::new).insert(s.clone());
-            }
+            FieldSlot::Authors => match nostr::PublicKey::from_hex(s) {
+                Ok(author) => {
+                    cf.authors
+                        .get_or_insert_with(BTreeSet::new)
+                        .insert(author.to_hex());
+                    true
+                }
+                Err(_) => false,
+            },
+            FieldSlot::Ids => match nostr::EventId::from_hex(s) {
+                Ok(id) => {
+                    cf.ids.get_or_insert_with(BTreeSet::new).insert(id.to_hex());
+                    true
+                }
+                Err(_) => false,
+            },
             FieldSlot::Tag(t) => {
                 cf.tags.entry(*t).or_default().insert(s.clone());
+                true
             }
         },
     }
