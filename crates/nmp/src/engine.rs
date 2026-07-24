@@ -987,13 +987,21 @@ mod tests {
             .expect("observe through supported facade");
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut found = false;
-        while !found && Instant::now() < deadline {
+        let mut execution = Vec::new();
+        while (!found
+            || !execution.iter().any(|fact: &crate::ObservationEvidence| {
+                matches!(fact.fact, crate::ObservationFact::RelayEose { .. })
+            }))
+            && Instant::now() < deadline
+        {
             if let Ok(frame) = subscription.recv_timeout(Duration::from_millis(250)) {
                 found = frame
                     .deltas
                     .iter()
                     .filter_map(|delta| delta.event())
-                    .any(|received| received.id == expected_id);
+                    .any(|received| received.id == expected_id)
+                    || found;
+                execution.extend(frame.execution);
             }
         }
 
@@ -1006,6 +1014,48 @@ mod tests {
         }
         let relay_result = relay_thread.join();
         assert!(found, "allowed local relay never reached the facade query");
+        assert!(execution.iter().any(|fact| matches!(
+            &fact.fact,
+            crate::ObservationFact::ConcreteFilter { path, revision: 1, .. }
+                if path == "$"
+        )));
+        let requests: BTreeSet<_> = execution
+            .iter()
+            .filter_map(|fact| match &fact.fact {
+                crate::ObservationFact::RelayRequest {
+                    path,
+                    filter_revision,
+                    transport_generation,
+                    request_revision,
+                    ..
+                } if path == "$" => {
+                    Some((*filter_revision, *transport_generation, *request_revision))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !requests.is_empty(),
+            "facade frame must expose an actual REQ handoff"
+        );
+        assert!(
+            execution.iter().any(|fact| matches!(
+                &fact.fact,
+                crate::ObservationFact::RelayEose {
+                    path,
+                    filter_revision,
+                    transport_generation,
+                    request_revision,
+                    ..
+                } if path == "$"
+                    && requests.contains(&(
+                        *filter_revision,
+                        *transport_generation,
+                        *request_revision,
+                    ))
+            )),
+            "EOSE must identify the exact accepted REQ: {execution:#?}"
+        );
         relay_result.expect("join local relay");
     }
 
@@ -2291,22 +2341,38 @@ mod tests {
             // No further events are ever published against this probe
             // query (no relays configured, arbitrary caller-owned kind) --
             // absent cancellation, this call blocks forever.
-            let result = subscription.recv();
-            let _ = result_tx.send(result.is_err());
+            let terminal = loop {
+                match subscription.recv() {
+                    Ok(frame)
+                        if frame.execution.iter().any(|evidence| {
+                            matches!(evidence.fact, crate::ObservationFact::Withdrawn)
+                        }) =>
+                    {
+                        break true;
+                    }
+                    Ok(_) => continue,
+                    Err(_) => break false,
+                }
+            };
+            let disconnected = subscription.recv().is_err();
+            let _ = result_tx.send((terminal, disconnected));
         });
 
         cancel.cancel();
 
-        let disconnected = result_rx
+        let (terminal, disconnected) = result_rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect(
                 "cancel() from a separate handle must unblock the drain thread's recv() \
                  within a bounded wait, not hang",
             );
         assert!(
+            terminal,
+            "the unblocked recv() must expose the observation's terminal Withdrawn fact"
+        );
+        assert!(
             disconnected,
-            "the unblocked recv() must observe a disconnect (Err), the same outcome \
-             Drop-driven withdrawal produces"
+            "the receive after Withdrawn must observe a deterministic disconnect"
         );
 
         engine.shutdown();

@@ -677,11 +677,12 @@ impl<S: EventStore> EngineCore<S> {
                             continue;
                         }
                     }
-                    self.attribution.record_send(
+                    self.record_observed_request(
                         &session,
                         &req.sub_id,
                         &req.filter,
                         req.absorbed.clone(),
+                        true,
                     );
                     plain_reqs.push(req.clone());
                 }
@@ -830,6 +831,12 @@ impl<S: EventStore> EngineCore<S> {
             if current != handle || session != reported_session {
                 return effects;
             }
+            self.close_requests_for_session(
+                &session,
+                handle,
+                format!("transport disconnected: {reason:?}"),
+                &mut effects,
+            );
             // AUTH truth is a property of the exact connection generation
             // that earned it (#8) — it dies with the socket, unconditionally,
             // for every disconnect reason: the epoch is cancelled, protected
@@ -968,11 +975,12 @@ impl<S: EventStore> EngineCore<S> {
         effects.push(Effect::ReleaseInitialRead(state.epoch.handle));
         if let Some(reqs) = self.router.plan().reqs.get(session).cloned() {
             for req in &reqs {
-                self.attribution.record_send(
+                self.record_observed_request(
                     session,
                     &req.sub_id,
                     &req.filter,
                     req.absorbed.clone(),
+                    true,
                 );
             }
             if !reqs.is_empty() {
@@ -1420,7 +1428,11 @@ impl<S: EventStore> EngineCore<S> {
                 let resolved = self.attribution.sub_id_for_wire(&session, wire_id);
                 let attributed = self
                     .attribution
-                    .attribute_eose(&session, wire_id, self.clock);
+                    .attribute_eose_detailed(&session, wire_id, self.clock);
+                let (completed_send, attributed) = attributed
+                    .map_or((None, Vec::new()), |(send, coverage)| {
+                        (Some(send), coverage)
+                    });
                 for (key, interval) in attributed {
                     if let Some(atom) = self.attribution.shape_of(key) {
                         // Coverage rows stay keyed (context-hashed key,
@@ -1442,6 +1454,9 @@ impl<S: EventStore> EngineCore<S> {
                         }
                         effects.push(Effect::RecordCoverage(key, session.relay.clone(), interval));
                     }
+                }
+                if let Some(send) = completed_send {
+                    self.emit_request_eose(send, self.clock, &mut effects);
                 }
                 // A watermark advancing can flip a handle's
                 // AcquisitionEvidence (a source's `reconciled_through`) even
@@ -1552,6 +1567,23 @@ impl<S: EventStore> EngineCore<S> {
                 ) =>
             {
                 effects.extend(self.on_auth_restricted(handle, session));
+            }
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } => {
+                if let Some(sub_id) = self
+                    .attribution
+                    .sub_id_for_wire(&session, subscription_id.as_str())
+                {
+                    self.close_requests_for_sub(
+                        &session,
+                        handle,
+                        &sub_id,
+                        message.into_owned(),
+                        &mut effects,
+                    );
+                }
             }
             RelayMessage::NegMsg {
                 subscription_id,

@@ -32,8 +32,10 @@ impl<S: EventStore> EngineCore<S> {
                 last_rows: BTreeMap::new(),
                 last_evidence: None,
                 projection_complete: false,
+                execution: ObservationExecutionState::default(),
             },
         );
+        self.reconcile_observation_resolution(id, ResolutionCause::Initial, &mut effects);
         self.recompile(&mut effects);
         // A wire-contributing query can change the capped greedy source plan
         // for every existing query. A suppressed query leaves that plan
@@ -44,9 +46,10 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     pub(super) fn on_unsubscribe(&mut self, id: HandleId) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        self.emit_observation_fact(id, ObservationFact::Withdrawn, &mut effects);
         let _delta = self.resolver.unsubscribe(id);
         self.handles.remove(&id);
-        let mut effects = Vec::new();
         self.recompile(&mut effects);
         // Removing one query can free capped-plan capacity and therefore
         // change the planned sources of every surviving handle.
@@ -197,8 +200,9 @@ impl<S: EventStore> EngineCore<S> {
                                 );
                             }
                             _ => {
-                                self.attribution
-                                    .record_send(session, sub_id, filter, absorbed);
+                                self.record_observed_request(
+                                    session, sub_id, filter, absorbed, false,
+                                );
                                 kept_ops.push(op.clone());
                             }
                         }
@@ -565,11 +569,12 @@ impl<S: EventStore> EngineCore<S> {
         };
         let live_sub_id = nip77_role_sub_id(&plan_sub_id, NIP77_LIVE_ROLE, &live_filter);
         let public_session = RelaySessionKey::public(probed.url().clone());
-        self.attribution.record_send(
+        self.record_observed_request(
             &public_session,
             &live_sub_id,
             &live_filter,
             absorbed.clone(),
+            false,
         );
         self.pending_neg_handoffs.insert(
             live_sub_id.clone(),
@@ -902,11 +907,12 @@ impl<S: EventStore> EngineCore<S> {
             // -- `absorbed` is deliberately empty; it targets exactly the
             // ids negentropy already proved, it is not itself a proof over
             // any atom's shape (the credit it unlocks is `sub_id`'s).
-            self.attribution.record_send(
+            self.record_observed_request(
                 &RelaySessionKey::public(relay.clone()),
                 &backfill_sub,
                 &backfill,
                 BTreeSet::new(),
+                false,
             );
             effects.push(Effect::Wire(WireDelta {
                 ops: vec![(
@@ -986,11 +992,12 @@ impl<S: EventStore> EngineCore<S> {
             self.attribution.discard_sub(&backlog_sub_id);
             ops.push(WireOp::Close(backlog_sub_id.clone()));
         }
-        self.attribution.record_send(
+        self.record_observed_request(
             &RelaySessionKey::public(relay.clone()),
             &backlog_sub_id,
             &filter,
             absorbed,
+            false,
         );
         ops.push(WireOp::Req(backlog_sub_id, filter));
         effects.push(Effect::Wire(WireDelta {
@@ -1152,6 +1159,15 @@ impl<S: EventStore> EngineCore<S> {
 
         #[cfg(feature = "bench-instrumentation")]
         let phase_started = std::time::Instant::now();
+        if demand_changed {
+            for id in &affected {
+                self.reconcile_observation_resolution(
+                    *id,
+                    ResolutionCause::DependencyChanged,
+                    effects,
+                );
+            }
+        }
         if demand_changed || force_recompile {
             self.recompile(effects);
         }

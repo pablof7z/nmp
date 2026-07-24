@@ -34,7 +34,7 @@ fn receive_current_ids(rx: &RowsReceiver) -> BTreeSet<EventId> {
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         assert!(!remaining.is_zero(), "timed out waiting for cached rows");
-        let (deltas, _) = rx
+        let (deltas, _, _) = rx
             .recv_timeout(remaining)
             .expect("bounded cached query must emit");
         for delta in deltas {

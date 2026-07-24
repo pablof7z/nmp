@@ -76,7 +76,7 @@ fn wait_for_rows(
             return false;
         }
         match rx.recv_timeout(remaining) {
-            Ok((deltas, _coverage)) => {
+            Ok((deltas, _coverage, _execution)) => {
                 for delta in deltas {
                     match delta {
                         RowDelta::Added(row) => {
@@ -730,7 +730,7 @@ fn identity_override_signs_as_registered_secondary_without_rerooting_active() {
             break false;
         }
         match rows_rx.recv_timeout(remaining) {
-            Ok((deltas, _coverage)) => {
+            Ok((deltas, _coverage, _execution)) => {
                 if deltas.iter().any(|delta| {
                     matches!(
                         delta,
