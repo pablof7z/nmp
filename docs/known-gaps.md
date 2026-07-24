@@ -352,6 +352,20 @@ about current code:
 
 - **Fallible ingest/read store doors landed; two read peeks and FFI plumbing deferred (#122).** The six ingest/read `EventStore` doors (`insert`/`query`/`remove`/`expire_due`/`record_coverage`/`gc`) now return `Result<_, PersistenceError>` — `RedbStore` propagates real redb I/O errors instead of `.expect()`-panicking on every EVENT frame, and the engine degrades the local cache to read-only (a `DiagnosticsSnapshot.store_degraded` signal) instead of crashing the host app. Deliberately NOT done in that change, flagged here so nothing hides: (1) `EventStore::next_expiration` and `get_coverage` (small index/coverage read peeks) are still `.expect()`-on-I/O — a disk error there still panics; widening them ripples into the engine's deadline-arming hot path and was scoped out. (2) `store_degraded` is surfaced only on the Rust `DiagnosticsSnapshot`; it is NOT plumbed through `FfiDiagnosticsSnapshot`/Swift/Kotlin, so a native host cannot yet observe the read-only degrade. (3) The degrade policy is intentionally minimal (latch first error, skip the reactive step, emit a diagnostic, keep running) — there is no recovery/reopen path, no per-door policy, and no bounded-retry framework.
 
+## Observation execution evidence
+
+- **Direct-Rust unwindowed observation evidence is built; windowed and native
+  SDK parity remain open (#718, PR #721).** `Frame.execution` now carries
+  resolver/reducer/runtime-owned facts for stable structural descriptor paths,
+  exact resolved values and canonical NIP-01 filters, transport-accepted REQ
+  and replay generations, attributed EOSE, relay close/refusal, withdrawal,
+  and explicit bounded-mailbox overflow. This is real observation-scoped
+  causality, not a projection of engine-global diagnostics. The current
+  projection deliberately stops at unwindowed direct Rust: windowed
+  observations currently deliver no execution facts, and UniFFI, Swift, and
+  Kotlin do not yet expose this vocabulary. Issue #718 remains open until those
+  projections and their cross-SDK falsifiers land.
+
 ## Security hardening deferred
 
 - **Secret zeroization and platform signer-provider boundary are not complete.** NIP-46 URI/session secrets use redacted debug output and zeroizing memory, and the durable event/outbox store persists only the expected pubkey plus an opaque identity reference. `LocalKeySigner` still holds `nostr::Keys` without the old repo's raw-bytes/zeroize hardening, and Swift/Kotlin do not yet ship standard secure-storage-backed providers that restore sessions automatically. Owner: security/signing workstream (#47).
