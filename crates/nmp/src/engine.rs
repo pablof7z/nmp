@@ -2634,8 +2634,26 @@ mod tests {
         ));
         // #680 removed the native-task census surface; the real semantic here
         // is that shutdown drained the live acquisition (ServiceClosed above)
-        // without blocking, and the subscription is closed.
-        assert!(subscription.recv().is_err());
+        // without blocking, and the subscription reaches disconnect. The
+        // observation-evidence stream may still have its final pre-shutdown
+        // batch queued after the initial row frame; consuming that bounded
+        // batch before disconnect is delivery, not an outliving producer.
+        let mut queued_after_shutdown = 0;
+        loop {
+            match subscription.recv_timeout(std::time::Duration::from_secs(1)) {
+                Ok(_) => {
+                    queued_after_shutdown += 1;
+                    assert_eq!(
+                        queued_after_shutdown, 1,
+                        "the one-slot mailbox cannot retain multiple frames after shutdown"
+                    );
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("subscription producer outlived engine shutdown")
+                }
+            }
+        }
 
         // These retained owners remain safe after exact-zero teardown.
         cancel.cancel();
