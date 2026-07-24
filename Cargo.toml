@@ -21,6 +21,8 @@ members = [
     "crates/nmp-parity",
     "crates/nmp-nip51",
     "crates/nmp-nip02",
+    "crates/nmp-nip65",
+    "crates/nmp-nip65-consumer-check",
     "crates/nmp-nip29",
     # Blossom (BUD-01/02/11) blob-upload core (#545, epic #216 T15-A-BLOSSOM).
     "crates/nmp-blossom",
@@ -68,6 +70,7 @@ nmp-ffi = { path = "crates/nmp-ffi" }
 nmp-bdd = { path = "crates/nmp-bdd" }
 nmp-nip51 = { path = "crates/nmp-nip51" }
 nmp-nip02 = { path = "crates/nmp-nip02" }
+nmp-nip65 = { path = "crates/nmp-nip65" }
 nmp-nip29 = { path = "crates/nmp-nip29" }
 nmp-blossom = { path = "crates/nmp-blossom" }
 nmp-nip68 = { path = "crates/nmp-nip68" }

@@ -29669,6 +29669,55 @@ reexport nmp::WriteIntent => nmp_grammar::write::WriteIntent
                                 },
                                 "name": "PinnedHost",
                                 "visibility": "default"
+                              },
+                              {
+                                "attrs": [],
+                                "inner": {
+                                  "variant": {
+                                    "discriminant": null,
+                                    "kind": {
+                                      "tuple": [
+                                        {
+                                          "attrs": [],
+                                          "inner": {
+                                            "struct_field": {
+                                              "resolved_path": {
+                                                "args": null,
+                                                "path": "RelayListBootstrapAuthority",
+                                                "resolved_item": {
+                                                  "definition": {
+                                                    "attrs": [],
+                                                    "inner": {
+                                                      "struct": {
+                                                        "generics": {
+                                                          "params": [],
+                                                          "where_predicates": []
+                                                        },
+                                                        "kind": {
+                                                          "plain": {
+                                                            "fields": [],
+                                                            "has_stripped_fields": true
+                                                          }
+                                                        }
+                                                      }
+                                                    },
+                                                    "name": "RelayListBootstrapAuthority",
+                                                    "visibility": "public"
+                                                  },
+                                                  "path": "nmp_grammar::write::RelayListBootstrapAuthority"
+                                                }
+                                              }
+                                            }
+                                          },
+                                          "name": "0",
+                                          "visibility": "default"
+                                        }
+                                      ]
+                                    }
+                                  }
+                                },
+                                "name": "RelayListBootstrap",
+                                "visibility": "default"
                               }
                             ]
                           }

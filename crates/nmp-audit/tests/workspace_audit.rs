@@ -38,6 +38,10 @@ fn registry() -> Vec<(&'static str, Enrollment)> {
             Enrollment::Claims(nmp_nip51::claims().to_vec()),
         ),
         (
+            "nmp-nip65",
+            Enrollment::Claims(nmp_nip65::claims().to_vec()),
+        ),
+        (
             "nmp-nip29",
             Enrollment::DeclaresNoClaims {
                 rationale: "contextual publication is not kind ownership \

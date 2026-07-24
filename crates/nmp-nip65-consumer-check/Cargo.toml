@@ -1,0 +1,13 @@
+[package]
+name = "nmp-nip65-consumer-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Structural acceptance proof for #719: an application names only the public
+# NMP facade plus the NIP-65 protocol module. It does not depend on
+# nmp-grammar, nmp-engine, nmp-router, nmp-store, or nmp-transport.
+[dependencies]
+nmp.workspace = true
+nmp-nip65.workspace = true

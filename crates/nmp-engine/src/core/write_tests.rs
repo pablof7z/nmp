@@ -231,4 +231,44 @@ mod receipt_allocator_tests {
             "the failed call must not revive or wrap the namespace"
         );
     }
+
+    #[test]
+    fn relay_list_bootstrap_resolves_exactly_without_installing_directory_facts() {
+        let author = Keys::generate().public_key();
+        let a = RelayUrl::parse("wss://bootstrap-a.example").unwrap();
+        let b = RelayUrl::parse("wss://bootstrap-b.example").unwrap();
+        let unrelated = RelayUrl::parse("wss://unrelated.example").unwrap();
+        let directory = FixtureDirectory::new().with_write(author.to_hex(), [unrelated]);
+        let core = EngineCore::new(MemoryStore::new(), Box::new(directory), 10);
+        let route =
+            WriteRouting::RelayListBootstrap(RelayListBootstrapAuthority::from_validated_relays([
+                b.clone(),
+                a.clone(),
+            ]));
+
+        assert_eq!(
+            core.resolve_routes(&route, &author.to_hex()).unwrap(),
+            BTreeSet::from([a, b]),
+            "bootstrap routing executes only its exact closed set and never unions existing author-outbox facts"
+        );
+    }
+
+    #[test]
+    fn relay_list_bootstrap_route_snapshot_round_trips_exactly() {
+        let a = RelayUrl::parse("wss://bootstrap-a.example").unwrap();
+        let b = RelayUrl::parse("wss://bootstrap-b.example").unwrap();
+        let route =
+            WriteRouting::RelayListBootstrap(RelayListBootstrapAuthority::from_validated_relays([
+                b.clone(),
+                a.clone(),
+            ]));
+
+        let snapshot = EngineCore::<MemoryStore>::routing_snapshot(&route);
+        let restored = EngineCore::<MemoryStore>::parse_routing_snapshot(&snapshot)
+            .expect("a valid NIP-65 bootstrap snapshot must remain readable");
+        let WriteRouting::RelayListBootstrap(authority) = restored else {
+            panic!("snapshot restored the wrong routing variant")
+        };
+        assert_eq!(authority.iter().cloned().collect::<Vec<_>>(), vec![a, b]);
+    }
 }
