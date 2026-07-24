@@ -4,6 +4,7 @@
 // `Swift.Error`, but re-wrapping it keeps the public surface entirely free
 // of the `Ffi` prefix, matching every other value type in this package.
 
+import Foundation
 import NMPFFI
 
 /// Every way a call into the engine can fail -- typed states, never a crash
@@ -149,6 +150,94 @@ public enum NMPError: Error, Sendable, Equatable {
             self = .invalidCorrelationToken(got: got, reason: reason)
         case .InvalidNip73Target(let reason):
             self = .invalidNip73Target(reason: reason)
+        }
+    }
+}
+
+extension NMPError: LocalizedError {
+    /// Stable native presentation for every typed failure. Keep this switch
+    /// exhaustive: adding a new error case must also decide what ordinary
+    /// Swift clients show without discarding its evidence.
+    public var errorDescription: String? {
+        switch self {
+        case .nonIndexableFilterTag(let got):
+            "Not indexable as a filter key: \(got.debugDescription)"
+        case .invalidPublicKey(let got):
+            "Invalid public key hex: \(got.debugDescription)"
+        case .invalidEventId(let got):
+            "Invalid event ID hex: \(got.debugDescription)"
+        case .invalidRelayUrl(let got):
+            "Invalid relay URL: \(got.debugDescription)"
+        case .invalidTag(let got):
+            "Invalid tag: \(String(reflecting: got))"
+        case .invalidSecretKey:
+            "Invalid secret key"
+        case .invalidSigner(let reason):
+            "Invalid signer: \(reason)"
+        case .authCapabilityRegistryFull(let limit):
+            "AUTH capability registry is full at \(limit) entries"
+        case .authCapabilityInstanceExhausted:
+            "AUTH capability instance space exhausted"
+        case .noActiveSigner:
+            "The active account has no registered signer"
+        case .invalidSignRequest(let reason):
+            "Invalid sign request: \(reason)"
+        case .signerUnavailable(let reason):
+            "Signer unavailable: \(reason)"
+        case .signerRejected(let reason):
+            "Signer rejected the request: \(reason)"
+        case .invalidSignerOutput(let reason):
+            "Invalid signer output: \(reason)"
+        case .receiptCorrelationIdExhausted:
+            "Receipt correlation ID namespace exhausted"
+        case .storeOpenFailed(let reason):
+            "Could not open store: \(reason)"
+        case .storeResetFailed(let reason):
+            "Could not reset store: \(reason)"
+        case .storeStillOpen(let path):
+            "Persistent store is still open: \(path)"
+        case .engineStartFailed(let component, let reason):
+            "Engine could not start (\(component)): \(reason)"
+        case .observationUnavailable(let reason):
+            "Observation could not be established: \(reason)"
+        case .concurrentNext:
+            "A next()/signed() call was awaited while a previous one was still in flight; observation streams are single-consumer"
+        case .factStreamLagged(let receiptId?):
+            "The finite live fact stream fell behind; reattach receipt \(receiptId) to replay"
+        case .factStreamLagged(receiptId: nil):
+            "The finite live fact stream fell behind before a receipt was observable"
+        case .receiptReplayUnavailable(let receiptId):
+            "Retained evidence for receipt \(receiptId) became unavailable during replay"
+        case .signEventAlreadyConsumed:
+            "This sign-event result was already consumed"
+        case .invalidSignature(let got):
+            "Invalid signature hex: \(got.debugDescription)"
+        case .engineClosed:
+            "Engine already shut down"
+        case .invalidNostrEntity(let reason):
+            "Invalid Nostr entity: \(reason)"
+        case .nostrEntitySecretKeyRejected:
+            "Refusing to decode a secret-key entity"
+        case .authorOutboxesRequiresBoundAuthors:
+            "SourceAuthority.authorOutboxes requires a selection whose authors field is bound"
+        case .emptyPinnedRelaySet:
+            "SourceAuthority.pinned requires a nonempty relay set"
+        case .windowZeroRows:
+            "Window initial/max must be representable nonzero row counts"
+        case .windowInitialExceedsMax(let initial, let max):
+            "Window initial \(initial) exceeds max \(max)"
+        case .windowSelectionHasLimit:
+            "A windowed selection must not also declare a limit"
+        case .noActiveAccount:
+            "Group messages require an active account"
+        case .intentAlreadyConsumed:
+            "This composed write intent was already published once"
+        case .relayInformationUnavailable(let kind):
+            "Relay information unavailable: \(kind)"
+        case .invalidCorrelationToken(let got, let reason):
+            "Invalid correlation token \(got.debugDescription): \(reason)"
+        case .invalidNip73Target(let reason):
+            "Invalid NIP-73 target: \(reason)"
         }
     }
 }
