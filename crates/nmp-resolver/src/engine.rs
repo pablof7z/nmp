@@ -262,6 +262,50 @@ pub struct GraphSnapshot {
     pub nodes: Vec<GraphNodeInfo>,
 }
 
+/// One stable structural node in a live descriptor's current resolved graph.
+///
+/// `path` is derived solely from descriptor structure, never allocation order:
+/// `$` is the root filter, fields append `.authors`, `.ids`, or `.tag(<name>)`,
+/// a derived binding's inner filter appends `.inner`, and set operands append
+/// `.operand(<zero-based index>)`. The same descriptor therefore retains the
+/// same paths across account switches, store mutations, and process restarts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionNodeSnapshot {
+    pub path: String,
+    pub kind: ResolutionNodeKind,
+}
+
+/// Current authoritative value of one resolver graph node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolutionNodeKind {
+    Reactive {
+        field: nmp_grammar::IdentityField,
+        values: Vec<ResolvedValue>,
+    },
+    Derived {
+        values: Vec<ResolvedValue>,
+    },
+    SetOp {
+        values: Vec<ResolvedValue>,
+    },
+    Filter {
+        atoms: Vec<ContextualAtom>,
+    },
+}
+
+/// A public, deterministic projection of the resolver's internal element
+/// vocabulary. These are the exact values already destined for a dependent
+/// filter, not a separately recomputed app projection.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ResolvedValue {
+    Scalar(String),
+    AddressCoordinate {
+        kind: u16,
+        author: String,
+        identifier: String,
+    },
+}
+
 /// Accumulates a batch's demand-set changes. Closes are appended in
 /// natural bottom-up discovery order and reversed exactly once when the
 /// delta is finalized, giving "closes in reverse-of-open order" (M1 plan
@@ -430,6 +474,18 @@ impl<S: EventStore> Engine<S> {
             })
             .collect();
         GraphSnapshot { nodes }
+    }
+
+    /// Snapshot the exact current values of every observable node reachable
+    /// from one live handle, in deterministic dependency-first order.
+    ///
+    /// This is an observation seam over the resolver's existing caches. It
+    /// performs no query, mutation, or parallel evaluation.
+    pub fn resolution_snapshot(&self, id: HandleId) -> Vec<ResolutionNodeSnapshot> {
+        let Some(&root) = self.handle_to_root.get(&id) else {
+            return Vec::new();
+        };
+        self.graph.resolution_snapshot(root)
     }
 
     // ---- identity re-root (M1 plan §3.6) --------------------------------
