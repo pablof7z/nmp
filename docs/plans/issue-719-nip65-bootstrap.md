@@ -2,7 +2,7 @@
 
 ## Current-state gate
 
-- NMP revision inspected: `59c17159d61dd002e4821f884ae78c927a9c6362`
+- NMP revision inspected: `d2004e00c3109e0d98f0eb2e692db0cdb7c659f1`
 - Existing module/crate that overlaps: no NIP-65 protocol owner exists; core
   already parses network-ingested kind:10002 winners into the relay directory.
 - Current public support: a direct Rust app can register and activate a signer,
