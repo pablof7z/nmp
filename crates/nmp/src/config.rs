@@ -63,19 +63,37 @@ pub struct EngineConfig {
     pub max_auth_capabilities: usize,
 }
 
-impl Default for EngineConfig {
-    fn default() -> Self {
-        Self {
-            store_path: None,
-            indexer_relays: Vec::new(),
-            app_relays: Vec::new(),
-            fallback_relays: Vec::new(),
-            allowed_local_relay_hosts: Vec::new(),
-            max_relays: nmp_transport::DEFAULT_MAX_RELAYS,
-            max_auth_capabilities: nmp_engine::runtime::DEFAULT_MAX_AUTH_CAPABILITIES,
+macro_rules! impl_engine_config_default {
+    (
+        store_path = none,
+        indexer_relays = empty_list,
+        app_relays = empty_list,
+        fallback_relays = empty_list,
+        allowed_local_relay_hosts = empty_list,
+        max_relays = $max_relays:literal,
+        max_auth_capabilities = $max_auth_capabilities:literal,
+    ) => {
+        impl Default for EngineConfig {
+            fn default() -> Self {
+                Self {
+                    store_path: None,
+                    indexer_relays: Vec::new(),
+                    app_relays: Vec::new(),
+                    fallback_relays: Vec::new(),
+                    allowed_local_relay_hosts: Vec::new(),
+                    max_relays: $max_relays,
+                    max_auth_capabilities: $max_auth_capabilities,
+                }
+            }
         }
-    }
+    };
 }
+
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../nmp-engine-config-defaults.inc.rs"
+));
+with_nmp_engine_config_defaults!(impl_engine_config_default);
 
 fn parse_relay_url(url: &str) -> Result<RelayUrl, EngineError> {
     RelayUrl::parse(url).map_err(|_| EngineError::InvalidRelayUrl {
