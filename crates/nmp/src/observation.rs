@@ -6,24 +6,28 @@
 //! engine-global diagnostics.
 
 use nmp_grammar::{AccessContext, IdentityField};
-use nostr::{JsonUtil, RelayUrl, Timestamp};
+use nostr::JsonUtil;
 
-/// Ordered execution evidence for one live observation.
+/// One ordered fact from a live observation's real execution.
+///
+/// `kind` is one of `reactive_input`, `derived_set`, `concrete_filter`,
+/// `relay_request`, `relay_eose`, `relay_closed`, `relay_refused`, `withdrawn`,
+/// or `overflow`. Resolver facts carry exact public wire values in `values`;
+/// relay requests carry their canonical NIP-01 filter JSON there. Additional
+/// scalar correlation fields are ordered key/value `attributes`: `field`,
+/// `relay`, `access`, `transport_generation`, `request_revision`, `replay`,
+/// `observed_at`, `reason`, `first_sequence`, `last_sequence`, and `dropped`
+/// when applicable. `access` is `public` or `nip42:<hex-pubkey>`.
 #[derive(Debug, Clone)]
 pub struct ObservationEvidence {
     /// Monotonic within this observation.
     pub sequence: u64,
-    pub fact: ObservationFact,
-}
-
-impl ObservationEvidence {
-    pub(crate) fn from_engine(value: nmp_engine::core::ObservationEvidence) -> Self {
-        let nmp_engine::core::ObservationEvidence { sequence, fact } = value;
-        Self {
-            sequence,
-            fact: ObservationFact::from_engine(fact),
-        }
-    }
+    pub kind: &'static str,
+    pub path: Option<String>,
+    pub revision: Option<u64>,
+    pub values: Vec<String>,
+    pub fingerprint: Option<String>,
+    pub attributes: Vec<(String, String)>,
 }
 
 fn resolved_value_string(value: nmp_engine::core::ResolvedBindingValue) -> String {
@@ -37,84 +41,36 @@ fn resolved_value_string(value: nmp_engine::core::ResolvedBindingValue) -> Strin
     }
 }
 
-/// Authoritative facts emitted by the owners of resolution and wire state.
-#[derive(Debug, Clone)]
-pub enum ObservationFact {
-    ReactiveInput {
-        path: String,
-        field: IdentityField,
-        revision: u64,
-        /// Exact strings destined for a dependent wire-filter field.
-        /// Address coordinates use canonical `kind:author:identifier` form.
-        values: Vec<String>,
-        fingerprint: String,
-    },
-    DerivedSet {
-        path: String,
-        revision: u64,
-        /// Exact strings destined for a dependent wire-filter field.
-        /// Address coordinates use canonical `kind:author:identifier` form.
-        values: Vec<String>,
-        fingerprint: String,
-    },
-    ConcreteFilter {
-        path: String,
-        revision: u64,
-        /// Exact canonical NIP-01 filter JSON, in resolver atom order.
-        filters: Vec<String>,
-        fingerprint: String,
-    },
-    RelayRequest {
-        path: String,
-        filter_revision: u64,
-        relay: RelayUrl,
-        access: AccessContext,
-        transport_generation: u64,
-        request_revision: u64,
-        /// Exact canonical NIP-01 filter JSON accepted by this transport.
-        filter: String,
-        replay: bool,
-    },
-    RelayEose {
-        path: String,
-        filter_revision: u64,
-        relay: RelayUrl,
-        access: AccessContext,
-        transport_generation: u64,
-        request_revision: u64,
-        observed_at: Timestamp,
-    },
-    RelayClosed {
-        path: String,
-        filter_revision: u64,
-        relay: RelayUrl,
-        access: AccessContext,
-        transport_generation: u64,
-        request_revision: Option<u64>,
-        reason: String,
-    },
-    RelayRefused {
-        path: String,
-        filter_revision: u64,
-        relay: RelayUrl,
-        access: AccessContext,
-        transport_generation: Option<u64>,
-        request_revision: u64,
-        reason: String,
-    },
-    Withdrawn,
-    /// The bounded delivery mailbox discarded an exact contiguous sequence
-    /// range. Loss is visible and never masquerades as a complete trace.
-    Overflow {
-        first_sequence: u64,
-        last_sequence: u64,
-        dropped: u64,
-    },
+fn identity_field_string(field: IdentityField) -> &'static str {
+    match field {
+        IdentityField::ActivePubkey => "active_pubkey",
+    }
 }
 
-impl ObservationFact {
-    fn from_engine(value: nmp_engine::core::ObservationFact) -> Self {
-        match value {
+fn access_string(access: AccessContext) -> String {
+    match access {
+        AccessContext::Public => "public".to_owned(),
+        AccessContext::Nip42(public_key) => format!("nip42:{}", public_key.to_hex()),
+    }
+}
+
+fn attribute(key: &str, value: impl ToString) -> (String, String) {
+    (key.to_owned(), value.to_string())
+}
+
+impl ObservationEvidence {
+    pub(crate) fn from_engine(value: nmp_engine::core::ObservationEvidence) -> Self {
+        let nmp_engine::core::ObservationEvidence { sequence, fact } = value;
+        let mut evidence = Self {
+            sequence,
+            kind: "",
+            path: None,
+            revision: None,
+            values: vec![],
+            fingerprint: None,
+            attributes: vec![],
+        };
+        match fact {
             nmp_engine::core::ObservationFact::ReactiveInput {
                 path,
                 field,
@@ -122,40 +78,45 @@ impl ObservationFact {
                 values,
                 fingerprint,
                 cause: _,
-            } => Self::ReactiveInput {
-                path,
-                field,
-                revision,
-                values: values.into_iter().map(resolved_value_string).collect(),
-                fingerprint,
-            },
+            } => {
+                evidence.kind = "reactive_input";
+                evidence.path = Some(path);
+                evidence.revision = Some(revision);
+                evidence.values = values.into_iter().map(resolved_value_string).collect();
+                evidence.fingerprint = Some(fingerprint);
+                evidence
+                    .attributes
+                    .push(attribute("field", identity_field_string(field)));
+            }
             nmp_engine::core::ObservationFact::DerivedSet {
                 path,
                 revision,
                 values,
                 fingerprint,
                 cause: _,
-            } => Self::DerivedSet {
-                path,
-                revision,
-                values: values.into_iter().map(resolved_value_string).collect(),
-                fingerprint,
-            },
+            } => {
+                evidence.kind = "derived_set";
+                evidence.path = Some(path);
+                evidence.revision = Some(revision);
+                evidence.values = values.into_iter().map(resolved_value_string).collect();
+                evidence.fingerprint = Some(fingerprint);
+            }
             nmp_engine::core::ObservationFact::ConcreteFilter {
                 path,
                 revision,
                 filters,
                 fingerprint,
                 cause: _,
-            } => Self::ConcreteFilter {
-                path,
-                revision,
-                filters: filters
+            } => {
+                evidence.kind = "concrete_filter";
+                evidence.path = Some(path);
+                evidence.revision = Some(revision);
+                evidence.values = filters
                     .into_iter()
                     .map(|filter| filter.to_nostr().as_json())
-                    .collect(),
-                fingerprint,
-            },
+                    .collect();
+                evidence.fingerprint = Some(fingerprint);
+            }
             nmp_engine::core::ObservationFact::RelayRequest {
                 path,
                 filter_revision,
@@ -165,16 +126,19 @@ impl ObservationFact {
                 request_revision,
                 filter,
                 replay,
-            } => Self::RelayRequest {
-                path,
-                filter_revision,
-                relay,
-                access,
-                transport_generation,
-                request_revision,
-                filter: filter.to_nostr().as_json(),
-                replay,
-            },
+            } => {
+                evidence.kind = "relay_request";
+                evidence.path = Some(path);
+                evidence.revision = Some(filter_revision);
+                evidence.values = vec![filter.to_nostr().as_json()];
+                evidence.attributes = vec![
+                    attribute("relay", relay),
+                    attribute("access", access_string(access)),
+                    attribute("transport_generation", transport_generation),
+                    attribute("request_revision", request_revision),
+                    attribute("replay", replay),
+                ];
+            }
             nmp_engine::core::ObservationFact::RelayEose {
                 path,
                 filter_revision,
@@ -183,15 +147,18 @@ impl ObservationFact {
                 transport_generation,
                 request_revision,
                 observed_at,
-            } => Self::RelayEose {
-                path,
-                filter_revision,
-                relay,
-                access,
-                transport_generation,
-                request_revision,
-                observed_at,
-            },
+            } => {
+                evidence.kind = "relay_eose";
+                evidence.path = Some(path);
+                evidence.revision = Some(filter_revision);
+                evidence.attributes = vec![
+                    attribute("relay", relay),
+                    attribute("access", access_string(access)),
+                    attribute("transport_generation", transport_generation),
+                    attribute("request_revision", request_revision),
+                    attribute("observed_at", observed_at.as_secs()),
+                ];
+            }
             nmp_engine::core::ObservationFact::RelayClosed {
                 path,
                 filter_revision,
@@ -200,15 +167,22 @@ impl ObservationFact {
                 transport_generation,
                 request_revision,
                 reason,
-            } => Self::RelayClosed {
-                path,
-                filter_revision,
-                relay,
-                access,
-                transport_generation,
-                request_revision,
-                reason,
-            },
+            } => {
+                evidence.kind = "relay_closed";
+                evidence.path = Some(path);
+                evidence.revision = Some(filter_revision);
+                evidence.attributes = vec![
+                    attribute("relay", relay),
+                    attribute("access", access_string(access)),
+                    attribute("transport_generation", transport_generation),
+                ];
+                if let Some(request_revision) = request_revision {
+                    evidence
+                        .attributes
+                        .push(attribute("request_revision", request_revision));
+                }
+                evidence.attributes.push(attribute("reason", reason));
+            }
             nmp_engine::core::ObservationFact::RelayRefused {
                 path,
                 filter_revision,
@@ -217,25 +191,40 @@ impl ObservationFact {
                 transport_generation,
                 request_revision,
                 reason,
-            } => Self::RelayRefused {
-                path,
-                filter_revision,
-                relay,
-                access,
-                transport_generation,
-                request_revision,
-                reason,
-            },
-            nmp_engine::core::ObservationFact::Withdrawn => Self::Withdrawn,
+            } => {
+                evidence.kind = "relay_refused";
+                evidence.path = Some(path);
+                evidence.revision = Some(filter_revision);
+                evidence.attributes = vec![
+                    attribute("relay", relay),
+                    attribute("access", access_string(access)),
+                ];
+                if let Some(transport_generation) = transport_generation {
+                    evidence
+                        .attributes
+                        .push(attribute("transport_generation", transport_generation));
+                }
+                evidence
+                    .attributes
+                    .push(attribute("request_revision", request_revision));
+                evidence.attributes.push(attribute("reason", reason));
+            }
+            nmp_engine::core::ObservationFact::Withdrawn => {
+                evidence.kind = "withdrawn";
+            }
             nmp_engine::core::ObservationFact::Overflow {
                 first_sequence,
                 last_sequence,
                 dropped,
-            } => Self::Overflow {
-                first_sequence,
-                last_sequence,
-                dropped,
-            },
+            } => {
+                evidence.kind = "overflow";
+                evidence.attributes = vec![
+                    attribute("first_sequence", first_sequence),
+                    attribute("last_sequence", last_sequence),
+                    attribute("dropped", dropped),
+                ];
+            }
         }
+        evidence
     }
 }

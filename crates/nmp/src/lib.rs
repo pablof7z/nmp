@@ -74,7 +74,7 @@ pub use engine::{
     SignEventRequest,
 };
 pub use error::EngineError;
-pub use observation::{ObservationEvidence, ObservationFact};
+pub use observation::ObservationEvidence;
 
 /// Monotonic count of real NMP-owned OS threads spawned this process (#680
 /// falsifier instrumentation). The thread-scaling falsifier asserts opening

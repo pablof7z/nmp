@@ -237,72 +237,6 @@ impl core::marker::Unpin for nmp::EngineError
 impl core::marker::UnsafeUnpin for nmp::EngineError
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::EngineError
 impl core::panic::unwind_safe::UnwindSafe for nmp::EngineError
-pub enum nmp::ObservationFact
-pub nmp::ObservationFact::ConcreteFilter
-pub nmp::ObservationFact::ConcreteFilter::filters: alloc::vec::Vec<alloc::string::String>
-pub nmp::ObservationFact::ConcreteFilter::fingerprint: alloc::string::String
-pub nmp::ObservationFact::ConcreteFilter::path: alloc::string::String
-pub nmp::ObservationFact::ConcreteFilter::revision: u64
-pub nmp::ObservationFact::DerivedSet
-pub nmp::ObservationFact::DerivedSet::fingerprint: alloc::string::String
-pub nmp::ObservationFact::DerivedSet::path: alloc::string::String
-pub nmp::ObservationFact::DerivedSet::revision: u64
-pub nmp::ObservationFact::DerivedSet::values: alloc::vec::Vec<alloc::string::String>
-pub nmp::ObservationFact::Overflow
-pub nmp::ObservationFact::Overflow::dropped: u64
-pub nmp::ObservationFact::Overflow::first_sequence: u64
-pub nmp::ObservationFact::Overflow::last_sequence: u64
-pub nmp::ObservationFact::ReactiveInput
-pub nmp::ObservationFact::ReactiveInput::field: nmp_grammar::selector::IdentityField
-pub nmp::ObservationFact::ReactiveInput::fingerprint: alloc::string::String
-pub nmp::ObservationFact::ReactiveInput::path: alloc::string::String
-pub nmp::ObservationFact::ReactiveInput::revision: u64
-pub nmp::ObservationFact::ReactiveInput::values: alloc::vec::Vec<alloc::string::String>
-pub nmp::ObservationFact::RelayClosed
-pub nmp::ObservationFact::RelayClosed::access: nmp_grammar::descriptor::AccessContext
-pub nmp::ObservationFact::RelayClosed::filter_revision: u64
-pub nmp::ObservationFact::RelayClosed::path: alloc::string::String
-pub nmp::ObservationFact::RelayClosed::reason: alloc::string::String
-pub nmp::ObservationFact::RelayClosed::relay: nostr::types::url::RelayUrl
-pub nmp::ObservationFact::RelayClosed::request_revision: core::option::Option<u64>
-pub nmp::ObservationFact::RelayClosed::transport_generation: u64
-pub nmp::ObservationFact::RelayEose
-pub nmp::ObservationFact::RelayEose::access: nmp_grammar::descriptor::AccessContext
-pub nmp::ObservationFact::RelayEose::filter_revision: u64
-pub nmp::ObservationFact::RelayEose::observed_at: nostr::types::time::Timestamp
-pub nmp::ObservationFact::RelayEose::path: alloc::string::String
-pub nmp::ObservationFact::RelayEose::relay: nostr::types::url::RelayUrl
-pub nmp::ObservationFact::RelayEose::request_revision: u64
-pub nmp::ObservationFact::RelayEose::transport_generation: u64
-pub nmp::ObservationFact::RelayRefused
-pub nmp::ObservationFact::RelayRefused::access: nmp_grammar::descriptor::AccessContext
-pub nmp::ObservationFact::RelayRefused::filter_revision: u64
-pub nmp::ObservationFact::RelayRefused::path: alloc::string::String
-pub nmp::ObservationFact::RelayRefused::reason: alloc::string::String
-pub nmp::ObservationFact::RelayRefused::relay: nostr::types::url::RelayUrl
-pub nmp::ObservationFact::RelayRefused::request_revision: u64
-pub nmp::ObservationFact::RelayRefused::transport_generation: core::option::Option<u64>
-pub nmp::ObservationFact::RelayRequest
-pub nmp::ObservationFact::RelayRequest::access: nmp_grammar::descriptor::AccessContext
-pub nmp::ObservationFact::RelayRequest::filter: alloc::string::String
-pub nmp::ObservationFact::RelayRequest::filter_revision: u64
-pub nmp::ObservationFact::RelayRequest::path: alloc::string::String
-pub nmp::ObservationFact::RelayRequest::relay: nostr::types::url::RelayUrl
-pub nmp::ObservationFact::RelayRequest::replay: bool
-pub nmp::ObservationFact::RelayRequest::request_revision: u64
-pub nmp::ObservationFact::RelayRequest::transport_generation: u64
-pub nmp::ObservationFact::Withdrawn
-impl core::clone::Clone for nmp::ObservationFact
-pub fn nmp::ObservationFact::clone(&self) -> nmp::ObservationFact
-impl core::fmt::Debug for nmp::ObservationFact
-pub fn nmp::ObservationFact::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for nmp::ObservationFact
-impl core::marker::Send for nmp::ObservationFact
-impl core::marker::Sync for nmp::ObservationFact
-impl core::marker::Unpin for nmp::ObservationFact
-impl core::marker::UnsafeUnpin for nmp::ObservationFact
-impl core::panic::unwind_safe::RefUnwindSafe for nmp::ObservationFact
-impl core::panic::unwind_safe::UnwindSafe for nmp::ObservationFact
 pub enum nmp::RelayInformationCachePolicy
 pub nmp::RelayInformationCachePolicy::Refresh
 pub nmp::RelayInformationCachePolicy::UseCache
@@ -674,8 +608,13 @@ impl core::marker::UnsafeUnpin for nmp::ObservationCancel
 impl !core::panic::unwind_safe::RefUnwindSafe for nmp::ObservationCancel
 impl !core::panic::unwind_safe::UnwindSafe for nmp::ObservationCancel
 pub struct nmp::ObservationEvidence
-pub nmp::ObservationEvidence::fact: nmp::ObservationFact
+pub nmp::ObservationEvidence::attributes: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
+pub nmp::ObservationEvidence::fingerprint: core::option::Option<alloc::string::String>
+pub nmp::ObservationEvidence::kind: &'static str
+pub nmp::ObservationEvidence::path: core::option::Option<alloc::string::String>
+pub nmp::ObservationEvidence::revision: core::option::Option<u64>
 pub nmp::ObservationEvidence::sequence: u64
+pub nmp::ObservationEvidence::values: alloc::vec::Vec<alloc::string::String>
 impl core::clone::Clone for nmp::ObservationEvidence
 pub fn nmp::ObservationEvidence::clone(&self) -> nmp::ObservationEvidence
 impl core::fmt::Debug for nmp::ObservationEvidence

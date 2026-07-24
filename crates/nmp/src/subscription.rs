@@ -134,7 +134,7 @@ pub struct Frame {
     /// Ordered execution facts for this exact observation. These are emitted
     /// by the resolver/reducer/runtime owners, never inferred from global
     /// diagnostics. A bounded slow-consumer loss appears as an explicit
-    /// [`crate::ObservationFact::Overflow`] item.
+    /// `kind == "overflow"` item.
     pub execution: Vec<ObservationEvidence>,
 }
 

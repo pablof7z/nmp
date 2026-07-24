@@ -897,6 +897,16 @@ mod tests {
         }
     }
 
+    fn evidence_attribute<'a>(
+        evidence: &'a crate::ObservationEvidence,
+        key: &str,
+    ) -> Option<&'a str> {
+        evidence
+            .attributes
+            .iter()
+            .find_map(|(candidate, value)| (candidate == key).then_some(value.as_str()))
+    }
+
     #[test]
     fn allowed_local_relay_host_reaches_the_facade_transport_pool() {
         use std::collections::BTreeSet;
@@ -989,9 +999,9 @@ mod tests {
         let mut found = false;
         let mut execution = Vec::new();
         while (!found
-            || !execution.iter().any(|fact: &crate::ObservationEvidence| {
-                matches!(fact.fact, crate::ObservationFact::RelayEose { .. })
-            }))
+            || !execution
+                .iter()
+                .any(|fact: &crate::ObservationEvidence| fact.kind == "relay_eose"))
             && Instant::now() < deadline
         {
             if let Ok(frame) = subscription.recv_timeout(Duration::from_millis(250)) {
@@ -1014,24 +1024,27 @@ mod tests {
         }
         let relay_result = relay_thread.join();
         assert!(found, "allowed local relay never reached the facade query");
-        assert!(execution.iter().any(|fact| matches!(
-            &fact.fact,
-            crate::ObservationFact::ConcreteFilter { path, revision: 1, .. }
-                if path == "$"
-        )));
+        assert!(execution.iter().any(|fact| {
+            fact.kind == "concrete_filter"
+                && fact.path.as_deref() == Some("$")
+                && fact.revision == Some(1)
+        }));
         let requests: BTreeSet<_> = execution
             .iter()
-            .filter_map(|fact| match &fact.fact {
-                crate::ObservationFact::RelayRequest {
-                    path,
-                    filter_revision,
-                    transport_generation,
-                    request_revision,
-                    ..
-                } if path == "$" => {
-                    Some((*filter_revision, *transport_generation, *request_revision))
-                }
-                _ => None,
+            .filter_map(|fact| {
+                (fact.kind == "relay_request" && fact.path.as_deref() == Some("$")).then(|| {
+                    (
+                        fact.revision.expect("request filter revision"),
+                        evidence_attribute(fact, "transport_generation")
+                            .expect("request transport generation")
+                            .parse::<u64>()
+                            .expect("numeric transport generation"),
+                        evidence_attribute(fact, "request_revision")
+                            .expect("request revision")
+                            .parse::<u64>()
+                            .expect("numeric request revision"),
+                    )
+                })
             })
             .collect();
         assert!(
@@ -1039,21 +1052,21 @@ mod tests {
             "facade frame must expose an actual REQ handoff"
         );
         assert!(
-            execution.iter().any(|fact| matches!(
-                &fact.fact,
-                crate::ObservationFact::RelayEose {
-                    path,
-                    filter_revision,
-                    transport_generation,
-                    request_revision,
-                    ..
-                } if path == "$"
+            execution.iter().any(|fact| {
+                fact.kind == "relay_eose"
+                    && fact.path.as_deref() == Some("$")
                     && requests.contains(&(
-                        *filter_revision,
-                        *transport_generation,
-                        *request_revision,
+                        fact.revision.expect("EOSE filter revision"),
+                        evidence_attribute(fact, "transport_generation")
+                            .expect("EOSE transport generation")
+                            .parse::<u64>()
+                            .expect("numeric transport generation"),
+                        evidence_attribute(fact, "request_revision")
+                            .expect("EOSE request revision")
+                            .parse::<u64>()
+                            .expect("numeric request revision"),
                     ))
-            )),
+            }),
             "EOSE must identify the exact accepted REQ: {execution:#?}"
         );
         relay_result.expect("join local relay");
@@ -2344,9 +2357,10 @@ mod tests {
             let terminal = loop {
                 match subscription.recv() {
                     Ok(frame)
-                        if frame.execution.iter().any(|evidence| {
-                            matches!(evidence.fact, crate::ObservationFact::Withdrawn)
-                        }) =>
+                        if frame
+                            .execution
+                            .iter()
+                            .any(|evidence| evidence.kind == "withdrawn") =>
                     {
                         break true;
                     }
