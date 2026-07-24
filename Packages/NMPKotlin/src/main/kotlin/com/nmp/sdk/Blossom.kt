@@ -1,4 +1,5 @@
-// The opt-in Blossom (BUD-01/02/04/11/12) blob surface (#555, epic #216
+// The opt-in Blossom (BUD-01/02/03/04/11/12) blob surface (#555/#731,
+// epic #216
 // T15-A-BLOSSOM) -- thin wrappers over the `FfiBlossom*` generated types,
 // mirroring Blossom.swift exactly: draft builders as free functions needing
 // no `NMPEngine` instance, and every operation's failure taxonomy as its
@@ -38,14 +39,25 @@ import uniffi.nmp_ffi.FfiBlossomDeleteException
 import uniffi.nmp_ffi.FfiBlossomDescriptorError
 import uniffi.nmp_ffi.FfiBlossomListException
 import uniffi.nmp_ffi.FfiBlossomMirrorException
+import uniffi.nmp_ffi.FfiBlossomMalformedServerEntry
+import uniffi.nmp_ffi.FfiBlossomQualificationException
+import uniffi.nmp_ffi.FfiBlossomServerAdmission
+import uniffi.nmp_ffi.FfiBlossomServerCandidateEvidence
+import uniffi.nmp_ffi.FfiBlossomServerCandidatePolicy
+import uniffi.nmp_ffi.FfiBlossomServerCandidateSource
+import uniffi.nmp_ffi.FfiBlossomServerList
+import uniffi.nmp_ffi.FfiBlossomServerListEntryError
 import uniffi.nmp_ffi.FfiBlossomServerUrlError
 import uniffi.nmp_ffi.FfiBlossomSha256HexError
 import uniffi.nmp_ffi.FfiBlossomUploadException
 import uniffi.nmp_ffi.FfiBlossomVerb
 import uniffi.nmp_ffi.FfiSignedEvent
+import uniffi.nmp_ffi.FfiRow
 import uniffi.nmp_ffi.blossomDeleteAuthorizationDraft as ffiBlossomDeleteAuthorizationDraft
 import uniffi.nmp_ffi.blossomListAuthorizationDraft as ffiBlossomListAuthorizationDraft
+import uniffi.nmp_ffi.blossomServerListDemand as ffiBlossomServerListDemand
 import uniffi.nmp_ffi.blossomUploadAuthorizationDraft as ffiBlossomUploadAuthorizationDraft
+import uniffi.nmp_ffi.decodeBlossomServerList as ffiDecodeBlossomServerList
 
 /** The BUD-11 authorization verbs (`FfiBlossomVerb` mirror). `GET` has no
  * draft builder yet -- the `get`/`media` endpoints are epic-#216
@@ -124,6 +136,16 @@ sealed class BlossomServerUrlError {
 
     object QueryOrFragment : BlossomServerUrlError()
 
+    internal fun toFfi(): FfiBlossomServerUrlError =
+        when (this) {
+            is Parse -> FfiBlossomServerUrlError.Parse(reason)
+            MissingHost -> FfiBlossomServerUrlError.MissingHost
+            is UnsupportedScheme -> FfiBlossomServerUrlError.UnsupportedScheme(scheme)
+            Credentialed -> FfiBlossomServerUrlError.Credentialed
+            is NonRootPath -> FfiBlossomServerUrlError.NonRootPath(path)
+            QueryOrFragment -> FfiBlossomServerUrlError.QueryOrFragment
+        }
+
     companion object {
         internal fun from(ffi: FfiBlossomServerUrlError): BlossomServerUrlError =
             when (ffi) {
@@ -133,6 +155,201 @@ sealed class BlossomServerUrlError {
                 is FfiBlossomServerUrlError.Credentialed -> Credentialed
                 is FfiBlossomServerUrlError.NonRootPath -> NonRootPath(ffi.path)
                 is FfiBlossomServerUrlError.QueryOrFragment -> QueryOrFragment
+            }
+    }
+}
+
+/** Why one signed BUD-03 `server` tag could not become a typed endpoint. */
+sealed class BlossomServerListEntryError {
+    object MissingUrl : BlossomServerListEntryError()
+
+    data class InvalidUrl(val error: BlossomServerUrlError) : BlossomServerListEntryError()
+
+    internal fun toFfi(): FfiBlossomServerListEntryError =
+        when (this) {
+            MissingUrl -> FfiBlossomServerListEntryError.MissingUrl
+            is InvalidUrl -> FfiBlossomServerListEntryError.InvalidUrl(error.toFfi())
+        }
+
+    companion object {
+        internal fun from(ffi: FfiBlossomServerListEntryError): BlossomServerListEntryError =
+            when (ffi) {
+                is FfiBlossomServerListEntryError.MissingUrl -> MissingUrl
+                is FfiBlossomServerListEntryError.InvalidUrl ->
+                    InvalidUrl(BlossomServerUrlError.from(ffi.error))
+            }
+    }
+}
+
+/** Position-preserving malformed BUD-03 tag evidence. */
+data class BlossomMalformedServerEntry(
+    val tagIndex: ULong,
+    val rawUrl: String?,
+    val error: BlossomServerListEntryError,
+) {
+    internal fun toFfi(): FfiBlossomMalformedServerEntry =
+        FfiBlossomMalformedServerEntry(tagIndex, rawUrl, error.toFfi())
+
+    companion object {
+        internal fun from(ffi: FfiBlossomMalformedServerEntry): BlossomMalformedServerEntry =
+            BlossomMalformedServerEntry(
+                ffi.tagIndex,
+                ffi.rawUrl,
+                BlossomServerListEntryError.from(ffi.error),
+            )
+    }
+}
+
+/** Closed decode of one canonical signed BUD-03 kind:10063 row. */
+data class BlossomServerList(
+    val eventId: String,
+    val authorPubkey: String,
+    /** Canonical URLs in exact signed-list order. */
+    val servers: List<String>,
+    val malformedEntries: List<BlossomMalformedServerEntry>,
+    val serverTagCount: ULong,
+    val hasUnexpectedContent: Boolean,
+    val isSpecCompliant: Boolean,
+) {
+    internal fun toFfi(): FfiBlossomServerList =
+        FfiBlossomServerList(
+            eventId,
+            authorPubkey,
+            servers,
+            malformedEntries.map { it.toFfi() },
+            serverTagCount,
+            hasUnexpectedContent,
+            isSpecCompliant,
+        )
+
+    companion object {
+        internal fun from(ffi: FfiBlossomServerList): BlossomServerList =
+            BlossomServerList(
+                ffi.eventId,
+                ffi.authorPubkey,
+                ffi.servers,
+                ffi.malformedEntries.map { BlossomMalformedServerEntry.from(it) },
+                ffi.serverTagCount,
+                ffi.unexpectedContent,
+                ffi.specCompliant,
+            )
+    }
+}
+
+/** Observe the active account's BUD-03 replacement winner through the
+ * ordinary live-query model. Signed-out state resolves to zero rows. */
+fun blossomServerListDemand(): NMPDemand = NMPDemand.from(ffiBlossomServerListDemand())
+
+/** Decode one ordinary delivered kind:10063 [Row]. Absence, replacement,
+ * deletion, expiry, acquisition evidence, and account rerooting stay on the
+ * surrounding query; this creates no second cache. */
+fun decodeBlossomServerList(row: Row): BlossomServerList =
+    BlossomServerList.from(
+        ffiDecodeBlossomServerList(
+            FfiRow(
+                row.id,
+                row.pubkey,
+                row.createdAt,
+                row.kind,
+                row.tags,
+                row.content,
+                row.sig,
+                row.sources,
+            ),
+        ),
+    )
+
+/** Explicit provenance-combination policy for endpoint qualification. */
+enum class BlossomServerCandidatePolicy {
+    SIGNED_LIST_ONLY,
+    OPERATOR_ONLY,
+    SIGNED_LIST_THEN_OPERATOR,
+    ;
+
+    internal fun toFfi(): FfiBlossomServerCandidatePolicy =
+        when (this) {
+            SIGNED_LIST_ONLY -> FfiBlossomServerCandidatePolicy.SIGNED_LIST_ONLY
+            OPERATOR_ONLY -> FfiBlossomServerCandidatePolicy.OPERATOR_ONLY
+            SIGNED_LIST_THEN_OPERATOR -> FfiBlossomServerCandidatePolicy.SIGNED_LIST_THEN_OPERATOR
+        }
+}
+
+/** Authority that contributed one candidate. */
+enum class BlossomServerCandidateSource {
+    SIGNED_LIST,
+    OPERATOR_CONFIG,
+    ;
+
+    companion object {
+        internal fun from(ffi: FfiBlossomServerCandidateSource): BlossomServerCandidateSource =
+            when (ffi) {
+                FfiBlossomServerCandidateSource.SIGNED_LIST -> SIGNED_LIST
+                FfiBlossomServerCandidateSource.OPERATOR_CONFIG -> OPERATOR_CONFIG
+            }
+    }
+}
+
+/** Syntax plus DNS/SSRF qualification evidence. Only [Admitted] is
+ * selectable, and the actual HTTP operation repeats the network gate. */
+sealed class BlossomServerAdmission {
+    data class Admitted(
+        val resolvedAddresses: List<String>,
+        val operatorLocalOverride: Boolean,
+    ) : BlossomServerAdmission()
+
+    data class InvalidUrl(val error: BlossomServerUrlError) : BlossomServerAdmission()
+
+    data class LocalHostNotAdmitted(val host: String) : BlossomServerAdmission()
+
+    data class DnsRefused(val reason: String) : BlossomServerAdmission()
+
+    companion object {
+        internal fun from(ffi: FfiBlossomServerAdmission): BlossomServerAdmission =
+            when (ffi) {
+                is FfiBlossomServerAdmission.Admitted ->
+                    Admitted(ffi.resolvedAddresses, ffi.operatorLocalOverride)
+                is FfiBlossomServerAdmission.InvalidUrl ->
+                    InvalidUrl(BlossomServerUrlError.from(ffi.error))
+                is FfiBlossomServerAdmission.LocalHostNotAdmitted ->
+                    LocalHostNotAdmitted(ffi.host)
+                is FfiBlossomServerAdmission.DnsRefused -> DnsRefused(ffi.reason)
+            }
+    }
+}
+
+/** Ordered, provenance-bearing evidence for one endpoint candidate. */
+data class BlossomServerCandidateEvidence(
+    val serverUrl: String,
+    val source: BlossomServerCandidateSource,
+    val admission: BlossomServerAdmission,
+) {
+    companion object {
+        internal fun from(
+            ffi: FfiBlossomServerCandidateEvidence,
+        ): BlossomServerCandidateEvidence =
+            BlossomServerCandidateEvidence(
+                ffi.serverUrl,
+                BlossomServerCandidateSource.from(ffi.source),
+                BlossomServerAdmission.from(ffi.admission),
+            )
+    }
+}
+
+/** Machinery failures before candidate qualification can run. Individual
+ * endpoint refusals are returned as [BlossomServerAdmission] values. */
+sealed class BlossomQualificationError(message: String) : Exception(message) {
+    data class RuntimeUnavailable(val reason: String) :
+        BlossomQualificationError("Blossom qualification runtime unavailable: $reason")
+
+    data class ClientBuild(val reason: String) :
+        BlossomQualificationError("Blossom HTTP client construction failed: $reason")
+
+    companion object {
+        internal fun from(ffi: FfiBlossomQualificationException): BlossomQualificationError =
+            when (ffi) {
+                is FfiBlossomQualificationException.RuntimeUnavailable ->
+                    RuntimeUnavailable(ffi.reason)
+                is FfiBlossomQualificationException.ClientBuild -> ClientBuild(ffi.reason)
             }
     }
 }
@@ -767,6 +984,27 @@ data class BlossomClientConfig(
  * sealed error class. */
 class BlossomClient(config: BlossomClientConfig = BlossomClientConfig()) {
     internal val ffi: FfiBlossomClient = FfiBlossomClient(config.toFfi())
+
+    /** Apply one explicit configuration/list policy and return admission
+     * evidence for every candidate in selection order. No HTTP request is
+     * sent. A signed list never grants local-network access; only the
+     * client's operator allowlist can produce `operatorLocalOverride`. */
+    suspend fun qualifyServerCandidates(
+        policy: BlossomServerCandidatePolicy,
+        operatorServerUrls: List<String> = emptyList(),
+        signedList: BlossomServerList? = null,
+    ): List<BlossomServerCandidateEvidence> =
+        withContext(Dispatchers.IO) {
+            try {
+                ffi.qualifyServerCandidates(
+                    policy.toFfi(),
+                    operatorServerUrls,
+                    signedList?.toFfi(),
+                ).map { BlossomServerCandidateEvidence.from(it) }
+            } catch (e: FfiBlossomQualificationException) {
+                throw BlossomQualificationError.from(e)
+            }
+        }
 
     /** `PUT /upload` of [blob]'s exact bytes -- self-verifying end to end:
      * the returned descriptor's sha256 was PROVEN equal to the hash of the

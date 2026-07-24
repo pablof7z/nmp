@@ -124,3 +124,31 @@ Required proofs include:
 - Swift, Kotlin, and direct Rust produce byte-identical final unsigned bodies
   for the same composed operation;
 - no module callback or hidden subscription lifecycle enters engine decisions.
+
+## 8. BUD-03 server-list placement
+
+Blossom owns both event schemas defined by the Blossom specification:
+kind:24242 authorization and kind:10063 user server lists. Kind:10063 is
+therefore an exclusive `nmp-blossom` claim, not a generic `nmp-nip51` list
+claim. Grouping every 1xxxx event under one module would make packaging
+convenience—not protocol ownership—the authority.
+
+Discovery stays inside the ordinary read noun:
+
+- one `Demand` selects kind:10063 authored by the reactive active pubkey;
+- its source/access defaults are `AuthorOutboxes + Public`;
+- the canonical store owns replacement, deletion, expiry, and absence;
+- account changes use the resolver's normal reroot/reconstruct path;
+- decoding preserves signed tag order and retains malformed/content evidence;
+- no Blossom-specific observation, cache, winner selector, or availability
+  verdict exists.
+
+A signed server tag is a user fact, never permission to dial a network
+location. Candidate use is a separate typed qualification step. Callers choose
+`SignedListOnly`, `OperatorOnly`, or `SignedListThenOperator`; the last form
+keeps the signed list first as BUD-03 requires and appends configuration only
+as provenance-visible fallback. Every candidate crosses the shared
+`BlossomServerUrl` syntax gate plus literal-host and post-DNS SSRF admission.
+Only the operator's explicit local-host allowlist can admit a local/private
+answer. HTTP operations repeat admission so qualification cannot become a DNS
+rebinding bypass.

@@ -12,6 +12,7 @@ publish.workspace = true
 [dependencies]
 nostr.workspace = true
 nmp-ownership.workspace = true
+nmp-grammar.workspace = true
 nmp-transport.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -21,3 +22,4 @@ hickory-resolver.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+nmp-resolver.workspace = true

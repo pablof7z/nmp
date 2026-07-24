@@ -1499,6 +1499,219 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiBlossomQualificationError",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "RuntimeUnavailable",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "ClientBuild",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Error {
+        flat: false,
+    },
+    non_exhaustive: false,
+    docstring: Some(
+        "Machinery failures before candidate qualification can run. Per-candidate\nsyntax/DNS/admission refusals are values in the returned evidence, not\nthrown failures.",
+    ),
+}
+
+enum Enum {
+    name: "FfiBlossomServerAdmission",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Admitted",
+            discr: None,
+            fields: [
+                Field {
+                    name: "resolved_addresses",
+                    type_: Sequence {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "operator_local_override",
+                    type_: Boolean,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "InvalidUrl",
+            discr: None,
+            fields: [
+                Field {
+                    name: "error",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomServerUrlError",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "LocalHostNotAdmitted",
+            discr: None,
+            fields: [
+                Field {
+                    name: "host",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "DnsRefused",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "Syntax plus network-admission evidence for one candidate. Only `Admitted`\nis selectable; the actual HTTP operation repeats DNS admission to protect\nagainst rebinding.",
+    ),
+}
+
+enum Enum {
+    name: "FfiBlossomServerCandidatePolicy",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "SignedListOnly",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "OperatorOnly",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "SignedListThenOperator",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "Explicit provenance-combination policy. No variant silently places local\nconfiguration ahead of a signed BUD-03 first server.",
+    ),
+}
+
+enum Enum {
+    name: "FfiBlossomServerCandidateSource",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "SignedList",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "OperatorConfig",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "Authority that contributed one qualified candidate.",
+    ),
+}
+
+enum Enum {
+    name: "FfiBlossomServerListEntryError",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "MissingUrl",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "InvalidUrl",
+            discr: None,
+            fields: [
+                Field {
+                    name: "error",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomServerUrlError",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "One malformed signed BUD-03 `server` tag.",
+    ),
+}
+
+enum Enum {
     name: "FfiBlossomServerUrlError",
     module_path: "nmp_ffi",
     remote: false,
@@ -5496,6 +5709,139 @@ record Record {
 }
 
 record Record {
+    name: "FfiBlossomMalformedServerEntry",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "tag_index",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "raw_url",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "error",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiBlossomServerListEntryError",
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "Position-preserving malformed-tag evidence from a signed BUD-03 list.",
+    ),
+}
+
+record Record {
+    name: "FfiBlossomServerCandidateEvidence",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "server_url",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "source",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiBlossomServerCandidateSource",
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "admission",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiBlossomServerAdmission",
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "One ordered, provenance-bearing qualification result.",
+    ),
+}
+
+record Record {
+    name: "FfiBlossomServerList",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "event_id",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "author_pubkey",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "servers",
+            type_: Sequence {
+                inner_type: String,
+            },
+            default: None,
+            docstring: Some(
+                "Canonical, syntactically admitted URLs in exact signed-list order.",
+            ),
+        },
+        Field {
+            name: "malformed_entries",
+            type_: Sequence {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiBlossomMalformedServerEntry",
+                },
+            },
+            default: None,
+            docstring: Some(
+                "Invalid `server` tags, retained rather than silently dropped.",
+            ),
+        },
+        Field {
+            name: "server_tag_count",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "unexpected_content",
+            type_: Boolean,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "spec_compliant",
+            type_: Boolean,
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "Closed BUD-03 decode of one delivered canonical kind:10063 row.",
+    ),
+}
+
+record Record {
     name: "FfiContentBlock",
     module_path: "nmp_ffi",
     remote: false,
@@ -7500,6 +7846,44 @@ function Function {
 }
 
 function Function {
+    name: "blossom_server_list_demand",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiDemand",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_blossom_server_list_demand",
+        is_async: false,
+        arguments: [],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiDemand",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "The active account's ordinary BUD-03 demand:\n`kinds:[10063], authors:Reactive(ActivePubkey), AuthorOutboxes + Public`.",
+    ),
+    throws: None,
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_blossom_server_list_demand",
+    checksum: Some(
+        2405,
+    ),
+}
+
+function Function {
     name: "blossom_upload_authorization_draft",
     module_path: "nmp_ffi",
     is_async: false,
@@ -7668,6 +8052,67 @@ function Function {
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_comment_thread_demand",
     checksum: Some(
         40171,
+    ),
+}
+
+function Function {
+    name: "decode_blossom_server_list",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "row",
+            type_: Record {
+                module_path: "nmp_ffi",
+                name: "FfiRow",
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiBlossomServerList",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_decode_blossom_server_list",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "row",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiRow",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiBlossomServerList",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Decode a delivered kind:10063 row. Replacement, deletion, expiry, absence,\naccount rerooting, source/access evidence, and caching remain the normal\nobservation/store path; this pure function adds no second lifecycle.",
+    ),
+    throws: None,
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_decode_blossom_server_list",
+    checksum: Some(
+        2469,
     ),
 }
 
@@ -9230,6 +9675,110 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffiblossomclient_mirror",
             checksum: Some(
                 55512,
+            ),
+        },
+        Method {
+            name: "qualify_server_candidates",
+            object_name: "FfiBlossomClient",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "policy",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomServerCandidatePolicy",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "operator_server_urls",
+                    type_: Sequence {
+                        inner_type: String,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "signed_list",
+                    type_: Optional {
+                        inner_type: Record {
+                            module_path: "nmp_ffi",
+                            name: "FfiBlossomServerList",
+                        },
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Sequence {
+                    inner_type: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomServerCandidateEvidence",
+                    },
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffiblossomclient_qualify_server_candidates",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiBlossomClient",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "policy",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiBlossomServerCandidatePolicy",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                    FfiArgument {
+                        name: "operator_server_urls",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "signed_list",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        None,
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "BLOCKING endpoint qualification with explicit configuration/list\ncombination and per-candidate provenance. No HTTP request is sent.\n`InvalidUrl`/local-host/DNS refusals remain evidence values so callers\ncan explain every candidate rather than catching one aggregate error.\nCall off the main thread.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiBlossomQualificationError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffiblossomclient_qualify_server_candidates",
+            checksum: Some(
+                28913,
             ),
         },
         Method {
