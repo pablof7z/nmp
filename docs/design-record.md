@@ -281,8 +281,9 @@ canonical statement is `docs/VISION.md`; detailed ownership lives in:
 - The two nouns remain live query and write intent, but a live query's semantic
   demand is `selection + source authority + access context`, not a bare filter.
 - The binding graph stays closed and inspectable. Reusable helpers construct
-  visible `Derived`/`SetOp` graphs; richer NIP helpers may return typed protocol
-  values without creating another demand lifecycle.
+  visible `Derived`/`SetOp` graphs; every `Derived.inner` is its own complete
+  demand with no implicit outer-context inheritance. Richer NIP helpers may
+  return typed protocol values without creating another demand lifecycle.
 - `$currentPubkey` is a reactive/default input, not a global engine identity.
   Changing it reroots only dependent queries. Other account-spanning queries
   remain live.

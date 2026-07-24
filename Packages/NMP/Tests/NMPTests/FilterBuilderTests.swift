@@ -59,7 +59,10 @@ final class FilterBuilderTests: XCTestCase {
     /// follows' notes" -- entirely a value, no closures, no comparator code.
     func testDerivedFollowsFilterRoundTrips() {
         let follows = NMPBinding.derived(
-            inner: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
+            inner: NMPDemand(
+                selection: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
+                source: .authorOutboxes
+            ),
             project: .tag("p")
         )
         let filter = NMPFilter(kinds: [1], authors: follows)
@@ -68,20 +71,59 @@ final class FilterBuilderTests: XCTestCase {
         guard case .derived(let derived) = ffi.authors else {
             return XCTFail("expected a derived binding")
         }
-        XCTAssertEqual(derived.inner().kinds, [3])
+        XCTAssertEqual(derived.inner().selection.kinds, [3])
         XCTAssertEqual(NMPSelector(derived.project()), .tag("p"))
         XCTAssertEqual(NMPFilter(ffi), filter)
+    }
+
+    func testDerivedInnerFullDemandRoundTripsEveryPolicyIndependently() {
+        let inner = NMPDemand(
+            selection: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
+            source: .pinned(["wss://inner.example.com"]),
+            access: .nip42(publicKey: String(repeating: "a", count: 64)),
+            cache: .strict,
+            freshness: .maxAge(seconds: 600)
+        )
+        let filter = NMPFilter(
+            kinds: [1],
+            authors: .derived(inner: inner, project: .tag("p"))
+        )
+
+        let ffi = filter.toFfi()
+        guard case .derived(let derived) = ffi.authors else {
+            return XCTFail("expected a derived binding")
+        }
+        XCTAssertEqual(NMPDemand(derived.inner()), inner)
+        XCTAssertEqual(NMPFilter(ffi), filter)
+
+        var publicInner = inner
+        publicInner.access = .public
+        let sameSelectionDifferentContext = NMPFilter(
+            kinds: [1],
+            authors: .derived(inner: publicInner, project: .tag("p"))
+        )
+        XCTAssertNotEqual(filter, sameSelectionDifferentContext)
+        XCTAssertEqual(
+            NMPFilter(sameSelectionDifferentContext.toFfi()),
+            sameSelectionDifferentContext
+        )
     }
 
     /// "Follows minus mutes" -- the set-algebra shape from the plan §9
     /// mapping's `mutes` example.
     func testSetOpDiffOfTwoDerivedBindingsRoundTrips() {
         let follows = NMPBinding.derived(
-            inner: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
+            inner: NMPDemand(
+                selection: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
+                source: .authorOutboxes
+            ),
             project: .tag("p")
         )
         let mutes = NMPBinding.derived(
-            inner: NMPFilter(kinds: [10_000], authors: .reactive(.activePubkey)),
+            inner: NMPDemand(
+                selection: NMPFilter(kinds: [10_000], authors: .reactive(.activePubkey)),
+                source: .authorOutboxes
+            ),
             project: .tag("p")
         )
         let filter = NMPFilter(kinds: [1], authors: .setOp(.diff, [follows, mutes]))

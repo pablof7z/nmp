@@ -1,6 +1,6 @@
 # Current surface and gaps
 
-Verified-Revision: `c071cb16485d51bb9b487a51bf07aa199dba4a41`
+Verified-Revision: `fa8ff8752826cb67376e97cf68fdf8423be575bd`
 
 Verified on 2026-07-14. This pins the declared product/source authorities, not the skill package commit. Recheck the [source map](source-map.md) when any declared authority changes; the validator accepts newer skill-only commits when those sources have not drifted.
 
@@ -20,7 +20,7 @@ Mechanism crates and generated `NMPFFI`/`uniffi.nmp_ffi` bindings are implementa
 | --- | --- | --- | --- |
 | Observe `Filter`/default demand | yes | `observe(NMPFilter)` | `observe(NMPFilter)` |
 | Explicit `Demand` source/cache | yes | `observe(NMPDemand)` | `observe(NMPDemand)` |
-| Derived inner descriptor | full `Demand` | `NMPFilter` only | `NMPFilter` only |
+| Derived inner descriptor | full `Demand` | full `NMPDemand` | full `NMPDemand` |
 | Query rows + scoped acquisition evidence | yes | yes | yes |
 | Publish and stream receipt facts | `publish`, `publish_tracked` | `publish` returns `Receipt` | `publish` returns `Receipt` |
 | Durable receipt reattachment | `reattach_receipt` | `reattachReceipt` | `reattachReceipt` |

@@ -77,10 +77,14 @@ does not create a polling loop or a third app-facing noun.
 ```text
 Binding  := Literal(set)
           | Reactive(CurrentPubkey)
-          | Derived(inner: Filter, project: Selector)
+          | Derived(inner: Demand, project: Selector)
           | SetOp(Union | Intersect | Diff, [Binding])
 Selector := Authors | Ids | Tag(name: String) | AddressCoord
 ```
+
+Every derived inner node owns a complete demand. Its source authority, access
+context, cache mode, and freshness policy are explicit and independent from the
+outer demand; implicit outer-context inheritance is unrepresentable.
 
 `Tag`'s `name` is an arbitrary event-tag key, not restricted to a single
 letter — it projects already-acquired events locally, so it carries no wire

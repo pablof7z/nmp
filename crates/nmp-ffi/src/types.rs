@@ -152,21 +152,24 @@ pub enum FfiBinding {
 
 /// A `Binding::Derived` payload mirror -- a UniFFI object (see [`FfiBinding`]'s
 /// doc for why): Swift constructs one via `FfiDerived(inner:project:)` and
-/// reads it back via the `inner()`/`project()` getters.
+/// reads it back via the `inner()`/`project()` getters. `inner` is a complete
+/// [`FfiDemand`], matching Rust's `nmp_grammar::Derived`: a nested query owns
+/// its source, access, cache, and freshness policy independently from the
+/// outer demand (#714).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
 pub struct FfiDerived {
-    pub inner: FfiFilter,
+    pub inner: FfiDemand,
     pub project: FfiSelector,
 }
 
 #[uniffi::export]
 impl FfiDerived {
     #[uniffi::constructor]
-    pub fn new(inner: FfiFilter, project: FfiSelector) -> Arc<Self> {
+    pub fn new(inner: FfiDemand, project: FfiSelector) -> Arc<Self> {
         Arc::new(Self { inner, project })
     }
 
-    pub fn inner(&self) -> FfiFilter {
+    pub fn inner(&self) -> FfiDemand {
         self.inner.clone()
     }
 

@@ -8,16 +8,16 @@ The July 11 architecture promotion intentionally corrected several assumptions
 after the original milestones. These are agreed target contracts, not claims
 about current code:
 
-- **Demand is still filter-shaped.** The supported descriptor does not yet carry
-  `selection + source authority + access context` end to end. Hashing,
-  coalescing, routing, evidence, FFI, Swift, and Kotlin must project the same
-  semantic descriptor. See `docs/design/query-demand-and-evidence.md`.
-- **Scoped acquisition evidence is built, but its reserved transport states
-  are not populated yet.** Query snapshots now carry rows plus compact
-  per-current-plan source facts and explicit shortfalls; diagnostics retains
-  exact per-relay/filter intervals as a distinct type. `AwaitingAuth` and
-  `AuthDenied` land with #8, and `Error` lands with #51. Full source-authority
-  and access-context identity remains part of the descriptor gap above (#49).
+- **Full Demand identity and scoped acquisition evidence are built
+  end-to-end (#49/#714).** Rust, FFI, Swift, and Kotlin carry
+  `selection + source authority + access context + cache + freshness`, including
+  an independently declared complete demand at every `Derived.inner`.
+  Context participates in graph/wire/coverage/evidence identity; native
+  conversion has no filter-shaped fallback that can reapply defaults.
+  Query snapshots carry compact per-current-plan source facts and explicit
+  shortfalls, including populated `AwaitingAuth`, `AuthDenied`, and `Error`
+  states. Diagnostics retains exact per-session/filter intervals as a distinct
+  type; broader permanent-diagnostics expansion remains under #51.
 - **Protected-session AUTH discovery is bounded, not proof that a relay will
   never challenge.** On each protected connection generation the transport
   observes until the socket first becomes readable or 250 ms elapse, whichever

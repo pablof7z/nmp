@@ -45,12 +45,12 @@ use crate::types::{
 };
 use nmp::ReceiptReattachment;
 
-/// Start a follow/unfollow action and expose its status stream (#680). A valid
-/// target starts the transient action worker (one thread on the engine's
-/// internal blocking-adapter pool, per user action — never observation-count
-/// driven); an unparseable target yields a one-shot stream carrying a single
+/// Start a follow/unfollow action and expose its status stream (#680/#704). A
+/// valid target starts an async action task on the shared runtime; an
+/// unparseable target yields a one-shot stream carrying a single
 /// `Failed(InvalidTarget)` fact. The status FIFO is delivered pull-based over
-/// [`NmpFollowActionStream`], so no drain thread bridges it.
+/// [`NmpFollowActionStream`], so no worker or drain thread is held by the
+/// action.
 fn start_following_action(
     engine: Arc<nmp::Engine>,
     target: String,
