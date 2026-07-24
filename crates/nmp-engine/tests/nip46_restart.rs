@@ -282,7 +282,7 @@ fn wait_for_exact_rows(
 ) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let (deltas, _) = rows
+        let (deltas, _, _) = rows
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .expect("expected live row state before deadline");
         for delta in deltas {

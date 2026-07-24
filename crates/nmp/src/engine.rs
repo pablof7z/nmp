@@ -897,6 +897,16 @@ mod tests {
         }
     }
 
+    fn evidence_attribute<'a>(
+        evidence: &'a crate::ObservationEvidence,
+        key: &str,
+    ) -> Option<&'a str> {
+        evidence
+            .attributes
+            .iter()
+            .find_map(|(candidate, value)| (candidate == key).then_some(value.as_str()))
+    }
+
     #[test]
     fn allowed_local_relay_host_reaches_the_facade_transport_pool() {
         use std::collections::BTreeSet;
@@ -987,13 +997,21 @@ mod tests {
             .expect("observe through supported facade");
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut found = false;
-        while !found && Instant::now() < deadline {
+        let mut execution = Vec::new();
+        while (!found
+            || !execution
+                .iter()
+                .any(|fact: &crate::ObservationEvidence| fact.kind == "relay_eose"))
+            && Instant::now() < deadline
+        {
             if let Ok(frame) = subscription.recv_timeout(Duration::from_millis(250)) {
                 found = frame
                     .deltas
                     .iter()
                     .filter_map(|delta| delta.event())
-                    .any(|received| received.id == expected_id);
+                    .any(|received| received.id == expected_id)
+                    || found;
+                execution.extend(frame.execution);
             }
         }
 
@@ -1006,6 +1024,50 @@ mod tests {
         }
         let relay_result = relay_thread.join();
         assert!(found, "allowed local relay never reached the facade query");
+        assert!(execution.iter().any(|fact| {
+            fact.kind == "concrete_filter"
+                && fact.path.as_deref() == Some("$")
+                && fact.revision == Some(1)
+        }));
+        let requests: BTreeSet<_> = execution
+            .iter()
+            .filter(|fact| fact.kind == "relay_request" && fact.path.as_deref() == Some("$"))
+            .map(|fact| {
+                (
+                    fact.revision.expect("request filter revision"),
+                    evidence_attribute(fact, "transport_generation")
+                        .expect("request transport generation")
+                        .parse::<u64>()
+                        .expect("numeric transport generation"),
+                    evidence_attribute(fact, "request_revision")
+                        .expect("request revision")
+                        .parse::<u64>()
+                        .expect("numeric request revision"),
+                )
+            })
+            .collect();
+        assert!(
+            !requests.is_empty(),
+            "facade frame must expose an actual REQ handoff"
+        );
+        assert!(
+            execution.iter().any(|fact| {
+                fact.kind == "relay_eose"
+                    && fact.path.as_deref() == Some("$")
+                    && requests.contains(&(
+                        fact.revision.expect("EOSE filter revision"),
+                        evidence_attribute(fact, "transport_generation")
+                            .expect("EOSE transport generation")
+                            .parse::<u64>()
+                            .expect("numeric transport generation"),
+                        evidence_attribute(fact, "request_revision")
+                            .expect("EOSE request revision")
+                            .parse::<u64>()
+                            .expect("numeric request revision"),
+                    ))
+            }),
+            "EOSE must identify the exact accepted REQ: {execution:#?}"
+        );
         relay_result.expect("join local relay");
     }
 
@@ -2291,22 +2353,39 @@ mod tests {
             // No further events are ever published against this probe
             // query (no relays configured, arbitrary caller-owned kind) --
             // absent cancellation, this call blocks forever.
-            let result = subscription.recv();
-            let _ = result_tx.send(result.is_err());
+            let terminal = loop {
+                match subscription.recv() {
+                    Ok(frame)
+                        if frame
+                            .execution
+                            .iter()
+                            .any(|evidence| evidence.kind == "withdrawn") =>
+                    {
+                        break true;
+                    }
+                    Ok(_) => continue,
+                    Err(_) => break false,
+                }
+            };
+            let disconnected = subscription.recv().is_err();
+            let _ = result_tx.send((terminal, disconnected));
         });
 
         cancel.cancel();
 
-        let disconnected = result_rx
+        let (terminal, disconnected) = result_rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect(
                 "cancel() from a separate handle must unblock the drain thread's recv() \
                  within a bounded wait, not hang",
             );
         assert!(
+            terminal,
+            "the unblocked recv() must expose the observation's terminal Withdrawn fact"
+        );
+        assert!(
             disconnected,
-            "the unblocked recv() must observe a disconnect (Err), the same outcome \
-             Drop-driven withdrawal produces"
+            "the receive after Withdrawn must observe a deterministic disconnect"
         );
 
         engine.shutdown();
@@ -2555,8 +2634,26 @@ mod tests {
         ));
         // #680 removed the native-task census surface; the real semantic here
         // is that shutdown drained the live acquisition (ServiceClosed above)
-        // without blocking, and the subscription is closed.
-        assert!(subscription.recv().is_err());
+        // without blocking, and the subscription reaches disconnect. The
+        // observation-evidence stream may still have its final pre-shutdown
+        // batch queued after the initial row frame; consuming that bounded
+        // batch before disconnect is delivery, not an outliving producer.
+        let mut queued_after_shutdown = 0;
+        loop {
+            match subscription.recv_timeout(std::time::Duration::from_secs(1)) {
+                Ok(_) => {
+                    queued_after_shutdown += 1;
+                    assert_eq!(
+                        queued_after_shutdown, 1,
+                        "the one-slot mailbox cannot retain multiple frames after shutdown"
+                    );
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("subscription producer outlived engine shutdown")
+                }
+            }
+        }
 
         // These retained owners remain safe after exact-zero teardown.
         cancel.cancel();

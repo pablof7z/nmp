@@ -37,8 +37,9 @@
 use nmp::{
     AcquisitionEvidence, AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, CoverageInterval, Demand,
     Derived, DiagnosticsSnapshot, Durability, Filter, FilterCoverageEntry, IdentityField,
-    IndexedTagName, Kind, Lane, LiveQuery, PublicKey, RelayDiagnosticsSnapshot, Selector, Tag,
-    Timestamp, UnsignedEvent, WriteIntent, WritePayload, WriteRouting,
+    IndexedTagName, Kind, Lane, LiveQuery, ObservationEvidence, PublicKey,
+    RelayDiagnosticsSnapshot, Selector, Tag, Timestamp, UnsignedEvent, WriteIntent, WritePayload,
+    WriteRouting,
 };
 
 /// The reactive index kind an app might declare its own membership list
@@ -131,6 +132,23 @@ pub fn describe_evidence(evidence: &AcquisitionEvidence) -> String {
         "{} source(s), {} shortfall fact(s)",
         evidence.sources.len(),
         evidence.shortfall.len()
+    )
+}
+
+/// Names and reads the observation-scoped execution envelope from an
+/// `nmp`-only dependency. The stable kind/path/revision fields drive cascade
+/// presentation; exact values/fingerprint and ordered attributes retain the
+/// resolver or transport owner's supporting evidence.
+pub fn describe_execution(evidence: &ObservationEvidence) -> String {
+    format!(
+        "#{} {} {:?}@{:?}: {} value(s), fingerprint {:?}, attributes {:?}",
+        evidence.sequence,
+        evidence.kind,
+        evidence.path,
+        evidence.revision,
+        evidence.values.len(),
+        evidence.fingerprint,
+        evidence.attributes,
     )
 }
 

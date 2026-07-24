@@ -798,10 +798,6 @@ fn handoff_is_quiescent(
     let [relay] = snapshot.relays.as_slice() else {
         return None;
     };
-    let has_discovery = relay
-        .filters
-        .iter()
-        .any(|filter| filter_names_kind(filter, DISCOVERY_TRIGGER_KIND));
     let has_content = relay
         .filters
         .iter()
@@ -818,8 +814,12 @@ fn handoff_is_quiescent(
         discovery: relay_witness.query_count_for_kind(Kind::RelayList.as_u16()),
         content: relay_witness.query_count_for_kind(QUERY_KIND),
     };
-    (has_discovery
-        && has_content
+    // Diagnostics is intentionally a latest-value stream, so the transient
+    // two-filter handoff snapshot may be conflated with the stable
+    // content-only snapshot before this consumer reads it (#722). The actual
+    // relay REQ counters plus cumulative engine event counters below are the
+    // durable proof that both phases crossed the wire and were processed.
+    (has_content
         && !has_internal_discovery
         && routed_through_nip65
         && baseline.discovery != 0
@@ -1624,10 +1624,11 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
         }
     };
     // Exact worker ownership (#235) may legitimately close this relay when
-    // demand reaches zero. Keep both observations live until the two-filter
-    // plan is visible and every admitted discovery/content response has
-    // reached diagnostics. That equality barrier is the stable baseline;
-    // only then may withdrawing discovery prove the handoff caused no replay.
+    // demand reaches zero. Keep both observations live until actual relay
+    // counters and cumulative diagnostics prove every admitted
+    // discovery/content response crossed the handoff. That equality barrier
+    // is the stable baseline; only then may withdrawing discovery prove the
+    // handoff caused no replay.
     let handoff_baseline = wait_for_direct_handoff_quiescence(&diag_rx, &relay);
     discovery_cancel.cancel();
 
@@ -1752,7 +1753,7 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
             break normalized;
         }
     };
-    // Same drained, continuously-owned handoff proof as the direct facade.
+    // Same durable, continuously-owned handoff proof as the direct facade.
     let handoff_baseline = wait_for_ffi_handoff_quiescence(&diag_rx, &relay);
     discovery_handle.cancel();
 

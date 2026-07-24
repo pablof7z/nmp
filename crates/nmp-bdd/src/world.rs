@@ -93,7 +93,7 @@ struct FeedState {
 
 impl FeedState {
     fn drain_available(&mut self) {
-        while let Ok((deltas, evidence)) = self.rx.try_recv() {
+        while let Ok((deltas, evidence, _execution)) = self.rx.try_recv() {
             self.apply(deltas, evidence);
         }
     }
@@ -132,7 +132,7 @@ impl FeedState {
                 return false;
             }
             match self.rx.recv_timeout(remaining) {
-                Ok((deltas, coverage)) => {
+                Ok((deltas, coverage, _execution)) => {
                     self.apply(deltas, coverage);
                     if pred(self) {
                         return true;
@@ -158,7 +158,7 @@ impl FeedState {
                 return true;
             }
             match self.rx.recv_timeout(remaining) {
-                Ok((deltas, coverage)) => {
+                Ok((deltas, coverage, _execution)) => {
                     self.apply(deltas, coverage);
                     if pred(self) {
                         return false;

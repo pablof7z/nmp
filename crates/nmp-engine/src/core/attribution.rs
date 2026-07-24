@@ -38,6 +38,12 @@ struct AttributionSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AttributionSendId(u64);
 
+impl AttributionSendId {
+    pub(crate) fn revision(self) -> u64 {
+        self.0
+    }
+}
+
 /// All coverage-attribution bookkeeping `EngineCore` owns. Keyed by `SubId`
 /// (which already embeds the relay — `SubId(RelayUrl, SkeletonHash, AccessContext)`), so a
 /// FIFO lookup is also implicitly relay-scoped.
@@ -236,24 +242,31 @@ impl AttributionState {
     /// never asked for. The oldest snapshot is popped unconditionally
     /// afterward (one REQ, one EOSE, FIFO order) — whether or not this call
     /// recorded anything.
+    #[cfg(test)]
     pub(crate) fn attribute_eose(
         &mut self,
         session: &RelaySessionKey,
         wire_sub_id: &str,
         eose_time: Timestamp,
     ) -> Vec<(CoverageKey, CoverageInterval)> {
-        let Some(sub_id) = self
+        self.attribute_eose_detailed(session, wire_sub_id, eose_time)
+            .map(|(_, coverage)| coverage)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn attribute_eose_detailed(
+        &mut self,
+        session: &RelaySessionKey,
+        wire_sub_id: &str,
+        eose_time: Timestamp,
+    ) -> Option<(AttributionSendId, Vec<(CoverageKey, CoverageInterval)>)> {
+        let sub_id = self
             .sub_id_by_wire
             .get(&(session.clone(), wire_sub_id.to_string()))
-            .cloned()
-        else {
-            return Vec::new();
-        };
-        let Some(fifo) = self.inflight.get_mut(&sub_id) else {
-            return Vec::new();
-        };
+            .cloned()?;
+        let fifo = self.inflight.get_mut(&sub_id)?;
         if fifo.is_empty() {
-            return Vec::new();
+            return None;
         }
 
         let poisoned = fifo.iter().any(|s| s.limited);
@@ -281,8 +294,10 @@ impl AttributionState {
             }
         }
 
-        fifo.pop_front();
-        result
+        let completed = fifo
+            .pop_front()
+            .expect("non-empty attribution FIFO checked above");
+        Some((completed.send_id, result))
     }
 
     /// Attribute a completion that is structurally correlated to one exact

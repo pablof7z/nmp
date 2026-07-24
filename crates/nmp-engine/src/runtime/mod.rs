@@ -84,7 +84,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel as cb;
-use nmp_grammar::ConcreteFilter;
+use nmp_grammar::{ConcreteFilter, DescriptorHash};
 use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{RelayDirectory, SubId, WireDelta, WireOp, WireReq};
 use nmp_signer::{PendingSignerOp, SignerOp, SigningCapability};
@@ -103,9 +103,9 @@ use nmp_transport::{
 pub use crate::core::ReceiptReplayCursor;
 use crate::core::{
     self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg,
-    HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, HistorySink, PublishError,
-    ReattachOutcome, ReceiptId, ReceiptSinkRegistration, RelayAdmissionPolicy, Row, RowDelta,
-    RowSink,
+    HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, HistorySink,
+    ObservationEvidence, PublishError, ReattachOutcome, ReceiptId, ReceiptSinkRegistration,
+    RelayAdmissionPolicy, Row, RowDelta, RowSink,
 };
 use crate::outbox::{CancelWriteError, CancelWriteOutcome, ReceiptSink, WriteStatus};
 use crate::relay_information::{
@@ -159,7 +159,7 @@ impl nmp_transport::PoolEventSink for EnginePoolSink {
 /// rebased onto the receiver's previous batch + the query's latest per-source
 /// acquisition evidence (see [`RowsReceiver`] and the module doc's "two
 /// delivery channels" note).
-pub type RowsMsg = (Vec<RowDelta>, AcquisitionEvidence);
+pub type RowsMsg = (Vec<RowDelta>, AcquisitionEvidence, Vec<ObservationEvidence>);
 pub type HistoryMsg = HistoryBatch;
 
 /// Receiver for one bounded, latest-wins history stream.
@@ -4747,8 +4747,6 @@ fn engine_loop<S, D>(
             }
             Cmd::Engine(EngineMsg::Unsubscribe(id)) => {
                 let effects = core.handle(EngineMsg::Unsubscribe(id));
-                // Drop the sender: the app's `Receiver` observes disconnect.
-                row_channels.remove(&id);
                 dispatch_core_effects(
                     &mut core,
                     effects,
@@ -4760,6 +4758,10 @@ fn engine_loop<S, D>(
                     &registry,
                     dispatch_runtime,
                 );
+                // Deliver the terminal observation-scoped withdrawal fact
+                // before dropping the sender; the app then observes channel
+                // disconnect deterministically.
+                row_channels.remove(&id);
             }
             Cmd::Engine(EngineMsg::SetActivePubkey(pk)) => {
                 // P3: active identity is a reactive read input. Accepted
@@ -5223,8 +5225,54 @@ fn dispatch_effect(
             #[cfg(feature = "bench-instrumentation")]
             crate::ingest_attribution::committed_observation_effect(phase_started.elapsed());
         }
-        Effect::Wire(delta) => apply_wire_delta(&delta, pool, preambles),
-        Effect::Replay(session, reqs) => apply_replay(&session, reqs, pool, preambles),
+        Effect::Wire(delta) => {
+            let reports = apply_wire_delta(&delta, pool, preambles);
+            for report in reports {
+                let evidence = core.on_wire_request_handoff(
+                    &report.session,
+                    &report.sub_id,
+                    report.filter_hash,
+                    report.handle,
+                    report.accepted,
+                    report.reason,
+                );
+                dispatch_effects(
+                    core,
+                    evidence,
+                    pool,
+                    row_channels,
+                    history_channels,
+                    diag_channels,
+                    preambles,
+                    registry,
+                    runtime,
+                );
+            }
+        }
+        Effect::Replay(session, reqs) => {
+            let reports = apply_replay(&session, reqs, pool, preambles);
+            for report in reports {
+                let evidence = core.on_wire_request_handoff(
+                    &report.session,
+                    &report.sub_id,
+                    report.filter_hash,
+                    report.handle,
+                    report.accepted,
+                    report.reason,
+                );
+                dispatch_effects(
+                    core,
+                    evidence,
+                    pool,
+                    row_channels,
+                    history_channels,
+                    diag_channels,
+                    preambles,
+                    registry,
+                    runtime,
+                );
+            }
+        }
         Effect::ReleaseInitialRead(handle) => {
             let _ = pool.release_initial_read(handle);
         }
@@ -5402,7 +5450,12 @@ fn dispatch_effect(
         }
         Effect::EmitRows(id, rows, evidence) => {
             if let Some(tx) = row_channels.get(&id) {
-                tx.send((rows, evidence));
+                tx.send((rows, evidence, Vec::new()));
+            }
+        }
+        Effect::EmitObservationEvidence(id, evidence) => {
+            if let Some(tx) = row_channels.get(&id) {
+                tx.send_evidence(evidence);
             }
         }
         Effect::EmitHistory(id, batch) => {
@@ -5537,7 +5590,21 @@ fn neg_close_frame_text(sub_id: &SubId) -> String {
 /// its own AUTH completes, so the pool must never auto-replay a protected
 /// REQ, and this module keeps no `preambles` entry that
 /// `retry_required_relay_workers` could accidentally resend.
-fn apply_wire_delta(delta: &WireDelta, pool: &Pool, preambles: &mut Preambles) {
+struct RequestHandoffReport {
+    session: RelaySessionKey,
+    sub_id: SubId,
+    filter_hash: DescriptorHash,
+    handle: Option<nmp_transport::RelayHandle>,
+    accepted: bool,
+    reason: Option<String>,
+}
+
+fn apply_wire_delta(
+    delta: &WireDelta,
+    pool: &Pool,
+    preambles: &mut Preambles,
+) -> Vec<RequestHandoffReport> {
+    let mut reports = Vec::new();
     for (session, ops) in &delta.ops {
         let has_req = ops.iter().any(|op| matches!(op, WireOp::Req(..)));
         let handle = if has_req {
@@ -5554,8 +5621,17 @@ fn apply_wire_delta(delta: &WireDelta, pool: &Pool, preambles: &mut Preambles) {
                     WireOp::Req(sub_id, filter) => req_frame_text(sub_id, filter),
                     WireOp::Close(sub_id) => close_frame_text(sub_id),
                 };
-                if let Some(handle) = handle {
-                    let _ = pool.send(handle, WireFrame::Text(text));
+                let accepted =
+                    handle.is_some_and(|handle| pool.send(handle, WireFrame::Text(text)));
+                if let WireOp::Req(sub_id, filter) = op {
+                    reports.push(RequestHandoffReport {
+                        session: session.clone(),
+                        sub_id: sub_id.clone(),
+                        filter_hash: filter.hash(),
+                        handle,
+                        accepted,
+                        reason: (!accepted).then(|| "transport send refused REQ".to_string()),
+                    });
                 }
             }
             if let Some(handle) = handle {
@@ -5569,9 +5645,16 @@ fn apply_wire_delta(delta: &WireDelta, pool: &Pool, preambles: &mut Preambles) {
             match op {
                 WireOp::Req(sub_id, filter) => {
                     let text = req_frame_text(sub_id, filter);
-                    if let Some(handle) = handle {
-                        let _ = pool.send(handle, WireFrame::Text(text.clone()));
-                    }
+                    let accepted = handle
+                        .is_some_and(|handle| pool.send(handle, WireFrame::Text(text.clone())));
+                    reports.push(RequestHandoffReport {
+                        session: session.clone(),
+                        sub_id: sub_id.clone(),
+                        filter_hash: filter.hash(),
+                        handle,
+                        accepted,
+                        reason: (!accepted).then(|| "transport send refused REQ".to_string()),
+                    });
                     entry.insert(sub_id.clone(), text);
                 }
                 WireOp::Close(sub_id) => {
@@ -5592,6 +5675,7 @@ fn apply_wire_delta(delta: &WireDelta, pool: &Pool, preambles: &mut Preambles) {
             preambles.remove(session);
         }
     }
+    reports
 }
 
 /// `Effect::Replay`: `reqs` is `EngineCore`'s full CURRENT req list for
@@ -5613,28 +5697,56 @@ fn apply_replay(
     reqs: Vec<WireReq>,
     pool: &Pool,
     preambles: &mut Preambles,
-) {
+) -> Vec<RequestHandoffReport> {
     let Ok(handle) = pool.ensure_session(session) else {
-        return;
+        return reqs
+            .into_iter()
+            .map(|req| RequestHandoffReport {
+                session: session.clone(),
+                sub_id: req.sub_id,
+                filter_hash: req.filter.hash(),
+                handle: None,
+                accepted: false,
+                reason: Some("transport could not open session for replay".to_string()),
+            })
+            .collect();
     };
+    let mut reports = Vec::new();
     if session.access != nmp_grammar::AccessContext::Public {
         for req in &reqs {
             let text = req_frame_text(&req.sub_id, &req.filter);
-            let _ = pool.send(handle, WireFrame::Text(text));
+            let accepted = pool.send(handle, WireFrame::Text(text));
+            reports.push(RequestHandoffReport {
+                session: session.clone(),
+                sub_id: req.sub_id.clone(),
+                filter_hash: req.filter.hash(),
+                handle: Some(handle),
+                accepted,
+                reason: (!accepted).then(|| "transport send refused replay REQ".to_string()),
+            });
         }
         pool.set_reconnect_preamble(handle, Vec::new());
         preambles.remove(session);
-        return;
+        return reports;
     }
     let entry = preambles.entry(session.clone()).or_default();
     entry.clear();
     for req in &reqs {
         let text = req_frame_text(&req.sub_id, &req.filter);
-        let _ = pool.send(handle, WireFrame::Text(text.clone()));
+        let accepted = pool.send(handle, WireFrame::Text(text.clone()));
+        reports.push(RequestHandoffReport {
+            session: session.clone(),
+            sub_id: req.sub_id.clone(),
+            filter_hash: req.filter.hash(),
+            handle: Some(handle),
+            accepted,
+            reason: (!accepted).then(|| "transport send refused replay REQ".to_string()),
+        });
         entry.insert(req.sub_id.clone(), text);
     }
     let frames: Vec<String> = entry.values().cloned().collect();
     pool.set_reconnect_preamble(handle, frames);
+    reports
 }
 
 /// The wire `["REQ", sub_id, filter]` text for `sub_id`/`filter`, using the

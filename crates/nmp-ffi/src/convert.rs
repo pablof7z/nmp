@@ -667,6 +667,7 @@ mod window_conversion_tests {
                 sources: vec![],
                 shortfall: vec![],
             },
+            execution: vec![],
         };
 
         let ffi = frame_to_ffi(frame);
@@ -698,6 +699,7 @@ mod window_conversion_tests {
                 sources: vec![],
                 shortfall: vec![],
             },
+            execution: vec![],
         };
 
         let ffi = frame_to_ffi(frame);

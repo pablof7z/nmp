@@ -14,14 +14,15 @@
 //! batch.
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::marker::PhantomData;
 use std::sync::mpsc::{RecvError, RecvTimeoutError, TryRecvError};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use nostr::{EventId, RelayUrl};
 
-use crate::core::{AcquisitionEvidence, Row, RowDelta};
+use crate::core::{AcquisitionEvidence, ObservationEvidence, ObservationFact, Row, RowDelta};
 
 use super::diagnostics_channel::{
     latest_channel, AsyncLatestReceiver, ConcurrentNext, LatestReceiver, LatestSender,
@@ -44,14 +45,60 @@ enum PendingTransition {
 struct PendingRows {
     by_id: BTreeMap<EventId, PendingTransition>,
     evidence: AcquisitionEvidence,
+    execution: VecDeque<ObservationEvidence>,
 }
+
+const EXECUTION_EVIDENCE_CAPACITY: usize = 256;
 
 impl PendingRows {
     fn new(evidence: AcquisitionEvidence) -> Self {
         Self {
             by_id: BTreeMap::new(),
             evidence,
+            execution: VecDeque::new(),
         }
+    }
+
+    fn push_execution(&mut self, facts: Vec<ObservationEvidence>) {
+        self.execution.extend(facts);
+        if self.execution.len() <= EXECUTION_EVIDENCE_CAPACITY {
+            return;
+        }
+
+        let mut first = u64::MAX;
+        let mut last = 0;
+        let mut dropped = 0u64;
+        while self
+            .execution
+            .front()
+            .is_some_and(|fact| matches!(fact.fact, ObservationFact::Overflow { .. }))
+        {
+            let prior = self.execution.pop_front().expect("front existed");
+            if let ObservationFact::Overflow {
+                first_sequence,
+                last_sequence,
+                dropped: prior_dropped,
+            } = prior.fact
+            {
+                first = first.min(first_sequence);
+                last = last.max(last_sequence);
+                dropped = dropped.saturating_add(prior_dropped);
+            }
+        }
+        while self.execution.len() >= EXECUTION_EVIDENCE_CAPACITY {
+            let removed = self.execution.pop_front().expect("length checked");
+            first = first.min(removed.sequence);
+            last = last.max(removed.sequence);
+            dropped = dropped.saturating_add(1);
+        }
+        self.execution.push_front(ObservationEvidence {
+            sequence: last,
+            fact: ObservationFact::Overflow {
+                first_sequence: first,
+                last_sequence: last,
+                dropped,
+            },
+        });
     }
 
     fn push(&mut self, delta: RowDelta) {
@@ -129,12 +176,18 @@ impl PendingRows {
                 }
             }
         }
-        (deltas, self.evidence)
+        (deltas, self.evidence, self.execution.into_iter().collect())
     }
 }
 
 pub(crate) struct RowsSender {
     pending: LatestSender<PendingRows>,
+    /// The acquisition snapshot most recently sent for this observation.
+    ///
+    /// Execution-only facts can arrive after the receiver consumed the latest
+    /// row batch. Retaining this snapshot prevents those facts from replacing
+    /// real acquisition evidence with `AcquisitionEvidence::default()`.
+    last_evidence: Mutex<AcquisitionEvidence>,
 }
 
 /// The single-consumer half of an ordinary live-query stream.
@@ -158,7 +211,10 @@ pub struct RowsReceiver {
 pub(crate) fn rows_channel() -> (RowsSender, RowsReceiver) {
     let (sender, receiver) = latest_channel();
     (
-        RowsSender { pending: sender },
+        RowsSender {
+            pending: sender,
+            last_evidence: Mutex::new(AcquisitionEvidence::default()),
+        },
         RowsReceiver {
             pending: receiver,
             not_sync: PhantomData,
@@ -167,20 +223,30 @@ pub(crate) fn rows_channel() -> (RowsSender, RowsReceiver) {
 }
 
 impl RowsSender {
-    pub(crate) fn send(&self, (deltas, evidence): RowsMsg) {
+    pub(crate) fn send(&self, (deltas, evidence, execution): RowsMsg) {
         #[cfg(feature = "bench-instrumentation")]
         let send_started = std::time::Instant::now();
         #[cfg(feature = "bench-instrumentation")]
         let delta_count = deltas.len();
+        *self.last_evidence.lock().unwrap() = evidence.clone();
         self.pending.update(|pending| {
             let pending = pending.get_or_insert_with(|| PendingRows::new(evidence.clone()));
             for delta in deltas {
                 pending.push(delta);
             }
             pending.evidence = evidence;
+            pending.push_execution(execution);
         });
         #[cfg(feature = "bench-instrumentation")]
         crate::ingest_attribution::row_channel_send(send_started.elapsed(), delta_count);
+    }
+
+    pub(crate) fn send_evidence(&self, execution: Vec<ObservationEvidence>) {
+        let evidence = self.last_evidence.lock().unwrap().clone();
+        self.pending.update(|pending| {
+            let pending = pending.get_or_insert_with(|| PendingRows::new(evidence));
+            pending.push_execution(execution);
+        });
     }
 }
 
@@ -282,6 +348,10 @@ mod tests {
         }
     }
 
+    fn send_rows(tx: &RowsSender, deltas: Vec<RowDelta>, evidence: AcquisitionEvidence) {
+        tx.send((deltas, evidence, Vec::new()));
+    }
+
     #[test]
     fn ten_thousand_skipped_updates_form_one_exact_transition() {
         fn assert_send<T: Send>() {}
@@ -291,25 +361,31 @@ mod tests {
         let mut expected = row(&keys, 1, "same-event");
         let id = expected.event.id;
         let (tx, rx) = rows_channel();
-        tx.send((
+        send_rows(
+            &tx,
             vec![RowDelta::Added(expected.clone())],
             AcquisitionEvidence::default(),
-        ));
+        );
         let mut delivered = BTreeMap::new();
         apply(&mut delivered, &rx.recv().unwrap().0);
 
         for update in 0..5_000 {
-            tx.send((vec![RowDelta::Removed(id)], AcquisitionEvidence::default()));
+            send_rows(
+                &tx,
+                vec![RowDelta::Removed(id)],
+                AcquisitionEvidence::default(),
+            );
             expected.sources = [RelayUrl::parse(&format!("wss://r{update}.example")).unwrap()]
                 .into_iter()
                 .collect();
-            tx.send((
+            send_rows(
+                &tx,
                 vec![RowDelta::Added(expected.clone())],
                 AcquisitionEvidence::default(),
-            ));
+            );
         }
 
-        let (deltas, _) = rx.recv().unwrap();
+        let (deltas, _, _) = rx.recv().unwrap();
         assert_eq!(deltas.len(), 2, "one remove/add transition for one id");
         apply(&mut delivered, &deltas);
         assert_eq!(delivered.get(&id), Some(&expected));
@@ -321,14 +397,19 @@ mod tests {
         let keys = Keys::generate();
         let added = row(&keys, 1, "temporary");
         let (tx, rx) = rows_channel();
-        tx.send((
+        send_rows(
+            &tx,
             vec![RowDelta::Added(added.clone())],
             AcquisitionEvidence::default(),
-        ));
+        );
         let evidence = latest_evidence();
-        tx.send((vec![RowDelta::Removed(added.event.id)], evidence.clone()));
+        send_rows(
+            &tx,
+            vec![RowDelta::Removed(added.event.id)],
+            evidence.clone(),
+        );
 
-        let (deltas, received_evidence) = rx.recv().unwrap();
+        let (deltas, received_evidence, _) = rx.recv().unwrap();
         assert!(deltas.is_empty());
         assert_eq!(received_evidence, evidence);
     }
@@ -341,28 +422,31 @@ mod tests {
         let a = RelayUrl::parse("wss://a.example").unwrap();
         let b = RelayUrl::parse("wss://b.example").unwrap();
         let (tx, rx) = rows_channel();
-        tx.send((
+        send_rows(
+            &tx,
             vec![RowDelta::Added(initial)],
             AcquisitionEvidence::default(),
-        ));
+        );
         rx.recv().unwrap();
-        tx.send((
+        send_rows(
+            &tx,
             vec![RowDelta::SourcesGrew {
                 id,
                 sources: [a.clone()].into_iter().collect(),
             }],
             AcquisitionEvidence::default(),
-        ));
+        );
         let expected: BTreeSet<_> = [a, b].into_iter().collect();
-        tx.send((
+        send_rows(
+            &tx,
             vec![RowDelta::SourcesGrew {
                 id,
                 sources: expected.clone(),
             }],
             latest_evidence(),
-        ));
+        );
 
-        let (deltas, evidence) = rx.recv().unwrap();
+        let (deltas, evidence, _) = rx.recv().unwrap();
         assert!(matches!(
             deltas.as_slice(),
             [RowDelta::SourcesGrew { id: delta_id, sources }]
@@ -377,16 +461,22 @@ mod tests {
         let initial = row(&keys, 1, "must-stay-removed");
         let id = initial.event.id;
         let (tx, rx) = rows_channel();
-        tx.send((
+        send_rows(
+            &tx,
             vec![RowDelta::Added(initial)],
             AcquisitionEvidence::default(),
-        ));
+        );
         let mut delivered = BTreeMap::new();
         apply(&mut delivered, &rx.recv().unwrap().0);
 
-        tx.send((vec![RowDelta::Removed(id)], AcquisitionEvidence::default()));
+        send_rows(
+            &tx,
+            vec![RowDelta::Removed(id)],
+            AcquisitionEvidence::default(),
+        );
         let evidence = latest_evidence();
-        tx.send((
+        send_rows(
+            &tx,
             vec![RowDelta::SourcesGrew {
                 id,
                 sources: [RelayUrl::parse("wss://unexpected.example").unwrap()]
@@ -394,9 +484,9 @@ mod tests {
                     .collect(),
             }],
             evidence.clone(),
-        ));
+        );
 
-        let (deltas, received_evidence) = rx.recv().unwrap();
+        let (deltas, received_evidence, _) = rx.recv().unwrap();
         assert!(matches!(deltas.as_slice(), [RowDelta::Removed(delta_id)] if *delta_id == id));
         apply(&mut delivered, &deltas);
         assert!(!delivered.contains_key(&id));
@@ -408,7 +498,11 @@ mod tests {
         let keys = Keys::generate();
         let added = row(&keys, 1, "last");
         let (tx, rx) = rows_channel();
-        tx.send((vec![RowDelta::Added(added)], AcquisitionEvidence::default()));
+        send_rows(
+            &tx,
+            vec![RowDelta::Added(added)],
+            AcquisitionEvidence::default(),
+        );
         drop(tx);
         assert_eq!(rx.recv().unwrap().0.len(), 1);
         assert!(matches!(rx.recv(), Err(RecvError)));
@@ -416,5 +510,52 @@ mod tests {
             rx.recv_timeout(Duration::from_secs(1)),
             Err(RecvTimeoutError::Disconnected)
         ));
+    }
+
+    #[test]
+    fn slow_observer_gets_explicit_execution_evidence_overflow() {
+        let (tx, rx) = rows_channel();
+        tx.send_evidence(
+            (1..=300)
+                .map(|sequence| ObservationEvidence {
+                    sequence,
+                    fact: ObservationFact::Withdrawn,
+                })
+                .collect(),
+        );
+
+        let (_, _, execution) = rx.recv().unwrap();
+        assert_eq!(execution.len(), EXECUTION_EVIDENCE_CAPACITY);
+        assert!(matches!(
+            &execution[0],
+            ObservationEvidence {
+                sequence: 45,
+                fact: ObservationFact::Overflow {
+                    first_sequence: 1,
+                    last_sequence: 45,
+                    dropped: 45,
+                },
+            }
+        ));
+        assert_eq!(execution[1].sequence, 46);
+        assert_eq!(execution.last().unwrap().sequence, 300);
+    }
+
+    #[test]
+    fn execution_only_batch_preserves_latest_acquisition_evidence() {
+        let (tx, rx) = rows_channel();
+        let evidence = latest_evidence();
+        send_rows(&tx, Vec::new(), evidence.clone());
+        assert_eq!(rx.recv().unwrap().1, evidence);
+
+        tx.send_evidence(vec![ObservationEvidence {
+            sequence: 1,
+            fact: ObservationFact::Withdrawn,
+        }]);
+
+        let (deltas, received_evidence, execution) = rx.recv().unwrap();
+        assert!(deltas.is_empty());
+        assert_eq!(received_evidence, evidence);
+        assert_eq!(execution.len(), 1);
     }
 }
