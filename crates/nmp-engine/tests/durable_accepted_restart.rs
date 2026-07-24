@@ -11,8 +11,8 @@ use nmp_engine::core::{
 };
 use nmp_engine::outbox::{ReceiptSink, WriteStatus};
 use nmp_grammar::{
-    AccessContext, Durability, HostAuthority, RelaySessionKey, WriteIntent, WritePayload,
-    WriteRouting,
+    AccessContext, Durability, HostAuthority, RelayListBootstrapAuthority, RelaySessionKey,
+    WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_router::FixtureDirectory;
 use nmp_store::{
@@ -1279,6 +1279,79 @@ fn pinned_host_routing_round_trips_across_a_restart() {
     let replay = Sink::default();
     assert!(core
         .reattach_receipt(id, Box::new(replay.clone()))
+        .is_attached());
+}
+
+/// #719: the first kind:10002's exact bootstrap relay set is part of the
+/// durable obligation. A process may die after acceptance but before either
+/// relay ACKs; recovery must reopen exactly that set without consulting or
+/// mutating the author directory.
+#[test]
+fn relay_list_bootstrap_routing_round_trips_across_a_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("nip65-bootstrap.redb");
+    let keys = Keys::generate();
+    let relay_a = RelayUrl::parse("wss://bootstrap-a.example").unwrap();
+    let relay_b = RelayUrl::parse("wss://bootstrap-b.example").unwrap();
+    let event = signed(&keys, "bootstrap", 601);
+    let session_a = signer_session(&relay_a, event.pubkey);
+    let session_b = signer_session(&relay_b, event.pubkey);
+
+    let id = {
+        let store = RedbStore::open(&path).unwrap();
+        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+        let effects = core.handle(EngineMsg::Publish(
+            WriteIntent {
+                payload: WritePayload::Signed(event),
+                durability: Durability::Durable,
+                routing: WriteRouting::RelayListBootstrap(
+                    RelayListBootstrapAuthority::from_validated_relays([
+                        relay_b.clone(),
+                        relay_a.clone(),
+                    ]),
+                ),
+                identity_override: None,
+                correlation: None,
+            },
+            Box::new(Sink::default()),
+        ));
+        let ensured = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::EnsureWriteRelay(session) => Some(session.clone()),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            ensured,
+            std::collections::BTreeSet::from([session_a.clone(), session_b.clone()])
+        );
+        receipt_id(&effects)
+    };
+
+    let store = RedbStore::open(&path).unwrap();
+    let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+    let recovery = core.recover_on_boot();
+    let ensured = recovery
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::EnsureWriteRelay(session) => Some(session.clone()),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        ensured,
+        std::collections::BTreeSet::from([session_a, session_b]),
+        "restart must recover the exact bootstrap set without an AuthorOutbox fact"
+    );
+    assert!(
+        !recovery
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitReceipt(_, WriteStatus::Accepted))),
+        "boot recovery must not accept the bootstrap a second time"
+    );
+    assert!(core
+        .reattach_receipt(id, Box::new(Sink::default()))
         .is_attached());
 }
 

@@ -20,6 +20,7 @@ publish.workspace = true
 nmp-ownership.workspace = true
 nmp-router.workspace = true
 nmp-nip02.workspace = true
+nmp-nip65.workspace = true
 nmp-nip51.workspace = true
 # nmp-nip29 exports no claims() (DeclaresNoClaims in the registry); the
 # dev-dep is kept purely for compile-time coupling -- a rename/removal of
