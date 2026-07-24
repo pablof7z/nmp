@@ -17,6 +17,7 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::marker::PhantomData;
 use std::sync::mpsc::{RecvError, RecvTimeoutError, TryRecvError};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use nostr::{EventId, RelayUrl};
@@ -181,6 +182,12 @@ impl PendingRows {
 
 pub(crate) struct RowsSender {
     pending: LatestSender<PendingRows>,
+    /// The acquisition snapshot most recently sent for this observation.
+    ///
+    /// Execution-only facts can arrive after the receiver consumed the latest
+    /// row batch. Retaining this snapshot prevents those facts from replacing
+    /// real acquisition evidence with `AcquisitionEvidence::default()`.
+    last_evidence: Mutex<AcquisitionEvidence>,
 }
 
 /// The single-consumer half of an ordinary live-query stream.
@@ -204,7 +211,10 @@ pub struct RowsReceiver {
 pub(crate) fn rows_channel() -> (RowsSender, RowsReceiver) {
     let (sender, receiver) = latest_channel();
     (
-        RowsSender { pending: sender },
+        RowsSender {
+            pending: sender,
+            last_evidence: Mutex::new(AcquisitionEvidence::default()),
+        },
         RowsReceiver {
             pending: receiver,
             not_sync: PhantomData,
@@ -218,6 +228,7 @@ impl RowsSender {
         let send_started = std::time::Instant::now();
         #[cfg(feature = "bench-instrumentation")]
         let delta_count = deltas.len();
+        *self.last_evidence.lock().unwrap() = evidence.clone();
         self.pending.update(|pending| {
             let pending = pending.get_or_insert_with(|| PendingRows::new(evidence.clone()));
             for delta in deltas {
@@ -231,9 +242,9 @@ impl RowsSender {
     }
 
     pub(crate) fn send_evidence(&self, execution: Vec<ObservationEvidence>) {
+        let evidence = self.last_evidence.lock().unwrap().clone();
         self.pending.update(|pending| {
-            let pending =
-                pending.get_or_insert_with(|| PendingRows::new(AcquisitionEvidence::default()));
+            let pending = pending.get_or_insert_with(|| PendingRows::new(evidence));
             pending.push_execution(execution);
         });
     }
@@ -528,5 +539,23 @@ mod tests {
         ));
         assert_eq!(execution[1].sequence, 46);
         assert_eq!(execution.last().unwrap().sequence, 300);
+    }
+
+    #[test]
+    fn execution_only_batch_preserves_latest_acquisition_evidence() {
+        let (tx, rx) = rows_channel();
+        let evidence = latest_evidence();
+        send_rows(&tx, Vec::new(), evidence.clone());
+        assert_eq!(rx.recv().unwrap().1, evidence);
+
+        tx.send_evidence(vec![ObservationEvidence {
+            sequence: 1,
+            fact: ObservationFact::Withdrawn,
+        }]);
+
+        let (deltas, received_evidence, execution) = rx.recv().unwrap();
+        assert!(deltas.is_empty());
+        assert_eq!(received_evidence, evidence);
+        assert_eq!(execution.len(), 1);
     }
 }
