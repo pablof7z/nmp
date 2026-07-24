@@ -858,7 +858,7 @@ impl BlossomClient {
             .strip_prefix('[')
             .and_then(|inner| inner.strip_suffix(']'))
             .unwrap_or(host);
-        let operator_local_override = self
+        let host_opted_in = self
             .allowed_local_hosts
             .contains(&normalize_bare_host(bare));
         let resolved_addresses = match bare.parse::<IpAddr>() {
@@ -870,6 +870,10 @@ impl BlossomClient {
                 }
             },
         };
+        let operator_local_override = host_opted_in
+            && resolved_addresses
+                .iter()
+                .any(|address| classify_ip(*address) == RelayHostClass::Local);
 
         ServerAdmission::Admitted {
             resolved_addresses,
@@ -1640,6 +1644,26 @@ mod tests {
             evidence[0].admission,
             ServerAdmission::Admitted {
                 operator_local_override: true,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn allowlisted_public_candidate_does_not_claim_an_unused_local_override() {
+        let client = BlossomClient::new(BlossomClientConfig {
+            allowed_local_hosts: BTreeSet::from(["8.8.8.8".to_string()]),
+            ..BlossomClientConfig::default()
+        })
+        .expect("client construction");
+        let server = BlossomServerUrl::parse("https://8.8.8.8").expect("literal public server");
+        let evidence = client
+            .qualify_server_candidates(ServerCandidatePolicy::OperatorOnly, &[server], None)
+            .await;
+        assert!(matches!(
+            evidence[0].admission,
+            ServerAdmission::Admitted {
+                operator_local_override: false,
                 ..
             }
         ));
