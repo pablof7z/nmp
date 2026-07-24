@@ -144,16 +144,20 @@ pub(crate) fn merge_interval(
 /// Shrink `interval` after evicting an event observed at `evicted_at`
 /// (caller has already established `evicted_at` falls inside `interval` and
 /// that the row's shape matches the evicted event — ruling §5). Keeps the
-/// UPPER side (`[evicted_at + 1, through]`): LRU evicts OLD events, claims
-/// protect recent ones, so the recent side is what live queries actually
-/// rely on. Returns `None` when the shrink empties the interval — the
-/// caller must then DELETE the row, in the same transaction as the event
-/// delete (never claim coverage of data no longer held).
+/// UPPER side (`[successor(evicted_at), through]`): LRU evicts OLD events,
+/// claims protect recent ones, so the recent side is what live queries
+/// actually rely on. Returns `None` when `evicted_at` has no representable
+/// successor or the shrink otherwise empties the interval — the caller must
+/// then DELETE the row, in the same transaction as the event delete (never
+/// claim coverage of data no longer held).
 pub(crate) fn shrink_after_eviction(
     interval: CoverageInterval,
     evicted_at: Timestamp,
 ) -> Option<CoverageInterval> {
-    let new_from = evicted_at + 1;
+    let new_from = evicted_at
+        .as_secs()
+        .checked_add(1)
+        .map(Timestamp::from_secs)?;
     if new_from > interval.through {
         None
     } else {
@@ -182,9 +186,10 @@ pub(crate) fn shape_matches(shape: &ConcreteFilter, event: &Event) -> bool {
 ///
 /// **Why the maximum alone determines a row's outcome** (the fact this
 /// type exists to exploit): [`shrink_after_eviction`] only ever RAISES
-/// `interval.from`, to `evicted_at + 1`. Fix one coverage row and let `V`
-/// be the set of victims that both match its shape and fall inside its
-/// CURRENT `[from, through]`. Apply `shrink_after_eviction` for every
+/// `interval.from`, to the representable successor of `evicted_at`, or
+/// deletes the interval when no successor exists. Fix one coverage row and
+/// let `V` be the set of victims that both match its shape and fall inside
+/// its CURRENT `[from, through]`. Apply `shrink_after_eviction` for every
 /// member of `V`, in any order:
 ///
 /// - A victim `v` only has any effect if `v.created_at` is still inside
@@ -200,9 +205,10 @@ pub(crate) fn shape_matches(shape: &ConcreteFilter, event: &Event) -> bool {
 ///   the (already-raised) interval and is a no-op.
 /// - Therefore the row's final state after processing every member of
 ///   `V`, IN ANY ORDER, is identical to processing just `m = max(V)`
-///   alone: untouched if `V` is empty, else `from' = m + 1`, and the row
-///   is deleted iff `from' > through` (same rule `shrink_after_eviction`
-///   already encodes for a single victim).
+///   alone: untouched if `V` is empty, else `from' = successor(m)`. The row
+///   is deleted if that successor does not exist or is greater than
+///   `through` (the same rule `shrink_after_eviction` already encodes for a
+///   single victim).
 ///
 /// This lets `gc` replace an O(victims × rows) nested loop (the eviction
 /// pass's original shape, mirrored in both backends before issue #507)
@@ -591,6 +597,15 @@ mod tests {
     fn shrink_after_eviction_returns_none_when_emptied() {
         let interval = CoverageInterval::new(Timestamp::from(100u64), Timestamp::from(100u64));
         assert!(shrink_after_eviction(interval, Timestamp::from(100u64)).is_none());
+    }
+
+    #[test]
+    fn shrink_after_eviction_drops_the_maximum_timestamp_boundary() {
+        let interval = CoverageInterval::new(Timestamp::max(), Timestamp::max());
+        assert!(
+            shrink_after_eviction(interval, Timestamp::max()).is_none(),
+            "u64::MAX has no representable upper-side successor"
+        );
     }
 
     #[test]
