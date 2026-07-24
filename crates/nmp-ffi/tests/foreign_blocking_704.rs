@@ -35,7 +35,7 @@
 //! The blocking foreign completion is submitted through
 //! `nmp::Engine::sign_event_with_completion(request, completion)` — the
 //! doc-hidden `pub` seam whose `completion: impl FnOnce(Result<Event,
-//! SignEventError>) + Send + 'static` is exactly the "foreign callback that may
+//! SignEventFailure>) + Send + 'static` is exactly the "foreign callback that may
 //! run arbitrary (blocking) code on completion", and exactly the seam the FFI
 //! facade's `NmpEngine::sign_event` calls. The facade wraps it with a
 //! NON-blocking forwarding completion (`move |r| sender.send(r)`), and does not
@@ -76,7 +76,7 @@ use std::time::{Duration, Instant};
 
 use nmp::{
     Engine, EngineConfig, Event, Filter, Kind, LiveQuery, RelayInformationCachePolicy,
-    SignEventError, SignEventRequest, Timestamp,
+    SignEventFailure, SignEventRequest, Timestamp,
 };
 
 const TEST_SECRET_KEY_HEX: &str =
@@ -332,7 +332,7 @@ async fn blocking_foreign_completion_never_stalls_unrelated_engine_work() {
     // thread and returns the verified signed event — the sharpest probe: were
     // completions worker-hosted, this fast completion could not run behind the
     // four blocked ones and its result would never arrive.
-    let (tx, rx) = nmp::fifo_channel::<Result<Event, SignEventError>>();
+    let (tx, rx) = nmp::fifo_channel::<Result<Event, SignEventFailure>>();
     let _unrelated_cancel = engine
         .sign_event_with_completion(text_note_request("unrelated-local-sign"), move |result| {
             tx.send(result);

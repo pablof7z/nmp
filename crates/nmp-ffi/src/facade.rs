@@ -334,7 +334,7 @@ impl NmpEngine {
         // One-shot result channel: the engine-admitted completion fires exactly
         // once (success / failure / cancellation), sending the result and then
         // dropping the sender so `signed()`'s awaited FIFO ends after it.
-        let (sender, receiver) = nmp::fifo_channel::<Result<nmp::Event, nmp::SignEventError>>();
+        let (sender, receiver) = nmp::fifo_channel::<Result<nmp::Event, nmp::SignEventFailure>>();
         let cancel = self
             .engine
             .sign_event_with_completion(request, move |result| {
@@ -922,7 +922,7 @@ impl Drop for ReceiptReadingGuard<'_> {
 #[derive(uniffi::Object)]
 pub struct NmpSignEventHandle {
     cancel: nmp::SignEventCancel,
-    result: nmp::AsyncFifoReceiver<Result<nmp::Event, nmp::SignEventError>>,
+    result: nmp::AsyncFifoReceiver<Result<nmp::Event, nmp::SignEventFailure>>,
 }
 
 #[uniffi::export]

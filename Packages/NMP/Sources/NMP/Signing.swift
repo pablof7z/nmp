@@ -71,8 +71,9 @@ extension NMPEngine {
     /// intent, pending row, receipt, relay plan, or publication (#680).
     ///
     /// `NmpEngine.signEvent` synchronously returns a one-shot
-    /// `NmpSignEventHandle`; awaiting `handle.signed()` delivers the verified
-    /// event or a typed failure. Task cancellation is wired through
+    /// `NmpSignEventHandle` or throws a start refusal; once the handle exists,
+    /// awaiting `handle.signed()` delivers the verified event or only an
+    /// `FfiSignEventFailure` (#727). Task cancellation is wired through
     /// `withTaskCancellationHandler` to `handle.cancel()` -- MANDATORY because
     /// Swift task cancellation never reaches Rust and never interrupts the
     /// in-flight `await` (#680); the cancel wakes `signed()` to a `.Cancelled`

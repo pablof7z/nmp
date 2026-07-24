@@ -47,8 +47,9 @@ pub use nmp::SetAlgebra
 pub use nmp::SetOp
 pub use nmp::ShortfallFact
 pub use nmp::SignEventCancel
-pub use nmp::SignEventError
+pub use nmp::SignEventFailure
 pub use nmp::SignEventOperation
+pub use nmp::SignEventStartError
 pub use nmp::SignerError
 pub use nmp::SignerOp
 pub use nmp::SignerRegistration
@@ -534,7 +535,7 @@ pub fn nmp::Engine::remove_signer(&self, nmp_engine::runtime::SignerRegistration
 pub fn nmp::Engine::reset_persistent_store(impl core::convert::AsRef<std::path::Path>) -> core::result::Result<(), nmp::EngineError>
 pub fn nmp::Engine::set_active_account(&self, core::option::Option<nostr::key::public_key::PublicKey>) -> core::result::Result<(), nmp::EngineError>
 pub fn nmp::Engine::shutdown(&self)
-pub fn nmp::Engine::sign_event(&self, nmp::SignEventRequest) -> core::result::Result<nmp_engine::runtime::SignEventOperation, nmp_engine::runtime::SignEventError>
+pub fn nmp::Engine::sign_event(&self, nmp::SignEventRequest) -> core::result::Result<nmp_engine::runtime::SignEventOperation, nmp_engine::runtime::SignEventStartError>
 impl core::ops::drop::Drop for nmp::Engine
 pub fn nmp::Engine::drop(&mut self)
 impl !core::marker::Freeze for nmp::Engine
@@ -26040,7 +26041,7 @@ reexport nmp::SignEventCancel => nmp_engine::runtime::SignEventCancel
   "name": "SignEventCancel",
   "visibility": "public"
 }
-reexport nmp::SignEventError => nmp_engine::runtime::SignEventError
+reexport nmp::SignEventFailure => nmp_engine::runtime::SignEventFailure
 {
   "attrs": [],
   "inner": {
@@ -26051,50 +26052,6 @@ reexport nmp::SignEventError => nmp_engine::runtime::SignEventError
       },
       "has_stripped_variants": false,
       "variants": [
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": "plain"
-            }
-          },
-          "name": "NoActiveSigner",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": {
-                "struct": {
-                  "fields": [
-                    {
-                      "attrs": [],
-                      "inner": {
-                        "struct_field": {
-                          "resolved_path": {
-                            "args": null,
-                            "path": "String",
-                            "resolved_item": {
-                              "path": "alloc::string::String"
-                            }
-                          }
-                        }
-                      },
-                      "name": "reason",
-                      "visibility": "default"
-                    }
-                  ],
-                  "has_stripped_fields": false
-                }
-              }
-            }
-          },
-          "name": "InvalidRequest",
-          "visibility": "default"
-        },
         {
           "attrs": [],
           "inner": {
@@ -26202,24 +26159,13 @@ reexport nmp::SignEventError => nmp_engine::runtime::SignEventError
               "kind": "plain"
             }
           },
-          "name": "EngineClosed",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": "plain"
-            }
-          },
           "name": "Cancelled",
           "visibility": "default"
         }
       ]
     }
   },
-  "name": "SignEventError",
+  "name": "SignEventFailure",
   "visibility": "public"
 }
 reexport nmp::SignEventOperation => nmp_engine::runtime::SignEventOperation
@@ -26281,12 +26227,12 @@ reexport nmp::SignEventOperation => nmp_engine::runtime::SignEventOperation
                             "type": {
                               "resolved_path": {
                                 "args": null,
-                                "path": "SignEventError",
+                                "path": "SignEventFailure",
                                 "resolved_item": {
                                   "definition": {
-                                    "previously_defined": "nmp_engine::runtime::SignEventError"
+                                    "previously_defined": "nmp_engine::runtime::SignEventFailure"
                                   },
-                                  "path": "nmp_engine::runtime::SignEventError"
+                                  "path": "nmp_engine::runtime::SignEventFailure"
                                 }
                               }
                             }
@@ -26381,6 +26327,78 @@ reexport nmp::SignEventOperation => nmp_engine::runtime::SignEventOperation
     }
   },
   "name": "SignEventOperation",
+  "visibility": "public"
+}
+reexport nmp::SignEventStartError => nmp_engine::runtime::SignEventStartError
+{
+  "attrs": [],
+  "inner": {
+    "enum": {
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "has_stripped_variants": false,
+      "variants": [
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "NoActiveSigner",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": null,
+                            "path": "String",
+                            "resolved_item": {
+                              "path": "alloc::string::String"
+                            }
+                          }
+                        }
+                      },
+                      "name": "reason",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "InvalidRequest",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "EngineClosed",
+          "visibility": "default"
+        }
+      ]
+    }
+  },
+  "name": "SignEventStartError",
   "visibility": "public"
 }
 reexport nmp::SignerError => nmp_signer::op::SignerError
