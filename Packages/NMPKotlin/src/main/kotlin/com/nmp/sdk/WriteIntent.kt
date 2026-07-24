@@ -45,11 +45,17 @@ sealed class WriteRouting {
  * P: signing and publishing are ORTHOGONAL stages -- `Unsigned` is a
  * template whose `pubkey` names the account being published as (see
  * `NMPEngine.setActiveAccount`); the key lives engine-side and signs it
- * there. `Signed` (#32, the M5 unlock) is a caller that already holds a
- * validly-signed event -- an external signer / NIP-46 bunker, or a
- * verbatim republish -- and hands its fields across as-is: the engine
- * verifies then publishes it exactly as given, never re-signing, mutating
- * a tag, or recomputing an id. */
+ * there. [UnsignedReplaceableEdit] (#597) carries that same complete
+ * caller-owned body plus the exact current local winner the caller observed;
+ * `null` asserts that the coordinate currently has no local winner. NMP
+ * checks the guard atomically before durable acceptance and reports
+ * [WriteStatus.ReplaceableConflict] on mismatch. The caller still owns the
+ * source policy that established the base and every kind/tag/content
+ * semantic. `Signed` (#32, the M5 unlock) is a caller that already holds a
+ * validly-signed event -- an external signer / NIP-46 bunker, or a verbatim
+ * republish -- and hands its fields across as-is: the engine verifies then
+ * publishes it exactly as given, never re-signing, mutating a tag, or
+ * recomputing an id. */
 sealed class WritePayload {
     data class Unsigned(
         val pubkey: String,
@@ -57,6 +63,15 @@ sealed class WritePayload {
         val kind: UShort,
         val tags: List<List<String>>,
         val content: String,
+    ) : WritePayload()
+
+    data class UnsignedReplaceableEdit(
+        val pubkey: String,
+        val createdAt: ULong,
+        val kind: UShort,
+        val tags: List<List<String>>,
+        val content: String,
+        val expectedBase: String?,
     ) : WritePayload()
 
     data class Signed(
@@ -72,6 +87,15 @@ sealed class WritePayload {
     fun toFfi(): FfiWritePayload =
         when (this) {
             is Unsigned -> FfiWritePayload.Unsigned(pubkey, createdAt, kind, tags, content)
+            is UnsignedReplaceableEdit ->
+                FfiWritePayload.UnsignedReplaceableEdit(
+                    pubkey,
+                    createdAt,
+                    kind,
+                    tags,
+                    content,
+                    expectedBase,
+                )
             is Signed -> FfiWritePayload.Signed(id, pubkey, createdAt, kind, tags, content, sig)
         }
 }

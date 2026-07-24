@@ -145,6 +145,49 @@ final class FilterBuilderTests: XCTestCase {
         XCTAssertEqual(sig, String(repeating: "d", count: 128))
     }
 
+    /// #597: the generic native guard stays one closed write payload; the
+    /// complete caller-owned body and nullable exact base cross FFI together.
+    func testGuardedReplaceableWriteIntentConversion() {
+        let expectedBase = String(repeating: "a", count: 64)
+        let intent = WriteIntent(
+            payload: .unsignedReplaceableEdit(
+                pubkey: String(repeating: "b", count: 64),
+                createdAt: 1_700_000_001,
+                kind: 10_042,
+                tags: [["x", "caller-owned"]],
+                content: "replacement",
+                expectedBase: expectedBase
+            ),
+            durability: .durable,
+            routing: .authorOutbox
+        )
+
+        guard case .unsignedReplaceableEdit(
+            let pubkey, let createdAt, let kind, let tags, let content, let actualBase
+        ) = intent.toFfi().payload else {
+            return XCTFail("expected a guarded replaceable payload")
+        }
+        XCTAssertEqual(pubkey, String(repeating: "b", count: 64))
+        XCTAssertEqual(createdAt, 1_700_000_001)
+        XCTAssertEqual(kind, 10_042)
+        XCTAssertEqual(tags, [["x", "caller-owned"]])
+        XCTAssertEqual(content, "replacement")
+        XCTAssertEqual(actualBase, expectedBase)
+
+        let first = WritePayload.unsignedReplaceableEdit(
+            pubkey: pubkey,
+            createdAt: createdAt,
+            kind: 10_043,
+            tags: [],
+            content: "first",
+            expectedBase: nil
+        )
+        guard case .unsignedReplaceableEdit(_, _, _, _, _, let nilBase) = first.toFfi() else {
+            return XCTFail("expected a guarded first creation")
+        }
+        XCTAssertNil(nilBase)
+    }
+
     /// #47: an `identityOverride` crosses to `FfiWriteIntent` intact -- the
     /// per-write identity is data, never rewritten or dropped by the mirror.
     func testWriteIntentConversionCarriesIdentityOverride() {

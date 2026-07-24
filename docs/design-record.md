@@ -308,8 +308,10 @@ canonical statement is `docs/VISION.md`; detailed ownership lives in:
   base its protocol operation established. The store compares that base inside
   atomic acceptance and emits a typed conflict without residue; the operation's
   separately declared source evidence authorizes composition but never claims
-  global completeness. Native apps cannot mint this guard through raw FFI
-  writes and reach it through semantic operations such as NIP-02 follow.
+  global completeness. Rust, FFI, Swift, and Kotlin expose the same generic
+  guarded payload for callers that own the complete event value and acquisition
+  policy; closed semantic operations such as NIP-02 follow additionally own
+  reusable preservation and readiness rules.
 - Durable retry uses logical backoff with one owner per domain and one deadline
   scheduler. There is no hidden durable transport buffer, fixed-rate polling,
   or silent give-up during temporary unavailability.
