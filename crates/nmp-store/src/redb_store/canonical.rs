@@ -87,6 +87,24 @@ pub(super) fn observation_relay_key(key: &[u8]) -> RelayKey {
     )
 }
 
+/// Fold one persisted observation into the typed relay identity exposed to
+/// callers. Distinct durable relay keys can outlive URL-normalization changes
+/// and parse to the same [`RelayUrl`]; the latest observation remains the
+/// strongest truthful seen-at fact.
+pub(super) fn fold_seen_at(
+    seen: &mut BTreeMap<RelayUrl, Timestamp>,
+    relay: RelayUrl,
+    at: Timestamp,
+) {
+    seen.entry(relay)
+        .and_modify(|existing| {
+            if at > *existing {
+                *existing = at;
+            }
+        })
+        .or_insert(at);
+}
+
 #[cfg(test)]
 pub(super) fn observation_event_key(key: &[u8]) -> EventKey {
     EventKey::from_be_bytes(
@@ -247,8 +265,8 @@ impl<'txn> CanonicalWriteTables<'txn> {
                 .map_err(persist_err)?
                 .expect("redb: observation relay key exists");
             let relay =
-                RelayUrl::parse(relay.value()).expect("redb: interned relay URL remains canonical");
-            assert!(seen.insert(relay, Timestamp::from(at.value())).is_none());
+                RelayUrl::parse(relay.value()).expect("redb: interned relay URL remains parseable");
+            fold_seen_at(&mut seen, relay, Timestamp::from(at.value()));
         }
         Ok(seen)
     }
