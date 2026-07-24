@@ -2430,6 +2430,13 @@ impl<S: EventStore> EngineCore<S> {
             WriteRouting::PinnedHost(auth) => {
                 format!("pinned-host-hex:{}", hex::encode(auth.host().to_string()))
             }
+            WriteRouting::RelayListBootstrap(auth) => format!(
+                "nip65-bootstrap-hex:{}",
+                auth.iter()
+                    .map(|relay| hex::encode(relay.to_string()))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
         }
     }
 
@@ -2472,6 +2479,23 @@ impl<S: EventStore> EngineCore<S> {
             return Some(WriteRouting::PinnedHost(HostAuthority::from_selected_host(
                 host,
             )));
+        }
+        if let Some(encoded) = snapshot.strip_prefix("nip65-bootstrap-hex:") {
+            let relays = if encoded.is_empty() {
+                Vec::new()
+            } else {
+                encoded
+                    .split(',')
+                    .map(|part| {
+                        let bytes = hex::decode(part).ok()?;
+                        let url = String::from_utf8(bytes).ok()?;
+                        RelayUrl::parse(&url).ok()
+                    })
+                    .collect::<Option<Vec<_>>>()?
+            };
+            return Some(WriteRouting::RelayListBootstrap(
+                RelayListBootstrapAuthority::from_validated_relays(relays),
+            ));
         }
         None
     }
@@ -2588,7 +2612,11 @@ impl<S: EventStore> EngineCore<S> {
     /// `PrivateNarrow`, an empty/unroutable state is structurally
     /// unreachable (`HostAuthority` always carries exactly one well-formed
     /// `RelayUrl`), so this arm is infallible where `PrivateNarrow`'s is
-    /// not.
+    /// not. `RelayListBootstrap` follows the same directory-blind execution
+    /// rule for a finite set minted by the NIP-65 module. Crucially, resolving
+    /// this route does NOT install those relays as author-outbox facts; only
+    /// the ordinary network-ingest path for the resulting kind:10002 can do
+    /// that.
     pub(super) fn resolve_routes(
         &self,
         routing: &WriteRouting,
@@ -2648,6 +2676,14 @@ impl<S: EventStore> EngineCore<S> {
                 }
             }
             WriteRouting::PinnedHost(auth) => Ok(BTreeSet::from([auth.host()])),
+            WriteRouting::RelayListBootstrap(auth) => {
+                let relays = auth.iter().cloned().collect::<BTreeSet<_>>();
+                if relays.is_empty() {
+                    Err("NIP-65 bootstrap route has no validated relay set".to_string())
+                } else {
+                    Ok(relays)
+                }
+            }
         }
     }
 

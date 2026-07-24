@@ -39,5 +39,5 @@ pub use nip19::{decode as decode_nostr_entity, NostrEntity, NostrEntityError};
 pub use selector::{IdentityField, Selector};
 pub use write::{
     CorrelationToken, CorrelationTokenError, Durability, HostAuthority, NarrowOnly, PrivateRoute,
-    WriteIntent, WritePayload, WriteRouting,
+    RelayListBootstrapAuthority, WriteIntent, WritePayload, WriteRouting,
 };

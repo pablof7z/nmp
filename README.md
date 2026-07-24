@@ -92,6 +92,12 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 
 **Protocol modules** (opt-in — core stays kind-agnostic)
 - ✅ NIP-02 following — canonical kind:3, guarded tag-preserving follow/unfollow, on **Swift + Kotlin**
+- ✅ NIP-65 new-account bootstrap — `nmp-nip65` validates a finite exact
+  bootstrap set, composes the first kind:10002, and returns the ordinary
+  tracked write receipt. It never injects relay-directory facts: subsequent
+  author-outbox writes become routable only after the relay list returns
+  through ordinary live observation/ingest. Direct Rust today; native
+  projection remains explicit follow-up work.
 - ✅ NIP-29 groups — metadata / membership / moderation, plus kind:9 group-chat **send + read** proven by a live round-trip test (device-scale room-open UX still to be re-measured)
 - ✅ Optional parser-only content module (source-ranged plaintext/Markdown and NIP-19 occurrences), pure safe reference-demand planning shared by Rust/Swift/Kotlin, and a SwiftUI family whose app-selected components—not parsing or visibility—own optional query handles. Exact kind:0/NIP-23 codecs belong to their own protocol owners, not `nmp-content` ([#561](https://github.com/pablof7z/nmp/issues/561))
 - 🧪 NIP-51 lists — decode/reading only today; list **editing** is deliberately gated on [#50](https://github.com/pablof7z/nmp/issues/50)
@@ -191,7 +197,7 @@ Diagnostics are a **permanent, read-only proof surface** — source plan, wire f
 - `crates/nmp` — the supported Rust facade (`nmp::Engine`); `crates/nmp-ffi` projects it to Swift/Kotlin via UniFFI
 - `crates/nmp-{store,resolver,router,transport,engine,signer,executor}` — internal seams, not alternate APIs
 - `crates/nmp-content` — optional parser-only semantic document layer
-- `crates/nmp-{nip02,nip29,nip51,blossom,nip68,media}` — opt-in protocol modules
+- `crates/nmp-{nip02,nip29,nip51,nip65,blossom,nip68,media}` — opt-in protocol modules
 - `crates/nmp-demo` — the read-only CLI falsifier
 - `Packages/NMP` (Swift) · `Packages/NMPKotlin` (Kotlin/JVM)
 - `apps/Falsifier`, `apps/UIGallery` — SwiftUI proving grounds

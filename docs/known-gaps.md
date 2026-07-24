@@ -358,6 +358,21 @@ about current code:
 
 ## Protocol modules
 
+- **NIP-65 first-publication bootstrap is shipped for direct Rust only
+  (#719).** `nmp-nip65` exclusively owns kind:10002 composition and exposes
+  one semantic `publish_relay_list_bootstrap` operation. Its request separates
+  the finite exact bootstrap delivery set from the bounded advertised relay
+  policy, requires at least one write-capable advertised relay, samples time
+  inside Rust, and returns the ordinary tracked receipt. The dedicated
+  `RelayListBootstrap` route is persisted across restart but never mutates the
+  relay directory. A real controlled-relay falsifier holds the bootstrap
+  EVENT before relay acceptance and proves an ordinary AuthorOutbox write
+  still fails; after the already-open kind:10002 observation receives real
+  relay provenance, the next AuthorOutbox write routes and ACKs. No synthetic
+  row, local directory injection, app transport, or `nmp-grammar` consumer
+  dependency exists. **Gap:** FFI, Swift, and Kotlin do not yet project this
+  operation and must not hand-roll it.
+
 - **`nmp-blossom` covers the BUD verbs and their FFI/Swift/Kotlin projection, but not the composition layers (#545 upload, #551 mirror/delete/list, #555 projection, epic #216).** The opt-in crate ships the BUD-11 kind:24242 authorization vocabulary (draft builders for upload/delete/list — BUD-04 mirror deliberately reuses the `upload` builder — plus validate + header encoding), the BUD-02 blob-descriptor parser, and an HTTP client with the engine's admission discipline covering sha256-self-verifying `PUT /upload`, `PUT /mirror` (409/502 kept distinct, same integrity gate), single-blob-bound `DELETE /<sha256>`, and strictly parsed, bounded `GET /list/<pubkey>` (cursor/limit pagination; the deprecated `since`/`until` are not modeled). #555 projects all of it through `nmp-ffi` (`crates/nmp-ffi/src/blossom.rs`: engine-less draft/validate free functions and objects plus the blocking `FfiBlossomClient`, each operation's failure taxonomy crossing as its own typed error enum) and the hand-written SDKs (`Packages/NMP/Sources/NMP/Blossom.swift`, `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Blossom.kt`). Signing note: FFI apps sign a Blossom draft through the existing governed sign-only surface (`NmpEngine::sign_event`), which freezes the author from the ACTIVE ACCOUNT — there is no per-operation identity override on the sign-only path (the `FfiWriteIntent.identity_override` seam from #550 covers publish intents only), so an app whose Blossom author differs from the active account must sign the draft's `unsigned_event_json` with an external/native signer and validate via `FfiBlossomAuthorization::validate`. Deliberately NOT in this unit, tracked as #216 follow-ups: the `get`/`media` endpoints (the `BlossomVerb` enum models `get` totally, but it has no draft builder), NIP-68 `imeta` picture events (T15-B), and the upload-then-publish composition seam (T15-C).
 
 - **`nmp-nip68` owns the NIP-68 kind:20 picture-first event build + decode with imeta artifact provenance, but not the composition, projection, or richer-tag layers (#558, epic #216 T15-B-NIP68-IMETA).** The opt-in crate exclusively claims kind:20 and, engine-free and signing-free (the `nmp-nip29`/`nmp-blossom` discipline), mints a `PictureImage` artifact reference only from a content-addressed Blossom `BlobDescriptor`/`VerifiedUpload` (`url`/`m`/`x` carried by construction; a descriptor without a mime type cannot mint one), builds an immutable unsigned kind:20 draft (`build_picture`, refusing zero images), and tolerantly decodes a kind:20 event into typed picture facts with recorded diagnostics (`decode_picture`, surfacing a missing `x` as `sha256: None` + `ImetaMissingSha256` rather than trusting it). The first cut carries `title` + `imeta` images + `content-warning` + `t` hashtags only. Deliberately NOT in this unit, tracked as #216 follow-ups: the richer event-level tags (`location`/geohash, annotate-user, `L`/`l` labels); the FFI/Swift/Kotlin projection (a separate later unit); and the T15-C upload → build → sign → publish composition seam (#559).

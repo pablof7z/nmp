@@ -1926,6 +1926,7 @@ dependencies = [
  "nmp-nip22",
  "nmp-nip29",
  "nmp-nip51",
+ "nmp-nip65",
  "nmp-nip68",
  "nmp-ownership",
  "nmp-router",
@@ -2114,6 +2115,27 @@ dependencies = [
  "nmp-grammar",
  "nmp-ownership",
  "nostr 0.44.4",
+]
+
+[[package]]
+name = "nmp-nip65"
+version = "0.1.0"
+dependencies = [
+ "nmp",
+ "nmp-grammar",
+ "nmp-ownership",
+ "nostr 0.44.4",
+ "nostr-relay-builder",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "nmp-nip65-consumer-check"
+version = "0.1.0"
+dependencies = [
+ "nmp",
+ "nmp-nip65",
 ]
 
 [[package]]

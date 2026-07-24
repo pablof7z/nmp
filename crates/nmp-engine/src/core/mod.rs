@@ -60,8 +60,9 @@ use nostr::{
 
 use nmp_grammar::{
     fold_byte, AccessContext, Binding, CacheMode, ConcreteFilter, ContextualAtom, DescriptorHash,
-    Durability, Filter, Freshness, HostAuthority, NarrowOnly, PrivateRoute, RelaySessionKey,
-    RoutingEvidence, SourceAuthority, WriteIntent, WritePayload, WriteRouting,
+    Durability, Filter, Freshness, HostAuthority, NarrowOnly, PrivateRoute,
+    RelayListBootstrapAuthority, RelaySessionKey, RoutingEvidence, SourceAuthority, WriteIntent,
+    WritePayload, WriteRouting,
 };
 use nmp_resolver::{
     CommittedMutationResult, CommittedRowChanges, Engine as ResolverEngine, HandleId, LiveQuery,

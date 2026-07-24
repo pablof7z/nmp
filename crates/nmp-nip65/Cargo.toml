@@ -1,0 +1,17 @@
+[package]
+name = "nmp-nip65"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+nostr.workspace = true
+nmp.workspace = true
+nmp-grammar.workspace = true
+nmp-ownership.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+nostr-relay-builder = "0.45.0-alpha.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }

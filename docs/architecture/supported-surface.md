@@ -7,6 +7,16 @@ identity and diagnostics. Mechanism crates such as `nmp-engine`, `nmp-store`,
 not parallel application contracts. The feature-gated `from_parts` path is
 explicitly unstable test infrastructure.
 
+Opt-in direct-Rust protocol crates may provide semantic operations over that
+same facade. `nmp-nip65` exposes the first kind:10002 bootstrap operation: its
+consumer manifest needs only `nmp` plus `nmp-nip65`, and the operation returns
+the ordinary `ReceiptStream`. The internal exact-route authority remains
+withheld from `nmp`; no raw relay-array write escape hatch is added.
+
+NIP-65 bootstrap is not projected through UniFFI, Swift, or Kotlin in its first
+unit. Native consumers must not recreate it with raw sockets or mechanism
+crates; parity is an explicit later surface change.
+
 `nmp-ffi` is a projection of that facade. The repository uses UniFFI proc
 macros and extracts component metadata from a compiled library; there is no UDL
 source of truth. Swift and Kotlin add native observation/lifecycle ergonomics

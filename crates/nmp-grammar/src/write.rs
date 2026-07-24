@@ -1,6 +1,7 @@
 //! The write-intent vocabulary (#115 Fable ruling, Fork 3's dependency
 //! ruling): `Durability`, `WritePayload`, `WriteIntent`, `WriteRouting`,
-//! `NarrowOnly`, `PrivateRoute`, and `HostAuthority` relocate here from
+//! `NarrowOnly`, `PrivateRoute`, [`RelayListBootstrapAuthority`], and
+//! `HostAuthority` relocate here from
 //! `nmp-engine::outbox` -- a protocol module (e.g. `nmp-nip29`) composing a
 //! `WriteIntent` must not gain an engine dependency to do so, and this
 //! crate is already the read noun's home (`Demand`/`SourceAuthority`), so
@@ -225,6 +226,22 @@ pub enum WriteRouting {
     /// entirely -- an app can only reach it transitively through a
     /// protocol module's composed intent).
     PinnedHost(HostAuthority),
+    /// NIP-65 account bootstrap: publish the author's first kind:10002 to
+    /// exactly the finite relay set validated by the NIP-65 protocol module.
+    ///
+    /// This route is deliberately distinct from [`Self::PrivateNarrow`]:
+    /// bootstrap relays are public delivery targets, not privacy authority.
+    /// It is also distinct from [`Self::PinnedHost`]: NIP-65 permits an
+    /// explicit relay SET rather than one protocol host. The engine executes
+    /// this closed value without interpreting NIP-65, mutating its directory,
+    /// or inserting synthetic relay provenance. Only an ordinary network
+    /// ingest of the resulting kind:10002 can establish later
+    /// [`Self::AuthorOutbox`] routing.
+    ///
+    /// The `nmp` facade deliberately does not re-export
+    /// [`RelayListBootstrapAuthority`]. A normal consumer reaches this route
+    /// only through the validated `nmp-nip65` semantic operation.
+    RelayListBootstrap(RelayListBootstrapAuthority),
 }
 
 /// Fail-closed narrow relay set (ledger #6). By construction this type
@@ -263,6 +280,37 @@ impl<T: Ord> NarrowOnly<T> {
 #[derive(Clone)]
 pub struct PrivateRoute {
     pub relays: NarrowOnly<RelayUrl>,
+}
+
+/// Exact relay-set authority for the first NIP-65 kind:10002 publication.
+///
+/// Like [`HostAuthority`], this is public at the trusted direct-Rust grammar
+/// tier because a separate protocol crate must be able to mint it without
+/// depending on the engine. It is intentionally withheld from the `nmp`
+/// facade. [`Self::from_validated_relays`] is therefore a protocol-module
+/// assertion: `nmp-nip65` validates non-emptiness, uniqueness, and its public
+/// bound before constructing this value. No mutation/widening API exists
+/// afterward.
+#[derive(Debug, Clone)]
+pub struct RelayListBootstrapAuthority {
+    relays: BTreeSet<RelayUrl>,
+}
+
+impl RelayListBootstrapAuthority {
+    /// Mint the exact relay set already validated by the NIP-65 module.
+    ///
+    /// This constructor performs only canonical set capture. Semantic
+    /// validation belongs to the protocol owner and is deliberately not
+    /// duplicated in the content-agnostic grammar.
+    pub fn from_validated_relays(relays: impl IntoIterator<Item = RelayUrl>) -> Self {
+        Self {
+            relays: relays.into_iter().collect(),
+        }
+    }
+
+    pub fn iter(&self) -> std::collections::btree_set::Iter<'_, RelayUrl> {
+        self.relays.iter()
+    }
 }
 
 /// An explicit, single pinned write-host authority (#115) — the write-side
@@ -320,6 +368,15 @@ mod tests {
         let host = RelayUrl::parse("wss://host.example.com").unwrap();
         let auth = HostAuthority::from_selected_host(host.clone());
         assert_eq!(auth.host(), host);
+    }
+
+    #[test]
+    fn relay_list_bootstrap_authority_is_an_immutable_exact_set() {
+        let a = RelayUrl::parse("wss://a.example.com").unwrap();
+        let b = RelayUrl::parse("wss://b.example.com").unwrap();
+        let auth =
+            RelayListBootstrapAuthority::from_validated_relays([b.clone(), a.clone(), b.clone()]);
+        assert_eq!(auth.iter().cloned().collect::<Vec<_>>(), vec![a, b]);
     }
 
     /// #47: the override is plain intent vocab — an optional pubkey the
