@@ -94,7 +94,7 @@ private func binding(from ffi: FfiBinding) -> NMPBinding {
         }
     case .derived(let derived):
         return .derived(
-            inner: filter(from: derived.inner()),
+            inner: demand(from: derived.inner()),
             project: selector(from: derived.project())
         )
     case .setOp(let setOp):

@@ -821,12 +821,11 @@ fn binding_from_ffi(b: FfiBinding, field: LiteralField) -> Result<GBinding, FfiE
             GBinding::Reactive(identity_field_from_ffi(id_field))
         }
         FfiBinding::Derived { derived } => GBinding::Derived(Box::new(GDerived {
-            // #106: the FFI surface stays `Filter`-only (no `Demand`/
-            // `SourceAuthority` exposed to apps yet) -- `Demand::
-            // from_filter`'s static default applies transparently at this
-            // boundary, identical to every direct-Rust `LiveQuery::
-            // from_filter` call site.
-            inner: GDemand::from_filter(filter_from_ffi(derived.inner.clone())?),
+            // #714: nested policy is app-visible and lossless. Never
+            // reconstruct it through `Demand::from_filter`: the inner query
+            // owns source/access/cache/freshness independently from its
+            // outer demand.
+            inner: demand_from_ffi(derived.inner.clone())?,
             project: selector_from_ffi(derived.project.clone())?,
         })),
         FfiBinding::SetOp { set_op } => GBinding::SetOp(Box::new(GSetOp {
@@ -851,11 +850,7 @@ pub fn binding_to_ffi(b: GBinding) -> FfiBinding {
         },
         GBinding::Derived(d) => FfiBinding::Derived {
             derived: std::sync::Arc::new(FfiDerived {
-                // The inverse of `binding_from_ffi`'s `Derived` arm: only
-                // the selection crosses back out (`source`/`access` are
-                // not yet part of the FFI surface, #106) -- reconstructed
-                // identically by `Demand::from_filter` on the way back in.
-                inner: filter_to_ffi(d.inner.selection),
+                inner: demand_to_ffi(d.inner),
                 project: selector_to_ffi(d.project),
             }),
         },
@@ -2073,12 +2068,18 @@ mod tests {
     fn derived_and_set_op_round_trip() {
         let derived = FfiBinding::Derived {
             derived: std::sync::Arc::new(FfiDerived {
-                inner: FfiFilter {
-                    kinds: Some(vec![3]),
-                    authors: Some(FfiBinding::Reactive {
-                        field: FfiIdentityField::ActivePubkey,
-                    }),
-                    ..FfiFilter::default()
+                inner: FfiDemand {
+                    selection: FfiFilter {
+                        kinds: Some(vec![3]),
+                        authors: Some(FfiBinding::Reactive {
+                            field: FfiIdentityField::ActivePubkey,
+                        }),
+                        ..FfiFilter::default()
+                    },
+                    source: FfiSourceAuthority::AuthorOutboxes,
+                    access: FfiAccessContext::Public,
+                    cache: FfiCacheMode::Agnostic,
+                    freshness: FfiFreshness::Live,
                 },
                 project: FfiSelector::Tag {
                     name: "p".to_string(),
@@ -2087,12 +2088,18 @@ mod tests {
         };
         let mutes = FfiBinding::Derived {
             derived: std::sync::Arc::new(FfiDerived {
-                inner: FfiFilter {
-                    kinds: Some(vec![10_000]),
-                    authors: Some(FfiBinding::Reactive {
-                        field: FfiIdentityField::ActivePubkey,
-                    }),
-                    ..FfiFilter::default()
+                inner: FfiDemand {
+                    selection: FfiFilter {
+                        kinds: Some(vec![10_000]),
+                        authors: Some(FfiBinding::Reactive {
+                            field: FfiIdentityField::ActivePubkey,
+                        }),
+                        ..FfiFilter::default()
+                    },
+                    source: FfiSourceAuthority::AuthorOutboxes,
+                    access: FfiAccessContext::Public,
+                    cache: FfiCacheMode::Agnostic,
+                    freshness: FfiFreshness::Live,
                 },
                 project: FfiSelector::Tag {
                     name: "p".to_string(),
@@ -2112,6 +2119,95 @@ mod tests {
         let grammar = filter_from_ffi(ffi.clone()).expect("valid filter");
         let back = filter_to_ffi(grammar);
         assert_eq!(ffi, back);
+    }
+
+    /// #714: a nested `Derived.inner` is a complete `Demand`, not a
+    /// filter-shaped value that silently regains defaults at the boundary.
+    /// Deliberately make every inner policy differ from the outer demand so
+    /// dropping any one of them fails this exact round trip.
+    #[test]
+    fn derived_inner_full_demand_round_trips_every_policy_independently() {
+        let inner = FfiDemand {
+            selection: FfiFilter {
+                kinds: Some(vec![3]),
+                authors: Some(FfiBinding::Reactive {
+                    field: FfiIdentityField::ActivePubkey,
+                }),
+                ..FfiFilter::default()
+            },
+            source: FfiSourceAuthority::Pinned {
+                relays: vec!["wss://inner.example.com".to_string()],
+            },
+            access: FfiAccessContext::Nip42 {
+                public_key: pk_hex(),
+            },
+            cache: FfiCacheMode::Strict,
+            freshness: FfiFreshness::MaxAge { seconds: 600 },
+        };
+        let mut public_inner = inner.clone();
+        public_inner.access = FfiAccessContext::Public;
+        assert_ne!(
+            inner, public_inner,
+            "identical nested selections under different access contexts are distinct descriptors"
+        );
+        let outer = FfiDemand {
+            selection: FfiFilter {
+                kinds: Some(vec![1]),
+                authors: Some(FfiBinding::Derived {
+                    derived: std::sync::Arc::new(FfiDerived {
+                        inner: inner.clone(),
+                        project: FfiSelector::Tag {
+                            name: "p".to_string(),
+                        },
+                    }),
+                }),
+                ..FfiFilter::default()
+            },
+            source: FfiSourceAuthority::Public,
+            access: FfiAccessContext::Public,
+            cache: FfiCacheMode::Agnostic,
+            freshness: FfiFreshness::Live,
+        };
+
+        let grammar = demand_from_ffi(outer.clone()).expect("every nested policy is valid");
+        let binding = grammar
+            .selection
+            .authors
+            .as_ref()
+            .expect("outer authors binding");
+        let GBinding::Derived(derived) = binding else {
+            panic!("expected derived authors binding");
+        };
+        assert!(matches!(derived.inner.source, GSourceAuthority::Pinned(_)));
+        assert!(matches!(derived.inner.access, GAccessContext::Nip42(_)));
+        assert_eq!(derived.inner.cache, GCacheMode::Strict);
+        assert_eq!(derived.inner.freshness, GFreshness::MaxAge { seconds: 600 });
+
+        assert_eq!(demand_to_ffi(grammar), outer);
+
+        let public_outer = FfiDemand {
+            selection: FfiFilter {
+                kinds: Some(vec![1]),
+                authors: Some(FfiBinding::Derived {
+                    derived: std::sync::Arc::new(FfiDerived {
+                        inner: public_inner,
+                        project: FfiSelector::Tag {
+                            name: "p".to_string(),
+                        },
+                    }),
+                }),
+                ..FfiFilter::default()
+            },
+            source: FfiSourceAuthority::Public,
+            access: FfiAccessContext::Public,
+            cache: FfiCacheMode::Agnostic,
+            freshness: FfiFreshness::Live,
+        };
+        assert_ne!(outer, public_outer);
+        assert_eq!(
+            demand_to_ffi(demand_from_ffi(public_outer.clone()).unwrap()),
+            public_outer
+        );
     }
 
     #[test]

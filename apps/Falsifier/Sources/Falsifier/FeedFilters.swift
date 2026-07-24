@@ -15,7 +15,10 @@ enum FeedFilters {
         NMPFilter(
             kinds: kinds,
             authors: .derived(
-                inner: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
+                inner: NMPDemand(
+                    selection: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
+                    source: .authorOutboxes
+                ),
                 project: .tag("p")
             ),
             limit: 200
@@ -31,7 +34,10 @@ enum FeedFilters {
         NMPFilter(
             kinds: [10_002],
             authors: .derived(
-                inner: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
+                inner: NMPDemand(
+                    selection: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
+                    source: .authorOutboxes
+                ),
                 project: .tag("p")
             )
         )

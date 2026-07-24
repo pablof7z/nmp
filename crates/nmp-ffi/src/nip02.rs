@@ -111,11 +111,10 @@ impl Drop for NmpFollowStream {
     }
 }
 
-/// Pull-based follow/unfollow action stream (#680). The action worker (one
-/// transient thread per user action on the engine's internal blocking-adapter
-/// pool) pushes each [`FollowActionStatus`] into a waker-aware FIFO; this
-/// handle awaits them in order. `None` is the terminal signal. `Drop`/`cancel`
-/// close the stream.
+/// Pull-based follow/unfollow action stream (#680/#704). The async action task
+/// pushes each [`FollowActionStatus`] into a waker-aware FIFO without holding a
+/// dedicated worker thread; this handle awaits them in order. `None` is the
+/// terminal signal. `Drop`/`cancel` close the stream.
 #[derive(uniffi::Object)]
 pub struct NmpFollowActionStream {
     inner: nmp::AsyncFifoReceiver<FollowActionStatus>,

@@ -1,10 +1,10 @@
 # Query demand and acquisition evidence
 
-- **Status:** PARTIAL CONTRACT. The current `Filter` selection graph now ships
-  with per-current-plan `AcquisitionEvidence` across Rust, FFI, Swift, and
-  Kotlin; the former query-level aggregate is gone. Full
-  `Selection + SourceAuthority + AccessContext` identity, persistence, and
-  context-safe wire sharing remain TARGET under #49.
+- **Status:** BUILT for the full descriptor and scoped evidence contract across
+  Rust, FFI, Swift, and Kotlin (#49/#714). `Demand` identity is
+  `Selection + SourceAuthority + AccessContext`; every `Derived.inner` carries
+  its own complete demand; persisted coverage, wire sharing, and evidence are
+  context-safe. Broader permanent-diagnostics expansion remains under #51.
 - **Owns:** live-query identity, reusable derived demand, snapshot evidence, and
   the boundary between ordinary observations and diagnostics.
 
@@ -79,10 +79,15 @@ a hostile future-dated event cannot manufacture freshness.
 ```text
 Binding  := Literal(set)
           | Reactive(CurrentPubkey)
-          | Derived(inner: Filter, project: Selector)
+          | Derived(inner: Demand, project: Selector)
           | SetOp(Union | Intersect | Diff, [Binding])
 Selector := Authors | Ids | Tag(name: String) | AddressCoord
 ```
+
+The nested demand is not shorthand for an inherited context. Inner and outer
+source/access identity participate independently in graph construction,
+sharing, routing, coverage, evidence, rerooting, and teardown. Cache and
+freshness remain per-handle policies on each demand.
 
 `Tag`'s `name` is an arbitrary event-tag key (#64): it projects
 already-acquired events locally, so it is never restricted to a single
