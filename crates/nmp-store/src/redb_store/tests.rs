@@ -861,6 +861,106 @@ fn relay_dictionary_is_shared_refcounted_reclaimed_and_never_reuses_keys() {
 }
 
 #[test]
+fn canonical_relay_aliases_fold_to_latest_timestamp_on_read_and_mutation() {
+    use nostr::EventBuilder;
+
+    const CANONICAL_RELAY: &str = "wss://relay-alias.example/";
+    const STORED_ALIAS: &str = "wss://relay-alias.example";
+
+    let canonical_relay = RelayUrl::parse(CANONICAL_RELAY).unwrap();
+    let parsed_alias = RelayUrl::parse(STORED_ALIAS).unwrap();
+    assert_eq!(
+        parsed_alias, canonical_relay,
+        "fixture spellings must parse to one typed relay identity"
+    );
+    assert_ne!(
+        STORED_ALIAS,
+        canonical_relay.as_str(),
+        "fixture must persist byte-distinct relay dictionary rows"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("canonical-relay-alias.redb");
+    let keys = nostr::Keys::generate();
+    let event = EventBuilder::new(Kind::TextNote, "canonical relay alias")
+        .custom_created_at(Timestamp::from(1u64))
+        .sign_with_keys(&keys)
+        .unwrap();
+
+    let mut store = RedbStore::open(&path).unwrap();
+    store
+        .insert(
+            event.clone(),
+            RelayObserved::new(canonical_relay.clone(), Timestamp::from(10u64)),
+        )
+        .unwrap();
+    drop(store);
+
+    // Reproduce a durable dictionary created under a different URL
+    // normalization spelling: two numeric relay keys, two byte-distinct URL
+    // rows, and two observations for one event, but one typed RelayUrl.
+    let db = Database::create(&path).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let event_ids = write_txn.open_table(EVENT_IDS).unwrap();
+        let event_key = event_ids.get(event.id.as_bytes()).unwrap().unwrap().value();
+        let mut relays = write_txn.open_table(RELAYS).unwrap();
+        let mut relay_keys = write_txn.open_table(RELAY_KEYS).unwrap();
+        let canonical_key = relay_keys
+            .get(canonical_relay.as_str())
+            .unwrap()
+            .unwrap()
+            .value();
+        let alias_key = canonical_key + 1;
+        let mut relay_refs = write_txn.open_table(RELAY_REFS).unwrap();
+        let mut relay_meta = write_txn.open_table(RELAY_META).unwrap();
+        let mut observations = write_txn.open_table(EVENT_OBSERVATIONS).unwrap();
+
+        relays.insert(alias_key, STORED_ALIAS).unwrap();
+        relay_keys.insert(STORED_ALIAS, alias_key).unwrap();
+        relay_refs.insert(alias_key, 1).unwrap();
+        observations
+            .insert(&observation_key(event_key, alias_key), 20)
+            .unwrap();
+        relay_meta.insert(NEXT_RELAY_KEY, alias_key + 1).unwrap();
+    }
+    write_txn.commit().unwrap();
+    drop(db);
+
+    let mut reopened = RedbStore::open(&path).unwrap();
+
+    // The ordinary query path materializes provenance through
+    // RedbStore::read_provenance.
+    let rows = reopened.query(&Filter::new().id(event.id)).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].provenance.seen,
+        BTreeMap::from([(canonical_relay.clone(), Timestamp::from(20u64))])
+    );
+
+    // Duplicate ingest first loads the canonical row through
+    // CanonicalWriteTables::load_seen, then grows the retained seen-at fact.
+    let outcome = reopened
+        .insert(
+            event,
+            RelayObserved::new(canonical_relay.clone(), Timestamp::from(30u64)),
+        )
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        InsertOutcome::Duplicate {
+            provenance_grew: true,
+            ..
+        }
+    ));
+    let rows = reopened.query(&Filter::new()).unwrap();
+    assert_eq!(
+        rows[0].provenance.seen,
+        BTreeMap::from([(canonical_relay, Timestamp::from(30u64))])
+    );
+}
+
+#[test]
 fn batch_relay_refcounts_flush_once_per_distinct_relay() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("relay-refcount-batch.redb");
