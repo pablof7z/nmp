@@ -1031,20 +1031,19 @@ mod tests {
         }));
         let requests: BTreeSet<_> = execution
             .iter()
-            .filter_map(|fact| {
-                (fact.kind == "relay_request" && fact.path.as_deref() == Some("$")).then(|| {
-                    (
-                        fact.revision.expect("request filter revision"),
-                        evidence_attribute(fact, "transport_generation")
-                            .expect("request transport generation")
-                            .parse::<u64>()
-                            .expect("numeric transport generation"),
-                        evidence_attribute(fact, "request_revision")
-                            .expect("request revision")
-                            .parse::<u64>()
-                            .expect("numeric request revision"),
-                    )
-                })
+            .filter(|fact| fact.kind == "relay_request" && fact.path.as_deref() == Some("$"))
+            .map(|fact| {
+                (
+                    fact.revision.expect("request filter revision"),
+                    evidence_attribute(fact, "transport_generation")
+                        .expect("request transport generation")
+                        .parse::<u64>()
+                        .expect("numeric transport generation"),
+                    evidence_attribute(fact, "request_revision")
+                        .expect("request revision")
+                        .parse::<u64>()
+                        .expect("numeric request revision"),
+                )
             })
             .collect();
         assert!(
