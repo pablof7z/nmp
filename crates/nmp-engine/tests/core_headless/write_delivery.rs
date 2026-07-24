@@ -467,7 +467,7 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
     assert!(still_blocked
         .recover_on_boot()
         .iter()
-        .any(|effect| matches!(effect, Effect::EnsureRelay(r)
+        .any(|effect| matches!(effect, Effect::EnsureWriteRelay(r)
             if r == &signer_session(&relay, author.public_key()))));
     connect_signer(&mut still_blocked, 0, &relay, author.public_key());
     authenticate_signer(&mut still_blocked, 0, &relay, &author);
@@ -490,7 +490,7 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
     let boot = recovered.recover_on_boot();
     assert!(boot
         .iter()
-        .any(|effect| matches!(effect, Effect::EnsureRelay(r)
+        .any(|effect| matches!(effect, Effect::EnsureWriteRelay(r)
             if r == &signer_session(&relay, author.public_key()))));
     connect_signer(&mut recovered, 0, &relay, author.public_key());
     let effects = release_author_probe(

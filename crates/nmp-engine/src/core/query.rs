@@ -123,7 +123,7 @@ impl<S: EventStore> EngineCore<S> {
                         && !self.auth_ready_sessions.contains_key(*session)
                 })
                 .cloned()
-                .map(Effect::EnsureRelay),
+                .map(Effect::EnsureReadRelay),
         );
         // `router.compile()` above ALWAYS finalizes `prev_plan`/`last_diag`
         // for the full current demand, regardless of whether anything

@@ -793,7 +793,7 @@ impl<S: EventStore> EngineCore<S> {
     /// `reason` is the one piece of information issue #506's CRITICAL fix
     /// restores across the pool->engine boundary. Ordinary (transient)
     /// disconnects keep EXACTLY today's behavior: the pool itself is already
-    /// redialing on its own backoff schedule, and `Effect::EnsureRelay` here
+    /// redialing on its own backoff schedule, and an ensure effect here
     /// is an idempotent no-op nudge for that same worker. A
     /// `DisconnectReason::PermanentlyFailed` slot is different in kind: the
     /// transport pool has ALREADY retired that worker thread for good (see
@@ -914,11 +914,12 @@ impl<S: EventStore> EngineCore<S> {
                     // reducer still owns demand for exactly this session --
                     // a session no longer required must not be redialed
                     // merely because its old socket errored on the way out.
-                    let still_required = self
-                        .required_relay_workers()
-                        .is_some_and(|required| required.contains(&session));
-                    if still_required {
-                        effects.push(Effect::EnsureRelay(session));
+                    if let Some(required) = self.relay_worker_requirements() {
+                        if required.writes.contains(&session) {
+                            effects.push(Effect::EnsureWriteRelay(session));
+                        } else if required.all.contains(&session) {
+                            effects.push(Effect::EnsureReadRelay(session));
+                        }
                     }
                 }
             }

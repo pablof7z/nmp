@@ -93,8 +93,12 @@ pub struct NmpEngineConfig {
     #[uniffi(default = [])]
     pub allowed_local_relay_hosts: Vec<String>,
     /// The one whole-engine relay ceiling. It bounds the complete compiled
-    /// demand and the transport worker set with the same effective value.
-    /// Legacy zero is normalized to the finite default, never uncapped.
+    /// demand and simultaneous physical transport workers with the same
+    /// effective value. Access contexts never share a socket; competing read
+    /// and write contexts for the same admitted relay time-share its slot and
+    /// the read is restored afterward, so apps do not multiply this value per
+    /// context (#598). Legacy zero is normalized to the finite default, never
+    /// uncapped.
     ///
     /// The `default =` literal below MUST stay equal to
     /// [`DEFAULT_MAX_RELAYS`] (uniffi record defaults accept only a literal,

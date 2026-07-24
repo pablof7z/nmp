@@ -292,7 +292,7 @@ impl<S: EventStore> EngineCore<S> {
                     },
                     &mut effects,
                 );
-                effects.push(Effect::EnsureRelay(target.session));
+                effects.push(Effect::EnsureWriteRelay(target.session));
             }
             (HandoffResult::Ambiguous, Some(Durability::Durable)) => {
                 self.emit_write_status(
@@ -313,7 +313,7 @@ impl<S: EventStore> EngineCore<S> {
 
     /// Full O(pending) re-read of every outstanding write's lanes. This
     /// remains a deliberate architectural stance for `schedule_ready` (its
-    /// caller below) and `required_relay_workers`, NOT an oversight (epic
+    /// caller below) and `relay_worker_requirements`, NOT an oversight (epic
     /// #507 finding E5): both compute durable-cap/attempt-ordinal
     /// accounting, which is defined over ALL outstanding lanes globally --
     /// there is no per-relay narrowing that preserves that meaning, so they
@@ -396,7 +396,7 @@ impl<S: EventStore> EngineCore<S> {
                         },
                         &mut effects,
                     );
-                    effects.push(Effect::EnsureRelay(session));
+                    effects.push(Effect::EnsureWriteRelay(session));
                 } else {
                     self.retry_scheduler_blocked = true;
                 }
@@ -953,13 +953,13 @@ impl<S: EventStore> EngineCore<S> {
                     LaneState::WaitingConnection
                     | LaneState::Eligible { .. }
                     | LaneState::Transient { .. } => {
-                        effects.push(Effect::EnsureRelay(session));
+                        effects.push(Effect::EnsureWriteRelay(session));
                     }
                     LaneState::InFlight {
                         phase: InFlightPhase::AwaitingAck { .. },
                         ..
                     } => {
-                        effects.push(Effect::EnsureRelay(session));
+                        effects.push(Effect::EnsureWriteRelay(session));
                     }
                     LaneState::WaitingAuth => {
                         // A `WaitingAuth` park never survives a restart: its
@@ -982,7 +982,7 @@ impl<S: EventStore> EngineCore<S> {
                             .set_lane_waiting(&lane.key, lane.revision, false)
                             .is_ok()
                         {
-                            effects.push(Effect::EnsureRelay(session));
+                            effects.push(Effect::EnsureWriteRelay(session));
                         } else {
                             self.lane_relay_index_degraded = true;
                         }
@@ -2340,7 +2340,7 @@ impl<S: EventStore> EngineCore<S> {
                         },
                         effects,
                     );
-                    effects.push(Effect::EnsureRelay(session));
+                    effects.push(Effect::EnsureWriteRelay(session));
                 }
             }
         }

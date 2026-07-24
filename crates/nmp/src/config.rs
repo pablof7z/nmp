@@ -47,9 +47,13 @@ pub struct EngineConfig {
     /// empty (fail closed).
     pub allowed_local_relay_hosts: Vec<String>,
     /// The one whole-engine relay ceiling. The same effective value bounds
-    /// the router's complete current demand and the transport's live workers;
-    /// zero is accepted only as a legacy spelling of the finite default.
-    /// Refused query candidates remain explicit `LocalLimit` evidence.
+    /// the router's complete current demand and simultaneous physical
+    /// transport workers. Access contexts never share a socket; when read and
+    /// write contexts for the same admitted relay compete at this ceiling,
+    /// NMP time-shares that relay's slot and restores the read afterward
+    /// rather than requiring the app to multiply this value (#598). Zero is
+    /// accepted only as a legacy spelling of the finite default. Refused
+    /// query candidates remain explicit `LocalLimit` evidence.
     pub max_relays: usize,
     /// Maximum live account-signer and AUTH-policy registrations admitted by
     /// the shared capability registry (#8). Unlike the legacy zero-valued
