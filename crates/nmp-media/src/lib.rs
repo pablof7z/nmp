@@ -46,9 +46,11 @@
 //! and kind:20 by `nmp-nip68`, exactly as `nmp-nip29` composes kind:10009
 //! without claiming it. See the `ownership_audit` module below.
 //!
-//! The FFI/Swift/Kotlin projection of this seam is a SEPARATE later unit
-//! (batched with the nip68 projection, compile-gated) -- see
-//! `docs/known-gaps.md`.
+//! The narrow FFI/Swift/Kotlin projection (#730) preserves this witness
+//! boundary: only the opaque verified-upload object returned by a successful
+//! upload/mirror can enter the NIP-68 composer, and the result is an opaque
+//! picture draft for the existing sign/write-intent path. Durable upload and
+//! BUD-03 placement remain separate -- see `docs/known-gaps.md`.
 
 mod compose;
 mod prepare;

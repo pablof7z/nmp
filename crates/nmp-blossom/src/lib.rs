@@ -18,8 +18,9 @@
 //! from `nmp-transport`'s public pure classifiers (see `client.rs`).
 //!
 //! This unit covers the BUD-11 verbs (upload, BUD-04 mirror, BUD-12
-//! delete/list); the `get`/`media` endpoints, platform projection, and
-//! the NIP-68/composition layers are tracked follow-ups under epic #216
+//! delete/list). Platform projection and the witness-preserving NIP-68
+//! composition seam are built (#555/#730); the `get`/`media` endpoints,
+//! durable upload, and BUD-03 placement remain tracked under epic #216
 //! (see `docs/known-gaps.md`).
 
 mod auth;

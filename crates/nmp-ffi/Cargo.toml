@@ -49,6 +49,12 @@ nmp-content.workspace = true
 # staticlib/cdylib every Swift/Kotlin app links, so it bundles the
 # projection without the crate joining the canonical `nmp` facade.
 nmp-blossom.workspace = true
+# #730 (epic #216): project the existing witness-typed NIP-68 media
+# composition seam through the one native boundary. `nmp-media` owns the
+# staged composition and `nmp-nip68` owns the kind:20 schema/value types;
+# neither joins the canonical `nmp` facade.
+nmp-media.workspace = true
+nmp-nip68.workspace = true
 # #555: `FfiBlossomAuthorization::validate_signed_event` reassembles an
 # `FfiSignedEvent` record into canonical event JSON for nostr's strict
 # `Event::from_json` parser (typed refusal on malformed id/sig hex).

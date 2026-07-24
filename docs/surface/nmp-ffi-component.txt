@@ -3965,6 +3965,61 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiPictureComposeError",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "InvalidAuthorPubkey",
+            discr: None,
+            fields: [
+                Field {
+                    name: "got",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Boundary-reintroduced parse refusal: direct Rust takes a proven key.",
+            ),
+        },
+        Variant {
+            name: "NoImages",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "No verified images were supplied.",
+            ),
+        },
+        Variant {
+            name: "ImageMissingMimeType",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "A verified descriptor omitted NIP-68's mandatory `m` value.",
+            ),
+        },
+        Variant {
+            name: "EmptyHashtag",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "A supplied hashtag was empty.",
+            ),
+        },
+    ],
+    shape: Error {
+        flat: false,
+    },
+    non_exhaustive: false,
+    docstring: Some(
+        "Composition-only failure taxonomy. Upload, signer, and publication\nfailures have their own existing types and never enter this enum.",
+    ),
+}
+
+enum Enum {
     name: "FfiReceiptReattachment",
     module_path: "nmp_ffi",
     remote: false,
@@ -5370,7 +5425,7 @@ record Record {
         },
     ],
     docstring: Some(
-        "A BUD-02 blob descriptor (`nmp_blossom::BlobDescriptor` mirror). When\nreturned by [`FfiBlossomClient::upload`]/[`FfiBlossomClient::mirror`]\nits `sha256` was PROVEN equal to the locally computed/authorized hash\n(the `VerifiedUpload` integrity gate); rows from\n[`FfiBlossomClient::list`] are strictly parsed but remain unverified\nserver claims, exactly as in the Rust crate.",
+        "A BUD-02 blob descriptor (`nmp_blossom::BlobDescriptor` mirror). Rows from\n[`FfiBlossomClient::list`] are strictly parsed but remain unverified server\nclaims, exactly as in the Rust crate. Successful upload/mirror calls return\n[`FfiVerifiedUpload`] instead, so the sha256 proof cannot be erased into\nthe same freely constructible record as an unverified list row.",
     ),
 }
 
@@ -5492,6 +5547,70 @@ record Record {
     ],
     docstring: Some(
         "[`FfiBlossomClient`] construction knobs\n(`nmp_blossom::BlossomClientConfig` mirror). `None` means the crate\ndefault.",
+    ),
+}
+
+record Record {
+    name: "FfiComposedImage",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "upload",
+            type_: Object {
+                module_path: "nmp_ffi",
+                name: "FfiVerifiedUpload",
+                imp: Struct,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "dim",
+            type_: Optional {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiImageDim",
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "alt",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "blurhash",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "thumbhash",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "fallbacks",
+            type_: Sequence {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "One verified upload plus app-owned NIP-68 presentation metadata.\n\nThe mandatory `url`/`m`/`x` values are deliberately absent: they come only\nfrom `upload`, whose opaque type has no public constructor. Optional\npresentation strings are carried verbatim, matching the direct Rust API.",
     ),
 }
 
@@ -6071,6 +6190,29 @@ record Record {
 }
 
 record Record {
+    name: "FfiImageDim",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "width",
+            type_: UInt32,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "height",
+            type_: UInt32,
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "Pixel dimensions for one NIP-68 `imeta` image.",
+    ),
+}
+
+record Record {
     name: "FfiKindCount",
     module_path: "nmp_ffi",
     remote: false,
@@ -6264,6 +6406,69 @@ record Record {
     ],
     docstring: Some(
         "`nmp_signer::Nip46SessionCheckpoint` mirror (#571) -- the minimum secrets\nand descriptor needed to reconnect an already-authorized NIP-46 client\nsession without another pairing handshake. `client_secret_key` crosses\nthis boundary once, matching `add_account`'s existing precedent; native\ncallers must never log, print, serialize to diagnostics, or otherwise\nsurface it outside their own secure checkpoint store.",
+    ),
+}
+
+record Record {
+    name: "FfiPictureContentWarning",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "reason",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "Optional NIP-68 `content-warning` tag. `None` at the post field means no\ntag; this record with `reason: None` means the one-cell tag.",
+    ),
+}
+
+record Record {
+    name: "FfiPicturePost",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "title",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "description",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "content_warning",
+            type_: Optional {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiPictureContentWarning",
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "hashtags",
+            type_: Sequence {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "Event-level metadata for a kind:20 picture draft.",
     ),
 }
 
@@ -7668,6 +7873,110 @@ function Function {
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_comment_thread_demand",
     checksum: Some(
         40171,
+    ),
+}
+
+function Function {
+    name: "compose_picture",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "author_pubkey_hex",
+            type_: String,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "created_at",
+            type_: UInt64,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "images",
+            type_: Sequence {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiComposedImage",
+                },
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "post",
+            type_: Record {
+                module_path: "nmp_ffi",
+                name: "FfiPicturePost",
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Object {
+            module_path: "nmp_ffi",
+            name: "FfiPictureDraft",
+            imp: Struct,
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_compose_picture",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "author_pubkey_hex",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+            FfiArgument {
+                name: "created_at",
+                type_: UInt64,
+            },
+            FfiArgument {
+                name: "images",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+            FfiArgument {
+                name: "post",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiPicturePost",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiPictureDraft",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Compose a kind:20 picture draft from verified uploads. There is no raw\ndescriptor, raw `imeta`, event-kind, or numeric routing input.",
+    ),
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiPictureComposeError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_compose_picture",
+    checksum: Some(
+        55204,
     ),
 }
 
@@ -9164,9 +9473,10 @@ object Object {
                 },
             ],
             return_type: Some(
-                Record {
+                Object {
                     module_path: "nmp_ffi",
-                    name: "FfiBlobDescriptor",
+                    name: "FfiVerifiedUpload",
+                    imp: Struct,
                 },
             ),
             ffi_func: FfiFunction {
@@ -9205,13 +9515,8 @@ object Object {
                     },
                 ],
                 return_type: Some(
-                    RustBuffer(
-                        Some(
-                            ExternalFfiMetadata {
-                                name: "FfiBlobDescriptor",
-                                module_path: "nmp_ffi",
-                            },
-                        ),
+                    RustArcPtr(
+                        "FfiVerifiedUpload",
                     ),
                 ),
                 has_rust_call_status_arg: true,
@@ -9229,7 +9534,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffiblossomclient_mirror",
             checksum: Some(
-                55512,
+                21942,
             ),
         },
         Method {
@@ -9275,9 +9580,10 @@ object Object {
                 },
             ],
             return_type: Some(
-                Record {
+                Object {
                     module_path: "nmp_ffi",
-                    name: "FfiBlobDescriptor",
+                    name: "FfiVerifiedUpload",
+                    imp: Struct,
                 },
             ),
             ffi_func: FfiFunction {
@@ -9316,13 +9622,8 @@ object Object {
                     },
                 ],
                 return_type: Some(
-                    RustBuffer(
-                        Some(
-                            ExternalFfiMetadata {
-                                name: "FfiBlobDescriptor",
-                                module_path: "nmp_ffi",
-                            },
-                        ),
+                    RustArcPtr(
+                        "FfiVerifiedUpload",
                     ),
                 ),
                 has_rust_call_status_arg: true,
@@ -9340,7 +9641,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffiblossomclient_upload",
             checksum: Some(
-                21684,
+                36058,
             ),
         },
     ],
@@ -9759,6 +10060,447 @@ object Object {
 }
 
 object Object {
+    name: "FfiPictureDraft",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [],
+    methods: [
+        Method {
+            name: "author_pubkey_hex",
+            object_name: "FfiPictureDraft",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                String,
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffipicturedraft_author_pubkey_hex",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiPictureDraft",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        None,
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffipicturedraft_author_pubkey_hex",
+            checksum: Some(
+                33435,
+            ),
+        },
+        Method {
+            name: "content",
+            object_name: "FfiPictureDraft",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                String,
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffipicturedraft_content",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiPictureDraft",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        None,
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffipicturedraft_content",
+            checksum: Some(
+                61567,
+            ),
+        },
+        Method {
+            name: "created_at",
+            object_name: "FfiPictureDraft",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                UInt64,
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffipicturedraft_created_at",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiPictureDraft",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    UInt64,
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffipicturedraft_created_at",
+            checksum: Some(
+                37121,
+            ),
+        },
+        Method {
+            name: "kind",
+            object_name: "FfiPictureDraft",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                UInt16,
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffipicturedraft_kind",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiPictureDraft",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    UInt16,
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Always 20. Exposed for parity/inspection, never caller-selected.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffipicturedraft_kind",
+            checksum: Some(
+                12892,
+            ),
+        },
+        Method {
+            name: "sign_request",
+            object_name: "FfiPictureDraft",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiSignEventRequest",
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffipicturedraft_sign_request",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiPictureDraft",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        Some(
+                            ExternalFfiMetadata {
+                                name: "FfiSignEventRequest",
+                                module_path: "nmp_ffi",
+                            },
+                        ),
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Existing governed sign-only input for this exact body. The request type\ndeliberately omits its author, which the engine freezes from active\nidentity; callers must keep that identity equal to\n`author_pubkey_hex`. The write-intent projection below carries the\nauthor explicitly and is the ordinary publication path.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffipicturedraft_sign_request",
+            checksum: Some(
+                17275,
+            ),
+        },
+        Method {
+            name: "tags",
+            object_name: "FfiPictureDraft",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Sequence {
+                    inner_type: Sequence {
+                        inner_type: String,
+                    },
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffipicturedraft_tags",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiPictureDraft",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        None,
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffipicturedraft_tags",
+            checksum: Some(
+                8768,
+            ),
+        },
+        Method {
+            name: "unsigned_event_json",
+            object_name: "FfiPictureDraft",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                String,
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffipicturedraft_unsigned_event_json",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiPictureDraft",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        None,
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffipicturedraft_unsigned_event_json",
+            checksum: Some(
+                50599,
+            ),
+        },
+        Method {
+            name: "write_intent",
+            object_name: "FfiPictureDraft",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "durability",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiDurability",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "routing",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiWriteRouting",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "identity_override",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "correlation",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiWriteIntent",
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffipicturedraft_write_intent",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiPictureDraft",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "durability",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiDurability",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                    FfiArgument {
+                        name: "routing",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiWriteRouting",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                    FfiArgument {
+                        name: "identity_override",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "correlation",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        Some(
+                            ExternalFfiMetadata {
+                                name: "FfiWriteIntent",
+                                module_path: "nmp_ffi",
+                            },
+                        ),
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Existing ordinary write intent for this exact picture body. Routing and\ndurability use the governed enums; kind/tags/content cannot be\nreplaced through this typed operation.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffipicturedraft_write_intent",
+            checksum: Some(
+                60940,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_ffipicturedraft",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiPictureDraft",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiPictureDraft",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_ffipicturedraft",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiPictureDraft",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "Immutable NIP-68 kind:20 draft. No constructor is exported: the only\ncreation site is [`compose_picture`], which consumes verified uploads and\nthe direct Rust composer. Its sign request and write intent are projections\nof this same held event body.",
+    ),
+}
+
+object Object {
     name: "FfiSetOp",
     imp: Struct,
     module_path: "nmp_ffi",
@@ -9964,6 +10706,103 @@ object Object {
     ffi_init_callback: None,
     docstring: Some(
         "A `Binding::SetOp` payload mirror -- a UniFFI object, same reasoning as\n[`FfiDerived`].",
+    ),
+}
+
+object Object {
+    name: "FfiVerifiedUpload",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [],
+    methods: [
+        Method {
+            name: "descriptor",
+            object_name: "FfiVerifiedUpload",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiBlobDescriptor",
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffiverifiedupload_descriptor",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiVerifiedUpload",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        Some(
+                            ExternalFfiMetadata {
+                                name: "FfiBlobDescriptor",
+                                module_path: "nmp_ffi",
+                            },
+                        ),
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "The verified descriptor as ordinary read-only data. Returning this\nrecord does not consume or recreate the proof held by this object.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffiverifiedupload_descriptor",
+            checksum: Some(
+                15754,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_ffiverifiedupload",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiVerifiedUpload",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiVerifiedUpload",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_ffiverifiedupload",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiVerifiedUpload",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "Opaque proof that a Blossom upload or mirror returned a descriptor whose\nsha256 matches the exact content hash the client verified. There is no\nconstructor: only [`FfiBlossomClient::upload`] and\n[`FfiBlossomClient::mirror`] can create one. The descriptor is readable,\nbut an arbitrary/listed descriptor cannot be promoted back into this\nwitness.",
     ),
 }
 

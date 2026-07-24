@@ -55,7 +55,7 @@ use nmp_blossom::{
     AuthDraftError, AuthValidationError, BlobDescriptor, BlossomClient, BlossomClientConfig,
     BlossomServerUrl, BlossomVerb, DeleteError, DescriptorError, ExpectedAuthorization, ListError,
     ListPage, MirrorError, ServerUrlError, Sha256Hash, Sha256HexError, SignedAuthorization,
-    UploadError, DEFAULT_MAX_LIST_RESPONSE_BYTES, DEFAULT_MAX_RESPONSE_BYTES,
+    UploadError, VerifiedUpload, DEFAULT_MAX_LIST_RESPONSE_BYTES, DEFAULT_MAX_RESPONSE_BYTES,
     DEFAULT_REQUEST_DEADLINE,
 };
 use nostr::{JsonUtil, PublicKey, Timestamp, UnsignedEvent};
@@ -91,12 +91,11 @@ fn verb_from_ffi(verb: FfiBlossomVerb) -> BlossomVerb {
     }
 }
 
-/// A BUD-02 blob descriptor (`nmp_blossom::BlobDescriptor` mirror). When
-/// returned by [`FfiBlossomClient::upload`]/[`FfiBlossomClient::mirror`]
-/// its `sha256` was PROVEN equal to the locally computed/authorized hash
-/// (the `VerifiedUpload` integrity gate); rows from
-/// [`FfiBlossomClient::list`] are strictly parsed but remain unverified
-/// server claims, exactly as in the Rust crate.
+/// A BUD-02 blob descriptor (`nmp_blossom::BlobDescriptor` mirror). Rows from
+/// [`FfiBlossomClient::list`] are strictly parsed but remain unverified server
+/// claims, exactly as in the Rust crate. Successful upload/mirror calls return
+/// [`FfiVerifiedUpload`] instead, so the sha256 proof cannot be erased into
+/// the same freely constructible record as an unverified list row.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct FfiBlobDescriptor {
     pub url: String,
@@ -107,13 +106,33 @@ pub struct FfiBlobDescriptor {
     pub uploaded: Option<u64>,
 }
 
-fn descriptor_to_ffi(descriptor: BlobDescriptor) -> FfiBlobDescriptor {
+fn descriptor_to_ffi(descriptor: &BlobDescriptor) -> FfiBlobDescriptor {
     FfiBlobDescriptor {
-        url: descriptor.url,
+        url: descriptor.url.clone(),
         sha256: descriptor.sha256.to_hex(),
         size: descriptor.size,
-        mime_type: descriptor.mime_type,
+        mime_type: descriptor.mime_type.clone(),
         uploaded: descriptor.uploaded,
+    }
+}
+
+/// Opaque proof that a Blossom upload or mirror returned a descriptor whose
+/// sha256 matches the exact content hash the client verified. There is no
+/// constructor: only [`FfiBlossomClient::upload`] and
+/// [`FfiBlossomClient::mirror`] can create one. The descriptor is readable,
+/// but an arbitrary/listed descriptor cannot be promoted back into this
+/// witness.
+#[derive(Debug, uniffi::Object)]
+pub struct FfiVerifiedUpload {
+    pub(crate) inner: VerifiedUpload,
+}
+
+#[uniffi::export]
+impl FfiVerifiedUpload {
+    /// The verified descriptor as ordinary read-only data. Returning this
+    /// record does not consume or recreate the proof held by this object.
+    pub fn descriptor(&self) -> FfiBlobDescriptor {
+        descriptor_to_ffi(self.inner.descriptor())
     }
 }
 
@@ -1288,7 +1307,7 @@ impl FfiBlossomClient {
         blob: Vec<u8>,
         content_type: Option<String>,
         auth: Arc<FfiBlossomAuthorization>,
-    ) -> Result<FfiBlobDescriptor, FfiBlossomUploadError> {
+    ) -> Result<Arc<FfiVerifiedUpload>, FfiBlossomUploadError> {
         let server = Self::parse_server(&server_url, |error| {
             FfiBlossomUploadError::InvalidServerUrl { error }
         })?;
@@ -1304,7 +1323,7 @@ impl FfiBlossomClient {
                 .upload(&server, &blob, content_type.as_deref(), &auth.inner)
                 .await
                 .map_err(upload_error_to_ffi)?;
-            Ok(descriptor_to_ffi(verified.into_descriptor()))
+            Ok(Arc::new(FfiVerifiedUpload { inner: verified }))
         })
     }
 
@@ -1319,7 +1338,7 @@ impl FfiBlossomClient {
         source_url: String,
         expected_sha256_hex: String,
         auth: Arc<FfiBlossomAuthorization>,
-    ) -> Result<FfiBlobDescriptor, FfiBlossomMirrorError> {
+    ) -> Result<Arc<FfiVerifiedUpload>, FfiBlossomMirrorError> {
         let server = Self::parse_server(&server_url, |error| {
             FfiBlossomMirrorError::InvalidServerUrl { error }
         })?;
@@ -1340,7 +1359,7 @@ impl FfiBlossomClient {
                 .mirror(&server, &source_url, expected, &auth.inner)
                 .await
                 .map_err(mirror_error_to_ffi)?;
-            Ok(descriptor_to_ffi(verified.into_descriptor()))
+            Ok(Arc::new(FfiVerifiedUpload { inner: verified }))
         })
     }
 
@@ -1420,7 +1439,7 @@ impl FfiBlossomClient {
                 .list(&server, owner, &page, auth.as_ref().map(|a| &a.inner))
                 .await
                 .map_err(list_error_to_ffi)?;
-            Ok(descriptors.into_iter().map(descriptor_to_ffi).collect())
+            Ok(descriptors.iter().map(descriptor_to_ffi).collect())
         })
     }
 }
@@ -1893,7 +1912,7 @@ mod tests {
             mime_type: Some("text/plain".to_string()),
             uploaded: Some(1_700_000_000),
         };
-        let ffi = descriptor_to_ffi(full.clone());
+        let ffi = descriptor_to_ffi(&full);
         assert_eq!(ffi.url, full.url);
         assert_eq!(ffi.sha256, full.sha256.to_hex());
         assert_eq!(ffi.size, full.size);
@@ -1907,7 +1926,7 @@ mod tests {
             mime_type: None,
             uploaded: None,
         };
-        let ffi = descriptor_to_ffi(minimal);
+        let ffi = descriptor_to_ffi(&minimal);
         assert_eq!(ffi.mime_type, None);
         assert_eq!(ffi.uploaded, None);
     }
