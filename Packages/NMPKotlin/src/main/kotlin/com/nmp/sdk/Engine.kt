@@ -36,8 +36,12 @@ data class NMPConfig(
      * Host-only match (port- and path-insensitive). Default empty. */
     val allowedLocalRelayHosts: List<String> = emptyList(),
     /** The one whole-engine relay ceiling. It bounds the complete compiled
-     * demand and the transport worker set with the same effective value.
-     * Legacy zero is normalized to the finite default, never uncapped. */
+     * demand and simultaneous physical transport workers with the same
+     * effective value. Access contexts never share a socket; competing read
+     * and write contexts for the same admitted relay time-share its slot and
+     * the read is restored afterward, so apps do not multiply this value per
+     * context. Legacy zero is normalized to the finite default, never
+     * uncapped. */
     val maxRelays: UInt = 10u,
     /** Finite shared ceiling for live signer and AUTH-policy registrations. Zero admits none. */
     val maxAuthCapabilities: UInt = 64u,

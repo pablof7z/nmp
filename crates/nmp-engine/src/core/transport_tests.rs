@@ -290,9 +290,10 @@ mod relay_session_key_tests {
             session,
             DisconnectReason::Closed,
         ));
-        assert!(!effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::EnsureRelay(..))));
+        assert!(!effects.iter().any(|effect| matches!(
+            effect,
+            Effect::EnsureReadRelay(..) | Effect::EnsureWriteRelay(..)
+        )));
     }
 }
 

@@ -1567,7 +1567,7 @@ fn stale_disconnect_cannot_erase_a_reopened_slot_generation() {
     assert!(
         current
             .iter()
-            .any(|effect| matches!(effect, Effect::EnsureRelay(key) if key == &session)),
+            .any(|effect| matches!(effect, Effect::EnsureReadRelay(key) if key == &session)),
         "the current generation disconnect still re-ensures required work"
     );
 }
@@ -1575,7 +1575,7 @@ fn stale_disconnect_cannot_erase_a_reopened_slot_generation() {
 /// The CRITICAL falsifier (issue #506), reducer half: a
 /// `DisconnectReason::PermanentlyFailed` (401/403 -- the transport pool has
 /// ALREADY retired the worker and freed its cap slot by the time this
-/// reaches the reducer) must NEVER re-issue `Effect::EnsureRelay` -- doing
+/// reaches the reducer) must NEVER re-issue a relay ensure effect -- doing
 /// so is either a no-op race against a wedged zombie (the pre-#506 bug) or,
 /// since the pool now grants a fresh worker on any `ensure_open` against an
 /// empty slot, a tight 401 busy-redial loop. It must instead record a
@@ -1608,7 +1608,7 @@ fn permanently_failed_relay_never_re_ensures_and_records_terminal_diagnostics() 
 
     assert!(
         !effects.iter().any(
-            |effect| matches!(effect, Effect::EnsureRelay(url) if url == &public_session(&relay))
+            |effect| matches!(effect, Effect::EnsureReadRelay(url) if url == &public_session(&relay))
         ),
         "a permanent failure must never re-issue EnsureRelay -- the pool has \
          already retired this worker for good, so this would either race a \
@@ -1640,7 +1640,7 @@ fn permanently_failed_relay_never_re_ensures_and_records_terminal_diagnostics() 
     ));
     assert!(
         transient_effects.iter().any(
-            |effect| matches!(effect, Effect::EnsureRelay(url) if url == &public_session(&relay))
+            |effect| matches!(effect, Effect::EnsureReadRelay(url) if url == &public_session(&relay))
         ),
         "an ordinary transient disconnect must keep re-issuing EnsureRelay unchanged"
     );

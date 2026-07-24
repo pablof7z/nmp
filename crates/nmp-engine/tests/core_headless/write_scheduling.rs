@@ -368,7 +368,7 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
             }));
         assert!(offline
             .iter()
-            .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &session)));
+            .any(|effect| matches!(effect, Effect::EnsureWriteRelay(r) if r == &session)));
         assert!(!offline
             .iter()
             .any(|effect| matches!(effect, Effect::PublishEvent(..))));
@@ -717,7 +717,7 @@ fn boot_recovers_parked_auth_write_as_redrivable_not_wedged() {
     assert!(
         recovery
             .iter()
-            .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &session)),
+            .any(|effect| matches!(effect, Effect::EnsureWriteRelay(r) if r == &session)),
         "boot must redial the exact authenticated session for the recovered lane"
     );
     // The fresh process has no in-memory auth-required fact for this relay,

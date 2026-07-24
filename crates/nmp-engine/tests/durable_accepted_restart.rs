@@ -239,10 +239,10 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
     assert!(
         recovery
             .iter()
-            .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &relay_session))
-            && recovery
-                .iter()
-                .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &appended_session)),
+            .any(|effect| matches!(effect, Effect::EnsureWriteRelay(r) if r == &relay_session))
+            && recovery.iter().any(
+                |effect| matches!(effect, Effect::EnsureWriteRelay(r) if r == &appended_session)
+            ),
         "recovery preserves both lanes but allocates no attempt while offline"
     );
     assert!(
@@ -872,7 +872,10 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
     )));
     assert!(!recovery.iter().any(|effect| matches!(
         effect,
-        Effect::EnsureRelay(_) | Effect::PublishEvent(..) | Effect::RequestSign(..)
+        Effect::EnsureReadRelay(_)
+            | Effect::EnsureWriteRelay(_)
+            | Effect::PublishEvent(..)
+            | Effect::RequestSign(..)
     )));
     assert_eq!(
         core.reattach_receipt(receipt, Box::new(Sink::default())),
@@ -907,7 +910,10 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
     ));
     assert!(!cancellation.iter().any(|effect| matches!(
         effect,
-        Effect::EnsureRelay(_) | Effect::PublishEvent(..) | Effect::RequestSign(..)
+        Effect::EnsureReadRelay(_)
+            | Effect::EnsureWriteRelay(_)
+            | Effect::PublishEvent(..)
+            | Effect::RequestSign(..)
     )));
 
     drop(core);
@@ -1248,7 +1254,7 @@ fn pinned_host_routing_round_trips_across_a_restart() {
     let recovery = core.recover_on_boot();
     assert!(recovery
         .iter()
-        .any(|effect| matches!(effect, Effect::EnsureRelay(r) if r == &session)));
+        .any(|effect| matches!(effect, Effect::EnsureWriteRelay(r) if r == &session)));
     let handle = RelayHandle {
         slot: 0,
         generation: 1,
