@@ -1,4 +1,4 @@
-use super::canonical::{observation_key, observation_range, observation_relay_key};
+use super::canonical::{fold_seen_at, observation_key, observation_range, observation_relay_key};
 use super::outbox::{
     is_suppressed_in_txn, reconcile_ephemeral_receipts_in_txn, replace_lane_in_txn,
     OUTBOX_KIND5_CLAIMS, OUTBOX_SUPPRESS_BY_ADDR, OUTBOX_SUPPRESS_BY_ID,
@@ -549,11 +549,11 @@ impl RedbStore {
                         PersistenceError(format!("observation points at missing relay {relay_key}"))
                     })?;
                 let relay = RelayUrl::parse(encoded_relay.value())
-                    .expect("redb: interned relay URL remains canonical");
+                    .expect("redb: interned relay URL remains parseable");
                 relay_cache.insert(relay_key, relay.clone());
                 relay
             };
-            assert!(seen.insert(relay, Timestamp::from(at.value())).is_none());
+            fold_seen_at(&mut seen, relay, Timestamp::from(at.value()));
         }
         Ok(Provenance { seen, local })
     }
