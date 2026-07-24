@@ -1310,7 +1310,25 @@ fn pool_build_error(error: nmp_transport::PoolBuildError) -> EngineThreadError {
     }
 }
 
-pub const DEFAULT_MAX_AUTH_CAPABILITIES: usize = 64;
+macro_rules! define_runtime_engine_config_default {
+    (
+        store_path = $store_path:ident,
+        indexer_relays = $indexer_relays:ident,
+        app_relays = $app_relays:ident,
+        fallback_relays = $fallback_relays:ident,
+        allowed_local_relay_hosts = $allowed_local_relay_hosts:ident,
+        max_relays = $max_relays:literal,
+        max_auth_capabilities = $max_auth_capabilities:literal,
+    ) => {
+        pub const DEFAULT_MAX_AUTH_CAPABILITIES: usize = $max_auth_capabilities;
+    };
+}
+
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../nmp-engine-config-defaults.inc.rs"
+));
+with_nmp_engine_config_defaults!(define_runtime_engine_config_default);
 
 /// #704: fixed worker-thread count of the ONE engine-owned adapter runtime.
 /// Two workers (not one — a single worker makes any accidental blocking call a

@@ -7183,7 +7183,9 @@ record Record {
             type_: Optional {
                 inner_type: String,
             },
-            default: None,
+            default: Some(
+                None,
+            ),
             docstring: Some(
                 "`None` -> in-memory store (nothing survives a restart). `Some(path)`\n-> a persistent `RedbStore` opened at that path (the same file\nreopened across restarts is what preserves source-scoped evidence for\na cold, offline read -- ledger #7).",
             ),
@@ -7193,7 +7195,9 @@ record Record {
             type_: Sequence {
                 inner_type: String,
             },
-            default: None,
+            default: Some(
+                EmptySequence,
+            ),
             docstring: None,
         },
         Field {
@@ -7201,7 +7205,9 @@ record Record {
             type_: Sequence {
                 inner_type: String,
             },
-            default: None,
+            default: Some(
+                EmptySequence,
+            ),
             docstring: Some(
                 "Operator app relay set (`Lane::AppRelay`). Default empty.",
             ),
@@ -7211,7 +7217,9 @@ record Record {
             type_: Sequence {
                 inner_type: String,
             },
-            default: None,
+            default: Some(
+                EmptySequence,
+            ),
             docstring: Some(
                 "Operator fallback relay set (`Lane::Fallback`). Default empty.",
             ),
@@ -7225,7 +7233,7 @@ record Record {
                 EmptySequence,
             ),
             docstring: Some(
-                "Local/private relay HOSTS the operator explicitly opts into despite\nthe SSRF admission policy (issue #121). A DISCOVERED (network-sourced\nkind:10002) relay on a loopback / RFC-1918 / link-local / `.onion`\nhost is rejected by default; listing its host here (e.g. `\"127.0.0.1\"`\nor `\"localhost\"`) re-admits discovered relays on that exact host.\nHost-only match (port- and path-insensitive). Default empty.\n\n`default = []` keeps this field OPTIONAL for existing foreign-language\ncallers — adding it must not break records constructed before #121.",
+                "Local/private relay HOSTS the operator explicitly opts into despite\nthe SSRF admission policy (issue #121). A DISCOVERED (network-sourced\nkind:10002) relay on a loopback / RFC-1918 / link-local / `.onion`\nhost is rejected by default; listing its host here (e.g. `\"127.0.0.1\"`\nor `\"localhost\"`) re-admits discovered relays on that exact host.\nHost-only match (port- and path-insensitive). Default empty.",
             ),
         },
         Field {
@@ -7239,7 +7247,7 @@ record Record {
                 ),
             ),
             docstring: Some(
-                "The one whole-engine relay ceiling. It bounds the complete compiled\ndemand and simultaneous physical transport workers with the same\neffective value. Access contexts never share a socket; competing read\nand write contexts for the same admitted relay time-share its slot and\nthe read is restored afterward, so apps do not multiply this value per\ncontext (#598). Legacy zero is normalized to the finite default, never\nuncapped.\n\nThe `default =` literal below MUST stay equal to\n[`DEFAULT_MAX_RELAYS`] (uniffi record defaults accept only a literal,\nnever a const path) — the const is the single Rust-side knob; the\nliteral is its foreign-binding mirror.",
+                "The one whole-engine relay ceiling. It bounds the complete compiled\ndemand and simultaneous physical transport workers with the same\neffective value. Access contexts never share a socket; competing read\nand write contexts for the same admitted relay time-share its slot and\nthe read is restored afterward, so apps do not multiply this value per\ncontext (#598). Legacy zero is normalized to the finite default, never\nuncapped.",
             ),
         },
         Field {

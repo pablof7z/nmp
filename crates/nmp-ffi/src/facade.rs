@@ -65,76 +65,85 @@ fn start_following_action(
     NmpFollowActionStream::new(action.into_async())
 }
 
-/// Construction config for [`NmpEngine::new`]. See the module doc: the only
-/// relay facts a caller ever supplies are the three operator-configured
-/// lanes -- `indexer_relays`, `app_relays`, `fallback_relays`
-/// (`routing-and-ownership.md` §2.1) -- everything else is discovered live.
-#[derive(uniffi::Record, Clone, Debug)]
-pub struct NmpEngineConfig {
-    /// `None` -> in-memory store (nothing survives a restart). `Some(path)`
-    /// -> a persistent `RedbStore` opened at that path (the same file
-    /// reopened across restarts is what preserves source-scoped evidence for
-    /// a cold, offline read -- ledger #7).
-    pub store_path: Option<String>,
-    pub indexer_relays: Vec<String>,
-    /// Operator app relay set (`Lane::AppRelay`). Default empty.
-    pub app_relays: Vec<String>,
-    /// Operator fallback relay set (`Lane::Fallback`). Default empty.
-    pub fallback_relays: Vec<String>,
-    /// Local/private relay HOSTS the operator explicitly opts into despite
-    /// the SSRF admission policy (issue #121). A DISCOVERED (network-sourced
-    /// kind:10002) relay on a loopback / RFC-1918 / link-local / `.onion`
-    /// host is rejected by default; listing its host here (e.g. `"127.0.0.1"`
-    /// or `"localhost"`) re-admits discovered relays on that exact host.
-    /// Host-only match (port- and path-insensitive). Default empty.
-    ///
-    /// `default = []` keeps this field OPTIONAL for existing foreign-language
-    /// callers — adding it must not break records constructed before #121.
-    #[uniffi(default = [])]
-    pub allowed_local_relay_hosts: Vec<String>,
-    /// The one whole-engine relay ceiling. It bounds the complete compiled
-    /// demand and simultaneous physical transport workers with the same
-    /// effective value. Access contexts never share a socket; competing read
-    /// and write contexts for the same admitted relay time-share its slot and
-    /// the read is restored afterward, so apps do not multiply this value per
-    /// context (#598). Legacy zero is normalized to the finite default, never
-    /// uncapped.
-    ///
-    /// The `default =` literal below MUST stay equal to
-    /// [`DEFAULT_MAX_RELAYS`] (uniffi record defaults accept only a literal,
-    /// never a const path) — the const is the single Rust-side knob; the
-    /// literal is its foreign-binding mirror.
-    #[uniffi(default = 10)]
-    pub max_relays: u32,
-    /// Maximum live signer and AUTH-policy registrations. Zero deliberately
-    /// admits none rather than selecting the default.
-    #[uniffi(default = 64)]
-    pub max_auth_capabilities: u32,
-}
-
-/// The default relay-count ceiling for a freshly-constructed engine config
-/// (#20). Update BOTH this const AND the `#[uniffi(default = N)]` literal
-/// on [`NmpEngineConfig::max_relays`] above — they must match.
-pub const DEFAULT_MAX_RELAYS: u32 = 10;
-pub const DEFAULT_MAX_AUTH_CAPABILITIES: u32 = 64;
-
-// A DERIVED `Default` would zero `max_auth_capabilities` — and zero
-// deliberately admits NO capability registrations — so the Rust-side
-// default is written out by hand to mirror every `#[uniffi(default = …)]`
-// literal above exactly.
-impl Default for NmpEngineConfig {
-    fn default() -> Self {
-        Self {
-            store_path: None,
-            indexer_relays: Vec::new(),
-            app_relays: Vec::new(),
-            fallback_relays: Vec::new(),
-            allowed_local_relay_hosts: Vec::new(),
-            max_relays: DEFAULT_MAX_RELAYS,
-            max_auth_capabilities: DEFAULT_MAX_AUTH_CAPABILITIES,
+macro_rules! define_ffi_engine_config {
+    (
+        store_path = none,
+        indexer_relays = empty_list,
+        app_relays = empty_list,
+        fallback_relays = empty_list,
+        allowed_local_relay_hosts = empty_list,
+        max_relays = $max_relays:literal,
+        max_auth_capabilities = $max_auth_capabilities:literal,
+    ) => {
+        /// Construction config for [`NmpEngine::new`]. See the module doc: the only
+        /// relay facts a caller ever supplies are the three operator-configured
+        /// lanes -- `indexer_relays`, `app_relays`, `fallback_relays`
+        /// (`routing-and-ownership.md` §2.1) -- everything else is discovered live.
+        #[derive(uniffi::Record, Clone, Debug)]
+        pub struct NmpEngineConfig {
+            /// `None` -> in-memory store (nothing survives a restart). `Some(path)`
+            /// -> a persistent `RedbStore` opened at that path (the same file
+            /// reopened across restarts is what preserves source-scoped evidence for
+            /// a cold, offline read -- ledger #7).
+            #[uniffi(default = None)]
+            pub store_path: Option<String>,
+            #[uniffi(default = [])]
+            pub indexer_relays: Vec<String>,
+            /// Operator app relay set (`Lane::AppRelay`). Default empty.
+            #[uniffi(default = [])]
+            pub app_relays: Vec<String>,
+            /// Operator fallback relay set (`Lane::Fallback`). Default empty.
+            #[uniffi(default = [])]
+            pub fallback_relays: Vec<String>,
+            /// Local/private relay HOSTS the operator explicitly opts into despite
+            /// the SSRF admission policy (issue #121). A DISCOVERED (network-sourced
+            /// kind:10002) relay on a loopback / RFC-1918 / link-local / `.onion`
+            /// host is rejected by default; listing its host here (e.g. `"127.0.0.1"`
+            /// or `"localhost"`) re-admits discovered relays on that exact host.
+            /// Host-only match (port- and path-insensitive). Default empty.
+            #[uniffi(default = [])]
+            pub allowed_local_relay_hosts: Vec<String>,
+            /// The one whole-engine relay ceiling. It bounds the complete compiled
+            /// demand and simultaneous physical transport workers with the same
+            /// effective value. Access contexts never share a socket; competing read
+            /// and write contexts for the same admitted relay time-share its slot and
+            /// the read is restored afterward, so apps do not multiply this value per
+            /// context (#598). Legacy zero is normalized to the finite default, never
+            /// uncapped.
+            #[uniffi(default = $max_relays)]
+            pub max_relays: u32,
+            /// Maximum live signer and AUTH-policy registrations. Zero deliberately
+            /// admits none rather than selecting the default.
+            #[uniffi(default = $max_auth_capabilities)]
+            pub max_auth_capabilities: u32,
         }
-    }
+
+        /// Default relay-count ceiling for a freshly constructed engine config.
+        pub const DEFAULT_MAX_RELAYS: u32 = $max_relays;
+        /// Default live signer/AUTH-policy registration ceiling.
+        pub const DEFAULT_MAX_AUTH_CAPABILITIES: u32 = $max_auth_capabilities;
+
+        impl Default for NmpEngineConfig {
+            fn default() -> Self {
+                Self {
+                    store_path: None,
+                    indexer_relays: Vec::new(),
+                    app_relays: Vec::new(),
+                    fallback_relays: Vec::new(),
+                    allowed_local_relay_hosts: Vec::new(),
+                    max_relays: DEFAULT_MAX_RELAYS,
+                    max_auth_capabilities: DEFAULT_MAX_AUTH_CAPABILITIES,
+                }
+            }
+        }
+    };
 }
+
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../nmp-engine-config-defaults.inc.rs"
+));
+with_nmp_engine_config_defaults!(define_ffi_engine_config);
 
 /// Destructively reset a closed persistent NMP store. This removes all
 /// canonical engine state at `store_path`, while leaving any separately
@@ -160,10 +169,6 @@ pub fn reset_persistent_store(store_path: String) -> Result<(), FfiError> {
 pub fn generate_account_secret_key() -> String {
     nostr::Keys::generate().secret_key().to_secret_hex()
 }
-
-// Keep the native-facing literal pinned to the canonical finite default.
-const _: () = assert!(DEFAULT_MAX_RELAYS == 10);
-const _: () = assert!(DEFAULT_MAX_AUTH_CAPABILITIES == 64);
 
 impl From<NmpEngineConfig> for nmp::EngineConfig {
     fn from(config: NmpEngineConfig) -> Self {
@@ -1008,10 +1013,23 @@ mod tests {
     }
 
     #[test]
-    fn ffi_config_manual_default_keeps_auth_capacity_finite() {
-        let config = NmpEngineConfig::default();
-        assert_eq!(config.max_auth_capabilities, 64);
-        assert_eq!(nmp::EngineConfig::from(config).max_auth_capabilities, 64);
+    fn ffi_and_direct_rust_config_share_the_declarative_defaults() {
+        let ffi = NmpEngineConfig::default();
+        let direct = nmp::EngineConfig::default();
+
+        assert_eq!(ffi.store_path, direct.store_path);
+        assert_eq!(ffi.indexer_relays, direct.indexer_relays);
+        assert_eq!(ffi.app_relays, direct.app_relays);
+        assert_eq!(ffi.fallback_relays, direct.fallback_relays);
+        assert_eq!(
+            ffi.allowed_local_relay_hosts,
+            direct.allowed_local_relay_hosts
+        );
+        assert_eq!(ffi.max_relays as usize, direct.max_relays);
+        assert_eq!(
+            ffi.max_auth_capabilities as usize,
+            direct.max_auth_capabilities
+        );
     }
 
     #[test]

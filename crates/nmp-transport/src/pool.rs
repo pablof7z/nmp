@@ -55,7 +55,25 @@ pub fn configure_diagnostic_preparsed_ceiling(
 /// Safe default for the single engine/transport relay ceiling. Zero is
 /// normalized to this value as well, so legacy/default construction cannot
 /// silently re-enable unbounded worker growth.
-pub const DEFAULT_MAX_RELAYS: usize = 10;
+macro_rules! define_transport_engine_config_default {
+    (
+        store_path = $store_path:ident,
+        indexer_relays = $indexer_relays:ident,
+        app_relays = $app_relays:ident,
+        fallback_relays = $fallback_relays:ident,
+        allowed_local_relay_hosts = $allowed_local_relay_hosts:ident,
+        max_relays = $max_relays:literal,
+        max_auth_capabilities = $max_auth_capabilities:literal,
+    ) => {
+        pub const DEFAULT_MAX_RELAYS: usize = $max_relays;
+    };
+}
+
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../nmp-engine-config-defaults.inc.rs"
+));
+with_nmp_engine_config_defaults!(define_transport_engine_config_default);
 
 /// Small fixed verifier set owned by one engine. Signature verification is
 /// CPU-bound and fed through bounded queues; copying host parallelism into

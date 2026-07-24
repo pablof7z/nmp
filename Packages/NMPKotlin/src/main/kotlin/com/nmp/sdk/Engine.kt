@@ -11,6 +11,8 @@ import uniffi.nmp_ffi.NmpEngineConfig
 import uniffi.nmp_ffi.generateAccountSecretKey as ffiGenerateAccountSecretKey
 import uniffi.nmp_ffi.resetPersistentStore as ffiResetPersistentStore
 
+private fun ffiEngineConfigDefaults() = NmpEngineConfig()
+
 /** Construction config for `NMPEngine`. The only relay facts this app ever
  * supplies are the three operator-configured lanes -- `indexerRelays`,
  * `appRelays`, `fallbackRelays` -- the engine self-navigates outbox routing
@@ -42,9 +44,9 @@ data class NMPConfig(
      * the read is restored afterward, so apps do not multiply this value per
      * context. Legacy zero is normalized to the finite default, never
      * uncapped. */
-    val maxRelays: UInt = 10u,
+    val maxRelays: UInt = ffiEngineConfigDefaults().maxRelays,
     /** Finite shared ceiling for live signer and AUTH-policy registrations. Zero admits none. */
-    val maxAuthCapabilities: UInt = 64u,
+    val maxAuthCapabilities: UInt = ffiEngineConfigDefaults().maxAuthCapabilities,
 ) {
     fun toFfi(): NmpEngineConfig =
         NmpEngineConfig(

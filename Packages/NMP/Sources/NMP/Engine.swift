@@ -50,6 +50,16 @@ func rethrowCheckpointFailureAfterRollback(
     throw persistenceError
 }
 
+@usableFromInline
+func nmpDefaultMaxRelays() -> UInt32 {
+    NmpEngineConfig().maxRelays
+}
+
+@usableFromInline
+func nmpDefaultMaxAuthCapabilities() -> UInt32 {
+    NmpEngineConfig().maxAuthCapabilities
+}
+
 /// Construction config for `NMPEngine`. The only relay facts this app ever
 /// supplies are the three operator-configured lanes -- `indexerRelays`,
 /// `appRelays`, `fallbackRelays` (`routing-and-ownership.md` §2.1): the
@@ -96,8 +106,8 @@ public struct NMPConfig: Sendable {
         appRelays: [String] = [],
         fallbackRelays: [String] = [],
         allowedLocalRelayHosts: [String] = [],
-        maxRelays: UInt32 = 10,
-        maxAuthCapabilities: UInt32 = 64
+        maxRelays: UInt32 = nmpDefaultMaxRelays(),
+        maxAuthCapabilities: UInt32 = nmpDefaultMaxAuthCapabilities()
     ) {
         self.storePath = storePath
         self.indexerRelays = indexerRelays
