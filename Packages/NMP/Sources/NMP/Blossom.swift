@@ -57,9 +57,10 @@ public enum BlossomVerb: Sendable, Hashable {
     }
 }
 
-/// A BUD-02 blob descriptor (`FfiBlobDescriptor` mirror). Returned by
-/// `upload`/`mirror` only after the sha256 integrity gate; `list` rows are
-/// strictly parsed but remain unverified server claims.
+/// A BUD-02 blob descriptor (`FfiBlobDescriptor` mirror). `list` rows are
+/// strictly parsed but remain unverified server claims. Successful
+/// upload/mirror operations return `VerifiedUpload`, keeping their integrity
+/// evidence structurally distinct from this freely copyable data record.
 public struct BlobDescriptor: Sendable, Hashable {
     public let url: String
     /// 64 lowercase hex characters -- the strict BUD-01 blob identity.
@@ -74,6 +75,24 @@ public struct BlobDescriptor: Sendable, Hashable {
         size = ffi.size
         mimeType = ffi.mimeType
         uploaded = ffi.uploaded
+    }
+}
+
+/// Opaque proof that Blossom returned a descriptor whose sha256 matched the
+/// exact content hash verified by the upload/mirror operation. There is no
+/// public initializer: a listed or app-assembled `BlobDescriptor` cannot be
+/// promoted into this witness.
+public final class VerifiedUpload: @unchecked Sendable {
+    let ffi: FfiVerifiedUpload
+
+    init(_ ffi: FfiVerifiedUpload) {
+        self.ffi = ffi
+    }
+
+    /// The verified descriptor as ordinary read-only data. The opaque witness
+    /// remains held by this value for typed media composition.
+    public var descriptor: BlobDescriptor {
+        BlobDescriptor(ffi.descriptor())
     }
 }
 
@@ -634,20 +653,20 @@ public final class BlossomClient: @unchecked Sendable {
     }
 
     /// `PUT /upload` of `blob`'s exact bytes -- self-verifying end to end:
-    /// the returned descriptor's sha256 was PROVEN equal to the hash of
-    /// the uploaded bytes. `authorization` must be an `upload` grant bound
-    /// to exactly those bytes.
+    /// the returned witness holds a descriptor whose sha256 was PROVEN equal
+    /// to the hash of the uploaded bytes. `authorization` must be an `upload`
+    /// grant bound to exactly those bytes.
     public func upload(
         serverURL: String,
         blob: Data,
         contentType: String? = nil,
         authorization: BlossomAuthorization
-    ) async throws -> BlobDescriptor {
+    ) async throws -> VerifiedUpload {
         let ffi = self.ffi
         let auth = authorization.ffi
         return try await blossomBlocking {
             do {
-                return BlobDescriptor(
+                return VerifiedUpload(
                     try ffi.upload(
                         serverUrl: serverURL, blob: blob, contentType: contentType, auth: auth
                     )
@@ -666,12 +685,12 @@ public final class BlossomClient: @unchecked Sendable {
         sourceURL: String,
         expectedSha256Hex: String,
         authorization: BlossomAuthorization
-    ) async throws -> BlobDescriptor {
+    ) async throws -> VerifiedUpload {
         let ffi = self.ffi
         let auth = authorization.ffi
         return try await blossomBlocking {
             do {
-                return BlobDescriptor(
+                return VerifiedUpload(
                     try ffi.mirror(
                         serverUrl: serverURL,
                         sourceUrl: sourceURL,

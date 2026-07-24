@@ -1,0 +1,71 @@
+{
+  "name": "verified-upload-picture-draft",
+  "secret_key_hex": "0000000000000000000000000000000000000000000000000000000000000001",
+  "author_pubkey_hex": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+  "created_at": 1723456789,
+  "blob_utf8": "nmp nip68 parity image",
+  "descriptor": {
+    "url": "https://cdn.example.com/media/parity.jpg",
+    "sha256": "0ad5e7c0405a0009edb4b896090213b2ea5447e70a6424a7e48f668d7df53655",
+    "size": 22,
+    "mime_type": "image/jpeg"
+  },
+  "image": {
+    "width": 1440,
+    "height": 900,
+    "alt": "Sunset over relay hills",
+    "blurhash": "LEHV6nWB2yk8pyo0adR*.7kCMdnj",
+    "thumbhash": "2QcSHQRnh493V4dIh4",
+    "fallbacks": [
+      "https://mirror-one.example/media/parity.jpg",
+      "https://mirror-two.example/media/parity.jpg"
+    ]
+  },
+  "post": {
+    "title": "NMP parity picture",
+    "description": "One verified artifact, one kind:20 body.",
+    "content_warning_reason": "synthetic fixture",
+    "hashtags": [
+      "nmp",
+      "nostr"
+    ]
+  },
+  "expected": {
+    "kind": 20,
+    "tags": [
+      [
+        "title",
+        "NMP parity picture"
+      ],
+      [
+        "imeta",
+        "url https://cdn.example.com/media/parity.jpg",
+        "m image/jpeg",
+        "x 0ad5e7c0405a0009edb4b896090213b2ea5447e70a6424a7e48f668d7df53655",
+        "dim 1440x900",
+        "alt Sunset over relay hills",
+        "blurhash LEHV6nWB2yk8pyo0adR*.7kCMdnj",
+        "thumbhash 2QcSHQRnh493V4dIh4",
+        "fallback https://mirror-one.example/media/parity.jpg",
+        "fallback https://mirror-two.example/media/parity.jpg"
+      ],
+      [
+        "content-warning",
+        "synthetic fixture"
+      ],
+      [
+        "t",
+        "nmp"
+      ],
+      [
+        "t",
+        "nostr"
+      ]
+    ],
+    "content": "One verified artifact, one kind:20 body.",
+    "event_id": "b0ef1d0739d72fd3a961545d61c2e2b21adc5a1bf0dc51a307f48c155d0b6a54",
+    "unsigned_event_json": "{\"id\":\"b0ef1d0739d72fd3a961545d61c2e2b21adc5a1bf0dc51a307f48c155d0b6a54\",\"pubkey\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"created_at\":1723456789,\"kind\":20,\"tags\":[[\"title\",\"NMP parity picture\"],[\"imeta\",\"url https://cdn.example.com/media/parity.jpg\",\"m image/jpeg\",\"x 0ad5e7c0405a0009edb4b896090213b2ea5447e70a6424a7e48f668d7df53655\",\"dim 1440x900\",\"alt Sunset over relay hills\",\"blurhash LEHV6nWB2yk8pyo0adR*.7kCMdnj\",\"thumbhash 2QcSHQRnh493V4dIh4\",\"fallback https://mirror-one.example/media/parity.jpg\",\"fallback https://mirror-two.example/media/parity.jpg\"],[\"content-warning\",\"synthetic fixture\"],[\"t\",\"nmp\"],[\"t\",\"nostr\"]],\"content\":\"One verified artifact, one kind:20 body.\"}",
+    "durability": "durable",
+    "routing": "author_outbox"
+  }
+}

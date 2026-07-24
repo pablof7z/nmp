@@ -92,6 +92,17 @@ impl PreparedUpload {
 }
 
 impl UploadedAsset {
+    /// Lift an already integrity-verified Blossom upload into the media
+    /// composition seam. [`VerifiedUpload`] has no public constructor and can
+    /// only escape the Blossom client's sha256 gate, so this conversion
+    /// preserves (rather than recreates) the upload witness. This is the
+    /// boundary used by the FFI/native projection: upload remains owned by
+    /// `nmp-blossom`, while composition consumes the exact witness it
+    /// produced.
+    pub fn from_verified_upload(verified: VerifiedUpload) -> Self {
+        Self { verified }
+    }
+
     /// The integrity-verified BUD-02 blob descriptor.
     pub fn descriptor(&self) -> &BlobDescriptor {
         self.verified.descriptor()

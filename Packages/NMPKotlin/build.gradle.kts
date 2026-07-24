@@ -54,6 +54,10 @@ tasks.test {
         "nmp.referenceFixturePath",
         rootProject.projectDir.resolve("../../fixtures/reference-plans.json").canonicalPath,
     )
+    systemProperty(
+        "nmp.mediaParityFixturePath",
+        rootProject.projectDir.resolve("../../fixtures/nip68-media-parity.json").canonicalPath,
+    )
     // Live-relay test only, same discipline as LiveRelayTests.swift -- every
     // wait inside the test itself is already bounded (~30s), this is just a
     // hard backstop so a genuinely hung JVM/network call can't wedge CI.

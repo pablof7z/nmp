@@ -43,6 +43,7 @@ import uniffi.nmp_ffi.FfiBlossomSha256HexError
 import uniffi.nmp_ffi.FfiBlossomUploadException
 import uniffi.nmp_ffi.FfiBlossomVerb
 import uniffi.nmp_ffi.FfiSignedEvent
+import uniffi.nmp_ffi.FfiVerifiedUpload
 import uniffi.nmp_ffi.blossomDeleteAuthorizationDraft as ffiBlossomDeleteAuthorizationDraft
 import uniffi.nmp_ffi.blossomListAuthorizationDraft as ffiBlossomListAuthorizationDraft
 import uniffi.nmp_ffi.blossomUploadAuthorizationDraft as ffiBlossomUploadAuthorizationDraft
@@ -76,9 +77,10 @@ enum class BlossomVerb {
     }
 }
 
-/** A BUD-02 blob descriptor (`FfiBlobDescriptor` mirror). Returned by
- * `upload`/`mirror` only after the sha256 integrity gate; `list` rows are
- * strictly parsed but remain unverified server claims. */
+/** A BUD-02 blob descriptor (`FfiBlobDescriptor` mirror). `list` rows are
+ * strictly parsed but remain unverified server claims. Successful
+ * upload/mirror operations return [VerifiedUpload], keeping their integrity
+ * evidence structurally distinct from this freely copyable data record. */
 data class BlobDescriptor(
     val url: String,
     /** 64 lowercase hex characters -- the strict BUD-01 blob identity. */
@@ -91,6 +93,16 @@ data class BlobDescriptor(
         internal fun from(ffi: FfiBlobDescriptor): BlobDescriptor =
             BlobDescriptor(ffi.url, ffi.sha256, ffi.size, ffi.mimeType, ffi.uploaded)
     }
+}
+
+/** Opaque proof that Blossom returned a descriptor whose sha256 matched the
+ * exact content hash verified by upload/mirror. There is no public
+ * constructor: a listed or app-assembled [BlobDescriptor] cannot be promoted
+ * into this witness. */
+class VerifiedUpload internal constructor(internal val ffi: FfiVerifiedUpload) {
+    /** The verified descriptor as ordinary read-only data. */
+    val descriptor: BlobDescriptor
+        get() = BlobDescriptor.from(ffi.descriptor())
 }
 
 /** Strict lowercase-hex sha256 parse refusals (`FfiBlossomSha256HexError`
@@ -769,18 +781,18 @@ class BlossomClient(config: BlossomClientConfig = BlossomClientConfig()) {
     internal val ffi: FfiBlossomClient = FfiBlossomClient(config.toFfi())
 
     /** `PUT /upload` of [blob]'s exact bytes -- self-verifying end to end:
-     * the returned descriptor's sha256 was PROVEN equal to the hash of the
-     * uploaded bytes. [authorization] must be an `upload` grant bound to
-     * exactly those bytes. */
+     * the returned witness holds a descriptor whose sha256 was PROVEN equal
+     * to the hash of the uploaded bytes. [authorization] must be an `upload`
+     * grant bound to exactly those bytes. */
     suspend fun upload(
         serverUrl: String,
         blob: ByteArray,
         contentType: String? = null,
         authorization: BlossomAuthorization,
-    ): BlobDescriptor =
+    ): VerifiedUpload =
         withContext(Dispatchers.IO) {
             try {
-                BlobDescriptor.from(
+                VerifiedUpload(
                     ffi.upload(
                         serverUrl,
                         blob,
@@ -801,10 +813,10 @@ class BlossomClient(config: BlossomClientConfig = BlossomClientConfig()) {
         sourceUrl: String,
         expectedSha256Hex: String,
         authorization: BlossomAuthorization,
-    ): BlobDescriptor =
+    ): VerifiedUpload =
         withContext(Dispatchers.IO) {
             try {
-                BlobDescriptor.from(
+                VerifiedUpload(
                     ffi.mirror(serverUrl, sourceUrl, expectedSha256Hex, authorization.ffi),
                 )
             } catch (e: FfiBlossomMirrorException) {
