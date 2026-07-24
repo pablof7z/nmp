@@ -111,6 +111,193 @@ public enum BlossomServerUrlError: Sendable, Hashable {
         case .queryOrFragment: self = .queryOrFragment
         }
     }
+
+    func toFfi() -> FfiBlossomServerUrlError {
+        switch self {
+        case .parse(let reason): return .parse(reason: reason)
+        case .missingHost: return .missingHost
+        case .unsupportedScheme(let scheme): return .unsupportedScheme(scheme: scheme)
+        case .credentialed: return .credentialed
+        case .nonRootPath(let path): return .nonRootPath(path: path)
+        case .queryOrFragment: return .queryOrFragment
+        }
+    }
+}
+
+/// Why one signed BUD-03 `server` tag could not become a typed endpoint.
+public enum BlossomServerListEntryError: Sendable, Hashable {
+    case missingUrl
+    case invalidUrl(BlossomServerUrlError)
+
+    init(_ ffi: FfiBlossomServerListEntryError) {
+        switch ffi {
+        case .missingUrl: self = .missingUrl
+        case .invalidUrl(let error): self = .invalidUrl(BlossomServerUrlError(error))
+        }
+    }
+
+    func toFfi() -> FfiBlossomServerListEntryError {
+        switch self {
+        case .missingUrl: return .missingUrl
+        case .invalidUrl(let error): return .invalidUrl(error: error.toFfi())
+        }
+    }
+}
+
+/// Position-preserving malformed BUD-03 tag evidence.
+public struct BlossomMalformedServerEntry: Sendable, Hashable {
+    public let tagIndex: UInt64
+    public let rawURL: String?
+    public let error: BlossomServerListEntryError
+
+    init(_ ffi: FfiBlossomMalformedServerEntry) {
+        tagIndex = ffi.tagIndex
+        rawURL = ffi.rawUrl
+        error = BlossomServerListEntryError(ffi.error)
+    }
+
+    func toFfi() -> FfiBlossomMalformedServerEntry {
+        FfiBlossomMalformedServerEntry(
+            tagIndex: tagIndex, rawUrl: rawURL, error: error.toFfi()
+        )
+    }
+}
+
+/// Closed decode of one canonical signed BUD-03 kind:10063 row.
+public struct BlossomServerList: Sendable, Hashable {
+    public let eventID: String
+    public let authorPubkey: String
+    /// Canonical URLs in exact signed-list order.
+    public let servers: [String]
+    public let malformedEntries: [BlossomMalformedServerEntry]
+    public let serverTagCount: UInt64
+    public let hasUnexpectedContent: Bool
+    public let isSpecCompliant: Bool
+
+    init(_ ffi: FfiBlossomServerList) {
+        eventID = ffi.eventId
+        authorPubkey = ffi.authorPubkey
+        servers = ffi.servers
+        malformedEntries = ffi.malformedEntries.map(BlossomMalformedServerEntry.init)
+        serverTagCount = ffi.serverTagCount
+        hasUnexpectedContent = ffi.unexpectedContent
+        isSpecCompliant = ffi.specCompliant
+    }
+
+    func toFfi() -> FfiBlossomServerList {
+        FfiBlossomServerList(
+            eventId: eventID,
+            authorPubkey: authorPubkey,
+            servers: servers,
+            malformedEntries: malformedEntries.map { $0.toFfi() },
+            serverTagCount: serverTagCount,
+            unexpectedContent: hasUnexpectedContent,
+            specCompliant: isSpecCompliant
+        )
+    }
+}
+
+/// Observe the active account's BUD-03 replacement winner through the
+/// ordinary live-query model. Signed-out state resolves to zero rows.
+public func blossomServerListDemand() -> NMPDemand {
+    NMPDemand(NMPFFI.blossomServerListDemand())
+}
+
+/// Decode an ordinary delivered kind:10063 row. Absence, deletion, expiry,
+/// replacement, source/access evidence, and account rerooting remain facts on
+/// the surrounding `NMPQuery`; this function creates no second cache.
+public func decodeBlossomServerList(_ row: Row) -> BlossomServerList {
+    BlossomServerList(
+        NMPFFI.decodeBlossomServerList(
+            row: FfiRow(
+                id: row.id,
+                pubkey: row.pubkey,
+                createdAt: row.createdAt,
+                kind: row.kind,
+                tags: row.tags,
+                content: row.content,
+                sig: row.sig,
+                sources: row.sources
+            )
+        )
+    )
+}
+
+/// Explicit provenance-combination policy for endpoint qualification.
+public enum BlossomServerCandidatePolicy: Sendable, Hashable {
+    case signedListOnly
+    case operatorOnly
+    case signedListThenOperator
+
+    func toFfi() -> FfiBlossomServerCandidatePolicy {
+        switch self {
+        case .signedListOnly: return .signedListOnly
+        case .operatorOnly: return .operatorOnly
+        case .signedListThenOperator: return .signedListThenOperator
+        }
+    }
+}
+
+/// Authority that contributed one candidate.
+public enum BlossomServerCandidateSource: Sendable, Hashable {
+    case signedList
+    case operatorConfig
+
+    init(_ ffi: FfiBlossomServerCandidateSource) {
+        switch ffi {
+        case .signedList: self = .signedList
+        case .operatorConfig: self = .operatorConfig
+        }
+    }
+}
+
+/// Syntax plus DNS/SSRF qualification evidence. Only `admitted` is
+/// selectable, and the actual HTTP operation repeats the network gate.
+public enum BlossomServerAdmission: Sendable, Hashable {
+    case admitted(resolvedAddresses: [String], operatorLocalOverride: Bool)
+    case invalidUrl(BlossomServerUrlError)
+    case localHostNotAdmitted(host: String)
+    case dnsRefused(reason: String)
+
+    init(_ ffi: FfiBlossomServerAdmission) {
+        switch ffi {
+        case .admitted(let resolvedAddresses, let operatorLocalOverride):
+            self = .admitted(
+                resolvedAddresses: resolvedAddresses,
+                operatorLocalOverride: operatorLocalOverride
+            )
+        case .invalidUrl(let error): self = .invalidUrl(BlossomServerUrlError(error))
+        case .localHostNotAdmitted(let host): self = .localHostNotAdmitted(host: host)
+        case .dnsRefused(let reason): self = .dnsRefused(reason: reason)
+        }
+    }
+}
+
+/// Ordered, provenance-bearing evidence for one endpoint candidate.
+public struct BlossomServerCandidateEvidence: Sendable, Hashable {
+    public let serverURL: String
+    public let source: BlossomServerCandidateSource
+    public let admission: BlossomServerAdmission
+
+    init(_ ffi: FfiBlossomServerCandidateEvidence) {
+        serverURL = ffi.serverUrl
+        source = BlossomServerCandidateSource(ffi.source)
+        admission = BlossomServerAdmission(ffi.admission)
+    }
+}
+
+/// Machinery failures before candidate qualification can run. Individual
+/// endpoint refusals are returned as `BlossomServerAdmission` values.
+public enum BlossomQualificationError: Error, Sendable, Hashable {
+    case runtimeUnavailable(reason: String)
+    case clientBuild(reason: String)
+
+    init(_ ffi: FfiBlossomQualificationError) {
+        switch ffi {
+        case .RuntimeUnavailable(let reason): self = .runtimeUnavailable(reason: reason)
+        case .ClientBuild(let reason): self = .clientBuild(reason: reason)
+        }
+    }
 }
 
 /// Strict BUD-02 descriptor parse refusals (`FfiBlossomDescriptorError`
@@ -631,6 +818,31 @@ public final class BlossomClient: @unchecked Sendable {
 
     public init(config: BlossomClientConfig = BlossomClientConfig()) {
         ffi = FfiBlossomClient(config: config.toFfi())
+    }
+
+    /// Apply one explicit configuration/list policy and return admission
+    /// evidence for every candidate in selection order. No HTTP request is
+    /// sent. A signed list never grants local-network access; only the
+    /// client's operator allowlist can produce `operatorLocalOverride`.
+    public func qualifyServerCandidates(
+        policy: BlossomServerCandidatePolicy,
+        operatorServerURLs: [String] = [],
+        signedList: BlossomServerList? = nil
+    ) async throws -> [BlossomServerCandidateEvidence] {
+        let ffi = self.ffi
+        let ffiPolicy = policy.toFfi()
+        let ffiList = signedList?.toFfi()
+        return try await blossomBlocking {
+            do {
+                return try ffi.qualifyServerCandidates(
+                    policy: ffiPolicy,
+                    operatorServerUrls: operatorServerURLs,
+                    signedList: ffiList
+                ).map(BlossomServerCandidateEvidence.init)
+            } catch let error as FfiBlossomQualificationError {
+                throw BlossomQualificationError(error)
+            }
+        }
     }
 
     /// `PUT /upload` of `blob`'s exact bytes -- self-verifying end to end:

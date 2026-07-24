@@ -655,10 +655,71 @@ impl std::fmt::Display for ListError {
 
 impl std::error::Error for ListError {}
 
+/// Which authority contributed one candidate to BUD-03 endpoint selection.
+/// This is provenance evidence, not a trust score: a signed-list entry is a
+/// user fact, while an operator entry is local configuration; both still pass
+/// the identical URL and network-admission gates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerCandidateSource {
+    SignedList,
+    OperatorConfig,
+}
+
+/// Explicit combination policy for signed BUD-03 facts and app/operator
+/// configuration. There is deliberately no ambient/default union:
+///
+/// - `SignedListOnly` implements the BUD-03 ordered list directly;
+/// - `OperatorOnly` is an explicit local override;
+/// - `SignedListThenOperator` preserves the BUD-03 first-server requirement
+///   and adds operator URLs only as a provenance-visible fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerCandidatePolicy {
+    SignedListOnly,
+    OperatorOnly,
+    SignedListThenOperator,
+}
+
+/// Why a syntactically valid candidate was refused before HTTP work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServerAdmissionRefusal {
+    /// A literal local/private/link-local/unspecified/onion host lacked the
+    /// exact operator allowlist entry.
+    LocalHostNotAdmitted { host: String },
+    /// DNS failed, or every resolved address was local and the hostname was
+    /// not operator opted-in. `reason` retains the resolver's exact evidence.
+    DnsRefused { reason: String },
+}
+
+/// Result of applying the exact same literal-host plus post-DNS admission
+/// gate used by every actual Blossom HTTP operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServerAdmission {
+    Admitted {
+        /// Only addresses allowed by the post-resolution filter. Sorted and
+        /// deduplicated for deterministic diagnostics.
+        resolved_addresses: Vec<IpAddr>,
+        /// True when this host's explicit operator allowlist entry is what
+        /// permits local answers. A signature can never set this bit.
+        operator_local_override: bool,
+    },
+    Refused(ServerAdmissionRefusal),
+}
+
+/// Provenance plus admission evidence for one candidate, preserving the
+/// policy-defined order. The URL has already passed [`BlossomServerUrl`]'s
+/// syntax gate; [`ServerAdmission::Admitted`] is required before selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerCandidateEvidence {
+    pub source: ServerCandidateSource,
+    pub server: BlossomServerUrl,
+    pub admission: ServerAdmission,
+}
+
 /// The async BUD-02/04/12 blob client. Construction wires the full engine
 /// HTTP discipline (module doc); one client may serve many operations.
 pub struct BlossomClient {
     http: reqwest::Client,
+    dns_resolver: AdmittedDnsResolver,
     allowed_local_hosts: Arc<BTreeSet<String>>,
     max_response_bytes: usize,
     max_list_response_bytes: usize,
@@ -708,7 +769,7 @@ impl BlossomClient {
         )
         .map_err(|reason| ClientBuildError { reason })?;
         let http = reqwest::Client::builder()
-            .dns_resolver(Arc::new(resolver))
+            .dns_resolver(Arc::new(resolver.clone()))
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
             .no_proxy()
@@ -720,10 +781,100 @@ impl BlossomClient {
             })?;
         Ok(Self {
             http,
+            dns_resolver: resolver,
             allowed_local_hosts,
             max_response_bytes: config.max_response_bytes,
             max_list_response_bytes: config.max_list_response_bytes,
         })
+    }
+
+    /// Qualify the endpoint candidates selected by an explicit provenance
+    /// policy. This performs no HTTP request. Each candidate crosses the
+    /// literal-host and post-DNS admission gates used again at operation time
+    /// (the second check protects against DNS rebinding between qualification
+    /// and the actual request).
+    pub async fn qualify_server_candidates(
+        &self,
+        policy: ServerCandidatePolicy,
+        operator_servers: &[BlossomServerUrl],
+        signed_list: Option<&crate::UserServerList>,
+    ) -> Vec<ServerCandidateEvidence> {
+        let mut candidates = Vec::new();
+        if matches!(
+            policy,
+            ServerCandidatePolicy::SignedListOnly | ServerCandidatePolicy::SignedListThenOperator
+        ) {
+            if let Some(list) = signed_list {
+                candidates.extend(
+                    list.servers()
+                        .iter()
+                        .cloned()
+                        .map(|server| (ServerCandidateSource::SignedList, server)),
+                );
+            }
+        }
+        if matches!(
+            policy,
+            ServerCandidatePolicy::OperatorOnly | ServerCandidatePolicy::SignedListThenOperator
+        ) {
+            candidates.extend(
+                operator_servers
+                    .iter()
+                    .cloned()
+                    .map(|server| (ServerCandidateSource::OperatorConfig, server)),
+            );
+        }
+
+        let mut evidence = Vec::with_capacity(candidates.len());
+        for (source, server) in candidates {
+            evidence.push(self.qualify_server_candidate(source, server).await);
+        }
+        evidence
+    }
+
+    /// Qualify one already-parsed candidate while retaining its authority.
+    /// The batch method above is the normal direct-Rust entry point; this
+    /// singular door exists so boundary adapters can retain invalid raw-URL
+    /// refusals beside the valid candidates they delegate here.
+    pub async fn qualify_server_candidate(
+        &self,
+        source: ServerCandidateSource,
+        server: BlossomServerUrl,
+    ) -> ServerCandidateEvidence {
+        ServerCandidateEvidence {
+            source,
+            admission: self.qualify_server(&server).await,
+            server,
+        }
+    }
+
+    async fn qualify_server(&self, server: &BlossomServerUrl) -> ServerAdmission {
+        if let Err(host) = self.reject_unadmitted_local_host(server.host_str()) {
+            return ServerAdmission::Refused(ServerAdmissionRefusal::LocalHostNotAdmitted { host });
+        }
+
+        let host = server.host_str();
+        let bare = host
+            .strip_prefix('[')
+            .and_then(|inner| inner.strip_suffix(']'))
+            .unwrap_or(host);
+        let operator_local_override = self
+            .allowed_local_hosts
+            .contains(&normalize_bare_host(bare));
+        let resolved_addresses = match bare.parse::<IpAddr>() {
+            Ok(address) => vec![address],
+            Err(_) => match self.dns_resolver.resolve_admitted(host).await {
+                Ok(addresses) => addresses,
+                Err(reason) => {
+                    return ServerAdmission::Refused(ServerAdmissionRefusal::DnsRefused { reason });
+                }
+            },
+        };
+
+        ServerAdmission::Admitted {
+            resolved_addresses,
+            operator_local_override,
+        }
     }
 
     /// `PUT /upload` of `blob`'s exact bytes, self-verifying end to end:
@@ -1194,6 +1345,7 @@ fn literal_host_class(bare_host: &str) -> RelayHostClass {
 /// classifies `Local` unless the queried name itself was operator opted
 /// in; if EVERY answer is dropped the whole lookup fails closed with the
 /// real reason.
+#[derive(Clone)]
 struct AdmittedDnsResolver {
     resolver: hickory_resolver::TokioResolver,
     allowed_local_hosts: Arc<BTreeSet<String>>,
@@ -1226,32 +1378,46 @@ impl AdmittedDnsResolver {
             allowed_local_hosts,
         })
     }
+
+    async fn resolve_admitted(&self, query_name: &str) -> Result<Vec<IpAddr>, String> {
+        let lookup = self
+            .resolver
+            .lookup_ip(query_name.to_string())
+            .await
+            .map_err(|error| format!("DNS lookup for {query_name} failed: {error}"))?;
+        let host_opted_in = self
+            .allowed_local_hosts
+            .contains(&normalize_bare_host(query_name));
+        let mut admitted = lookup
+            .iter()
+            .filter(|address| classify_ip(*address) != RelayHostClass::Local || host_opted_in)
+            .collect::<Vec<_>>();
+        admitted.sort_unstable();
+        admitted.dedup();
+        if admitted.is_empty() {
+            return Err(format!(
+                "refusing to resolve {query_name}: every resolved address is \
+                 loopback/private/link-local/unspecified and the host is not operator opted-in"
+            ));
+        }
+        Ok(admitted)
+    }
 }
 
 impl reqwest::dns::Resolve for AdmittedDnsResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        let resolver = self.resolver.clone();
-        let allowed_local_hosts = Arc::clone(&self.allowed_local_hosts);
+        let resolver = self.clone();
         let query_name = name.as_str().to_string();
         Box::pin(async move {
-            let lookup = resolver.lookup_ip(query_name.clone()).await?;
-            let host_opted_in = allowed_local_hosts.contains(&normalize_bare_host(&query_name));
-            let mut admitted = Vec::new();
-            for address in lookup.iter() {
-                if classify_ip(address) == RelayHostClass::Local && !host_opted_in {
-                    continue;
-                }
-                admitted.push(std::net::SocketAddr::new(address, 0));
-            }
-            if admitted.is_empty() {
-                let message = format!(
-                    "refusing to resolve {query_name}: every resolved address is \
-                     loopback/private/link-local/unspecified and the host is not operator \
-                     opted-in"
-                );
-                return Err(Box::<dyn std::error::Error + Send + Sync>::from(message));
-            }
-            let addrs: reqwest::dns::Addrs = Box::new(admitted.into_iter());
+            let admitted = resolver
+                .resolve_admitted(&query_name)
+                .await
+                .map_err(Box::<dyn std::error::Error + Send + Sync>::from)?;
+            let addrs: reqwest::dns::Addrs = Box::new(
+                admitted
+                    .into_iter()
+                    .map(|address| std::net::SocketAddr::new(address, 0)),
+            );
             Ok(addrs)
         })
     }
@@ -1384,6 +1550,99 @@ mod tests {
         });
         let resolver = resolver_config_for_dns_server(dns_address);
         (resolver, dns_server)
+    }
+
+    #[tokio::test]
+    async fn candidate_policy_preserves_signed_order_provenance_and_literal_admission() {
+        let raw_tags = [
+            vec!["server".to_string(), "http://127.0.0.1:3000".to_string()],
+            vec!["server".to_string(), "https://8.8.8.8".to_string()],
+        ];
+        let signed =
+            crate::decode_server_list_from_raw_tags(raw_tags.iter().map(Vec::as_slice), "");
+        let operator = BlossomServerUrl::parse("https://1.1.1.1").expect("public operator server");
+        let client =
+            BlossomClient::new(BlossomClientConfig::default()).expect("client construction");
+
+        let evidence = client
+            .qualify_server_candidates(
+                ServerCandidatePolicy::SignedListThenOperator,
+                &[operator],
+                Some(&signed),
+            )
+            .await;
+        assert_eq!(evidence.len(), 3);
+        assert_eq!(evidence[0].source, ServerCandidateSource::SignedList);
+        assert_eq!(evidence[1].source, ServerCandidateSource::SignedList);
+        assert_eq!(evidence[2].source, ServerCandidateSource::OperatorConfig);
+        assert!(matches!(
+            evidence[0].admission,
+            ServerAdmission::Refused(ServerAdmissionRefusal::LocalHostNotAdmitted { .. })
+        ));
+        assert!(matches!(
+            evidence[1].admission,
+            ServerAdmission::Admitted {
+                operator_local_override: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            evidence[2].admission,
+            ServerAdmission::Admitted {
+                operator_local_override: false,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn candidate_dns_to_loopback_is_refused_before_http_selection() {
+        let (resolver, dns_server) = spawn_loopback_dns();
+        let client = BlossomClient::with_resolver_config(BlossomClientConfig::default(), resolver)
+            .expect("client construction");
+        let server = BlossomServerUrl::parse("https://blossom.nmp.test").expect("hostname server");
+
+        let evidence = client
+            .qualify_server_candidates(ServerCandidatePolicy::OperatorOnly, &[server], None)
+            .await;
+        assert_eq!(evidence.len(), 1);
+        match &evidence[0].admission {
+            ServerAdmission::Refused(ServerAdmissionRefusal::DnsRefused { reason }) => {
+                assert!(reason.contains("every resolved address is"));
+                assert!(reason.contains("not operator opted-in"));
+            }
+            other => panic!("expected post-DNS refusal, got {other:?}"),
+        }
+        dns_server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn only_operator_allowlist_can_admit_a_local_candidate() {
+        let client = BlossomClient::new(BlossomClientConfig {
+            allowed_local_hosts: BTreeSet::from(["127.0.0.1".to_string()]),
+            ..BlossomClientConfig::default()
+        })
+        .expect("client construction");
+        let server = BlossomServerUrl::parse("http://127.0.0.1:3000").expect("literal server");
+        let evidence = client
+            .qualify_server_candidates(
+                ServerCandidatePolicy::SignedListOnly,
+                &[],
+                Some(&crate::decode_server_list_from_raw_tags(
+                    [vec!["server".to_string(), server.as_str().to_string()]]
+                        .iter()
+                        .map(Vec::as_slice),
+                    "",
+                )),
+            )
+            .await;
+        assert!(matches!(
+            evidence[0].admission,
+            ServerAdmission::Admitted {
+                operator_local_override: true,
+                ..
+            }
+        ));
     }
 
     /// Draft -> sign -> validate a `delete` grant for `blob` (test keys

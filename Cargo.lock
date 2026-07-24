@@ -1959,7 +1959,9 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "hickory-resolver",
+ "nmp-grammar",
  "nmp-ownership",
+ "nmp-resolver",
  "nmp-transport",
  "nostr 0.44.4",
  "reqwest",

@@ -1,4 +1,5 @@
-//! Blossom (BUD-01/02/04/11/12) blob projection over UniFFI (#555, epic
+//! Blossom (BUD-01/02/03/04/11/12) blob projection over UniFFI (#555/#731,
+//! epic
 //! #216 T15-A-BLOSSOM): `nmp-blossom`'s draft builders, fail-closed
 //! authorization validation, and the self-verifying blob client, exported
 //! in the same engine-less shape as [`crate::entity`]/[`crate::nip29`] --
@@ -54,13 +55,15 @@ use std::time::Duration;
 use nmp_blossom::{
     AuthDraftError, AuthValidationError, BlobDescriptor, BlossomClient, BlossomClientConfig,
     BlossomServerUrl, BlossomVerb, DeleteError, DescriptorError, ExpectedAuthorization, ListError,
-    ListPage, MirrorError, ServerUrlError, Sha256Hash, Sha256HexError, SignedAuthorization,
-    UploadError, DEFAULT_MAX_LIST_RESPONSE_BYTES, DEFAULT_MAX_RESPONSE_BYTES,
+    ListPage, MalformedServerEntryReason, MirrorError, ServerAdmission, ServerAdmissionRefusal,
+    ServerCandidatePolicy, ServerCandidateSource, ServerUrlError, Sha256Hash, Sha256HexError,
+    SignedAuthorization, UploadError, DEFAULT_MAX_LIST_RESPONSE_BYTES, DEFAULT_MAX_RESPONSE_BYTES,
     DEFAULT_REQUEST_DEADLINE,
 };
 use nostr::{JsonUtil, PublicKey, Timestamp, UnsignedEvent};
 
-use crate::types::FfiSignedEvent;
+use crate::convert::demand_to_ffi;
+use crate::types::{FfiDemand, FfiRow, FfiSignedEvent};
 
 /// The BUD-11 authorization verbs (`nmp_blossom::BlossomVerb` mirror).
 /// `get` is modeled totally (the Rust enum is total) but has no draft
@@ -174,6 +177,196 @@ fn server_url_error_to_ffi(error: ServerUrlError) -> FfiBlossomServerUrlError {
         ServerUrlError::QueryOrFragment => FfiBlossomServerUrlError::QueryOrFragment,
     }
 }
+
+/// One malformed signed BUD-03 `server` tag.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiBlossomServerListEntryError {
+    MissingUrl,
+    InvalidUrl { error: FfiBlossomServerUrlError },
+}
+
+/// Position-preserving malformed-tag evidence from a signed BUD-03 list.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiBlossomMalformedServerEntry {
+    pub tag_index: u64,
+    pub raw_url: Option<String>,
+    pub error: FfiBlossomServerListEntryError,
+}
+
+/// Closed BUD-03 decode of one delivered canonical kind:10063 row.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiBlossomServerList {
+    pub event_id: String,
+    pub author_pubkey: String,
+    /// Canonical, syntactically admitted URLs in exact signed-list order.
+    pub servers: Vec<String>,
+    /// Invalid `server` tags, retained rather than silently dropped.
+    pub malformed_entries: Vec<FfiBlossomMalformedServerEntry>,
+    pub server_tag_count: u64,
+    pub unexpected_content: bool,
+    pub spec_compliant: bool,
+}
+
+/// The active account's ordinary BUD-03 demand:
+/// `kinds:[10063], authors:Reactive(ActivePubkey), AuthorOutboxes + Public`.
+#[uniffi::export]
+pub fn blossom_server_list_demand() -> FfiDemand {
+    demand_to_ffi(nmp_blossom::active_account_server_list_demand())
+}
+
+/// Decode a delivered kind:10063 row. Replacement, deletion, expiry, absence,
+/// account rerooting, source/access evidence, and caching remain the normal
+/// observation/store path; this pure function adds no second lifecycle.
+#[uniffi::export]
+pub fn decode_blossom_server_list(row: FfiRow) -> FfiBlossomServerList {
+    let decoded = nmp_blossom::decode_server_list_from_raw_tags(
+        row.tags.iter().map(Vec::as_slice),
+        &row.content,
+    );
+    FfiBlossomServerList {
+        event_id: row.id,
+        author_pubkey: row.pubkey,
+        servers: decoded
+            .servers()
+            .iter()
+            .map(|server| server.as_str().to_string())
+            .collect(),
+        malformed_entries: decoded
+            .malformed_entries()
+            .iter()
+            .map(|entry| FfiBlossomMalformedServerEntry {
+                tag_index: entry.tag_index as u64,
+                raw_url: entry.raw_url.clone(),
+                error: match &entry.reason {
+                    MalformedServerEntryReason::MissingUrl => {
+                        FfiBlossomServerListEntryError::MissingUrl
+                    }
+                    MalformedServerEntryReason::InvalidUrl(error) => {
+                        FfiBlossomServerListEntryError::InvalidUrl {
+                            error: server_url_error_to_ffi(error.clone()),
+                        }
+                    }
+                },
+            })
+            .collect(),
+        server_tag_count: decoded.server_tag_count() as u64,
+        unexpected_content: decoded.has_unexpected_content(),
+        spec_compliant: decoded.is_spec_compliant(),
+    }
+}
+
+/// Explicit provenance-combination policy. No variant silently places local
+/// configuration ahead of a signed BUD-03 first server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiBlossomServerCandidatePolicy {
+    SignedListOnly,
+    OperatorOnly,
+    SignedListThenOperator,
+}
+
+fn candidate_policy_from_ffi(policy: FfiBlossomServerCandidatePolicy) -> ServerCandidatePolicy {
+    match policy {
+        FfiBlossomServerCandidatePolicy::SignedListOnly => ServerCandidatePolicy::SignedListOnly,
+        FfiBlossomServerCandidatePolicy::OperatorOnly => ServerCandidatePolicy::OperatorOnly,
+        FfiBlossomServerCandidatePolicy::SignedListThenOperator => {
+            ServerCandidatePolicy::SignedListThenOperator
+        }
+    }
+}
+
+/// Authority that contributed one qualified candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiBlossomServerCandidateSource {
+    SignedList,
+    OperatorConfig,
+}
+
+fn candidate_source_to_ffi(source: ServerCandidateSource) -> FfiBlossomServerCandidateSource {
+    match source {
+        ServerCandidateSource::SignedList => FfiBlossomServerCandidateSource::SignedList,
+        ServerCandidateSource::OperatorConfig => FfiBlossomServerCandidateSource::OperatorConfig,
+    }
+}
+
+fn candidate_source_from_ffi(source: FfiBlossomServerCandidateSource) -> ServerCandidateSource {
+    match source {
+        FfiBlossomServerCandidateSource::SignedList => ServerCandidateSource::SignedList,
+        FfiBlossomServerCandidateSource::OperatorConfig => ServerCandidateSource::OperatorConfig,
+    }
+}
+
+/// Syntax plus network-admission evidence for one candidate. Only `Admitted`
+/// is selectable; the actual HTTP operation repeats DNS admission to protect
+/// against rebinding.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiBlossomServerAdmission {
+    Admitted {
+        resolved_addresses: Vec<String>,
+        operator_local_override: bool,
+    },
+    InvalidUrl {
+        error: FfiBlossomServerUrlError,
+    },
+    LocalHostNotAdmitted {
+        host: String,
+    },
+    DnsRefused {
+        reason: String,
+    },
+}
+
+fn server_admission_to_ffi(admission: ServerAdmission) -> FfiBlossomServerAdmission {
+    match admission {
+        ServerAdmission::Admitted {
+            resolved_addresses,
+            operator_local_override,
+        } => FfiBlossomServerAdmission::Admitted {
+            resolved_addresses: resolved_addresses
+                .into_iter()
+                .map(|address| address.to_string())
+                .collect(),
+            operator_local_override,
+        },
+        ServerAdmission::Refused(ServerAdmissionRefusal::LocalHostNotAdmitted { host }) => {
+            FfiBlossomServerAdmission::LocalHostNotAdmitted { host }
+        }
+        ServerAdmission::Refused(ServerAdmissionRefusal::DnsRefused { reason }) => {
+            FfiBlossomServerAdmission::DnsRefused { reason }
+        }
+    }
+}
+
+/// One ordered, provenance-bearing qualification result.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiBlossomServerCandidateEvidence {
+    pub server_url: String,
+    pub source: FfiBlossomServerCandidateSource,
+    pub admission: FfiBlossomServerAdmission,
+}
+
+/// Machinery failures before candidate qualification can run. Per-candidate
+/// syntax/DNS/admission refusals are values in the returned evidence, not
+/// thrown failures.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
+pub enum FfiBlossomQualificationError {
+    RuntimeUnavailable { reason: String },
+    ClientBuild { reason: String },
+}
+
+impl std::fmt::Display for FfiBlossomQualificationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RuntimeUnavailable { reason } => {
+                write!(f, "Blossom qualification runtime unavailable: {reason}")
+            }
+            Self::ClientBuild { reason } => {
+                write!(f, "Blossom HTTP client construction failed: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FfiBlossomQualificationError {}
 
 /// `nmp_blossom::DescriptorError` mirror -- the strict BUD-02 descriptor
 /// parse refusals, variant-for-variant.
@@ -1278,6 +1471,78 @@ impl FfiBlossomClient {
         })
     }
 
+    /// BLOCKING endpoint qualification with explicit configuration/list
+    /// combination and per-candidate provenance. No HTTP request is sent.
+    /// `InvalidUrl`/local-host/DNS refusals remain evidence values so callers
+    /// can explain every candidate rather than catching one aggregate error.
+    /// Call off the main thread.
+    pub fn qualify_server_candidates(
+        &self,
+        policy: FfiBlossomServerCandidatePolicy,
+        operator_server_urls: Vec<String>,
+        signed_list: Option<FfiBlossomServerList>,
+    ) -> Result<Vec<FfiBlossomServerCandidateEvidence>, FfiBlossomQualificationError> {
+        let policy = candidate_policy_from_ffi(policy);
+        let mut candidates = Vec::new();
+        if matches!(
+            policy,
+            ServerCandidatePolicy::SignedListOnly | ServerCandidatePolicy::SignedListThenOperator
+        ) {
+            if let Some(list) = signed_list {
+                candidates.extend(
+                    list.servers
+                        .into_iter()
+                        .map(|url| (FfiBlossomServerCandidateSource::SignedList, url)),
+                );
+            }
+        }
+        if matches!(
+            policy,
+            ServerCandidatePolicy::OperatorOnly | ServerCandidatePolicy::SignedListThenOperator
+        ) {
+            candidates.extend(
+                operator_server_urls
+                    .into_iter()
+                    .map(|url| (FfiBlossomServerCandidateSource::OperatorConfig, url)),
+            );
+        }
+
+        let runtime = blocking_runtime()
+            .map_err(|reason| FfiBlossomQualificationError::RuntimeUnavailable { reason })?;
+        runtime.block_on(async {
+            let client = BlossomClient::new(self.config.clone()).map_err(|error| {
+                FfiBlossomQualificationError::ClientBuild {
+                    reason: error.reason,
+                }
+            })?;
+            let mut evidence = Vec::with_capacity(candidates.len());
+            for (source, raw_url) in candidates {
+                match BlossomServerUrl::parse(&raw_url) {
+                    Ok(server) => {
+                        let qualified = client
+                            .qualify_server_candidate(candidate_source_from_ffi(source), server)
+                            .await;
+                        evidence.push(FfiBlossomServerCandidateEvidence {
+                            server_url: qualified.server.as_str().to_string(),
+                            source: candidate_source_to_ffi(qualified.source),
+                            admission: server_admission_to_ffi(qualified.admission),
+                        });
+                    }
+                    Err(error) => {
+                        evidence.push(FfiBlossomServerCandidateEvidence {
+                            server_url: raw_url,
+                            source,
+                            admission: FfiBlossomServerAdmission::InvalidUrl {
+                                error: server_url_error_to_ffi(error),
+                            },
+                        });
+                    }
+                }
+            }
+            Ok(evidence)
+        })
+    }
+
     /// BLOCKING `PUT /upload` of `blob`'s exact bytes -- self-verifying end
     /// to end (`nmp_blossom::BlossomClient::upload`): the returned
     /// descriptor's sha256 was PROVEN equal to the hash of the uploaded
@@ -1485,6 +1750,113 @@ mod tests {
             assert_eq!(verb_to_ffi(rust), ffi);
             assert_eq!(verb_from_ffi(ffi), rust);
         }
+    }
+
+    #[test]
+    fn bud03_demand_and_decode_preserve_order_and_malformed_evidence() {
+        let demand = blossom_server_list_demand();
+        assert_eq!(demand.selection.kinds, Some(vec![10063]));
+
+        let row = FfiRow {
+            id: "11".repeat(32),
+            pubkey: "22".repeat(32),
+            created_at: 10,
+            kind: 10063,
+            tags: vec![
+                vec!["server".to_string(), "https://first.example".to_string()],
+                vec!["server".to_string()],
+                vec!["server".to_string(), "ftp://invalid.example".to_string()],
+                vec!["server".to_string(), "https://second.example/".to_string()],
+            ],
+            content: "not-used".to_string(),
+            sig: "33".repeat(64),
+            sources: vec!["wss://relay.example".to_string()],
+        };
+        let list = decode_blossom_server_list(row);
+        assert_eq!(list.event_id, "11".repeat(32));
+        assert_eq!(list.author_pubkey, "22".repeat(32));
+        assert_eq!(
+            list.servers,
+            vec![
+                "https://first.example/".to_string(),
+                "https://second.example/".to_string(),
+            ]
+        );
+        assert_eq!(list.server_tag_count, 4);
+        assert_eq!(list.malformed_entries.len(), 2);
+        assert_eq!(list.malformed_entries[0].tag_index, 1);
+        assert!(matches!(
+            list.malformed_entries[0].error,
+            FfiBlossomServerListEntryError::MissingUrl
+        ));
+        assert_eq!(list.malformed_entries[1].tag_index, 2);
+        assert!(matches!(
+            list.malformed_entries[1].error,
+            FfiBlossomServerListEntryError::InvalidUrl {
+                error: FfiBlossomServerUrlError::UnsupportedScheme { .. }
+            }
+        ));
+        assert!(list.unexpected_content);
+        assert!(!list.spec_compliant);
+    }
+
+    #[test]
+    fn qualification_keeps_source_order_and_all_refusal_reasons() {
+        let signed_list = FfiBlossomServerList {
+            event_id: "11".repeat(32),
+            author_pubkey: "22".repeat(32),
+            servers: vec![
+                "http://127.0.0.1:3000/".to_string(),
+                "https://8.8.8.8/".to_string(),
+            ],
+            malformed_entries: vec![],
+            server_tag_count: 2,
+            unexpected_content: false,
+            spec_compliant: true,
+        };
+        let client = FfiBlossomClient::new(FfiBlossomClientConfig {
+            allowed_local_hosts: vec![],
+            max_response_bytes: None,
+            max_list_response_bytes: None,
+            request_deadline_secs: None,
+        });
+        let evidence = client
+            .qualify_server_candidates(
+                FfiBlossomServerCandidatePolicy::SignedListThenOperator,
+                vec![
+                    "ftp://invalid.example".to_string(),
+                    "https://1.1.1.1".to_string(),
+                ],
+                Some(signed_list),
+            )
+            .expect("qualification machinery");
+        assert_eq!(evidence.len(), 4);
+        assert_eq!(
+            evidence[0].source,
+            FfiBlossomServerCandidateSource::SignedList
+        );
+        assert!(matches!(
+            evidence[0].admission,
+            FfiBlossomServerAdmission::LocalHostNotAdmitted { .. }
+        ));
+        assert!(matches!(
+            evidence[1].admission,
+            FfiBlossomServerAdmission::Admitted { .. }
+        ));
+        assert_eq!(
+            evidence[2].source,
+            FfiBlossomServerCandidateSource::OperatorConfig
+        );
+        assert!(matches!(
+            evidence[2].admission,
+            FfiBlossomServerAdmission::InvalidUrl {
+                error: FfiBlossomServerUrlError::UnsupportedScheme { .. }
+            }
+        ));
+        assert!(matches!(
+            evidence[3].admission,
+            FfiBlossomServerAdmission::Admitted { .. }
+        ));
     }
 
     /// Invariant (#555): every `AuthValidationError` variant maps to a
