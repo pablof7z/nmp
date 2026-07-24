@@ -126,39 +126,62 @@ public struct NMPConfig: Sendable {
 /// wrapper. `import NMP; let nmp = try NMPEngine(config: .init(...))` is the
 /// entire adoption cost.
 public final class NMPEngine: Sendable {
-    /// Lock-guarded record of which pubkey the configured checkpoint file
-    /// currently holds (#529), plus -- when that pubkey was installed on the
-    /// init-restore path -- the exact `NMPAccountRegistration` created for it
-    /// (#589). Set on the init restore path (`setRestored`) and on every
-    /// successful `addAccount` checkpoint save or `removeAccount`/
-    /// `clearPersistedAccount` clear (plain `set`, which always drops the
-    /// restored registration: a later `addAccount` or a clear both mean the
-    /// checkpoint no longer holds -- or no longer only holds -- the
-    /// originally-restored installation). Consulted by `removeAccount` so
-    /// removing that exact account also clears the on-disk checkpoint
-    /// instead of letting it resurrect on restart, and by
-    /// `detachPersistedAccount` so it can recover the exact restored
-    /// registration to detach.
+    /// One mutation domain for the configured checkpoint store and the
+    /// metadata describing its contents (#607). The store bytes and these
+    /// fields are one fact: every save/clear and matching metadata update
+    /// happens under this lock, so concurrent add/remove/clear operations
+    /// cannot delete a newer checkpoint or leave the tracker describing
+    /// bytes that are not present.
+    ///
+    /// `restoredRegistration` is retained only when the current checkpoint
+    /// was installed by the init-restore path (#589). A later save or clear
+    /// spends it.
     private final class CheckpointTracker: @unchecked Sendable {
         private let lock = NSLock()
-        private var pubkey: String?
+        private var registration: NMPAccountRegistration?
         private var restoredRegistration: NMPAccountRegistration?
 
-        func set(_ value: String?) {
-            lock.withLock {
-                pubkey = value
+        func save(
+            secretKey: String,
+            registration: NMPAccountRegistration,
+            to store: any NMPLocalAccountCheckpoint
+        ) throws {
+            try lock.withLock {
+                try store.saveSecretKey(secretKey)
+                self.registration = registration
                 restoredRegistration = nil
             }
         }
 
-        func holds(_ candidate: String) -> Bool {
-            lock.withLock { pubkey == candidate }
+        /// Clear only when the checkpoint still belongs to `candidate`.
+        /// Returns `false` when a later save already replaced it.
+        func clearIfCurrent(
+            _ candidate: NMPAccountRegistration,
+            from store: (any NMPLocalAccountCheckpoint)?
+        ) throws -> Bool {
+            try lock.withLock {
+                guard registration === candidate else {
+                    return false
+                }
+                try store?.clear()
+                registration = nil
+                restoredRegistration = nil
+                return true
+            }
+        }
+
+        func clear(from store: (any NMPLocalAccountCheckpoint)?) throws {
+            try lock.withLock {
+                try store?.clear()
+                registration = nil
+                restoredRegistration = nil
+            }
         }
 
         /// Record the exact registration created on the init-restore path.
         func setRestored(_ registration: NMPAccountRegistration) {
             lock.withLock {
-                pubkey = registration.publicKey
+                self.registration = registration
                 restoredRegistration = registration
             }
         }
@@ -169,7 +192,7 @@ public final class NMPEngine: Sendable {
         /// later `addAccount` has since overwritten the checkpoint.
         func restoredRegistrationIfCurrent() -> NMPAccountRegistration? {
             lock.withLock {
-                guard let restoredRegistration, pubkey == restoredRegistration.publicKey else {
+                guard let restoredRegistration, registration === restoredRegistration else {
                     return nil
                 }
                 return restoredRegistration
@@ -179,7 +202,7 @@ public final class NMPEngine: Sendable {
 
     let ffi: NmpEngineProtocol
     private let localAccountStore: (any NMPLocalAccountCheckpoint)?
-    private let checkpointedPubkey = CheckpointTracker()
+    private let checkpointTracker = CheckpointTracker()
 
     /// Destructively remove one closed persistent NMP store. A live engine in
     /// this process using the same canonical path throws
@@ -221,7 +244,7 @@ public final class NMPEngine: Sendable {
                 }
                 let registration = NMPAccountRegistration(ffi: ffiRegistration)
                 try nmpRethrowing { try ffi.setActiveAccount(pubkey: registration.publicKey) }
-                checkpointedPubkey.setRestored(registration)
+                checkpointTracker.setRestored(registration)
             }
         } catch {
             ffi.shutdown()
@@ -268,7 +291,11 @@ public final class NMPEngine: Sendable {
         let registration = NMPAccountRegistration(ffi: ffiRegistration)
         if let localAccountStore {
             do {
-                try localAccountStore.saveSecretKey(secretKey)
+                try checkpointTracker.save(
+                    secretKey: secretKey,
+                    registration: registration,
+                    to: localAccountStore
+                )
             } catch let persistenceError {
                 try rethrowCheckpointFailureAfterRollback(persistenceError) {
                     try nmpRethrowing {
@@ -276,7 +303,6 @@ public final class NMPEngine: Sendable {
                     }
                 }
             }
-            checkpointedPubkey.set(registration.publicKey)
         }
         return registration
     }
@@ -298,13 +324,15 @@ public final class NMPEngine: Sendable {
         let removed = try nmpRethrowing {
             try ffi.removeAccount(registration: registration.ffi)
         }
-        if removed, checkpointedPubkey.holds(registration.publicKey) {
+        if removed {
             do {
-                try localAccountStore?.clear()
+                _ = try checkpointTracker.clearIfCurrent(
+                    registration,
+                    from: localAccountStore
+                )
             } catch {
                 throw NMPAccountCheckpointClearError(underlying: error)
             }
-            checkpointedPubkey.set(nil)
         }
         return removed
     }
@@ -327,7 +355,7 @@ public final class NMPEngine: Sendable {
     /// shutting down the engine, never by a later `detachPersistedAccount()`
     /// call).
     public func detachPersistedAccount() throws -> Bool {
-        guard let registration = checkpointedPubkey.restoredRegistrationIfCurrent() else {
+        guard let registration = checkpointTracker.restoredRegistrationIfCurrent() else {
             return false
         }
         return try removeAccount(registration)
@@ -351,8 +379,7 @@ public final class NMPEngine: Sendable {
     /// when it holds that exact account -- see `removeAccount`). Also the
     /// documented retry path after an `NMPAccountCheckpointClearError`.
     public func clearPersistedAccount() throws {
-        try localAccountStore?.clear()
-        checkpointedPubkey.set(nil)
+        try checkpointTracker.clear(from: localAccountStore)
     }
 
     // MARK: - Read noun
