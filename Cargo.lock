@@ -2161,6 +2161,7 @@ dependencies = [
  "nmp-ffi",
  "nmp-grammar",
  "nmp-nip02",
+ "nmp-nip22",
  "nostr 0.44.4",
  "tempfile",
  "tokio",
