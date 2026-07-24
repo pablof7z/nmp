@@ -84,18 +84,17 @@ class NMPEngine(
 
     internal val ffi: NmpEngine = nmpRethrowing { NmpEngine(config.toFfi()) }
 
-    /** Guards [checkpointedPubkey] -- the identity currently persisted in
-     * [localAccountStore]'s checkpoint file, `null` when no checkpoint is
-     * known to exist -- and [restoredRegistration], the exact
-     * [NMPAccountRegistration] created on the init-restore path, when the
-     * checkpoint still holds exactly that installation (#589). Tracked so
-     * [removeAccount] can clear the checkpoint for exactly the removed
-     * identity (#529): without this, a removed account would silently
-     * resurrect from the checkpoint on the next engine construction. Also
-     * consulted by [detachPersistedAccount] to recover the exact restored
-     * registration to detach. */
+    /** One mutation domain for [localAccountStore] bytes plus the metadata
+     * describing those bytes (#607). Every save/clear and matching metadata
+     * update runs under [checkpointLock], so concurrent add/remove/clear
+     * cannot delete a newer checkpoint or leave the tracker describing
+     * material the store does not contain.
+     *
+     * [restoredRegistration] retains the exact installation created by the
+     * init-restore path (#589) only while that same checkpoint remains
+     * current. A later save or clear spends it. */
     private val checkpointLock = Any()
-    private var checkpointedPubkey: String? = null
+    private var checkpointedRegistration: NMPAccountRegistration? = null
     private var restoredRegistration: NMPAccountRegistration? = null
 
     init {
@@ -105,7 +104,7 @@ class NMPEngine(
                 val registration = NMPAccountRegistration(ffiRegistration)
                 nmpRethrowing { ffi.setActiveAccount(registration.publicKey) }
                 synchronized(checkpointLock) {
-                    checkpointedPubkey = registration.publicKey
+                    checkpointedRegistration = registration
                     restoredRegistration = registration
                 }
             }
@@ -135,8 +134,19 @@ class NMPEngine(
      * [setActiveAccount] for that. */
     fun addAccount(secretKey: String): NMPAccountRegistration {
         val ffiRegistration = nmpRethrowing { ffi.addAccount(secretKey) }
+        val registration = NMPAccountRegistration(ffiRegistration)
         try {
-            localAccountStore?.saveSecretKey(secretKey)
+            if (localAccountStore != null) {
+                synchronized(checkpointLock) {
+                    localAccountStore.saveSecretKey(secretKey)
+                    checkpointedRegistration = registration
+                    // This account -- not whatever the init-restore path
+                    // installed -- now owns the checkpoint; a later
+                    // `detachPersistedAccount()` must not fire against a
+                    // registration the checkpoint no longer reflects.
+                    restoredRegistration = null
+                }
+            }
         } catch (persistenceError: Throwable) {
             try {
                 if (!nmpRethrowing { ffi.removeAccount(ffiRegistration) }) {
@@ -149,17 +159,7 @@ class NMPEngine(
             }
             throw persistenceError
         }
-        if (localAccountStore != null) {
-            synchronized(checkpointLock) {
-                checkpointedPubkey = ffiRegistration.publicKey()
-                // This account -- not whatever the init-restore path
-                // installed -- now owns the checkpoint; a later
-                // `detachPersistedAccount()` must not fire against a
-                // registration the checkpoint no longer (solely) reflects.
-                restoredRegistration = null
-            }
-        }
-        return NMPAccountRegistration(ffiRegistration)
+        return registration
     }
 
     /** Remove only the installation proven by [registration]. The proof
@@ -173,9 +173,9 @@ class NMPEngine(
         val removed = nmpRethrowing { ffi.removeAccount(registration.ffi) }
         if (removed) {
             synchronized(checkpointLock) {
-                if (checkpointedPubkey == registration.publicKey) {
+                if (checkpointedRegistration === registration) {
                     localAccountStore?.clear()
-                    checkpointedPubkey = null
+                    checkpointedRegistration = null
                     restoredRegistration = null
                 }
             }
@@ -198,7 +198,7 @@ class NMPEngine(
      * call). */
     fun detachPersistedAccount(): Boolean {
         val registration = synchronized(checkpointLock) {
-            restoredRegistration?.takeIf { checkpointedPubkey == it.publicKey }
+            restoredRegistration?.takeIf { checkpointedRegistration === it }
         } ?: return false
         return removeAccount(registration)
     }
@@ -232,7 +232,7 @@ class NMPEngine(
     fun clearPersistedAccount() {
         synchronized(checkpointLock) {
             localAccountStore?.clear()
-            checkpointedPubkey = null
+            checkpointedRegistration = null
             restoredRegistration = null
         }
     }
