@@ -43,8 +43,8 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `crates/nmp-signer/src/nip46.rs`
 - Source: `crates/nmp-signer/tests/nip46_mock_relay.rs`
 - Source: `crates/nmp-ownership/src/lib.rs`
-- Source: `crates/nmp-content/src/article.rs`
-- Source: `crates/nmp-content/src/reference.rs`
+- Source: `crates/nmp-content/src/document.rs`
+- Source: `crates/nmp-content/src/parse.rs`
 
 ## FFI and native wrappers
 
@@ -100,12 +100,12 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `Packages/NMP/Sources/NMP/Following.swift`
 - Source: `Packages/NMP/Sources/NMP/NIP29.swift`
 - Source: `Packages/NMP/Sources/NMPContent`
-- Source: `Packages/NMP/Sources/NMPContent/ContentSession.swift`
+- Source: `Packages/NMP/Sources/NMPContent/ContentDocument.swift`
 - Source: `Packages/NMP/Sources/NMPUI`
 - Source: `Packages/NMPKotlin/README.md`
 - Source: `Packages/NMPKotlin/build.gradle.kts`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Content.kt`
-- Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/ContentSession.kt`
+- Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Reference.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29.kt`
 - Source: `scripts/build-swift-xcframework.sh`
 - Source: `scripts/build-kotlin-jvm.sh`

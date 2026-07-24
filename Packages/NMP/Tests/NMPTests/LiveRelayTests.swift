@@ -42,7 +42,10 @@ final class LiveRelayTests: XCTestCase {
         let followFeed = NMPFilter(
             kinds: [1],
             authors: .derived(
-                inner: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
+                inner: NMPDemand(
+                    selection: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
+                    source: .authorOutboxes
+                ),
                 project: .tag("p")
             ),
             limit: 50
@@ -81,7 +84,10 @@ final class LiveRelayTests: XCTestCase {
         let followFeed = NMPFilter(
             kinds: [1],
             authors: .derived(
-                inner: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
+                inner: NMPDemand(
+                    selection: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
+                    source: .authorOutboxes
+                ),
                 project: .tag("p")
             ),
             limit: 50

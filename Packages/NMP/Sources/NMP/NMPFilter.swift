@@ -36,7 +36,7 @@ public enum NMPSetAlgebra: Sendable, Hashable {
 }
 
 /// Every bindable filter-field value. `indirect` because `.derived` embeds a
-/// whole `NMPFilter` (which itself may embed further bindings).
+/// complete nested `NMPDemand` (which itself may embed further bindings).
 public indirect enum NMPBinding: Sendable, Hashable {
     /// A fixed, literal set of hex values (pubkeys/ids/tag values).
     case literal(Set<String>)
@@ -45,7 +45,9 @@ public indirect enum NMPBinding: Sendable, Hashable {
     case reactive(NMPIdentityField)
     /// Projects `inner`'s matching rows through `project` (e.g. "authors of
     /// my kind:3 contact list, projected through their `p` tags" = follows).
-    case derived(inner: NMPFilter, project: NMPSelector)
+    /// The inner demand owns source, access, cache, and freshness independently
+    /// from the outer demand.
+    case derived(inner: NMPDemand, project: NMPSelector)
     /// Combines several bindings with a set operation.
     case setOp(NMPSetAlgebra, [NMPBinding])
 }
@@ -158,7 +160,7 @@ extension NMPBinding {
         case .reactive(let field):
             self = .reactive(NMPIdentityField(field))
         case .derived(let derived):
-            self = .derived(inner: NMPFilter(derived.inner()), project: NMPSelector(derived.project()))
+            self = .derived(inner: NMPDemand(derived.inner()), project: NMPSelector(derived.project()))
         case .setOp(let setOp):
             self = .setOp(NMPSetAlgebra(setOp.op()), setOp.operands().map { NMPBinding($0) })
         }

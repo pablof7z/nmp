@@ -4,8 +4,8 @@
 // `NMPEngine.observe(_)`. `NMPBinding` mirrors `nmp_grammar::Binding`'s
 // four cases as a plain sealed class; unlike Swift's `indirect enum`,
 // Kotlin's sealed classes are already heap-allocated references, so no
-// `indirect` keyword is needed for `.Derived` to self-embed a whole
-// `NMPFilter`. `FfiDerived`/`FfiSetOp` (UniFFI objects, needed only because
+// `indirect` keyword is needed for `.Derived` to self-embed a complete
+// `NMPDemand`. `FfiDerived`/`FfiSetOp` (UniFFI objects, needed only because
 // Rust enums can't self-reference) are constructed on the way OUT
 // (`toFfi()`), never exposed to a caller.
 
@@ -107,8 +107,10 @@ sealed class NMPBinding {
     data class Reactive(val field: NMPIdentityField) : NMPBinding()
 
     /** Projects `inner`'s matching rows through `project` (e.g. "authors of
-     * my kind:3 contact list, projected through their `p` tags" = follows). */
-    data class Derived(val inner: NMPFilter, val project: NMPSelector) : NMPBinding()
+     * my kind:3 contact list, projected through their `p` tags" = follows).
+     * The inner demand owns source, access, cache, and freshness independently
+     * from the outer demand. */
+    data class Derived(val inner: NMPDemand, val project: NMPSelector) : NMPBinding()
 
     /** Combines several bindings with a set operation. */
     data class SetOp(val op: NMPSetAlgebra, val operands: List<NMPBinding>) : NMPBinding()
@@ -127,7 +129,7 @@ sealed class NMPBinding {
                 is FfiBinding.Literal -> Literal(ffi.values.toSet())
                 is FfiBinding.Reactive -> Reactive(NMPIdentityField.from(ffi.field))
                 is FfiBinding.Derived ->
-                    Derived(NMPFilter.from(ffi.derived.inner()), NMPSelector.from(ffi.derived.project()))
+                    Derived(NMPDemand.from(ffi.derived.inner()), NMPSelector.from(ffi.derived.project()))
                 is FfiBinding.SetOp ->
                     SetOp(NMPSetAlgebra.from(ffi.setOp.op()), ffi.setOp.operands().map { from(it) })
             }

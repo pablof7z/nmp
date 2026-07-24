@@ -521,6 +521,27 @@ mod tests {
         assert_ne!(coverage_key(&outbox), coverage_key(&public));
     }
 
+    /// #49's access-context anti-alias falsifier: a proven public interval
+    /// cannot satisfy the identical selection acquired through an
+    /// authenticated NIP-42 session (or vice versa).
+    #[test]
+    fn coverage_key_differs_for_different_access_context() {
+        let filter = cf(&[1], &["aa"], None, None);
+        let public = ContextualAtom {
+            filter: filter.clone(),
+            source: nmp_grammar::SourceAuthority::AuthorOutboxes,
+            access: nmp_grammar::AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
+        };
+        let authenticated = ContextualAtom {
+            filter,
+            source: nmp_grammar::SourceAuthority::AuthorOutboxes,
+            access: nmp_grammar::AccessContext::Nip42(nostr::Keys::generate().public_key()),
+            routing_evidence: BTreeSet::new(),
+        };
+        assert_ne!(coverage_key(&public), coverage_key(&authenticated));
+    }
+
     #[test]
     fn coverage_key_erases_routing_evidence() {
         let plain = atom(cf(&[1], &["aa"], None, None));
