@@ -446,33 +446,93 @@ pub fn signed_event_to_ffi(event: SignedEvent) -> FfiSignedEvent {
     }
 }
 
-pub fn sign_event_start_error(error: nmp::SignEventError) -> FfiError {
+pub fn sign_event_start_error(error: nmp::SignEventStartError) -> FfiError {
     match error {
-        nmp::SignEventError::NoActiveSigner => FfiError::NoActiveSigner,
-        nmp::SignEventError::InvalidRequest { reason } => FfiError::InvalidSignRequest { reason },
-        nmp::SignEventError::EngineClosed => FfiError::EngineClosed,
-        nmp::SignEventError::SignerUnavailable { reason }
-        | nmp::SignEventError::SignerRejected { reason }
-        | nmp::SignEventError::InvalidSignerOutput { reason } => FfiError::InvalidSigner { reason },
-        nmp::SignEventError::Cancelled => FfiError::EngineClosed,
+        nmp::SignEventStartError::NoActiveSigner => FfiError::NoActiveSigner,
+        nmp::SignEventStartError::InvalidRequest { reason } => {
+            FfiError::InvalidSignRequest { reason }
+        }
+        nmp::SignEventStartError::EngineClosed => FfiError::EngineClosed,
     }
 }
 
-pub fn sign_event_failure(error: nmp::SignEventError) -> FfiSignEventFailure {
+pub fn sign_event_failure(error: nmp::SignEventFailure) -> FfiSignEventFailure {
     match error {
-        nmp::SignEventError::SignerUnavailable { reason } => {
+        nmp::SignEventFailure::SignerUnavailable { reason } => {
             FfiSignEventFailure::SignerUnavailable { reason }
         }
-        nmp::SignEventError::SignerRejected { reason } => {
+        nmp::SignEventFailure::SignerRejected { reason } => {
             FfiSignEventFailure::SignerRejected { reason }
         }
-        nmp::SignEventError::InvalidSignerOutput { reason } => {
+        nmp::SignEventFailure::InvalidSignerOutput { reason } => {
             FfiSignEventFailure::InvalidSignerOutput { reason }
         }
-        nmp::SignEventError::Cancelled => FfiSignEventFailure::Cancelled,
-        other => FfiSignEventFailure::InvalidSignerOutput {
-            reason: format!("unexpected post-acceptance sign failure: {other}"),
-        },
+        nmp::SignEventFailure::Cancelled => FfiSignEventFailure::Cancelled,
+    }
+}
+
+#[cfg(test)]
+mod sign_event_error_tests {
+    use super::*;
+
+    /// #727: this function pointer can accept only the three pre-acceptance
+    /// variants. Cancellation and signer outcomes are not members of the
+    /// input type, so no defensive/collapsing match arm can compile here.
+    #[test]
+    fn start_refusal_conversion_is_exhaustive_over_only_reachable_start_states() {
+        let convert: fn(nmp::SignEventStartError) -> FfiError = sign_event_start_error;
+        assert_eq!(
+            convert(nmp::SignEventStartError::NoActiveSigner),
+            FfiError::NoActiveSigner
+        );
+        assert_eq!(
+            convert(nmp::SignEventStartError::InvalidRequest {
+                reason: "bad body".to_string(),
+            }),
+            FfiError::InvalidSignRequest {
+                reason: "bad body".to_string(),
+            }
+        );
+        assert_eq!(
+            convert(nmp::SignEventStartError::EngineClosed),
+            FfiError::EngineClosed
+        );
+    }
+
+    /// #727: accepted-operation completion has the inverse closed type.
+    /// `NoActiveSigner`, malformed request, and closed-before-start cannot be
+    /// handed to this conversion because they are not `SignEventFailure`.
+    #[test]
+    fn completion_conversion_is_exhaustive_over_only_reachable_failures() {
+        let convert: fn(nmp::SignEventFailure) -> FfiSignEventFailure = sign_event_failure;
+        assert_eq!(
+            convert(nmp::SignEventFailure::SignerUnavailable {
+                reason: "offline".to_string(),
+            }),
+            FfiSignEventFailure::SignerUnavailable {
+                reason: "offline".to_string(),
+            }
+        );
+        assert_eq!(
+            convert(nmp::SignEventFailure::SignerRejected {
+                reason: "denied".to_string(),
+            }),
+            FfiSignEventFailure::SignerRejected {
+                reason: "denied".to_string(),
+            }
+        );
+        assert_eq!(
+            convert(nmp::SignEventFailure::InvalidSignerOutput {
+                reason: "wrong id".to_string(),
+            }),
+            FfiSignEventFailure::InvalidSignerOutput {
+                reason: "wrong id".to_string(),
+            }
+        );
+        assert_eq!(
+            convert(nmp::SignEventFailure::Cancelled),
+            FfiSignEventFailure::Cancelled
+        );
     }
 }
 

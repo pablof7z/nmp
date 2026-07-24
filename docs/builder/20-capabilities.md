@@ -29,6 +29,14 @@ engine's sign-only operation for that case:
 - Swift: `try await engine.signEvent(unsigned)`.
 - Kotlin: `engine.signEvent(unsigned)` from a coroutine.
 
+The operation has two typed lifecycle stages. A refused start returns only a
+start error (no active signer, invalid request, or closed engine), before any
+operation exists. Once accepted, its handle completes only with a signed event
+or an operation failure (signer unavailable/rejected, invalid signer output, or
+cancellation). A cancellation can never masquerade as a closed-engine start
+refusal, and a missing signer can never appear as the completion of an accepted
+operation.
+
 The unsigned value names the active account explicitly. NMP refuses a missing
 active signer or author mismatch, freezes the exact body, routes only to the
 registered capability, and validates the returned body, author, id, and

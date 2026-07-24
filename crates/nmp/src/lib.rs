@@ -153,8 +153,8 @@ pub use nmp_grammar::{decode_nostr_entity, NostrEntity, NostrEntityError};
 pub use nmp_engine::core::ReceiptId;
 pub use nmp_engine::outbox::WriteStatus;
 pub use nmp_engine::runtime::{
-    ReceiptReattachment, ReceiptStream, SignEventCancel, SignEventError, SignEventOperation,
-    SignerRegistration,
+    ReceiptReattachment, ReceiptStream, SignEventCancel, SignEventFailure, SignEventOperation,
+    SignEventStartError, SignerRegistration,
 };
 // The receipt/status receiver is delivery mechanism — it was previously an
 // external `std::sync::mpsc::Receiver` (never a documented nmp noun); it is now

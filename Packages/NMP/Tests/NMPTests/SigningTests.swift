@@ -84,9 +84,10 @@ final class SigningTests: XCTestCase {
         }
     }
 
-    /// #680: the sign-event failure taxonomy still maps to typed `NMPError`s;
-    /// `.Cancelled` becomes a Swift `CancellationError`, and the new one-shot
-    /// `.AlreadyConsumed` maps to `.signEventAlreadyConsumed`.
+    /// #727: the accepted-operation failure taxonomy is a closed type distinct
+    /// from synchronous `FfiError` start refusals. `.Cancelled` becomes a Swift
+    /// `CancellationError`, and `.AlreadyConsumed` maps to
+    /// `.signEventAlreadyConsumed`.
     func testSignEventFailureMappingKeepsEveryTypedAxis() {
         XCTAssertEqual(
             mapSignEventFailure(.SignerUnavailable(reason: "no signer")) as? NMPError,

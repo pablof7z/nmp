@@ -37,10 +37,12 @@ data class NMPSignedEvent(
     )
 }
 
-/** Sign one exact event through the active signer (#680). The engine returns
- * a one-shot [uniffi.nmp_ffi.NmpSignEventHandle] synchronously; awaiting its
- * `signed()` yields the fully-verified event or a typed
- * [FfiSignEventFailure]. There is no `suspendCancellableCoroutine` state
+/** Sign one exact event through the active signer (#680, #727). Starting the
+ * operation either returns a one-shot
+ * [uniffi.nmp_ffi.NmpSignEventHandle] or throws a synchronous start refusal;
+ * after a handle exists, awaiting its `signed()` yields the fully-verified
+ * event or only a typed [FfiSignEventFailure]. There is no
+ * `suspendCancellableCoroutine` state
  * machine anymore: the pull IS the await. `handle.cancel()` runs in a
  * `finally` so that cancelling the calling coroutine (which drops the
  * in-flight Rust future) also withdraws the Rust operation -- Kotlin
@@ -65,7 +67,7 @@ internal suspend fun signEvent(
  * `Cancelled` becomes a coroutine [CancellationException] (the operation was
  * withdrawn, not a signer fault); `AlreadyConsumed` is caller misuse -- a
  * second await on a one-shot handle -- surfaced as [IllegalStateException]. */
-private fun mapSignEventFailure(failure: FfiSignEventFailure): Throwable =
+internal fun mapSignEventFailure(failure: FfiSignEventFailure): Throwable =
     when (failure) {
         is FfiSignEventFailure.SignerUnavailable ->
             NMPError.SignerUnavailable(failure.reason)

@@ -807,7 +807,7 @@ enum Cmd {
     SignEvent {
         unsigned: UnsignedEvent,
         completion: SignEventCompletion,
-        reply: Sender<Result<SignEventRegistration, SignEventError>>,
+        reply: Sender<Result<SignEventRegistration, SignEventStartError>>,
     },
     CancelSignEvent(u64),
     SignEventFinished(u64),
@@ -847,22 +847,29 @@ struct SignerRegistry {
     pending_writes: RefCell<HashMap<(ReceiptId, u64), PendingWriteCancel>>,
 }
 
-/// Typed outcome vocabulary for the governed sign-only operation. This is
-/// deliberately separate from write receipts: signing here never accepts a
-/// write intent, mutates canonical storage, creates an outbox lane, or
-/// publishes to a relay.
+/// Typed refusals before a governed sign-only operation is accepted. Every
+/// variant is decided synchronously by the start door; none can complete an
+/// accepted operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SignEventError {
+pub enum SignEventStartError {
     NoActiveSigner,
     InvalidRequest { reason: String },
+    EngineClosed,
+}
+
+/// Typed failures after a governed sign-only operation is accepted. This is
+/// deliberately separate from both [`SignEventStartError`] and write receipts:
+/// signing here never accepts a write intent, mutates canonical storage,
+/// creates an outbox lane, or publishes to a relay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignEventFailure {
     SignerUnavailable { reason: String },
     SignerRejected { reason: String },
     InvalidSignerOutput { reason: String },
-    EngineClosed,
     Cancelled,
 }
 
-type SignEventCompletion = Box<dyn FnOnce(Result<SignedEvent, SignEventError>) + Send + 'static>;
+type SignEventCompletion = Box<dyn FnOnce(Result<SignedEvent, SignEventFailure>) + Send + 'static>;
 
 #[repr(u8)]
 #[derive(Clone, Copy)]
@@ -969,7 +976,7 @@ fn spawn_sign_event_completion(
                     Some(result) if terminal.resolve() => result
                         .map_err(signer_error)
                         .and_then(|signed| validate_signer_output(&unsigned, expected_id, signed)),
-                    Some(_) | None => Err(SignEventError::Cancelled),
+                    Some(_) | None => Err(SignEventFailure::Cancelled),
                 };
                 completion(result);
             });
@@ -1026,37 +1033,46 @@ impl Drop for SignEventFinishedGuard {
     }
 }
 
-impl std::fmt::Display for SignEventError {
+impl std::fmt::Display for SignEventStartError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoActiveSigner => f.write_str("the active account has no registered signer"),
             Self::InvalidRequest { reason } => write!(f, "invalid sign request: {reason}"),
+            Self::EngineClosed => f.write_str("engine already shut down"),
+        }
+    }
+}
+
+impl std::error::Error for SignEventStartError {}
+
+impl std::fmt::Display for SignEventFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
             Self::SignerUnavailable { reason } => write!(f, "signer unavailable: {reason}"),
             Self::SignerRejected { reason } => write!(f, "signer rejected request: {reason}"),
             Self::InvalidSignerOutput { reason } => {
                 write!(f, "signer returned invalid output: {reason}")
             }
-            Self::EngineClosed => f.write_str("engine already shut down"),
             Self::Cancelled => f.write_str("sign operation cancelled"),
         }
     }
 }
 
-impl std::error::Error for SignEventError {}
+impl std::error::Error for SignEventFailure {}
 
-fn signer_error(error: nmp_signer::SignerError) -> SignEventError {
+fn signer_error(error: nmp_signer::SignerError) -> SignEventFailure {
     match error {
         nmp_signer::SignerError::InvalidResponse(reason) => {
-            SignEventError::InvalidSignerOutput { reason }
+            SignEventFailure::InvalidSignerOutput { reason }
         }
-        nmp_signer::SignerError::Rejected(reason) => SignEventError::SignerRejected { reason },
-        other => SignEventError::SignerUnavailable {
+        nmp_signer::SignerError::Rejected(reason) => SignEventFailure::SignerRejected { reason },
+        other => SignEventFailure::SignerUnavailable {
             reason: other.to_string(),
         },
     }
 }
 
-fn validate_sign_request(unsigned: &UnsignedEvent) -> Result<EventId, SignEventError> {
+fn validate_sign_request(unsigned: &UnsignedEvent) -> Result<EventId, SignEventStartError> {
     let computed = EventId::new(
         &unsigned.pubkey,
         &unsigned.created_at,
@@ -1065,7 +1081,7 @@ fn validate_sign_request(unsigned: &UnsignedEvent) -> Result<EventId, SignEventE
         &unsigned.content,
     );
     if unsigned.id.is_some_and(|declared| declared != computed) {
-        return Err(SignEventError::InvalidRequest {
+        return Err(SignEventStartError::InvalidRequest {
             reason: "declared event id does not match the immutable body".to_string(),
         });
     }
@@ -1076,7 +1092,7 @@ fn validate_signer_output(
     unsigned: &UnsignedEvent,
     expected_id: EventId,
     signed: SignedEvent,
-) -> Result<SignedEvent, SignEventError> {
+) -> Result<SignedEvent, SignEventFailure> {
     if signed.id != expected_id
         || signed.pubkey != unsigned.pubkey
         || signed.created_at != unsigned.created_at
@@ -1084,13 +1100,13 @@ fn validate_signer_output(
         || signed.tags != unsigned.tags
         || signed.content != unsigned.content
     {
-        return Err(SignEventError::InvalidSignerOutput {
+        return Err(SignEventFailure::InvalidSignerOutput {
             reason: "signed event does not match the frozen body, author, or id".to_string(),
         });
     }
     signed
         .verify()
-        .map_err(|error| SignEventError::InvalidSignerOutput {
+        .map_err(|error| SignEventFailure::InvalidSignerOutput {
             reason: format!("signature verification failed: {error}"),
         })?;
     Ok(signed)
@@ -1671,6 +1687,66 @@ mod receipt_sink_lifecycle_tests {
 
         handle.shutdown();
         thread.join();
+    }
+}
+
+#[cfg(test)]
+mod sign_event_lifecycle_tests {
+    use super::*;
+    use nmp_router::FixtureDirectory;
+    use nmp_signer::LocalKeySigner;
+    use nmp_store::MemoryStore;
+    use nostr::{Keys, Kind};
+
+    fn runtime() -> (EngineThread, Handle) {
+        EngineThread::spawn(
+            MemoryStore::new(),
+            FixtureDirectory::new(),
+            1,
+            PoolConfig::default(),
+            RelayAdmissionPolicy::default(),
+        )
+        .expect("engine construction")
+    }
+
+    fn unsigned(keys: &Keys, content: &str) -> UnsignedEvent {
+        UnsignedEvent::new(
+            keys.public_key(),
+            Timestamp::from(1),
+            Kind::TextNote,
+            Vec::new(),
+            content.to_string(),
+        )
+    }
+
+    #[test]
+    fn start_door_constructs_each_refusal_before_an_operation_exists() {
+        let (engine, handle) = runtime();
+        let active = Keys::generate();
+        let other = Keys::generate();
+
+        assert_eq!(
+            handle.sign_event(unsigned(&active, "no signer")).err(),
+            Some(SignEventStartError::NoActiveSigner)
+        );
+
+        handle
+            .add_signer(LocalKeySigner::new(active.clone()))
+            .expect("signer registration");
+        handle.set_active_account(Some(active.public_key()));
+        assert_eq!(
+            handle.sign_event(unsigned(&other, "wrong author")).err(),
+            Some(SignEventStartError::InvalidRequest {
+                reason: "request author does not match the active account".to_string(),
+            })
+        );
+
+        handle.shutdown();
+        assert_eq!(
+            handle.sign_event(unsigned(&active, "closed")).err(),
+            Some(SignEventStartError::EngineClosed)
+        );
+        engine.join();
     }
 }
 
@@ -3862,7 +3938,7 @@ fn engine_loop<S, D>(
                     let _ = reply.send(Err(CancelWriteError::EngineClosed));
                 }
                 Cmd::SignEvent { reply, .. } => {
-                    let _ = reply.send(Err(SignEventError::EngineClosed));
+                    let _ = reply.send(Err(SignEventStartError::EngineClosed));
                 }
                 Cmd::RemoveAuthPolicy {
                     registration,
@@ -4293,11 +4369,11 @@ fn engine_loop<S, D>(
                 reply,
             } => {
                 let Some(author) = active_pubkey else {
-                    let _ = reply.send(Err(SignEventError::NoActiveSigner));
+                    let _ = reply.send(Err(SignEventStartError::NoActiveSigner));
                     continue;
                 };
                 if unsigned.pubkey != author {
-                    let _ = reply.send(Err(SignEventError::InvalidRequest {
+                    let _ = reply.send(Err(SignEventStartError::InvalidRequest {
                         reason: "request author does not match the active account".to_string(),
                     }));
                     continue;
@@ -4310,7 +4386,7 @@ fn engine_loop<S, D>(
                     }
                 };
                 let Some(signer_op) = registry.sign(unsigned.clone()) else {
-                    let _ = reply.send(Err(SignEventError::NoActiveSigner));
+                    let _ = reply.send(Err(SignEventStartError::NoActiveSigner));
                     continue;
                 };
 
@@ -5817,7 +5893,7 @@ pub struct Handle {
 /// One accepted sign-only operation. It owns no write receipt or durable
 /// obligation: dropping it before completion cancels the exact signer RPC.
 pub struct SignEventOperation {
-    result: Option<Receiver<Result<SignedEvent, SignEventError>>>,
+    result: Option<Receiver<Result<SignedEvent, SignEventFailure>>>,
     cancel: SignEventCancel,
 }
 
@@ -5827,12 +5903,12 @@ enum SignEventSignerResult {
 }
 
 impl SignEventOperation {
-    pub fn recv(mut self) -> Result<SignedEvent, SignEventError> {
+    pub fn recv(mut self) -> Result<SignedEvent, SignEventFailure> {
         self.result
             .take()
             .expect("sign-event result is consumed exactly once")
             .recv()
-            .unwrap_or(Err(SignEventError::Cancelled))
+            .unwrap_or(Err(SignEventFailure::Cancelled))
     }
 
     #[must_use]
@@ -6148,7 +6224,7 @@ impl Handle {
     pub fn sign_event(
         &self,
         unsigned: UnsignedEvent,
-    ) -> Result<SignEventOperation, SignEventError> {
+    ) -> Result<SignEventOperation, SignEventStartError> {
         let (completion_tx, completion_rx) = mpsc::channel();
         let cancel = self.sign_event_with_completion(unsigned, move |result| {
             let _ = completion_tx.send(result);
@@ -6163,8 +6239,8 @@ impl Handle {
     pub fn sign_event_with_completion(
         &self,
         unsigned: UnsignedEvent,
-        completion: impl FnOnce(Result<SignedEvent, SignEventError>) + Send + 'static,
-    ) -> Result<SignEventCancel, SignEventError> {
+        completion: impl FnOnce(Result<SignedEvent, SignEventFailure>) + Send + 'static,
+    ) -> Result<SignEventCancel, SignEventStartError> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox
             .send(Cmd::SignEvent {
@@ -6172,10 +6248,10 @@ impl Handle {
                 completion: Box::new(completion),
                 reply: reply_tx,
             })
-            .map_err(|_| SignEventError::EngineClosed)?;
+            .map_err(|_| SignEventStartError::EngineClosed)?;
         let registration = reply_rx
             .recv()
-            .map_err(|_| SignEventError::EngineClosed)??;
+            .map_err(|_| SignEventStartError::EngineClosed)??;
         Ok(SignEventCancel {
             inbox: self.inbox.clone(),
             id: registration.id,

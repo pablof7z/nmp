@@ -219,8 +219,8 @@ pub fn describe_snapshot(snapshot: &DiagnosticsSnapshot) -> String {
 mod tests {
     use super::*;
     use nmp::{
-        Engine, EngineConfig, SignEventError, SignEventRequest, SignerError, SignerOp,
-        SigningCapability,
+        Engine, EngineConfig, SignEventFailure, SignEventOperation, SignEventRequest,
+        SignEventStartError, SignerError, SignerOp, SigningCapability,
     };
 
     /// A fixed, valid secp256k1 secret key -- generated once via `openssl
@@ -386,19 +386,19 @@ mod tests {
             .set_active_account(Some(author))
             .expect("external signer must become active");
 
-        let result = engine
-            .sign_event(SignEventRequest {
+        let start: Result<SignEventOperation, SignEventStartError> =
+            engine.sign_event(SignEventRequest {
                 created_at: Timestamp::from(42),
                 kind: Kind::Custom(CALLER_CONTENT_KIND),
                 tags: Vec::new(),
                 content: "external asynchronous signing".to_string(),
-            })
-            .expect("sign operation must be accepted")
-            .recv();
+            });
+        let result: Result<nmp::Event, SignEventFailure> =
+            start.expect("sign operation must be accepted").recv();
 
         assert_eq!(
             result,
-            Err(SignEventError::SignerRejected {
+            Err(SignEventFailure::SignerRejected {
                 reason: "external asynchronous refusal".to_string(),
             })
         );

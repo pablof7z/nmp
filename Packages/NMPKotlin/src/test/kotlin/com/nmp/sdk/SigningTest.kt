@@ -1,10 +1,13 @@
 package com.nmp.sdk
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import org.junit.jupiter.api.Assertions.assertInstanceOf
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
+import uniffi.nmp_ffi.FfiSignEventFailure
 
 class SigningTest {
     private val secret = "0".repeat(63) + "1"
@@ -57,5 +60,32 @@ class SigningTest {
                 }
             }
         }
+    }
+
+    /** #727: accepted-operation failures are a closed type distinct from the
+     * synchronous `FfiException` start-refusal type consumed by
+     * `nmpRethrowing`. This exhaustive mapper cannot accept a start refusal. */
+    @Test
+    fun signEventCompletionMappingKeepsEveryTypedAxis() {
+        assertEquals(
+            NMPError.SignerUnavailable("offline"),
+            mapSignEventFailure(FfiSignEventFailure.SignerUnavailable("offline")),
+        )
+        assertEquals(
+            NMPError.SignerRejected("declined"),
+            mapSignEventFailure(FfiSignEventFailure.SignerRejected("declined")),
+        )
+        assertEquals(
+            NMPError.InvalidSignerOutput("wrong body"),
+            mapSignEventFailure(FfiSignEventFailure.InvalidSignerOutput("wrong body")),
+        )
+        assertInstanceOf(
+            CancellationException::class.java,
+            mapSignEventFailure(FfiSignEventFailure.Cancelled()),
+        )
+        assertInstanceOf(
+            IllegalStateException::class.java,
+            mapSignEventFailure(FfiSignEventFailure.AlreadyConsumed()),
+        )
     }
 }

@@ -29,8 +29,8 @@ use nmp_engine::core::ReceiptId;
 use nmp_engine::outbox::WriteStatus;
 use nmp_engine::runtime::{
     EngineThread, Handle, HistoryHandle, HistoryReceiver, QueryHandle, ReceiptReattachment,
-    ReceiptReplayCursor, ReceiptStream, RowsReceiver, RuntimeConfig, SignEventError,
-    SignEventOperation, SignerRegistration,
+    ReceiptReplayCursor, ReceiptStream, RowsReceiver, RuntimeConfig, SignEventFailure,
+    SignEventOperation, SignEventStartError, SignerRegistration,
 };
 use nmp_grammar::WriteIntent;
 use nmp_resolver::LiveQuery;
@@ -675,14 +675,16 @@ impl Engine {
     pub fn sign_event(
         &self,
         request: SignEventRequest,
-    ) -> Result<SignEventOperation, SignEventError> {
+    ) -> Result<SignEventOperation, SignEventStartError> {
         let (handle, pubkey) = {
             let guard = self
                 .inner
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            let inner = guard.as_ref().ok_or(SignEventError::EngineClosed)?;
-            let pubkey = inner.active_pubkey.ok_or(SignEventError::NoActiveSigner)?;
+            let inner = guard.as_ref().ok_or(SignEventStartError::EngineClosed)?;
+            let pubkey = inner
+                .active_pubkey
+                .ok_or(SignEventStartError::NoActiveSigner)?;
             (inner.handle.clone(), pubkey)
         };
         let unsigned = UnsignedEvent::new(
@@ -703,15 +705,17 @@ impl Engine {
     pub fn sign_event_with_completion(
         &self,
         request: SignEventRequest,
-        completion: impl FnOnce(Result<nostr::Event, SignEventError>) + Send + 'static,
-    ) -> Result<nmp_engine::runtime::SignEventCancel, SignEventError> {
+        completion: impl FnOnce(Result<nostr::Event, SignEventFailure>) + Send + 'static,
+    ) -> Result<nmp_engine::runtime::SignEventCancel, SignEventStartError> {
         let (handle, pubkey) = {
             let guard = self
                 .inner
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            let inner = guard.as_ref().ok_or(SignEventError::EngineClosed)?;
-            let pubkey = inner.active_pubkey.ok_or(SignEventError::NoActiveSigner)?;
+            let inner = guard.as_ref().ok_or(SignEventStartError::EngineClosed)?;
+            let pubkey = inner
+                .active_pubkey
+                .ok_or(SignEventStartError::NoActiveSigner)?;
             (inner.handle.clone(), pubkey)
         };
         let unsigned = UnsignedEvent::new(
@@ -1345,12 +1349,12 @@ mod tests {
             content: "body".to_string(),
         };
         match engine.sign_event(request.clone()) {
-            Err(error) => assert_eq!(error, SignEventError::NoActiveSigner),
+            Err(error) => assert_eq!(error, SignEventStartError::NoActiveSigner),
             Ok(_) => panic!("a missing active account must refuse before acceptance"),
         }
         engine.set_active_account(Some(active)).unwrap();
         match engine.sign_event(request) {
-            Err(error) => assert_eq!(error, SignEventError::NoActiveSigner),
+            Err(error) => assert_eq!(error, SignEventStartError::NoActiveSigner),
             Ok(_) => panic!("a missing signer must refuse before acceptance"),
         }
         engine.shutdown();
@@ -1403,10 +1407,76 @@ mod tests {
         };
         assert!(matches!(
             engine.sign_event(request).unwrap().recv(),
-            Err(SignEventError::InvalidSignerOutput { .. })
+            Err(SignEventFailure::InvalidSignerOutput { .. })
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         engine.shutdown();
+    }
+
+    struct ReadyFailureSigner {
+        public_key: PublicKey,
+        failure: nmp_signer::SignerError,
+    }
+
+    impl nmp_signer::SigningCapability for ReadyFailureSigner {
+        fn public_key(&self) -> Option<PublicKey> {
+            Some(self.public_key)
+        }
+
+        fn sign(&self, _unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
+            nmp_signer::SignerOp::err(self.failure.clone())
+        }
+    }
+
+    /// #727: signer-service outcomes can only complete an already-accepted
+    /// operation. The start result is `Ok(SignEventOperation)` in every case;
+    /// the disjoint `SignEventFailure` arrives only from `recv`.
+    #[test]
+    fn accepted_sign_event_preserves_each_signer_failure_axis() {
+        let cases = [
+            (
+                nmp_signer::SignerError::Unavailable,
+                SignEventFailure::SignerUnavailable {
+                    reason: "signer unavailable".to_string(),
+                },
+            ),
+            (
+                nmp_signer::SignerError::Rejected("user denied".to_string()),
+                SignEventFailure::SignerRejected {
+                    reason: "user denied".to_string(),
+                },
+            ),
+            (
+                nmp_signer::SignerError::InvalidResponse("malformed response".to_string()),
+                SignEventFailure::InvalidSignerOutput {
+                    reason: "malformed response".to_string(),
+                },
+            ),
+        ];
+
+        for (failure, expected) in cases {
+            let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+            let public_key = Keys::generate().public_key();
+            engine
+                .add_signer(ReadyFailureSigner {
+                    public_key,
+                    failure,
+                })
+                .expect("signer must register");
+            engine.set_active_account(Some(public_key)).unwrap();
+            let operation: Result<SignEventOperation, SignEventStartError> =
+                engine.sign_event(SignEventRequest {
+                    created_at: Timestamp::from(3),
+                    kind: Kind::TextNote,
+                    tags: Vec::new(),
+                    content: "accepted before signer failure".to_string(),
+                });
+            assert_eq!(
+                operation.expect("sign operation must be accepted").recv(),
+                Err(expected)
+            );
+            engine.shutdown();
+        }
     }
 
     struct PendingSigner {
@@ -1619,7 +1689,7 @@ mod tests {
         // The cancel hook runs inside `recv_or_cancel` before the operation
         // resolves, so `cancellations == 1` is deterministic once `recv()`
         // observes `Cancelled` (no removed native-task idle barrier needed).
-        assert_eq!(operation.recv(), Err(SignEventError::Cancelled));
+        assert_eq!(operation.recv(), Err(SignEventFailure::Cancelled));
         assert_eq!(cancellations.load(Ordering::SeqCst), 1);
         engine.shutdown();
     }
@@ -1646,7 +1716,7 @@ mod tests {
             .expect("operation must be accepted");
 
         engine.shutdown();
-        assert_eq!(operation.recv(), Err(SignEventError::Cancelled));
+        assert_eq!(operation.recv(), Err(SignEventFailure::Cancelled));
         assert_eq!(cancellations.load(Ordering::SeqCst), 1);
     }
 
@@ -1676,7 +1746,7 @@ mod tests {
         // the operation, so once `recv()` observes `Cancelled` the worker
         // receiver is already dropped — deterministic without the removed
         // native-task idle barrier (#680).
-        assert_eq!(operation.recv(), Err(SignEventError::Cancelled));
+        assert_eq!(operation.recv(), Err(SignEventFailure::Cancelled));
         assert!(
             matches!(
                 producer.resolve(Err(nmp_signer::SignerError::Unavailable)),
@@ -1709,7 +1779,7 @@ mod tests {
             .expect("operation must be accepted");
 
         engine.shutdown();
-        assert_eq!(operation.recv(), Err(SignEventError::Cancelled));
+        assert_eq!(operation.recv(), Err(SignEventFailure::Cancelled));
         assert!(
             matches!(
                 producer.resolve(Err(nmp_signer::SignerError::Unavailable)),
@@ -1744,15 +1814,15 @@ mod tests {
         // `recv_or_cancel` fires the cancel hook before the completion resolves
         // the operation, so once `recv()` observes `Cancelled` the hook has run
         // exactly once — no native-task idle barrier is needed (removed in #680).
-        assert_eq!(operation.recv(), Err(SignEventError::Cancelled));
+        assert_eq!(operation.recv(), Err(SignEventFailure::Cancelled));
         assert_eq!(cancellations.load(Ordering::SeqCst), 1);
         engine.shutdown();
     }
 
     // #680 deleted `sign_event_capacity_refusal_happens_before_signer_invocation`:
-    // it asserted the removed global native-task capacity refusal
-    // (`SignEventError::ExecutorSaturated` + `max_native_tasks`). Sign-event
-    // admission no longer surfaces a configurable capacity ceiling.
+    // it asserted the removed start-time executor-saturation refusal and
+    // `max_native_tasks`. Sign-event admission no longer surfaces a configurable
+    // capacity ceiling.
     use nmp_grammar::{Durability, WritePayload, WriteRouting};
     use nostr::ToBech32;
 
@@ -2032,7 +2102,7 @@ mod tests {
             content: "unsigned".to_string(),
         });
         match result {
-            Err(error) => assert_eq!(error, SignEventError::NoActiveSigner),
+            Err(error) => assert_eq!(error, SignEventStartError::NoActiveSigner),
             Ok(_) => panic!("a missing active account must fail closed"),
         }
         engine.shutdown();
@@ -2214,6 +2284,17 @@ mod tests {
             correlation: None,
         });
         assert_eq!(publish_result.err(), Some(EngineError::EngineClosed));
+        assert_eq!(
+            engine
+                .sign_event(SignEventRequest {
+                    created_at: Timestamp::from(1),
+                    kind: Kind::TextNote,
+                    tags: Vec::new(),
+                    content: "unreachable".to_string(),
+                })
+                .err(),
+            Some(SignEventStartError::EngineClosed)
+        );
     }
 
     /// A second, concurrent `shutdown` racing the first must still only
