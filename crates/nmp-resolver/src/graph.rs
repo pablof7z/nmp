@@ -195,8 +195,12 @@ impl Graph {
             if set.is_empty() {
                 return None;
             }
+            let mut contributed = false;
             for (el, _) in set {
-                merge_element_into(&mut cf, slot, el);
+                contributed |= merge_element_into(&mut cf, slot, el);
+            }
+            if !contributed {
+                return None;
             }
         }
         Some(cf)
@@ -234,13 +238,18 @@ impl Graph {
             for (existing, existing_evidence) in &atoms {
                 for (el, element_evidence) in set {
                     let mut cf = existing.clone();
-                    merge_element_into(&mut cf, slot, el);
+                    if !merge_element_into(&mut cf, slot, el) {
+                        continue;
+                    }
                     let mut routing_evidence = existing_evidence.clone();
                     routing_evidence.extend(element_evidence.iter().cloned());
                     next.push((cf, routing_evidence));
                 }
             }
             atoms = next;
+            if atoms.is_empty() {
+                return BTreeSet::new();
+            }
         }
         atoms
             .into_iter()
@@ -380,5 +389,76 @@ impl Graph {
             Node::Filter(_) => unreachable!("a BindingNode id must never reference a FilterNode"),
         }
         out.push(binding_id);
+    }
+}
+
+#[cfg(test)]
+mod destination_tests {
+    use super::*;
+    use crate::types::Element;
+
+    fn filter_with_literal_slot(
+        slot: FieldSlot,
+        values: impl IntoIterator<Item = String>,
+    ) -> (Graph, NodeId) {
+        let mut graph = Graph::default();
+        let filter_id = graph.alloc_id();
+        let binding_id = graph.alloc_id();
+        graph.insert(
+            binding_id,
+            Node::Literal(LiteralNode {
+                resolved: values.into_iter().map(Element::Scalar).collect(),
+            }),
+            ParentLink::FilterField(filter_id),
+            1,
+        );
+        graph.insert(
+            filter_id,
+            Node::Filter(FilterNodeData {
+                kinds: Some(BTreeSet::from([1])),
+                since: None,
+                until: None,
+                limit: None,
+                bound: vec![(slot, binding_id)],
+                cached_atoms: BTreeSet::new(),
+                source: SourceAuthority::Public,
+                access: AccessContext::Public,
+            }),
+            ParentLink::Root,
+            0,
+        );
+        (graph, filter_id)
+    }
+
+    #[test]
+    fn wide_and_atom_paths_do_not_widen_an_all_invalid_author_binding() {
+        let (graph, filter_id) =
+            filter_with_literal_slot(FieldSlot::Authors, ["Mute List".to_string()]);
+
+        assert_eq!(graph.wide_concrete(filter_id), None);
+        assert!(graph.compute_atoms(filter_id).is_empty());
+    }
+
+    #[test]
+    fn wide_and_atom_paths_discard_invalid_ids_and_keep_canonical_valid_ids() {
+        let id = "ab".repeat(32);
+        let (graph, filter_id) = filter_with_literal_slot(
+            FieldSlot::Ids,
+            ["not-an-event-id".to_string(), id.to_uppercase()],
+        );
+
+        let wide = graph
+            .wide_concrete(filter_id)
+            .expect("one valid id keeps the bound filter live");
+        assert_eq!(wide.ids, Some(BTreeSet::from([id.clone()])));
+
+        let atoms = graph.compute_atoms(filter_id);
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(
+            atoms.iter().next().unwrap().filter.ids,
+            Some(BTreeSet::from([id]))
+        );
+        let _ = wide.to_nostr();
+        let _ = atoms.iter().next().unwrap().filter.to_nostr();
     }
 }

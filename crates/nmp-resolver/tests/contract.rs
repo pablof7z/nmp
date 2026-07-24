@@ -251,12 +251,155 @@ fn bounded_recent_authors_filter(limit: usize) -> Filter {
     }
 }
 
+/// The exact issue #715 descriptor:
+///
+/// kind:30023 authors := Derived(
+///   kind:10000 authors := Derived(
+///     kind:3 authors := Reactive(ActivePubkey),
+///     project Tag("p")
+///   ),
+///   project Tag("p")
+/// )
+fn nested_article_authors_filter() -> Filter {
+    Filter {
+        kinds: Some(BTreeSet::from([30_023u16])),
+        authors: Some(Binding::Derived(Box::new(Derived {
+            inner: Demand::from_filter(Filter {
+                kinds: Some(BTreeSet::from([10_000u16])),
+                authors: Some(Binding::Derived(Box::new(Derived {
+                    inner: Demand::from_filter(Filter {
+                        kinds: Some(BTreeSet::from([3u16])),
+                        authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+                        ..Filter::default()
+                    }),
+                    project: Selector::Tag("p".to_string()),
+                }))),
+                ..Filter::default()
+            }),
+            project: Selector::Tag("p".to_string()),
+        }))),
+        ..Filter::default()
+    }
+}
+
+fn event_with_raw_tags(
+    author: &Keys,
+    kind: u16,
+    tag_name: &str,
+    values: &[&str],
+    created_at: u64,
+) -> nostr::Event {
+    EventBuilder::new(Kind::from(kind), "")
+        .tags(
+            values
+                .iter()
+                .map(|value| Tag::parse([tag_name, *value]).unwrap()),
+        )
+        .allow_self_tagging()
+        .custom_created_at(Timestamp::from(created_at))
+        .sign_with_keys(author)
+        .expect("test fixture event must sign cleanly")
+}
+
 fn dummy_event_id(seed: &str) -> nostr::EventId {
     let keys = Keys::generate();
     EventBuilder::new(Kind::TextNote, seed)
         .sign_with_keys(&keys)
         .unwrap()
         .id
+}
+
+#[test]
+fn nested_derived_author_values_are_validated_at_the_destination_slot() {
+    let mut h = Harness::new();
+    let active = Keys::generate();
+    let mute_list_author = Keys::generate();
+    let valid_article_author = Keys::generate();
+
+    h.set_active(Some(active.public_key()));
+    let (_handle, _open) = h.subscribe(LiveQuery::from_filter(nested_article_authors_filter()));
+    h.deliver(vec![kind3(&active, &[mute_list_author.public_key()], 100)]);
+
+    let inner = cf_kinds_authors(&[3], &[&active.public_key().to_hex()]);
+    let middle = cf_kinds_authors(&[10_000], &[&mute_list_author.public_key().to_hex()]);
+    assert_eq!(h.demand(), BTreeSet::from([inner.clone(), middle.clone()]));
+
+    h.deliver(vec![event_with_raw_tags(
+        &mute_list_author,
+        10_000,
+        "p",
+        &["Mute List"],
+        100,
+    )]);
+    let demand = h.demand();
+    assert_eq!(
+        demand,
+        BTreeSet::from([inner.clone(), middle.clone()]),
+        "an all-invalid outer binding resolves to no atoms, never a kind-only wildcard"
+    );
+    for filter in &demand {
+        let _ = filter.to_nostr();
+    }
+
+    let valid_uppercase = valid_article_author.public_key().to_hex().to_uppercase();
+    h.deliver(vec![event_with_raw_tags(
+        &mute_list_author,
+        10_000,
+        "p",
+        &["Mute List", &valid_uppercase],
+        101,
+    )]);
+    let article = cf_kinds_authors(&[30_023], &[&valid_article_author.public_key().to_hex()]);
+    let demand = h.demand();
+    assert_eq!(
+        demand,
+        BTreeSet::from([inner, middle, article]),
+        "the valid value cascades in canonical lowercase while its malformed sibling is dropped"
+    );
+    for filter in demand {
+        let _ = filter.to_nostr();
+    }
+}
+
+#[test]
+fn derived_id_values_are_validated_and_canonicalized_at_the_destination_slot() {
+    let mut h = Harness::new();
+    let active = Keys::generate();
+    let valid_id = dummy_event_id("valid-derived-id").to_hex();
+    let uppercase_id = valid_id.to_uppercase();
+    let filter = Filter {
+        kinds: Some(BTreeSet::from([1u16])),
+        ids: Some(Binding::Derived(Box::new(Derived {
+            inner: Demand::from_filter(Filter {
+                kinds: Some(BTreeSet::from([10_003u16])),
+                authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+                ..Filter::default()
+            }),
+            project: Selector::Tag("e".to_string()),
+        }))),
+        ..Filter::default()
+    };
+
+    h.set_active(Some(active.public_key()));
+    let (_handle, _open) = h.subscribe(LiveQuery::from_filter(filter));
+    h.deliver(vec![event_with_raw_tags(
+        &active,
+        10_003,
+        "e",
+        &["not-an-event-id", &uppercase_id],
+        100,
+    )]);
+
+    let inner = cf_kinds_authors(&[10_003], &[&active.public_key().to_hex()]);
+    let outer = ConcreteFilter {
+        kinds: Some(BTreeSet::from([1u16])),
+        ids: Some(BTreeSet::from([valid_id])),
+        ..ConcreteFilter::default()
+    };
+    assert_eq!(h.demand(), BTreeSet::from([inner, outer]));
+    for filter in h.demand() {
+        let _ = filter.to_nostr();
+    }
 }
 
 #[test]
