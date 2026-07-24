@@ -1640,6 +1640,169 @@ mod tests {
         engine.shutdown();
     }
 
+    /// #597's complete FFI acceptance oracle uses arbitrary kind:10042/10043
+    /// values -- no protocol helper or kind-specific branch. Exact-base and
+    /// nil-base guards enter the ordinary signer/outbox path; a stale base is
+    /// refused by the existing atomic store comparison before durable receipt
+    /// allocation.
+    #[tokio::test]
+    async fn ffi_generic_guarded_replaceable_edits_preserve_atomic_acceptance() {
+        async fn accepted_signed_id(receipt: &NmpReceiptStream) -> String {
+            assert_eq!(next_status(receipt).await, Some(FfiWriteStatus::Accepted));
+            match next_status(receipt).await {
+                Some(FfiWriteStatus::Signed { event_id }) => event_id,
+                other => panic!("expected Signed after Accepted, got {other:?}"),
+            }
+        }
+
+        fn payload(
+            author: &str,
+            created_at: u64,
+            kind: u16,
+            content: &str,
+            expected_base: Option<String>,
+        ) -> FfiWritePayload {
+            FfiWritePayload::UnsignedReplaceableEdit {
+                pubkey: author.to_string(),
+                created_at,
+                kind,
+                tags: vec![vec!["x".to_string(), "caller-owned".to_string()]],
+                content: content.to_string(),
+                expected_base,
+            }
+        }
+
+        fn intent(payload: FfiWritePayload) -> FfiWriteIntent {
+            FfiWriteIntent {
+                payload,
+                durability: FfiDurability::Durable,
+                routing: FfiWriteRouting::AuthorOutbox,
+                identity_override: None,
+                correlation: None,
+            }
+        }
+
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let account = engine
+            .add_account(format!("{:064x}", 43u8))
+            .expect("account must register");
+        let author = account.public_key();
+        engine
+            .set_active_account(Some(author.clone()))
+            .expect("account must activate");
+
+        let base = engine
+            .publish(intent(FfiWritePayload::Unsigned {
+                pubkey: author.clone(),
+                created_at: 1_723_460_000,
+                kind: 10_042,
+                tags: vec![vec!["x".to_string(), "caller-owned".to_string()]],
+                content: "base".to_string(),
+            }))
+            .expect("base must publish");
+        let base_id = accepted_signed_id(&base).await;
+
+        let exact = engine
+            .publish(intent(payload(
+                &author,
+                1_723_460_001,
+                10_042,
+                "exact replacement",
+                Some(base_id.clone()),
+            )))
+            .expect("exact-base edit must publish");
+        let exact_id = accepted_signed_id(&exact).await;
+        assert_ne!(exact_id, base_id);
+
+        let stale = engine
+            .publish(intent(payload(
+                &author,
+                1_723_460_002,
+                10_042,
+                "stale replacement",
+                Some(base_id.clone()),
+            )))
+            .expect("a well-formed stale edit gets a transient refusal stream");
+        let stale_receipt_id = stale.id();
+        assert_eq!(
+            next_status(&stale).await,
+            Some(FfiWriteStatus::ReplaceableConflict {
+                expected: Some(base_id),
+                actual: Some(exact_id),
+            })
+        );
+        assert!(
+            matches!(
+                engine
+                    .reattach_receipt(stale_receipt_id)
+                    .expect("receipt lookup must succeed"),
+                FfiReceiptReattachment::NotFound
+            ),
+            "a stale guard must leave no durable receipt"
+        );
+
+        let first = engine
+            .publish(intent(payload(
+                &author,
+                1_723_460_003,
+                10_043,
+                "first value",
+                None,
+            )))
+            .expect("nil-base first creation must publish");
+        let first_id = accepted_signed_id(&first).await;
+        assert_eq!(first_id.len(), 64);
+
+        let address_base = engine
+            .publish(intent(FfiWritePayload::Unsigned {
+                pubkey: author.clone(),
+                created_at: 1_723_460_004,
+                kind: 30_042,
+                tags: vec![vec!["d".to_string(), "coordinate-a".to_string()]],
+                content: "address base".to_string(),
+            }))
+            .expect("addressable base must publish");
+        let address_base_id = accepted_signed_id(&address_base).await;
+        let wrong_coordinate = engine
+            .publish(intent(FfiWritePayload::UnsignedReplaceableEdit {
+                pubkey: author.clone(),
+                created_at: 1_723_460_005,
+                kind: 30_042,
+                tags: vec![vec!["d".to_string(), "coordinate-b".to_string()]],
+                content: "different coordinate".to_string(),
+                expected_base: Some(address_base_id.clone()),
+            }))
+            .expect("a well-formed coordinate mismatch gets a refusal stream");
+        assert_eq!(
+            next_status(&wrong_coordinate).await,
+            Some(FfiWriteStatus::ReplaceableConflict {
+                expected: Some(address_base_id),
+                actual: None,
+            }),
+            "the expected id cannot authorize a different d-tag coordinate"
+        );
+
+        let other = nostr::Keys::generate().public_key().to_hex();
+        let wrong_author = engine
+            .publish(intent(payload(
+                &other,
+                1_723_460_006,
+                10_044,
+                "wrong author",
+                None,
+            )))
+            .expect("a well-formed author mismatch gets a refusal stream");
+        assert!(
+            matches!(
+                next_status(&wrong_author).await,
+                Some(FfiWriteStatus::Failed { .. })
+            ),
+            "guarded edits must pass through the ordinary author check before acceptance"
+        );
+
+        engine.shutdown();
+    }
+
     /// #47 Unit A through the FFI boundary: an `identity_override` naming a
     /// pubkey with NO registered signer capability is accepted and PARKED as
     /// `AwaitingCapability`. It must never silently terminate: after

@@ -4781,6 +4781,55 @@ enum Enum {
             docstring: None,
         },
         Variant {
+            name: "UnsignedReplaceableEdit",
+            discr: None,
+            fields: [
+                Field {
+                    name: "pubkey",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "created_at",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "kind",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "tags",
+                    type_: Sequence {
+                        inner_type: Sequence {
+                            inner_type: String,
+                        },
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "content",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "expected_base",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
             name: "Signed",
             discr: None,
             fields: [
@@ -4837,7 +4886,7 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "The event payload of a write intent (`nmp::WritePayload` mirror). VISION\nP: signing and publishing are ORTHOGONAL stages -- `Unsigned` is a\ntemplate the engine signs internally (\"the key lives in the engine\",\nledger #12); `Signed` (#32, the M5 unlock) is a caller that already\nholds a validly-signed event -- an external signer / NIP-46 bunker, or a\nverbatim republish -- and hands its fields across as-is. `Signed`'s\nfields are field-for-field [`FfiRow`] (the read-side mirror of a signed\n`nostr::Event`) plus `sig`, deliberately: the write side stays symmetric\nwith the read side rather than introducing a JSON-blob shape.\n\n`Signed`'s fields are PARSED at this FFI boundary (typed hex/signature-\nshape errors, see `convert::signed_event_from_ffi`) but NOT verified\nhere (#52 Unit B) -- `nostr::Event::verify` runs at\n`nmp-engine::core::EngineCore::on_publish`'s acceptance boundary (Unit\nA0/#56) instead, so the guarantee holds for every entry point, not only\nthis one. A tampered `Signed` event still parses fine here and is\nrejected downstream, surfacing as `WriteStatus::Failed` on the receipt\nstream rather than a synchronous `FfiError`. The engine itself never\nre-signs, mutates a tag, or recomputes an id for this variant.",
+        "The event payload of a write intent (`nmp::WritePayload` mirror). VISION\nP: signing and publishing are ORTHOGONAL stages -- `Unsigned` is a\ntemplate the engine signs internally (\"the key lives in the engine\",\nledger #12); `UnsignedReplaceableEdit` (#597) is that same complete\ncaller-owned template plus an atomic assertion about the exact current\nlocal winner at its replaceable/addressable coordinate; `Signed` (#32,\nthe M5 unlock) is a caller that already holds a validly-signed event --\nan external signer / NIP-46 bunker, or a verbatim republish -- and hands\nits fields across as-is. `Signed`'s fields are field-for-field [`FfiRow`]\n(the read-side mirror of a signed `nostr::Event`) plus `sig`,\ndeliberately: the write side stays symmetric with the read side rather\nthan introducing a JSON-blob shape.\n\n`UnsignedReplaceableEdit.expected_base` is a 64-character hex event id,\nor `None` to assert that this coordinate currently has no local winner.\nThe store compares it inside the same atomic acceptance transaction that\nwould allocate the durable intent/receipt and install the pending row.\nMismatch surfaces as [`FfiWriteStatus::ReplaceableConflict`] with no\ndurable residue. This is a generic guarded WRITE, not source evidence:\nthe caller still owns the policy that established its local base and the\ncomplete event kind/tags/content it is replacing. NMP continues to own\nauthor validation, signing, routing, durability, retry, receipts, and\ncanonical storage after acceptance.\n\n`Signed`'s fields are PARSED at this FFI boundary (typed hex/signature-\nshape errors, see `convert::signed_event_from_ffi`) but NOT verified\nhere (#52 Unit B) -- `nostr::Event::verify` runs at\n`nmp-engine::core::EngineCore::on_publish`'s acceptance boundary (Unit\nA0/#56) instead, so the guarantee holds for every entry point, not only\nthis one. A tampered `Signed` event still parses fine here and is\nrejected downstream, surfacing as `WriteStatus::Failed` on the receipt\nstream rather than a synchronous `FfiError`. The engine itself never\nre-signs, mutates a tag, or recomputes an id for this variant.",
     ),
 }
 

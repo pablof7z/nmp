@@ -1704,13 +1704,15 @@ fn signed_event_from_ffi(
 }
 
 /// `FfiWriteIntent -> nmp::WriteIntent`. `Unsigned` builds an
-/// `UnsignedEvent` template the engine signs internally; `Signed` (#32)
-/// parses the caller-supplied event's fields and passes it through
-/// verbatim -- see `signed_event_from_ffi`'s doc for where the verify now
-/// happens. `identity_override` (#47 Unit A) parses first, so a malformed
-/// override is a typed synchronous refusal before anything else is even
-/// looked at -- see `parse_identity_override`'s doc for the parse/mismatch
-/// boundary split.
+/// `UnsignedEvent` template the engine signs internally;
+/// `UnsignedReplaceableEdit` (#597) builds the same complete body and parses
+/// its optional exact local base into the grammar's existing guarded-write
+/// variant; `Signed` (#32) parses the caller-supplied event's fields and
+/// passes it through verbatim -- see `signed_event_from_ffi`'s doc for where
+/// the verify now happens. `identity_override` (#47 Unit A) parses first, so
+/// a malformed override is a typed synchronous refusal before anything else
+/// is even looked at -- see `parse_identity_override`'s doc for the
+/// parse/mismatch boundary split.
 pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, FfiError> {
     let identity_override = intent
         .identity_override
@@ -1740,6 +1742,30 @@ pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, Ffi
                 content,
             );
             GWritePayload::Unsigned(unsigned)
+        }
+        FfiWritePayload::UnsignedReplaceableEdit {
+            pubkey,
+            created_at,
+            kind,
+            tags,
+            content,
+            expected_base,
+        } => {
+            let pubkey = parse_pubkey(&pubkey)?;
+            let unsigned = UnsignedEvent::new(
+                pubkey,
+                Timestamp::from(created_at),
+                nostr::Kind::from(kind),
+                tags_from_ffi(tags)?,
+                content,
+            );
+            let expected_base = expected_base
+                .map(|id| EventId::from_hex(&id).map_err(|_| FfiError::InvalidEventId { got: id }))
+                .transpose()?;
+            GWritePayload::UnsignedReplaceableEdit {
+                unsigned,
+                expected_base,
+            }
         }
         FfiWritePayload::Signed {
             id,
@@ -2287,12 +2313,107 @@ mod tests {
         match parsed.payload {
             GWritePayload::Unsigned(u) => assert_eq!(u.tags.len(), 1),
             GWritePayload::UnsignedReplaceableEdit { .. } => {
-                panic!("the raw FFI write surface must not mint guarded replaceable edits")
+                panic!("an Unsigned FfiWritePayload must build an Unsigned GWritePayload")
             }
             GWritePayload::Signed(_) => {
                 panic!("an Unsigned FfiWritePayload must build an Unsigned GWritePayload")
             }
         }
+    }
+
+    #[test]
+    fn guarded_replaceable_edit_preserves_the_complete_body_and_exact_base() {
+        let expected_base_hex = "c".repeat(64);
+        let intent = FfiWriteIntent {
+            payload: FfiWritePayload::UnsignedReplaceableEdit {
+                pubkey: pk_hex(),
+                created_at: 101,
+                kind: 10_042,
+                tags: vec![
+                    vec!["d".to_string(), "caller-coordinate".to_string()],
+                    vec!["x".to_string(), "caller-owned".to_string()],
+                ],
+                content: "complete replacement".to_string(),
+                expected_base: Some(expected_base_hex.clone()),
+            },
+            durability: FfiDurability::Durable,
+            routing: FfiWriteRouting::AuthorOutbox,
+            identity_override: None,
+            correlation: None,
+        };
+
+        let parsed = write_intent_from_ffi(intent).expect("guarded edit must parse");
+        let GWritePayload::UnsignedReplaceableEdit {
+            unsigned,
+            expected_base,
+        } = parsed.payload
+        else {
+            panic!("guarded FFI payload must stay guarded");
+        };
+        assert_eq!(unsigned.pubkey.to_hex(), pk_hex());
+        assert_eq!(unsigned.created_at.as_secs(), 101);
+        assert_eq!(unsigned.kind, nostr::Kind::Custom(10_042));
+        assert_eq!(
+            unsigned
+                .tags
+                .iter()
+                .map(|tag| tag.clone().to_vec())
+                .collect::<Vec<_>>(),
+            vec![
+                vec!["d".to_string(), "caller-coordinate".to_string()],
+                vec!["x".to_string(), "caller-owned".to_string()],
+            ]
+        );
+        assert_eq!(unsigned.content, "complete replacement");
+        assert_eq!(
+            expected_base,
+            Some(EventId::from_hex(&expected_base_hex).unwrap())
+        );
+    }
+
+    #[test]
+    fn guarded_replaceable_edit_none_is_a_real_empty_coordinate_assertion() {
+        let intent = FfiWriteIntent {
+            payload: FfiWritePayload::UnsignedReplaceableEdit {
+                pubkey: pk_hex(),
+                created_at: 102,
+                kind: 10_043,
+                tags: vec![],
+                content: "first value".to_string(),
+                expected_base: None,
+            },
+            durability: FfiDurability::Durable,
+            routing: FfiWriteRouting::AuthorOutbox,
+            identity_override: None,
+            correlation: None,
+        };
+
+        let parsed = write_intent_from_ffi(intent).expect("nil-base edit must parse");
+        assert!(matches!(
+            parsed.payload,
+            GWritePayload::UnsignedReplaceableEdit {
+                expected_base: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn guarded_replaceable_edit_rejects_a_malformed_expected_base() {
+        let mut intent = valid_write_intent();
+        intent.payload = FfiWritePayload::UnsignedReplaceableEdit {
+            pubkey: pk_hex(),
+            created_at: 103,
+            kind: 10_042,
+            tags: vec![],
+            content: "replacement".to_string(),
+            expected_base: Some("not-an-event-id".to_string()),
+        };
+
+        assert!(matches!(
+            write_intent_from_ffi(intent),
+            Err(FfiError::InvalidEventId { got }) if got == "not-an-event-id"
+        ));
     }
 
     /// Arbitrary event tags survive the write boundary UNCHANGED and are
@@ -2464,7 +2585,7 @@ mod tests {
                 panic!("a Signed FfiWritePayload must build a Signed GWritePayload")
             }
             GWritePayload::UnsignedReplaceableEdit { .. } => {
-                panic!("the raw FFI write surface must not mint guarded replaceable edits")
+                panic!("a Signed FfiWritePayload must build a Signed GWritePayload")
             }
         }
     }

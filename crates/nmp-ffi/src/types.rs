@@ -557,12 +557,26 @@ pub enum FfiWriteRouting {
 /// The event payload of a write intent (`nmp::WritePayload` mirror). VISION
 /// P: signing and publishing are ORTHOGONAL stages -- `Unsigned` is a
 /// template the engine signs internally ("the key lives in the engine",
-/// ledger #12); `Signed` (#32, the M5 unlock) is a caller that already
-/// holds a validly-signed event -- an external signer / NIP-46 bunker, or a
-/// verbatim republish -- and hands its fields across as-is. `Signed`'s
-/// fields are field-for-field [`FfiRow`] (the read-side mirror of a signed
-/// `nostr::Event`) plus `sig`, deliberately: the write side stays symmetric
-/// with the read side rather than introducing a JSON-blob shape.
+/// ledger #12); `UnsignedReplaceableEdit` (#597) is that same complete
+/// caller-owned template plus an atomic assertion about the exact current
+/// local winner at its replaceable/addressable coordinate; `Signed` (#32,
+/// the M5 unlock) is a caller that already holds a validly-signed event --
+/// an external signer / NIP-46 bunker, or a verbatim republish -- and hands
+/// its fields across as-is. `Signed`'s fields are field-for-field [`FfiRow`]
+/// (the read-side mirror of a signed `nostr::Event`) plus `sig`,
+/// deliberately: the write side stays symmetric with the read side rather
+/// than introducing a JSON-blob shape.
+///
+/// `UnsignedReplaceableEdit.expected_base` is a 64-character hex event id,
+/// or `None` to assert that this coordinate currently has no local winner.
+/// The store compares it inside the same atomic acceptance transaction that
+/// would allocate the durable intent/receipt and install the pending row.
+/// Mismatch surfaces as [`FfiWriteStatus::ReplaceableConflict`] with no
+/// durable residue. This is a generic guarded WRITE, not source evidence:
+/// the caller still owns the policy that established its local base and the
+/// complete event kind/tags/content it is replacing. NMP continues to own
+/// author validation, signing, routing, durability, retry, receipts, and
+/// canonical storage after acceptance.
 ///
 /// `Signed`'s fields are PARSED at this FFI boundary (typed hex/signature-
 /// shape errors, see `convert::signed_event_from_ffi`) but NOT verified
@@ -581,6 +595,14 @@ pub enum FfiWritePayload {
         kind: u16,
         tags: Vec<Vec<String>>,
         content: String,
+    },
+    UnsignedReplaceableEdit {
+        pubkey: String,
+        created_at: u64,
+        kind: u16,
+        tags: Vec<Vec<String>>,
+        content: String,
+        expected_base: Option<String>,
     },
     Signed {
         id: String,

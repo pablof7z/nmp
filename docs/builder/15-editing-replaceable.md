@@ -1,9 +1,12 @@
 # Editing replaceable state safely
 
-**Status: IMPLEMENTED CONTRACT.** NMP now has an atomic exact-base guard for
-protocol-owned whole-value edits. The first public semantic operation is
-NIP-02 following (`nmp.follow(pubkey)` / `nmp.unfollow(pubkey)`). The contract
-is source-scoped; it never claims to know the globally newest Nostr value.
+**Status: IMPLEMENTED CONTRACT.** NMP has an atomic exact-base guard for
+whole-value edits. NIP-02 following (`nmp.follow(pubkey)` /
+`nmp.unfollow(pubkey)`) is the first closed semantic operation, and the generic
+guarded write is also available to Rust, Swift, and Kotlin callers that
+legitimately own the complete event schema and their acquisition policy. The
+contract is local and source-scoped; it never claims to know the globally newest
+Nostr value.
 
 ## The destructive-write trap
 
@@ -27,6 +30,11 @@ must be one NMP-owned operation.
 A protocol action opens an ordinary NMP live demand for the replaceable
 coordinate. It receives the canonical local winner and the same
 `AcquisitionEvidence` every other query receives.
+
+A caller using the generic guarded payload instead must establish its own
+source-scoped base through an ordinary live query and retain that exact row id.
+The write guard does not manufacture acquisition evidence or turn a cache miss
+into proof of remote absence.
 
 NIP-02's closed default policy is ready only when every relay in the current
 author-outbox plan is live, has reconciled the query shape, and reports no
@@ -83,7 +91,63 @@ before acceptance. It cannot prevent a previously unknown remote event from
 appearing later; source evidence remains scoped and the newer valid winner will
 still refine ordinary live queries.
 
-## Swift API
+## Generic native primitive
+
+Use the generic payload only when the application owns the complete event
+kind, tags, and content. In Swift:
+
+```swift
+let receipt = try await nmp.publish(
+    WriteIntent(
+        payload: .unsignedReplaceableEdit(
+            pubkey: account,
+            createdAt: timestamp,
+            kind: 10_042,
+            tags: completeTags,
+            content: completeContent,
+            expectedBase: observedRow?.id
+        ),
+        durability: .durable,
+        routing: .authorOutbox
+    )
+)
+```
+
+The Kotlin shape is identical in meaning:
+
+```kotlin
+val receipt = nmp.publish(
+    WriteIntent(
+        payload = WritePayload.UnsignedReplaceableEdit(
+            pubkey = account,
+            createdAt = timestamp,
+            kind = 10_042u,
+            tags = completeTags,
+            content = completeContent,
+            expectedBase = observedRow?.id,
+        ),
+        durability = Durability.Durable,
+        routing = WriteRouting.AuthorOutbox,
+    ),
+)
+```
+
+`expectedBase = nil` / `null` is not "I did not look." It asserts that the
+new event's replaceable/addressable coordinate has no winner in NMP's local
+canonical store at the instant of acceptance. A malformed id is refused at the
+FFI boundary. A different winner at that exact coordinate produces
+`replaceableConflict(expected, actual)` before durable receipt allocation,
+journal mutation, signing, or pending-row insertion. The replacement still
+passes the ordinary active-author check; the event's own kind and `d` tag
+derive the coordinate, so an id observed at one coordinate cannot authorize a
+write to another.
+
+After acceptance there is no special pipeline: NMP owns signer selection,
+canonical pending state, routing, retry, reattachment, and receipt evidence.
+For a protocol whose preservation and readiness rules should be reusable across
+apps, prefer a closed semantic operation such as NIP-02 following.
+
+## Swift semantic API
 
 Use the action directly when an application owns its own presentation:
 
@@ -124,10 +188,13 @@ selects relays, signs, retries, or invents success.
 
 ## Extending the pattern
 
-`UnsignedReplaceableEdit` is the generic Rust write payload for protocol
-modules that need this exact-base acceptance contract. The raw FFI write API
-deliberately cannot mint it: native apps reach guarded replacement only through
-a semantic NMP operation whose module owns the schema and acquisition policy.
+`UnsignedReplaceableEdit` is the generic Rust write payload, mirrored as
+`FfiWritePayload::UnsignedReplaceableEdit`,
+Swift `.unsignedReplaceableEdit`, and Kotlin
+`WritePayload.UnsignedReplaceableEdit`. It is the low-level exact-base
+acceptance primitive for protocol modules and applications that own the full
+event value. It deliberately owns no kind-specific parsing, merge, or source
+readiness policy.
 
 Another replaceable protocol helper must still define and falsify:
 
@@ -149,6 +216,9 @@ The shipped falsifiers cover:
 - exact-base success, generic `None`-means-`None`, regular-event misuse
   rejection, and a concurrent winner producing a typed conflict with no
   journal residue;
+- FFI, Swift, and Kotlin arbitrary-kind exact-base, stale-base, and first-value
+  paths, including a native store-acceptance test rather than conversion-only
+  coverage;
 - signed-out, no-source, and reconciled-no-contact-list failure without a
   write;
 - a real loopback indexer/outbox relay through both direct Rust and the iOS FFI

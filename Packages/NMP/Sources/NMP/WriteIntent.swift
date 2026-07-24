@@ -39,13 +39,21 @@ public enum WriteRouting: Sendable, Hashable {
 /// P: signing and publishing are ORTHOGONAL stages -- `.unsigned` is a
 /// template whose `pubkey` names the account being published as (see
 /// `NMPEngine.setActiveAccount`); the key lives engine-side and signs it
-/// there. `.signed` (#32, the M5 unlock) is a caller that already holds a
-/// validly-signed event -- an external signer / NIP-46 bunker, or a
-/// verbatim republish -- and hands its fields across as-is: the engine
-/// verifies then publishes it exactly as given, never re-signing, mutating
-/// a tag, or recomputing an id.
+/// there. `.unsignedReplaceableEdit` (#597) carries that same complete
+/// caller-owned body plus the exact current local winner the caller observed;
+/// `nil` asserts that the coordinate currently has no local winner. NMP checks
+/// the guard atomically before durable acceptance and reports
+/// `.replaceableConflict` on mismatch. The caller still owns the source policy
+/// that established the base and every kind/tag/content semantic. `.signed`
+/// (#32, the M5 unlock) is a caller that already holds a validly-signed event
+/// -- an external signer / NIP-46 bunker, or a verbatim republish -- and hands
+/// its fields across as-is: the engine verifies then publishes it exactly as
+/// given, never re-signing, mutating a tag, or recomputing an id.
 public enum WritePayload: Sendable, Hashable {
     case unsigned(pubkey: String, createdAt: UInt64, kind: UInt16, tags: [[String]], content: String)
+    case unsignedReplaceableEdit(
+        pubkey: String, createdAt: UInt64, kind: UInt16, tags: [[String]], content: String,
+        expectedBase: String?)
     case signed(
         id: String, pubkey: String, createdAt: UInt64, kind: UInt16, tags: [[String]],
         content: String, sig: String)
@@ -54,6 +62,17 @@ public enum WritePayload: Sendable, Hashable {
         switch self {
         case .unsigned(let pubkey, let createdAt, let kind, let tags, let content):
             return .unsigned(pubkey: pubkey, createdAt: createdAt, kind: kind, tags: tags, content: content)
+        case .unsignedReplaceableEdit(
+            let pubkey, let createdAt, let kind, let tags, let content, let expectedBase
+        ):
+            return .unsignedReplaceableEdit(
+                pubkey: pubkey,
+                createdAt: createdAt,
+                kind: kind,
+                tags: tags,
+                content: content,
+                expectedBase: expectedBase
+            )
         case .signed(let id, let pubkey, let createdAt, let kind, let tags, let content, let sig):
             return .signed(
                 id: id, pubkey: pubkey, createdAt: createdAt, kind: kind, tags: tags, content: content,
