@@ -12,8 +12,9 @@ use std::collections::{BTreeSet, HashMap};
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
 
+use crate::engine::{ResolutionNodeKind, ResolutionNodeSnapshot, ResolvedValue};
 use crate::eval::merge_element_into;
-use crate::types::{FieldSlot, NodeId, ParentLink, ResolvedSet};
+use crate::types::{Element, FieldSlot, NodeId, ParentLink, ResolvedSet};
 
 /// A `BindingNode::Literal` — a fixed value set, immutable for the graph's
 /// lifetime.
@@ -102,6 +103,86 @@ pub(crate) struct Graph {
 }
 
 impl Graph {
+    pub(crate) fn resolution_snapshot(&self, root: NodeId) -> Vec<ResolutionNodeSnapshot> {
+        let mut out = Vec::new();
+        self.snapshot_filter(root, "$", &mut out);
+        out
+    }
+
+    fn snapshot_filter(
+        &self,
+        filter_id: NodeId,
+        path: &str,
+        out: &mut Vec<ResolutionNodeSnapshot>,
+    ) {
+        let filter = self.filter_data(filter_id);
+        for (slot, binding_id) in &filter.bound {
+            let field = match slot {
+                FieldSlot::Authors => "authors".to_string(),
+                FieldSlot::Ids => "ids".to_string(),
+                FieldSlot::Tag(name) => format!("tag({name})"),
+            };
+            self.snapshot_binding(*binding_id, &format!("{path}.{field}"), out);
+        }
+        out.push(ResolutionNodeSnapshot {
+            path: path.to_string(),
+            kind: ResolutionNodeKind::Filter {
+                atoms: filter.cached_atoms.iter().cloned().collect(),
+            },
+        });
+    }
+
+    fn snapshot_binding(
+        &self,
+        binding_id: NodeId,
+        path: &str,
+        out: &mut Vec<ResolutionNodeSnapshot>,
+    ) {
+        let values = |set: &ResolvedSet| {
+            set.iter()
+                .map(|(element, _)| match element {
+                    Element::Scalar(value) => ResolvedValue::Scalar(value.clone()),
+                    Element::Coord { kind, author, d } => ResolvedValue::AddressCoordinate {
+                        kind: *kind,
+                        author: author.clone(),
+                        identifier: d.clone(),
+                    },
+                })
+                .collect()
+        };
+        match self.node(binding_id) {
+            Node::Literal(_) => {}
+            Node::Reactive(node) => out.push(ResolutionNodeSnapshot {
+                path: path.to_string(),
+                kind: ResolutionNodeKind::Reactive {
+                    field: node.field,
+                    values: values(&node.cached),
+                },
+            }),
+            Node::Derived(node) => {
+                self.snapshot_filter(node.inner, &format!("{path}.inner"), out);
+                out.push(ResolutionNodeSnapshot {
+                    path: path.to_string(),
+                    kind: ResolutionNodeKind::Derived {
+                        values: values(&node.cached),
+                    },
+                });
+            }
+            Node::SetOp(node) => {
+                for (index, operand) in node.operands.iter().enumerate() {
+                    self.snapshot_binding(*operand, &format!("{path}.operand({index})"), out);
+                }
+                out.push(ResolutionNodeSnapshot {
+                    path: path.to_string(),
+                    kind: ResolutionNodeKind::SetOp {
+                        values: values(&node.cached),
+                    },
+                });
+            }
+            Node::Filter(_) => unreachable!("a BindingNode id must never reference a FilterNode"),
+        }
+    }
+
     pub(crate) fn alloc_id(&mut self) -> NodeId {
         self.next_id += 1;
         self.next_id

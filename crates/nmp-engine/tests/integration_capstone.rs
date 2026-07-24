@@ -91,7 +91,7 @@ fn wait_for_rows(
             return false;
         }
         match rx.recv_timeout(remaining) {
-            Ok((deltas, evidence)) => {
+            Ok((deltas, evidence, _execution)) => {
                 for delta in deltas {
                     match delta {
                         RowDelta::Added(row) => {

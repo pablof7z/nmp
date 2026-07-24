@@ -55,6 +55,7 @@ mod config;
 mod diagnostics;
 mod engine;
 mod error;
+mod observation;
 mod relay_information;
 mod subscription;
 
@@ -73,6 +74,7 @@ pub use engine::{
     SignEventRequest,
 };
 pub use error::EngineError;
+pub use observation::ObservationEvidence;
 
 /// Monotonic count of real NMP-owned OS threads spawned this process (#680
 /// falsifier instrumentation). The thread-scaling falsifier asserts opening

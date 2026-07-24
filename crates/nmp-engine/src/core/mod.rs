@@ -36,6 +36,7 @@ mod history;
 mod history_lifecycle;
 #[cfg(test)]
 mod history_lifecycle_tests;
+mod observation;
 mod query;
 #[cfg(test)]
 mod query_tests;
@@ -46,7 +47,7 @@ mod write;
 mod write_tests;
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -197,6 +198,10 @@ pub use diagnostics::{
 };
 pub use evidence::{AcquisitionEvidence, AuthPhase, ShortfallFact, SourceEvidence, SourceStatus};
 pub use history::{HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, WindowLoad};
+use observation::{ActiveRequestEvidence, ObservationExecutionState, PendingRequestEvidence};
+pub use observation::{
+    ObservationEvidence, ObservationFact, ResolutionCause, ResolvedBindingValue,
+};
 // `runtime` (C) needs the EXACT same wire subscription-id string
 // `attribution.rs` records at send time (`AttributionState::record_send`) so
 // that a REQ actually placed on the wire under this string round-trips back
@@ -630,6 +635,9 @@ pub enum Effect {
         nmp_store::CoverageInterval,
     ),
     EmitRows(HandleId, Vec<RowDelta>, AcquisitionEvidence),
+    /// Ordered observation-scoped execution facts. Runtime folds these into
+    /// the same bounded observation mailbox as rows and acquisition facts.
+    EmitObservationEvidence(HandleId, Vec<ObservationEvidence>),
     EmitHistory(HistorySessionId, HistoryBatch),
     HistoryLoadResult(HistorySessionId, Result<(), HistoryAdvanceError>),
     /// The engine-global diagnostics projection (M5 plan §1.2 step 3),
@@ -717,6 +725,7 @@ struct HandleState {
     /// possibly missed historical snapshot, so the next affected batch must
     /// retry the full oracle before incremental application resumes.
     projection_complete: bool,
+    execution: ObservationExecutionState,
 }
 
 /// The immutable opening-time result of one handle's freshness policy.
@@ -990,6 +999,8 @@ pub struct EngineCore<S: EventStore> {
     history_by_handle: HashMap<HandleId, HistorySessionId>,
     next_history_id: u64,
     attribution: AttributionState,
+    pending_request_evidence: HashMap<(RelaySessionKey, SubId), VecDeque<PendingRequestEvidence>>,
+    active_request_evidence: HashMap<u64, ActiveRequestEvidence>,
     /// EngineCore's memory of the exact connection generation and SESSION
     /// that currently occupy each pool slot. Disconnects are asynchronous;
     /// the generation prevents a delayed old disconnect from erasing a slot
@@ -1251,6 +1262,8 @@ impl<S: EventStore> EngineCore<S> {
             history_by_handle: HashMap::new(),
             next_history_id: 1,
             attribution: AttributionState::new(),
+            pending_request_evidence: HashMap::new(),
+            active_request_evidence: HashMap::new(),
             slot_to_relay: HashMap::new(),
             connected_relays: BTreeSet::new(),
             ever_connected_relays: BTreeSet::new(),
@@ -1839,6 +1852,14 @@ impl<S: EventStore> EngineCore<S> {
         if let Err(e) = self.resolver.set_active_pubkey(pk) {
             self.degrade_store(e, &mut effects);
             return effects;
+        }
+        let ids: Vec<_> = self.handles.keys().copied().collect();
+        for id in ids {
+            self.reconcile_observation_resolution(
+                id,
+                ResolutionCause::ActiveAccountChanged,
+                &mut effects,
+            );
         }
         self.recompile(&mut effects);
         self.refresh_all_handles(&mut effects);
