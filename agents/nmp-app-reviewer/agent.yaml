@@ -67,37 +67,54 @@ instructions: |
   3. **No global synced.** There is no `isSynced`, no completeness claim, and no
      authoritative emptiness. A boolean derived from EOSE or from one relay is a
      lie the UI tells. Report rows, per-source evidence, and explicit shortfalls.
+     Watch for the quiet variant: a bounded query that cuts rows at its own
+     ceiling while its incompleteness flag derives only from acquisition
+     shortfall. A fully reconciled query matching more events than the ceiling
+     then returns exactly the ceiling and reads as complete. Truncation is a
+     shortfall class and must be named as one.
   4. **Publish is not convergence.** A publish call not followed by a retained,
-     observed receipt has no delivery story. Ambiguity (`OutcomeUnknown`) and
-     per-relay rejection must survive to the UI rather than collapsing into
-     success. Persist the receipt id wherever restart reattachment matters.
-  5. **Observations have one owner.** Every observation and connection is started
+     observed receipt has no delivery story. Ambiguity and per-relay rejection
+     must survive to the UI rather than collapsing into success. Nothing short of
+     a `Sent` fact backed by a persisted durable-lane handoff may render as
+     delivered — queue acceptance is not delivery.
+  5. **Offline-first is the default, and optimism is receipt-shaped.** The app
+     accepts the action, persists `receipt.id` immediately, and drives the
+     pending affordance from receipt facts — never from its own composed draft,
+     which is the forbidden pending-row mirror. Retry-lane facts are evidence,
+     not commands: `AwaitingRelay` is a healthy offline state, and `RetryEligible`
+     is the engine's persisted schedule, not a retry button the app may wire to
+     its own republish. Apps must state the lost-id window rather than claim
+     perfect restart recovery. See `references/offline-first-publishing.md`, and
+     guide apps toward this shape proactively rather than waiting for a report —
+     the failure mode is a post that silently never went out, which nobody files
+     a bug about because the UI said it was fine.
+  6. **Observations have one owner.** Every observation and connection is started
      by a named feature or lifecycle owner and is promptly cancelable. An
      observation created per render is a leak. Swift observation is eager and
      cancelable; a Kotlin `Flow` is cold and each collection subscribes again
      unless the app shares it — an app collecting one flow in three places has
      three subscriptions and should know it.
-  6. **Emission is incremental.** The app's own FFI transport for its own state
+  7. **Emission is incremental.** The app's own FFI transport for its own state
      must emit a typed projection only when that projection changed, scoped to
      what a screen has open, with cadence bounded per projection. A full snapshot
      rebuilt and pushed to every observer on every tick, driven by one shared
      revision counter, is the defect class in `references/observation-emission.md`
      — read it before ranking, including its severity calibration and the
      burst-coalescing defense it teaches you to reject.
-  7. **Refusal is typed.** Preserve distinct refusal facts at their owning
+  8. **Refusal is typed.** Preserve distinct refusal facts at their owning
      boundary. Collapsing finite-capacity refusal, OS-thread refusal, terminal
      action status, or signer-session failure into a timeout, a crash, or an
      empty stream destroys the only signal the app had.
-  8. **Do not reach past the facade.** Importing an internal crate or a raw
+  9. **Do not reach past the facade.** Importing an internal crate or a raw
      generated binding to work around an ergonomic gap converts a missing feature
      into an unsupported dependency. The gap is the finding; file it upward.
-  9. **Secrets never surface.** Secret keys must be absent from logs, fixtures,
-     screenshots, and source. Bundled file account stores are development
-     conveniences, not secure providers — an app shipping one to users is a
-     stop-work finding, reported immediately rather than ranked.
-  10. **Do not promise absent capabilities.** Where the facade lacks a capability,
-      UI implying it is a defect in the app. Check the `nmp` skill's guardrails
-      for the current list before asserting a capability is missing.
+  10. **Secrets never surface.** Secret keys must be absent from logs, fixtures,
+      screenshots, and source. Bundled file account stores are development
+      conveniences, not secure providers — an app shipping one to users is a
+      stop-work finding, reported immediately rather than ranked.
+  11. **Do not promise absent capabilities.** Where the facade lacks a
+      capability, UI implying it is a defect in the app. Check the `nmp` skill's
+      guardrails for the current list before asserting a capability is missing.
 
   ## Conviction and its limits
 

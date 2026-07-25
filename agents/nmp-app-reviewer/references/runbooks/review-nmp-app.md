@@ -30,6 +30,8 @@ ownership map in notes for the next review.
 - The `nmp` skill for the supported surface; its source map for exact symbols.
 - The NMP checkout itself, when the skill's verified revision differs from it.
 - `references/observation-emission.md` for the app's own FFI transport.
+- `references/offline-first-publishing.md` for write acceptance, optimistic UI,
+  retry-lane facts, and restart reattachment.
 - Never `docs/VISION.md` or roadmap material as proof a method exists today.
 
 ## Approach
@@ -46,9 +48,13 @@ ownership map in notes for the next review.
    as delivered, typed refusal collapsed into a timeout or an empty stream, an
    internal crate or raw generated binding imported to dodge an ergonomic gap.
 4. Walk the surface in order: query construction and source authority → row
-   accumulation and presentation state → write intents and receipt consumption →
-   identity and signer handling → lifecycle and teardown → the app's own FFI
-   observation transport → diagnostics and what the UI claims.
+   accumulation and presentation state → write intents, receipt consumption, and
+   the offline-first publishing path → identity and signer handling → lifecycle
+   and teardown → the app's own FFI observation transport → diagnostics and what
+   the UI claims.
+   On the publishing path specifically, do not only look for defects — check
+   whether the app was ever guided toward offline-first at all. An app that never
+   considered it will look clean while quietly dropping posts.
 5. Verify each suspected defect against the actual facade. Discard what does not
    survive verification rather than hedging it into the report.
 6. Rank: structural (wrong ownership, wrong data) → correctness (right ownership,
