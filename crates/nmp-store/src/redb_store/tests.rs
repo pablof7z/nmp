@@ -492,6 +492,91 @@ fn coverage_row_key_carries_the_full_256_bit_digest() {
     );
 }
 
+#[test]
+fn reopen_conservatively_invalidates_pre_fix_max_only_coverage_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("test.redb");
+    let relay = RelayUrl::parse("wss://relay.example").unwrap();
+    let max_atom = ContextualAtom {
+        filter: ConcreteFilter {
+            kinds: Some(BTreeSet::from([1u16])),
+            ..ConcreteFilter::default()
+        },
+        source: nmp_grammar::SourceAuthority::Public,
+        access: nmp_grammar::AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    };
+    let retained_atom = ContextualAtom {
+        filter: ConcreteFilter {
+            kinds: Some(BTreeSet::from([2u16])),
+            ..ConcreteFilter::default()
+        },
+        ..max_atom.clone()
+    };
+    let max_key = compute_coverage_key(&max_atom);
+    let retained_key = compute_coverage_key(&retained_atom);
+
+    {
+        let mut store = RedbStore::open(&db_path).unwrap();
+        store
+            .record_coverage(
+                &max_atom,
+                &relay,
+                CoverageInterval::new(Timestamp::from(u64::MAX), Timestamp::from(u64::MAX)),
+            )
+            .unwrap();
+        store
+            .record_coverage(
+                &retained_atom,
+                &relay,
+                CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
+            )
+            .unwrap();
+    }
+
+    // Model a database last opened by a build predating the repair marker.
+    {
+        let db = Database::open(&db_path).unwrap();
+        let write = db.begin_write().unwrap();
+        {
+            let mut schema = write.open_table(SCHEMA_META).unwrap();
+            schema
+                .remove(COVERAGE_MAX_EVICTION_REPAIR_KEY)
+                .unwrap()
+                .expect("fresh stores carry the repair marker");
+        }
+        write.commit().unwrap();
+    }
+
+    let store = RedbStore::open(&db_path).unwrap();
+    assert_eq!(
+        store.get_coverage(max_key, &relay),
+        None,
+        "an old exact MAX-only row is indistinguishable from the false GC result and must be cleared"
+    );
+    assert_eq!(
+        store.get_coverage(retained_key, &relay),
+        Some(CoverageInterval::new(
+            Timestamp::from(0u64),
+            Timestamp::from(100u64)
+        )),
+        "conservative invalidation must not erase unrelated coverage"
+    );
+    drop(store);
+
+    let db = Database::open(&db_path).unwrap();
+    let read = db.begin_read().unwrap();
+    let schema = read.open_table(SCHEMA_META).unwrap();
+    assert_eq!(
+        schema
+            .get(COVERAGE_MAX_EVICTION_REPAIR_KEY)
+            .unwrap()
+            .unwrap()
+            .value(),
+        COVERAGE_MAX_EVICTION_REPAIR_VERSION
+    );
+}
+
 /// #106's legacy-purge falsifier: a coverage row written under the OLD
 /// (pre-#106, unversioned) key format is silently unreachable via
 /// `get_coverage` (its key never matches anything `record_coverage`
