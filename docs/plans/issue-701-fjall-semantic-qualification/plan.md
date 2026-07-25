@@ -1,8 +1,12 @@
-# Fjall semantic and maintenance qualification
+# Fjall semantic and maintenance qualification plan
 
 ## Summary
 
-Run Fjall through the unchanged event-and-publishing semantic oracle, prove every durable boundary with process death and reopen, then measure foreground and fully accounted maintenance separately. Redb remains the production baseline.
+This document defines the experiment that may qualify Fjall; it does not qualify
+Fjall. After the coverage oracle is corrected and pinned, run Fjall through the
+unchanged event-and-publishing semantic oracle, prove every durable boundary with
+process death and reopen, then measure foreground and fully accounted maintenance
+separately. Redb remains the production baseline.
 
 ## Boundaries
 
