@@ -30,12 +30,34 @@ PR #729 changes coverage shrink behavior at the maximum timestamp and touches an
 
 ## Fixed candidate profile
 
-- Pin `fjall = 3.1.6` with default LZ4 features, as already locked.
+- Pin `fjall = 3.1.7` with default LZ4 features. The previously locked
+  `3.1.6` is disqualified by the source audit below.
 - Use `SingleWriterTxDatabase` and one `WriteTransaction` per semantic mutation.
 - Set transaction durability to `PersistMode::SyncAll`.
 - Start from the existing governed multi-keyspace mapping in `fjall_ingest_bench.rs`; do not substitute the rejected one-keyspace packed-postings experiment from #691.
 - Keep every candidate type and constructor behind `bench-instrumentation` plus test/evidence-only module reachability.
 - Do not add Fjall to any engine constructor, FFI surface, native SDK, WASM graph, migration path, or schema negotiation.
+
+## Pre-implementation Fjall source audit
+
+The exact `3.1.6` candidate cannot be used for durability qualification.
+`WriteBatch::commit` called `journal_writer.write_batch(...)` and discarded its
+`Result`, despite documenting that commit returns I/O errors. It could
+therefore continue to `SyncAll`, publish the sequence, apply the batch to
+memtables, and return `Ok(())` after a journal-write failure. That invalidates
+the requirement that an acknowledged mutation is recoverable.
+
+Fjall `3.1.7` changes this exact call to
+`journal_writer.write_batch(...)?` and makes journal-writer acquisition
+fallible. The experiment must pin `3.1.7` and record crate checksum
+`f11ea8b671d9e2c523a90e4afc0de9fea88db692102c169151294c497ccd9d8c`.
+This is a prerequisite correction, not a performance tuning variable.
+
+The positive source evidence remains narrow: Fjall describes its write batch
+as atomic across keyspaces; the journal encloses every batch in a counted start
+record and checksummed end record; recovery discards an incomplete final batch;
+and `PersistMode::SyncAll` calls `fsync`. NMP still needs real process-death
+tests at every mapped boundary. Source inspection does not replace them.
 
 ## Stage 1: backend-independent harness seam
 
