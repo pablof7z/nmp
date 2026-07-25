@@ -59,6 +59,36 @@ record and checksummed end record; recovery discards an incomplete final batch;
 and `PersistMode::SyncAll` calls `fsync`. NMP still needs real process-death
 tests at every mapped boundary. Source inspection does not replace them.
 
+## Preliminary durable-boundary map
+
+The `3.1.7` source establishes one candidate commit primitive:
+`SingleWriterTxDatabase::WriteTransaction::commit` lowers every touched
+keyspace into one cross-keyspace `WriteBatch`. The adapter must not introduce a
+second commit inside any row below.
+
+| Redb semantic seam | Fjall candidate operation | Candidate durable boundary | Allowed recovery |
+|---|---|---|---|
+| accept after event mutation, before journal rows | `accept_write` | same single batch as the rest of acceptance | exact pre-state before commit; exact post-state after commit |
+| accept before commit | `accept_write` | acceptance batch | exact pre/post state |
+| signing promotion | `promote_signed` | promotion batch | exact pre/post state |
+| compensation or cancellation | `compensate_write_with_state` | compensation batch | exact pre/post state |
+| route revision | `record_route_revision` | route batch | exact pre/post state |
+| lane bootstrap | `bootstrap_outbox_lanes` | bootstrap batch | exact pre/post state |
+| lane transition | waiting, eligible, transient, or suspended transition | transition batch | exact pre/post state |
+| attempt start | `start_lane_attempt` | start batch | exact pre/post state |
+| handoff | `record_lane_handoff` | handoff/detail/deadline batch | exact pre/post state |
+| attempt finish | `finish_lane_attempt` | finish batch | exact pre/post state |
+| terminal close | `close_terminal_intent` | close batch | exact pre/post state |
+| relay observation | duplicate or batch insert | observation/canonical batch | exact pre/post state |
+| GC before commit | `gc` | event/index/coverage batch | exact pre-state |
+| GC after commit | `gc` | same batch, exit after acknowledged commit | exact post-state |
+
+Each candidate test gets a pre-commit exit and an after-commit-before-return
+exit. A separate commit-in-progress stress case must repeatedly kill a child
+while a deliberately large batch is inside Fjall and accept only the same
+operation's exact pre- or post-digest. No row-count or family-level sample can
+replace the table.
+
 ## Stage 1: backend-independent harness seam
 
 Refactor `semantic_oracle.rs` only enough to describe an opener/reopener that returns a private `dyn EventStore`. Keep the operation trace, normalized state, ordered query assertions, recovery projection, and BLAKE3 digest construction byte-for-byte shared.
