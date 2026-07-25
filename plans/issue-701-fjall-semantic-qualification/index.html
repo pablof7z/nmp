@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Fjall semantic and maintenance qualification</title>
+    <link rel="stylesheet" href="../../assets/style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <nav class="topbar">
+        <a href="../../">Planning pages</a>
+        
+      </nav>
+      <section class="hero">
+        <div class="eyebrow">Architecture plan</div>
+        <h1>Fjall semantic and maintenance qualification</h1>
+        <p class="summary">Run Fjall through the unchanged event-and-publishing semantic oracle, prove every durable boundary with process death and reopen, then measure foreground and fully accounted maintenance separately. Redb remains the production baseline.</p>
+        <div class="meta">
+          <span class="pill ready">Ready to implement</span>
+          <span class="pill">86 percent certainty</span>
+        </div>
+      </section>
+      <div class="grid">
+        <div>
+
+          <section class="section">
+            <h2>Boundaries</h2>
+            <pre class="mermaid">flowchart LR
+  O[Unchanged semantic trace] --&gt; M[Memory oracle]
+  O --&gt; R[Redb baseline]
+  O --&gt; F[Test-only Fjall adapter]
+  F --&gt; C[Crash and reopen matrix]
+  C --&gt;|semantic green| P[Physical and maintenance evidence]
+  C --&gt;|counterexample| X[Reject tested profile]
+  P --&gt; D[Narrow evidence only]
+  R -. remains production .-&gt; D</pre>
+          </section>
+          <section class="section">
+            <h2>Very High Level</h2>
+            <p>Qualify the existing multi-keyspace Fjall experiment without making it production-reachable. First, merge the pending coverage-correctness fix because it changes an oracle-covered invariant. Then generalize only the private semantic harness so MemoryStore, RedbStore, and a bench-instrumentation-only Fjall candidate use the same operations and checkpoint comparisons.
+
+The candidate will use Fjall 3.1.6, its single-writer transaction API, and SyncAll durability. Shared ingest policy remains shared. Other backend-independent state-machine decisions will be extracted only where necessary; candidate-specific semantic branches are forbidden. Every semantic operation must commit through one mapped Fjall transaction or expose and crash-test every intermediate commit.
+
+The unchanged trace will compare normalized semantic state, ordered query results, recovery state, and deterministic digests after every mutation and reopen. A checked boundary map will pair each Redb crash seam with the actual Fjall transaction boundary, and child processes will die before and after each durable boundary.
+
+Only after semantic and crash qualification succeeds will the representative workload run against Redb and Fjall on the same filesystem with rotated fresh-process order. Foreground time and process-accounted write bytes will be separated from maintenance-inclusive time and bytes. Fjall&#x27;s compaction and debt inspection methods are hidden/non-stable in the pinned release, so any use is benchmark-only and cannot support a production-readiness claim. If compaction settlement cannot be established conservatively, that is the result.
+
+No migration, production constructor, default feature, public API, or database-winner recommendation is in scope.</p>
+          </section>
+          <section class="section">
+            <h2>Existing Rules Or ADRs</h2>
+            <ul><li>Issue-first discipline is satisfied by #701 under storage epic #698.</li><li>Redb remains the production baseline; the Fjall adapter is reachable only with bench-instrumentation and has no production constructor.</li><li>The unchanged EventStore oracle remains semantic authority; physical tables, row counts, and candidate-specific branches cannot define correctness.</li><li>Durable event-store mutations remain internally atomic. Cross-authority relaxation from #627 and #629 is not used to excuse partial state inside this candidate.</li><li>No app-facing noun, FFI surface, lifecycle ownership, or destructive API changes.</li></ul>
+          </section>
+          <section class="section">
+            <h2>Rule Tension And Tightening</h2>
+            <h3>Possible loosening</h3>
+            <ul><li>No correctness or production rule needs loosening.</li><li>Hidden Fjall maintenance APIs may be used only inside evidence instrumentation, clearly labeled non-stable and incapable of production-qualification.</li></ul>
+            <h3>Possible tightening</h3>
+            <ul><li>Require every future persistent backend experiment to check in a semantic-operation-to-durable-boundary map and process-death falsifier matrix.</li><li>Require LSM comparisons to report foreground and maintenance-inclusive process-accounted write bytes separately and to disclose any remaining compaction debt.</li><li>Require a compile-graph falsifier proving experimental backends are absent from default and production feature graphs.</li></ul>
+          </section>
+          <section class="section">
+            <h2>Alternatives Considered</h2>
+            <ul><li>Promote the existing Fjall ingest benchmark directly: rejected because it lacks complete query, coverage, expiry, publishing, retry, receipt, and recovery semantics.</li><li>Persist and replay a MemoryStore snapshot or operation log through Fjall: rejected because it would test a journal wrapper, not the candidate event and index layout.</li><li>Fork the oracle for missing Fjall operations: rejected because duplicated policy could make both implementations agree with themselves while violating EventStore semantics.</li><li>Begin a production Fjall migration: rejected by scope and unsupported by current evidence.</li><li>Move to LMDB first: deferred to its separate packed, backend-native experiment after this lowest-cost semantic qualification.</li></ul>
+          </section>
+        </div>
+        <aside>
+          <section class="card">
+            <h2>TTS Version</h2>
+            <audio controls preload="metadata" src="https://blossom.primal.net/a2aa5f99cc0dc3f0b150e3c1266331a4c182c34ef90107aa61747fd62034ca38.mp3"></audio>
+            <p>Audio-friendly narration generated from the planning payload.</p>
+          </section>
+          <section class="card">
+            <h2>Certainty</h2>
+            <div class="certainty ">86%</div>
+            <p>Ready to implement.</p>
+          </section>
+          <section class="card links">
+            <h2>Links</h2>
+            
+            <a href="https://blossom.primal.net/a2aa5f99cc0dc3f0b150e3c1266331a4c182c34ef90107aa61747fd62034ca38.mp3">Open narration</a>
+            <a href="../../docs/plans/issue-701-fjall-semantic-qualification/plan.md">Detailed plan file</a>
+          </section>
+        </aside>
+      </div>
+    </main>
+
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral" });
+    </script>
+  </body>
+</html>
