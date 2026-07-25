@@ -160,6 +160,6 @@ ready
 
 ## Hosted Artifacts
 
-- Plan page: Generated after publishing.
+- Plan page: https://pablof7z.github.io/nmp/plans/issue-701-fjall-semantic-qualification/
 
 - TTS audio: https://blossom.primal.net/a2aa5f99cc0dc3f0b150e3c1266331a4c182c34ef90107aa61747fd62034ca38.mp3
