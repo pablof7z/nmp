@@ -41,3 +41,4 @@ Six gates applied to every PR, encoding the type-over-convention doctrine (`docs
 - **Truth and honesty are the anchors.** The README is the current honest picture, not a pitch, and not a changelog. `docs/known-gaps.md` must list what doesn't work. Compiles ≠ works — verify the running result.
 - **Fix end-to-end.** No temporary hacks, no compat aliases, no narrating a defect instead of fixing it. If a change is right, make it and update every caller in the same PR.
 - **Test scope:** run the tests for the crates you touched (`cargo test -p <crate>`); a workspace run is the merge-time gate, not the per-change loop.
+- **Hand off out loud.** Before ending a session or handing off in-progress work — a git worktree left behind, a blocker punted to someone else, a PR not yet merged — tag @chief-of-staff via `mosaico channel send`/`reply` so the handoff isn't silent.
