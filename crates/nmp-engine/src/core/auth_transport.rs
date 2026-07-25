@@ -1434,26 +1434,11 @@ impl<S: EventStore> EngineCore<S> {
                         (Some(send), coverage)
                     });
                 for (key, interval) in attributed {
-                    if let Some(atom) = self.attribution.shape_of(key) {
-                        // Coverage rows stay keyed (context-hashed key,
-                        // relay URL) — the access distinction already lives
-                        // inside the key's own hash, so the store door takes
-                        // the session's relay.
-                        if let Err(e) = self.resolver.store_mut().record_coverage(
-                            &atom,
-                            &session.relay,
-                            interval,
-                        ) {
-                            // Persisting a coverage watermark failed (issue
-                            // #122): degrade rather than panic. The
-                            // in-memory `Effect::RecordCoverage` is skipped
-                            // too — no watermark is claimed that did not
-                            // durably land.
-                            self.degrade_store(e, &mut effects);
-                            continue;
-                        }
-                        effects.push(Effect::RecordCoverage(key, session.relay.clone(), interval));
-                    }
+                    // Coverage rows stay keyed (context-hashed key, relay
+                    // URL) — the access distinction already lives inside
+                    // the key's own hash, so the shared persistence door
+                    // takes the session's relay.
+                    self.persist_attributed_coverage(key, interval, &session.relay, &mut effects);
                 }
                 if let Some(send) = completed_send {
                     self.emit_request_eose(send, self.clock, &mut effects);

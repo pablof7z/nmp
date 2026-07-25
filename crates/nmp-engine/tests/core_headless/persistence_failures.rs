@@ -157,12 +157,13 @@ fn ingest_door_surfaces_io_failure_as_persistence_error_not_panic() {
     );
 }
 
-/// Engine-level falsifier (issue #122): a relay EVENT frame whose store
+/// Engine-level falsifier (issues #122/#816): a relay EVENT frame whose store
 /// `insert` fails on I/O DEGRADES the engine to read-only (a `store_degraded`
 /// diagnostic is emitted) and never panics the reducer. The failed frame
-/// delivers no phantom rows, and the engine stays usable for later messages.
+/// delivers no phantom rows, and its later EOSE cannot put a coverage claim
+/// ahead of the missing event.
 #[test]
-fn ingest_io_failure_degrades_read_only_without_panicking() {
+fn ingest_io_failure_degrades_read_only_and_later_eose_mints_no_coverage() {
     let a = Keys::generate();
     let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]);
@@ -172,10 +173,11 @@ fn ingest_io_failure_degrades_read_only_without_panicking() {
     let mut core = EngineCore::new(FailIngestStore::armed(), Box::new(dir), 10);
 
     let sink = CapturingSink::default();
-    let _ = core.handle(EngineMsg::Subscribe(
+    let subscribed = core.handle(EngineMsg::Subscribe(
         literal_query(&[1], &a.public_key().to_hex()),
         Box::new(sink.clone()),
     ));
+    let wire = wire_sub_string(req_for(&subscribed, &relay).0);
     let _ = core.handle(EngineMsg::RelayConnected(
         RelayHandle {
             slot: 0,
@@ -193,7 +195,7 @@ fn ingest_io_failure_degrades_read_only_without_panicking() {
             generation: 1,
         },
         public_session(&relay),
-        event_frame("s", event),
+        event_frame(&wire, event),
     ));
 
     // Degrade, don't panic: the read-only signal reaches the diagnostics
@@ -211,8 +213,151 @@ fn ingest_io_failure_degrades_read_only_without_panicking() {
             .any(|e| matches!(e, Effect::EmitRows(_, rows, _) if !rows.is_empty())),
         "a failed ingest must not deliver phantom rows, got {effects:?}"
     );
-    // The reducer survives and keeps handling messages (no poisoned state).
-    let _ = core.handle(EngineMsg::Tick(Timestamp::from(1u64)));
+
+    // The reducer survives and keeps handling messages (no poisoned state),
+    // but a later terminal observation must fail closed. `FailIngestStore`
+    // deliberately leaves its coverage door healthy, so this detects a real
+    // missing guard rather than a second injected error.
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(1_001u64)));
+    let completed = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire),
+    ));
+    assert!(
+        !completed
+            .iter()
+            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+        "EOSE after a failed event write must not claim coverage: {completed:?}"
+    );
+    assert_eq!(
+        core.get_coverage(&ctx_atom(cf(&[1], &[&a.public_key().to_hex()])), &relay),
+        None,
+        "facts may get ahead of claims, but claims must never get ahead of facts"
+    );
+}
+
+/// #816's NIP-77 falsifier: completion correctly waits for a missing-id
+/// backfill, but that backfill's EOSE is not proof if its EVENT failed to
+/// persist. The terminal frame must close the temporary request without
+/// minting the deferred NEG coverage.
+#[test]
+fn neg_backfill_ingest_failure_then_eose_mints_no_coverage() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
+    let dir = FixtureDirectory::new()
+        .with_write(a.public_key().to_hex(), [relay.clone()])
+        .with_write(b.public_key().to_hex(), [relay.clone()]);
+    let mut core = EngineCore::new(FailIngestStore::armed(), Box::new(dir), 10);
+
+    // First demand opens the relay and proves NIP-77 support. A second atom
+    // widens the same kind skeleton, which takes the live-first NEG path.
+    let first = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    req_for(&first, &relay);
+    let connected = connect(&mut core, 0, &relay);
+    let probe = connected
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::StartProbe(url, sub_id, ..) if url == &relay => Some(sub_id.clone()),
+            _ => None,
+        })
+        .expect("connected demanded relay starts its NIP-77 probe");
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        neg_msg_frame(&wire_sub_string(&probe), "6100"),
+    ));
+
+    let widened = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &b.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let live = req_for(&widened, &relay).0.clone();
+    let opened = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire_sub_string(&live)),
+    ));
+    let (neg_sub, initial_hex) = opened
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::NegOpen(_, sub_id, _, initial_hex) => {
+                Some((sub_id.clone(), initial_hex.clone()))
+            }
+            _ => None,
+        })
+        .expect("live EOSE opens the widened demand's NEG session");
+
+    // Act as the relay side of one real Negentropy exchange and advertise a
+    // matching event absent from the client's failed store.
+    let missing = nmp_resolver::testkit::kind1(&b, "must persist before coverage", 7);
+    let mut remote_storage = ::negentropy::NegentropyStorageVector::new();
+    remote_storage
+        .insert(
+            missing.created_at.as_secs(),
+            ::negentropy::Id::from_byte_array(*missing.id.as_bytes()),
+        )
+        .unwrap();
+    remote_storage.seal().unwrap();
+    let mut remote = ::negentropy::Negentropy::owned(remote_storage, 0).unwrap();
+    let response = remote
+        .reconcile(&hex::decode(initial_hex).unwrap())
+        .unwrap();
+    let completed = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        neg_msg_frame(&wire_sub_string(&neg_sub), &hex::encode(response)),
+    ));
+    let backfill = req_for(&completed, &relay).0.clone();
+
+    // The missing EVENT fails to persist and degrades the store. Its EOSE
+    // must not unlock the deferred coverage obligation.
+    let failed = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        event_frame(&wire_sub_string(&backfill), missing),
+    ));
+    assert!(failed
+        .iter()
+        .any(|effect| matches!(effect, Effect::EmitDiagnostics(snapshot)
+            if snapshot.store_degraded.is_some())));
+    let backfill_eose = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire_sub_string(&backfill)),
+    ));
+    assert!(
+        !backfill_eose
+            .iter()
+            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+        "failed backfill persistence must poison deferred NEG credit: {backfill_eose:?}"
+    );
+    assert_eq!(
+        core.get_coverage(&ctx_atom(cf(&[1], &[&b.public_key().to_hex()])), &relay),
+        None
+    );
 }
 
 // ---- epic #507 finding E5: wake_relay_lanes lane-relay index -----------

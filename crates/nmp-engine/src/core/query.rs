@@ -4,6 +4,7 @@
 //! NIP-77 handoff/repair, and committed-store mutations projected to observers.
 
 use super::*;
+use nmp_store::CoverageInterval;
 
 impl<S: EventStore> EngineCore<S> {
     // ---- subscribe / unsubscribe / re-root ------------------------------
@@ -946,23 +947,44 @@ impl<S: EventStore> EngineCore<S> {
             completed_at,
         );
         for (key, interval) in attributed {
-            if let Some(shape) = self.attribution.shape_of(key) {
-                if let Err(e) = self
-                    .resolver
-                    .store_mut()
-                    .record_coverage(&shape, relay, interval)
-                {
-                    // Coverage-watermark persistence failed (issue #122):
-                    // degrade to read-only, claim no watermark that did not
-                    // land, and do not panic.
-                    self.degrade_store(e, effects);
-                    continue;
-                }
-                effects.push(Effect::RecordCoverage(key, relay.clone(), interval));
-            }
+            self.persist_attributed_coverage(key, interval, relay, effects);
         }
         self.refresh_all_handle_evidence(effects);
         self.refresh_all_history_evidence(effects);
+    }
+
+    /// Persist one coverage claim only while the event store is healthy.
+    ///
+    /// A relay EVENT and its later EOSE/NEG completion are separate reducer
+    /// inputs. If EVENT persistence failed, accepting the terminal frame must
+    /// not put the coverage claim ahead of the missing fact (#816). The
+    /// engine's existing degraded state is process-wide and fail-closed, so
+    /// every coverage minting path shares this single door.
+    pub(super) fn persist_attributed_coverage(
+        &mut self,
+        key: CoverageKey,
+        interval: CoverageInterval,
+        relay: &RelayUrl,
+        effects: &mut Vec<Effect>,
+    ) {
+        if self.store_degraded.is_some() {
+            return;
+        }
+        let Some(shape) = self.attribution.shape_of(key) else {
+            return;
+        };
+        if let Err(error) = self
+            .resolver
+            .store_mut()
+            .record_coverage(&shape, relay, interval)
+        {
+            // Coverage-watermark persistence failed (issue #122): degrade
+            // to read-only, claim no watermark that did not land, and do
+            // not panic.
+            self.degrade_store(error, effects);
+            return;
+        }
+        effects.push(Effect::RecordCoverage(key, relay.clone(), interval));
     }
 
     /// Start one unlimited one-shot backlog REQ under a role-separated id.

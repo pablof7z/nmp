@@ -229,6 +229,35 @@ fn redb_crash_worker() {
     let (_, signed) = event_pair();
     let relay = RelayUrl::parse(RELAY).expect("relay");
     match point.as_str() {
+        "coverage-order-before-event" => {
+            let _store = RedbStore::open(path).expect("open coverage-order worker store");
+            std::process::abort();
+        }
+        "coverage-order-after-event"
+        | "coverage-order-before-coverage"
+        | "coverage-order-after-coverage" => {
+            let mut store = RedbStore::open(path).expect("open coverage-order worker store");
+            store
+                .insert(
+                    signed,
+                    RelayObserved::new(relay.clone(), Timestamp::from(2_000u64)),
+                )
+                .expect("commit event before coverage");
+            if point == "coverage-order-after-event" {
+                std::process::abort();
+            }
+            if point == "coverage-order-before-coverage" {
+                std::process::abort();
+            }
+            store
+                .record_coverage(
+                    &retention_atom(),
+                    &relay,
+                    CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(1_000u64)),
+                )
+                .expect("commit coverage after event");
+            std::process::abort();
+        }
         "accept-after-event" => {
             let mut store = RedbStore::open_with_crash_point(
                 path,
@@ -414,6 +443,48 @@ fn redb_crash_worker() {
         other => panic!("unknown crash point {other}"),
     }
     panic!("crash seam did not abort at {point}");
+}
+
+#[test]
+fn event_then_coverage_ordering_never_reopens_with_a_claim_ahead_of_its_fact() {
+    let cases = [
+        ("coverage-order-before-event", false, false),
+        ("coverage-order-after-event", true, false),
+        ("coverage-order-before-coverage", true, false),
+        ("coverage-order-after-coverage", true, true),
+    ];
+
+    for (point, expect_event, expect_coverage) in cases {
+        let (_dir, path) = fixture();
+        RedbStore::open(&path).expect("initialize coverage-order fixture");
+
+        crash(&path, point);
+
+        let store = RedbStore::open(&path).expect("reopen coverage-order fixture");
+        let (_, signed) = event_pair();
+        let event_visible = !store
+            .query(&Filter::new().id(signed.id))
+            .expect("query event after forced termination")
+            .is_empty();
+        let coverage_visible = store
+            .get_coverage(
+                compute_coverage_key(&retention_atom()),
+                &RelayUrl::parse(RELAY).expect("relay"),
+            )
+            .is_some();
+        assert_eq!(
+            event_visible, expect_event,
+            "unexpected event state after {point}"
+        );
+        assert_eq!(
+            coverage_visible, expect_coverage,
+            "unexpected coverage state after {point}"
+        );
+        assert!(
+            event_visible || !coverage_visible,
+            "facts may lead claims, but claims must never lead facts at {point}"
+        );
+    }
 }
 
 #[test]
