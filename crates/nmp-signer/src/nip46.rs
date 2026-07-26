@@ -328,11 +328,11 @@ impl Nip46Invitation {
 
     /// #704: async twin of
     /// [`Self::connect_observed_with_executor_and_cancellation`]. Identical
-    /// handshake, except the availability wait is awaited
-    /// ([`Session::wait_available_async`]) instead of blocking a std channel,
-    /// so it runs as a task on the engine's shared adapter `runtime` and holds
-    /// no OS thread while the signer comes online. `#[doc(hidden)]` for the same
-    /// reason as its blocking `_with_executor_` sibling.
+    /// handshake, except both availability and remote replies are awaited
+    /// instead of blocking a std channel, so it runs as a task on the engine's
+    /// shared adapter `runtime` and holds no OS thread while the signer comes
+    /// online. `#[doc(hidden)]` for the same reason as its blocking
+    /// `_with_executor_` sibling.
     #[doc(hidden)]
     pub async fn connect_observed_async(
         self,
@@ -351,18 +351,17 @@ impl Nip46Invitation {
         )?;
         forward_events(&session, event_sink)?;
         session.wait_available_async(timeout).await?;
-        let remote_signer_public_key = session
-            .accept_invitation(self.secret.as_str())
-            .recv_timeout(timeout)
-            .map_err(map_connect_recv)??;
-        let user_public_key = request_string(&session, "get_public_key", Vec::new())
-            .wait(timeout)
-            .map_err(Nip46Error::from)
-            .and_then(|value| {
-                PublicKey::from_hex(&value).map_err(|error| {
-                    Nip46Error::InvalidResponse(format!("get_public_key: {error}"))
-                })
-            })?;
+        let remote_signer_public_key =
+            await_signer_op(session.accept_invitation(self.secret.as_str()), timeout).await?;
+        let user_public_key = await_signer_op(
+            request_string(&session, "get_public_key", Vec::new()),
+            timeout,
+        )
+        .await
+        .and_then(|value| {
+            PublicKey::from_hex(&value)
+                .map_err(|error| Nip46Error::InvalidResponse(format!("get_public_key: {error}")))
+        })?;
         session.emit(Nip46ConnectionEvent::Connected { user_public_key });
         session.request_switch_relays();
         Ok(Nip46Signer {
@@ -387,8 +386,8 @@ impl Nip46Invitation {
         session.wait_available(timeout)?;
         let remote_signer_public_key = session
             .accept_invitation(self.secret.as_str())
-            .recv_timeout(timeout)
-            .map_err(map_connect_recv)??;
+            .wait(timeout)
+            .map_err(Nip46Error::from)?;
         let user_public_key = request_string(&session, "get_public_key", Vec::new())
             .wait(timeout)
             .map_err(Nip46Error::from)
@@ -563,11 +562,11 @@ impl Nip46Signer {
 
     /// #704: async twin of
     /// [`Self::connect_bunker_observed_with_executor_and_cancellation`].
-    /// Identical `bunker://` handshake, except the availability wait is awaited
-    /// ([`Session::wait_available_async`]) instead of blocking a std channel, so
-    /// it runs as a task on the engine's shared adapter `runtime` and holds no
-    /// OS thread while the signer comes online. `#[doc(hidden)]` for the same
-    /// reason as its blocking `_with_executor_` sibling.
+    /// Identical `bunker://` handshake, except both availability and remote
+    /// replies are awaited instead of blocking a std channel, so it runs as a
+    /// task on the engine's shared adapter `runtime` and holds no OS thread
+    /// while the signer comes online. `#[doc(hidden)]` for the same reason as
+    /// its blocking `_with_executor_` sibling.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub async fn connect_bunker_observed_async(
@@ -605,9 +604,8 @@ impl Nip46Signer {
             permissions.unwrap_or_default(),
             metadata_json,
         ];
-        let connect_result = request_string(&session, "connect", params)
-            .wait(timeout)
-            .map_err(Nip46Error::from)?;
+        let connect_result =
+            await_signer_op(request_string(&session, "connect", params), timeout).await?;
         if connect_result != "ack"
             && parsed.secret.as_deref().map(String::as_str) != Some(connect_result.as_str())
         {
@@ -616,14 +614,15 @@ impl Nip46Signer {
             )));
         }
 
-        let user_public_key = request_string(&session, "get_public_key", Vec::new())
-            .wait(timeout)
-            .map_err(Nip46Error::from)
-            .and_then(|value| {
-                PublicKey::from_hex(&value).map_err(|error| {
-                    Nip46Error::InvalidResponse(format!("get_public_key: {error}"))
-                })
-            })?;
+        let user_public_key = await_signer_op(
+            request_string(&session, "get_public_key", Vec::new()),
+            timeout,
+        )
+        .await
+        .and_then(|value| {
+            PublicKey::from_hex(&value)
+                .map_err(|error| Nip46Error::InvalidResponse(format!("get_public_key: {error}")))
+        })?;
         session.emit(Nip46ConnectionEvent::Connected { user_public_key });
         session.request_switch_relays();
         Ok(Self {
@@ -807,12 +806,12 @@ impl Nip46Signer {
 
     /// #704: engine-associated async twin of
     /// [`Self::from_parts_observed_with_cancellation`]. Identical restore-and-
-    /// validate reconnect, except the availability wait is awaited
-    /// ([`Session::wait_available_async`]) instead of blocking a std channel, so
-    /// it runs as a task on the engine's shared adapter `runtime` — removing the
-    /// last standalone-runtime use on the FFI restore path — and holds no OS
-    /// thread while the session comes online. `#[doc(hidden)]` for the same
-    /// reason as its blocking sibling.
+    /// validate reconnect, except both availability and remote replies are
+    /// awaited instead of blocking a std channel, so it runs as a task on the
+    /// engine's shared adapter `runtime` — removing the last standalone-runtime
+    /// use on the FFI restore path — and holds no OS thread while the session
+    /// comes online. `#[doc(hidden)]` for the same reason as its blocking
+    /// sibling.
     #[doc(hidden)]
     pub async fn from_parts_observed_async(
         parts: Nip46SessionCheckpoint,
@@ -831,14 +830,15 @@ impl Nip46Signer {
         )?;
         forward_events(&session, event_sink)?;
         session.wait_available_async(timeout).await?;
-        let live_user_public_key = request_string(&session, "get_public_key", Vec::new())
-            .wait(timeout)
-            .map_err(Nip46Error::from)
-            .and_then(|value| {
-                PublicKey::from_hex(&value).map_err(|error| {
-                    Nip46Error::InvalidResponse(format!("get_public_key: {error}"))
-                })
-            })?;
+        let live_user_public_key = await_signer_op(
+            request_string(&session, "get_public_key", Vec::new()),
+            timeout,
+        )
+        .await
+        .and_then(|value| {
+            PublicKey::from_hex(&value)
+                .map_err(|error| Nip46Error::InvalidResponse(format!("get_public_key: {error}")))
+        })?;
         if live_user_public_key != parts.user_public_key {
             return Err(Nip46Error::RestoredIdentityMismatch {
                 expected: parts.user_public_key,
@@ -1075,7 +1075,7 @@ struct RequestMsg {
 enum WorkerMsg {
     AcceptInvitation {
         expected_secret: String,
-        reply: Sender<Result<PublicKey, Nip46Error>>,
+        reply: PendingSignerSender<PublicKey>,
     },
     ReplaceRelays(Vec<RelayUrl>),
 }
@@ -1384,24 +1384,24 @@ impl Session {
             .clone()
     }
 
-    fn accept_invitation(&self, expected_secret: &str) -> Receiver<Result<PublicKey, Nip46Error>> {
-        let (tx, rx) = mpsc::channel();
+    fn accept_invitation(&self, expected_secret: &str) -> SignerOp<PublicKey> {
+        let (reply, operation) = SignerOp::pending_channel();
         let commands = self.commands.clone();
         let expected_secret = expected_secret.to_string();
-        let failure = tx.clone();
+        let failure = reply.clone();
         self.runtime_handle().spawn(async move {
             if commands
                 .send(WorkerMsg::AcceptInvitation {
                     expected_secret,
-                    reply: tx,
+                    reply,
                 })
                 .await
                 .is_err()
             {
-                let _ = failure.send(Err(Nip46Error::Disconnected));
+                let _ = failure.resolve(Err(SignerError::Disconnected));
             }
         });
-        rx
+        operation
     }
 
     fn request_switch_relays(self: &Arc<Self>) {
@@ -1478,7 +1478,7 @@ struct SessionWorker {
     handles: HashMap<u32, (nmp_transport::RelayHandle, RelayUrl)>,
     configured: HashMap<RelayUrl, nmp_transport::RelayHandle>,
     pending: HashMap<String, PendingRequest>,
-    invitation: Option<(String, Sender<Result<PublicKey, Nip46Error>>)>,
+    invitation: Option<(String, PendingSignerSender<PublicKey>)>,
     subscription_id: SubscriptionId,
 }
 
@@ -1592,7 +1592,7 @@ impl SessionWorker {
             let _ = pending.reply.resolve(Err(SignerError::Disconnected));
         }
         if let Some((_, reply)) = self.invitation.take() {
-            let _ = reply.send(Err(Nip46Error::Disconnected));
+            let _ = reply.resolve(Err(SignerError::Disconnected));
         }
         self.subscribers
             .lock()
@@ -1869,7 +1869,7 @@ impl SessionWorker {
                 .expect("invitation was just validated");
             self.remote = Some(event.pubkey);
             self.refresh_preambles();
-            let _ = reply.send(Ok(event.pubkey));
+            let _ = reply.resolve(Ok(event.pubkey));
             return;
         }
 
@@ -2031,11 +2031,14 @@ where
     }
 }
 
-fn map_connect_recv(error: RecvTimeoutError) -> Nip46Error {
-    match error {
-        RecvTimeoutError::Timeout => Nip46Error::Timeout,
-        RecvTimeoutError::Disconnected => Nip46Error::Disconnected,
-    }
+async fn await_signer_op<T: Send + 'static>(
+    operation: SignerOp<T>,
+    timeout: Duration,
+) -> Result<T, Nip46Error> {
+    tokio::time::timeout(timeout, operation.recv_async())
+        .await
+        .map_err(|_| Nip46Error::Timeout)?
+        .map_err(Nip46Error::from)
 }
 
 fn emit_to(
@@ -2087,7 +2090,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn nip46_queue_overload_is_finite_backpressured_and_control_still_progresses() {
         fn invitation_message() -> WorkerMsg {
-            let (reply, _receiver) = mpsc::channel();
+            let (reply, _operation) = SignerOp::pending_channel();
             WorkerMsg::AcceptInvitation {
                 expected_secret: "bounded".to_string(),
                 reply,
@@ -2245,7 +2248,7 @@ mod tests {
             .unwrap();
 
         let (commands, command_inbox) = tokio_mpsc::channel(CONTROL_QUEUE_CAPACITY);
-        let (invitation_reply, invitation_result) = mpsc::channel();
+        let (invitation_reply, invitation_result) = SignerOp::pending_channel();
         commands
             .send(WorkerMsg::AcceptInvitation {
                 expected_secret: "control-progress".to_string(),
@@ -2294,8 +2297,8 @@ mod tests {
             "control traffic is serviced while the pending RPC envelope is full"
         );
         assert_eq!(
-            invitation_result.recv_timeout(Duration::from_millis(100)),
-            Ok(Err(Nip46Error::Disconnected)),
+            invitation_result.wait(Duration::from_millis(100)),
+            Err(SignerError::Disconnected),
             "teardown resolves the installed control operation"
         );
         drop(retained_operations);

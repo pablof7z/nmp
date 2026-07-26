@@ -1,11 +1,11 @@
 use std::net::TcpListener;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
 use nmp_signer::{
-    CryptoCapability, Nip46ClientMetadata, Nip46ConnectionEvent, Nip46Invitation, Nip46Origin,
-    Nip46Signer, SignerError, SignerOp, SigningCapability,
+    CryptoCapability, Nip46Cancellation, Nip46ClientMetadata, Nip46ConnectionEvent,
+    Nip46Invitation, Nip46Origin, Nip46Signer, SignerError, SignerOp, SigningCapability,
 };
 use nostr::nips::nip44;
 use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
@@ -411,6 +411,96 @@ fn checkpoint_then_from_parts_reconnects_without_repairing_and_signs() {
     assert!(
         !second_session_methods.contains(&"connect".to_string()),
         "restore must never re-send the pairing `connect` RPC: {second_session_methods:?}"
+    );
+    assert!(second_session_methods.contains(&"get_public_key".to_string()));
+    assert!(second_session_methods.contains(&"sign_event".to_string()));
+}
+
+/// #834 falsifier: the engine-associated Android path runs the NIP-46
+/// handshake and restore on a shared async runtime. A blocking wait inside
+/// either async constructor self-deadlocks a one-thread runtime before its
+/// request-admission task can send `connect`/`get_public_key`.
+#[test]
+fn async_bunker_pair_and_restore_progress_on_a_current_thread_runtime() {
+    let remote = Keys::generate();
+    let user = Keys::generate();
+    let (relay, seen) = spawn_multi_session_signer_relay(remote.clone(), user.clone());
+    let uri = format!(
+        "bunker://{}?relay={}&secret=current-thread-proof",
+        remote.public_key().to_hex(),
+        url::form_urlencoded::byte_serialize(relay.as_bytes()).collect::<String>()
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let checkpoint = runtime.block_on(async {
+        let cancellation = Nip46Cancellation::default();
+        let signer = Nip46Signer::connect_bunker_observed_async(
+            &uri,
+            None,
+            Nip46ClientMetadata::default(),
+            Duration::from_secs(5),
+            Arc::new(|_| {}),
+            &cancellation,
+            runtime.handle().clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(signer.user_public_key(), user.public_key());
+        let checkpoint = signer.checkpoint();
+        drop(signer);
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        checkpoint
+    });
+    let first_session_methods = seen.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(
+        first_session_methods
+            .iter()
+            .filter(|method| *method == "connect")
+            .count(),
+        1
+    );
+    assert!(first_session_methods.contains(&"get_public_key".to_string()));
+
+    runtime.block_on(async {
+        let cancellation = Nip46Cancellation::default();
+        let restored = Nip46Signer::from_parts_observed_async(
+            checkpoint,
+            Duration::from_secs(5),
+            Arc::new(|_| {}),
+            &cancellation,
+            runtime.handle().clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(restored.user_public_key(), user.public_key());
+
+        let unsigned = UnsignedEvent::new(
+            user.public_key(),
+            Timestamp::from(1_700_000_051),
+            Kind::TextNote,
+            Vec::new(),
+            "async resumed after restore",
+        );
+        let signed =
+            tokio::time::timeout(Duration::from_secs(5), restored.sign(unsigned).recv_async())
+                .await
+                .expect("the async sign result stays schedulable")
+                .unwrap();
+        signed.verify().unwrap();
+        assert_eq!(signed.pubkey, user.public_key());
+
+        drop(restored);
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    });
+    let second_session_methods = seen.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(
+        !second_session_methods.contains(&"connect".to_string()),
+        "restore must not repeat pairing: {second_session_methods:?}"
     );
     assert!(second_session_methods.contains(&"get_public_key".to_string()));
     assert!(second_session_methods.contains(&"sign_event".to_string()));
