@@ -7,7 +7,9 @@ publish.workspace = true
 description = "Shared process-level test seams for NMP integration tests."
 
 [dependencies]
-nostr.workspace = true
+nostr = { workspace = true, features = ["nip44"] }
+serde.workspace = true
+serde_json.workspace = true
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync"] }
 tungstenite = "0.29"
 

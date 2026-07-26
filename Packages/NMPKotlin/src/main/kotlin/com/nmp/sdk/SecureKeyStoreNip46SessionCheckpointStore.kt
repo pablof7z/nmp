@@ -20,9 +20,10 @@ import javax.crypto.spec.SecretKeySpec
  * [NMPNip46SessionCheckpoint.serialize]'s versioned bytes as a
  * [SecretKeyEntry] instead of a raw account secret string. See that type's
  * doc for the full honesty note about what "secure" means here (JVM
- * `KeyStore` + password, not hardware-backed) and the Android seam this
- * would eventually become (`AndroidKeyStore` + `EncryptedSharedPreferences`,
- * #40).
+ * `KeyStore` + password, not hardware-backed). Android callers use the AAR's
+ * `NMPAndroidKeyStoreNip46SessionCheckpointStore`, which generates its
+ * wrapping key in `AndroidKeyStore` and persists authenticated ciphertext in
+ * app-private storage.
  */
 class NMPSecureKeyStoreNip46SessionCheckpointStore(
     private val file: Path,

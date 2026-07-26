@@ -46,8 +46,29 @@ external fixture then proves one explicitly app-owned engine across Activity
 recreation and background/foreground transitions, exact cold-Flow handle
 cancellation, deterministic concurrent close, and zero post-teardown
 collectors or wire demand. NMP itself adds no required Android owner/provider
-type. Android Keystore/process-death recovery remains #834. Accordingly, the
-two desktop JCEKS/password providers are excluded from this artifact. The
-explicit plaintext development checkpoint remains available at API 26, with
-its existing warning; no production Android credential-security claim is made
-here.
+type. Issue #834 adds Android-native account and NIP-46 checkpoint providers:
+`NMPAndroidKeyStoreAccountStore` and
+`NMPAndroidKeyStoreNip46SessionCheckpointStore`. Each generates a
+non-exportable AES-256-GCM wrapping key in `AndroidKeyStore` and stores only
+authenticated ciphertext in the app's `noBackupFilesDir`. Missing keys,
+invalidated keys, locked-user refusal, corrupt/tampered ciphertext, platform
+key refusal, and persistence failures remain typed failures; an absent
+checkpoint remains the existing typed `null` state. Same-alias operations are
+linearized across provider instances, and `clear()` removes ciphertext before
+the wrapping key so stale ciphertext can never silently mint a new identity.
+
+The governed emulator records the wrapping key's actual `KeyInfo` security
+level rather than claiming every Android Keystore implementation is
+hardware-backed. The AES wrapping key may be software-, TEE-, or
+StrongBox-backed. NMP does **not** claim secp256k1 signing happens inside
+Android Keystore: restoring either checkpoint decrypts the local account or
+NIP-46 client secret into the engine's live memory. The process-death
+qualification runs three separate app processes and proves exact local-account
+restore, NIP-46 restore without re-pairing, durable receipt reattachment
+without republishing, relay ACK completion, clear, and non-resurrection while
+the canonical row and receipt remain durable.
+
+The desktop JCEKS/password providers remain excluded from this artifact. The
+explicit plaintext development checkpoint remains available at API 26 with
+its existing warning; production Android consumers should use the two
+AndroidKeyStore providers above.

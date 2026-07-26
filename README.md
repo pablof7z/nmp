@@ -78,7 +78,14 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 - ✅ Local key signer — secret held in a `Zeroizing<[u8;32]>` (compiler-fenced wipe on drop), `Debug` redacted to public key only ([#47 Unit C](https://github.com/pablof7z/nmp/pull/546))
 - ✅ Full **NIP-46 bunker** — independent signer-relay connection, request correlation, `auth_url`/`switch_relays`, NIP-44 crypto, **reconnect across store close/reopen**, bounded sign-only across all four surfaces (Rust/FFI/Swift/Kotlin)
 - ✅ Per-write identity override — publish a single write under a registered secondary identity without changing the active account, across Rust/FFI/Swift/Kotlin. Retarget-immunity is proven: once accepted under the override, a later `set_active_account` can never redirect it to a different signer, even across a store close/reopen ([#47](https://github.com/pablof7z/nmp/issues/47) Unit A, [#550](https://github.com/pablof7z/nmp/pull/550))
-- ✅ Platform secure-vault account stores — Keychain-backed (Swift, iOS/macOS) and JVM `KeyStore`-backed (Kotlin/desktop) checkpoint providers for automatic secure session restore ([#47](https://github.com/pablof7z/nmp/issues/47) vault providers, [#554](https://github.com/pablof7z/nmp/pull/554))
+- ✅ Platform secure-vault checkpoint stores — Keychain-backed (Swift,
+  iOS/macOS), JVM `KeyStore`-backed (Kotlin/desktop), and
+  AndroidKeyStore-wrapped (Kotlin/Android) account checkpoints, plus protected
+  NIP-46 session checkpoints on desktop JVM and Android. Android records the
+  actual wrapping-key security level and makes no hardware secp256k1 claim
+  ([#47](https://github.com/pablof7z/nmp/issues/47) vault providers,
+  [#554](https://github.com/pablof7z/nmp/pull/554),
+  [#834](https://github.com/pablof7z/nmp/issues/834))
 - ✅ Frozen identity on a parked write (`AwaitingCapability{pubkey}`) — a stranded reattached write now carries the exact pubkey it's still waiting on, not just "still parked." The PR's own cross-surface parity test caught direct-Rust and FFI reporting two *different* frozen pubkeys for the same receipt pre-merge, was fixed, and re-verified clean ([#47](https://github.com/pablof7z/nmp/issues/47) Unit B, [#556](https://github.com/pablof7z/nmp/pull/556))
 - ✅ **#47 signer-lifecycle epic is fully closed** — all four units (zeroization, per-write override, reattachment, platform vaults) merged across Rust/FFI/Swift/Kotlin
 - ⛔ No NIP-55 (Android intent-based signing)
@@ -124,9 +131,11 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
   [#832](https://github.com/pablof7z/nmp/issues/832). One explicit app-owned
   engine, Activity recreation/background behavior, exact cold-flow
   cancellation, and deterministic zero-residue close are qualified in
-  [#833](https://github.com/pablof7z/nmp/issues/833). Android
-  Keystore/process-death recovery remains
-  [#834](https://github.com/pablof7z/nmp/issues/834).
+  [#833](https://github.com/pablof7z/nmp/issues/833). AndroidKeyStore-backed
+  account/NIP-46 checkpoints, actual device security-level evidence, and
+  three-process exact identity/session/receipt recovery are qualified in
+  [#834](https://github.com/pablof7z/nmp/issues/834); the wrapping key protects
+  checkpoint-at-rest bytes and is not claimed as a hardware secp256k1 signer.
 
 ## Status / maturity
 
@@ -179,7 +188,7 @@ a governed API-35 emulator.
 - Govern the provisional demand / receipt / signer shapes toward a **v2 freeze**
 - Encode lifecycle invariants **as types**, not conventions
 - Close remaining **platform qualification** — an iOS-Simulator runtime target
-  and Android Keystore/process-death recovery
+  and Android NIP-55 execution
 - Finish **bounded delivery** with an explicit shortfall contract everywhere
 - Land NIP-51 list editing; broaden opt-in protocol modules
 - Project NIP-68 + `nmp-media` composition through FFI/Swift/Kotlin, batched together (currently Rust-only)

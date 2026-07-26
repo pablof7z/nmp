@@ -74,12 +74,32 @@ exact owner and collection, independent cold-flow collections remain exact
 handles, final cancellation removes wire demand while preserving cached rows,
 and close races leave no collector or late app callback (#833).
 
-A production Android product must also include standard Keystore-backed
-providers and prove process-death receipt/signer reattachment (#834), not
-merely AAR construction. Newest-state observation is bounded/conflated while
-receipt history remains recoverable. The app—not a framework-owned singleton—
-owns engine and collector lifetime; #833 proves that boundary without adding
-an NMP `Application`, provider, navigation host, or `ViewModel` base class.
+The AAR also includes `NMPAndroidKeyStoreAccountStore` and
+`NMPAndroidKeyStoreNip46SessionCheckpointStore` (#834). Both generate a
+non-exportable AES-256-GCM wrapping key in `AndroidKeyStore` and persist only
+authenticated ciphertext under the app's `noBackupFilesDir`; neither requires
+a password or uses the desktop JCEKS file. Use distinct stable `name` values
+when an app owns more than one account/session checkpoint. Absence returns
+`null`; missing/invalidated/locked keys, corrupt ciphertext, platform refusal,
+and persistence failures throw the corresponding
+`NMPAndroidCheckpointException` subtype.
+
+`wrappingKeyAlias` is exposed so a host can inspect `KeyInfo` or apply its own
+platform policy. The actual key security level is device-dependent: software,
+TEE, or StrongBox are all honest AndroidKeyStore outcomes. These stores protect
+checkpoint-at-rest bytes; they do not turn AndroidKeyStore into a secp256k1
+signer. Restore decrypts the local account or NIP-46 client secret into the
+engine's live memory.
+
+The #834 emulator gate force-stops the app between three instrumentation
+processes. It proves exact local-account and NIP-46 restore, durable receipt
+reattachment by id and correlation, one resumed signature and relay ACK with
+no re-pair or duplicate publish, then credential clear and non-resurrection
+while the receipt and canonical row remain durable. Newest-state observation
+is bounded/conflated while receipt history remains recoverable. The app—not a
+framework-owned singleton—owns engine and collector lifetime; #833 proves that
+boundary without adding an NMP `Application`, provider, navigation host, or
+`ViewModel` base class.
 
 The current JVM projection also exposes `NMPInsecureFileAccountStore(Path)` for
 explicit plaintext sandbox persistence. It provides the same restore/clear
@@ -92,9 +112,9 @@ results through `installedAndroid(packageIds)` and produce an exact
 package visibility for the signer packages/schemes, start
 `connectNip46(invitation)` before launching the URI, and apply
 `Intent.setPackage(packageName)` so a shared scheme never selects the wrong
-app. Keystore/process-death recovery and NIP-55 execution remain open work; AAR
-construction is qualified by #831, external-consumer runtime by #832, and the
-ordinary app-owned lifecycle by #833.
+app. AAR construction is qualified by #831, external-consumer runtime by #832,
+the ordinary app-owned lifecycle by #833, and Keystore/process-death recovery
+by #834. NIP-55 execution remains open.
 
 ## Other platforms
 

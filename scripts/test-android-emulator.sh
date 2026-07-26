@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run #832's external AAR consumer on the already-booted governed emulator.
+# Run #832/#833/#834's external AAR consumer on the governed emulator.
 #
 # reactivecircus/android-emulator-runner owns emulator creation and calls this
 # script only after boot completion. The host relay stays outside the app;
@@ -24,6 +24,7 @@ MISSING_ABI_AAR="$ARTIFACTS/NMPAndroid-missing-x86_64.aar"
 mkdir -p "$ARTIFACTS"
 
 relay_pid=
+nip46_pairing_secret=
 capture_runtime_evidence() {
     adb logcat -d > "$ARTIFACTS/logcat.txt" 2>&1 || true
     adb shell getprop > "$ARTIFACTS/emulator-properties.txt" 2>&1 || true
@@ -49,7 +50,9 @@ trap capture_runtime_evidence EXIT
 } > "$ARTIFACTS/runtime-context.txt"
 unzip -l "$AAR" > "$ARTIFACTS/aar-inventory.txt"
 
+nip46_pairing_secret=$(openssl rand -hex 32)
 NMP_ANDROID_RELAY_PORT=$RELAY_PORT \
+NMP_ANDROID_NIP46_SECRET=$nip46_pairing_secret \
     "$REPO_ROOT/target/release/android_controlled_relay" \
     > "$RELAY_LOG" 2>&1 &
 relay_pid=$!
@@ -69,6 +72,13 @@ if [[ "$ready" != 1 ]]; then
     echo "error: controlled relay did not become ready" >&2
     exit 1
 fi
+nip46_remote_pubkey=$(
+    sed -n 's/.*remote_signer=\([^ ]*\).*/\1/p' "$RELAY_LOG" | head -n 1
+)
+if [[ ! "$nip46_remote_pubkey" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "error: controlled relay did not expose a valid NIP-46 remote pubkey" >&2
+    exit 1
+fi
 
 "$GRADLE" \
     --no-daemon \
@@ -83,11 +93,62 @@ echo "== positive: x86_64 AAR executes observation, cancellation, reopen, and cl
     -p "$CONSUMER" \
     -PnmpAndroidRepository="$QUALIFICATION_REPOSITORY" \
     -PnmpQualificationRelay="$RELAY_URL" \
+    -PnmpNip46RemotePubkey="$nip46_remote_pubkey" \
+    -PnmpNip46PairingSecret="$nip46_pairing_secret" \
     :app:clean :app:connectedDebugAndroidTest \
     | tee "$ARTIFACTS/positive-instrumentation.txt"
 
 if ! grep -q 'NMP_ANDROID_RELAY_REQ' "$RELAY_LOG"; then
     echo "error: Android run reported success without a controlled-relay REQ" >&2
+    exit 1
+fi
+
+adb install -r "$CONSUMER/app/build/outputs/apk/debug/app-debug.apk"
+adb install -r -t \
+    "$CONSUMER/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
+
+run_process_phase() {
+    local phase=$1
+    local method=$2
+    local output="$ARTIFACTS/process-$phase-instrumentation.txt"
+    adb shell am instrument \
+        -w \
+        -r \
+        -e nmpProcessPhase "$phase" \
+        -e class \
+        "com.nmp.qualification.consumer.NMPAndroidProcessDeathQualificationTest#$method" \
+        "com.nmp.qualification.consumer.test/androidx.test.runner.AndroidJUnitRunner" \
+        | tee "$output"
+    if grep -q 'FAILURES!!!' "$output" ||
+        ! grep -q 'INSTRUMENTATION_CODE: -1' "$output"; then
+        echo "error: Android process-death phase $phase failed" >&2
+        exit 1
+    fi
+    adb shell am force-stop com.nmp.qualification.consumer
+    if [[ -n "$(adb shell pidof com.nmp.qualification.consumer | tr -d '\r')" ]]; then
+        echo "error: target process survived force-stop after phase $phase" >&2
+        exit 1
+    fi
+}
+
+echo "== process death: seed protected checkpoints and one durable receipt =="
+run_process_phase seed seedProtectedCheckpointsAndDurableReceipt
+echo "== process death: restore exact identity/session/receipt without publish =="
+run_process_phase restore restoreIdentitySessionAndExactReceipt
+echo "== process death: cleared credentials must not resurrect =="
+run_process_phase verify-clear clearedCredentialsStayAbsentAfterAnotherProcessDeath
+
+connect_count=$(grep -c 'NMP_ANDROID_NIP46_METHOD connect' "$RELAY_LOG" || true)
+get_public_key_count=$(grep -c 'NMP_ANDROID_NIP46_METHOD get_public_key' "$RELAY_LOG" || true)
+sign_event_count=$(grep -c 'NMP_ANDROID_NIP46_METHOD sign_event' "$RELAY_LOG" || true)
+write_count=$(grep -c 'NMP_ANDROID_RELAY_WRITE' "$RELAY_LOG" || true)
+if [[ "$connect_count" != 1 ||
+    "$get_public_key_count" -lt 2 ||
+    "$sign_event_count" != 1 ||
+    "$write_count" != 1 ]]; then
+    echo "error: process restore re-paired or re-published " \
+        "(connect=$connect_count get_public_key=$get_public_key_count " \
+        "sign=$sign_event_count write=$write_count)" >&2
     exit 1
 fi
 
@@ -102,6 +163,8 @@ echo "== negative: AAR missing libnmp_ffi x86_64 must refuse NMPEngine =="
     -p "$CONSUMER" \
     -PnmpAndroidRepository="$QUALIFICATION_REPOSITORY" \
     -PnmpQualificationRelay="$RELAY_URL" \
+    -PnmpNip46RemotePubkey="$nip46_remote_pubkey" \
+    -PnmpNip46PairingSecret="$nip46_pairing_secret" \
     -PnmpMissingRuntimeAar="$MISSING_ABI_AAR" \
     :app:clean :app:connectedDebugAndroidTest \
     | tee "$ARTIFACTS/missing-abi-instrumentation.txt"
@@ -117,6 +180,13 @@ for marker in \
     NMP_ANDROID_LIFECYCLE_RECREATED \
     NMP_ANDROID_COLD_FLOW_HANDLES \
     NMP_ANDROID_LIFECYCLE_CLOSED \
+    NMP_ANDROID_KEYSTORE_CIPHERTEXT \
+    NMP_ANDROID_KEYSTORE_TAMPER \
+    NMP_ANDROID_KEYSTORE_INVALIDATED \
+    NMP_ANDROID_KEYSTORE_CONCURRENT \
+    NMP_ANDROID_PROCESS_SEEDED \
+    NMP_ANDROID_PROCESS_RESTORED \
+    NMP_ANDROID_PROCESS_CLEARED \
     NMP_ANDROID_WRONG_ABI_REFUSED; do
     if ! grep -q "$marker" "$ARTIFACTS/qualification-logcat.txt"; then
         echo "error: missing runtime proof marker $marker" >&2

@@ -30,17 +30,9 @@ import javax.crypto.spec.SecretKeySpec
  * [loadSecretKey] again after a restart, exactly like
  * [NMPInsecureFileAccountStore].
  *
- * This type deliberately keeps the exact same three-method internal surface
- * as [NMPInsecureFileAccountStore] (`loadSecretKey(): String?`,
- * `saveSecretKey(String)`, `clear()`) so it is a shape-for-shape drop-in at
- * every call site inside `NMPEngine`. `NMPEngine`'s constructor currently
- * types its checkpoint parameter as the concrete
- * `NMPInsecureFileAccountStore?` rather than a shared interface -- widening
- * that parameter (or introducing a common `LocalAccountStore` interface
- * both types implement) is a follow-on edit to `Engine.kt`, deliberately
- * left untouched here to keep this change file-disjoint from the rest of
- * issue #47. Until that seam lands, callers exercise this type directly
- * (see `SecureKeyStoreAccountStoreTest`) rather than through `NMPEngine`.
+ * This type implements [NMPLocalAccountCheckpoint], the same three-method seam
+ * consumed directly by [NMPEngine], so desktop callers can use it for
+ * automatic account restore.
  *
  * ### Honesty about what "secure" means here
  * This is NOT hardware-backed. The keystore file is only as strong as
@@ -49,31 +41,15 @@ import javax.crypto.spec.SecretKeySpec
  * Callers must never hardcode the password or persist it beside the
  * keystore file -- doing so would degrade this back to
  * [NMPInsecureFileAccountStore] with extra steps. This constraint, and the
- * whole JVM-`KeyStore` approach, is a consequence of NMPKotlin currently
- * being desktop-JVM-only (no Android AAR target exists yet -- see the
- * Android seam note below).
+ * whole JVM-`KeyStore` approach, is why this provider is desktop-only and
+ * excluded from the Android AAR.
  *
- * ### Android seam (future drop-in; #40 / platform gap)
- * A real Android build would replace this entirely with
- * `KeyStore.getInstance("AndroidKeyStore")`: a hardware/TEE-backed provider
- * that generates its key in place (never importing raw bytes the way this
- * type's [SecretKeySpec] does) and, paired with
- * `androidx.security.crypto.EncryptedSharedPreferences` for the small
- * amount of associated metadata, needs no caller-supplied [password] at
- * all -- the OS mediates access (biometric/device-credential gating)
- * instead. That variant is intentionally NOT implemented here because it
- * needs the Android AAR target that does not exist yet in this repo (#40).
- * The seam is kept clean on purpose: an `NMPAndroidKeyStoreAccountStore`
- * would only need to
- *   1. swap `KeyStore.getInstance(keyStoreType)` for
- *      `KeyStore.getInstance("AndroidKeyStore")`,
- *   2. generate (not import) its `SecretKey` via `KeyGenParameterSpec`,
- *   3. drop the [file]/[password]-based load/store round-trip in favor of
- *      `EncryptedSharedPreferences` for the (still non-secret) bookkeeping
- *      this type keeps in a file today,
- * while keeping the exact same `loadSecretKey` / `saveSecretKey` / `clear`
- * surface, so `NMPEngine` (once it accepts the shared seam described above)
- * would not need to change at all to pick either implementation.
+ * Android callers use the AAR's `NMPAndroidKeyStoreAccountStore` instead. It
+ * generates a non-exportable AES/GCM wrapping key inside `AndroidKeyStore`,
+ * needs no caller password, and persists only authenticated ciphertext in
+ * app-private storage. Its measured hardware security level remains
+ * device-dependent, and restoring a checkpoint still places the secp256k1
+ * secret in the engine's live signer memory.
  */
 class NMPSecureKeyStoreAccountStore(
     private val file: Path,

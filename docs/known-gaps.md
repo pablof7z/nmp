@@ -85,8 +85,7 @@ about current code:
   write/flush persisted against an exact lane ordinal; `Sent` is never emitted
   for queue acceptance, ambiguity, or an ephemeral handoff with no outbox fact.
 - **NIP-46 reconnect, governed sign-only, per-write override, and the
-  Keychain/JVM checkpoint providers are built; Android Keystore and NIP-55 are
-  not.**
+  Keychain/JVM/Android checkpoint providers are built; NIP-55 is not.**
   A current NIP-46 client now owns its independent signer-relay connection,
   NIP-42 AUTH, exact request correlation, `auth_url`, `switch_relays`, distinct
   communication/user keys, NIP-44 crypto, and frozen-event validation. Missing
@@ -112,10 +111,18 @@ about current code:
   installed engine owner survives Activity recreation and background/foreground
   transitions, cold-flow collectors remain exact independently cancellable
   handles, and concurrent close returns engine/collector/wire ownership to
-  baseline without GC or late callbacks. Still open are Android Keystore and
-  process-death receipt/NIP-46 checkpoint recovery (#834), NIP-55 execution,
-  and permanent signer connection/correlation counters in engine diagnostics
-  (#51).
+  baseline without GC or late callbacks. #834 adds AndroidKeyStore-backed
+  AES-256-GCM account and NIP-46 checkpoint providers with app-private
+  authenticated ciphertext, typed missing/invalidated/locked/tamper/platform/
+  persistence failures, same-alias concurrency linearization, and an honest
+  device security-level report. Its three-process emulator falsifier proves
+  exact local-account and NIP-46 restore, durable receipt reattachment without
+  re-pairing or republishing, ACK completion, clear, and non-resurrection while
+  the canonical row and receipt remain durable. The AndroidKeyStore key wraps
+  checkpoint bytes only; restored secp256k1 and NIP-46 client secrets still
+  enter engine live memory, so no hardware-backed signing claim is made. Still
+  open are NIP-55 execution and permanent signer connection/correlation
+  counters in engine diagnostics (#51).
   The sign-only operation now projects across Rust, FFI, Swift, and Kotlin:
   it binds an immutable request to the active registered signer, validates the
   exact returned event, remains bounded/cancellable, and creates no

@@ -37,6 +37,9 @@ fi
 for class_file in \
     com/nmp/sdk/NMPEngine.class \
     com/nmp/sdk/NMPConfig.class \
+    com/nmp/sdk/NMPAndroidCheckpointException.class \
+    com/nmp/sdk/NMPAndroidKeyStoreAccountStore.class \
+    com/nmp/sdk/NMPAndroidKeyStoreNip46SessionCheckpointStore.class \
     uniffi/nmp_ffi/NmpEngine.class; do
     if [[ ! -f "$TMP/classes/$class_file" ]]; then
         echo "error: AAR classes.jar is missing $class_file" >&2
