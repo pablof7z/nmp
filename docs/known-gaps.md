@@ -104,12 +104,14 @@ about current code:
   they are not Keystore-backed. Android AAR construction is separated from
   runtime/security claims: #831 source-builds API-26
   `arm64-v8a`/`x86_64` slices, generated bindings, and the shared facade, then
-  verifies the exact archive and a clean external compile. Still open are the
-  governed controlled-relay emulator run (#832), app-owned
-  lifecycle/configuration recreation proof (#833), Android Keystore and
-  process-death receipt/NIP-46 checkpoint recovery (#834), NIP-55 execution, and
-  permanent signer connection/correlation counters in engine diagnostics
-  (#51).
+  verifies the exact archive and a clean external compile. #832 runs that
+  artifact on a governed API-35 x86_64 emulator and proves a controlled-relay
+  observation, bounded cancellation, app-private persistent reopen,
+  unavailable-relay scoped evidence, explicit close, and wrong-ABI refusal.
+  Still open are app-owned lifecycle/configuration recreation proof (#833),
+  Android Keystore and process-death receipt/NIP-46 checkpoint recovery (#834),
+  NIP-55 execution, and permanent signer connection/correlation counters in
+  engine diagnostics (#51).
   The sign-only operation now projects across Rust, FFI, Swift, and Kotlin:
   it binds an immutable request to the active registered signer, validates the
   exact returned event, remains bounded/cancellable, and creates no

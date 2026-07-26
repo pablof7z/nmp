@@ -62,8 +62,11 @@ The sibling `Packages/NMPAndroid` project now builds a source-reproducible API
 26+ AAR with exact `arm64-v8a` and `x86_64` slices, generated Android UniFFI
 bindings, and the same hand-written `com.nmp.sdk` facade. Its qualification
 compiles a standalone app against the locally published coordinate and
-falsifies missing-ABI and binding/native mismatch controls. That proves
-packaging, not runtime: the controlled-relay emulator gate is #832.
+falsifies missing-ABI and binding/native mismatch controls. A second gate runs
+that external consumer on a pinned API-35 x86_64 emulator, receives a real
+event and scoped evidence from a host-owned controlled relay through the public
+facade, cancels collection, closes/reopens the app-private store, and proves an
+arm64-only package refuses native construction (#832).
 
 A production Android product must also include standard Keystore-backed
 providers and prove process-death receipt/signer reattachment (#834), not
@@ -83,8 +86,9 @@ results through `installedAndroid(packageIds)` and produce an exact
 package visibility for the signer packages/schemes, start
 `connectNip46(invitation)` before launching the URI, and apply
 `Intent.setPackage(packageName)` so a shared scheme never selects the wrong
-app. Android runtime Compose, lifecycle, Keystore recovery, and NIP-55
-execution remain open work; AAR construction itself is qualified by #831.
+app. Android Compose/configuration lifecycle, Keystore recovery, and NIP-55
+execution remain open work; AAR construction is qualified by #831 and the
+headless external-consumer runtime by #832.
 
 ## Other platforms
 

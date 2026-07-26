@@ -37,10 +37,13 @@ scripts/test-build-android-aar.sh
 The consumer imports `com.nmp.sdk.*`. `uniffi.nmp_ffi` remains generated
 implementation plumbing and is not an alternate app API.
 
-This issue qualifies source construction, ABI contents, dependency metadata,
-and external compilation. It does not claim that the engine has run on Android;
-the governed emulator proof is issue #832. Android lifecycle ownership is #833,
-and Android Keystore/process-death recovery is #834. Accordingly, the two
-desktop JCEKS/password providers are excluded from this artifact. The explicit
-plaintext development checkpoint remains available at API 26, with its existing
-warning; no production Android credential-security claim is made here.
+Issue #831 qualifies source construction, ABI contents, dependency metadata,
+and external compilation. Issue #832 runs that exact artifact through
+`com.nmp.sdk` on a pinned API-35 x86_64 emulator: controlled-relay observation,
+bounded cancellation, app-private persistent reopen, unavailable-relay scoped
+evidence, explicit/idempotent close, and a wrong-ABI control. Android lifecycle
+ownership remains #833, and Android Keystore/process-death recovery remains
+#834. Accordingly, the two desktop JCEKS/password providers are excluded from
+this artifact. The explicit plaintext development checkpoint remains available
+at API 26, with its existing warning; no production Android credential-security
+claim is made here.

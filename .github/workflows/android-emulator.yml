@@ -1,0 +1,76 @@
+name: Android emulator
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  android-emulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK command-line tools
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+        with:
+          packages: ""
+          log-accepted-android-sdk-licenses: false
+
+      - name: Install pinned Android SDK and NDK inputs
+        run: |
+          sdkmanager \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;27.2.12479018"
+
+      - name: Install Rust Android targets and cargo-ndk
+        run: |
+          rustup target add aarch64-linux-android x86_64-linux-android
+          cargo install cargo-ndk --version 4.1.2 --locked
+
+      - name: Build exact AAR and controlled relay
+        run: |
+          scripts/build-android-aar.sh
+          scripts/verify-android-aar.sh \
+            Packages/NMPAndroid/build/outputs/aar/NMPAndroid-release.aar \
+            Packages/NMPAndroid/src/main/kotlin/uniffi/nmp_ffi/nmp_ffi.kt
+          cargo build -p nmp-test-support --bin android_controlled_relay --release
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run external AAR consumer on governed emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: default
+          arch: x86_64
+          profile: pixel_7
+          emulator-options: >-
+            -no-window -gpu swiftshader_indirect -no-snapshot -noaudio
+            -no-boot-anim -camera-back none
+          disable-animations: true
+          script: scripts/test-android-emulator.sh
+
+      - name: Publish emulator, APK, AAR, relay, and logcat evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nmp-android-emulator-evidence
+          path: |
+            artifacts/android-emulator
+            Packages/NMPAndroid/build/outputs/aar/NMPAndroid-release.aar
+            fixtures/android-aar-consumer/app/build/outputs/apk
+            fixtures/android-aar-consumer/app/build/outputs/androidTest-results
+          if-no-files-found: warn

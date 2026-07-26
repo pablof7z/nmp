@@ -52,7 +52,7 @@ repository today?
 | Protocol modules | exact module ownership and immutable contextual publication are designed, not shipped; NIP-51 kind 10009 composition into NIP-29 remains queued | [#45](https://github.com/pablof7z/nmp/issues/45), [#63](https://github.com/pablof7z/nmp/issues/63) |
 | Bounded delivery | end-to-end queue, observer, ingress, and explicit-shortfall proof remains | [#46](https://github.com/pablof7z/nmp/issues/46) |
 | Diagnostics | raw connection, AUTH, retry, error, and limit evidence remains incomplete | [#51](https://github.com/pablof7z/nmp/issues/51) |
-| Android | source AAR construction, exact ABI inspection, binding/native fail-closed checks, and external consumer compilation are built; governed emulator runtime, lifecycle ownership, and Keystore/process-death recovery remain | [#831](https://github.com/pablof7z/nmp/issues/831), [#832](https://github.com/pablof7z/nmp/issues/832), [#833](https://github.com/pablof7z/nmp/issues/833), [#834](https://github.com/pablof7z/nmp/issues/834) |
+| Android | source AAR construction, exact ABI inspection, binding/native fail-closed checks, external consumer compilation, and controlled-relay runtime/persistent-reopen on a governed x86_64 emulator are built; lifecycle ownership and Keystore/process-death recovery remain | [#831](https://github.com/pablof7z/nmp/issues/831), [#832](https://github.com/pablof7z/nmp/issues/832), [#833](https://github.com/pablof7z/nmp/issues/833), [#834](https://github.com/pablof7z/nmp/issues/834) |
 
 The umbrella ordering and design-signoff trail live in
 [#43](https://github.com/pablof7z/nmp/issues/43).
@@ -84,7 +84,7 @@ the current source plan; inspect diagnostics for exact per-relay/filter facts.
   projection.
 - [Packages/NMPAndroid](https://github.com/pablof7z/nmp/tree/master/Packages/NMPAndroid) is the source-built
   Android AAR project; [fixtures/android-aar-consumer](https://github.com/pablof7z/nmp/tree/master/fixtures/android-aar-consumer)
-  is its clean external compile consumer.
+  is its clean external compile and governed-emulator runtime consumer.
 - [features](https://github.com/pablof7z/nmp/tree/master/features) contains executable current behavior plus
   `@wip` target scenarios.
 

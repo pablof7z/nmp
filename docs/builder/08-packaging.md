@@ -63,11 +63,15 @@ capabilities, not in application event storage.
 `scripts/test-build-android-aar.sh` builds the Rust libraries and bindings from
 the same checkout, verifies the exact ABI set and UniFFI contract symbols,
 publishes the AAR to an isolated Maven repository, and compiles a standalone
-consumer that imports only `com.nmp.sdk`. Deliberately incomplete and tracked
-separately: governed emulator runtime (#832), Android-owned engine/collector
-lifecycle (#833), and Keystore-backed checkpoint/process-death recovery (#834).
-The desktop JCEKS/password providers are excluded from the AAR; their presence
-would be a false Android security claim.
+consumer that imports only `com.nmp.sdk`. The sibling
+`scripts/test-android-emulator.sh` gate runs that published artifact on a pinned
+API-35 x86_64 emulator, drives a controlled-relay observation, cancels it,
+closes/reopens an app-private store, and falsifies missing-ABI and unavailable
+relay paths (#832). Deliberately incomplete and tracked separately:
+Android-owned engine/collector lifecycle (#833) and Keystore-backed
+checkpoint/process-death recovery (#834). The desktop JCEKS/password providers
+are excluded from the AAR; their presence would be a false Android security
+claim.
 
 ## Rust
 

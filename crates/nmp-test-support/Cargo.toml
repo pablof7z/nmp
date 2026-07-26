@@ -7,7 +7,9 @@ publish.workspace = true
 description = "Shared process-level test seams for NMP integration tests."
 
 [dependencies]
-tokio = { version = "1", features = ["io-util", "net", "rt", "sync"] }
+nostr.workspace = true
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync"] }
+tungstenite = "0.29"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

@@ -118,9 +118,12 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 - 🧪 Kotlin SDK — desktop-JVM projection plus a source-reproducible Android AAR
   for API 26+ with explicit `arm64-v8a` and `x86_64` native slices. Packaging,
   UniFFI contract checks, and a clean external consumer compile are qualified
-  by [#831](https://github.com/pablof7z/nmp/issues/831); governed emulator
-  runtime, lifecycle, and Keystore/process-death recovery remain
-  [#832](https://github.com/pablof7z/nmp/issues/832)–[#834](https://github.com/pablof7z/nmp/issues/834).
+  by [#831](https://github.com/pablof7z/nmp/issues/831); a controlled-relay
+  observation, cancellation, app-private persistent reopen, close, and
+  wrong-ABI refusal run on a governed API-35 x86_64 emulator in
+  [#832](https://github.com/pablof7z/nmp/issues/832). Lifecycle ownership and
+  Keystore/process-death recovery remain
+  [#833](https://github.com/pablof7z/nmp/issues/833)–[#834](https://github.com/pablof7z/nmp/issues/834).
 
 ## Status / maturity
 
