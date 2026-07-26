@@ -58,10 +58,19 @@ composables against the public SDK without adding Compose to the core module.
 It owns no engine, HTTP, timer, polling, cache, or image loader and is not an
 Android artifact qualification; see [Controlled relay identity UI](36-relay-ui.md).
 
-The Android product must include a standard Keystore-backed provider and prove
-process-death receipt/signer reattachment, not merely JVM binding generation.
-Newest-state observation is bounded/conflated while receipt history remains
-recoverable.
+The sibling `Packages/NMPAndroid` project now builds a source-reproducible API
+26+ AAR with exact `arm64-v8a` and `x86_64` slices, generated Android UniFFI
+bindings, and the same hand-written `com.nmp.sdk` facade. Its qualification
+compiles a standalone app against the locally published coordinate and
+falsifies missing-ABI and binding/native mismatch controls. That proves
+packaging, not runtime: the controlled-relay emulator gate is #832.
+
+A production Android product must also include standard Keystore-backed
+providers and prove process-death receipt/signer reattachment (#834), not
+merely AAR construction. Newest-state observation is bounded/conflated while
+receipt history remains recoverable. The app—not a framework-owned singleton—
+owns engine and collector lifetime; configuration recreation/background-resume
+falsification is #833.
 
 The current JVM projection also exposes `NMPInsecureFileAccountStore(Path)` for
 explicit plaintext sandbox persistence. It provides the same restore/clear
@@ -74,7 +83,8 @@ results through `installedAndroid(packageIds)` and produce an exact
 package visibility for the signer packages/schemes, start
 `connectNip46(invitation)` before launching the URI, and apply
 `Intent.setPackage(packageName)` so a shared scheme never selects the wrong
-app. Android AAR/runtime Compose/Keystore and NIP-55 execution remain open work.
+app. Android runtime Compose, lifecycle, Keystore recovery, and NIP-55
+execution remain open work; AAR construction itself is qualified by #831.
 
 ## Other platforms
 

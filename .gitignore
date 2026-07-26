@@ -61,4 +61,16 @@ xcuserdata/
 /Packages/NMPKotlin/src/main/resources
 /Packages/NMPKotlin/build/
 /Packages/NMPKotlin/.gradle/
+
+# #831 Android AAR outputs. The Android package is rebuilt from the same
+# nmp-ffi source and hand-written com.nmp.sdk facade on every qualification
+# run; generated bindings, cross-compiled .so files, Gradle output, and the
+# local qualification Maven repository are never committed.
+/gen-android-kotlin
+/Packages/NMPAndroid/src/main/kotlin/uniffi
+/Packages/NMPAndroid/src/main/jniLibs
+/Packages/NMPAndroid/build/
+/Packages/NMPAndroid/.gradle/
+/fixtures/android-aar-consumer/.gradle/
+/fixtures/android-aar-consumer/app/build/
 tmp

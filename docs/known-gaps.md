@@ -84,7 +84,9 @@ about current code:
   persisted attempt ordinal and time, ambiguous handoff, and proven socket
   write/flush persisted against an exact lane ordinal; `Sent` is never emitted
   for queue acceptance, ambiguity, or an ephemeral handoff with no outbox fact.
-- **The NIP-46 reconnect and governed sign-only paths are built; standard platform vault providers are not.**
+- **NIP-46 reconnect, governed sign-only, per-write override, and the
+  Keychain/JVM checkpoint providers are built; Android Keystore and NIP-55 are
+  not.**
   A current NIP-46 client now owns its independent signer-relay connection,
   NIP-42 AUTH, exact request correlation, `auth_url`, `switch_relays`, distinct
   communication/user keys, NIP-44 crypto, and frozen-event validation. Missing
@@ -96,11 +98,18 @@ about current code:
   stale session cannot detach its replacement, and close/drop deterministically
   finishes only that session. An explicitly insecure SDK-owned plaintext file
   checkpoint now provides opt-in personal/development autologin (#197), while
-  remaining distinct from the secure-provider contract. Still open under
-  #47/#51: explicit per-write identity override, standard Keychain/Keystore
-  providers and automatic secure-vault restore, NIP-55 execution/Android AAR
-  integration, and permanent signer connection/correlation counters in engine
-  diagnostics.
+  remaining distinct from the secure-provider contract. Standard Keychain
+  (Swift) and JCEKS/password (desktop JVM) checkpoint providers and automatic
+  restore are built; the latter are deliberately excluded from Android because
+  they are not Keystore-backed. Android AAR construction is separated from
+  runtime/security claims: #831 source-builds API-26
+  `arm64-v8a`/`x86_64` slices, generated bindings, and the shared facade, then
+  verifies the exact archive and a clean external compile. Still open are the
+  governed controlled-relay emulator run (#832), app-owned
+  lifecycle/configuration recreation proof (#833), Android Keystore and
+  process-death receipt/NIP-46 checkpoint recovery (#834), NIP-55 execution, and
+  permanent signer connection/correlation counters in engine diagnostics
+  (#51).
   The sign-only operation now projects across Rust, FFI, Swift, and Kotlin:
   it binds an immutable request to the active registered signer, validates the
   exact returned event, remains bounded/cancellable, and creates no

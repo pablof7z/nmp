@@ -115,7 +115,12 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 **Platforms**
 - ✅ Rust core (the source of truth)
 - 🧪 Swift SDK — qualified on the macOS host; XCFramework simulator slices compile, iOS-Simulator runtime target [pending](https://github.com/pablof7z/nmp/issues/465)
-- 🧪 Kotlin SDK — desktop-JVM projection; **no Android AAR** qualified yet
+- 🧪 Kotlin SDK — desktop-JVM projection plus a source-reproducible Android AAR
+  for API 26+ with explicit `arm64-v8a` and `x86_64` native slices. Packaging,
+  UniFFI contract checks, and a clean external consumer compile are qualified
+  by [#831](https://github.com/pablof7z/nmp/issues/831); governed emulator
+  runtime, lifecycle, and Keystore/process-death recovery remain
+  [#832](https://github.com/pablof7z/nmp/issues/832)–[#834](https://github.com/pablof7z/nmp/issues/834).
 
 ## Status / maturity
 
@@ -199,7 +204,8 @@ Diagnostics are a **permanent, read-only proof surface** — source plan, wire f
 - `crates/nmp-content` — optional parser-only semantic document layer
 - `crates/nmp-{nip02,nip29,nip51,nip65,blossom,nip68,media}` — opt-in protocol modules
 - `crates/nmp-demo` — the read-only CLI falsifier
-- `Packages/NMP` (Swift) · `Packages/NMPKotlin` (Kotlin/JVM)
+- `Packages/NMP` (Swift) · `Packages/NMPKotlin` (Kotlin/JVM) ·
+  `Packages/NMPAndroid` (Android AAR)
 - `apps/Falsifier`, `apps/UIGallery` — SwiftUI proving grounds
 - `docs/` — vision, design record, known gaps, surface baselines
 

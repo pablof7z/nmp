@@ -1,0 +1,41 @@
+name: Android AAR
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  android-aar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install pinned Android SDK and NDK inputs
+        run: |
+          sdkmanager \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;27.2.12479018"
+
+      - name: Install Rust Android targets and cargo-ndk
+        run: |
+          rustup target add aarch64-linux-android x86_64-linux-android
+          cargo install cargo-ndk --version 4.1.2 --locked
+
+      - name: Build, inspect, falsify, and externally consume the AAR
+        run: scripts/test-build-android-aar.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nmp-android-aar
+          path: Packages/NMPAndroid/build/outputs/aar/NMPAndroid-release.aar
+          if-no-files-found: error

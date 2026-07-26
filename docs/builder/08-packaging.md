@@ -44,12 +44,13 @@ platform secure storage; the event/outbox database does not become a key vault.
 
 ## Kotlin and Android
 
-The intended Android product is an AAR containing the native libraries for its
-supported ABIs, generated Kotlin bindings, and the hand-written `Flow`
-projection:
+The Android product is `Packages/NMPAndroid`, a source-reproducible AAR
+containing generated Kotlin bindings, the hand-written `com.nmp.sdk` `Flow`
+projection shared with the desktop-JVM package, and native libraries for an
+explicit matrix: API 26+, `arm64-v8a`, and `x86_64`.
 
 ```kotlin
-val engine = NmpEngine(configuration)
+val engine = NMPEngine(configuration)
 engine.observe(demand).collect { snapshot ->
     appState = appState.withSnapshot(snapshot)
 }
@@ -59,9 +60,14 @@ The Compose app owns coroutine and UI scope. NMP owns demand lifetime beneath
 the observation. Android secure signer providers belong behind Keystore-backed
 capabilities, not in application event storage.
 
-Desktop JVM proof does not by itself make the Android package complete. The AAR,
-ABI matrix, cancellation, process restart, secure storage, and real-device
-falsifier all belong to the Android acceptance gate.
+`scripts/test-build-android-aar.sh` builds the Rust libraries and bindings from
+the same checkout, verifies the exact ABI set and UniFFI contract symbols,
+publishes the AAR to an isolated Maven repository, and compiles a standalone
+consumer that imports only `com.nmp.sdk`. Deliberately incomplete and tracked
+separately: governed emulator runtime (#832), Android-owned engine/collector
+lifecycle (#833), and Keystore-backed checkpoint/process-death recovery (#834).
+The desktop JCEKS/password providers are excluded from the AAR; their presence
+would be a false Android security claim.
 
 ## Rust
 

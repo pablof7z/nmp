@@ -4,12 +4,13 @@ The **minimal Kotlin/Flow falsifier** for #40 (parent epic #43) -- proves the
 two-noun surface (`observe(filter): Flow<RowBatch>`, `publish(intent):
 Flow<WriteStatus>`, `observeDiagnostics(): Flow<DiagnosticsSnapshot>`) ports
 cleanly onto Kotlin's `Flow`, using the SAME canonical Rust facade
-(`crates/nmp-ffi`) Swift already ships against. This is **not** the M6
-Android app -- the root SDK has no Compose dependency, Gradle Android plugin,
-AAR, or cargo-ndk cross-compilation. The optional `:ui` child now contains the
-narrow controlled relay identity family from #198, using desktop-JVM Compose
-only; it is not an Android runtime or packaging claim. Both projects target
-desktop JVM, the cheapest
+(`crates/nmp-ffi`) Swift already ships against. This project remains the
+desktop-JVM product. Its sibling `Packages/NMPAndroid` source-builds an AAR
+from the same hand-written `com.nmp.sdk` sources, Android-generated bindings,
+and explicit `arm64-v8a`/`x86_64` Rust slices; it does not fork the facade.
+The optional `:ui` child here contains the narrow controlled relay identity
+family from #198, using desktop-JVM Compose only; it is not an Android runtime
+claim. Both projects in this directory target desktop JVM, the cheapest
 environment that can prove or falsify the Flow mapping before the M5
 human library-vs-framework verdict gates building the real app. See
 `docs/builder/30-platform-guides.md`'s "Android / Kotlin" section for the
@@ -55,7 +56,7 @@ queries. Launch acceptance is not connection readiness; collect
 `connection.states` until `Ready`. This module remains desktop JVM, so the
 `Intent`/`PackageManager` calls above belong to the consuming Android host.
 Amber appears in discovery as NIP-55-only and is rejected by
-`androidHandoff`; NIP-55 execution belongs to the future Android AAR.
+`androidHandoff`; NIP-55 execution is not yet implemented by the Android AAR.
 `NMPNip46Connection` is `AutoCloseable`, and closing it detaches only its exact
 session even if another connection has since replaced the same pubkey. Its
 bounded multicast `Flow` replays lifecycle facts; UI and lifecycle collectors
