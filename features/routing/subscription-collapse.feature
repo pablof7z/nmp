@@ -121,10 +121,12 @@ Feature: One subscription per relay, not one per thing you asked about
     # The bound is a frame-size limit, not a demand limit: it must chunk and
     # ship the remainder as further subscriptions, exactly as the existing
     # id-array bound does (`nmp_router::coalesce::MAX_IDS_PER_FILTER`, which
-    # shards rather than drops). Measured here: 1200 values leave over 2000
-    # live subscriptions against a relay ceiling of about 20 -- one per value
-    # plus the ids churned along the way -- with every filter carrying one
-    # value out of a 500-value budget.
+    # shards rather than drops). Measured here: 1200 values leave 2121 LIVE
+    # subscriptions against a relay ceiling of about 20, every filter
+    # carrying one value out of a 500-value budget. Note the count is well
+    # over one per value and the relay was asked to close NOTHING -- so the
+    # surplus ids are abandoned rather than recycled. This spec does not
+    # diagnose why; it only records that the fan-out understates the damage.
     When I watch for notes tagged "p" as 1200 different values
     Then relay "hub" serves every "p" watch with 3 subscriptions
     And no subscription on relay "hub" carries more than 500 "p" values

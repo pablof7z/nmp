@@ -255,13 +255,18 @@ impl WireReq {
     /// no tag, no author, no id. The shape the privacy floor forbids: an
     /// empty resolved value set must never widen into "send me everything
     /// of this kind".
+    ///
+    /// `limit` is tolerated because the relay injects one of its own before
+    /// any observation downstream of the socket would see it. `since`/`until`
+    /// deliberately are NOT: a demand-side time window still asks for every
+    /// event of a kind within it, which is the same disclosure this floor
+    /// exists to prevent.
     pub fn narrows_by_kind_alone(&self) -> bool {
         self.filters.iter().any(|f| {
             let Some(obj) = f.as_object() else {
                 return false;
             };
-            obj.keys()
-                .all(|k| matches!(k.as_str(), "kinds" | "limit" | "since" | "until"))
+            obj.keys().all(|k| matches!(k.as_str(), "kinds" | "limit"))
         })
     }
 }
