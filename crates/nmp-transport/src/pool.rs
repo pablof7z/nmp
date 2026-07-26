@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub use nmp_grammar::RelaySessionKey;
+use nmp_network_policy::DestinationPolicy;
 use nostr::{Event, EventId, JsonUtil, RelayMessage, RelayUrl, SubscriptionId};
 
 use crate::handle::RelayHandle;
@@ -609,18 +610,18 @@ pub struct PoolConfig {
     /// Integration tests that force a reconnect pass `Some(Duration::ZERO)`
     /// so retries fire back-to-back instead of racing a per-URL lottery.
     pub reconnect_jitter_max: Option<Duration>,
-    /// Host keys (in [`crate::relay_host_key`]'s normalized form) an operator
-    /// explicitly opted in despite classifying `Local` — issue #519. Empty
-    /// by default, matching `nmp-engine`'s `RelayAdmissionPolicy` default: no
-    /// discovered-or-explicit relay may dial a loopback/private/link-local/
-    /// unspecified/broadcast address. This is the SAME allowlist the engine
-    /// enforces before a discovered relay enters the routable directory; it
-    /// is threaded down here so `pool::connect`'s post-resolution IP check
-    /// (the defense against DNS-based SSRF and rebind — a URL host string can
-    /// look public and still resolve to an internal address) can still admit
-    /// an operator's INTENTIONAL local relay after DNS resolves it, instead
-    /// of only ever checking the URL string before a socket exists.
-    pub allowed_local_hosts: Arc<BTreeSet<String>>,
+    /// The one pure destination-admission owner (#885) this pool dials
+    /// under. Empty by default, matching `nmp-engine`'s
+    /// `RelayAdmissionPolicy` default: no discovered-or-explicit relay may
+    /// dial a loopback/private/link-local/unspecified/broadcast address.
+    /// This is the SAME policy the engine enforces before a discovered relay
+    /// enters the routable directory; it is threaded down here so
+    /// `pool::connect`'s post-resolution answer-set check (the defense
+    /// against DNS-based SSRF and rebind — a URL host string can look public
+    /// and still resolve to an internal address) can still admit an
+    /// operator's INTENTIONAL local relay after DNS resolves it, instead of
+    /// only ever checking the URL string before a socket exists.
+    pub destination_policy: Arc<DestinationPolicy>,
 }
 
 impl Default for PoolConfig {
@@ -650,7 +651,7 @@ impl Default for PoolConfig {
             keepalive_pong_timeout: None,
             reconnect_delay_initial: None,
             reconnect_jitter_max: None,
-            allowed_local_hosts: Arc::new(BTreeSet::new()),
+            destination_policy: Arc::new(DestinationPolicy::default()),
         }
     }
 }
