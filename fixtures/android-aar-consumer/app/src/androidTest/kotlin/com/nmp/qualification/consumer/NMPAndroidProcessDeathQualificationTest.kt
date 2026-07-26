@@ -66,7 +66,7 @@ class NMPAndroidProcessDeathQualificationTest {
         File(context.noBackupFilesDir, "nmp-process-death.redb").absolutePath
 
     @Test
-    fun seedProtectedCheckpointsAndDurableReceipt() = runBlocking {
+    fun seedProtectedCheckpointsAndDurableReceipt(): Unit = runBlocking {
         assumePhase("seed")
         assertTrue(BuildConfig.NMP_NIP46_REMOTE_PUBKEY.isNotEmpty())
         assertTrue(BuildConfig.NMP_NIP46_PAIRING_SECRET.isNotEmpty())
@@ -160,7 +160,7 @@ class NMPAndroidProcessDeathQualificationTest {
     }
 
     @Test
-    fun restoreIdentitySessionAndExactReceipt() = runBlocking {
+    fun restoreIdentitySessionAndExactReceipt(): Unit = runBlocking {
         assumePhase("restore")
         val receiptId = requireCoordinate(RECEIPT_ID).toULong()
         val correlation = requireCoordinate(RECEIPT_CORRELATION)
@@ -249,7 +249,7 @@ class NMPAndroidProcessDeathQualificationTest {
     }
 
     @Test
-    fun clearedCredentialsStayAbsentAfterAnotherProcessDeath() = runBlocking {
+    fun clearedCredentialsStayAbsentAfterAnotherProcessDeath(): Unit = runBlocking {
         assumePhase("verify-clear")
         assertTrue(preferences.getBoolean(RESTORE_COMPLETED, false))
         assertNull(accountStore.loadSecretKey())
