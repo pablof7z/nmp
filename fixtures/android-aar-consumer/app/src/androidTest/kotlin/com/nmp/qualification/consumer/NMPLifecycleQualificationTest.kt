@@ -51,7 +51,7 @@ class NMPLifecycleQualificationTest {
         )
 
     @Test
-    fun configurationAndBackgroundRetainOneExplicitOwnerAndScreenCollection() = runBlocking {
+    fun configurationAndBackgroundRetainOneExplicitOwnerAndScreenCollection(): Unit = runBlocking {
         assumeTrue(BuildConfig.NMP_EXPECT_NATIVE_LOAD)
         awaitGlobalOwners(0)
         val application =
@@ -157,7 +157,7 @@ class NMPLifecycleQualificationTest {
     }
 
     @Test
-    fun twoColdCollectorsAreVisibleAndCancelIndependently() = runBlocking {
+    fun twoColdCollectorsAreVisibleAndCancelIndependently(): Unit = runBlocking {
         assumeTrue(BuildConfig.NMP_EXPECT_NATIVE_LOAD)
         awaitGlobalOwners(0)
         val owner = newOwner()
@@ -241,7 +241,7 @@ class NMPLifecycleQualificationTest {
     }
 
     @Test
-    fun concurrentIdempotentCloseDrainsRowsDiagnosticsAndReceipt() = runBlocking {
+    fun concurrentIdempotentCloseDrainsRowsDiagnosticsAndReceipt(): Unit = runBlocking {
         assumeTrue(BuildConfig.NMP_EXPECT_NATIVE_LOAD)
         awaitGlobalOwners(0)
         val owner = newOwner()
