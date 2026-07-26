@@ -1624,7 +1624,7 @@ fn query_newest_ids_fails_closed_on_stale_ordered_index() {
     let error = store
         .query_newest_ids(&Filter::new().kind(Kind::from(9u16)), 1)
         .unwrap_err();
-    assert!(error.0.contains("canonical id map"));
+    assert!(error.message().contains("canonical id map"));
 }
 
 #[test]

@@ -176,7 +176,8 @@ pub fn run_lmdb_governed_ingest_bench(
             .map_err(|error| error.to_string())?
     };
     let mut init = env.write_txn().map_err(|error| error.to_string())?;
-    let databases = LmdbDatabases::create(&env, &mut init).map_err(|error| error.0)?;
+    let databases =
+        LmdbDatabases::create(&env, &mut init).map_err(|error| error.message().to_owned())?;
     init.commit().map_err(|error| error.to_string())?;
 
     let relay = RelayUrl::parse("wss://lmdb-ceiling.invalid").map_err(|error| error.to_string())?;
@@ -198,8 +199,8 @@ pub fn run_lmdb_governed_ingest_bench(
     for batch in events.chunks(batch_size) {
         let mut write = env.write_txn().map_err(|error| error.to_string())?;
         let mut postings = LmdbPostingsBatch::default();
-        let mut canonical =
-            LmdbIngestTxn::open(&databases, &mut write, &mut postings).map_err(|error| error.0)?;
+        let mut canonical = LmdbIngestTxn::open(&databases, &mut write, &mut postings)
+            .map_err(|error| error.message().to_owned())?;
         let apply_started = Instant::now();
         for event in batch {
             insert_with_tables(
@@ -207,17 +208,19 @@ pub fn run_lmdb_governed_ingest_bench(
                 event.clone(),
                 RelayObserved::new(relay.clone(), Timestamp::from(observed_at)),
             )
-            .map_err(|error| error.0)?;
+            .map_err(|error| error.message().to_owned())?;
         }
         apply_ns = apply_ns.saturating_add(elapsed_ns(apply_started));
         let canonical_flush_started = Instant::now();
-        canonical.flush_pending().map_err(|error| error.0)?;
+        canonical
+            .flush_pending()
+            .map_err(|error| error.message().to_owned())?;
         canonical_flush_ns = canonical_flush_ns.saturating_add(elapsed_ns(canonical_flush_started));
         drop(canonical);
         let postings_started = Instant::now();
         postings
             .flush(&databases, &mut write, &mut packed_work)
-            .map_err(|error| error.0)?;
+            .map_err(|error| error.message().to_owned())?;
         postings_flush_ns = postings_flush_ns.saturating_add(elapsed_ns(postings_started));
         let commit_started = Instant::now();
         write.commit().map_err(|error| error.to_string())?;
@@ -249,11 +252,11 @@ pub fn run_lmdb_governed_ingest_bench(
                 event.clone(),
                 RelayObserved::new(relay.clone(), Timestamp::from(observed_at)),
             )
-            .map_err(|error| error.0)?;
+            .map_err(|error| error.message().to_owned())?;
     }
     let expected_ids: HashSet<_> = oracle
         .query(&Filter::new())
-        .map_err(|error| error.0)?
+        .map_err(|error| error.message().to_owned())?
         .into_iter()
         .map(|row| *row.event.id.as_bytes())
         .collect();
@@ -369,14 +372,14 @@ fn validate_packed(db: &LmdbDatabases, txn: &RoTxn<'_>) -> Result<bool, String> 
     let mut canonical = BTreeMap::new();
     for row in db.events.iter(txn).map_err(|error| error.to_string())? {
         let (key, value) = row.map_err(|error| error.to_string())?;
-        let key = decode_u64(key).map_err(|error| error.0)?;
+        let key = decode_u64(key).map_err(|error| error.message().to_owned())?;
         let event = StoredEventView::from_trusted(value)
             .map_err(|error| format!("decode reopened LMDB event: {error:?}"))?
             .materialize_event()
             .map_err(|error| format!("materialize reopened LMDB event: {error:?}"))?;
         canonical.insert(key, event);
     }
-    let metas = load_run_metas(db, txn).map_err(|error| error.0)?;
+    let metas = load_run_metas(db, txn).map_err(|error| error.message().to_owned())?;
     validate_run_metas(&metas)?;
     let mut actual = Vec::new();
     for meta in &metas {
@@ -386,7 +389,8 @@ fn validate_packed(db: &LmdbDatabases, txn: &RoTxn<'_>) -> Result<bool, String> 
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("missing reopened dictionary {}", meta.run_id))?;
         let dictionary = DictionaryView::parse(dictionary_bytes)?.validate()?;
-        let dead = load_run_deaths(db, txn, meta.run_id).map_err(|error| error.0)?;
+        let dead =
+            load_run_deaths(db, txn, meta.run_id).map_err(|error| error.message().to_owned())?;
         let mut live_keys = BTreeSet::new();
         for family in Family::ALL {
             for shard in 0..=SHARD_MASK {
@@ -470,9 +474,9 @@ impl<'db, 'txn, 'batch> LmdbIngestTxn<'db, 'txn, 'batch> {
 
     fn allocate_event_key(&mut self) -> Result<EventKey, PersistenceError> {
         let key = self.next_event_key;
-        self.next_event_key = key
-            .checked_add(1)
-            .ok_or_else(|| PersistenceError("canonical event key space exhausted".to_owned()))?;
+        self.next_event_key = key.checked_add(1).ok_or_else(|| {
+            PersistenceError::invariant("canonical event key space exhausted".to_owned())
+        })?;
         self.event_allocator_dirty = true;
         Ok(key)
     }
@@ -481,7 +485,7 @@ impl<'db, 'txn, 'batch> LmdbIngestTxn<'db, 'txn, 'batch> {
         let key = self.next_relay_key;
         self.next_relay_key = key
             .checked_add(1)
-            .ok_or_else(|| PersistenceError("relay key space exhausted".to_owned()))?;
+            .ok_or_else(|| PersistenceError::invariant("relay key space exhausted".to_owned()))?;
         self.relay_allocator_dirty = true;
         Ok(key)
     }
@@ -515,8 +519,10 @@ impl<'db, 'txn, 'batch> LmdbIngestTxn<'db, 'txn, 'batch> {
         if let Some(value) = self.relay_ref_counts.get(&key) {
             return Ok(*value);
         }
-        let value = get_u64(self.db.relay_refs, self.txn, &key.to_be_bytes())?
-            .ok_or_else(|| PersistenceError("interned relay has no refcount".to_owned()))?;
+        let value =
+            get_u64(self.db.relay_refs, self.txn, &key.to_be_bytes())?.ok_or_else(|| {
+                PersistenceError::invariant("interned relay has no refcount".to_owned())
+            })?;
         self.relay_ref_counts.insert(key, value);
         Ok(value)
     }
@@ -528,7 +534,9 @@ impl<'db, 'txn, 'batch> LmdbIngestTxn<'db, 'txn, 'batch> {
         } else {
             current.checked_sub(delta.unsigned_abs())
         }
-        .ok_or_else(|| PersistenceError("relay reference count overflow/underflow".to_owned()))?;
+        .ok_or_else(|| {
+            PersistenceError::invariant("relay reference count overflow/underflow".to_owned())
+        })?;
         self.relay_ref_counts.insert(key, next);
         Ok(())
     }
@@ -549,7 +557,9 @@ impl<'db, 'txn, 'batch> LmdbIngestTxn<'db, 'txn, 'batch> {
                 .relays
                 .get(self.txn, &relay_key.to_be_bytes())
                 .map_err(lmdb_err)?
-                .ok_or_else(|| PersistenceError("observation relay is absent".to_owned()))?;
+                .ok_or_else(|| {
+                    PersistenceError::invariant("observation relay is absent".to_owned())
+                })?;
             let relay = std::str::from_utf8(relay)
                 .map_err(lmdb_err)
                 .and_then(|value| RelayUrl::parse(value).map_err(lmdb_err))?;
@@ -584,7 +594,7 @@ impl<'db, 'txn, 'batch> LmdbIngestTxn<'db, 'txn, 'batch> {
         let current = self.cardinality_deltas.entry(key).or_default();
         *current = current
             .checked_add(delta)
-            .ok_or_else(|| PersistenceError("cardinality delta overflow".to_owned()))?;
+            .ok_or_else(|| PersistenceError::invariant("cardinality delta overflow".to_owned()))?;
         Ok(())
     }
 
@@ -635,8 +645,9 @@ impl<'db, 'txn, 'batch> LmdbIngestTxn<'db, 'txn, 'batch> {
         }
         for (relay_key, effective) in std::mem::take(&mut self.relay_ref_counts) {
             let key = relay_key.to_be_bytes();
-            let persisted = get_u64(self.db.relay_refs, self.txn, &key)?
-                .ok_or_else(|| PersistenceError("interned relay has no refcount".to_owned()))?;
+            let persisted = get_u64(self.db.relay_refs, self.txn, &key)?.ok_or_else(|| {
+                PersistenceError::invariant("interned relay has no refcount".to_owned())
+            })?;
             if effective > 0 {
                 if effective != persisted {
                     self.db
@@ -651,7 +662,7 @@ impl<'db, 'txn, 'batch> LmdbIngestTxn<'db, 'txn, 'batch> {
                 .relays
                 .get(self.txn, &key)
                 .map_err(lmdb_err)?
-                .ok_or_else(|| PersistenceError("interned relay is absent".to_owned()))?
+                .ok_or_else(|| PersistenceError::invariant("interned relay is absent".to_owned()))?
                 .to_vec();
             self.db
                 .relay_refs
@@ -673,7 +684,9 @@ impl<'db, 'txn, 'batch> LmdbIngestTxn<'db, 'txn, 'batch> {
             } else {
                 persisted.checked_sub(delta.unsigned_abs())
             }
-            .ok_or_else(|| PersistenceError("cardinality overflow/underflow".to_owned()))?;
+            .ok_or_else(|| {
+                PersistenceError::invariant("cardinality overflow/underflow".to_owned())
+            })?;
             if effective == 0 {
                 self.db
                     .cardinality
@@ -1598,22 +1611,22 @@ fn decode_u64(bytes: &[u8]) -> Result<u64, PersistenceError> {
     bytes
         .try_into()
         .map(u64::from_be_bytes)
-        .map_err(|_| PersistenceError("invalid LMDB u64 width".to_owned()))
+        .map_err(|_| PersistenceError::invariant("invalid LMDB u64 width".to_owned()))
 }
 
 fn decode_u32(bytes: &[u8]) -> Result<u32, PersistenceError> {
     bytes
         .try_into()
         .map(u32::from_be_bytes)
-        .map_err(|_| PersistenceError("invalid LMDB u32 width".to_owned()))
+        .map_err(|_| PersistenceError::invariant("invalid LMDB u32 width".to_owned()))
 }
 
 fn lmdb_err(error: impl std::fmt::Display) -> PersistenceError {
-    PersistenceError(format!("LMDB benchmark: {error}"))
+    PersistenceError::invariant(format!("LMDB benchmark: {error}"))
 }
 
 fn packed_err(error: impl std::fmt::Display) -> PersistenceError {
-    PersistenceError(format!("packed postings: {error}"))
+    PersistenceError::invariant(format!("packed postings: {error}"))
 }
 
 fn elapsed_ns(started: Instant) -> u64 {

@@ -28,10 +28,10 @@ use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{FixtureDirectory, SubId, WireOp};
 use nmp_store::{
     AcceptOutcome, AcceptWrite, AttemptOutcome, CancelEphemeralOutcome, ClaimSet,
-    CompensateOutcome, CompensationReason, CoverageInterval, CoverageKey, EventStore, GcReport,
-    InsertOutcome, MemoryStore, PersistenceError, PromoteOutcome, RecoveredAttempt,
-    RecoveredIntent, RecoveredReceipt, RecoveredRouteRevision, RedbStore, RelayObserved,
-    RetractReason, StoredEvent,
+    CompensateOutcome, CompensationReason, CoverageInterval, CoverageKey, DurabilityOutcome,
+    EventStore, GcReport, InsertOutcome, MemoryStore, PersistenceError, PersistenceFault,
+    PromoteOutcome, RecoveredAttempt, RecoveredIntent, RecoveredReceipt, RecoveredRouteRevision,
+    RedbStore, RelayObserved, RetractReason, StoredEvent,
 };
 use nmp_transport::{DisconnectReason, HandoffResult, RelayFrame, RelayHandle};
 use nostr::{Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent};
@@ -295,7 +295,7 @@ impl EventStore for FailOnceCompensationStore {
     ) -> Result<CompensateOutcome, PersistenceError> {
         if self.fail_next_compensation {
             self.fail_next_compensation = false;
-            Err(PersistenceError(
+            Err(PersistenceError::invariant(
                 "injected compensation failure".to_string(),
             ))
         } else {
@@ -309,7 +309,7 @@ impl EventStore for FailOnceCompensationStore {
     ) -> Result<CompensateOutcome, PersistenceError> {
         if self.fail_next_compensation {
             self.fail_next_compensation = false;
-            Err(PersistenceError(
+            Err(PersistenceError::invariant(
                 "injected compensation failure".to_string(),
             ))
         } else {
@@ -377,7 +377,9 @@ impl EventStore for FailOnceCompensationStore {
     ) -> Result<nmp_store::RecoveredLane, PersistenceError> {
         if self.fail_next_attempt_finish {
             self.fail_next_attempt_finish = false;
-            return Err(PersistenceError("injected attempt finish failure".into()));
+            return Err(PersistenceError::invariant(
+                "injected attempt finish failure",
+            ));
         }
         self.inner
             .finish_lane_attempt(key, revision, ordinal, outcome, finished_at)
@@ -515,7 +517,9 @@ impl EventStore for SharedFailStartStore {
         started_at: Timestamp,
     ) -> Result<(RecoveredAttempt, nmp_store::RecoveredLane), PersistenceError> {
         if self.failed_relays.contains(&key.relay) {
-            return Err(PersistenceError("injected attempt start failure".into()));
+            return Err(PersistenceError::invariant(
+                "injected attempt start failure",
+            ));
         }
         self.inner
             .start_lane_attempt(key, revision, event, started_at)
@@ -652,7 +656,9 @@ impl EventStore for RedbFailStartStore {
         relays: BTreeSet<RelayUrl>,
     ) -> Result<RecoveredRouteRevision, PersistenceError> {
         if self.fail_route_revisions {
-            return Err(PersistenceError("injected route revision failure".into()));
+            return Err(PersistenceError::invariant(
+                "injected route revision failure",
+            ));
         }
         self.inner.record_route_revision(intent_id, relays)
     }
@@ -677,7 +683,9 @@ impl EventStore for RedbFailStartStore {
         started_at: Timestamp,
     ) -> Result<(RecoveredAttempt, nmp_store::RecoveredLane), PersistenceError> {
         if self.failed_relays.contains(&key.relay) {
-            return Err(PersistenceError("injected attempt start failure".into()));
+            return Err(PersistenceError::invariant(
+                "injected attempt start failure",
+            ));
         }
         self.inner
             .start_lane_attempt(key, revision, event, started_at)
