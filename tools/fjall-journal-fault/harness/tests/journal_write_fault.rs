@@ -511,16 +511,20 @@ fn misinjected_fault_is_refused_rather_than_silently_passing() {
             run.release.version,
             evidence.raw
         );
-        // The decisive check: the target transaction is durable. A mis-injected
-        // run therefore cannot be mistaken for the 3.1.6 acknowledged-loss
-        // shape, where the reopened state collapses back to the pre-state.
-        assert_ne!(
-            evidence.state("STATE_REOPEN1"),
-            evidence.state("STATE_PRE"),
-            "fjall {}: mis-injected run looks like the acknowledged-loss counterexample\n{}",
-            run.release.version,
-            evidence.raw
-        );
+        // The decisive check: every target key and value is present immediately
+        // and after both reopens. A partial transaction, corrupted value, or
+        // unrelated extra row must not make this control look healthy.
+        let expected = expected_post_state(TARGET_ROWS_PER_KEYSPACE, TARGET_VALUE_BYTES);
+        for pass in ["STATE_LIVE", "STATE_REOPEN1", "STATE_REOPEN2"] {
+            assert_eq!(
+                evidence.state(pass),
+                expected,
+                "fjall {}: mis-injected run did not preserve the exact post-transaction \
+                 state at {pass}\n{}",
+                run.release.version,
+                evidence.raw
+            );
+        }
     }
 }
 
