@@ -73,8 +73,8 @@ class NMPLifecycleQualificationTest {
                 owner.census.value,
             )
             awaitWireCount(owner, 0)
-            val launched =
-                ActivityScenario.launch(
+            val launched: ActivityScenario<QualificationActivity> =
+                ActivityScenario.launch<QualificationActivity>(
                     QualificationActivity.lifecycleQualificationIntent(),
                 )
             scenario = launched
