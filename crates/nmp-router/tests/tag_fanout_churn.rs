@@ -219,3 +219,130 @@ fn the_authors_slot_already_achieves_one_stable_sub_with_no_churn() {
         "one in-place REQ per growth step — the cheapest of the three shapes"
     );
 }
+
+// ---- the injectivity falsifier ------------------------------------------
+
+/// A `SubId` must be unique within one (relay session, source) partition.
+/// `diff_plans` keys the emitted delta by `SubId` (`plan.rs`), so two
+/// `WireReq`s sharing one id cannot both reach the wire — one is silently
+/// dropped, and the next compile is a no-op, so it never repairs.
+///
+/// `Skeleton::of` erases `authors`, which is only safe while `AuthorUnion` is
+/// TOTAL over the partition. `neither_limited` makes it partial: two atoms
+/// identical except `authors`, both carrying a `limit`, refuse to merge and
+/// then collide on the erased skeleton.
+#[test]
+fn limited_identical_except_authors_atoms_collide_on_sub_id() {
+    let dir = FixtureDirectory::new();
+    let mut router = Router::new(
+        DiscoveryKinds::default(),
+        RuleRegistry::default_widen_only(),
+    );
+
+    let limited = |author: &str| ContextualAtom {
+        filter: ConcreteFilter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(BTreeSet::from([author.to_string()])),
+            limit: Some(10),
+            ..ConcreteFilter::default()
+        },
+        source: SourceAuthority::Pinned(relays()),
+        access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    };
+    let a = format!("{:064x}", 0xaa);
+    let b = format!("{:064x}", 0xbb);
+    let demand = BTreeSet::from([limited(&a), limited(&b)]);
+
+    let delta = router.compile(&demand, &dir, CAP);
+
+    let planned: Vec<_> = router
+        .plan()
+        .reqs
+        .values()
+        .flat_map(|reqs| reqs.iter())
+        .cloned()
+        .collect();
+    let planned_ids: BTreeSet<_> = planned.iter().map(|req| req.sub_id.clone()).collect();
+    let emitted: usize = delta
+        .ops
+        .iter()
+        .map(|(_, ops)| {
+            ops.iter()
+                .filter(|op| matches!(op, WireOp::Req(..)))
+                .count()
+        })
+        .sum();
+
+    println!("\n=== injectivity check: two LIMITED identical-except-authors atoms ===");
+    println!("demand atoms:            2");
+    println!("WireReqs in the plan:    {}", planned.len());
+    println!("distinct SubIds:         {}", planned_ids.len());
+    println!("REQs actually emitted:   {emitted}");
+    for req in &planned {
+        println!(
+            "  planned: authors={:?} limit={:?}",
+            req.filter.authors, req.filter.limit
+        );
+    }
+
+    // Recompiling identical demand must not repair the loss.
+    let second = router.compile(&demand, &dir, CAP);
+    let repaired: usize = second.ops.iter().map(|(_, ops)| ops.len()).sum();
+    println!("ops on identical recompile: {repaired}");
+
+    assert_eq!(planned.len(), 2, "both atoms are planned separately");
+    assert_eq!(
+        planned_ids.len(),
+        1,
+        "FABLE'S CLAIM: the two planned WireReqs share ONE SubId"
+    );
+    assert_eq!(
+        emitted, 1,
+        "FABLE'S CLAIM: only one REQ reaches the wire — the other author's demand is silently lost"
+    );
+    assert_eq!(
+        repaired, 0,
+        "FABLE'S CLAIM: an identical recompile is a no-op, so the loss never repairs"
+    );
+}
+
+/// The control that proves the collision is caused by `limit` blocking the
+/// merge, not by the two-author shape itself: drop the limit and `AuthorUnion`
+/// merges them into one REQ carrying both authors — no loss.
+#[test]
+fn unlimited_identical_except_authors_atoms_merge_instead_of_colliding() {
+    let dir = FixtureDirectory::new();
+    let mut router = Router::new(
+        DiscoveryKinds::default(),
+        RuleRegistry::default_widen_only(),
+    );
+
+    let unlimited = |author: &str| ContextualAtom {
+        filter: ConcreteFilter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(BTreeSet::from([author.to_string()])),
+            ..ConcreteFilter::default()
+        },
+        source: SourceAuthority::Pinned(relays()),
+        access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    };
+    let a = format!("{:064x}", 0xaa);
+    let b = format!("{:064x}", 0xbb);
+    router.compile(&BTreeSet::from([unlimited(&a), unlimited(&b)]), &dir, CAP);
+
+    let planned: Vec<_> = router
+        .plan()
+        .reqs
+        .values()
+        .flat_map(|reqs| reqs.iter())
+        .cloned()
+        .collect();
+    assert_eq!(planned.len(), 1, "AuthorUnion merges the unlimited pair");
+    assert_eq!(
+        planned[0].filter.authors.as_ref().map(|a| a.len()),
+        Some(2),
+        "the merged filter carries BOTH authors — nothing is lost"
+    );
+}
