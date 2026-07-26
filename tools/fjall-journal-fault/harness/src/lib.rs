@@ -103,6 +103,112 @@ impl Evidence {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Expected fixture state, constructed independently of the probe
+// ---------------------------------------------------------------------------
+//
+// These mirror the fixture constants and key/value formulas in
+// `../shared/probe.rs`. The duplication is deliberate: asserting an observed
+// state against a value the probe also produced would only prove the probe is
+// self-consistent. Re-deriving the expected rows here means a dropped row, a
+// corrupted value, or an unrelated extra row fails the comparison.
+//
+// If the probe's fixture changes, these must change with it, and the tests fail
+// loudly until they do -- which is the intended behaviour for a falsifier whose
+// fixture is part of the evidence.
+
+/// Keyspaces the target transaction spans. Mirrors `probe.rs::KEYSPACES`.
+pub const KEYSPACES: [&str; 3] = ["alpha", "beta", "gamma"];
+/// Mirrors `probe.rs::PRE_STATE_ROWS`.
+pub const PRE_STATE_ROWS: usize = 4;
+/// Mirrors `probe.rs::TARGET_ROWS_PER_KEYSPACE`.
+pub const TARGET_ROWS_PER_KEYSPACE: usize = 4;
+/// Mirrors `probe.rs::TARGET_VALUE_BYTES`.
+pub const TARGET_VALUE_BYTES: usize = 1_024;
+/// Mirrors `probe.rs::UNDERSIZED_ROWS_PER_KEYSPACE`.
+pub const UNDERSIZED_ROWS_PER_KEYSPACE: usize = 1;
+/// Mirrors `probe.rs::UNDERSIZED_VALUE_BYTES`.
+pub const UNDERSIZED_VALUE_BYTES: usize = 700;
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// Mirrors `probe.rs::target_value`.
+fn target_value(keyspace: &str, index: usize, width: usize) -> Vec<u8> {
+    let seed = format!("target-value/{keyspace}/{index:04}/");
+    let mut value = Vec::with_capacity(width);
+    while value.len() < width {
+        let remaining = width - value.len();
+        let chunk = seed.as_bytes();
+        if chunk.len() <= remaining {
+            value.extend_from_slice(chunk);
+        } else {
+            value.extend_from_slice(&chunk[..remaining]);
+        }
+    }
+    value
+}
+
+/// Serialises rows the way the probe does: grouped by keyspace, ordered by key,
+/// rendered as `keyspace/keyhex=valuehex`.
+fn encode(rows: BTreeMap<String, BTreeMap<String, String>>) -> Vec<String> {
+    let mut out = Vec::new();
+    for (keyspace, keyed) in rows {
+        for (key, value) in keyed {
+            out.push(format!("{keyspace}/{key}={value}"));
+        }
+    }
+    out
+}
+
+/// The exact baseline written and synced before the fault is armed.
+pub fn expected_pre_state() -> Vec<String> {
+    let mut rows = BTreeMap::new();
+    for keyspace in KEYSPACES {
+        let mut keyed = BTreeMap::new();
+        for index in 0..PRE_STATE_ROWS {
+            keyed.insert(
+                hex(format!("pre/{keyspace}/{index:04}").as_bytes()),
+                hex(format!("pre-value/{keyspace}/{index:04}").as_bytes()),
+            );
+        }
+        rows.insert(keyspace.to_owned(), keyed);
+    }
+    encode(rows)
+}
+
+/// The exact state once the target transaction has been applied: the baseline
+/// plus every target row, byte for byte.
+///
+/// This is what a release that acknowledges the failed journal write exposes
+/// in-process, and what a healthy commit leaves behind.
+pub fn expected_post_state(rows_per_keyspace: usize, value_bytes: usize) -> Vec<String> {
+    let mut rows = BTreeMap::new();
+    for keyspace in KEYSPACES {
+        let mut keyed = BTreeMap::new();
+        for index in 0..PRE_STATE_ROWS {
+            keyed.insert(
+                hex(format!("pre/{keyspace}/{index:04}").as_bytes()),
+                hex(format!("pre-value/{keyspace}/{index:04}").as_bytes()),
+            );
+        }
+        for index in 0..rows_per_keyspace {
+            keyed.insert(
+                hex(format!("target/{keyspace}/{index:04}").as_bytes()),
+                hex(&target_value(keyspace, index, value_bytes)),
+            );
+        }
+        rows.insert(keyspace.to_owned(), keyed);
+    }
+    encode(rows)
+}
+
 fn workspace_root() -> PathBuf {
     // `harness/` sits beside the three release packages.
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -226,6 +332,30 @@ pub fn run(release: &Release, mode: &str, directory: &Path) -> Result<Evidence, 
         return Err(format!("probe terminated by signal\n{raw}"));
     }
 
+    // Echo the evidence on every run, not only on failure. The child's stdout is
+    // captured so the fault cannot escape into the test runner, which means
+    // without this the records would be visible only inside a panic message and
+    // `--nocapture` would have nothing to uncapture. State rows are elided --
+    // they are kilobytes of hex, and the assertions compare them exactly.
+    println!("--- fjall {} / {mode} ---", release.version);
+    for (key, value) in &records {
+        if key.starts_with("STATE_") {
+            println!(
+                "  {key}=<{} rows>",
+                if value.is_empty() {
+                    0
+                } else {
+                    value.matches(',').count() + 1
+                }
+            );
+        } else {
+            println!("  {key}={value}");
+        }
+    }
+    for reason in &refusals {
+        println!("  REFUSE={reason}");
+    }
+
     Ok(Evidence {
         records,
         refusals,
@@ -236,10 +366,11 @@ pub fn run(release: &Release, mode: &str, directory: &Path) -> Result<Evidence, 
 
 /// Every mode runs against every release; the matrix in the test decides what
 /// each combination must show.
-pub const MODES: [&str; 5] = [
+pub const MODES: [&str; 6] = [
     "healthy",
     "one-shot",
     "persistent",
     "undersized",
+    "undersized-sustained",
     "misinjected",
 ];

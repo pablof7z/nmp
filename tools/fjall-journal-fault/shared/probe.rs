@@ -101,6 +101,30 @@ const PRE_STATE_ROWS: usize = 4;
 const TARGET_ROWS_PER_KEYSPACE: usize = 4;
 const TARGET_VALUE_BYTES: usize = 1_024;
 
+/// Fjall's default `journal_compression_threshold`: values at or above this are
+/// LZ4-compressed into the journal record.
+///
+/// This is why summing plain key and value lengths is a sound proxy for "the
+/// record was larger than the journal buffer". These fixtures are highly
+/// repetitive and would compress by roughly 30:1, so a value width at or above
+/// this threshold would let a nominally 12 KiB batch sit entirely inside the
+/// 8 KiB buffer while the `TARGET_EXCEEDS_JOURNAL_BUFFER` record still reported
+/// `true`.
+/// [`assert_uncompressed_fixture`] keeps that from happening silently.
+const JOURNAL_COMPRESSION_THRESHOLD_BYTES: usize = 4_096;
+
+/// Refuses a fixture whose values would be journal-compressed, which would make
+/// the uncompressed byte count a meaningless proxy for the record's real size.
+fn assert_uncompressed_fixture(value_bytes: usize) -> Option<String> {
+    (value_bytes >= JOURNAL_COMPRESSION_THRESHOLD_BYTES).then(|| {
+        format!(
+            "fixture value width {value_bytes} is at or above Fjall's journal compression \
+             threshold {JOURNAL_COMPRESSION_THRESHOLD_BYTES}; the uncompressed batch size is \
+             no longer a sound proxy for the journal record size"
+        )
+    })
+}
+
 /// Deliberately below [`JOURNAL_BUFFER_BYTES`] but above [`FAULT_MARGIN_BYTES`],
 /// for the undersized control: the record stays inside the `BufWriter`, so
 /// `write_batch` returns without touching the file descriptor and the armed
@@ -119,7 +143,9 @@ enum Mode {
     /// The real regression: one journal extension fails, later persistence is
     /// healthy.
     OneShot,
-    /// The soft limit is never raised, so the later persist path fails too.
+    /// The handler never raises the soft limit, so the later persist path
+    /// inside the same commit fails too. (The limit is still lifted after the
+    /// commit returns, so state capture and reopen are not themselves faulted.)
     /// Control: proves a persistence failure is a distinguishable outcome and
     /// cannot stand in for the one-shot journal result.
     Persistent,
@@ -127,6 +153,17 @@ enum Mode {
     /// so `write_batch` never reaches the file descriptor. Control: the
     /// harness must refuse rather than silently pass on the later flush error.
     Undersized,
+    /// [`Mode::Undersized`], but the fault is never lifted -- not by the
+    /// handler and not after the commit -- so it is still in force through
+    /// close and reopen.
+    ///
+    /// Control for the rejected-but-durable property recorded in #821: with the
+    /// fault lifted, a commit rejected with `Poisoned` still reopens with its
+    /// rows present, because the buffered journal record completes at shutdown.
+    /// With the fault sustained, the same rejected commit reopens to the exact
+    /// pre-transaction state. Committing both halves is what makes that
+    /// comparison a falsifier rather than a claim.
+    UndersizedSustained,
     /// One-shot fault armed, but consumed by a write to a scratch file before
     /// the transaction. Control: a fault that did not land on the journal must
     /// be refused as mis-injected.
@@ -140,6 +177,7 @@ impl Mode {
             "one-shot" => Self::OneShot,
             "persistent" => Self::Persistent,
             "undersized" => Self::Undersized,
+            "undersized-sustained" => Self::UndersizedSustained,
             "misinjected" => Self::MisInjected,
             _ => return None,
         })
@@ -151,29 +189,38 @@ impl Mode {
             Self::OneShot => "one-shot",
             Self::Persistent => "persistent",
             Self::Undersized => "undersized",
+            Self::UndersizedSustained => "undersized-sustained",
             Self::MisInjected => "misinjected",
         }
     }
 
     /// Whether the handler raises the soft limit on the first fault.
     fn one_shot(self) -> bool {
-        !matches!(self, Self::Persistent)
+        !matches!(self, Self::Persistent | Self::UndersizedSustained)
     }
 
     fn arms_fault(self) -> bool {
         !matches!(self, Self::Healthy)
     }
 
+    /// Whether the limit is lifted once the target commit has returned.
+    ///
+    /// Only [`Mode::UndersizedSustained`] keeps it armed, so that close and
+    /// reopen also run under the fault.
+    fn disarms_after_commit(self) -> bool {
+        !matches!(self, Self::UndersizedSustained)
+    }
+
     fn rows_per_keyspace(self) -> usize {
         match self {
-            Self::Undersized => UNDERSIZED_ROWS_PER_KEYSPACE,
+            Self::Undersized | Self::UndersizedSustained => UNDERSIZED_ROWS_PER_KEYSPACE,
             _ => TARGET_ROWS_PER_KEYSPACE,
         }
     }
 
     fn value_bytes(self) -> usize {
         match self {
-            Self::Undersized => UNDERSIZED_VALUE_BYTES,
+            Self::Undersized | Self::UndersizedSustained => UNDERSIZED_VALUE_BYTES,
             _ => TARGET_VALUE_BYTES,
         }
     }
@@ -203,17 +250,17 @@ mod fault {
     /// thread that acknowledges through the ack pipe before the handler returns
     /// to Fjall's `write_all`.
     extern "C" fn handler(_signal: libc::c_int) {
-        SIGNALS.fetch_add(1, Ordering::Relaxed);
+        SIGNALS.fetch_add(1, Ordering::AcqRel);
 
         // Consume the one-shot permit. A second fault must NOT raise again; the
         // probe reports the signal count and the harness refuses a run that
         // injected more than one failure.
-        if RAISE_ON_FAULT.swap(0, Ordering::Relaxed) == 0 {
+        if RAISE_ON_FAULT.swap(0, Ordering::Acquire) == 0 {
             return;
         }
 
-        let notify = NOTIFY_WRITE_FD.load(Ordering::Relaxed);
-        let ack = ACK_READ_FD.load(Ordering::Relaxed);
+        let notify = NOTIFY_WRITE_FD.load(Ordering::Acquire);
+        let ack = ACK_READ_FD.load(Ordering::Acquire);
         let request = b'r';
         let mut reply = 0u8;
 
@@ -255,8 +302,8 @@ mod fault {
                 return Err(std::io::Error::last_os_error());
             }
         }
-        NOTIFY_WRITE_FD.store(notify[1], Ordering::Relaxed);
-        ACK_READ_FD.store(ack[0], Ordering::Relaxed);
+        NOTIFY_WRITE_FD.store(notify[1], Ordering::Release);
+        ACK_READ_FD.store(ack[0], Ordering::Release);
 
         let notify_read = notify[0];
         let ack_write = ack[1];
@@ -292,7 +339,7 @@ mod fault {
                 }
             })?;
 
-        RAISE_ON_FAULT.store(u32::from(raise_on_fault), Ordering::Relaxed);
+        RAISE_ON_FAULT.store(u32::from(raise_on_fault), Ordering::Release);
 
         // SAFETY: `action` is zeroed then fully populated; `SIGXFSZ` is a valid signal.
         unsafe {
@@ -313,12 +360,12 @@ mod fault {
     /// Restores a permissive limit. Called immediately after the target commit
     /// so that state capture, close, and reopen can never trip the fault.
     pub fn disarm(hard: u64) -> std::io::Result<()> {
-        RAISE_ON_FAULT.store(0, Ordering::Relaxed);
+        RAISE_ON_FAULT.store(0, Ordering::Release);
         set_limit(hard, hard)
     }
 
     pub fn signal_count() -> u32 {
-        SIGNALS.load(Ordering::Relaxed)
+        SIGNALS.load(Ordering::Acquire)
     }
 }
 
@@ -507,7 +554,8 @@ pub fn run(version: &str) -> ! {
     let mode_arg = args.next().unwrap_or_default();
     let Some(mode) = Mode::parse(&mode_arg) else {
         eprintln!(
-            "usage: <probe> <healthy|one-shot|persistent|undersized|misinjected> <directory>"
+            "usage: <probe> <healthy|one-shot|persistent|undersized|undersized-sustained|\
+             misinjected> <directory>"
         );
         std::process::exit(64);
     };
@@ -619,12 +667,19 @@ pub fn run(version: &str) -> ! {
         "TARGET_EXCEEDS_JOURNAL_BUFFER",
         target_bytes > JOURNAL_BUFFER_BYTES,
     );
+    evidence.record(
+        "JOURNAL_COMPRESSION_THRESHOLD_BYTES",
+        JOURNAL_COMPRESSION_THRESHOLD_BYTES,
+    );
+    if let Some(reason) = assert_uncompressed_fixture(width) {
+        evidence.refuse(reason);
+    }
 
     let signals_before_commit = fault::signal_count();
     let commit_result = target.commit();
     let signals_after_commit = fault::signal_count();
 
-    if mode.arms_fault() {
+    if mode.arms_fault() && mode.disarms_after_commit() {
         fault::disarm(HARD_LIMIT_BYTES).expect("disarm RLIMIT_FSIZE fault");
     }
 

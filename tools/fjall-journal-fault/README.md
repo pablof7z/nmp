@@ -60,6 +60,13 @@ Because the probe packages are detached, the repo-wide `cargo fmt --all` and
 `cargo clippy --workspace` never see them; `scripts/check-fjall-journal-fault.sh`
 lints them.
 
+One consequence worth stating: the root lockfile carries Fjall 3.1.6 only.
+Fjall/`lsm-tree` 3.1.7 and 3.1.8 are resolved by the child `cargo build --locked`
+calls the harness makes *while the test runs*, so `cargo test --workspace` needs
+the crates.io registry (or a warm cache) at test time. On an `--offline` or
+vendored runner this fails loudly — `cargo build failed for fjall 3.1.7` — rather
+than skipping.
+
 Three packages exist because the three releases cannot coexist in one dependency
 graph. Each pins `lsm-tree` explicitly as well: Fjall depends on it with a caret
 range, so without that pin a 3.1.6 probe would silently link `lsm-tree` 3.1.8 and
@@ -123,6 +130,7 @@ and not from the later persist path.
 | `healthy` | The fixture, not the injection, is sound | All three commit and reopen to the same exact post-state; zero signals |
 | `persistent` | A later persistence failure must not stand in for this result | 3.1.6 → `Poisoned`; 3.1.7/3.1.8 → `Io(EFBIG)` |
 | `undersized` | A batch below the journal buffer never reaches the fd inside `write_batch` | All three → `Poisoned`, indistinguishable |
+| `undersized-sustained` | Same batch with the fault never lifted, so close and reopen also run under it | All three → `Poisoned`; reopen returns the exact pre-state |
 | `misinjected` | A fault aimed away from the journal must be refused | Fault consumed on a scratch file; all three commit and the target survives reopen |
 
 The `persistent` control is the reason the primary fault must be one-shot: under
@@ -136,20 +144,28 @@ every release reports the identical `Poisoned`.
 That control also surfaced a separate property, now measured rather than
 assumed: the commit is **rejected** with `Poisoned` and leaves nothing live
 in-process, yet the target rows are **present after reopen**. The record was
-still buffered, the one-shot handler raised the soft limit when the fault fired,
-and the buffered record therefore completed during shutdown and was replayed.
-(The earlier wording here blamed the probe's explicit disarm; the actual cause is
-the one-shot handler's raise, which happens first.)
+still buffered, the soft limit was lifted, and the buffered record therefore
+completed during shutdown and was replayed.
 
-Verified against the alternative: with the fault **sustained** through close and
-reopen, the same rejected commit reopens to the exact 12-row pre-state. Both
-variants return `Poisoned` and both stop at journal offset 1190 before drop, so
-the difference materialises only at shutdown.
+The probe lifts the limit in two places — the one-shot handler raises it when
+the fault fires, and `fault::disarm` raises it again after the commit returns.
+Measured across all four combinations, **either lift alone is sufficient**; the
+handler's simply happens first, so in the committed `undersized` run the later
+disarm is already a no-op. What the rows' survival depends on is that the fault
+is lifted *somewhere* before shutdown, not on which lift did it.
 
-| undersized variant | `commit()` | reopen ×2 |
-| --- | --- | --- |
-| fault lifted (this control) | `Err(Poisoned)` | 15 rows — rejected transaction is durable |
-| fault sustained | `Err(Poisoned)` | 12 rows — exact pre-state |
+| undersized variant | handler raises | disarm after commit | reopen ×2 |
+| --- | --- | --- | --- |
+| `undersized` (committed) | yes | yes | 15 rows — rejected transaction is durable |
+| handler only | yes | no | 15 rows |
+| disarm only | no | yes | 15 rows |
+| `undersized-sustained` (committed) | no | no | 12 rows — exact pre-state |
+
+Both committed rows of that table are asserted:
+`undersized_batch_is_refused_rather_than_silently_passing` and
+`sustained_fault_leaves_the_rejected_undersized_batch_absent`. Both variants
+return `Poisoned` and both stop at journal offset 1190 before drop, so the
+difference materialises only at shutdown.
 
 So a rejected transaction can become durable, **conditional on the underlying
 fault clearing before shutdown**. This is not a claim about Fjall under a

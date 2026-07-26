@@ -17,15 +17,13 @@
 //! whole is never skip-only.
 
 use fjall_journal_fault_harness::{
-    run, verify_pinned_identity, Evidence, Release, Role, MODES, RELEASES,
+    expected_post_state, expected_pre_state, run, verify_pinned_identity, Evidence, Release, Role,
+    MODES, RELEASES, TARGET_ROWS_PER_KEYSPACE, TARGET_VALUE_BYTES, UNDERSIZED_ROWS_PER_KEYSPACE,
+    UNDERSIZED_VALUE_BYTES,
 };
 
 /// EFBIG. The journal write must fail for a real filesystem reason.
 const EFBIG: u64 = 27;
-
-/// Rows the undersized control's target transaction writes -- one per keyspace.
-/// Mirrors `UNDERSIZED_ROWS_PER_KEYSPACE * KEYSPACES.len()` in the probe.
-const UNDERSIZED_TARGET_ROWS: usize = 3;
 
 struct Run {
     release: Release,
@@ -72,15 +70,31 @@ fn assert_injection_is_sound(run: &Run, mode: &str) {
         evidence.exit_code,
         evidence.raw
     );
+    // Cheap wiring check only: `PROBE_VERSION` is a constant compiled into each
+    // probe's `main.rs`, so it proves the harness ran the binary it meant to
+    // run, NOT that that binary linked the Fjall release it names. The actual
+    // pinning is the committed lockfile plus `--locked`, asserted by
+    // `pinned_release_identities_match_the_recorded_evidence`.
     assert_eq!(
         evidence.get("PROBE_VERSION"),
         run.release.version,
-        "probe binary reports a different Fjall version than the package it was built from\n{}",
+        "harness ran the wrong probe binary for this release slot\n{}",
         evidence.raw
     );
     assert!(
         !evidence.flag("JOURNAL_ROTATED"),
         "fjall {} / {mode}: journal rotated, so the armed offset was not the target\n{}",
+        run.release.version,
+        evidence.raw
+    );
+    // Every later comparison is stated relative to the pre-transaction state, so
+    // pin that state itself against an independently constructed baseline. If
+    // the fixture silently wrote something other than what it claims, every
+    // "byte-identical to pre-state" assertion downstream would be vacuous.
+    assert_eq!(
+        evidence.state("STATE_PRE"),
+        expected_pre_state(),
+        "fjall {} / {mode}: the baseline is not exactly the expected pre-transaction state\n{}",
         run.release.version,
         evidence.raw
     );
@@ -119,11 +133,14 @@ fn healthy_control_commits_and_reopens_on_every_release() {
             run.release.version,
             evidence.raw
         );
+        // Exact post-state, independently constructed -- this is also the oracle
+        // the 3.1.6 one-shot lane is compared against, so it must be pinned
+        // rather than merely "different from pre-state".
         let live = evidence.state("STATE_LIVE");
-        assert_ne!(
+        assert_eq!(
             live,
-            evidence.state("STATE_PRE"),
-            "fjall {}: healthy control never applied the target transaction\n{}",
+            expected_post_state(TARGET_ROWS_PER_KEYSPACE, TARGET_VALUE_BYTES),
+            "fjall {}: healthy commit did not produce exactly the expected post-state\n{}",
             run.release.version,
             evidence.raw
         );
@@ -207,19 +224,19 @@ fn one_shot_journal_write_failure_separates_the_fixed_releases() {
          returns an error, the negative control no longer demonstrates the defect\n{}",
         negative.evidence.raw
     );
-    // The strongest actually observed unsafe shape: every batch key is visible
-    // in-process after a commit whose journal record is truncated, and all of
-    // it disappears on reopen.
-    let live = negative.evidence.state("STATE_LIVE");
-    let pre = negative.evidence.state("STATE_PRE");
-    assert!(
-        live.len() > pre.len(),
-        "fjall 3.1.6: expected the acknowledged batch to be live in-process\n{}",
-        negative.evidence.raw
-    );
-    assert!(
-        pre.iter().all(|row| live.contains(row)),
-        "fjall 3.1.6: live state lost pre-transaction rows\n{}",
+    // The strongest actually observed unsafe shape: EVERY batch key and value is
+    // visible in-process after a commit whose journal record is truncated, and
+    // all of it disappears on reopen.
+    //
+    // Asserted against an independently constructed post-state, not against a
+    // length inequality: a dropped target row, a corrupted value, or an
+    // unrelated extra row must all fail here, because the recorded claim is
+    // "every target key/value is live", not "more rows than before".
+    assert_eq!(
+        negative.evidence.state("STATE_LIVE"),
+        expected_post_state(TARGET_ROWS_PER_KEYSPACE, TARGET_VALUE_BYTES),
+        "fjall 3.1.6: in-process state after the acknowledged failed write is not exactly \
+         the full post-transaction state\n{}",
         negative.evidence.raw
     );
 
@@ -377,19 +394,16 @@ fn undersized_batch_is_refused_rather_than_silently_passing() {
             run.release.version,
             evidence.raw
         );
+        // Exact durable state, independently constructed -- same discipline as
+        // the one-shot lane. A dropped, corrupted, or extra row must fail rather
+        // than satisfy a row-count arithmetic check.
         let reopened = evidence.state("STATE_REOPEN1");
-        let pre = evidence.state("STATE_PRE");
-        assert!(
-            pre.iter().all(|row| reopened.contains(row)),
-            "fjall {}: the undersized control lost pre-transaction rows on reopen\n{}",
-            run.release.version,
-            evidence.raw
-        );
         assert_eq!(
-            reopened.len(),
-            pre.len() + UNDERSIZED_TARGET_ROWS,
-            "fjall {}: expected the rejected undersized batch to become durable on reopen \
-             (see #821); a change here is a change in Fjall's rejected-transaction contract\n{}",
+            reopened,
+            expected_post_state(UNDERSIZED_ROWS_PER_KEYSPACE, UNDERSIZED_VALUE_BYTES),
+            "fjall {}: expected the rejected undersized batch to become durable on reopen as \
+             exactly the full post-state (see #821); a change here is a change in Fjall's \
+             rejected-transaction contract\n{}",
             run.release.version,
             evidence.raw
         );
@@ -402,15 +416,74 @@ fn undersized_batch_is_refused_rather_than_silently_passing() {
         );
     }
 
-    // All three releases land on the identical reopened state, byte for byte --
+    // Every release lands on the identical reopened state, byte for byte --
     // another way of saying this mode cannot discriminate between them.
-    assert_eq!(
-        negative.evidence.state("STATE_REOPEN1"),
-        candidate.evidence.state("STATE_REOPEN1"),
-        "the undersized control produced different durable states across releases\n{}\n{}",
-        negative.evidence.raw,
-        candidate.evidence.raw
-    );
+    for run in &runs {
+        assert_eq!(
+            run.evidence.state("STATE_REOPEN1"),
+            negative.evidence.state("STATE_REOPEN1"),
+            "fjall {}: the undersized control produced a different durable state than 3.1.6\n{}",
+            run.release.version,
+            run.evidence.raw
+        );
+    }
+    let _ = candidate;
+}
+
+/// The other half of the #821 property, and the reason the half above is a
+/// falsifier rather than an anecdote.
+///
+/// Same undersized batch, but the fault is never lifted -- not by the handler,
+/// not after the commit -- so it is still in force through close and reopen.
+/// The commit is rejected exactly as before, and this time the rows do NOT
+/// survive: the database reopens to the exact pre-transaction state.
+///
+/// Together the two controls establish that the durability of a rejected
+/// transaction is conditional on the underlying fault clearing before shutdown,
+/// which is the claim #821 carries. Neither half alone shows that.
+#[test]
+fn sustained_fault_leaves_the_rejected_undersized_batch_absent() {
+    if !supported_platform() {
+        return unsupported_platform();
+    }
+    for run in &run_matrix("undersized-sustained") {
+        assert_injection_is_sound(run, "undersized-sustained");
+        let evidence = &run.evidence;
+        assert_eq!(
+            evidence.get("COMMIT_RESULT"),
+            "err",
+            "fjall {}: a sustained fault must still fail the commit\n{}",
+            run.release.version,
+            evidence.raw
+        );
+        assert_eq!(
+            evidence.get("COMMIT_ERROR_KIND"),
+            "poisoned",
+            "fjall {}: the sustained undersized fault was expected on the persist path\n{}",
+            run.release.version,
+            evidence.raw
+        );
+        assert_eq!(
+            evidence.state("STATE_LIVE"),
+            expected_pre_state(),
+            "fjall {}: a rejected commit must leave no state in-process\n{}",
+            run.release.version,
+            evidence.raw
+        );
+        // The discriminating observation: with the fault sustained, the rejected
+        // rows are absent after reopen -- exactly the pre-transaction state.
+        for pass in ["STATE_REOPEN1", "STATE_REOPEN2"] {
+            assert_eq!(
+                evidence.state(pass),
+                expected_pre_state(),
+                "fjall {}: with the fault sustained, {pass} must be the exact pre-transaction \
+                 state; if the rejected rows now survive, the conditional framing of #821 is \
+                 wrong\n{}",
+                run.release.version,
+                evidence.raw
+            );
+        }
+    }
 }
 
 /// Control: the fault is spent on a scratch file before the transaction, so the
@@ -451,21 +524,19 @@ fn misinjected_fault_is_refused_rather_than_silently_passing() {
     }
 }
 
-/// Every mode is exercised by a named test above. This keeps a newly added mode
-/// from sitting unrun.
+/// Every mode is actually driven by a test in this file.
+///
+/// Checked against this file's own source rather than a hand-copied list: a
+/// second list with the same contents would agree with `MODES` by construction
+/// and could never detect a mode that nobody runs.
 #[test]
 fn every_probe_mode_is_covered_by_a_named_test() {
-    let covered = [
-        "healthy",
-        "one-shot",
-        "persistent",
-        "undersized",
-        "misinjected",
-    ];
+    let source = include_str!("journal_write_fault.rs");
     for mode in MODES {
+        let invocation = format!("run_matrix(\"{mode}\")");
         assert!(
-            covered.contains(&mode),
-            "probe mode {mode} has no owning regression test"
+            source.contains(&invocation),
+            "probe mode {mode} has no owning regression test: no `{invocation}` call in this file"
         );
     }
 }
