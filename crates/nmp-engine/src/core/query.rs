@@ -1591,6 +1591,7 @@ impl<S: EventStore> EngineCore<S> {
             &self.connected_relays,
             &auth_status,
             &self.ever_connected_relays,
+            &self.relay_open_failures,
         )
     }
 

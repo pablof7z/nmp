@@ -179,9 +179,10 @@ pub enum ShortfallFact {
 ///   truth from `auth_status` (exact phase, `AuthDenied`, `Error`, or
 ///   `Requesting` once ready), defaulting to `AwaitingAuth {
 ///   AwaitingChallenge }` when the reducer holds no entry (connected but
-///   never challenged); `Disconnected` if it has connected before but is
-///   not connected now; else `Connecting` (planned but never yet
-///   connected).
+///   never challenged); `Error` if its required worker has reported a
+///   current never-connected open failure; `Disconnected` if it has
+///   connected before but is not connected now; else `Connecting` (planned
+///   but never yet connected).
 /// - Sources are returned sorted by session key for deterministic equality.
 pub(crate) fn acquisition_evidence<S: EventStore>(
     subtree_atoms: &BTreeSet<ContextualAtom>,
@@ -190,6 +191,7 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
     connected: &BTreeSet<RelaySessionKey>,
     auth_status: &BTreeMap<RelaySessionKey, SourceStatus>,
     ever_connected: &BTreeSet<RelaySessionKey>,
+    relay_open_failures: &BTreeMap<RelaySessionKey, String>,
 ) -> AcquisitionEvidence {
     if subtree_atoms.is_empty() {
         return AcquisitionEvidence {
@@ -263,6 +265,8 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
                             phase: AuthPhase::AwaitingChallenge,
                         })
                 }
+            } else if relay_open_failures.contains_key(&session) {
+                SourceStatus::Error
             } else if ever_connected.contains(&session) {
                 SourceStatus::Disconnected
             } else {
@@ -327,6 +331,7 @@ mod tests {
             &BTreeSet::new(),
             &BTreeMap::new(),
             &BTreeSet::new(),
+            &BTreeMap::new(),
         );
 
         assert_eq!(evidence.sources.len(), 1);
@@ -356,6 +361,7 @@ mod tests {
             &BTreeSet::new(),
             &BTreeMap::new(),
             &BTreeSet::new(),
+            &BTreeMap::new(),
         );
 
         assert!(evidence.sources.is_empty());
@@ -363,6 +369,40 @@ mod tests {
             evidence.shortfall,
             vec![ShortfallFact::LocalLimit { atom: atom.filter }]
         );
+    }
+
+    #[test]
+    fn never_connected_open_failure_is_scoped_source_error() {
+        let atom = atom();
+        let relay = RelayUrl::parse("wss://unavailable.example").unwrap();
+        let session = RelaySessionKey::public(relay.clone());
+        let key = coverage_key(&atom);
+        let plan = RelayPlan {
+            reqs: BTreeMap::from([(
+                session.clone(),
+                vec![WireReq {
+                    sub_id: SubId::for_wire(relay.clone(), &atom.filter, &atom.source, atom.access),
+                    filter: atom.filter.clone(),
+                    provenance: Vec::new(),
+                    absorbed: BTreeSet::from([key]),
+                }],
+            )]),
+            ..RelayPlan::default()
+        };
+
+        let evidence = acquisition_evidence(
+            &BTreeSet::from([atom]),
+            &plan,
+            &MemoryStore::new(),
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &BTreeMap::from([(session, "connection refused".to_string())]),
+        );
+
+        assert_eq!(evidence.sources.len(), 1);
+        assert_eq!(evidence.sources[0].relay, relay);
+        assert_eq!(evidence.sources[0].status, SourceStatus::Error);
     }
 
     #[test]
@@ -407,6 +447,7 @@ mod tests {
                 &connected,
                 &BTreeMap::from([(session.clone(), status)]),
                 &connected,
+                &BTreeMap::new(),
             );
             assert_eq!(evidence.sources[0].status, status);
         }
@@ -418,6 +459,7 @@ mod tests {
             &connected,
             &BTreeMap::new(),
             &connected,
+            &BTreeMap::new(),
         );
         assert_eq!(
             waiting.sources[0].status,
