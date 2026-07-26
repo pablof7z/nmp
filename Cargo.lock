@@ -1924,6 +1924,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nmp-asset"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "nmp-audit"
 version = "0.1.0"
 dependencies = [
@@ -1966,6 +1973,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "hickory-resolver",
+ "nmp-asset",
  "nmp-ownership",
  "nmp-transport",
  "nostr 0.44.4",
@@ -2044,6 +2052,7 @@ name = "nmp-ffi"
 version = "0.1.0"
 dependencies = [
  "nmp",
+ "nmp-asset",
  "nmp-blossom",
  "nmp-content",
  "nmp-grammar",
@@ -2076,6 +2085,7 @@ dependencies = [
 name = "nmp-media"
 version = "0.1.0"
 dependencies = [
+ "nmp-asset",
  "nmp-blossom",
  "nmp-nip68",
  "nmp-ownership",
@@ -2149,6 +2159,7 @@ dependencies = [
 name = "nmp-nip68"
 version = "0.1.0"
 dependencies = [
+ "nmp-asset",
  "nmp-blossom",
  "nmp-ownership",
  "nostr 0.44.4",

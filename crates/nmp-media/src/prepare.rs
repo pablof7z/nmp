@@ -20,7 +20,8 @@
 
 use nostr::{PublicKey, Timestamp, UnsignedEvent};
 
-use nmp_blossom::{upload_authorization_draft, AuthDraftError, Sha256Hash};
+use nmp_asset::Sha256Hash;
+use nmp_blossom::{upload_authorization_draft, AuthDraftError};
 
 /// A prepared, not-yet-uploaded image: the exact bytes, their sha256, the
 /// mime type, and the kind:24242 `upload` authorization draft bound to that

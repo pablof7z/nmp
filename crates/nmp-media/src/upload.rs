@@ -14,8 +14,9 @@
 //! authorization binds exactly that hash -- and because we hand it the HELD
 //! bytes, a substitution can only be caught, never sneak through.
 
+use nmp_asset::{Sha256Hash, VerifiedAsset};
 use nmp_blossom::{
-    BlobDescriptor, BlossomClient, BlossomServerUrl, Sha256Hash, SignedAuthorization, UploadError,
+    BlobDescriptor, BlossomClient, BlossomServerUrl, SignedAuthorization, UploadError,
     VerifiedUpload,
 };
 use nmp_nip68::{PictureImage, PictureImageError};
@@ -56,10 +57,11 @@ impl std::error::Error for MediaUploadError {
 }
 
 /// A blob that has been uploaded and integrity-verified by Blossom: it wraps a
-/// `nmp_blossom::VerifiedUpload`, whose descriptor's sha256 was PROVEN equal
-/// to the uploaded bytes. Private field: an `UploadedAsset` exists only by
-/// spending a [`PreparedUpload`] through [`PreparedUpload::upload`] (the
-/// verified upload witness is not forgeable here).
+/// `nmp_blossom::VerifiedUpload`, which carries the protocol-neutral
+/// [`VerifiedAsset`] proof computed from the exact uploaded bytes (#884).
+/// Private field: an `UploadedAsset` exists only by spending a
+/// [`PreparedUpload`] through [`PreparedUpload::upload`] (the verified upload
+/// witness is not forgeable here).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UploadedAsset {
     verified: VerifiedUpload,
@@ -97,10 +99,20 @@ impl UploadedAsset {
         self.verified.descriptor()
     }
 
-    /// The content-addressed sha256 the server's descriptor was verified
-    /// against -- the blob's identity.
+    /// The protocol-neutral exact-byte proof for the uploaded blob (#884).
+    /// Its digest was computed from the bytes this seam HELD and uploaded,
+    /// not read out of the server's descriptor; `url`/`mime_type` on it stay
+    /// untrusted server text.
+    pub fn asset(&self) -> &VerifiedAsset {
+        self.verified.asset()
+    }
+
+    /// The content-addressed sha256 of the uploaded bytes -- the blob's
+    /// identity. Read from the exact-byte proof, not from the server's
+    /// descriptor claim (the integrity gate has already proven the two
+    /// agree).
     pub fn sha256(&self) -> Sha256Hash {
-        self.verified.descriptor().sha256
+        self.verified.asset().sha256()
     }
 
     /// Mint a NIP-68 [`PictureImage`] artifact reference from this verified

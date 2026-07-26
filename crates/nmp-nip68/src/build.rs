@@ -132,7 +132,8 @@ pub fn build_picture(
 mod tests {
     use super::*;
     use crate::image::ImageDim;
-    use nmp_blossom::{BlobDescriptor, Sha256Hash};
+    use nmp_asset::Sha256Hash;
+    use nmp_blossom::BlobDescriptor;
 
     fn author() -> PublicKey {
         nostr::Keys::generate().public_key()

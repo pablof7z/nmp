@@ -10,10 +10,11 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use nostr::{Alphabet, Event, EventBuilder, JsonUtil, Keys, Kind, Tag, TagKind, Tags, Timestamp};
 
+use nmp_asset::Sha256Hash;
 use nmp_blossom::{
     upload_authorization_draft, AuthDraftError, AuthValidationError, BlossomClient,
-    BlossomClientConfig, BlossomServerUrl, BlossomVerb, ExpectedAuthorization, Sha256Hash,
-    SignedAuthorization, UploadError,
+    BlossomClientConfig, BlossomServerUrl, BlossomVerb, ExpectedAuthorization, SignedAuthorization,
+    UploadError,
 };
 
 /// The scripted HTTP/1.1 test double shared with
@@ -97,6 +98,15 @@ async fn upload_authorization_binds_exact_sha256_verb_and_expiration() {
         .await
         .expect("upload succeeds");
     assert_eq!(verified.descriptor().sha256, hash);
+    // #884: the upload also carries protocol-neutral exact-byte proof, minted
+    // from the bytes this client sent -- not lifted out of the server's
+    // descriptor claim. url/mime ride along as untrusted presentation text.
+    assert_eq!(verified.asset().sha256(), hash);
+    assert_eq!(verified.asset().byte_len(), blob.len());
+    assert_eq!(
+        verified.asset().mime_type(),
+        Some("application/octet-stream")
+    );
 
     let requests = mock.join();
     assert_eq!(requests.len(), 1);

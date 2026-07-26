@@ -11,6 +11,9 @@ publish.workspace = true
 # and NEVER signs (signing and publishing are orthogonal stages, #47/#32).
 [dependencies]
 nostr.workspace = true
+# #884: exact-byte asset identity (`Sha256Hash`, `VerifiedAsset`) is owned by
+# the protocol-neutral `nmp-asset` crate, not privately re-implemented here.
+nmp-asset.workspace = true
 nmp-ownership.workspace = true
 nmp-transport.workspace = true
 serde.workspace = true
