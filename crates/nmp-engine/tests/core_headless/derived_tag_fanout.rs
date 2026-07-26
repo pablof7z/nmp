@@ -702,3 +702,93 @@ fn g_authors_slot_collapses_to_one_sub_where_a_tag_slot_opens_one_per_value() {
         "five derived TAG values must open five separate wire subs"
     );
 }
+
+// ---- I. what a regrouping REQ actually costs ---------------------------
+
+/// I — the hidden cost of collapsing subscriptions, and the bound on it.
+///
+/// No wire filter this router builds ever carries `since` (verified: nothing
+/// in `nmp-router` sets it). So a REQ that replaces a live sub's filter makes
+/// the relay re-serve its whole stored set for the NEW filter — including
+/// every event already delivered under the old one. That is the real cost of
+/// regrouping, and it is invisible to a ledger that counts wire messages.
+///
+/// This measures whether that re-serve costs ROWS as well as bandwidth. It
+/// must not: canonical dedup should absorb a re-served event entirely, so
+/// collapsing subscriptions is a bandwidth question only — which is what
+/// makes debounce an optimization rather than a correctness requirement.
+#[test]
+fn i_re_served_events_after_a_replacement_cost_bandwidth_but_never_rows() {
+    let r0 = relay(0);
+    let mut core = new_core(FixtureDirectory::new());
+    connect(&mut core, 0, &r0);
+    let me = Keys::generate();
+    core.handle(EngineMsg::SetActivePubkey(Some(me.public_key())));
+
+    let sink = CapturingSink::default();
+    core.handle(EngineMsg::Subscribe(
+        posts_by_my_follows(&[r0.clone()]),
+        Box::new(sink.clone()),
+    ));
+
+    let follows: Vec<Keys> = (0..3).map(|_| Keys::generate()).collect();
+    let mut posts = Vec::new();
+    for (n, author) in follows.iter().enumerate() {
+        // Follow one more author — this REPLACES the live sub's filter in
+        // place, which is exactly when a real relay re-serves.
+        let list: Vec<nostr::PublicKey> = follows[..=n].iter().map(|k| k.public_key()).collect();
+        core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            public_session(&r0),
+            event_frame(
+                "s",
+                nmp_resolver::testkit::kind3(&me, &list, 200 + n as u64),
+            ),
+        ));
+        let post = nmp_resolver::testkit::kind1(author, "post", 300 + n as u64);
+        posts.push(post.clone());
+        core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            public_session(&r0),
+            event_frame("s", post),
+        ));
+    }
+
+    let rows_before: usize = sink.0.lock().unwrap().iter().map(|b| b.len()).sum();
+
+    // The relay re-serves everything the widened filter now matches — the
+    // full stored set, every previously delivered post included.
+    for post in &posts {
+        core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            public_session(&r0),
+            event_frame("s", post.clone()),
+        ));
+    }
+
+    let rows_after: usize = sink.0.lock().unwrap().iter().map(|b| b.len()).sum();
+
+    println!("\n=== I. cost of a re-serve after filter replacement ===");
+    println!("distinct posts:              {}", posts.len());
+    println!("row deltas before re-serve:  {rows_before}");
+    println!("row deltas after re-serve:   {rows_after}");
+    println!(
+        "rows added by re-serving every stored event: {}",
+        rows_after - rows_before
+    );
+
+    assert_eq!(
+        rows_after, rows_before,
+        "a re-served event must produce ZERO new row deltas — collapsing subscriptions \
+         costs relay bandwidth, never duplicated rows"
+    );
+}
