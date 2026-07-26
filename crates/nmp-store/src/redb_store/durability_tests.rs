@@ -11,19 +11,20 @@
 //! only way to tell a dead handle from a failed write was
 //! `contains("Previous I/O")`.
 
+use std::collections::BTreeSet;
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use nostr::{EventBuilder, Keys, Kind, Timestamp};
+use nostr::{EventBuilder, Keys, Kind, RelayUrl, Timestamp};
 use redb::backends::InMemoryBackend;
 use redb::StorageBackend;
 use tempfile::TempDir;
 
 use super::store::RedbStore;
 use crate::{
-    AcceptWrite, DurabilityOutcome, EventStore, IntentSigState, PersistenceError, PersistenceFault,
-    WriteDurability,
+    AcceptWrite, DurabilityOutcome, EventStore, IntentId, IntentSigState, PersistenceError,
+    PersistenceFault, WriteDurability,
 };
 
 // ---- fault-injecting storage backend -----------------------------------
@@ -269,14 +270,33 @@ fn no_door_retries_a_commit_against_a_latched_memory() {
     control.arm(FAIL_WRITE);
     attempt_durable_write(&mut store, 2_001).expect_err("first failure latches the handle");
 
+    // Several independent commit paths, repeatedly. Each opens its own
+    // write transaction against the same latched memory.
     for round in 0..16 {
-        let error = attempt_durable_write(&mut store, 2_100 + round)
-            .expect_err("a latched handle never starts succeeding on its own");
-        assert!(
-            error.fault().requires_reopen(),
-            "every post-latch failure must tell the embedder to reopen, got {:?}",
-            error.fault()
+        let mut faults = vec![attempt_durable_write(&mut store, 2_100 + round).err()];
+        faults.push(
+            store
+                .accept_ephemeral(frozen_event(2_200 + round).id, keys().public_key())
+                .err(),
         );
+        faults.push(
+            store
+                .record_route_revision(
+                    IntentId(1),
+                    BTreeSet::from([
+                        RelayUrl::parse("wss://durability-proof.example").expect("fixed relay url")
+                    ]),
+                )
+                .err(),
+        );
+        for fault in faults {
+            let error = fault.expect("a latched handle never starts succeeding on its own");
+            assert!(
+                error.fault().requires_reopen(),
+                "every post-latch failure must tell the embedder to reopen, got {:?}",
+                error.fault()
+            );
+        }
     }
 
     // The store also exposes no door that could retry: the only recovery is
