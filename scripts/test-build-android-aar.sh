@@ -53,10 +53,10 @@ fi
 
 echo "== falsifier: generated bindings naming an absent native checksum must be rejected =="
 cp "$BINDINGS" "$TMP/mismatched.kt"
-first_checksum=$(
-    sed -n 's/^[[:space:]]*fun[[:space:]]\+\([A-Za-z0-9_]*checksum_[A-Za-z0-9_]*\).*/\1/p' "$BINDINGS" \
-        | head -n 1
+checksum_candidates=$(
+    sed -n 's/^[[:space:]]*fun[[:space:]]\+\([A-Za-z0-9_]*checksum_[A-Za-z0-9_]*\).*/\1/p' "$BINDINGS"
 )
+first_checksum=${checksum_candidates%%$'\n'*}
 if [[ -z "$first_checksum" ]]; then
     echo "error: could not select a checksum for the mismatch control" >&2
     exit 1
