@@ -819,7 +819,7 @@ entry is validated against the actual PR context by the trusted base workflow.
 - **Superseded path removed:** the filter-only `FfiDerived.inner`, both native filter-only derived cases, and the conversion through `Demand::from_filter` are deleted outright. No deprecated initializer, implicit inheritance rule, or filter-shaped compatibility path remains.
 - **Human signoff:** the repository owner explicitly requested this repair under the issue-first workflow and required the identified gaps to be fixed end-to-end. PR #716 is the exact review record; required CI, surface governance, and reviewer approval remain merge gates.
 
-## 2026-07-27 — Own exact-byte asset identity in one protocol-neutral crate ([issue #884](https://github.com/pablof7z/nmp/issues/884), [PR #TBD](https://github.com/pablof7z/nmp/pulls))
+## 2026-07-27 — Own exact-byte asset identity in one protocol-neutral crate ([issue #884](https://github.com/pablof7z/nmp/issues/884), [PR #897](https://github.com/pablof7z/nmp/pull/897))
 
 - **Failure evidence:** issue #884 records that byte identity for uploaded media had no single owner: `nmp-blossom` held BUD-01 hashing privately, and a digest parsed out of an untrusted descriptor was the same Rust type as a digest computed from bytes we actually saw. Nothing structurally distinguished a claimed hash from a verified one, so the bad path was excluded only by reviewer attention (`docs/bug-class-ledger.md:3-5`).
 - **Changed projections:** ffi
