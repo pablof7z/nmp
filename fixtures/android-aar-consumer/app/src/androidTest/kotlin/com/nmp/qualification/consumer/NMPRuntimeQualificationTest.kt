@@ -45,7 +45,7 @@ class NMPRuntimeQualificationTest {
         )
 
     @Test
-    fun publicFacadeObservesCancelsClosesAndReopensAndroidStorage() = runBlocking {
+    fun publicFacadeObservesCancelsClosesAndReopensAndroidStorage(): Unit = runBlocking {
         assumeTrue(BuildConfig.NMP_EXPECT_NATIVE_LOAD)
         val context = ApplicationProvider.getApplicationContext<Context>()
         val store = File(context.filesDir, "nmp-runtime-qualification.redb")
@@ -104,7 +104,7 @@ class NMPRuntimeQualificationTest {
     }
 
     @Test
-    fun cancellationBeforeAnyRequiredFrameIsBounded() = runBlocking {
+    fun cancellationBeforeAnyRequiredFrameIsBounded(): Unit = runBlocking {
         assumeTrue(BuildConfig.NMP_EXPECT_NATIVE_LOAD)
         val engine = NMPEngine(NMPConfig(allowedLocalRelayHosts = listOf("10.0.2.2")))
         val unavailable = demandFor("ws://10.0.2.2:47392")
@@ -121,7 +121,7 @@ class NMPRuntimeQualificationTest {
     }
 
     @Test
-    fun unavailableRelaySurfacesScopedFailureEvidence() = runBlocking {
+    fun unavailableRelaySurfacesScopedFailureEvidence(): Unit = runBlocking {
         assumeTrue(BuildConfig.NMP_EXPECT_NATIVE_LOAD)
         val engine = NMPEngine(NMPConfig(allowedLocalRelayHosts = listOf("10.0.2.2")))
         val unavailableRelay = "ws://10.0.2.2:47392"
