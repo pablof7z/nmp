@@ -23,6 +23,10 @@ use fjall_journal_fault_harness::{
 /// EFBIG. The journal write must fail for a real filesystem reason.
 const EFBIG: u64 = 27;
 
+/// Rows the undersized control's target transaction writes -- one per keyspace.
+/// Mirrors `UNDERSIZED_ROWS_PER_KEYSPACE * KEYSPACES.len()` in the probe.
+const UNDERSIZED_TARGET_ROWS: usize = 3;
+
 struct Run {
     release: Release,
     evidence: Evidence,
@@ -350,6 +354,62 @@ fn undersized_batch_is_refused_rather_than_silently_passing() {
         "poisoned",
         "fjall 3.1.6: the undersized fault was expected on the persist path\n{}",
         negative.evidence.raw
+    );
+
+    // The reopened state of this control is asserted, not merely narrated.
+    //
+    // Every release rejects the commit (`Poisoned`, nothing live in-process) and
+    // yet the target rows are present after reopen: the record was still sitting
+    // in the journal `BufWriter`, the one-shot handler raised the soft limit
+    // when the fault fired, and the buffered record therefore completed during
+    // shutdown and was replayed. Verified against the alternative: with the
+    // fault sustained through close, reopen returns the exact pre-state instead.
+    //
+    // That is a rejected transaction becoming durable, conditional on the fault
+    // clearing. #821 owns the resulting backend error contract; here it is
+    // pinned so the behaviour cannot change unobserved.
+    for run in &runs {
+        let evidence = &run.evidence;
+        assert_eq!(
+            evidence.state("STATE_LIVE"),
+            evidence.state("STATE_PRE"),
+            "fjall {}: a rejected commit must leave no state in-process\n{}",
+            run.release.version,
+            evidence.raw
+        );
+        let reopened = evidence.state("STATE_REOPEN1");
+        let pre = evidence.state("STATE_PRE");
+        assert!(
+            pre.iter().all(|row| reopened.contains(row)),
+            "fjall {}: the undersized control lost pre-transaction rows on reopen\n{}",
+            run.release.version,
+            evidence.raw
+        );
+        assert_eq!(
+            reopened.len(),
+            pre.len() + UNDERSIZED_TARGET_ROWS,
+            "fjall {}: expected the rejected undersized batch to become durable on reopen \
+             (see #821); a change here is a change in Fjall's rejected-transaction contract\n{}",
+            run.release.version,
+            evidence.raw
+        );
+        assert_eq!(
+            reopened,
+            evidence.state("STATE_REOPEN2"),
+            "fjall {}: the undersized reopened state is not stable across two reopens\n{}",
+            run.release.version,
+            evidence.raw
+        );
+    }
+
+    // All three releases land on the identical reopened state, byte for byte --
+    // another way of saying this mode cannot discriminate between them.
+    assert_eq!(
+        negative.evidence.state("STATE_REOPEN1"),
+        candidate.evidence.state("STATE_REOPEN1"),
+        "the undersized control produced different durable states across releases\n{}\n{}",
+        negative.evidence.raw,
+        candidate.evidence.raw
     );
 }
 

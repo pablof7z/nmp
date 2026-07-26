@@ -3,10 +3,12 @@
 Permanent regression proving how three pinned Fjall releases behave when a
 **real** journal write fails at the transaction boundary.
 
-Run it:
+The regression runs as part of the ordinary workspace test lane:
 
 ```sh
-./scripts/check-fjall-journal-fault.sh
+cargo test --workspace                        # includes this regression
+cargo test -p fjall-journal-fault-harness     # just this regression
+./scripts/check-fjall-journal-fault.sh        # plus fmt/clippy for the detached probes
 ```
 
 Tracks #818, under #701 and storage epic #698.
@@ -48,9 +50,15 @@ production backend, and NMP's production constructors stay Redb-only.
 | `v3_1_6/`, `v3_1_7/`, `v3_1_8/` | One package per pinned release, each with its own committed lockfile |
 | `harness/` | Builds and runs the probes, parses evidence, asserts the matrix |
 
-Every package sets an empty `[workspace]`, so none of this enters NMP's build.
-`cargo test --workspace` cannot reach it — which is why
-`scripts/check-fjall-journal-fault.sh` has its own CI lane.
+`harness/` is a member of the NMP workspace, so `cargo test --workspace` runs
+the regression and it cannot rot. That is safe because the harness depends on no
+Fjall crate: each `v3_1_*` package sets an empty `[workspace]`, so the three
+pinned releases stay detached and are built and run as child processes. No Fjall
+version enters NMP's production or default feature graph.
+
+Because the probe packages are detached, the repo-wide `cargo fmt --all` and
+`cargo clippy --workspace` never see them; `scripts/check-fjall-journal-fault.sh`
+lints them.
 
 Three packages exist because the three releases cannot coexist in one dependency
 graph. Each pins `lsm-tree` explicitly as well: Fjall depends on it with a caret
@@ -123,12 +131,36 @@ disk-full style fault would wrongly conclude 3.1.6 is safe.
 
 The `undersized` control shows the same trap from the other side — with the
 record still inside the `BufWriter`, the fault lands on the `persist` flush and
-every release reports the identical `Poisoned`. Note that in this control the
-commit is rejected while the journal record still completes during shutdown once
-the probe lifts the limit, so the rows appear after reopen. That is a property
-of this control (the limit is deliberately lifted before close), not a claim
-about Fjall under a sustained fault — and it is one more reason a persist-path
-failure is not interchangeable with the one-shot `write_batch` result.
+every release reports the identical `Poisoned`.
+
+That control also surfaced a separate property, now measured rather than
+assumed: the commit is **rejected** with `Poisoned` and leaves nothing live
+in-process, yet the target rows are **present after reopen**. The record was
+still buffered, the one-shot handler raised the soft limit when the fault fired,
+and the buffered record therefore completed during shutdown and was replayed.
+(The earlier wording here blamed the probe's explicit disarm; the actual cause is
+the one-shot handler's raise, which happens first.)
+
+Verified against the alternative: with the fault **sustained** through close and
+reopen, the same rejected commit reopens to the exact 12-row pre-state. Both
+variants return `Poisoned` and both stop at journal offset 1190 before drop, so
+the difference materialises only at shutdown.
+
+| undersized variant | `commit()` | reopen ×2 |
+| --- | --- | --- |
+| fault lifted (this control) | `Err(Poisoned)` | 15 rows — rejected transaction is durable |
+| fault sustained | `Err(Poisoned)` | 12 rows — exact pre-state |
+
+So a rejected transaction can become durable, **conditional on the underlying
+fault clearing before shutdown**. This is not a claim about Fjall under a
+sustained fault, and it does not touch the one-shot `write_batch` lane, where the
+record is truncated mid-batch and every release reopens to the pre-state.
+[#821](https://github.com/pablof7z/nmp/issues/821) owns the resulting backend
+error contract and its oracle consequence;
+`undersized_batch_is_refused_rather_than_silently_passing` asserts the exact
+reopened state so the behaviour cannot change unobserved. It is also one more
+reason a persist-path failure is not interchangeable with the one-shot
+`write_batch` result.
 
 Refusals — more than one injected failure, a fault that missed the commit,
 journal rotation, or a batch that is not actually over/under the buffer — fail

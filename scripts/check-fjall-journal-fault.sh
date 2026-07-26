@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # #818: run the Fjall journal-write-error falsifier.
 #
-# Deterministic entry point for CI and for humans. The regression lives in a
-# workspace detached from NMP's build (`tools/fjall-journal-fault/`), because it
-# links three mutually exclusive Fjall releases and must never enter the
-# production or default feature graph. `cargo test --workspace` does not reach
-# it, so without this command the regression would silently rot.
+# The regression itself runs in the ordinary workspace lane: the harness is a
+# workspace member, so `cargo test --workspace` executes it and it cannot rot.
+#
+# This script is the fuller local entry point. It adds what the workspace lane
+# structurally cannot cover: the three pinned release probes under
+# `tools/fjall-journal-fault/v3_1_*` are detached workspaces (they link mutually
+# exclusive Fjall releases and must never enter the production or default
+# feature graph), so `cargo fmt --all` and `cargo clippy --workspace` never see
+# them.
 #
 # Passing qualifies exactly one behaviour of the pinned Fjall 3.1.8 build: an
 # acknowledged transaction is not silently unrecoverable when the journal write

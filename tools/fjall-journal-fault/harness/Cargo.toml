@@ -1,15 +1,20 @@
 # Driver for the #818 Fjall journal-write-error falsifier.
 #
-# Detached from the NMP workspace: this builds three mutually exclusive Fjall
-# releases in child processes and must never enter NMP's production or default
-# feature graph. `cargo test -p nmp-store` does not reach it.
+# This package IS a member of the NMP workspace, so `cargo test --workspace`
+# runs the regression and it cannot silently rot. That is safe because the
+# harness depends on no Fjall crate at all: the three pinned release probes
+# under `../v3_1_*` are detached workspaces with their own lockfiles, built and
+# run as child processes. No Fjall version enters NMP's production or default
+# feature graph, and NMP's production constructors remain Redb-only.
+#
+# A child process is also required rather than stylistic: `RLIMIT_FSIZE` and
+# signal disposition are process-global and must not escape into the test runner.
 [package]
 name = "fjall-journal-fault-harness"
-version = "0.1.0"
-edition = "2021"
-publish = false
-
-[workspace]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [dependencies]
 

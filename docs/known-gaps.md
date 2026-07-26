@@ -358,8 +358,9 @@ about current code:
   the journal holds only a truncated batch, so reopen silently returns the
   pre-transaction state; 3.1.7 and 3.1.8 return the propagated journal error
   (`Error::Io(EFBIG)`) with no partial state in-process and reopen byte-identical
-  to the pre-state twice over. `scripts/check-fjall-journal-fault.sh` has its
-  own CI lane because the probes live in workspaces detached from NMP's build.
+  to the pre-state twice over. The harness is a workspace member so
+  `cargo test --workspace` runs it, while the three pinned release probes stay
+  detached workspaces built as child processes.
   This qualifies exactly one behaviour of the pinned 3.1.8 candidate — an
   acknowledged transaction is not silently unrecoverable when the journal write
   fails. It does **not** qualify Fjall's semantics, maintenance, compaction
@@ -368,7 +369,10 @@ about current code:
   Redb-only. Linux is the only platform where the fault shape is claimed; other
   kernels are typed unsupported rather than skipped. A later Fjall release
   requires a fresh source and fault audit — it cannot inherit this result by
-  semver.
+  semver. Separately, that work measured a Fjall transaction rejected with
+  `Error::Poisoned` becoming durable after reopen when the underlying write
+  fault clears before shutdown (with the fault sustained, it reopens to the exact
+  pre-state); #821 owns that error contract and its oracle consequence.
 
 - **Fallible ingest/read store doors landed; two read peeks and FFI plumbing deferred (#122).** The six ingest/read `EventStore` doors (`insert`/`query`/`remove`/`expire_due`/`record_coverage`/`gc`) now return `Result<_, PersistenceError>` — `RedbStore` propagates real redb I/O errors instead of `.expect()`-panicking on every EVENT frame, and the engine degrades the local cache to read-only (a `DiagnosticsSnapshot.store_degraded` signal) instead of crashing the host app. Deliberately NOT done in that change, flagged here so nothing hides: (1) `EventStore::next_expiration` and `get_coverage` (small index/coverage read peeks) are still `.expect()`-on-I/O — a disk error there still panics; widening them ripples into the engine's deadline-arming hot path and was scoped out. (2) `store_degraded` is surfaced only on the Rust `DiagnosticsSnapshot`; it is NOT plumbed through `FfiDiagnosticsSnapshot`/Swift/Kotlin, so a native host cannot yet observe the read-only degrade. (3) The degrade policy is intentionally minimal (latch first error, skip the reactive step, emit a diagnostic, keep running) — there is no recovery/reopen path, no per-door policy, and no bounded-retry framework.
 

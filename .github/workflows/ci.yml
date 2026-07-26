@@ -121,22 +121,6 @@ jobs:
       - name: cargo test (workspace)
         run: cargo test --workspace
 
-  # #818: Fjall journal-write-error falsifier. Lives in a detached workspace
-  # (three mutually exclusive Fjall releases), so `cargo test --workspace` above
-  # cannot reach it and it needs its own lane or it rots. ubuntu-latest is the
-  # supported lane: the one-shot RLIMIT_FSIZE/SIGXFSZ fault is only claimed for
-  # Linux, and this job executes the real fault rather than skipping.
-  fjall-journal-fault:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install pinned Rust toolchain
-        run: rustup show
-
-      - name: Falsify Fjall journal write-error recovery (3.1.6 / 3.1.7 / 3.1.8)
-        run: ./scripts/check-fjall-journal-fault.sh
-
   # Clean-clone Swift package smoke test (#18): `Packages/NMP/Package.swift`
   # depends on a binary xcframework + generated UniFFI bindings that are
   # deliberately NOT committed (see `.gitignore`/`Packages/NMP/README.md`).
