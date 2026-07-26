@@ -31,7 +31,7 @@ use nmp_signer::LocalKeySigner;
 use nmp_store::MemoryStore;
 use nmp_transport::PoolConfig;
 
-use crate::relays::{RelayConfig, ScriptedRelay};
+use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 
 /// Bounded wait for a positive ("eventually true") assertion.
 pub const EVENTUALLY: Duration = Duration::from_secs(5);

@@ -1,11 +1,18 @@
-//! Shared process-level seams for NMP integration tests.
+//! Shared test-only fixtures and process seams for NMP integration tests.
 //!
-//! This crate is test infrastructure, not product API. In particular,
+//! This crate is test infrastructure, not product API. [`reference_fixtures`]
+//! owns the NIP-19 reference corpus every parity surface reads; [`relays`]
+//! owns the in-process scripted relay scenarios are built from; and
 //! [`ConnectionOwner`] gives reconnect tests explicit ownership of every TCP
 //! connection accepted on a relay's public address. Its async shutdown does
 //! not return until the listener and all accepted sockets have been dropped.
 
 #![forbid(unsafe_code)]
+
+/// Shared NIP-19 reference corpus and its normalized expected values.
+pub mod reference_fixtures;
+/// In-process relay with externally observable contact/query/write facts.
+pub mod relays;
 
 use std::io;
 use std::net::SocketAddr;

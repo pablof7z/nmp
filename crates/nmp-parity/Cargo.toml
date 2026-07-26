@@ -13,12 +13,12 @@ doctest = false
 nostr.workspace = true
 nmp.workspace = true
 nmp-ffi.workspace = true
-nmp-bdd.workspace = true
 nmp-content.workspace = true
 nmp-grammar.workspace = true
 nmp-nip02.workspace = true
 
 [dev-dependencies]
+nmp-test-support.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 # #99: the terminal-retained-receipt reattach scenario needs a real
 # `RedbStore` file (an ephemeral receipt abandoned across a genuine

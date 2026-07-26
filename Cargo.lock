@@ -1954,9 +1954,6 @@ dependencies = [
  "nmp-test-support",
  "nmp-transport",
  "nostr 0.44.4",
- "nostr-relay-builder",
- "serde",
- "serde_json",
  "tokio",
 ]
 
@@ -2163,11 +2160,11 @@ name = "nmp-parity"
 version = "0.1.0"
 dependencies = [
  "nmp",
- "nmp-bdd",
  "nmp-content",
  "nmp-ffi",
  "nmp-grammar",
  "nmp-nip02",
+ "nmp-test-support",
  "nostr 0.44.4",
  "tempfile",
  "tokio",
@@ -2180,6 +2177,7 @@ dependencies = [
  "libc",
  "nmp-grammar",
  "nmp-store",
+ "nmp-test-support",
  "nostr 0.44.4",
 ]
 
@@ -2190,6 +2188,7 @@ dependencies = [
  "nmp-grammar",
  "nmp-resolver",
  "nmp-store",
+ "nmp-test-support",
  "nostr 0.44.4",
  "proptest",
 ]
@@ -2231,6 +2230,10 @@ dependencies = [
 name = "nmp-test-support"
 version = "0.1.0"
 dependencies = [
+ "nostr 0.44.4",
+ "nostr-relay-builder",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 
