@@ -87,7 +87,7 @@ Exercise the product-relevant subset:
 - one ACK plus one rejection remains mixed evidence;
 - at-most-once ambiguity never offers blind retry;
 - pre-acceptance failure leaves no durable row/receipt;
-- the native receipt bridge is established before acceptance with no capacity or thread refusal, so a returned handle reflects an accepted obligation and consumed composed intent;
+- the native receipt bridge is established before acceptance with no capacity or thread refusal, so a returned handle reflects an accepted obligation; NIP-22 must use an ordinary `WriteIntent` with no second lifecycle, while any test of NIP-29's current take-once path records defect behavior pending #823 rather than accepting it as a reusable contract;
 - process restart reattaches the same receipt and frozen intent;
 - restart replays persisted `AwaitingRelay`, `AwaitingAuth`, `RetryEligible`, `HandoffAmbiguous`, and exact-`Written` `Sent` facts while never replaying transient `Routed` or turning `AttemptStarted`, ambiguity, or an ephemeral handoff into `Sent`;
 - old remote-signer close cannot detach its replacement;
@@ -98,6 +98,13 @@ Exercise the product-relevant subset:
 ## Protocol-module falsifiers
 
 Use the checklist in [Protocol authoring](protocol-authoring.md), then compare the same semantic operation through direct Rust and every projected native tier. Compare final unsigned/signed bytes, authority, rows, evidence, receipt facts, and teardown—not merely JSON shape.
+
+For engine-free composition such as NIP-22 comments, additionally prove that the
+operation is a protocol-owned free function at every tier, returns the ordinary
+`WriteIntent` noun, and reaches pending rows, receipts, correlation, and
+cancellation through generic `publish`. The absence of an engine method,
+protocol-specific intent carrier, and protocol-specific publication overload is
+part of the falsifier, not a naming preference.
 
 ## Diagnostics proof
 

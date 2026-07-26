@@ -17,6 +17,7 @@ nmp-bdd.workspace = true
 nmp-content.workspace = true
 nmp-grammar.workspace = true
 nmp-nip02.workspace = true
+nmp-nip22.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

@@ -26,6 +26,24 @@ only renders that state and forwards taps. The ordinary action refuses a
 missing contact-list base; first-list creation is intentionally a separate,
 not-yet-shipped policy rather than a hidden one-contact replacement.
 
+NIP-22 comment composition remains a protocol-owned free function:
+
+```swift
+let intent = try commentIntent(
+    root: root,
+    parent: parent,
+    authorPubkey: author,
+    createdAt: timestamp,
+    content: text,
+    correlation: correlation
+)
+let receipt = try await nmp.publish(intent)
+```
+
+The composer returns the ordinary `WriteIntent`. It does not live on
+`NMPEngine`, introduce a `CommentIntent` wrapper, or add another publication
+lifecycle.
+
 NIP-46 remote signers are also projected directly:
 
 ```swift

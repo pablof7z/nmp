@@ -49,12 +49,29 @@ If a module needs a new grammar node, propose a public closed vocabulary change
 with defined hashing, equality, persistence, diagnostics, and Rust/Swift/Kotlin
 projection. Do not hide the missing concept in an opaque extension payload.
 
+## Keep engine-free composition off Engine
+
+Needing the engine and eventually publishing through the engine are different
+facts. If a protocol operation can compose an existing `Demand` or
+`WriteIntent` entirely from explicit inputs, expose it as a protocol-owned free
+function. Do not add it to `Engine` for naming symmetry, discoverability, or
+because another protocol currently has an engine-bound operation.
+
+NIP-22 is the reference shape. Comment composition takes the root, parent,
+author, timestamp, content, and optional correlation; it returns the ordinary
+write intent. Swift and Kotlin use the matching top-level `commentIntent`
+function, then pass that value to generic `publish`. No `CommentIntent`
+wrapper, take-once lifecycle, or NIP-22 `publishComposed` overload exists.
+
 ## Distinguish public protocol context from private authority
 
-A public protocol may make one host relay part of an object's identity. A
-NIP-29 constructor can therefore accept `(groupId, hostRelay)` and return an
-opaque group context. That typed parameter is not a generic relay list and
-cannot be reused to route unrelated traffic.
+A public protocol may make one host relay part of an object's identity. An
+NIP-29 composer can therefore accept `(groupId, hostRelay)`, but the resulting
+host authority must be non-forgeable and payload-bound inside the ordinary
+immutable `WriteIntent`. It is not a generic relay list and cannot be extracted
+or reused to route unrelated traffic. The current parallel NIP-29 intent and
+publication lifecycle does not satisfy this architecture; #823 owns its hard
+cut.
 
 Private-inbox or recipient authority is stricter: it cannot be a public
 constructor over arbitrary relay URLs. The owning module or engine mints it only

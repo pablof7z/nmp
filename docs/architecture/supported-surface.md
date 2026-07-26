@@ -17,6 +17,14 @@ NIP-65 bootstrap is not projected through UniFFI, Swift, or Kotlin in its first
 unit. Native consumers must not recreate it with raw sockets or mechanism
 crates; parity is an explicit later surface change.
 
+NIP-22 comment composition is projected, but it does not become an Engine
+capability. `nmp-nip22` owns the kind:1111/NIP-73 schema and returns the
+ordinary `WriteIntent`; FFI, Swift, and Kotlin expose matching engine-free
+`comment_intent`/`commentIntent` free functions returning
+`FfiWriteIntent`/`WriteIntent`. Publication uses the existing generic
+`publish` door and receipt lifecycle. There is no `Engine.commentIntent`,
+`CommentIntent` wrapper, or NIP-22-specific composed-publication overload.
+
 `nmp-ffi` is a projection of that facade. The repository uses UniFFI proc
 macros and extracts component metadata from a compiled library; there is no UDL
 source of truth. Swift and Kotlin add native observation/lifecycle ergonomics

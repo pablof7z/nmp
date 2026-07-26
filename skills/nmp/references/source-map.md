@@ -38,6 +38,8 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `crates/nmp-executor/src/lib.rs`
 - Source: `crates/nmp-nip02/src/lib.rs`
 - Source: `crates/nmp-nip02/src/service.rs`
+- Source: `crates/nmp-nip22/src/lib.rs`
+- Source: `crates/nmp-nip22/src/intent.rs`
 - Source: `crates/nmp-nip29/src/lib.rs`
 - Source: `crates/nmp-signer/src/op.rs`
 - Source: `crates/nmp-signer/src/nip46.rs`
@@ -52,6 +54,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `crates/nmp-ffi/src/types.rs`
 - Source: `crates/nmp-ffi/src/convert.rs`
 - Source: `crates/nmp-ffi/src/nip02.rs`
+- Source: `crates/nmp-ffi/src/nip22.rs`
 - Source: `crates/nmp-ffi/src/signer.rs`
 - Source: `Packages/NMP/Sources/NMP/Engine.swift`
 - Source: `Packages/NMP/Sources/NMP/NMPError.swift`
@@ -98,6 +101,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `Packages/NMP/Package.swift`
 - Source: `Packages/NMP/README.md`
 - Source: `Packages/NMP/Sources/NMP/Following.swift`
+- Source: `Packages/NMP/Sources/NMP/NIP22.swift`
 - Source: `Packages/NMP/Sources/NMP/NIP29.swift`
 - Source: `Packages/NMP/Sources/NMPContent`
 - Source: `Packages/NMP/Sources/NMPContent/ContentDocument.swift`
@@ -105,6 +109,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `Packages/NMPKotlin/README.md`
 - Source: `Packages/NMPKotlin/build.gradle.kts`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Content.kt`
+- Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP22.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Reference.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29.kt`
 - Source: `scripts/build-swift-xcframework.sh`

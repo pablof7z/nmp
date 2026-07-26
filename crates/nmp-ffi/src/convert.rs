@@ -1625,8 +1625,8 @@ fn parse_identity_override(input: &str) -> Result<PublicKey, FfiError> {
     parse_pubkey(input).or_else(|err| PublicKey::from_bech32(input).map_err(|_| err))
 }
 
-/// #591: `FfiWriteIntent.correlation`'s dedicated parse (also used by
-/// `nip22.rs`'s `comment_intent`, hence `pub(crate)`). Delegates entirely
+/// #591: `FfiWriteIntent.correlation`'s dedicated parse (also used by the
+/// engine-free NIP-22 composer, hence `pub(crate)`). Delegates entirely
 /// to `nmp_grammar::CorrelationToken`'s `TryFrom<&str>` bounded/non-empty
 /// validation; a rejection becomes a typed, synchronous
 /// [`FfiError::InvalidCorrelationToken`] naming both the offending input and
