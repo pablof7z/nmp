@@ -36,6 +36,13 @@ members = [
     # Typed NIP-22 comments over NIP-73 external targets (#572), exclusive
     # kind:1111 schema owner.
     "crates/nmp-nip22",
+    # #818 Fjall journal-write-error falsifier. ONLY the harness is a member,
+    # so `cargo test --workspace` runs the regression instead of letting it rot
+    # behind a bespoke lane. It depends on no Fjall crate: the three pinned
+    # release probes under `tools/fjall-journal-fault/v3_1_*` stay detached
+    # workspaces that the harness builds and runs as child processes, so no
+    # Fjall version ever enters NMP's production or default graph.
+    "tools/fjall-journal-fault/harness",
 ]
 
 [workspace.package]

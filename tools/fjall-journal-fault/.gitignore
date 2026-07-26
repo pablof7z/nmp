@@ -1,0 +1,8 @@
+# Each release probe and the harness is its own detached workspace, so each
+# builds into its own target directory. Regenerated, never committed -- same as
+# `/target` at the repo root.
+#
+# The `Cargo.lock` files beside them are deliberately NOT ignored: they are the
+# pinning that makes this regression evidence about exact Fjall and lsm-tree
+# releases (#818).
+*/target/

@@ -1,0 +1,30 @@
+# Release probe for #818: Fjall 3.1.7 under a real one-shot journal write failure.
+#
+# Detached from the NMP workspace on purpose. Three packages exist because the
+# three Fjall releases cannot coexist in one dependency graph, and because each
+# needs its own committed lockfile so the exact crate identities under test are
+# pinned rather than resolved.
+[package]
+name = "fjall-journal-fault-v3_1_7"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Keeps the pinned release out of NMP's normal workspace build; nothing in the
+# production graph may depend on it.
+[workspace]
+
+[[bin]]
+name = "fjall-journal-fault-v3_1_7"
+path = "src/main.rs"
+
+[dependencies]
+# Exact version, default features (LZ4 journal compression is part of the
+# qualified profile). A semver-compatible bump is a new source and fault audit,
+# not a substitution -- see #818.
+fjall = { version = "=3.1.7", default-features = true }
+libc = "0.2"
+# Pinned explicitly, not inherited. Fjall depends on `lsm-tree` with a caret
+# range, so without this the probe would silently link a newer lsm-tree than the
+# release under test and the recorded checksum would not describe what ran.
+lsm-tree = "=3.1.7"
