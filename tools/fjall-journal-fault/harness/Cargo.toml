@@ -1,0 +1,17 @@
+# Driver for the #818 Fjall journal-write-error falsifier.
+#
+# Detached from the NMP workspace: this builds three mutually exclusive Fjall
+# releases in child processes and must never enter NMP's production or default
+# feature graph. `cargo test -p nmp-store` does not reach it.
+[package]
+name = "fjall-journal-fault-harness"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+
+[dev-dependencies]
+tempfile = "3"
