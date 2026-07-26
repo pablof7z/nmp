@@ -24,6 +24,8 @@ use crate::{
 const ALICE_SECRET: &str = "0000000000000000000000000000000000000000000000000000000000000001";
 const BOB_SECRET: &str = "0000000000000000000000000000000000000000000000000000000000000002";
 const COVERAGE_SECRET: &str = "0000000000000000000000000000000000000000000000000000000000000003";
+const MAX_COVERAGE_SECRET: &str =
+    "0000000000000000000000000000000000000000000000000000000000000004";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Checkpoint {
@@ -52,13 +54,14 @@ struct TraceFixture {
     delete_future: Event,
     expiring: Event,
     covered: Event,
+    max_covered: Event,
     publish_signed: Event,
     publish_frozen: Event,
     cancel_frozen: Event,
 }
 
 impl TraceFixture {
-    fn new(alice: &Keys, bob: &Keys, coverage_author: &Keys) -> Self {
+    fn new(alice: &Keys, bob: &Keys, coverage_author: &Keys, max_coverage_author: &Keys) -> Self {
         let delete_target = regular(alice, "delete me", 150);
         let future_target = regular(alice, "arrives after deletion", 170);
         let (publish_signed, publish_frozen) = signed_and_frozen(bob, "publish with retry", 220);
@@ -75,6 +78,7 @@ impl TraceFixture {
             future_target,
             expiring: expiring(alice, "short lived", 190, 200),
             covered: regular(coverage_author, "covered then evicted", 210),
+            max_covered: regular(max_coverage_author, "maximum timestamp boundary", u64::MAX),
             publish_signed,
             publish_frozen,
             cancel_frozen,
@@ -465,12 +469,17 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
     let alice = keys(ALICE_SECRET);
     let bob = keys(BOB_SECRET);
     let coverage_author = keys(COVERAGE_SECRET);
+    let max_coverage_author = keys(MAX_COVERAGE_SECRET);
     let primary = relay("wss://oracle-primary.example");
     let secondary = relay("wss://oracle-secondary.example");
     let publish = relay("wss://oracle-publish.example");
     let atom = coverage_atom(&coverage_author);
+    let max_atom = coverage_atom(&max_coverage_author);
     let mut context = OracleContext {
-        coverage: vec![(atom.clone(), primary.clone())],
+        coverage: vec![
+            (atom.clone(), primary.clone()),
+            (max_atom.clone(), primary.clone()),
+        ],
         ..OracleContext::default()
     };
     let mut checkpoints = Vec::new();
@@ -698,6 +707,41 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
         &context,
         &mut checkpoints,
         "coverage-safe gc",
+        &alice,
+        &primary,
+    );
+
+    harness
+        .store()
+        .insert(fixture.max_covered.clone(), observed(&primary, u64::MAX))
+        .unwrap();
+    harness
+        .store()
+        .record_coverage(
+            &max_atom,
+            &primary,
+            CoverageInterval::new(Timestamp::from(u64::MAX), Timestamp::from(u64::MAX)),
+        )
+        .unwrap();
+    record(
+        &mut harness,
+        &context,
+        &mut checkpoints,
+        "maximum coverage fact and claim persisted",
+        &alice,
+        &primary,
+    );
+    let report = harness
+        .store()
+        .gc(&ClaimSet::new(vec![protect_author(&alice)]))
+        .unwrap();
+    assert_eq!(report.events_evicted, 1);
+    assert_eq!(report.coverage_rows_deleted, 1);
+    record(
+        &mut harness,
+        &context,
+        &mut checkpoints,
+        "maximum coverage removed with fact",
         &alice,
         &primary,
     );
@@ -944,6 +988,7 @@ fn full_semantic_trace_matches_memory_and_redb_after_every_operation_and_reopen(
         &keys(ALICE_SECRET),
         &keys(BOB_SECRET),
         &keys(COVERAGE_SECRET),
+        &keys(MAX_COVERAGE_SECRET),
     );
     let expected = run_trace(Harness::memory(), &fixture);
     let dir = tempfile::tempdir().expect("oracle tempdir");

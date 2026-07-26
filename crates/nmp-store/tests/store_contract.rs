@@ -944,6 +944,38 @@ fn gc_deletes_watermark_row_when_shrink_empties_it() {
 }
 
 #[test]
+fn gc_deletes_coverage_when_evicting_the_maximum_timestamp_boundary() {
+    for_each_backend(|store| {
+        let k = keys();
+        let event = regular_event_at(&k, "maximum timestamp", u64::MAX);
+        let event_id = event.id;
+        store.insert(event, observed("wss://r1", 1)).unwrap();
+
+        let s = shape(&[1], Some(&k));
+        let r = relay("wss://r1");
+        store
+            .record_coverage(
+                &atom(&s),
+                &r,
+                CoverageInterval::new(Timestamp::max(), Timestamp::max()),
+            )
+            .unwrap();
+
+        let report = store.gc(&ClaimSet::new(vec![])).unwrap();
+        assert_eq!(report.events_evicted, 1);
+        assert_eq!(report.coverage_rows_deleted, 1);
+        assert_eq!(report.coverage_rows_shrunk, 0);
+
+        let key = coverage_key(&atom(&s));
+        assert!(
+            store.get_coverage(key, &r).is_none(),
+            "coverage must not claim the evicted u64::MAX point"
+        );
+        assert!(store.query(&Filter::new().id(event_id)).unwrap().is_empty());
+    });
+}
+
+#[test]
 fn gc_retains_claimed_event_and_replaceable_current_winner() {
     for_each_backend(|store| {
         let k = keys();
@@ -1273,6 +1305,42 @@ fn persistence_roundtrip_events_and_coverage_survive_reopen() {
         .expect("coverage survives reopen");
     assert_eq!(interval.from, Timestamp::from(0u64));
     assert_eq!(interval.through, Timestamp::from(150u64));
+}
+
+#[test]
+fn gc_max_timestamp_coverage_deletion_survives_redb_reopen() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("store.redb");
+    let k = keys();
+    let event = regular_event_at(&k, "maximum timestamp", u64::MAX);
+    let event_id = event.id;
+    let s = shape(&[1], Some(&k));
+    let r = relay("wss://r1");
+    let key = coverage_key(&atom(&s));
+
+    {
+        let mut store = RedbStore::open(&path).expect("open redb store");
+        store.insert(event, observed("wss://r1", 1)).unwrap();
+        store
+            .record_coverage(
+                &atom(&s),
+                &r,
+                CoverageInterval::new(Timestamp::max(), Timestamp::max()),
+            )
+            .unwrap();
+
+        let report = store.gc(&ClaimSet::new(vec![])).unwrap();
+        assert_eq!(report.events_evicted, 1);
+        assert_eq!(report.coverage_rows_deleted, 1);
+        assert_eq!(report.coverage_rows_shrunk, 0);
+    }
+
+    let store = RedbStore::open(&path).expect("reopen redb store");
+    assert!(
+        store.get_coverage(key, &r).is_none(),
+        "the deleted u64::MAX coverage row must not survive reopen"
+    );
+    assert!(store.query(&Filter::new().id(event_id)).unwrap().is_empty());
 }
 
 // ---------------------------------------------------------------------
