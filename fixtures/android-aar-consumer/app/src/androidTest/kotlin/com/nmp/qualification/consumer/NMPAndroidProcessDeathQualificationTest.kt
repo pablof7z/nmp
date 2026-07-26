@@ -69,8 +69,14 @@ class NMPAndroidProcessDeathQualificationTest {
     fun seedProtectedCheckpointsAndDurableReceipt(): Unit = runBlocking {
         assumePhase("seed")
         assertTrue(BuildConfig.NMP_NIP46_REMOTE_PUBKEY.isNotEmpty())
-        assertTrue(BuildConfig.NMP_NIP46_PAIRING_SECRET.isNotEmpty())
         assertTrue(BuildConfig.NMP_NIP46_RELAY.startsWith("ws://127.0.0.1:"))
+        val pairingSecret =
+            requireNotNull(
+                InstrumentationRegistry.getArguments().getString(NIP46_PAIRING_SECRET),
+            ) {
+                "seed phase requires the ephemeral NIP-46 pairing secret"
+            }
+        assertTrue(pairingSecret.isNotEmpty())
         accountStore.clear()
         sessionStore.clear()
         preferences.edit().clear().commit()
@@ -86,7 +92,7 @@ class NMPAndroidProcessDeathQualificationTest {
             val localSecret = requireNotNull(accountStore.loadSecretKey())
             val pairedConnection =
                 engine.connectNip46(
-                    bunkerUri(),
+                    bunkerUri(pairingSecret),
                     timeout = 15.seconds,
                 )
             connection = pairedConnection
@@ -317,14 +323,14 @@ class NMPAndroidProcessDeathQualificationTest {
             maxRelays = 3u,
         )
 
-    private fun bunkerUri(): String {
+    private fun bunkerUri(pairingSecret: String): String {
         val encodedRelay =
             URLEncoder.encode(
                 BuildConfig.NMP_NIP46_RELAY,
                 StandardCharsets.UTF_8.name(),
             )
         return "bunker://${BuildConfig.NMP_NIP46_REMOTE_PUBKEY}" +
-            "?relay=$encodedRelay&secret=${BuildConfig.NMP_NIP46_PAIRING_SECRET}"
+            "?relay=$encodedRelay&secret=$pairingSecret"
     }
 
     private suspend fun awaitNip46Terminal(
@@ -380,6 +386,7 @@ class NMPAndroidProcessDeathQualificationTest {
     private companion object {
         const val TAG = "NMPQualification"
         const val PROCESS_PHASE = "nmpProcessPhase"
+        const val NIP46_PAIRING_SECRET = "nmpNip46PairingSecret"
         const val PROCESS_ACCOUNT_NAME = "process-account"
         const val PROCESS_SESSION_NAME = "process-nip46"
         const val PROCESS_COORDINATES = "nmp-process-coordinates"

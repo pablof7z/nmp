@@ -15,10 +15,6 @@ val nip46RemotePubkey =
     providers.gradleProperty("nmpNip46RemotePubkey")
         .orElse("")
         .get()
-val nip46PairingSecret =
-    providers.gradleProperty("nmpNip46PairingSecret")
-        .orElse("")
-        .get()
 val missingRuntimeAar = providers.gradleProperty("nmpMissingRuntimeAar").orNull
 
 android {
@@ -35,7 +31,6 @@ android {
         buildConfigField("String", "NMP_QUALIFICATION_RELAY", "\"$qualificationRelay\"")
         buildConfigField("String", "NMP_NIP46_RELAY", "\"$nip46Relay\"")
         buildConfigField("String", "NMP_NIP46_REMOTE_PUBKEY", "\"$nip46RemotePubkey\"")
-        buildConfigField("String", "NMP_NIP46_PAIRING_SECRET", "\"$nip46PairingSecret\"")
         buildConfigField("boolean", "NMP_EXPECT_NATIVE_LOAD", (missingRuntimeAar == null).toString())
     }
 

@@ -61,7 +61,10 @@ The host then runs three separate `am instrument` processes with an explicit
    available from the durable store.
 
 Only non-secret receipt coordinates live in `SharedPreferences`; checkpoint
-plaintext is scanned for absence under the app data directory.
+plaintext is scanned for absence under the app data directory. The ephemeral
+NIP-46 pairing secret enters only the seed instrumentation process; it is not
+compiled into either APK, and the harness rejects it anywhere in captured
+artifacts.
 
 The clean-checkout hosted command is:
 

@@ -108,7 +108,6 @@ echo "== positive: x86_64 AAR executes observation, cancellation, reopen, and cl
     -PnmpQualificationRelay="$RELAY_URL" \
     -PnmpNip46Relay="$NIP46_RELAY_URL" \
     -PnmpNip46RemotePubkey="$nip46_remote_pubkey" \
-    -PnmpNip46PairingSecret="$nip46_pairing_secret" \
     :app:clean :app:connectedDebugAndroidTest \
     | tee "$ARTIFACTS/positive-instrumentation.txt"
 
@@ -125,10 +124,15 @@ run_process_phase() {
     local phase=$1
     local method=$2
     local output="$ARTIFACTS/process-$phase-instrumentation.txt"
+    local phase_arguments=()
+    if [[ "$phase" == seed ]]; then
+        phase_arguments=(-e nmpNip46PairingSecret "$nip46_pairing_secret")
+    fi
     adb shell am instrument \
         -w \
         -r \
         -e nmpProcessPhase "$phase" \
+        "${phase_arguments[@]}" \
         -e class \
         "com.nmp.qualification.consumer.NMPAndroidProcessDeathQualificationTest#$method" \
         "com.nmp.qualification.consumer.test/androidx.test.runner.AndroidJUnitRunner" \
@@ -151,6 +155,14 @@ echo "== process death: restore exact identity/session/receipt without publish =
 run_process_phase restore restoreIdentitySessionAndExactReceipt
 echo "== process death: cleared credentials must not resurrect =="
 run_process_phase verify-clear clearedCredentialsStayAbsentAfterAnotherProcessDeath
+
+if grep -R -F -l -- "$nip46_pairing_secret" \
+    "$ARTIFACTS" \
+    "$CONSUMER/app/build/outputs" \
+    "$ANDROID_PROJECT/build/outputs" >/dev/null; then
+    echo "error: ephemeral NIP-46 pairing secret escaped into captured artifacts" >&2
+    exit 1
+fi
 
 connect_count=$(grep -c 'NMP_ANDROID_NIP46_METHOD connect' "$RELAY_LOG" || true)
 get_public_key_count=$(grep -c 'NMP_ANDROID_NIP46_METHOD get_public_key' "$RELAY_LOG" || true)
@@ -179,7 +191,6 @@ echo "== negative: AAR missing libnmp_ffi x86_64 must refuse NMPEngine =="
     -PnmpQualificationRelay="$RELAY_URL" \
     -PnmpNip46Relay="$NIP46_RELAY_URL" \
     -PnmpNip46RemotePubkey="$nip46_remote_pubkey" \
-    -PnmpNip46PairingSecret="$nip46_pairing_secret" \
     -PnmpMissingRuntimeAar="$MISSING_ABI_AAR" \
     :app:clean :app:connectedDebugAndroidTest \
     | tee "$ARTIFACTS/missing-abi-instrumentation.txt"
