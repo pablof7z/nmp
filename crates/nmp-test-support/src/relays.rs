@@ -35,7 +35,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use nmp_test_support::ConnectionOwner;
+use crate::ConnectionOwner;
 use nostr::{JsonUtil, RelayUrl};
 
 use nostr_relay_builder::builder::{
