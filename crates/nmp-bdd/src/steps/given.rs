@@ -113,6 +113,26 @@ async fn person_posted_n_notes(w: &mut NmpWorld, person: String, n: usize) {
     }
 }
 
+#[given(regex = r#"^I administer (\d+) groups?$"#)]
+async fn administer_n_groups(w: &mut NmpWorld, n: usize) {
+    w.stage_administered_groups(n);
+}
+
+#[given(regex = r#"^I administer no groups$"#)]
+async fn administer_no_groups(w: &mut NmpWorld) {
+    w.stage_administered_groups(0);
+}
+
+#[given(regex = r#"^the group state of every group I administer is open$"#)]
+async fn group_state_is_open(w: &mut NmpWorld) {
+    w.open_group_state_watch().await;
+}
+
+#[given(regex = r#"^relay "([^"]+)" is the relay I watch directly$"#)]
+async fn watch_relay(w: &mut NmpWorld, name: String) {
+    w.set_watch_relay(&name);
+}
+
 #[given(regex = r#"^my feed of my follows' notes is open$"#)]
 async fn my_feed_is_open(w: &mut NmpWorld) {
     w.open_my_follows_feed().await;

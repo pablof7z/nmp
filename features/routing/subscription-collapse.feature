@@ -72,7 +72,8 @@ Feature: One subscription per relay, not one per thing you asked about
     And I watch for notes tagged "p" as "bob"
     And I watch for notes tagged "p" as "carol"
     Then relay "hub" serves every "p" watch with 1 subscription
-    And relay "hub" widened that subscription in place
+    And relay "hub" widened the "p" subscription in place
+    And relay "hub" was never asked to close a "p" subscription
     And one subscription on relay "hub" asks for every "p" value I watch
 
   @wip
@@ -87,7 +88,7 @@ Feature: One subscription per relay, not one per thing you asked about
     And I stop watching notes tagged "p" as "carol"
     Then relay "hub" serves every "p" watch with 1 subscription
     And one subscription on relay "hub" asks for every "p" value I watch
-    And relay "hub" was never asked to close a subscription
+    And relay "hub" was never asked to close a "p" subscription
 
   @wip
   Scenario: Values arriving apart in time aggregate like values arriving together
@@ -120,9 +121,10 @@ Feature: One subscription per relay, not one per thing you asked about
     # The bound is a frame-size limit, not a demand limit: it must chunk and
     # ship the remainder as further subscriptions, exactly as the existing
     # id-array bound does (`nmp_router::coalesce::MAX_IDS_PER_FILTER`, which
-    # shards rather than drops). Measured today: 1200 values compile to 1200
-    # subscriptions against a relay ceiling of about 20 -- every filter
-    # carrying one value out of a 500-value budget.
+    # shards rather than drops). Measured here: 1200 values leave over 2000
+    # live subscriptions against a relay ceiling of about 20 -- one per value
+    # plus the ids churned along the way -- with every filter carrying one
+    # value out of a 500-value budget.
     When I watch for notes tagged "p" as 1200 different values
     Then relay "hub" serves every "p" watch with 3 subscriptions
     And no subscription on relay "hub" carries more than 500 "p" values
@@ -180,8 +182,8 @@ Feature: One subscription per relay, not one per thing you asked about
     And I watch for notes from Carol
     Then relay "hub" serves every author watch with 1 subscription
     And one subscription on relay "hub" asks for every author I watch
-    And relay "hub" widened that subscription in place
-    And relay "hub" was never asked to close a subscription
+    And relay "hub" widened the author subscription in place
+    And relay "hub" was never asked to close an author subscription
 
   Scenario: Dropping one author shrinks the author subscription in place
     # The teardown half of the same guard, observed live: an author filter
@@ -192,7 +194,7 @@ Feature: One subscription per relay, not one per thing you asked about
     And I stop watching notes from Carol
     Then relay "hub" serves every author watch with 1 subscription
     And one subscription on relay "hub" asks for every author I watch
-    And relay "hub" was never asked to close a subscription
+    And relay "hub" was never asked to close an author subscription
 
   # ---- the catalog shape this came from --------------------------------
 
@@ -221,7 +223,8 @@ Feature: One subscription per relay, not one per thing you asked about
     And the group state of every group I administer is open
     When I am made an admin of one more group
     Then relay "hub" serves every "d" watch with 1 subscription
-    And relay "hub" widened that subscription in place
+    And relay "hub" widened the "d" subscription in place
+    And relay "hub" was never asked to close a "d" subscription
     And every "d" value I watch is covered by some subscription on relay "hub"
 
   @wip

@@ -13,7 +13,7 @@
 //! `relay_contacted`/`relay_contact_count`) are the ONLY things a `Then`
 //! step is allowed to assert on (approach doc §1.3).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -23,6 +23,7 @@ use nostr::{EventId, Keys, PublicKey, Tag, Timestamp, UnsignedEvent};
 use nmp_engine::core::{AcquisitionEvidence, DiagnosticsSnapshot, RowDelta};
 use nmp_engine::outbox::WriteStatus;
 use nmp_engine::runtime::{DiagnosticsHandle, EngineThread, Handle, QueryHandle, RowsReceiver};
+use nmp_grammar::{AccessContext, IndexedTagName, SourceAuthority};
 use nmp_grammar::{Binding, Demand, Derived, Filter, IdentityField, Selector};
 use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
 use nmp_resolver::LiveQuery;
@@ -31,7 +32,7 @@ use nmp_signer::LocalKeySigner;
 use nmp_store::MemoryStore;
 use nmp_transport::PoolConfig;
 
-use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
+use nmp_test_support::relays::{RelayConfig, ScriptedRelay, WireRecord};
 
 /// Bounded wait for a positive ("eventually true") assertion.
 pub const EVENTUALLY: Duration = Duration::from_secs(5);
@@ -54,6 +55,21 @@ pub const NEVER: Duration = Duration::from_millis(1200);
 /// worst-case jitter, so every step AFTER "relay comes back" runs against an
 /// already-reconnected relay and never has to absorb that variance itself.
 pub const RECONNECT: Duration = Duration::from_secs(8);
+
+/// How long a relay's client-to-relay wire must stay SILENT before a
+/// count-shaped assertion ("exactly one subscription", "two distinct ones",
+/// "no CLOSE") is allowed to read it. Its own constant rather than a reuse of
+/// `NEVER`, because it bounds something different: `NEVER` is a settle window
+/// for an app-visible channel, while this one waits out RECOMPILATION.
+/// Resolution is driven by ingested rows -- every demand mutation recompiles
+/// the whole live demand set, with no debounce window anywhere -- so REQs keep
+/// arriving for as long as demand is still resolving, and a count read
+/// mid-flight would be an artifact of when it was taken rather than a fact
+/// about the plan.
+pub const WIRE_QUIET: Duration = Duration::from_millis(400);
+/// Ceiling on the whole quiet-down wait, so a relay whose client never stops
+/// talking fails its scenario's assertion rather than hanging the suite.
+pub const WIRE_SETTLE: Duration = Duration::from_secs(6);
 
 /// The canonical name for the scenario's own (implicit "I"/"my") account --
 /// every `my`/`I`-phrased step resolves through this one name, so "my
@@ -79,13 +95,106 @@ pub fn my_follows_query() -> LiveQuery {
     })
 }
 
+/// `kinds:[1]` narrowed to ONE value of ONE single-letter tag and PINNED to
+/// `relay` -- the smallest demand that exercises the tag axis of wire
+/// subscription aggregation. Pinned rather than outbox-routed on purpose: the
+/// contract under specification is about what reaches a NAMED relay, so the
+/// scenario must not also depend on relay discovery choosing that relay.
+pub fn tagged_note_query(relay: &RelayUrl, tag: char, value: &str) -> LiveQuery {
+    let tag = IndexedTagName::new(tag).expect("nmp-bdd: an indexed tag name is one ASCII letter");
+    pinned_note_query(
+        relay,
+        Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            tags: BTreeMap::from([(tag, Binding::Literal(BTreeSet::from([value.to_string()])))]),
+            ..Filter::default()
+        },
+    )
+}
+
+/// The same shape on the AUTHOR axis -- the one axis that already
+/// aggregates, so every tag-axis scenario has a control to be measured
+/// against. `limit` is what makes a pair of these UNMERGEABLE: a relay-side
+/// `limit` caps the result COUNT, so `AuthorUnion` refuses to widen across
+/// one (see `nmp_router::coalesce::neither_limited`).
+pub fn authored_note_query(relay: &RelayUrl, author_hex: &str, limit: Option<usize>) -> LiveQuery {
+    pinned_note_query(
+        relay,
+        Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
+            limit,
+            ..Filter::default()
+        },
+    )
+}
+
+/// The shape a real group-first app hydrates with: "every group that lists
+/// me as an admin" projected into the `#d` slot of "all state for those
+/// groups". Identical in structure to `nmp-engine`'s own
+/// `core_headless/derived_tag_fanout.rs` fixture, and the reason the tag axis
+/// matters -- the resolved value set here is a CATALOG, not a handful.
+///
+/// Pinned, like the literal shapes above: group state has no author whose
+/// outbox could be discovered, so a real client names its relay.
+pub fn my_group_state_query(relay: &RelayUrl) -> LiveQuery {
+    let pinned = BTreeSet::from([relay.clone()]);
+    let inner = Demand::new(
+        Filter {
+            kinds: Some(BTreeSet::from([GROUP_ADMINS_KIND])),
+            tags: BTreeMap::from([(
+                IndexedTagName::new('p').expect("'p' is an indexed tag name"),
+                Binding::Reactive(IdentityField::ActivePubkey),
+            )]),
+            ..Filter::default()
+        },
+        SourceAuthority::Pinned(pinned.clone()),
+        AccessContext::Public,
+    )
+    .expect("nmp-bdd: a pinned inner demand over a nonempty relay set is constructible");
+    LiveQuery(
+        Demand::new(
+            Filter {
+                kinds: Some(GROUP_STATE_KINDS.into_iter().collect()),
+                tags: BTreeMap::from([(
+                    IndexedTagName::new('d').expect("'d' is an indexed tag name"),
+                    Binding::Derived(Box::new(Derived {
+                        inner,
+                        project: Selector::Tag("d".to_string()),
+                    })),
+                )]),
+                ..Filter::default()
+            },
+            SourceAuthority::Pinned(pinned),
+            AccessContext::Public,
+        )
+        .expect("nmp-bdd: a pinned outer demand over a nonempty relay set is constructible"),
+    )
+}
+
+/// NIP-29 group admins -- the inner query's kind: which groups name me.
+const GROUP_ADMINS_KIND: u16 = 39_001;
+/// NIP-29 group metadata/admins/members -- the outer query's kinds.
+const GROUP_STATE_KINDS: [u16; 3] = [39_000, 39_001, 39_002];
+
+fn pinned_note_query(relay: &RelayUrl, filter: Filter) -> LiveQuery {
+    LiveQuery(
+        Demand::new(
+            filter,
+            SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+            AccessContext::Public,
+        )
+        .expect("nmp-bdd: a pinned demand over a nonempty relay set is constructible"),
+    )
+}
+
 /// One accumulated feed: folds every `Added`/`Removed` delta this channel
 /// has delivered so far into a live row set + the query's latest acquisition
 /// evidence -- exactly what a real app must do (`Handle::subscribe`'s wire is
 /// deltas, never snapshots). Persists across multiple `Then` steps in one
 /// scenario.
 struct FeedState {
-    _handle: QueryHandle,
+    handle: QueryHandle,
     rx: RowsReceiver,
     rows: BTreeMap<EventId, nostr::Event>,
     evidence: AcquisitionEvidence,
@@ -300,11 +409,27 @@ pub struct NmpWorld {
 
     pending_contact_lists: Vec<PendingContactList>,
     pending_notes: Vec<PendingNote>,
+    /// Groups I administer, staged as kind:39001 fixtures at the watched
+    /// relay (see [`NmpWorld::stage_administered_groups`]).
+    pending_groups: Vec<String>,
+    group_counter: usize,
 
     active_person: Option<String>,
     ts_counter: u64,
     switch_counter: u64,
     started: bool,
+
+    /// The relay every `watch` step pins its demand to -- the subject of the
+    /// subscription-collapse scenarios.
+    watch_relay: Option<String>,
+    /// Open watches, keyed by the scenario-visible thing being watched
+    /// (`"p=alice"`, `"author=Alice"`), so one of N can be closed by name.
+    watches: BTreeMap<String, FeedState>,
+    /// Which values of which single-letter tag are watched RIGHT NOW (a
+    /// closed watch is removed) -- what "every value I watch" resolves to.
+    watched_tag_values: BTreeMap<char, BTreeSet<String>>,
+    /// The same, for the author-axis control.
+    watched_authors: BTreeSet<String>,
 
     engine: Option<EngineThread>,
     handle: Option<Handle>,
@@ -520,6 +645,10 @@ impl NmpWorld {
             }
         }
 
+        for group in std::mem::take(&mut self.pending_groups) {
+            self.seed_group_admins(&group).await;
+        }
+
         let (engine_thread, handle) = EngineThread::spawn(
             MemoryStore::new(),
             directory,
@@ -575,7 +704,7 @@ impl NmpWorld {
             .subscribe(my_follows_query())
             .expect("BDD subscription construction");
         self.feed = Some(FeedState {
-            _handle: handle_id,
+            handle: handle_id,
             rx,
             rows: BTreeMap::new(),
             evidence: AcquisitionEvidence::default(),
@@ -754,6 +883,194 @@ impl NmpWorld {
              the engine's Pool did not reconnect/resubscribe in time"
         );
         self.relays.insert(name.to_string(), fresh);
+    }
+
+    // ---- wire subscription aggregation --------------------------------
+
+    /// `Given relay <name> is the relay I watch directly` -- registers the
+    /// relay (well-behaved by default; a later `Given` may still reconfigure
+    /// it) and names it as the pin target for every later `watch` step.
+    pub fn set_watch_relay(&mut self, name: &str) {
+        self.relay_config_mut(name);
+        self.watch_relay = Some(name.to_string());
+    }
+
+    fn watch_relay_url(&self) -> RelayUrl {
+        let name = self
+            .watch_relay
+            .as_ref()
+            .expect("nmp-bdd: no relay has been named as the one I watch directly");
+        self.relays[name].url.clone()
+    }
+
+    async fn open_watch(&mut self, key: String, query: LiveQuery) {
+        let (handle, rx) = self
+            .handle()
+            .subscribe(query)
+            .expect("nmp-bdd: watch subscription construction");
+        self.watches.insert(
+            key,
+            FeedState {
+                handle,
+                rx,
+                rows: BTreeMap::new(),
+                evidence: AcquisitionEvidence::default(),
+            },
+        );
+    }
+
+    /// `When I watch for notes tagged <tag> as <value>`.
+    pub async fn watch_tag_value(&mut self, tag: char, value: &str) {
+        self.ensure_started().await;
+        let url = self.watch_relay_url();
+        self.watched_tag_values
+            .entry(tag)
+            .or_default()
+            .insert(value.to_string());
+        self.open_watch(
+            format!("{tag}={value}"),
+            tagged_note_query(&url, tag, value),
+        )
+        .await;
+    }
+
+    /// `When I watch for notes tagged <tag> as <n> different values` -- the
+    /// scale shape (a catalog of groups, a directory of channels), where the
+    /// per-value fan-out is the difference between one relay connection
+    /// working and hitting its concurrent-subscription ceiling.
+    pub async fn watch_n_tag_values(&mut self, tag: char, n: usize) {
+        for i in 1..=n {
+            self.watch_tag_value(tag, &format!("value-{i:04}")).await;
+        }
+    }
+
+    /// `When I stop watching notes tagged <tag> as <value>`. Explicitly
+    /// withdrawn through `Handle::unsubscribe`, never left to a drop.
+    pub async fn stop_watching_tag_value(&mut self, tag: char, value: &str) {
+        let watch = self
+            .watches
+            .remove(&format!("{tag}={value}"))
+            .unwrap_or_else(|| panic!("nmp-bdd: no open watch for #{tag} = {value:?}"));
+        self.handle().unsubscribe(watch.handle);
+        if let Some(values) = self.watched_tag_values.get_mut(&tag) {
+            values.remove(value);
+        }
+    }
+
+    /// `When I watch for notes from <person>` / `... the latest <n> notes
+    /// from <person>` -- the author-axis control.
+    pub async fn watch_author(&mut self, person: &str, limit: Option<usize>) {
+        self.ensure_started().await;
+        let url = self.watch_relay_url();
+        let author_hex = self.person(person).public_key().to_hex();
+        self.watched_authors.insert(author_hex.clone());
+        self.open_watch(
+            format!("author={person}"),
+            authored_note_query(&url, &author_hex, limit),
+        )
+        .await;
+    }
+
+    /// `When I stop watching notes from <person>`.
+    pub async fn stop_watching_author(&mut self, person: &str) {
+        let author_hex = self.person(person).public_key().to_hex();
+        let watch = self
+            .watches
+            .remove(&format!("author={person}"))
+            .unwrap_or_else(|| panic!("nmp-bdd: no open watch for {person}"));
+        self.handle().unsubscribe(watch.handle);
+        self.watched_authors.remove(&author_hex);
+    }
+
+    /// Every value of `tag` currently watched.
+    pub fn watched_tag_values(&self, tag: char) -> BTreeSet<String> {
+        self.watched_tag_values
+            .get(&tag)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Every author currently watched, as hex.
+    pub fn watched_authors(&self) -> BTreeSet<String> {
+        self.watched_authors.clone()
+    }
+
+    /// Block until EVERY started relay's client-to-relay wire has been silent
+    /// for a whole [`WIRE_QUIET`] window. Every wire assertion goes through
+    /// here first: see that constant's doc for why an unsettled count is an
+    /// artifact rather than a fact.
+    pub async fn wire_settled(&self) {
+        for relay in self.relays.values() {
+            relay.wait_wire_quiet(WIRE_QUIET, WIRE_SETTLE).await;
+        }
+    }
+
+    /// `Given I administer <n> groups` -- one kind:39001 (NIP-29 group
+    /// admins) fixture per group, each naming me, staged at the watched
+    /// relay. These are what the group-state query's inner demand resolves
+    /// from, so they also define what "every `d` value I watch" means.
+    pub fn stage_administered_groups(&mut self, n: usize) {
+        for _ in 0..n {
+            self.group_counter += 1;
+            let group = format!("group-{:04}", self.group_counter);
+            self.watched_tag_values
+                .entry('d')
+                .or_default()
+                .insert(group.clone());
+            self.pending_groups.push(group);
+        }
+    }
+
+    /// The kind:39001 event that makes me an admin of `group`, seeded into
+    /// the watched relay exactly as a real relay would already hold it.
+    async fn seed_group_admins(&mut self, group: &str) {
+        let me = self
+            .active_person
+            .clone()
+            .expect("nmp-bdd: administering a group needs a logged-in account");
+        let me_pk = self.person(&me).public_key();
+        let host = self.person("group-host");
+        let created_at = self.next_created_at();
+        let event = nostr::EventBuilder::new(nostr::Kind::from(GROUP_ADMINS_KIND), "")
+            .tags([Tag::identifier(group), Tag::public_key(me_pk)])
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(&host)
+            .expect("nmp-bdd: a group-admins fixture must sign cleanly");
+        let relay = self
+            .watch_relay
+            .clone()
+            .expect("nmp-bdd: no relay has been named as the one I watch directly");
+        self.relays[&relay].seed_signed_event(&event).await;
+    }
+
+    /// `When I open the group state of every group I administer`.
+    pub async fn open_group_state_watch(&mut self) {
+        self.ensure_started().await;
+        let url = self.watch_relay_url();
+        self.open_watch("group-state".to_string(), my_group_state_query(&url))
+            .await;
+    }
+
+    /// `When I am made an admin of one more group` -- a LIVE kind:39001,
+    /// landing at the relay after the watch is already open, so the value set
+    /// grows through the same ingest path a real admin grant would take.
+    pub async fn made_admin_of_one_more_group(&mut self) {
+        self.ensure_started().await;
+        self.group_counter += 1;
+        let group = format!("group-{:04}", self.group_counter);
+        self.watched_tag_values
+            .entry('d')
+            .or_default()
+            .insert(group.clone());
+        self.seed_group_admins(&group).await;
+    }
+
+    /// Every REQ/CLOSE `name`'s client has put on the socket, decoded.
+    pub fn wire_record(&self, name: &str) -> WireRecord {
+        self.relays
+            .get(name)
+            .unwrap_or_else(|| panic!("nmp-bdd: unknown relay {name:?}"))
+            .wire_record()
     }
 
     // ---- Then observables ---------------------------------------------

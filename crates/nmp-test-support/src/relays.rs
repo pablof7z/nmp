@@ -7,6 +7,10 @@
 //! - **behavior knobs** (`reject_writes`, `reject_queries` — a `Given` about
 //!   the world, per the approach doc §2.3), wired through `LocalRelay`'s own
 //!   `WritePolicy`/`QueryPolicy` plugin points;
+//! - **a world-side wire recorder** ([`WireRecord`]) that decodes every
+//!   `REQ`/`CLOSE` a client actually put on the socket, subscription id and
+//!   all -- see the `wire observation` section below for why the library's
+//!   `QueryPolicy` hook cannot answer that question;
 //! - **a world-side "was this relay ever contacted" observable**
 //!   (`ScriptedRelay::contacted`/`contact_count`/`wait_contacted`), bumped by
 //!   those SAME policy hooks on every inbound EVENT/REQ. This is
@@ -28,14 +32,14 @@
 //! cross-version value (keypairs, seeded events) is bridged explicitly by
 //! hex/id string round-trip (`mirror_keys`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crate::ConnectionOwner;
+use crate::{ClientTap, ClientTapFactory, ConnectionOwner};
 use nostr::{JsonUtil, RelayUrl};
 
 use nostr_relay_builder::builder::{
@@ -151,7 +155,477 @@ impl ContactLog {
     }
 }
 
-/// One running in-process relay + its contacted-log.
+// ---- wire observation ------------------------------------------------
+//
+// `contacted`/`query_count_for_kind` above answer "was this relay asked
+// anything, and about which kind". They cannot answer the question this
+// crate's subscription-collapse scenarios are ABOUT: how many distinct
+// SUBSCRIPTIONS a set of demands compiled into, and whether a REQ opened a
+// new one or replaced a live one in place. `nostr-relay-builder`'s
+// `QueryPolicy` hook cannot answer it either -- it is invoked once per
+// FILTER, never sees the subscription id, and only after the relay has
+// already rewritten `filter.limit` out from under the observation.
+//
+// So this half of the observation sits one layer lower, on the raw
+// client-to-relay byte stream that [`ConnectionOwner`] already forwards
+// (`ClientTapFactory`). It decodes exactly the frames NIP-01 defines --
+// `["REQ", <sub-id>, <filter>...]` and `["CLOSE", <sub-id>]` -- and is
+// therefore a witness to what NMP literally put on the socket, entirely
+// independent of both the engine's diagnostics and the relay library's
+// own bookkeeping. Same discipline as the contacted-log (see the module
+// doc): a scenario claiming "one subscription, not eight" must not take
+// the thing under test as its only witness.
+
+/// One REQ a client put on a relay's socket.
+#[derive(Debug, Clone)]
+pub struct WireReq {
+    /// The NIP-01 subscription id this REQ names.
+    pub sub_id: String,
+    /// The REQ's filters, verbatim, exactly as they crossed the socket.
+    pub filters: Vec<serde_json::Value>,
+    /// `true` iff `sub_id` was ALREADY live when this REQ arrived -- a
+    /// NIP-01 in-place filter REPLACEMENT (the shape the author axis uses
+    /// to widen without churn), rather than a newly opened subscription.
+    pub replaces: bool,
+}
+
+impl WireReq {
+    /// Every value this REQ asks for under single-letter tag `tag` (`#p`,
+    /// `#d`, ...), unioned across its filters.
+    pub fn tag_values(&self, tag: char) -> BTreeSet<String> {
+        let key = format!("#{tag}");
+        self.filters
+            .iter()
+            .filter_map(|f| f.get(&key))
+            .filter_map(serde_json::Value::as_array)
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// True iff any of this REQ's filters constrains tag `tag` at all.
+    pub fn names_tag(&self, tag: char) -> bool {
+        let key = format!("#{tag}");
+        self.filters.iter().any(|f| f.get(&key).is_some())
+    }
+
+    /// Every single-letter tag name this REQ constrains.
+    pub fn tag_names(&self) -> BTreeSet<char> {
+        self.filters
+            .iter()
+            .filter_map(serde_json::Value::as_object)
+            .flat_map(|obj| obj.keys())
+            .filter_map(|k| {
+                let mut chars = k.chars();
+                match (chars.next(), chars.next(), chars.next()) {
+                    (Some('#'), Some(c), None) => Some(c),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    /// Every author this REQ asks for, unioned across its filters -- the
+    /// control axis the tag axis is measured against.
+    pub fn authors(&self) -> BTreeSet<String> {
+        self.filters
+            .iter()
+            .filter_map(|f| f.get("authors"))
+            .filter_map(serde_json::Value::as_array)
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Every kind this REQ asks for.
+    pub fn kinds(&self) -> BTreeSet<u16> {
+        self.filters
+            .iter()
+            .filter_map(|f| f.get("kinds"))
+            .filter_map(serde_json::Value::as_array)
+            .flatten()
+            .filter_map(serde_json::Value::as_u64)
+            .map(|k| k as u16)
+            .collect()
+    }
+
+    /// True iff some filter in this REQ narrows by NOTHING but `kinds` --
+    /// no tag, no author, no id. The shape the privacy floor forbids: an
+    /// empty resolved value set must never widen into "send me everything
+    /// of this kind".
+    pub fn narrows_by_kind_alone(&self) -> bool {
+        self.filters.iter().any(|f| {
+            let Some(obj) = f.as_object() else {
+                return false;
+            };
+            obj.keys()
+                .all(|k| matches!(k.as_str(), "kinds" | "limit" | "since" | "until"))
+        })
+    }
+}
+
+/// Everything one scripted relay saw a client send, in arrival order.
+#[derive(Debug, Clone, Default)]
+pub struct WireRecord {
+    pub reqs: Vec<WireReq>,
+    pub closes: Vec<String>,
+}
+
+impl WireRecord {
+    /// Distinct subscription ids, in first-seen order.
+    pub fn subscription_ids(&self) -> Vec<String> {
+        let mut seen = BTreeSet::new();
+        let mut order = Vec::new();
+        for req in &self.reqs {
+            if seen.insert(req.sub_id.clone()) {
+                order.push(req.sub_id.clone());
+            }
+        }
+        order
+    }
+
+    /// Only the REQs that constrain tag `tag`. Every scenario about one tag
+    /// axis reads through this, so an unrelated background REQ (a relay-list
+    /// lookup, a discovery probe) can never inflate a "how many
+    /// subscriptions" count.
+    pub fn reqs_naming_tag(&self, tag: char) -> Vec<&WireReq> {
+        self.reqs.iter().filter(|r| r.names_tag(tag)).collect()
+    }
+
+    /// Distinct subscription ids that ever carried a filter on tag `tag`,
+    /// in first-seen order.
+    pub fn subscription_ids_naming_tag(&self, tag: char) -> Vec<String> {
+        let mut seen = BTreeSet::new();
+        let mut order = Vec::new();
+        for req in self.reqs_naming_tag(tag) {
+            if seen.insert(req.sub_id.clone()) {
+                order.push(req.sub_id.clone());
+            }
+        }
+        order
+    }
+
+    /// Distinct subscription ids that carried a filter on tag `tag` and have
+    /// NOT since been closed -- what the relay is serving right now. The
+    /// count-shaped assertions read this rather than every id ever seen: a
+    /// subscription that was opened and closed again is churn (which
+    /// `redundant_reqs`/`closes` witness separately), not something the relay
+    /// is still serving.
+    pub fn live_subscription_ids_naming_tag(&self, tag: char) -> Vec<String> {
+        self.subscription_ids_naming_tag(tag)
+            .into_iter()
+            .filter(|id| !self.closes.contains(id))
+            .collect()
+    }
+
+    /// Distinct subscription ids that ever carried an `authors` filter, in
+    /// first-seen order -- the control axis's sibling of
+    /// [`Self::subscription_ids_naming_tag`].
+    pub fn subscription_ids_naming_authors(&self) -> Vec<String> {
+        let mut seen = BTreeSet::new();
+        let mut order = Vec::new();
+        for req in self.reqs_naming_authors() {
+            if seen.insert(req.sub_id.clone()) {
+                order.push(req.sub_id.clone());
+            }
+        }
+        order
+    }
+
+    /// The live-only sibling of [`Self::subscription_ids_naming_authors`].
+    pub fn live_subscription_ids_naming_authors(&self) -> Vec<String> {
+        self.subscription_ids_naming_authors()
+            .into_iter()
+            .filter(|id| !self.closes.contains(id))
+            .collect()
+    }
+
+    /// Only the REQs that constrain `authors` -- the control axis.
+    pub fn reqs_naming_authors(&self) -> Vec<&WireReq> {
+        self.reqs
+            .iter()
+            .filter(|r| !r.authors().is_empty())
+            .collect()
+    }
+
+    /// The LAST REQ sent on `sub_id` -- NIP-01 replacement means only the
+    /// most recent filter set for a subscription is the live one.
+    pub fn latest_req_on(&self, sub_id: &str) -> Option<&WireReq> {
+        self.reqs.iter().rev().find(|r| r.sub_id == sub_id)
+    }
+
+    /// Subscription ids opened and not since closed.
+    pub fn live_subscription_ids(&self) -> Vec<String> {
+        self.subscription_ids()
+            .into_iter()
+            .filter(|id| !self.closes.contains(id))
+            .collect()
+    }
+
+    /// REQs that re-sent a subscription's EXISTING filter verbatim -- same
+    /// subscription id, byte-identical filter set as that id's previous REQ.
+    /// A replacement that changes nothing is pure wire cost: the relay
+    /// re-runs the query and re-streams whatever it matched.
+    pub fn redundant_reqs(&self) -> Vec<&WireReq> {
+        let mut latest: BTreeMap<&str, &Vec<serde_json::Value>> = BTreeMap::new();
+        let mut redundant = Vec::new();
+        for req in &self.reqs {
+            if latest.insert(req.sub_id.as_str(), &req.filters) == Some(&req.filters) {
+                redundant.push(req);
+            }
+        }
+        redundant
+    }
+
+    /// How many REQs re-used an already-live subscription id (widened or
+    /// shrank it in place) rather than opening a new one.
+    pub fn replacement_count(&self) -> usize {
+        self.reqs.iter().filter(|r| r.replaces).count()
+    }
+}
+
+/// Decoded REQ/CLOSE log plus a monotonic frame counter (the quiescence
+/// signal every count-shaped assertion settles against) and a fault list.
+#[derive(Debug, Default)]
+struct WireLog {
+    inner: Mutex<WireLogInner>,
+}
+
+#[derive(Debug, Default)]
+struct WireLogInner {
+    reqs: Vec<WireReq>,
+    closes: Vec<String>,
+    live: BTreeSet<String>,
+    frames: u64,
+    /// Anything the decoder could not honestly account for. Surfaced as a
+    /// PANIC at read time rather than swallowed: a silently dropped frame
+    /// would turn a red scenario green, which is the one failure mode this
+    /// whole spec exists to prevent.
+    faults: Vec<String>,
+}
+
+impl WireLog {
+    fn record_message(&self, message: &serde_json::Value) {
+        let Some(array) = message.as_array() else {
+            return;
+        };
+        let Some(verb) = array.first().and_then(serde_json::Value::as_str) else {
+            return;
+        };
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        match verb {
+            "REQ" => {
+                let Some(sub_id) = array.get(1).and_then(serde_json::Value::as_str) else {
+                    inner
+                        .faults
+                        .push(format!("REQ without a subscription id: {message}"));
+                    return;
+                };
+                let replaces = inner.live.contains(sub_id);
+                inner.live.insert(sub_id.to_string());
+                inner.frames += 1;
+                inner.reqs.push(WireReq {
+                    sub_id: sub_id.to_string(),
+                    filters: array[2..].to_vec(),
+                    replaces,
+                });
+            }
+            "CLOSE" => {
+                let Some(sub_id) = array.get(1).and_then(serde_json::Value::as_str) else {
+                    inner
+                        .faults
+                        .push(format!("CLOSE without a subscription id: {message}"));
+                    return;
+                };
+                inner.live.remove(sub_id);
+                inner.frames += 1;
+                inner.closes.push(sub_id.to_string());
+            }
+            // EVENT/AUTH/COUNT are already witnessed by the contacted-log;
+            // nothing in this crate asserts on their wire shape.
+            _ => {}
+        }
+    }
+
+    fn fault(&self, what: String) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .faults
+            .push(what);
+    }
+
+    fn frames(&self) -> u64 {
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).frames
+    }
+
+    fn snapshot(&self) -> WireRecord {
+        let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(
+            inner.faults.is_empty(),
+            "nmp-bdd: the relay's client-frame decoder could not account for \
+             every frame, so no count read from it is trustworthy: {:?}",
+            inner.faults
+        );
+        WireRecord {
+            reqs: inner.reqs.clone(),
+            closes: inner.closes.clone(),
+        }
+    }
+}
+
+/// Per-connection websocket reassembler over the raw client-to-relay bytes.
+///
+/// Deliberately minimal, and LOUD about everything it does not handle. NMP's
+/// own client is `tungstenite` 0.29 built with `default-features = false`
+/// (`handshake` + rustls only), and tungstenite implements no compression
+/// extension at all, so these frames are always unfragmented, masked, plain
+/// text. Rather than trust that reasoning, every assumption is checked at
+/// RUNTIME and a violation is recorded as a fault, not skipped.
+struct ClientFrames {
+    log: Arc<WireLog>,
+    buf: Vec<u8>,
+    handshake_done: bool,
+}
+
+impl ClientFrames {
+    fn new(log: Arc<WireLog>) -> Self {
+        Self {
+            log,
+            buf: Vec::new(),
+            handshake_done: false,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        self.buf.extend_from_slice(bytes);
+        if !self.handshake_done && !self.skip_handshake() {
+            return;
+        }
+        while self.decode_one_frame() {}
+    }
+
+    /// Consume the client's HTTP upgrade request. Returns `false` while it is
+    /// still incomplete.
+    fn skip_handshake(&mut self) -> bool {
+        let Some(end) = self
+            .buf
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map(|i| i + 4)
+        else {
+            return false;
+        };
+        let headers = String::from_utf8_lossy(&self.buf[..end]).to_lowercase();
+        if headers.contains("sec-websocket-extensions") {
+            // A negotiated extension (permessage-deflate) would make the
+            // payloads below compressed rather than plain JSON, and this
+            // decoder would silently see nothing.
+            self.log.fault(
+                "client negotiated a websocket extension; frame payloads are no longer plain text"
+                    .to_string(),
+            );
+        }
+        self.buf.drain(..end);
+        self.handshake_done = true;
+        true
+    }
+
+    /// Decode ONE frame off the front of the buffer. Returns `false` when the
+    /// buffer does not yet hold a whole frame.
+    fn decode_one_frame(&mut self) -> bool {
+        if self.buf.len() < 2 {
+            return false;
+        }
+        let fin = self.buf[0] & 0x80 != 0;
+        let opcode = self.buf[0] & 0x0f;
+        let masked = self.buf[1] & 0x80 != 0;
+        let short_len = (self.buf[1] & 0x7f) as usize;
+
+        let (payload_len, mut offset) = match short_len {
+            126 => {
+                if self.buf.len() < 4 {
+                    return false;
+                }
+                (
+                    u16::from_be_bytes([self.buf[2], self.buf[3]]) as usize,
+                    4usize,
+                )
+            }
+            127 => {
+                if self.buf.len() < 10 {
+                    return false;
+                }
+                let mut be = [0u8; 8];
+                be.copy_from_slice(&self.buf[2..10]);
+                (u64::from_be_bytes(be) as usize, 10usize)
+            }
+            n => (n, 2usize),
+        };
+
+        let mask = if masked {
+            if self.buf.len() < offset + 4 {
+                return false;
+            }
+            let mask = [
+                self.buf[offset],
+                self.buf[offset + 1],
+                self.buf[offset + 2],
+                self.buf[offset + 3],
+            ];
+            offset += 4;
+            Some(mask)
+        } else {
+            None
+        };
+
+        let total = offset + payload_len;
+        if self.buf.len() < total {
+            return false;
+        }
+        let mut payload = self.buf[offset..total].to_vec();
+        if let Some(mask) = mask {
+            for (i, byte) in payload.iter_mut().enumerate() {
+                *byte ^= mask[i % 4];
+            }
+        }
+        self.buf.drain(..total);
+
+        match opcode {
+            // Text -- the only frame NIP-01 traffic uses.
+            0x1 => {
+                if !fin {
+                    self.log.fault(
+                        "fragmented client text frame: this decoder reassembles no continuations"
+                            .to_string(),
+                    );
+                    return true;
+                }
+                match serde_json::from_slice::<serde_json::Value>(&payload) {
+                    Ok(message) => self.log.record_message(&message),
+                    Err(error) => self
+                        .log
+                        .fault(format!("client text frame is not JSON: {error}")),
+                }
+            }
+            // Continuation / binary: never produced by this client, and
+            // silently ignoring either could hide a whole REQ.
+            0x0 | 0x2 => self
+                .log
+                .fault(format!("unexpected client frame opcode {opcode:#x}")),
+            // Close/ping/pong carry no NIP-01 message.
+            0x8 | 0x9 | 0xa => {}
+            other => self
+                .log
+                .fault(format!("unknown client frame opcode {other:#x}")),
+        }
+        true
+    }
+}
+
+/// One running in-process relay, its contacted-log, and its wire recorder.
 pub struct ScriptedRelay {
     pub url: RelayUrl,
     port: u16,
@@ -159,6 +633,7 @@ pub struct ScriptedRelay {
     connection_owner: Option<ConnectionOwner>,
     contacted: Arc<ContactLog>,
     queries: Arc<QueryLog>,
+    wire: Arc<WireLog>,
 }
 
 impl ScriptedRelay {
@@ -181,6 +656,7 @@ impl ScriptedRelay {
     async fn start_on_addr(public_addr: SocketAddr, config: &RelayConfig) -> Self {
         let contacted = Arc::new(ContactLog::default());
         let queries = Arc::new(QueryLog::default());
+        let wire = Arc::new(WireLog::default());
         let backend_port = free_port();
 
         let mut builder = LocalRelayBuilder::default()
@@ -203,9 +679,15 @@ impl ScriptedRelay {
             .run()
             .await
             .expect("nmp-bdd: scripted relay must start");
-        let connection_owner = ConnectionOwner::bind(
+        let tap_log = Arc::clone(&wire);
+        let tap: ClientTapFactory = Arc::new(move || {
+            let mut frames = ClientFrames::new(Arc::clone(&tap_log));
+            Box::new(move |bytes: &[u8]| frames.push(bytes)) as ClientTap
+        });
+        let connection_owner = ConnectionOwner::bind_with_tap(
             public_addr,
             SocketAddr::from((Ipv4Addr::LOCALHOST, backend_port)),
+            Some(tap),
         )
         .await
         .expect("nmp-bdd: client-facing relay owner must bind");
@@ -220,6 +702,7 @@ impl ScriptedRelay {
             connection_owner: Some(connection_owner),
             contacted,
             queries,
+            wire,
         }
     }
 
@@ -330,6 +813,33 @@ impl ScriptedRelay {
         self.queries.count(kind)
     }
 
+    /// Every `REQ`/`CLOSE` this relay's client has sent so far, decoded from
+    /// the raw socket bytes -- subscription ids included. Panics if the
+    /// decoder ever failed to account for a frame (see [`WireLog::snapshot`]):
+    /// a count read off an incomplete record would be worse than no count.
+    pub fn wire_record(&self) -> WireRecord {
+        self.wire.snapshot()
+    }
+
+    /// Block until this relay's client has sent NOTHING for a whole `quiet`
+    /// window (or `max` elapses). Nearly every subscription-collapse
+    /// assertion is a COUNT ("exactly one subscription", "two distinct
+    /// ones", "no CLOSE"), and a count is only meaningful against a settled
+    /// wire: recompilation is driven by ingested rows, so REQs keep arriving
+    /// for as long as demand is still resolving. Coarse by design -- one
+    /// `sleep` per quiet window, comparing a monotonic frame counter, not a
+    /// spin-poll.
+    pub async fn wait_wire_quiet(&self, quiet: Duration, max: Duration) {
+        let deadline = Instant::now() + max;
+        loop {
+            let before = self.wire.frames();
+            tokio::time::sleep(quiet).await;
+            if self.wire.frames() == before || Instant::now() >= deadline {
+                return;
+            }
+        }
+    }
+
     /// Bounded wait (no spin-poll -- see [`ContactLog::wait_contacted`]) for
     /// this relay instance to be contacted at least once. The deterministic
     /// "has the engine's `Pool` actually reconnected and resubscribed here
@@ -438,6 +948,90 @@ impl QueryPolicy for LoggingQueryPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build the client-to-server websocket frame `payload` would be sent
+    /// as: FIN + text opcode, masked (RFC 6455 requires client masking, and
+    /// tungstenite does mask), 7-bit length.
+    fn masked_text_frame(payload: &str) -> Vec<u8> {
+        let bytes = payload.as_bytes();
+        assert!(
+            bytes.len() < 126,
+            "test fixture frames stay in the 7-bit length form"
+        );
+        let mask = [0xa1u8, 0x0b, 0xc3, 0x5d];
+        let mut frame = vec![0x81, 0x80 | bytes.len() as u8];
+        frame.extend_from_slice(&mask);
+        frame.extend(bytes.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+        frame
+    }
+
+    /// The recorder's own falsifier: a REQ and a CLOSE, fed in through the
+    /// same path a real client's bytes take (HTTP upgrade first, then
+    /// frames), delivered ONE BYTE AT A TIME so every reassembly boundary is
+    /// exercised. Proves the three things every scenario's counts rest on:
+    /// the handshake is skipped, masked payloads are recovered, and a second
+    /// REQ on a live subscription id is reported as a REPLACEMENT rather than
+    /// a second subscription.
+    #[test]
+    fn decodes_subscription_ids_and_replacement_from_raw_client_bytes() {
+        let log = Arc::new(WireLog::default());
+        let mut frames = ClientFrames::new(Arc::clone(&log));
+
+        let mut stream = Vec::new();
+        stream
+            .extend_from_slice(b"GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\r\n");
+        stream.extend(masked_text_frame(
+            r##"["REQ","sub-a",{"kinds":[1],"#p":["x"]}]"##,
+        ));
+        stream.extend(masked_text_frame(
+            r##"["REQ","sub-a",{"kinds":[1],"#p":["x","y"]}]"##,
+        ));
+        stream.extend(masked_text_frame(
+            r##"["REQ","sub-b",{"kinds":[1],"#t":["z"]}]"##,
+        ));
+        stream.extend(masked_text_frame(r#"["CLOSE","sub-b"]"#));
+        for byte in stream {
+            frames.push(&[byte]);
+        }
+
+        let record = log.snapshot();
+        assert_eq!(record.reqs.len(), 3);
+        assert_eq!(record.subscription_ids(), vec!["sub-a", "sub-b"]);
+        assert_eq!(record.subscription_ids_naming_tag('p'), vec!["sub-a"]);
+        assert_eq!(record.subscription_ids_naming_tag('t'), vec!["sub-b"]);
+        assert_eq!(record.replacement_count(), 1);
+        assert!(!record.reqs[0].replaces);
+        assert!(
+            record.reqs[1].replaces,
+            "a REQ re-using a live sub id replaces it"
+        );
+        assert_eq!(
+            record.latest_req_on("sub-a").unwrap().tag_values('p'),
+            BTreeSet::from(["x".to_string(), "y".to_string()])
+        );
+        assert_eq!(record.closes, vec!["sub-b"]);
+        assert_eq!(record.live_subscription_ids(), vec!["sub-a"]);
+        assert_eq!(record.reqs[2].tag_names(), BTreeSet::from(['t']));
+        assert!(!record.reqs[0].narrows_by_kind_alone());
+    }
+
+    /// A REQ this decoder could not account for must POISON every later
+    /// read, never be skipped -- a dropped frame silently deflates exactly
+    /// the counts the subscription-collapse scenarios assert on.
+    #[test]
+    fn an_unaccountable_frame_poisons_every_later_read() {
+        let log = Arc::new(WireLog::default());
+        let mut frames = ClientFrames::new(Arc::clone(&log));
+        frames.push(b"GET / HTTP/1.1\r\n\r\n");
+        // Binary opcode, unmasked, empty payload: legal websocket, but not
+        // something this client ever sends, so it is a fault by construction.
+        frames.push(&[0x82, 0x00]);
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| log.snapshot()));
+        assert!(
+            poisoned.is_err(),
+            "an unaccounted frame must panic the reader"
+        );
+    }
 
     /// Falsifier for the lost-wakeup trap `wait_contacted` must close
     /// (caught pre-merge on #60/PR #72 by codex-nova review): a bare
