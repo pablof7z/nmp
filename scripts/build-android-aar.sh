@@ -45,9 +45,7 @@ if [[ -z "${ANDROID_HOME:-}" || ! -d "$ANDROID_HOME/platforms/android-35" ]]; th
     exit 1
 fi
 
-if [[ -z "${ANDROID_NDK_HOME:-}" ]]; then
-    ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION"
-fi
+ANDROID_NDK_HOME=${NMP_ANDROID_NDK_HOME:-"$ANDROID_HOME/ndk/$NDK_VERSION"}
 if [[ ! -f "$ANDROID_NDK_HOME/source.properties" ]]; then
     echo "error: Android NDK $NDK_VERSION not found at $ANDROID_NDK_HOME" >&2
     exit 1
