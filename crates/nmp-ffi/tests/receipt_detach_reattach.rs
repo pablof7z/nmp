@@ -214,7 +214,7 @@ async fn ffi_reattachment_transparently_traverses_more_than_one_durable_page() {
                         &key,
                         awaiting_ack.revision,
                         ordinal,
-                        AttemptOutcome::GaveUp,
+                        AttemptOutcome::Acked,
                         nostr::Timestamp::from(base + 2),
                     )
                     .expect("finish final attempt");
@@ -263,6 +263,14 @@ async fn ffi_reattachment_transparently_traverses_more_than_one_durable_page() {
             .count(),
         40,
         "every persisted handoff must arrive exactly once"
+    );
+    assert_eq!(
+        replay
+            .iter()
+            .filter(|status| matches!(status, FfiWriteStatus::Acked { .. }))
+            .count(),
+        1,
+        "the public FFI stream must replay the terminal ACK from the closed redb intent"
     );
 
     engine.shutdown();

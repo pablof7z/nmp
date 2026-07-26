@@ -28,6 +28,7 @@ import com.nmp.sdk.connectNip46
 import com.nmp.sdk.restoreNip46Session
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
@@ -311,10 +312,19 @@ class NMPAndroidProcessDeathQualificationTest {
                     (reattached as ReceiptReattachment.Attached)
                         .receipt
                         .status
+                        .onEach { status ->
+                            Log.i(
+                                TAG,
+                                "NMP_ANDROID_PROCESS_RECEIPT_FACT " +
+                                    status.javaClass.simpleName,
+                            )
+                        }
                         .first { it is WriteStatus.Acked }
                 }
             assertTrue(ack is WriteStatus.Acked)
+            Log.i(TAG, "NMP_ANDROID_PROCESS_RECEIPT_ACK_RETAINED true")
 
+            Log.i(TAG, "NMP_ANDROID_PROCESS_CACHE_READ_STARTED true")
             val cached =
                 withTimeout(20_000) {
                     engine.observe(
@@ -336,6 +346,7 @@ class NMPAndroidProcessDeathQualificationTest {
                         batch.rows.any { it.content == PROCESS_WRITE_CONTENT }
                     }
                 }
+            Log.i(TAG, "NMP_ANDROID_PROCESS_CACHE_READ_COMPLETED true")
             assertEquals(
                 1,
                 cached.rows.count { it.content == PROCESS_WRITE_CONTENT },

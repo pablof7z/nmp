@@ -410,8 +410,46 @@ fn offline_accept_restart_real_bunker_reattach_publish_and_ack() {
     assert_eq!(event.tags, unsigned.tags);
     assert_eq!(event.content, unsigned.content);
 
+    drop(statuses);
     handle.shutdown();
     engine.join();
+
+    // Android qualification #834 force-stops the restored process after the
+    // ACK, then asks a third process to recover both the terminal receipt and
+    // the canonical signed row. Keep that second crash boundary in the Rust
+    // falsifier too: a live ACK is insufficient evidence if boot #2 cannot
+    // reconstruct it from redb.
+    let (engine, handle) = EngineThread::spawn(
+        RedbStore::open(&path).unwrap(),
+        directory(),
+        10,
+        PoolConfig::default(),
+        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+    )
+    .expect("test engine thread construction after terminal ACK");
+    let replayed = match handle.reattach_receipt(receipt_id) {
+        ReceiptReattachment::Attached { statuses, .. } => statuses,
+        _ => panic!("terminal receipt must reattach after a second restart"),
+    };
+    assert!(matches!(
+        wait_for_status(&replayed, |status| matches!(status, WriteStatus::Acked(_))),
+        WriteStatus::Acked(relay) if relay == write_relay
+    ));
+    drop(replayed);
+    handle.shutdown();
+    engine.join();
+
+    let store = RedbStore::open(&path).unwrap();
+    let rows = store.query(&nostr::Filter::new().id(frozen_id)).unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the canonical signed row must survive the second restart"
+    );
+    assert_eq!(
+        rows[0].provenance.local.as_ref().unwrap().sig_state,
+        SigState::Signed
+    );
 }
 
 #[test]
