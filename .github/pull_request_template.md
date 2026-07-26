@@ -20,4 +20,4 @@
 - [ ] **Superseded path removed:** the obsolete API/semantic path is deleted; no compatibility alias remains.
 - [ ] **Surface snapshots:** `scripts/regenerate-surface-snapshots.sh` was run and any diff is committed.
 - [ ] **Append-only trail:** if a snapshot changed, a complete entry was appended to `docs/surface-change-log.md`; old entries were not edited.
-- [ ] **Human signoff:** reviewer approval covers the snapshot delta and log entry.
+- [ ] **Approval trail:** independent exact-head review and required CI cover the snapshot delta and log entry.
