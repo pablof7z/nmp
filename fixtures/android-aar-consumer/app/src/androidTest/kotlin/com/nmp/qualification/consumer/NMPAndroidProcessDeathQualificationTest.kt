@@ -195,6 +195,41 @@ class NMPAndroidProcessDeathQualificationTest {
             assertTrue(replay.first() is WriteStatus.Accepted)
             assertTrue(replay.last() is WriteStatus.AwaitingCapability)
 
+            // AuthorOutbox deliberately fails closed without current NIP-65
+            // evidence. A fresh process must reacquire that network fact
+            // before attaching the restored signer; the durable obligation
+            // itself must not smuggle a stale route across the crash boundary.
+            val routeEvidence =
+                withTimeout(20_000) {
+                    engine.observe(
+                        NMPDemand(
+                            selection =
+                                NMPFilter(
+                                    kinds = listOf(10_002u.toUShort()),
+                                    authors = NMPBinding.Literal(setOf(expectedRemoteUser)),
+                                ),
+                            source =
+                                NMPSourceAuthority.Pinned(
+                                    setOf(BuildConfig.NMP_QUALIFICATION_RELAY),
+                                ),
+                            access = NMPAccessContext.Public,
+                            cache = NMPCacheMode.Strict,
+                            freshness = NMPFreshness.Live,
+                        ),
+                    ).first { batch ->
+                        batch.rows.any { row ->
+                            row.kind == 10_002u.toUShort() &&
+                                row.pubkey == expectedRemoteUser
+                        }
+                    }
+                }
+            assertTrue(
+                routeEvidence.rows.any { row ->
+                    row.kind == 10_002u.toUShort() &&
+                        row.pubkey == expectedRemoteUser
+                },
+            )
+
             val byCorrelation = engine.reattachReceipt(correlation)
             assertTrue(byCorrelation is ReceiptReattachment.Attached)
             val correlatedReceipt =

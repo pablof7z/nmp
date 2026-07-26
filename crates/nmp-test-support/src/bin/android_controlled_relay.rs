@@ -1,10 +1,11 @@
 //! Host-owned controlled relay for Android emulator qualification (#832/#834).
 //!
 //! The emulator reaches this loopback listener through Android's documented
-//! `10.0.2.2` host alias. It provides three bounded test seams over ordinary
-//! Nostr relay frames: one valid kind-1 row, a multi-connection NIP-46 bunker,
-//! and ACKs for valid writes. It is test infrastructure, never app-side relay
-//! or signer machinery.
+//! `10.0.2.2` host alias. It provides four bounded test seams over ordinary
+//! Nostr relay frames: one valid kind-1 row, the NIP-65 write route for the
+//! bunker-controlled user, a multi-connection NIP-46 bunker, and ACKs for
+//! valid writes. It is test infrastructure, never app-side relay or signer
+//! machinery.
 
 use std::io::{self, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
@@ -15,7 +16,7 @@ use std::time::Duration;
 use nostr::filter::MatchEventOptions;
 use nostr::nips::nip44;
 use nostr::{
-    ClientMessage, Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, RelayMessage, Tag,
+    ClientMessage, Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, RelayMessage, Tag, Tags,
     Timestamp, UnsignedEvent,
 };
 use serde::Deserialize;
@@ -28,6 +29,7 @@ const EVENT_CONTENT: &str = "nmp-android-controlled-relay";
 #[derive(Clone)]
 struct RelayFixture {
     row: Event,
+    relay_list: Event,
     remote_signer: Keys,
     user: Keys,
     pairing_secret: String,
@@ -62,10 +64,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))?;
+    let user = Keys::generate();
+    let emulator_relay = nostr::RelayUrl::parse(&format!("ws://10.0.2.2:{port}"))?;
     let fixture = Arc::new(RelayFixture {
         row: EventBuilder::text_note(EVENT_CONTENT).sign_with_keys(&Keys::generate())?,
         remote_signer: Keys::generate(),
-        user: Keys::generate(),
+        relay_list: EventBuilder::new(Kind::RelayList, "")
+            .tags(Tags::from_list(vec![Tag::relay_metadata(
+                emulator_relay,
+                None,
+            )]))
+            .sign_with_keys(&user)?,
+        user,
         pairing_secret,
     });
 
@@ -125,15 +135,18 @@ fn serve_connection(
                             filters.len()
                         );
                         io::stdout().flush()?;
-                        if filters.into_iter().any(|filter| {
-                            filter
-                                .into_owned()
-                                .match_event(&fixture.row, MatchEventOptions::new())
-                        }) {
-                            socket.send(Message::text(
-                                RelayMessage::event(requested_id.clone(), fixture.row.clone())
-                                    .as_json(),
-                            ))?;
+                        for event in [&fixture.row, &fixture.relay_list] {
+                            if filters.iter().any(|filter| {
+                                filter
+                                    .clone()
+                                    .into_owned()
+                                    .match_event(event, MatchEventOptions::new())
+                            }) {
+                                socket.send(Message::text(
+                                    RelayMessage::event(requested_id.clone(), event.clone())
+                                        .as_json(),
+                                ))?;
+                            }
                         }
                         socket.send(Message::text(RelayMessage::eose(requested_id).as_json()))?;
                         socket.flush()?;
@@ -292,12 +305,20 @@ mod tests {
     use super::*;
 
     fn fixture() -> RelayFixture {
+        let user = Keys::generate();
         RelayFixture {
             row: EventBuilder::text_note(EVENT_CONTENT)
                 .sign_with_keys(&Keys::generate())
                 .expect("sign fixture event"),
+            relay_list: EventBuilder::new(Kind::RelayList, "")
+                .tags(Tags::from_list(vec![Tag::relay_metadata(
+                    nostr::RelayUrl::parse("ws://127.0.0.1:47391").expect("parse fixture relay"),
+                    None,
+                )]))
+                .sign_with_keys(&user)
+                .expect("sign fixture relay list"),
             remote_signer: Keys::generate(),
-            user: Keys::generate(),
+            user,
             pairing_secret: "test-pairing-secret".to_string(),
         }
     }
@@ -325,6 +346,34 @@ mod tests {
         assert!(event_frame.contains("\"EVENT\""));
         assert!(event_frame.contains(expected_id.to_hex().as_str()));
         assert_eq!(eose_frame, r#"["EOSE","android-qualification"]"#);
+        client.close(None).expect("close client");
+        relay.join().expect("join relay");
+    }
+
+    #[test]
+    fn matching_relay_list_req_receives_the_remote_users_write_route() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind relay");
+        let address = listener.local_addr().expect("relay address");
+        let fixture = fixture();
+        let expected_id = fixture.relay_list.id;
+        let expected_user = fixture.user.public_key().to_hex();
+        let relay = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept client");
+            serve_connection(stream, &fixture).expect("serve client");
+        });
+
+        let (mut client, _) =
+            tungstenite::connect(format!("ws://{address}")).expect("connect client");
+        client
+            .send(Message::text(format!(
+                r#"["REQ","android-route",{{"kinds":[10002],"authors":["{expected_user}"]}}]"#
+            )))
+            .expect("send route REQ");
+        let event_frame = client.read().expect("read EVENT").into_text().unwrap();
+        let eose_frame = client.read().expect("read EOSE").into_text().unwrap();
+        assert!(event_frame.contains("\"EVENT\""));
+        assert!(event_frame.contains(expected_id.to_hex().as_str()));
+        assert_eq!(eose_frame, r#"["EOSE","android-route"]"#);
         client.close(None).expect("close client");
         relay.join().expect("join relay");
     }
