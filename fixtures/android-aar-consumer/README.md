@@ -22,6 +22,17 @@ host-owned controlled NIP-01 relay reachable through Android's documented
   and
 - an arm64-only negative build cannot construct `NMPEngine` on x86_64.
 
+Issue #833 adds an ordinary consuming-app ownership proof without adding an
+NMP framework type. Instrumentation explicitly constructs one engine owner,
+installs that exact value at the app's dependency-injection boundary, and lets
+an Android `ViewModel` own one cold-flow collection. The governed emulator
+proves that the same owner and ViewModel survive Activity recreation and
+background/foreground transitions; two independent collections remain two
+handles while compatible wire work coalesces; cancelling either handle leaves
+its peer intact; cancelling the last leaves the canonical row cached; and
+concurrent idempotent close drains query, diagnostics, and receipt collectors
+without a late callback into disposed app state.
+
 The clean-checkout hosted command is:
 
 ```sh
@@ -34,6 +45,6 @@ publication, Rust relay binary, and Android tooling prepared by
 identity, instrumentation output, relay requests, APK inventories, and logcat
 under `artifacts/android-emulator`.
 
-This fixture does not claim Compose ownership, configuration recreation, or
-background/resume correctness (#833), and it does not claim Android Keystore
-or process-death credential/receipt recovery (#834).
+This fixture does not impose a Compose, navigation, `Application`, or
+`ViewModel` base class on NMP consumers. Android Keystore and process-death
+credential/receipt recovery remain #834.

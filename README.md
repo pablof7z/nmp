@@ -121,9 +121,12 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
   by [#831](https://github.com/pablof7z/nmp/issues/831); a controlled-relay
   observation, cancellation, app-private persistent reopen, close, and
   wrong-ABI refusal run on a governed API-35 x86_64 emulator in
-  [#832](https://github.com/pablof7z/nmp/issues/832). Lifecycle ownership and
-  Keystore/process-death recovery remain
-  [#833](https://github.com/pablof7z/nmp/issues/833)–[#834](https://github.com/pablof7z/nmp/issues/834).
+  [#832](https://github.com/pablof7z/nmp/issues/832). One explicit app-owned
+  engine, Activity recreation/background behavior, exact cold-flow
+  cancellation, and deterministic zero-residue close are qualified in
+  [#833](https://github.com/pablof7z/nmp/issues/833). Android
+  Keystore/process-death recovery remains
+  [#834](https://github.com/pablof7z/nmp/issues/834).
 
 ## Status / maturity
 
@@ -167,13 +170,16 @@ Built for **bounded memory and streaming — never first-N truncation.** Measure
 
 ## Platforms in one line
 
-Rust core is the truth · **Swift** qualified on macOS host (iOS-sim runtime pending) · **Kotlin** desktop-JVM only (no Android AAR yet).
+Rust core is the truth · **Swift** qualified on macOS host (iOS-sim runtime
+pending) · **Kotlin** qualified as desktop JVM plus an API-26+ Android AAR on
+a governed API-35 emulator.
 
 ## Roadmap / where it's heading
 
 - Govern the provisional demand / receipt / signer shapes toward a **v2 freeze**
 - Encode lifecycle invariants **as types**, not conventions
-- Close **platform qualification** — an iOS-Simulator test target, an Android AAR
+- Close remaining **platform qualification** — an iOS-Simulator runtime target
+  and Android Keystore/process-death recovery
 - Finish **bounded delivery** with an explicit shortfall contract everywhere
 - Land NIP-51 list editing; broaden opt-in protocol modules
 - Project NIP-68 + `nmp-media` composition through FFI/Swift/Kotlin, batched together (currently Rust-only)

@@ -3,6 +3,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
 
     <application
+        android:name=".QualificationApplication"
         android:allowBackup="false"
         android:label="NMP AAR qualification"
         android:usesCleartextTraffic="true">

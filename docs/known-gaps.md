@@ -108,10 +108,14 @@ about current code:
   artifact on a governed API-35 x86_64 emulator and proves a controlled-relay
   observation, bounded cancellation, app-private persistent reopen,
   unavailable-relay scoped evidence, explicit close, and wrong-ABI refusal.
-  Still open are app-owned lifecycle/configuration recreation proof (#833),
-  Android Keystore and process-death receipt/NIP-46 checkpoint recovery (#834),
-  NIP-55 execution, and permanent signer connection/correlation counters in
-  engine diagnostics (#51).
+  #833 adds the ordinary Android-owned lifecycle proof: one explicitly
+  installed engine owner survives Activity recreation and background/foreground
+  transitions, cold-flow collectors remain exact independently cancellable
+  handles, and concurrent close returns engine/collector/wire ownership to
+  baseline without GC or late callbacks. Still open are Android Keystore and
+  process-death receipt/NIP-46 checkpoint recovery (#834), NIP-55 execution,
+  and permanent signer connection/correlation counters in engine diagnostics
+  (#51).
   The sign-only operation now projects across Rust, FFI, Swift, and Kotlin:
   it binds an immutable request to the active registered signer, validates the
   exact returned event, remains bounded/cancellable, and creates no

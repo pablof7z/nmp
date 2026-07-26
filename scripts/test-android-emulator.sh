@@ -114,6 +114,9 @@ for marker in \
     NMP_ANDROID_UNAVAILABLE \
     NMP_ANDROID_CLOSED \
     NMP_ANDROID_REOPENED \
+    NMP_ANDROID_LIFECYCLE_RECREATED \
+    NMP_ANDROID_COLD_FLOW_HANDLES \
+    NMP_ANDROID_LIFECYCLE_CLOSED \
     NMP_ANDROID_WRONG_ABI_REFUSED; do
     if ! grep -q "$marker" "$ARTIFACTS/qualification-logcat.txt"; then
         echo "error: missing runtime proof marker $marker" >&2

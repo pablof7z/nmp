@@ -66,14 +66,20 @@ falsifies missing-ABI and binding/native mismatch controls. A second gate runs
 that external consumer on a pinned API-35 x86_64 emulator, receives a real
 event and scoped evidence from a host-owned controlled relay through the public
 facade, cancels collection, closes/reopens the app-private store, and proves an
-arm64-only package refuses native construction (#832).
+arm64-only package refuses native construction (#832). The same external app
+now explicitly installs one app-owned engine lifetime and uses an ordinary
+Android `ViewModel` for a screen collection. Hosted lifecycle falsifiers prove
+that Activity recreation and background/foreground transitions retain that
+exact owner and collection, independent cold-flow collections remain exact
+handles, final cancellation removes wire demand while preserving cached rows,
+and close races leave no collector or late app callback (#833).
 
 A production Android product must also include standard Keystore-backed
 providers and prove process-death receipt/signer reattachment (#834), not
 merely AAR construction. Newest-state observation is bounded/conflated while
 receipt history remains recoverable. The app—not a framework-owned singleton—
-owns engine and collector lifetime; configuration recreation/background-resume
-falsification is #833.
+owns engine and collector lifetime; #833 proves that boundary without adding
+an NMP `Application`, provider, navigation host, or `ViewModel` base class.
 
 The current JVM projection also exposes `NMPInsecureFileAccountStore(Path)` for
 explicit plaintext sandbox persistence. It provides the same restore/clear
@@ -86,9 +92,9 @@ results through `installedAndroid(packageIds)` and produce an exact
 package visibility for the signer packages/schemes, start
 `connectNip46(invitation)` before launching the URI, and apply
 `Intent.setPackage(packageName)` so a shared scheme never selects the wrong
-app. Android Compose/configuration lifecycle, Keystore recovery, and NIP-55
-execution remain open work; AAR construction is qualified by #831 and the
-headless external-consumer runtime by #832.
+app. Keystore/process-death recovery and NIP-55 execution remain open work; AAR
+construction is qualified by #831, external-consumer runtime by #832, and the
+ordinary app-owned lifecycle by #833.
 
 ## Other platforms
 
