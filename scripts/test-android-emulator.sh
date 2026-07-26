@@ -16,6 +16,7 @@ CONSUMER="$REPO_ROOT/fixtures/android-aar-consumer"
 QUALIFICATION_REPOSITORY="$ANDROID_PROJECT/build/qualification-repository"
 RELAY_PORT=47391
 RELAY_URL="ws://10.0.2.2:$RELAY_PORT"
+NIP46_RELAY_URL="ws://127.0.0.1:$RELAY_PORT"
 RELAY_LOG="$ARTIFACTS/controlled-relay.log"
 GRADLE="$REPO_ROOT/Packages/NMPKotlin/gradlew"
 AAR="$ANDROID_PROJECT/build/outputs/aar/NMPAndroid-release.aar"
@@ -28,6 +29,7 @@ nip46_pairing_secret=
 capture_runtime_evidence() {
     adb logcat -d > "$ARTIFACTS/logcat.txt" 2>&1 || true
     adb shell getprop > "$ARTIFACTS/emulator-properties.txt" 2>&1 || true
+    adb reverse --list > "$ARTIFACTS/adb-reverse.txt" 2>&1 || true
     find "$CONSUMER/app/build/outputs" -type f -print \
         > "$ARTIFACTS/consumer-output-inventory.txt" 2>&1 || true
     while IFS= read -r apk; do
@@ -37,6 +39,7 @@ capture_runtime_evidence() {
         kill "$relay_pid" 2>/dev/null || true
         wait "$relay_pid" 2>/dev/null || true
     fi
+    adb reverse --remove "tcp:$RELAY_PORT" 2>/dev/null || true
 }
 trap capture_runtime_evidence EXIT
 
@@ -47,6 +50,7 @@ trap capture_runtime_evidence EXIT
     echo "sdk=$(adb shell getprop ro.build.version.sdk | tr -d '\r')"
     echo "abi=$(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
     echo "relay=$RELAY_URL"
+    echo "nip46_relay=$NIP46_RELAY_URL"
 } > "$ARTIFACTS/runtime-context.txt"
 unzip -l "$AAR" > "$ARTIFACTS/aar-inventory.txt"
 
@@ -80,6 +84,15 @@ if [[ ! "$nip46_remote_pubkey" =~ ^[0-9a-f]{64}$ ]]; then
     exit 1
 fi
 
+# NIP-46's explicit bunker-session pool admits device loopback by design.
+# Reverse that exact emulator port to the same host-owned relay rather than
+# widening product admission to Android's emulator-only 10.0.2.2 gateway.
+adb reverse "tcp:$RELAY_PORT" "tcp:$RELAY_PORT"
+if ! adb reverse --list | grep -q "tcp:$RELAY_PORT tcp:$RELAY_PORT"; then
+    echo "error: NIP-46 loopback reverse was not installed" >&2
+    exit 1
+fi
+
 "$GRADLE" \
     --no-daemon \
     --console=plain \
@@ -93,6 +106,7 @@ echo "== positive: x86_64 AAR executes observation, cancellation, reopen, and cl
     -p "$CONSUMER" \
     -PnmpAndroidRepository="$QUALIFICATION_REPOSITORY" \
     -PnmpQualificationRelay="$RELAY_URL" \
+    -PnmpNip46Relay="$NIP46_RELAY_URL" \
     -PnmpNip46RemotePubkey="$nip46_remote_pubkey" \
     -PnmpNip46PairingSecret="$nip46_pairing_secret" \
     :app:clean :app:connectedDebugAndroidTest \
@@ -163,6 +177,7 @@ echo "== negative: AAR missing libnmp_ffi x86_64 must refuse NMPEngine =="
     -p "$CONSUMER" \
     -PnmpAndroidRepository="$QUALIFICATION_REPOSITORY" \
     -PnmpQualificationRelay="$RELAY_URL" \
+    -PnmpNip46Relay="$NIP46_RELAY_URL" \
     -PnmpNip46RemotePubkey="$nip46_remote_pubkey" \
     -PnmpNip46PairingSecret="$nip46_pairing_secret" \
     -PnmpMissingRuntimeAar="$MISSING_ABI_AAR" \

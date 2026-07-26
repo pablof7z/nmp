@@ -7,6 +7,10 @@ val qualificationRelay =
     providers.gradleProperty("nmpQualificationRelay")
         .orElse("ws://10.0.2.2:47391")
         .get()
+val nip46Relay =
+    providers.gradleProperty("nmpNip46Relay")
+        .orElse("ws://127.0.0.1:47391")
+        .get()
 val nip46RemotePubkey =
     providers.gradleProperty("nmpNip46RemotePubkey")
         .orElse("")
@@ -29,6 +33,7 @@ android {
         versionName = "1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "NMP_QUALIFICATION_RELAY", "\"$qualificationRelay\"")
+        buildConfigField("String", "NMP_NIP46_RELAY", "\"$nip46Relay\"")
         buildConfigField("String", "NMP_NIP46_REMOTE_PUBKEY", "\"$nip46RemotePubkey\"")
         buildConfigField("String", "NMP_NIP46_PAIRING_SECRET", "\"$nip46PairingSecret\"")
         buildConfigField("boolean", "NMP_EXPECT_NATIVE_LOAD", (missingRuntimeAar == null).toString())

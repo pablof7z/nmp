@@ -70,6 +70,7 @@ class NMPAndroidProcessDeathQualificationTest {
         assumePhase("seed")
         assertTrue(BuildConfig.NMP_NIP46_REMOTE_PUBKEY.isNotEmpty())
         assertTrue(BuildConfig.NMP_NIP46_PAIRING_SECRET.isNotEmpty())
+        assertTrue(BuildConfig.NMP_NIP46_RELAY.startsWith("ws://127.0.0.1:"))
         accountStore.clear()
         sessionStore.clear()
         preferences.edit().clear().commit()
@@ -319,7 +320,7 @@ class NMPAndroidProcessDeathQualificationTest {
     private fun bunkerUri(): String {
         val encodedRelay =
             URLEncoder.encode(
-                BuildConfig.NMP_QUALIFICATION_RELAY,
+                BuildConfig.NMP_NIP46_RELAY,
                 StandardCharsets.UTF_8.name(),
             )
         return "bunker://${BuildConfig.NMP_NIP46_REMOTE_PUBKEY}" +

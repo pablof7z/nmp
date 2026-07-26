@@ -41,6 +41,13 @@ falsifies tampered ciphertext, deleted wrapping keys, and concurrent
 save/clear/load; it also records the device's actual `KeyInfo` security level
 without claiming the engine's secp256k1 signer is hardware-backed.
 
+The ordinary NIP-01 fixture relay remains at the emulator's `10.0.2.2` host
+gateway. The explicit NIP-46 bunker URI uses device loopback
+`127.0.0.1:47391`, with that one port forwarded by `adb reverse` to the
+same host-owned controlled relay. This exercises the bunker session's
+intentional explicit-loopback admission without widening it to an
+emulator-specific private gateway.
+
 The host then runs three separate `am instrument` processes with an explicit
 `force-stop` between them:
 
