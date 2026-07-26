@@ -339,7 +339,12 @@ class NMPAndroidProcessDeathQualificationTest {
                                     setOf(BuildConfig.NMP_QUALIFICATION_RELAY),
                                 ),
                             access = NMPAccessContext.Public,
-                            cache = NMPCacheMode.Strict,
+                            // A relay OK is durable delivery evidence, not
+                            // relay-observation provenance. This check asks
+                            // whether explicit credential clearing left the
+                            // unrelated canonical public row intact, so its
+                            // cache projection must include local provenance.
+                            cache = NMPCacheMode.Agnostic,
                             freshness = NMPFreshness.CacheOnly,
                         ),
                     ).first { batch ->
