@@ -136,17 +136,6 @@ extension NMPEngine {
         return Receipt(handle: handle)
     }
 
-    /// Publish a `CommentIntent` from `commentIntent` (#572). Take-once --
-    /// see `publishComposed(_ intent: GroupSendIntent)`'s own doc; identical
-    /// contract, just for the NIP-22 composed intent, delivered pull-based
-    /// over `Receipt.status` (#680).
-    public func publishComposed(_ intent: CommentIntent) async throws -> Receipt {
-        let handle = try nmpRethrowing {
-            try ffi.publishComposed(intent: intent.ffi)
-        }
-        return Receipt(handle: handle)
-    }
-
     /// Attach a fresh pull stream to retained receipt facts (#680): the
     /// `.attached` result carries a new `NmpReceiptStream` that transparently
     /// traverses the durable `WriteStatus` history in finite pages and then

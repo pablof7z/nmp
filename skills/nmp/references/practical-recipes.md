@@ -54,22 +54,30 @@ This deliberately avoids a magic `loadProfileAndPosts` noun. NMP exposes composa
 
 Goal: read and write one NIP-29 group without widening its host authority.
 
-Swift/Kotlin call shape:
+The live read shape is:
 
 ```text
 groupContentDemand(host, groupId)
 engine.observe(demand)
-engine.groupMessageIntent(host, groupId, content, recipients, reply)
-engine.publishComposed(intent)
 ```
+
+The live write shape (`engine.groupMessageIntent` →
+`GroupSendIntent` → `publishComposed`) is an unsound extra noun and lifecycle,
+not a recipe to copy; #823 owns its hard cut. The target write shape, which is
+not yet available at this revision, is a protocol-owned immutable composer
+returning the ordinary `WriteIntent`, followed by generic `engine.publish`.
 
 Rules:
 
 - Treat `(host, groupId)` as the group identity. Do not union events with the same group id from another relay.
-- The helper returns pinned authority. Do not replace it with a generic filter plus app relay list.
+- Pinned authority must be non-forgeable and payload-bound inside the ordinary
+  write noun. Do not replace it with a generic filter plus app relay list.
 - Sort the accumulated rows in the app. Preserve each row's source proof and the query evidence.
-- `groupMessageIntent` derives active author and time, protocol tags, reply/recipient rows, previous-state provenance, and pinned routing. Do not hand-build those fields in Swift/Kotlin.
-- The composed intent is take-once. A new user decision requires a freshly composed intent.
+- The protocol composer derives active author and time, protocol tags,
+  reply/recipient rows, previous-state provenance, and pinned routing. Do not
+  hand-build those fields in Swift/Kotlin.
+- Do not build around the current take-once wrapper; it is part of the #823
+  defect, not a lifecycle contract.
 - Keep the receipt id and observe all relay outcomes. One ACK is not universal delivery.
 
 For rich rendering, use Swift `NMPContent` resources or Kotlin `NMPContentClient(engine).session(...) -> NostrContentSession` for only a bounded visible-plus-prefetch window keyed by stable event id. Session policy limits are per session, not engine-global. Enforce a separate aggregate app permit pool before claiming a distinct target: use the reference-demand plan's `1 + helpers.count` as that target's query cost (one canonical query plus its helper queries), and cap the number of open row sessions independently. `claim(referenceID:)` in Swift / `claim(referenceId)` in Kotlin accepts an occurrence id from that session's parsed document and may return `nil`/`null`; it is not a row id or target key. Record the permits with the claim, then cancel/close claims and release their permits before stopping/closing the row's session on eviction.

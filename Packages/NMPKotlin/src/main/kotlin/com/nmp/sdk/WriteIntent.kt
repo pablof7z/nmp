@@ -21,6 +21,15 @@ enum class Durability {
             Ephemeral -> FfiDurability.EPHEMERAL
             AtMostOnce -> FfiDurability.AT_MOST_ONCE
         }
+
+    companion object {
+        internal fun from(ffi: FfiDurability): Durability =
+            when (ffi) {
+                FfiDurability.DURABLE -> Durable
+                FfiDurability.EPHEMERAL -> Ephemeral
+                FfiDurability.AT_MOST_ONCE -> AtMostOnce
+            }
+    }
 }
 
 /** Where a write is routed. There is deliberately no `PrivateNarrow` case
@@ -39,6 +48,14 @@ sealed class WriteRouting {
             is AuthorOutbox -> FfiWriteRouting.AuthorOutbox
             is ToInboxes -> FfiWriteRouting.ToInboxes(recipients)
         }
+
+    companion object {
+        internal fun from(ffi: FfiWriteRouting): WriteRouting =
+            when (ffi) {
+                is FfiWriteRouting.AuthorOutbox -> AuthorOutbox
+                is FfiWriteRouting.ToInboxes -> ToInboxes(ffi.recipients)
+            }
+    }
 }
 
 /** The event payload of a write intent (`FfiWritePayload` mirror). VISION
@@ -74,6 +91,24 @@ sealed class WritePayload {
             is Unsigned -> FfiWritePayload.Unsigned(pubkey, createdAt, kind, tags, content)
             is Signed -> FfiWritePayload.Signed(id, pubkey, createdAt, kind, tags, content, sig)
         }
+
+    companion object {
+        internal fun from(ffi: FfiWritePayload): WritePayload =
+            when (ffi) {
+                is FfiWritePayload.Unsigned ->
+                    Unsigned(ffi.pubkey, ffi.createdAt, ffi.kind, ffi.tags, ffi.content)
+                is FfiWritePayload.Signed ->
+                    Signed(
+                        ffi.id,
+                        ffi.pubkey,
+                        ffi.createdAt,
+                        ffi.kind,
+                        ffi.tags,
+                        ffi.content,
+                        ffi.sig,
+                    )
+            }
+    }
 }
 
 /** A caller's publish request (`FfiWriteIntent` mirror).
@@ -119,6 +154,20 @@ data class WriteIntent(
             identityOverride = identityOverride,
             correlation = correlation,
         )
+
+    companion object {
+        /** Reverse projection for protocol-owned FFI composers that return the
+         * ordinary write noun. Internal so apps receive a [WriteIntent] rather
+         * than raw generated FFI vocabulary. */
+        internal fun from(ffi: FfiWriteIntent): WriteIntent =
+            WriteIntent(
+                payload = WritePayload.from(ffi.payload),
+                durability = Durability.from(ffi.durability),
+                routing = WriteRouting.from(ffi.routing),
+                identityOverride = ffi.identityOverride,
+                correlation = ffi.correlation,
+            )
+    }
 }
 
 /** Every state a publish's receipt stream may report (ledger #9: enqueue is

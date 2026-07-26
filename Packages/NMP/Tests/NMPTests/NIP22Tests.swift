@@ -172,7 +172,7 @@ final class NIP22Tests: XCTestCase {
         try engine.setActiveAccount(author)
 
         let token = "nip22-offline-signer-token"
-        let intent = try engine.commentIntent(
+        let intent = try NMP.commentIntent(
             root: .external(target: .podcastEpisodeGuid(guid: "guid-offline")),
             parent: .root,
             authorPubkey: author,
@@ -180,7 +180,7 @@ final class NIP22Tests: XCTestCase {
             content: "great show",
             correlation: token
         )
-        let receipt = try await engine.publishComposed(intent)
+        let receipt = try await engine.publish(intent)
         let statuses = try await Self.withTimeout {
             await Self.collect(receipt.status, count: 2)
         }
@@ -216,14 +216,41 @@ final class NIP22Tests: XCTestCase {
         defer { engine.shutdown() }
         try engine.setActiveAccount(authorPubkey)
 
-        let intent = try engine.commentIntent(
+        let intent = try NMP.commentIntent(
             root: .external(target: .podcastEpisodeGuid(guid: "golden-guid-572")),
             parent: .root,
             authorPubkey: authorPubkey,
             createdAt: 1_700_000_000,
             content: "golden fixture content"
         )
-        let receipt = try await engine.publishComposed(intent)
+        guard case .unsigned(
+            let composedAuthor,
+            let composedAt,
+            let composedKind,
+            let composedTags,
+            let composedContent
+        ) = intent.payload else {
+            return XCTFail("NIP-22 must compose an ordinary unsigned write payload")
+        }
+        XCTAssertEqual(composedAuthor, authorPubkey)
+        XCTAssertEqual(composedAt, 1_700_000_000)
+        XCTAssertEqual(composedKind, 1111)
+        XCTAssertEqual(
+            composedTags,
+            [
+                ["I", "podcast:item:guid:golden-guid-572"],
+                ["K", "podcast:item:guid"],
+                ["i", "podcast:item:guid:golden-guid-572"],
+                ["k", "podcast:item:guid"],
+            ]
+        )
+        XCTAssertEqual(composedContent, "golden fixture content")
+        XCTAssertEqual(intent.durability, .durable)
+        XCTAssertEqual(intent.routing, .authorOutbox)
+        XCTAssertNil(intent.identityOverride)
+        XCTAssertNil(intent.correlation)
+
+        let receipt = try await engine.publish(intent)
         let statuses = try await Self.withTimeout {
             await Self.collect(receipt.status, count: 2)
         }
@@ -262,14 +289,14 @@ final class NIP22Tests: XCTestCase {
         let demand = try commentThreadDemand(root: root)
         let query = try engine.observe(demand)
 
-        let intent = try engine.commentIntent(
+        let intent = try NMP.commentIntent(
             root: root,
             parent: .root,
             authorPubkey: author,
             createdAt: 1_723_459_000,
             content: "visible through the ordinary query path"
         )
-        let receipt = try await engine.publishComposed(intent)
+        let receipt = try await engine.publish(intent)
         _ = try await Self.withTimeout {
             await Self.collect(receipt.status, count: 2)
         }
