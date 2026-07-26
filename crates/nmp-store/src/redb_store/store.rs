@@ -1,4 +1,5 @@
 use super::canonical::{fold_seen_at, observation_key, observation_range, observation_relay_key};
+use super::event_ops::CoverageRowRecord;
 use super::outbox::{
     is_suppressed_in_txn, reconcile_ephemeral_receipts_in_txn, replace_lane_in_txn,
     OUTBOX_KIND5_CLAIMS, OUTBOX_SUPPRESS_BY_ADDR, OUTBOX_SUPPRESS_BY_ID,
@@ -10,7 +11,8 @@ use super::postings_store::{rebuild_from_canonical, scan_packed, PackedScan};
 use super::query::{rebuild_index_cardinality_from_events, OrderedIndex, OrderedPlan};
 use super::schema::{
     persist_err, EventKey, RelayKey, ADDR_INDEX, ADDR_TOMBSTONES, BY_AUTHOR, BY_CREATED_AT,
-    BY_KIND, BY_TAG, COVERAGE, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS,
+    BY_KIND, BY_TAG, COVERAGE, COVERAGE_MAX_EVICTION_REPAIR_KEY,
+    COVERAGE_MAX_EVICTION_REPAIR_VERSION, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS,
     EVENT_STORE_META, EXPIRATION_INDEX, INDEX_CARDINALITY, INDEX_CARDINALITY_META,
     INDEX_CARDINALITY_SAMPLE_KEY, INDEX_CARDINALITY_SAMPLE_META, INDEX_CARDINALITY_VERSION,
     INDEX_CARDINALITY_VERSION_KEY, LEGACY_BY_AUTHOR_KIND, LEGACY_EVENT_TABLES,
@@ -216,6 +218,7 @@ impl RedbStore {
                 needs_schema_migration,
                 needs_legacy_index_removal,
                 needs_cardinality_rebuild,
+                needs_coverage_max_repair,
                 pending_ephemeral,
             ) = {
                 let read_txn = db.begin_read()?;
@@ -231,6 +234,10 @@ impl RedbStore {
                 }
                 let needs_schema_migration = version != Some(SCHEMA_VERSION);
                 let needs_legacy_index_removal = version == Some(LEGACY_SCHEMA_VERSION);
+                let needs_coverage_max_repair = schema_meta
+                    .get(COVERAGE_MAX_EVICTION_REPAIR_KEY)?
+                    .map(|guard| guard.value())
+                    != Some(COVERAGE_MAX_EVICTION_REPAIR_VERSION);
                 let cardinality_meta = read_txn.open_table(INDEX_CARDINALITY_META)?;
                 let cardinality_version = cardinality_meta
                     .get(INDEX_CARDINALITY_VERSION_KEY)?
@@ -261,10 +268,15 @@ impl RedbStore {
                     needs_legacy_index_removal
                         || cardinality_version != Some(INDEX_CARDINALITY_VERSION)
                         || cardinality_sample_key_len.is_none(),
+                    needs_coverage_max_repair,
                     pending_ephemeral,
                 )
             };
-            if needs_schema_migration || needs_cardinality_rebuild || pending_ephemeral > 0 {
+            if needs_schema_migration
+                || needs_cardinality_rebuild
+                || needs_coverage_max_repair
+                || pending_ephemeral > 0
+            {
                 let write_txn = db.begin_write()?;
                 {
                     if needs_schema_migration {
@@ -307,6 +319,31 @@ impl RedbStore {
                         cardinality_meta
                             .insert(INDEX_CARDINALITY_VERSION_KEY, INDEX_CARDINALITY_VERSION)?;
                     }
+                    if needs_coverage_max_repair {
+                        let mut coverage = write_txn.open_table(COVERAGE)?;
+                        let mut stale = Vec::new();
+                        for entry in coverage.iter()? {
+                            let (key, value) = entry?;
+                            let record: CoverageRowRecord = serde_json::from_str(value.value())
+                                .map_err(|error| {
+                                    redb::Error::Corrupted(format!(
+                                        "invalid coverage row during MAX-boundary repair: {error}"
+                                    ))
+                                })?;
+                            if record.from == u64::MAX && record.through == u64::MAX {
+                                stale.push(key.value().to_owned());
+                            }
+                        }
+                        for key in stale {
+                            coverage.remove(key.as_str())?;
+                        }
+                        drop(coverage);
+                        let mut schema_meta = write_txn.open_table(SCHEMA_META)?;
+                        schema_meta.insert(
+                            COVERAGE_MAX_EVICTION_REPAIR_KEY,
+                            COVERAGE_MAX_EVICTION_REPAIR_VERSION,
+                        )?;
+                    }
                     if needs_schema_migration {
                         write_txn.delete_table(BY_CREATED_AT)?;
                         write_txn.delete_table(BY_AUTHOR)?;
@@ -326,10 +363,18 @@ impl RedbStore {
                         outbox_meta.insert(PENDING_EPHEMERAL_RECEIPTS_KEY, "0")?;
                     }
                 }
+                #[cfg(test)]
+                if needs_coverage_max_repair {
+                    crash_if_postings("coverage-repair-before-commit");
+                }
                 write_txn.commit()?;
                 #[cfg(test)]
                 if needs_schema_migration {
                     crash_if_postings("postings-after-migration-commit");
+                }
+                #[cfg(test)]
+                if needs_coverage_max_repair {
+                    crash_if_postings("coverage-repair-after-commit");
                 }
                 _open_write_transactions += 1;
             }
@@ -388,6 +433,10 @@ impl RedbStore {
                 write_txn.open_table(OUTBOX_CORRELATIONS)?;
                 let mut schema_meta = write_txn.open_table(SCHEMA_META)?;
                 schema_meta.insert(SCHEMA_VERSION_KEY, SCHEMA_VERSION)?;
+                schema_meta.insert(
+                    COVERAGE_MAX_EVICTION_REPAIR_KEY,
+                    COVERAGE_MAX_EVICTION_REPAIR_VERSION,
+                )?;
             }
             write_txn.commit()?;
             _open_write_transactions += 1;

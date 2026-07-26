@@ -321,7 +321,9 @@ fn redb_crash_worker() {
         }
         "postings-before-migration-ready"
         | "postings-after-migration-ready"
-        | "postings-after-migration-commit" => {
+        | "postings-after-migration-commit"
+        | "coverage-repair-before-commit"
+        | "coverage-repair-after-commit" => {
             let _ = RedbStore::open(path);
         }
         "route-revision-before-commit" => {
@@ -750,6 +752,74 @@ fn explicit_retention_eviction_and_coverage_lowering_are_atomic_across_process_d
             Timestamp::from(1_100u64),
         )),
         "successful explicit policy must lower evidence with row deletion"
+    );
+}
+
+fn prepare_pre_repair_max_coverage(path: &Path) {
+    let relay = RelayUrl::parse(RELAY).expect("relay");
+    {
+        let mut store = RedbStore::open(path).expect("initialize pre-repair fixture");
+        store
+            .record_coverage(
+                &retention_atom(),
+                &relay,
+                CoverageInterval::new(Timestamp::from(u64::MAX), Timestamp::from(u64::MAX)),
+            )
+            .expect("record old MAX-only coverage");
+    }
+    let db = Database::open(path).expect("open raw pre-repair fixture");
+    let write = db.begin_write().expect("begin marker removal");
+    {
+        let mut schema = write.open_table(SCHEMA_META).expect("open schema meta");
+        schema
+            .remove(COVERAGE_MAX_EVICTION_REPAIR_KEY)
+            .expect("remove repair marker")
+            .expect("fresh fixture carries repair marker");
+    }
+    write.commit().expect("commit marker removal");
+}
+
+fn coverage_repair_state(path: &Path) -> (Option<u64>, u64) {
+    let db = Database::open(path).expect("open raw repair state");
+    let read = db.begin_read().expect("begin repair state read");
+    let schema = read.open_table(SCHEMA_META).expect("open schema meta");
+    let marker = schema
+        .get(COVERAGE_MAX_EVICTION_REPAIR_KEY)
+        .expect("read repair marker")
+        .map(|guard| guard.value());
+    let coverage = read.open_table(COVERAGE).expect("open coverage");
+    let rows = coverage.len().expect("count coverage rows");
+    (marker, rows)
+}
+
+#[test]
+fn max_coverage_repair_retries_before_commit_and_survives_after_commit() {
+    let (_before_dir, before_path) = fixture();
+    prepare_pre_repair_max_coverage(&before_path);
+    crash_before_v8(&before_path, "coverage-repair-before-commit");
+    assert_eq!(
+        coverage_repair_state(&before_path),
+        (None, 1),
+        "a pre-commit death must leave the old marker so repair retries"
+    );
+    drop(RedbStore::open(&before_path).expect("retry repair after pre-commit death"));
+    assert_eq!(
+        coverage_repair_state(&before_path),
+        (Some(COVERAGE_MAX_EVICTION_REPAIR_VERSION), 0)
+    );
+
+    let (_after_dir, after_path) = fixture();
+    prepare_pre_repair_max_coverage(&after_path);
+    crash_before_v8(&after_path, "coverage-repair-after-commit");
+    assert_eq!(
+        coverage_repair_state(&after_path),
+        (Some(COVERAGE_MAX_EVICTION_REPAIR_VERSION), 0),
+        "a post-commit death must retain both invalidation and marker"
+    );
+    drop(RedbStore::open(&after_path).expect("reopen committed repair"));
+    assert_eq!(
+        coverage_repair_state(&after_path),
+        (Some(COVERAGE_MAX_EVICTION_REPAIR_VERSION), 0)
     );
 }
 

@@ -50,6 +50,8 @@ pub(super) const LEGACY_EVENT_TABLES: [&str; 9] = [
 ];
 pub(super) const SCHEMA_META: TableDefinition<&str, u64> = TableDefinition::new("schema_meta_v6");
 pub(super) const SCHEMA_VERSION_KEY: &str = "version";
+pub(super) const COVERAGE_MAX_EVICTION_REPAIR_KEY: &str = "coverage_max_eviction_repair";
+pub(super) const COVERAGE_MAX_EVICTION_REPAIR_VERSION: u64 = 1;
 pub(super) const LEGACY_SCHEMA_VERSION: u64 = 6;
 pub(super) const PREVIOUS_SCHEMA_VERSION: u64 = 7;
 pub(super) const SCHEMA_VERSION: u64 = 8;
