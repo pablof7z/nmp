@@ -56,7 +56,6 @@ kotlin {
         // package does not copy or fork com.nmp.sdk; it consumes the exact
         // Kotlin/JVM sources and adds only its generated Android bindings.
         srcDir("../NMPKotlin/src/main/kotlin")
-        exclude("uniffi/**")
 
         // These two providers are explicitly desktop-JVM JCEKS/password
         // implementations. Shipping them under Android would make a false
