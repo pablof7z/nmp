@@ -7,10 +7,6 @@ use std::collections::BTreeMap;
 use nmp::{
     AccessContext, Binding, CacheMode, Demand, Freshness, NostrEntityError, SourceAuthority,
 };
-use nmp_bdd::reference_fixtures::{
-    reference_fixtures, NormalizedDemand, NormalizedFilter, NormalizedReferencePlan,
-    NormalizedReferenceTarget, NormalizedSource, ReferenceFixtureOutcome,
-};
 use nmp_content::{parse_content, ContentSyntax, InlineNode};
 use nmp_ffi::content::{parse_nostr_content, FfiContentSyntax, FfiInlineNode};
 use nmp_ffi::convert::FfiError;
@@ -22,6 +18,10 @@ use nmp_ffi::types::{
     FfiAccessContext, FfiBinding, FfiCacheMode, FfiDemand, FfiFreshness, FfiSourceAuthority,
 };
 use nmp_grammar::reference::{ReferenceDemandPlan, ReferenceTarget};
+use nmp_test_support::reference_fixtures::{
+    reference_fixtures, NormalizedDemand, NormalizedFilter, NormalizedReferencePlan,
+    NormalizedReferenceTarget, NormalizedSource, ReferenceFixtureOutcome,
+};
 
 #[test]
 fn shared_nip19_fixtures_match_direct_rust_and_ffi_exactly() {

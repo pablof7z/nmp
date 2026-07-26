@@ -1,7 +1,7 @@
 //! #52 Unit D: execute one content-neutral loopback scenario through the
 //! supported direct Rust facade and through `nmp-ffi`, then compare the
 //! semantic observations. Each run gets an isolated instance of the SAME
-//! `nmp-bdd::relays::ScriptedRelay`; no second relay fake lives here.
+//! `nmp-test-support::relays::ScriptedRelay`; no second relay fake lives here.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::RecvTimeoutError;
@@ -16,8 +16,8 @@ use nmp::{
     ShortfallFact, SourceStatus, Timestamp, UnsignedEvent, WriteIntent, WritePayload, WriteRouting,
     WriteStatus,
 };
-use nmp_bdd::relays::{RelayConfig, ScriptedRelay};
 use nmp_ffi::convert::{write_status_to_ffi, WriteStatusRef};
+use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 // #680: observers/callbacks are gone; the facade exposes pull-based async
 // stream objects whose `next()` we bridge into the existing mpsc drains via a
 // forwarding Tokio task (all parity tests are `#[tokio::test(multi_thread)]`).
