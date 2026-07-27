@@ -686,6 +686,20 @@ quiet socket. Until then the polling helper stays, used only to SEQUENCE a
 stimulus (so "one more group" arrives after the first subscription is genuinely
 live), never to take an assertion.
 
+**It reaches further than the scenarios it was found on, and §6's own feature
+is in it.** Measured 2026-07-27 over six consecutive `cargo test -p nmp-bdd
+--test bdd` runs on a branch carrying NO library changes: two runs red, four
+green. The failures were `relay "hub" is holding 1 subscription` in
+`features/routing/relay-subscription-limits.feature` ("A catalog of three
+hundred groups fits inside a limit of twenty"), reporting **2** live
+subscriptions where the end state holds 1, and `the subscriptions serving
+Alice are untouched` in `features/queries/reactive-follows.feature`. Same
+mechanism, same verdict: a transient second subscription exists between two
+compiles that did not group identically, the one-shot socket read lands in
+it, and the end state is correct. So the flake is a property of the harness's
+observation model rather than of any one feature — **a red run here is not
+evidence against the change under test until the same seed goes red twice.**
+
 ### 8.2 CLOSED — the Close/reopen straggler race (#932)
 
 The coverage ruling assumed a Close leaves pending snapshots to be "harmlessly
