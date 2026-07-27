@@ -1,0 +1,9 @@
+[package]
+name = "nmp-network-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Pure, protocol-independent network destination admission for NMP."
+
+[dependencies]

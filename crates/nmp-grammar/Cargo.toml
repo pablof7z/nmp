@@ -7,6 +7,9 @@ publish.workspace = true
 
 [dependencies]
 nostr.workspace = true
+# The one pure owner of host normalization and public/local classification
+# (#885); `relay` is only the RelayUrl adapter over it.
+nmp-network-policy.workspace = true
 # `DescriptorHash`'s collision-resistant digest (see the workspace
 # `[workspace.dependencies]` comment for why this replaced 64-bit FNV).
 blake3.workspace = true

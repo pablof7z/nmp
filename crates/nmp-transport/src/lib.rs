@@ -28,16 +28,12 @@
 //! Push-model only: there is no "send to all" — the caller iterates its own
 //! routing plan and issues one `send` per (relay, current handle).
 
-mod admission;
 mod backoff;
 mod handle;
 mod health;
 mod keepalive;
 mod pool;
 
-pub use admission::{
-    classify_ip, classify_relay_host, normalize_bare_host, relay_host_key, RelayHostClass,
-};
 pub use handle::RelayHandle;
 pub use health::{ConnState, RelayHealth};
 #[cfg(feature = "bench-instrumentation")]

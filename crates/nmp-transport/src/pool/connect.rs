@@ -16,18 +16,16 @@
 //! relay) — `to_socket_addrs` runs directly, bounded only by the OS resolver.
 //! Noted as a deviation, not a silent narrowing.
 
-use std::collections::BTreeSet;
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::Once;
 use std::time::Duration;
 
+use nmp_network_policy::{AdmittedHost, DestinationPolicy, DestinationRefusal};
 use tungstenite::client::{uri_mode, IntoClientRequest};
 use tungstenite::error::{Error as WsError, UrlError};
 use tungstenite::protocol::WebSocketConfig;
 use tungstenite::stream::{MaybeTlsStream, Mode};
 use tungstenite::{client_tls_with_config, HandshakeError};
-
-use crate::admission::{classify_ip, normalize_bare_host, RelayHostClass};
 
 /// Upper bound on the OS-level TCP connect + TLS/HTTP upgrade for one dial.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -64,21 +62,21 @@ fn install_rustls_provider() {
 /// [`CONNECT_TIMEOUT`]: a stuck TCP connect or a stalled TLS/HTTP upgrade
 /// fails fast rather than wedging the worker thread.
 ///
-/// `allowed_local_hosts` is the operator's opt-in allowlist (issue #519,
-/// `PoolConfig::allowed_local_hosts` — the SAME set `nmp-engine`'s
+/// `destination_policy` is the one pure admission owner (#885,
+/// `PoolConfig::destination_policy` — the SAME policy `nmp-engine`'s
 /// `RelayAdmissionPolicy` enforces before a discovered relay ever reaches
 /// this pool). It matters here because the URL's host STRING having already
 /// cleared admission proves nothing about what it resolves to: an ordinary-
 /// looking domain can still answer with a loopback/RFC-1918/link-local
 /// address (DNS-based SSRF), and a second lookup at retry time could answer
-/// differently than the first (DNS rebind). [`connect_with_timeout`]
-/// re-classifies every resolved candidate and connects to the exact
-/// [`std::net::SocketAddr`] it just classified — never re-resolving — so
-/// there is no window between the check and the connect for a rebind to
+/// differently than the first (DNS rebind). [`connect_with_timeout`] admits
+/// the complete fresh answer set and connects to the exact
+/// [`std::net::SocketAddr`] values it just admitted — never re-resolving —
+/// so there is no window between the check and the connect for a rebind to
 /// exploit.
 pub(super) fn open_relay_socket(
     relay_url: &str,
-    allowed_local_hosts: &BTreeSet<String>,
+    destination_policy: &DestinationPolicy,
 ) -> Result<RelaySocket, String> {
     install_rustls_provider();
 
@@ -105,7 +103,7 @@ pub(super) fn open_relay_socket(
         Mode::Tls => 443,
     });
 
-    let stream = connect_with_timeout(host, port, CONNECT_TIMEOUT, allowed_local_hosts)
+    let stream = connect_with_timeout(host, port, CONNECT_TIMEOUT, destination_policy)
         .map_err(|error| format!("tcp connect {host}:{port}: {error}"))?;
     stream
         .set_nodelay(true)
@@ -134,58 +132,71 @@ pub(super) fn open_relay_socket(
     Ok(socket)
 }
 
-/// Resolve `(host, port)` and connect to the first candidate address that is
-/// either not `Local` (issue #519) or belongs to a host the operator
-/// explicitly opted in. Every candidate is classified from the SAME
-/// `SocketAddr` `TcpStream::connect_timeout` is then called against — never
-/// a re-resolved one — so there is no TOCTOU window for a DNS answer to
-/// change between the check and the connect (a rebind attack).
+/// Resolve `(host, port)`, admit the COMPLETE answer set, and connect to the
+/// first admitted candidate. The exact `SocketAddr` values checked are the
+/// ones `TcpStream::connect_timeout` is then called against — never a
+/// re-resolved one — so there is no TOCTOU window for a DNS answer to change
+/// between the check and the connect (a rebind attack).
 ///
-/// A host resolving ONLY to local addresses (and not opted in) is refused
-/// outright: every candidate is skipped without ever attempting a connect,
-/// and the loop's fallback error is distinguishable
-/// ([`std::io::ErrorKind::PermissionDenied`]) from an ordinary connect
-/// failure ([`std::io::ErrorKind::AddrNotAvailable`]/whatever the OS
-/// reported) so callers/tests can tell "refused" apart from "unreachable".
+/// One unallowed local answer refuses the WHOLE set, including a mixed
+/// public+local answer: the convenient public subset is never dialed, because
+/// selecting it is exactly how rebinding protection gets defeated. The typed
+/// refusal maps to [`std::io::ErrorKind::PermissionDenied`], distinguishable
+/// from an ordinary connect failure
+/// ([`std::io::ErrorKind::AddrNotAvailable`]/whatever the OS reported) so
+/// callers/tests can tell "refused" apart from "unreachable".
 fn connect_with_timeout(
     host: &str,
     port: u16,
     timeout: Duration,
-    allowed_local_hosts: &BTreeSet<String>,
+    destination_policy: &DestinationPolicy,
 ) -> std::io::Result<TcpStream> {
-    let addrs = (host, port).to_socket_addrs().map_err(|error| {
-        std::io::Error::new(error.kind(), format!("resolve {host}:{port}: {error}"))
-    })?;
-    let host_opted_in = allowed_local_hosts.contains(&normalize_bare_host(host));
+    let admitted_host = destination_policy
+        .admit_host(host)
+        .map_err(destination_refusal)?;
+    let addrs: Vec<SocketAddr> = (host, port)
+        .to_socket_addrs()
+        .map_err(|error| {
+            std::io::Error::new(error.kind(), format!("resolve {host}:{port}: {error}"))
+        })?
+        .collect();
+    let addrs = admit_socket_addresses(destination_policy, &admitted_host, addrs)?;
     let mut last_err: Option<std::io::Error> = None;
-    let mut refused_local = false;
     for addr in addrs {
-        if classify_ip(addr.ip()) == RelayHostClass::Local && !host_opted_in {
-            refused_local = true;
-            continue;
-        }
         match TcpStream::connect_timeout(&addr, timeout) {
             Ok(stream) => return Ok(stream),
             Err(error) => last_err = Some(error),
         }
     }
     Err(last_err.unwrap_or_else(|| {
-        if refused_local {
-            std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!(
-                    "refusing to connect {host}:{port}: every resolved address is \
-                     loopback/private/link-local/unspecified/broadcast and the host is not \
-                     operator opted-in"
-                ),
-            )
-        } else {
-            std::io::Error::new(
-                std::io::ErrorKind::AddrNotAvailable,
-                "no addresses resolved for host",
-            )
-        }
+        std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            "no admitted address accepted the connection",
+        )
     }))
+}
+
+/// Apply the shared all-or-nothing answer-set policy before any dial. The
+/// returned addresses are exactly the ones admitted — nothing is filtered
+/// out, so a partially-admissible answer cannot be silently narrowed.
+fn admit_socket_addresses(
+    destination_policy: &DestinationPolicy,
+    admitted_host: &AdmittedHost,
+    addresses: Vec<SocketAddr>,
+) -> std::io::Result<Vec<SocketAddr>> {
+    destination_policy
+        .admit_resolved(admitted_host, addresses.iter().map(SocketAddr::ip))
+        .map_err(destination_refusal)?;
+    Ok(addresses)
+}
+
+fn destination_refusal(refusal: DestinationRefusal) -> std::io::Error {
+    let kind = if matches!(refusal, DestinationRefusal::NoResolvedAddresses { .. }) {
+        std::io::ErrorKind::AddrNotAvailable
+    } else {
+        std::io::ErrorKind::PermissionDenied
+    };
+    std::io::Error::new(kind, refusal)
 }
 
 #[cfg(test)]
@@ -213,7 +224,12 @@ mod tests {
     #[test]
     fn connect_with_timeout_is_bounded_not_os_default() {
         let started = Instant::now();
-        let result = connect_with_timeout("192.0.2.1", 9, Duration::from_secs(2), &BTreeSet::new());
+        let result = connect_with_timeout(
+            "192.0.2.1",
+            9,
+            Duration::from_secs(2),
+            &DestinationPolicy::default(),
+        );
         let elapsed = started.elapsed();
         assert!(result.is_err());
         assert!(
@@ -231,10 +247,10 @@ mod tests {
         // Deliberately literal IP text only: `(host, port).to_socket_addrs()`
         // fast-paths a parseable IP without touching the OS resolver, so
         // this stays a hermetic, network-free test. The trailing-dot
-        // literal falsifier (`ws://127.0.0.1.`) is pinned at the URL-host
-        // classifier level instead (`admission::trailing_dot_ipv4_literal_is_local`),
-        // where the SAME string would instead go through `nostr`/`url`'s
-        // host parser rather than `getaddrinfo`.
+        // literal falsifier (`ws://127.0.0.1.`) is pinned at the relay-URL
+        // adapter level instead (`nmp_grammar::relay`), where the SAME string
+        // would instead go through `nostr`/`url`'s host parser rather than
+        // `getaddrinfo`.
         for (host, port) in [
             ("127.0.0.1", 7777),
             ("10.0.0.1", 7777),
@@ -242,7 +258,12 @@ mod tests {
             ("::1", 7777),
         ] {
             let started = Instant::now();
-            let result = connect_with_timeout(host, port, Duration::from_secs(5), &BTreeSet::new());
+            let result = connect_with_timeout(
+                host,
+                port,
+                Duration::from_secs(5),
+                &DestinationPolicy::default(),
+            );
             let elapsed = started.elapsed();
             let error = result.expect_err(&format!("{host} must be refused"));
             assert_eq!(
@@ -257,11 +278,11 @@ mod tests {
         }
     }
 
-    /// The operator opt-in (`PoolConfig::allowed_local_hosts`, threaded from
+    /// The operator opt-in (`PoolConfig::destination_policy`, threaded from
     /// `nmp-engine`'s `RelayAdmissionPolicy`) must still let an intentional
     /// local relay's resolved address through — issue #519's "don't break
     /// the intentional local-relay path" requirement. A loopback listener
-    /// stands in for a real relay: reaching `Ok(_)` proves the classifier did
+    /// stands in for a real relay: reaching `Ok(_)` proves the policy did
     /// not skip the opted-in address.
     #[test]
     fn opted_in_local_host_still_connects() {
@@ -269,13 +290,36 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let accept_thread = std::thread::spawn(move || listener.accept().unwrap());
 
-        let mut allowed = BTreeSet::new();
-        allowed.insert("127.0.0.1".to_string());
-        let result = connect_with_timeout("127.0.0.1", port, Duration::from_secs(5), &allowed);
+        let policy = DestinationPolicy::new(["127.0.0.1".to_string()]);
+        let result = connect_with_timeout("127.0.0.1", port, Duration::from_secs(5), &policy);
         assert!(
             result.is_ok(),
             "an opted-in local host must still connect: {result:?}"
         );
         accept_thread.join().unwrap();
+    }
+
+    /// #885 falsifier at the DIAL site: a mixed public+local DNS answer for a
+    /// public-looking host refuses the whole set. No `SocketAddr` survives to
+    /// `TcpStream::connect_timeout`, so the convenient public subset is never
+    /// dialed (that narrowing is precisely how DNS rebinding wins).
+    #[test]
+    fn mixed_resolved_answer_yields_no_dialable_address() {
+        let policy = DestinationPolicy::default();
+        let host = policy
+            .admit_host("relay.example.com")
+            .expect("a public-looking literal host is admitted");
+        let mixed: Vec<SocketAddr> = vec![
+            "8.8.8.8:443".parse().unwrap(),
+            "127.0.0.1:443".parse().unwrap(),
+        ];
+        let error = admit_socket_addresses(&policy, &host, mixed)
+            .expect_err("a mixed answer must be refused in full");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        let reported = error.to_string();
+        assert!(
+            reported.contains("8.8.8.8") && reported.contains("127.0.0.1"),
+            "the refusal must name both the public and the local answers: {reported}"
+        );
     }
 }

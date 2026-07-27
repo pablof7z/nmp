@@ -12,7 +12,8 @@ publish.workspace = true
 [dependencies]
 nostr.workspace = true
 nmp-ownership.workspace = true
-nmp-transport.workspace = true
+# #885: the one pure destination-admission owner every Blossom dial uses.
+nmp-network-policy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true

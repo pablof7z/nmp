@@ -23,7 +23,7 @@
 //!    must invalidate stale handles. See [`pack_generation`] for how this is
 //!    made safe without an extra thread of coordination with the pool.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::io;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,6 +34,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
+use nmp_network_policy::DestinationPolicy;
 use nostr::RelayUrl;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::Message;
@@ -321,7 +322,7 @@ pub(super) fn spawn(
     reconnect_delay_initial: Duration,
     reconnect_jitter_max: Duration,
     command_queue_capacity: usize,
-    allowed_local_hosts: Arc<BTreeSet<String>>,
+    destination_policy: Arc<DestinationPolicy>,
     committed_observations: Arc<super::committed_observations::CommittedObservationCache>,
     spawner: &dyn ThreadSpawner,
 ) -> Result<WorkerHandle, ThreadSpawnError> {
@@ -356,7 +357,7 @@ pub(super) fn spawn(
                     keepalive_pong_timeout,
                     reconnect_delay_initial,
                     reconnect_jitter_max,
-                    &allowed_local_hosts,
+                    &destination_policy,
                     &committed_observations,
                 );
             }),
@@ -403,7 +404,7 @@ fn run_worker(
     keepalive_pong_timeout: Duration,
     reconnect_delay_initial: Duration,
     reconnect_jitter_max: Duration,
-    allowed_local_hosts: &BTreeSet<String>,
+    destination_policy: &DestinationPolicy,
     committed_observations: &super::committed_observations::CommittedObservationCache,
 ) {
     let relay_scope = super::committed_observations::RelayScope::new(&url);
@@ -442,7 +443,7 @@ fn run_worker(
             return;
         }
         let generation = pack_generation(worker_id, attempt);
-        match open_relay_socket(url.as_str(), allowed_local_hosts) {
+        match open_relay_socket(url.as_str(), destination_policy) {
             Ok(mut socket) => {
                 let connected_at = Instant::now();
                 // REQ-before-EVENT: inject the registered preamble at the
