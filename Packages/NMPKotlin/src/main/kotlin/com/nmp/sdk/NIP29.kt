@@ -7,55 +7,20 @@
 // write-side counterpart. The app supplies semantic composer state; NMP owns
 // author/time/kind, NIP-27 mention materialization, `p`/reply-`e` tags, and
 // `h`/pinned-host composition.
+//
+// #858: nothing here re-labels NIP-51's value. A kind:10009 Simple-groups
+// list is decoded once, as itself, by `parseSimpleGroupsListTolerant` in
+// NIP51.kt; the app selects one `SimpleGroupEntry` and passes its exact
+// `hostRelay`/`groupId` to the constructors below. This file declares no
+// NIP-51 record type and no decode function of its own.
 
 package com.nmp.sdk
 
 import uniffi.nmp_ffi.FfiComposedWriteIntent
-import uniffi.nmp_ffi.FfiGroupRef
 import uniffi.nmp_ffi.FfiGroupReplyParent
-import uniffi.nmp_ffi.FfiRememberedGroups
-import uniffi.nmp_ffi.FfiRow
 import uniffi.nmp_ffi.NmpEngineInterface
-import uniffi.nmp_ffi.activeAccountDemand as ffiActiveAccountDemand
-import uniffi.nmp_ffi.decodeRememberedGroups as ffiDecodeRememberedGroups
 import uniffi.nmp_ffi.groupContentDemand as ffiGroupContentDemand
 import uniffi.nmp_ffi.groupDiscoveryDemand as ffiGroupDiscoveryDemand
-
-/** A remembered NIP-29 group reference (#108, `FfiGroupRef` mirror) --
- * group id, host relay, and optional display name. */
-data class GroupRef(
-    val groupId: String,
-    val host: String,
-    val name: String?,
-) {
-    companion object {
-        fun from(ffi: FfiGroupRef): GroupRef = GroupRef(ffi.groupId, ffi.host, ffi.name)
-    }
-}
-
-/** The composed remembered-groups/host-relays value (#108,
- * `FfiRememberedGroups` mirror) -- what `decodeRememberedGroups` returns
- * from a delivered kind:10009 [Row]. */
-data class RememberedGroups(
-    val groups: List<GroupRef>,
-    val hostsInUse: List<String>,
-    val hasPrivateContent: Boolean,
-) {
-    companion object {
-        fun from(ffi: FfiRememberedGroups): RememberedGroups =
-            RememberedGroups(
-                ffi.groups.map { GroupRef.from(it) },
-                ffi.hostsInUse,
-                ffi.hasPrivateContent,
-            )
-    }
-}
-
-/** The signed-in account's remembered-groups demand (#108): `kinds:
- * [10009]`, `AuthorOutboxes + Public`. Signed-out (no active account)
- * resolves to zero rows through the ordinary reactive-binding empty-
- * resolution path -- no special case needed on the caller's side. */
-fun activeAccountDemand(): NMPDemand = NMPDemand.from(ffiActiveAccountDemand())
 
 /** Group discovery (kind:39000) pinned to [host] (#108). Throws
  * `NMPError.InvalidRelayUrl` if `host` doesn't parse. */
@@ -69,24 +34,6 @@ fun groupContentDemand(
     host: String,
     groupId: String,
 ): NMPDemand = NMPDemand.from(nmpRethrowing { ffiGroupContentDemand(host, groupId) })
-
-/** Decode a delivered kind:10009 [Row] into the composed remembered-
- * groups/host-relays value (#108). Infallible: malformed individual items
- * are dropped internally, never the whole decode. */
-fun decodeRememberedGroups(row: Row): RememberedGroups {
-    val ffiRow =
-        FfiRow(
-            id = row.id,
-            pubkey = row.pubkey,
-            createdAt = row.createdAt,
-            kind = row.kind,
-            tags = row.tags,
-            content = row.content,
-            sig = row.sig,
-            sources = row.sources,
-        )
-    return RememberedGroups.from(ffiDecodeRememberedGroups(ffiRow))
-}
 
 /** A direct reply parent for a kind:9 group message. NMP turns this into the
  * marked reply `e` row plus the author's deduplicated recipient `p` row. */

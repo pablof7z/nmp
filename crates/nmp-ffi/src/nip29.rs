@@ -1,12 +1,17 @@
 //! Read-only NIP-29 host-browser projection (#108): top-level free
 //! functions, same shape as [`crate::entity`]'s precedent (#116) -- these
-//! need no `NmpEngine` instance, only `nmp-nip51`/`nmp-nip29` directly
-//! (deliberately NOT proxied through the `nmp` facade -- see those
-//! crates' own Cargo.toml comments: they stay opt-in, app-chosen
-//! dependencies at the direct-Rust layer, #63/#45's "opt-in protocol
-//! crate" framing; `nmp-ffi` bundles the projection because it is the ONE
-//! staticlib/cdylib every Swift/Kotlin app links, not because these
-//! crates became part of the canonical facade).
+//! need no `NmpEngine` instance, only `nmp-nip29` directly (deliberately
+//! NOT proxied through the `nmp` facade -- see that crate's own Cargo.toml
+//! comment: it stays an opt-in, app-chosen dependency at the direct-Rust
+//! layer, #63/#45's "opt-in protocol crate" framing; `nmp-ffi` bundles the
+//! projection because it is the ONE staticlib/cdylib every Swift/Kotlin app
+//! links, not because that crate became part of the canonical facade).
+//!
+//! #858: nothing here re-labels NIP-51's value. The kind:10009 Simple-groups
+//! list is decoded ONCE, as itself, by [`crate::nip51`]; a native caller
+//! selects one [`crate::types::FfiSimpleGroupEntry`] and hands its exact
+//! fields -- `host_relay` and `group_id` -- to the constructors below. This
+//! module exports no NIP-51 record type and no decode door of its own.
 //!
 //! The selected host rides as `SourceAuthority::Pinned({host})` on the
 //! returned `FfiDemand` -- pass it straight to
@@ -24,28 +29,10 @@ use std::sync::{Arc, Mutex};
 use nostr::{EventId, RelayUrl};
 
 use crate::convert::{demand_to_ffi, parse_pubkey, FfiError};
-use crate::types::{FfiDemand, FfiGroupRef, FfiRememberedGroups, FfiRow};
-
-fn group_ref_to_ffi(g: nmp_nip29::GroupRef) -> FfiGroupRef {
-    FfiGroupRef {
-        group_id: g.group_id,
-        host: g.host.to_string(),
-        name: g.name,
-    }
-}
+use crate::types::FfiDemand;
 
 fn parse_host(host: String) -> Result<RelayUrl, FfiError> {
     RelayUrl::parse(&host).map_err(|_| FfiError::InvalidRelayUrl { got: host })
-}
-
-/// The signed-in account's remembered-groups demand (#108,
-/// `nmp_nip51::active_account_demand` mirror): `kinds:[10009]`,
-/// `AuthorOutboxes + Public`. Signed-out (no active account) resolves to
-/// zero atoms through the ordinary reactive-binding empty-resolution path
-/// -- no special case needed on either side of this boundary.
-#[uniffi::export]
-pub fn active_account_demand() -> FfiDemand {
-    demand_to_ffi(nmp_nip51::active_account_demand())
 }
 
 /// Group discovery (kind:39000) pinned to `host` (#108,
@@ -68,32 +55,6 @@ pub fn group_content_demand(host: String, group_id: String) -> Result<FfiDemand,
         parse_host(host)?,
         &group_id,
     )))
-}
-
-/// Decode a delivered kind:10009 [`FfiRow`] into the composed remembered-
-/// groups/host-relays value (#108). Infallible, mirroring
-/// `nmp_nip51::parse_simple_groups_list_tolerant`'s own never-fails contract:
-/// malformed individual items are dropped, never the whole decode.
-#[uniffi::export]
-pub fn decode_remembered_groups(row: FfiRow) -> FfiRememberedGroups {
-    let list = nmp_nip51::parse_simple_groups_list_from_raw_tags_tolerant(
-        row.tags.iter().map(|t| t.as_slice()),
-        &row.content,
-    );
-    let remembered = nmp_nip29::remembered_groups(&list);
-    FfiRememberedGroups {
-        groups: remembered
-            .groups
-            .into_iter()
-            .map(group_ref_to_ffi)
-            .collect(),
-        hosts_in_use: remembered
-            .hosts_in_use
-            .iter()
-            .map(RelayUrl::to_string)
-            .collect(),
-        has_private_content: remembered.has_private_content,
-    }
 }
 
 /// Typed reply contribution for an ordinary kind:9 group message (#156).
@@ -176,12 +137,6 @@ mod tests {
     use super::*;
     use crate::types::FfiSourceAuthority;
     use nmp::{EngineConfig, WritePayload};
-
-    #[test]
-    fn active_account_demand_projects_the_reactive_authors_binding() {
-        let demand = active_account_demand();
-        assert_eq!(demand.selection.kinds, Some(vec![10009]));
-    }
 
     #[test]
     fn group_discovery_demand_pins_a_parsed_host() {
@@ -311,30 +266,5 @@ mod tests {
             Ok(_) => panic!("malformed recipients must fail"),
         }
         engine.shutdown();
-    }
-
-    #[test]
-    fn decode_remembered_groups_composes_a_kind_10009_row() {
-        let row = FfiRow {
-            id: "id".to_string(),
-            pubkey: "pubkey".to_string(),
-            created_at: 1,
-            kind: 10009,
-            tags: vec![vec![
-                "group".to_string(),
-                "group-a".to_string(),
-                "wss://relay-a.example.com".to_string(),
-                "Group A".to_string(),
-            ]],
-            content: String::new(),
-            sig: "sig".to_string(),
-            sources: vec![],
-        };
-        let remembered = decode_remembered_groups(row);
-        assert_eq!(remembered.groups.len(), 1);
-        assert_eq!(remembered.groups[0].group_id, "group-a");
-        assert_eq!(remembered.groups[0].host, "wss://relay-a.example.com");
-        assert_eq!(remembered.groups[0].name.as_deref(), Some("Group A"));
-        assert!(!remembered.has_private_content);
     }
 }

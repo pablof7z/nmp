@@ -269,16 +269,10 @@ private class LocalAckRelay : AutoCloseable {
     }
 }
 
-// The read-only NIP-29 host-browser projection (#108) -- construction/
-// mapping tests only. No network: these are pure Demand constructors and
-// a pure decode.
+// The read-only NIP-29 host-browser projection (#108) -- construction tests
+// only. No network: these are pure Demand constructors. Decoding a
+// kind:10009 Simple-groups list is NIP-51's, and lives in NIP51Test (#858).
 class NIP29Test {
-    @Test
-    fun activeAccountDemandTargetsKind10009() {
-        val demand = activeAccountDemand()
-        assertEquals(listOf<UShort>(10009u), demand.selection.kinds)
-    }
-
     @Test
     fun groupDiscoveryDemandPinsTheParsedHost() {
         val demand = groupDiscoveryDemand("wss://host-1.example.com")
@@ -300,27 +294,6 @@ class NIP29Test {
     fun groupContentDemandScopesByHTag() {
         val demand = groupContentDemand("wss://host-1.example.com", "group-a")
         assertEquals(listOf<UShort>(9u, 30315u), demand.selection.kinds)
-    }
-
-    @Test
-    fun decodeRememberedGroupsComposesAKind10009Row() {
-        val row =
-            Row(
-                id = "id",
-                pubkey = "pubkey",
-                createdAt = 1uL,
-                kind = 10009u,
-                tags = listOf(listOf("group", "group-a", "wss://relay-a.example.com", "Group A")),
-                content = "",
-                sig = "sig",
-                sources = emptyList(),
-            )
-        val remembered = decodeRememberedGroups(row)
-        assertEquals(1, remembered.groups.size)
-        assertEquals("group-a", remembered.groups[0].groupId)
-        assertEquals("wss://relay-a.example.com", remembered.groups[0].host)
-        assertEquals("Group A", remembered.groups[0].name)
-        assertFalse(remembered.hasPrivateContent)
     }
 
     // groupMessageIntent / publishComposed (#156)

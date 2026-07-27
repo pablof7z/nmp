@@ -47,8 +47,7 @@ pub enum GroupSendError {
 /// peek door for compose to query directly. Instead, the CALLER courier's
 /// rows it already has (from its live `group_content_demand` read, #108) --
 /// this type owns 100% of the selection/verification/truncation/encoding
-/// of those rows into a `previous` tag, the inverse of the read-side
-/// `decode_remembered_groups` courier pattern.
+/// of those rows into a `previous` tag.
 ///
 /// Best-effort, not authoritative: a `previous` ref is minted ONLY from a
 /// row this client actually saw delivered -- that is the provenance
@@ -121,9 +120,10 @@ fn is_member_of(tags: &[Vec<String>], group_id: &str) -> bool {
 /// -- the engine treats this as "route to exactly this one relay," nothing
 /// more, and never learns this is a NIP-29 group host.
 ///
-/// Takes `(host, group_id)` PRIMITIVES rather than a `GroupRef` -- a group
-/// the caller has browsed but not remembered (no #63 kind:10009 entry) must
-/// still be sendable.
+/// Takes `(host, group_id)` PRIMITIVES rather than any decoded remembered-
+/// list value -- a group the caller has browsed but not remembered (no #63
+/// kind:10009 entry) must still be sendable, and NIP-29 never re-owns
+/// NIP-51's schema to say so (#858).
 ///
 /// The hand-roll/courier distinction the #115 ruling drew: *hand-rolling*
 /// would be the app deciding the `h`/`previous` tag names, truncation,
