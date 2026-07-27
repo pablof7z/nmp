@@ -5,12 +5,12 @@
 //! DEDUP-ONLY (registry empty) and measures per-relay `wire_sub_count` +
 //! the max author-count of any single filter against this test's own
 //! admission thresholds (`MAX_SUBS_PER_RELAY` / `MAX_FILTER_AUTHORS`), PRINTS
-//! the numbers, then recompiles WITH `AuthorUnion` and re-measures.
+//! the numbers, then recompiles WITH the union rule and re-measures.
 //!
 //! The kill is pre-committed: with coalescing fully disabled (dedup-only
 //! floor), M1's per-author atoms should indeed blow relay sub-count limits
 //! on the popular relays (expected, not itself a failure). The kill FIRES
-//! only if even `AuthorUnion` -- the one trivially-provable widening rule
+//! only if even the author union -- the trivially-provable widening case
 //! (test 10) -- fails to bring every relay back within those thresholds. If it
 //! fires, that is reported honestly, not hidden.
 
@@ -132,11 +132,11 @@ fn kill_measurement_dedup_only_within_relay_limits() {
          M1 emits per-author atoms, so a relay serving many authors gets one sub per author)"
     );
 
-    // ---- Tier 2: with AuthorUnion ----------------------------------------
+    // ---- Tier 2: with the union rule -------------------------------------
     let mut router_with_union = Router::new(discovery, RuleRegistry::default_widen_only());
     router_with_union.compile(&demand, &dir, cap);
     let m_union = measure(&router_with_union);
-    print_measurement("with AuthorUnion", &m_union);
+    print_measurement("with StructuralUnion", &m_union);
 
     // ---- The kill verdict, printed honestly ------------------------------
     let union_over_sub_limit: Vec<_> = m_union
@@ -149,28 +149,28 @@ fn kill_measurement_dedup_only_within_relay_limits() {
     println!("KILL VERDICT: fired={kill_fired}");
     if kill_fired {
         println!(
-            "  relays still over max_subs_per_relay after AuthorUnion: {:?}",
+            "  relays still over max_subs_per_relay after coalescing: {:?}",
             union_over_sub_limit
         );
         println!(
-            "  max_filter_authors after AuthorUnion: {} (limit {})",
+            "  max_filter_authors after coalescing: {} (limit {})",
             m_union.max_filter_authors, MAX_FILTER_AUTHORS
         );
     }
 
-    // ---- Strict-improvement sanity: AuthorUnion must actually help -------
+    // ---- Strict-improvement sanity: the union must actually help ---------
     let total_dedup: usize = m_dedup.per_relay_sub_count.iter().map(|(_, c)| *c).sum();
     let total_union: usize = m_union.per_relay_sub_count.iter().map(|(_, c)| *c).sum();
-    println!("total wire_sub_count: dedup-only={total_dedup}, with AuthorUnion={total_union}");
+    println!("total wire_sub_count: dedup-only={total_dedup}, coalesced={total_union}");
     assert!(
         total_union < total_dedup,
-        "AuthorUnion must strictly reduce total wire subscription count"
+        "the union must strictly reduce total wire subscription count"
     );
 
     // ---- The pre-committed assertion: report the kill, do not hide it ---
     assert!(
         !kill_fired,
-        "M2 KILL FIRED: even AuthorUnion coalescing leaves a relay over max_subs_per_relay or a \
+        "M2 KILL FIRED: even the author union leaves a relay over max_subs_per_relay or a \
          filter over max_filter_authors on this falsifier demand -- per-relay compilation needs \
          redesign (see printed measurement above)"
     );

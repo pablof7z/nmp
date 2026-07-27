@@ -299,10 +299,11 @@ pub(crate) fn lane_of(
 /// Turn a solved [`Coverage`]'s per-author assignment into one
 /// `RouteProvenance` per (author, relay) pair -- deliberately NOT grouped
 /// or unioned here. Author-union is achieved entirely downstream, by
-/// `coalesce::RuleRegistry`'s `AuthorUnion` rule folding these single-author
-/// entries together (M2 plan §4.1 step 4) -- the SAME real mechanism the
-/// widen-only property test proves and the kill measurement's "dedup-only
-/// vs with-AuthorUnion" tiers toggle by registry choice alone. Mirrors
+/// `coalesce::RuleRegistry`'s `StructuralUnion` rule folding these
+/// single-author entries together on the `authors` component (M2 plan §4.1
+/// step 4) -- the SAME real mechanism the widen-only property test proves and
+/// the kill measurement's "dedup-only vs coalesced" tiers toggle by registry
+/// choice alone. Mirrors
 /// [`provenance_for_pinned`]'s shape.
 pub(crate) fn provenance_for_outbox(
     coverage: &Coverage,

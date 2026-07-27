@@ -103,18 +103,34 @@ pub fn my_follows_query() -> LiveQuery {
     })
 }
 
+/// What makes one tag watch different from another beyond its value -- the
+/// two shapes that must BLOCK a merge the value alone would allow.
+///
+/// A `limit` caps the relay-side RESULT COUNT rather than the predicate, so
+/// two limited watches for different values cannot be unioned without
+/// under-fetching. A `since` is a co-pinned time bound, and no union of two
+/// windows both widens and stays near either operand. Either one present and
+/// differing means the two watches must reach the relay as two subscriptions.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WatchShape {
+    pub limit: Option<usize>,
+    pub since: Option<u64>,
+}
+
 /// `kinds:[1]` narrowed to ONE value of ONE single-letter tag and PINNED to
 /// `relay` -- the smallest demand that exercises the tag axis of wire
 /// subscription aggregation. Pinned rather than outbox-routed on purpose: the
 /// contract under specification is about what reaches a NAMED relay, so the
 /// scenario must not also depend on relay discovery choosing that relay.
-pub fn tagged_note_query(relay: &RelayUrl, tag: char, value: &str) -> LiveQuery {
+pub fn tagged_note_query(relay: &RelayUrl, tag: char, value: &str, shape: WatchShape) -> LiveQuery {
     let tag = IndexedTagName::new(tag).expect("nmp-bdd: an indexed tag name is one ASCII letter");
     pinned_note_query(
         relay,
         Filter {
             kinds: Some(BTreeSet::from([1u16])),
             tags: BTreeMap::from([(tag, Binding::Literal(BTreeSet::from([value.to_string()])))]),
+            limit: shape.limit,
+            since: shape.since,
             ..Filter::default()
         },
     )
@@ -123,7 +139,7 @@ pub fn tagged_note_query(relay: &RelayUrl, tag: char, value: &str) -> LiveQuery 
 /// The same shape on the AUTHOR axis -- the one axis that already
 /// aggregates, so every tag-axis scenario has a control to be measured
 /// against. `limit` is what makes a pair of these UNMERGEABLE: a relay-side
-/// `limit` caps the result COUNT, so `AuthorUnion` refuses to widen across
+/// `limit` caps the result COUNT, so the union refuses to widen across
 /// one (see `nmp_router::coalesce::neither_limited`).
 pub fn authored_note_query(relay: &RelayUrl, author_hex: &str, limit: Option<usize>) -> LiveQuery {
     pinned_note_query(
@@ -927,19 +943,33 @@ impl NmpWorld {
         );
     }
 
-    /// `When I watch for notes tagged <tag> as <value>`.
-    pub async fn watch_tag_value(&mut self, tag: char, value: &str) {
+    /// `When I watch for notes tagged <tag> as <value>`, plus the shaped
+    /// variants (`the latest N notes tagged ...`, `... from the last N days`)
+    /// whose whole point is that they must NOT merge with an unshaped
+    /// sibling.
+    ///
+    /// The watch key carries the shape, so two watches for the same value
+    /// under different shapes are two distinct open watches rather than one
+    /// silently overwriting the other.
+    pub async fn watch_tag_value_shaped(&mut self, tag: char, value: &str, shape: WatchShape) {
         self.ensure_started().await;
         let url = self.watch_relay_url();
         self.watched_tag_values
             .entry(tag)
             .or_default()
             .insert(value.to_string());
-        self.open_watch(
-            format!("{tag}={value}"),
-            tagged_note_query(&url, tag, value),
-        )
-        .await;
+        let key = match (shape.limit, shape.since) {
+            (None, None) => format!("{tag}={value}"),
+            (limit, since) => format!("{tag}={value}/limit={limit:?}/since={since:?}"),
+        };
+        self.open_watch(key, tagged_note_query(&url, tag, value, shape))
+            .await;
+    }
+
+    /// `When I watch for notes tagged <tag> as <value>`.
+    pub async fn watch_tag_value(&mut self, tag: char, value: &str) {
+        self.watch_tag_value_shaped(tag, value, WatchShape::default())
+            .await;
     }
 
     /// `When I watch for notes tagged <tag> as <n> different values` -- the

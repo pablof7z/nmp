@@ -414,7 +414,7 @@ impl<S: EventStore> EngineCore<S> {
     /// mechanism behind the 7112-for-39 finding. Leaving a resolved author
     /// in the filter a while longer is widen-safe (matches(wider) ⊇
     /// matches(narrower), the same proof obligation `nmp_router::coalesce`'s
-    /// `AuthorUnion` rule already carries) -- it can only mean a few extra,
+    /// union rule already carries) -- it can only mean a few extra,
     /// already-known kind:10002 deliveries for that author, never a
     /// structural over-fetch. The subscription is only ever torn down when
     /// `needed` goes fully empty (every demanded author has resolved, or

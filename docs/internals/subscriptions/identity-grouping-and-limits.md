@@ -2,7 +2,7 @@
 title: Subscription identity, grouping, and relay limits
 category: subscriptions
 slug: identity-grouping-and-limits
-status: partly-built, partly-decided-not-built
+status: built
 date: 2026-07-27
 owns:
   - how demand becomes wire subscriptions
@@ -16,6 +16,7 @@ related:
 issues:
   - "#899 unmergeable demands collide on one SubId and silently vanish"
   - "#900 AuthorUnion narrows an unconstrained authors filter"
+  - "the tag axis has no merge rule (§3.4)"
 ---
 
 # Subscription identity, grouping, and relay limits
@@ -28,9 +29,10 @@ It exists because three separate defects in this area were found in one day, and
 all three were consequences of a single design choice that was never written
 down. Read §5 first if you only want the failure modes.
 
-**Status is mixed and is marked per section.** Sections marked BUILT describe
-shipped behaviour. Sections marked DECIDED describe an agreed design that is not
-yet written. Sections marked OPEN are unresolved.
+**Status is marked per section.** Sections marked BUILT describe shipped
+behaviour; sections marked OPEN are unresolved. §7's design is now built —
+§7.1 as `nmp_router::StructuralUnion`, §7.2 as `nmp_router::wire_id`. What
+remains unbuilt is §6's per-relay subscription budget, and §8.1b/§8.2.
 
 ---
 
@@ -147,13 +149,17 @@ Coalescing runs over the **whole engine's live atom set**, not per query. Two
 unrelated subscriptions that happen to produce compatible filters on the same
 relay will be combined.
 
-### 3.3 The rules as shipped
+### 3.3 The rule as shipped
 
-`RuleRegistry::default_widen_only()` = `[AuthorUnion, KindUnion, IdUnion]`.
+`RuleRegistry::default_widen_only()` = `[StructuralUnion]` — ONE rule, derived
+from the filter's shape rather than named after a field (§7.1). It requires
+that **exactly one array component differs** and everything else is equal.
+That single-component restriction is deliberate: merging two at once
+over-widens into cartesian corners.
 
-Each rule requires that **exactly one field differs** and everything else is
-equal — including `since`, `until`, and `tags`. That single-field restriction is
-deliberate: merging two fields at once over-widens into cartesian corners.
+Until 2026-07-27 this was three rules — `AuthorUnion`, `KindUnion`, `IdUnion` —
+each hard-coding one field, with `tags` required equal by all three. §3.4
+records what that cost. The guards below survived the collapse unchanged.
 
 ```
 {kinds:[1], authors:[A]} + {kinds:[2], authors:[A]}  → merge  → {kinds:[1,2], authors:[A]}
@@ -173,18 +179,41 @@ Three guards deserve individual attention:
   disjoint authors each promise 200 rows; a merged `{authors: a∪b, limit:200}`
   promises 200 total. The union would silently under-fetch. Note this makes
   `AuthorUnion` **partial**, which §5.1 shows is the root of a live bug.
-- **Output caps.** `IdUnion` refuses above `MAX_IDS_PER_FILTER = 256`; the
-  overflow ships as further REQs rather than being dropped. Caps make a rule
-  *pair-dependent* — whether two filters merge depends on their combined size,
-  not on either alone.
-- **`ids` presence.** `IdUnion` refuses unless both sides carry `ids`.
-  `AuthorUnion` has no equivalent guard, and that asymmetry is issue #900.
+- **Output caps.** The union refuses above `MAX_IDS_PER_FILTER = 256` on
+  `ids`, and above `MAX_TAG_VALUES_PER_FILTER = 500` under any one tag name;
+  the overflow ships as further REQs rather than being dropped. Caps make the
+  rule *pair-dependent* — whether two filters merge depends on their combined
+  size, not on either alone.
+- **Unconstrained-operand admission.** Both operands must actually constrain
+  the axis being unioned. `AuthorUnion` had no such guard, and that asymmetry
+  was issue #900; the shared `both_constrain` test generalised it to every
+  axis, with the inverted polarity §3.5 describes on tags.
 
-### 3.4 The tag axis has no rule — this is the gap
+**Cap-driven chunking is greedy, and the chunk COUNT is an artifact of merge
+order, not `⌈n/cap⌉`.** Mutually-mergeable filters pair up in a doubling
+cascade (1→2→4→…), so chunks stall at the largest power of two still under the
+cap: `MAX_IDS_PER_FILTER = 256` lands exactly on its cap, while 500 stalls at
+256 and leaves real headroom unused. Measured: 1200 `#d` values at a 500 cap
+produce **4** filters sized `[256, 256, 256, 432]`, not 3.
 
-Nothing in the registry merges on tags. `AuthorUnion` and `KindUnion` both
-require `a.tags == b.tags`; `IdUnion` requires both sides carry `ids`. So two
-filters differing only in a `#p` or `#d` value **never combine**, at any scale.
+What *is* provable is a window. A terminal state of `merge_fixed_point` has no
+mergeable pair left, and only the cap can refuse two same-axis chunks, so every
+pair sums over the cap — meaning at most one chunk holds `cap/2` or fewer
+values. With `k` chunks over `n` values that gives `(k-1)·(cap/2 + 1) ≤ n`,
+alongside the floor `⌈n/cap⌉`. Tests assert that window rather than the number,
+and `features/routing/subscription-collapse.feature` was revised from "exactly
+3 subscriptions" to a bound for the same reason. The inefficiency is
+bin-packing only: every value still ships, and the count stays orders of
+magnitude inside the ~20-subscription ceiling. Improving it means changing the
+fixed point, which a differential oracle pins byte-for-byte against its naive
+twin — separate work, not a tidy-up.
+
+### 3.4 The tag axis had no rule — CLOSED
+
+Until 2026-07-27 nothing in the registry merged on tags. `AuthorUnion` and
+`KindUnion` both required `a.tags == b.tags`; `IdUnion` required both sides to
+carry `ids`. So two filters differing only in a `#p` or `#d` value **never
+combined**, at any scale.
 
 Measured against a live `nak serve` relay
 (`crates/nmp/examples/tag_fanout_live.rs`):
@@ -199,11 +228,25 @@ Same relay, same run, same pinned source. The author filter accumulates
 teardown. The tag filters never touch each other.
 
 At scale (`crates/nmp-router/tests/tag_kill_measurement.rs`): 300 groups over 2
-hosts compiles to **300 subscriptions per host** against a real-world cap of
-~20, while every filter carries 1 value out of a ~500-value budget. Compiling
+hosts compiled to **300 subscriptions per host** against a real-world cap of
+~20, while every filter carried 1 value out of a ~500-value budget. Compiling
 the identical demand with `RuleRegistry::dedup_only()` — the empty registry —
-gives an **identical** result, asserted as an equality. The registry is a
+gave an **identical** result, asserted as an equality. The registry was a
 measured no-op on this axis.
+
+**Closed by `StructuralUnion`.** Same falsifier, same file, re-measured:
+
+| | dedup-only floor | `default_widen_only()` |
+|---|---|---|
+| subscriptions per host | 300 | **1** |
+| total wire subs, 2 hosts | 600 | **2** |
+| widest filter | 1 value | **300 values** (bound 500) |
+
+The equality assertion is now a strict improvement and the kill verdict is
+`fired=false`. Two neighbouring measurements moved with it: `tag_fanout_churn.rs`
+now records resolver fan-out and a pre-batched atom compiling to the *same
+plan* (8 REQs, 0 CLOSEs, 1 live sub either way), and `derived_tag_fanout.rs`'s
+tag-versus-author contrast has become an asserted equality.
 
 ---
 
@@ -387,10 +430,10 @@ input is identity instability.
 Three designs were reviewed adversarially. The chosen one has two halves that
 are independent of each other.
 
-### 7.1 Merging: one structural rule
+### 7.1 Merging: one structural rule — BUILT
 
-Replace `AuthorUnion` / `KindUnion` / `IdUnion` with a single rule derived from
-the filter's shape:
+`nmp_router::StructuralUnion` replaces `AuthorUnion` / `KindUnion` / `IdUnion`
+with a single rule derived from the filter's shape:
 
 ```
 arrays  (kinds, authors, ids, and EACH tag name)  → union, when exactly one differs
@@ -440,7 +483,24 @@ the harmless end. This is the reverse of the array axes, and it is why "refuse
 Recorded because the structural rule (§7.1) has to get this right on four axes
 with two different polarities.
 
-### 7.2 Identity: allocated ids, structural-signature matching
+**One component model, two consumers.** `Component` and `differing` live in
+`crates/nmp-router/src/component.rs`, shared by `coalesce` and `wire_id`. The
+sharing is load-bearing rather than incidental: the whole wire story is that
+growing a value set costs ONE overwriting REQ, and that only holds if what the
+merge produces when a value arrives is — *by the identity matcher's own
+definition* — a one-component difference from what it produced last compile.
+Two separate notions of "component" could drift, and the symptom would be
+silent: merges that mint fresh tokens and churn instead of widening in place.
+§7.3's independence is about FUNCTION (count versus naming), not about the
+coordinate system.
+
+`differing` destructures `ConcreteFilter` by name so that adding an eighth
+field is a compile error there. A field it forgot would be reported as
+always-equal — which for `wire_id` misnames a subscription, but for `coalesce`
+is a real NARROWING: the merge would keep `a`'s value and drop `b`'s
+constraint.
+
+### 7.2 Identity: allocated ids, structural-signature matching — BUILT
 
 The wire id becomes an **allocated opaque token** — minted at first appearance,
 carried forward by matching, closed when unmatched — rather than a function of
@@ -489,7 +549,8 @@ domain-separated from the allocated namespace.
 
 ### 7.3 The relationship between the halves
 
-They are independent. Merging controls **how many** subscriptions exist;
+They are independent in FUNCTION, and share one coordinate system (§7.1).
+Merging controls **how many** subscriptions exist;
 identity controls **what they are called** and whether growth replaces in place.
 Neither substitutes for the other: without merging, 300 filters remain 300
 subscriptions whatever their ids; without identity, growth churns.
@@ -574,9 +635,10 @@ Everything asserted above is measured, not reasoned. Reproduce with:
 
 | what | where |
 |---|---|
-| engine-level fan-out; warm cache; EOSE independence; multi-relay; 50 values | `crates/nmp-engine/tests/core_headless/derived_tag_fanout.rs` |
-| three-way cost comparison; the #899 falsifier and its control | `crates/nmp-router/tests/tag_fanout_churn.rs` |
-| 300 groups vs a 20-subscription cap; registry-is-a-no-op equality | `crates/nmp-router/tests/tag_kill_measurement.rs` |
+| engine-level collapse; warm cache; EOSE independence; multi-relay; 50 values; the tag/author equality | `crates/nmp-engine/tests/core_headless/derived_tag_fanout.rs` |
+| fan-out and pre-batched compiling to one plan; the #899 falsifier and its control | `crates/nmp-router/tests/tag_fanout_churn.rs` |
+| 300 groups INSIDE a 20-subscription cap; strict improvement over dedup-only | `crates/nmp-router/tests/tag_kill_measurement.rs` |
+| widen-only over the full component-shape space with PER-AXIS fire counters; the tag polarity, both ends; the two-tag-name refusal; cap chunking | `crates/nmp-router/tests/coalescing.rs`, `crates/nmp-router/src/coalesce.rs` |
 | author-axis limits under `AuthorUnion` (the pre-existing twin) | `crates/nmp-router/tests/kill_measurement.rs` |
 | live REQ frames against a real relay | `crates/nmp/examples/tag_fanout_live.rs` |
 | intended behaviour, `@wip` | `features/routing/subscription-collapse.feature` |
@@ -603,3 +665,11 @@ cargo run -p nmp --example tag_fanout_live -- ws://localhost:10547 20 0 both
 6. **Property-test generators are the real defence.** #900 lived because a
    generator never produced `None`. Every axis added here needs generator
    coverage before it needs a rule.
+7. **Fire counters belong per AXIS, not per rule.** Collapsing three rules into
+   one made a whole-rule counter *weaker* than what it replaced: the rule can
+   fire prolifically on `authors` and never once touch `tags`. A widening
+   property over pairs no rule accepts is vacuously green, and that is half of
+   why #900 survived.
+8. **A chunk count is not a contract.** Where a cap shards a filter, assert the
+   provable window and the relay's own ceiling — never `⌈n/cap⌉`, which the
+   greedy fixed point does not promise.

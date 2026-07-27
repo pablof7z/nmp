@@ -603,8 +603,10 @@ fn local_refilter_is_exact_on_the_tag_axis() {
     );
 
     for own in [&x, &y] {
-        let delivered: BTreeSet<nostr::EventId> =
-            deliver(&wire_events, own).into_iter().map(|e| e.id).collect();
+        let delivered: BTreeSet<nostr::EventId> = deliver(&wire_events, own)
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
         let expected: BTreeSet<nostr::EventId> = u
             .events
             .iter()

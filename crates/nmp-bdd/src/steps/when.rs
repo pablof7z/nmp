@@ -7,7 +7,7 @@ use std::time::Duration;
 use cucumber::when;
 
 use crate::steps::{parse_people, parse_tag};
-use crate::world::NmpWorld;
+use crate::world::{NmpWorld, WatchShape};
 
 #[when(regex = r#"^I open a feed of my follows' notes$"#)]
 async fn open_feed(w: &mut NmpWorld) {
@@ -82,6 +82,53 @@ async fn watch_tag_value_after(w: &mut NmpWorld, delay_ms: u64, tag: String, val
 #[when(regex = r#"^I watch for notes tagged "([a-zA-Z])" as (\d+) different values$"#)]
 async fn watch_n_tag_values(w: &mut NmpWorld, tag: String, n: usize) {
     w.watch_n_tag_values(parse_tag(&tag), n).await;
+}
+
+/// A watch for the LATEST n notes under a tag value. The `limit` is not
+/// decoration: a relay-side limit caps the RESULT COUNT rather than the
+/// predicate, so two limited watches for different values cannot be unioned
+/// into one without under-fetching. The author-axis twin of this step
+/// (`I watch for the latest N notes from <person>`) is what the injectivity
+/// scenario uses.
+#[when(regex = r#"^I watch for the latest (\d+) notes tagged "([a-zA-Z])" as "([^"]+)"$"#)]
+async fn watch_tag_value_limited(w: &mut NmpWorld, limit: usize, tag: String, value: String) {
+    w.watch_tag_value_shaped(
+        parse_tag(&tag),
+        &value,
+        WatchShape {
+            limit: Some(limit),
+            ..WatchShape::default()
+        },
+    )
+    .await;
+}
+
+/// A watch narrowed to a time window. `since` is a co-pinned bound, not a
+/// value list, so two windows never union -- the scenarios using this step
+/// assert that two tag watches under DIFFERENT windows stay two
+/// subscriptions.
+///
+/// The day count is turned into a `since` timestamp here rather than in the
+/// scenario, so the spec reads in days and the wire sees seconds.
+#[when(regex = r#"^I watch for notes tagged "([a-zA-Z])" as "([^"]+)" from the last (\d+) days?$"#)]
+async fn watch_tag_value_windowed(w: &mut NmpWorld, tag: String, value: String, days: u64) {
+    w.watch_tag_value_shaped(
+        parse_tag(&tag),
+        &value,
+        WatchShape {
+            since: Some(days_ago(days)),
+            ..WatchShape::default()
+        },
+    )
+    .await;
+}
+
+/// A fixed epoch minus `days`, so the same scenario run twice produces the
+/// same filter and a scenario that asks for two different windows really does
+/// get two different `since` values.
+fn days_ago(days: u64) -> u64 {
+    const EPOCH: u64 = 1_750_000_000;
+    EPOCH - days * 86_400
 }
 
 #[when(regex = r#"^I stop watching notes tagged "([a-zA-Z])" as "([^"]+)"$"#)]

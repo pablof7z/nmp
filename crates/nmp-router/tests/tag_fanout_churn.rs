@@ -168,7 +168,10 @@ fn resolver_fan_out_and_a_pre_batched_filter_compile_to_the_same_plan() {
         fan_live, 1,
         "the resolver's per-value atoms must coalesce onto ONE wire sub"
     );
-    assert_eq!(batch_live, 1, "a pre-batched filter holds exactly one live sub");
+    assert_eq!(
+        batch_live, 1,
+        "a pre-batched filter holds exactly one live sub"
+    );
 
     // INVERTED when allocated ids landed (#899). Under derived ids a widened
     // filter's SubId moved on every growth step, so batching bought one live

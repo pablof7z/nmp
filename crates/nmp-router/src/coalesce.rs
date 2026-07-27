@@ -634,7 +634,10 @@ mod tests {
             kinds: Some(Set::from([1u16])),
             tags: BTreeMap::from([(
                 name(tag),
-                values.iter().map(|s| s.to_string()).collect::<Set<String>>(),
+                values
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Set<String>>(),
             )]),
             ..ConcreteFilter::default()
         }
@@ -849,12 +852,16 @@ mod tests {
             "fixture sanity: no tag constraint at all"
         );
         assert!(
-            StructuralUnion.try_merge(&unconstrained, &bearing).is_none(),
+            StructuralUnion
+                .try_merge(&unconstrained, &bearing)
+                .is_none(),
             "a filter with no #d constraint matches EVERY #d -- folding it \
              into {{group-1}} narrows"
         );
         assert!(
-            StructuralUnion.try_merge(&bearing, &unconstrained).is_none(),
+            StructuralUnion
+                .try_merge(&bearing, &unconstrained)
+                .is_none(),
             "refusal must not depend on operand order"
         );
     }
@@ -887,8 +894,12 @@ mod tests {
         let unconstrained = cf(&[1], &[]);
         let bearing = cf(&[1], &["aa"]);
         assert_eq!(unconstrained.authors, None, "fixture sanity");
-        assert!(StructuralUnion.try_merge(&unconstrained, &bearing).is_none());
-        assert!(StructuralUnion.try_merge(&bearing, &unconstrained).is_none());
+        assert!(StructuralUnion
+            .try_merge(&unconstrained, &bearing)
+            .is_none());
+        assert!(StructuralUnion
+            .try_merge(&bearing, &unconstrained)
+            .is_none());
     }
 
     /// `Some(∅)` is refused for the same reason: `nostr`'s matcher treats an
@@ -1178,7 +1189,11 @@ mod tests {
             expected,
             "the cap must chunk, never truncate"
         );
-        assert!(chunk_count_is_provable(out.len(), expected.len(), MAX_IDS_PER_FILTER));
+        assert!(chunk_count_is_provable(
+            out.len(),
+            expected.len(),
+            MAX_IDS_PER_FILTER
+        ));
     }
 
     /// The same on the tag axis, at `MAX_TAG_VALUES_PER_FILTER`.
@@ -1203,7 +1218,9 @@ mod tests {
         println!(
             "{total} #d values at a {MAX_TAG_VALUES_PER_FILTER} cap → {} filter(s), sizes {:?}",
             out.len(),
-            out.iter().map(|f| tag_values(f, 'd').len()).collect::<Vec<_>>()
+            out.iter()
+                .map(|f| tag_values(f, 'd').len())
+                .collect::<Vec<_>>()
         );
         assert!(chunk_count_is_provable(
             out.len(),

@@ -6,13 +6,19 @@ Feature: One subscription per relay, not one per thing you asked about
   they accept arrays of 500 values without complaint. Fanning out inverts
   that.
 
-  NMP already gets this right on ONE axis. Two demands differing only in
-  `authors` are merged by `AuthorUnion` into a single accumulating filter on
-  a single subscription, widened in place as more authors resolve and shrunk
-  in place as they go away. The TAG axis has no merge rule at all
-  (`nmp_router::coalesce::RuleRegistry::default_widen_only` is AuthorUnion,
-  KindUnion, IdUnion), so N demands differing only in one single-letter tag
-  value produce N subscriptions carrying one value each.
+  NMP got this right on ONE axis first. Two demands differing only in
+  `authors` merged into a single accumulating filter on a single
+  subscription, widened in place as more authors resolved and shrunk in place
+  as they went away. The TAG axis had no merge rule at all, so N demands
+  differing only in one single-letter tag value produced N subscriptions
+  carrying one value each.
+
+  Both axes are now instances of one rule
+  (`nmp_router::coalesce::StructuralUnion`): filters differing in exactly one
+  ARRAY component -- kinds, authors, ids, or the values under ONE tag name --
+  union that component. Scalars must match, a `limit` refuses, and a
+  per-filter value bound chunks rather than truncates. Which slot a value set
+  occupies stopped being something the wire can tell.
 
   Every scenario here reads the REQ and CLOSE frames NMP actually put on the
   relay's socket -- subscription ids included -- never the engine's own
@@ -24,28 +30,24 @@ Feature: One subscription per relay, not one per thing you asked about
 
   # ---- the tag axis ----------------------------------------------------
 
-  @wip
   Scenario: Two values of one tag are one subscription, not two
-    # THE headline gap. Measured live against `nak serve` and again here:
-    # `{#p:["alice"]}` and `{#p:["bob"]}` reach the relay as TWO subscriptions
-    # carrying one value each (four REQs in all), where the author axis with
-    # the same two demands sends one subscription carrying both. There is no
-    # TagValueUnion rule in `crates/nmp-router/src/coalesce.rs`, and
-    # `crates/nmp-router/tests/tag_kill_measurement.rs` shows `dedup_only()`
-    # and `default_widen_only()` give IDENTICAL results on this axis -- the
-    # registry is a no-op here.
+    # THE headline gap, now closed. Measured live against `nak serve` and
+    # again here: `{#p:["alice"]}` and `{#p:["bob"]}` used to reach the relay
+    # as TWO subscriptions carrying one value each, where the author axis with
+    # the same two demands sent one carrying both. They are the same case --
+    # exactly one array component differs -- and one rule now says so.
     When I watch for notes tagged "p" as "alice"
     And I watch for notes tagged "p" as "bob"
     Then relay "hub" serves every "p" watch with 1 subscription
     And one subscription on relay "hub" asks for every "p" value I watch
 
-  @wip
   Scenario Outline: The collapse is the same for every single-letter tag
     # The contract is tag-name-agnostic: a value list under ANY single-letter
     # tag is a choice between values, so any two demands differing only there
-    # are mergeable. Measured: all five tags below fan out identically today
-    # (two subscriptions, one value each), so nothing about this is specific
-    # to `#p` or to the `#d` shape that first surfaced it.
+    # are mergeable. All five tags below fanned out identically before the fix
+    # (two subscriptions, one value each), so nothing about this was ever
+    # specific to `#p` or to the `#d` shape that first surfaced it -- and the
+    # rule that fixed it names no tag at all.
     When I watch for notes tagged "<tag>" as "first-value"
     And I watch for notes tagged "<tag>" as "second-value"
     Then relay "hub" serves every "<tag>" watch with 1 subscription
@@ -59,15 +61,15 @@ Feature: One subscription per relay, not one per thing you asked about
       | t   |
       | a   |
 
-  @wip
   Scenario: A third value widens the same subscription in place
     # Growth must cost ONE replacing REQ on the live subscription id, never a
-    # close-and-reopen. Measured today: three subscriptions, six REQs, nothing
-    # widened. Note that a naive widened filter would NOT fix this on its own
-    # -- `crates/nmp-router/tests/tag_fanout_churn.rs` shows each growth step
-    # costing a Close plus a Req, because `SubId::for_wire` keys on
-    # `route::Skeleton`, which erases `authors` and nothing else. The rule
-    # needs the matching skeleton erasure to reproduce the author axis.
+    # close-and-reopen. This needed BOTH halves of the design and neither
+    # alone: a merge rule without stable identity paid a Close plus a Req per
+    # value (`crates/nmp-router/tests/tag_fanout_churn.rs` measured that),
+    # because `SubId::for_wire` keyed on a skeleton erasing `authors` and
+    # nothing else. Allocated tokens matched by structural signature (#899)
+    # decide continuity from the filter's shape instead, so a grown value set
+    # is a one-component difference that overwrites in place.
     When I watch for notes tagged "p" as "alice"
     And I watch for notes tagged "p" as "bob"
     And I watch for notes tagged "p" as "carol"
@@ -76,12 +78,13 @@ Feature: One subscription per relay, not one per thing you asked about
     And relay "hub" was never asked to close a "p" subscription
     And one subscription on relay "hub" asks for every "p" value I watch
 
-  @wip
   Scenario: Dropping one of three shrinks the subscription in place
-    # The mirror of growth, and something the author axis already does: the
+    # The mirror of growth, and something the author axis already did: the
     # live probe shows an eight-author filter shrinking one author at a time
-    # on a single subscription id, never a CLOSE. Measured on the tag axis
-    # today: three separate subscriptions, and dropping one closes it.
+    # on a single subscription id, never a CLOSE. The tag axis used to hold
+    # three separate subscriptions, and dropping one closed it. A shrinking
+    # value set is a one-component difference too, so it replaces in place --
+    # explicit closure is for demand that is GONE, not merely narrower.
     When I watch for notes tagged "p" as "alice"
     And I watch for notes tagged "p" as "bob"
     And I watch for notes tagged "p" as "carol"
@@ -90,45 +93,53 @@ Feature: One subscription per relay, not one per thing you asked about
     And one subscription on relay "hub" asks for every "p" value I watch
     And relay "hub" was never asked to close a "p" subscription
 
-  @wip
   Scenario: Values arriving apart in time aggregate like values arriving together
     # Aggregation must not be a debounce window. It already is not one --
     # opening at gaps of 0ms, 50ms and 250ms produces byte-identical wire
     # traffic, because every demand mutation recompiles the whole live demand
-    # set. What fails here is the collapse itself, identically at every gap;
-    # this scenario exists so that a fix cannot quietly buy the collapse by
+    # set. The collapse is a property of that recompile, not of a window; this
+    # scenario exists so that no future change can quietly buy the collapse by
     # introducing a batching delay.
     When I watch for notes tagged "p" as "alice"
     And 250ms later I watch for notes tagged "p" as "bob"
     Then relay "hub" serves every "p" watch with 1 subscription
     And one subscription on relay "hub" asks for every "p" value I watch
 
-  @wip
   Scenario: Collapsing does not wait for the relay to finish
     # Resolution is driven by ingested rows alone, so a relay that never
     # confirms end of stored events must not hold up a value already known.
-    # Measured: a never-confirming relay produces the same wire traffic as a
-    # well-behaved one -- the same fan-out, no extra churn. The concern is
-    # that a fix must not start gating the collapse on EOSE to get it.
+    # A never-confirming relay produces the same wire traffic as a
+    # well-behaved one. The concern this pins is that nothing may start gating
+    # the collapse on EOSE to get it -- the engine-level twin is
+    # `crates/nmp-engine/tests/core_headless/derived_tag_fanout.rs`'s D.
     Given relay "hub" never confirms end of stored events
     When I watch for notes tagged "p" as "alice"
     And I watch for notes tagged "p" as "bob"
     Then relay "hub" serves every "p" watch with 1 subscription
     And one subscription on relay "hub" asks for every "p" value I watch
 
-  @wip
   Scenario: Past the value bound the request splits rather than truncating
     # The bound is a frame-size limit, not a demand limit: it must chunk and
-    # ship the remainder as further subscriptions, exactly as the existing
-    # id-array bound does (`nmp_router::coalesce::MAX_IDS_PER_FILTER`, which
-    # shards rather than drops). Measured here: 1200 values leave 2121 LIVE
-    # subscriptions against a relay ceiling of about 20, every filter
-    # carrying one value out of a 500-value budget. Note the count is well
-    # over one per value and the relay was asked to close NOTHING -- so the
-    # surplus ids are abandoned rather than recycled. This spec does not
-    # diagnose why; it only records that the fan-out understates the damage.
+    # ship the remainder as further subscriptions, exactly as the id-array
+    # bound does (`nmp_router::MAX_IDS_PER_FILTER`, which shards rather than
+    # drops). Before the collapse, 1200 values left 2121 LIVE subscriptions
+    # against a relay ceiling of about 20, every filter carrying one value out
+    # of a 500-value budget.
+    #
+    # THE COUNT IS DELIBERATELY A BOUND, NOT A NUMBER, and this scenario was
+    # revised to say so. It originally asked for exactly 3 -- the arithmetic
+    # of 1200 at 500 a filter. The coalescer is a greedy pairwise fixed point,
+    # so mutually-mergeable filters double (1 -> 2 -> 4 -> ...) and chunks
+    # stall at the largest power of two still under the bound: measured, 1200
+    # values produce FOUR filters of 256/256/256/432. What is provable rather
+    # than emergent is a window -- a terminal state has no mergeable pair, so
+    # every pair of chunks sums over the bound and at most one chunk is
+    # half-full. The contract worth stating is the relay's own ceiling, which
+    # is what this now asserts; the wasted headroom is a bin-packing cost, not
+    # a correctness one, and is recorded in
+    # `docs/internals/subscriptions/identity-grouping-and-limits.md` §3.3.
     When I watch for notes tagged "p" as 1200 different values
-    Then relay "hub" serves every "p" watch with 3 subscriptions
+    Then relay "hub" serves every "p" watch with at most 20 subscriptions
     And no subscription on relay "hub" carries more than 500 "p" values
     And every "p" value I watch is covered by some subscription on relay "hub"
 
@@ -146,17 +157,72 @@ Feature: One subscription per relay, not one per thing you asked about
     And relay "hub" serves every "t" watch with 1 subscription
     And relay "hub" never received a request naming both "p" and "t"
 
-  @wip
+  Scenario: A limited watch never merges into an unlimited one
+    # A relay-side `limit` caps the RESULT COUNT, not the predicate. Two
+    # `limit:10` REQs for different values each promise up to 10 rows; a
+    # merged one still promises 10 in total, so the union silently
+    # under-fetches. The refusal is therefore on the PRESENCE of a limit, not
+    # on limits differing -- two watches with the SAME limit must stay apart
+    # too, which is what this asserts.
+    When I watch for the latest 10 notes tagged "p" as "alice"
+    And I watch for the latest 10 notes tagged "p" as "bob"
+    Then relay "hub" serves every "p" watch with 2 subscriptions
+    And every "p" value I watch is covered by some subscription on relay "hub"
+
+  Scenario: A limited watch and an unlimited one for the same tag stay apart
+    # The asymmetric case: one side bounded, one not. Folding the bounded one
+    # into the unbounded one would drop its bound; folding the other way would
+    # truncate the unbounded one. Neither is a widening, so they ship as two.
+    When I watch for notes tagged "p" as "alice"
+    And I watch for the latest 10 notes tagged "p" as "bob"
+    Then relay "hub" serves every "p" watch with 2 subscriptions
+    And every "p" value I watch is covered by some subscription on relay "hub"
+
+  Scenario: Two different time windows over one tag never merge
+    # `since` is a co-pinned BOUND, not a value list. There is no union of two
+    # windows that both widens and stays near either operand: taking the
+    # earlier bound over-fetches unboundedly, taking the later one drops
+    # events the earlier watch asked for. So a scalar must MATCH for two
+    # filters to merge, and two windows over the same tag are two
+    # subscriptions however much their values overlap.
+    When I watch for notes tagged "p" as "alice" from the last 1 day
+    And I watch for notes tagged "p" as "bob" from the last 30 days
+    Then relay "hub" serves every "p" watch with 2 subscriptions
+    And every "p" value I watch is covered by some subscription on relay "hub"
+
+  Scenario: Two values under one window do collapse
+    # The control for the scenario above, and the guard against fixing it by
+    # over-refusing: a shared window is a MATCHING scalar, so the two watches
+    # differ in exactly one array component and must still collapse. Without
+    # this, "refuse anything with a since" would pass the window scenario and
+    # nobody would notice.
+    When I watch for notes tagged "p" as "alice" from the last 7 days
+    And I watch for notes tagged "p" as "bob" from the last 7 days
+    Then relay "hub" serves every "p" watch with 1 subscription
+    And one subscription on relay "hub" asks for every "p" value I watch
+
+  Scenario: A tag watch and an author watch never merge into one request
+    # Tag names are conjunctive with each other and with an author list alike:
+    # a filter naming both `#p` and `authors` demands both at once and matches
+    # neither original watch. This is the ACROSS-AXIS form of the two-tag-name
+    # refusal above, and it is what a rule unioning two components at a time
+    # would break.
+    When I watch for notes tagged "p" as "alice"
+    And I watch for notes from Bob
+    Then relay "hub" serves every "p" watch with 1 subscription
+    And relay "hub" serves every author watch with 1 subscription
+    And relay "hub" never received a request naming both "p" and authors
+
   Scenario: Two demands that cannot be merged never collapse onto one subscription
-    # The injectivity requirement, and a CONFIRMED live bug rather than a
-    # missing feature. A relay-side `limit` caps the result COUNT, so
-    # `AuthorUnion` correctly refuses to widen across one -- but
-    # `SubId::for_wire` erases `authors` from the skeleton regardless, so both
-    # demands land on the SAME subscription id and one REQ silently replaces
-    # the other, forever. Measured here: two limited author watches produce
-    # ONE subscription carrying one author. Falsifier:
+    # The injectivity requirement. A relay-side `limit` caps the result COUNT
+    # rather than the predicate, so the union correctly refuses to widen
+    # across one -- and this used to be where demand SILENTLY VANISHED,
+    # because `SubId::for_wire` erased `authors` from the skeleton regardless,
+    # landing both demands on the same subscription id where one REQ replaced
+    # the other forever. Two unmergeable filters now simply get two allocated
+    # tokens (#899). Falsifier:
     # `crates/nmp-router/tests/tag_fanout_churn.rs`'s
-    # `limited_identical_except_authors_atoms_collide_on_sub_id`.
+    # `limited_identical_except_authors_atoms_each_reach_the_wire`.
     When I watch for the latest 10 notes from Alice
     And I watch for the latest 10 notes from Bob
     Then relay "hub" serves every author watch with 2 subscriptions
@@ -200,27 +266,27 @@ Feature: One subscription per relay, not one per thing you asked about
 
   # ---- the catalog shape this came from --------------------------------
 
-  @wip
   Scenario: A catalog of groups is one subscription, not three hundred
     # The originating case: "which groups am I an admin of" projected into
-    # the `#d` slot of "hydrate all state for those groups". Measured today
-    # in `crates/nmp-router/tests/tag_kill_measurement.rs`: 300 groups over 2
-    # hosts compiles to 300 subscriptions PER HOST against a ceiling of 20,
-    # while every filter carries 1 value out of a 500-value budget. Nothing
-    # about the derived binding is the problem -- the same collapse is
-    # missing for literal values, above.
+    # the `#d` slot of "hydrate all state for those groups". This compiled to
+    # 300 subscriptions PER HOST against a ceiling of 20, while every filter
+    # carried 1 value out of a 500-value budget; the same demand now compiles
+    # to ONE per host carrying all 300
+    # (`crates/nmp-router/tests/tag_kill_measurement.rs`, whose kill assertion
+    # was inverted to prove it). Nothing about the derived binding was ever
+    # the problem -- the same collapse was missing for literal values, above.
     Given I administer 300 groups
     When I open the group state of every group I administer
     Then relay "hub" serves every "d" watch with 1 subscription
     And no subscription on relay "hub" carries more than 500 "d" values
     And every "d" value I watch is covered by some subscription on relay "hub"
 
-  @wip
   Scenario: Learning about one more group replaces the subscription in place
     # A newly resolved value must widen the live subscription, not open
-    # another one. Measured today: six groups, six subscriptions, no
-    # replacement of any kind. Engine-level ledgers for the same behavior are
-    # in `crates/nmp-engine/tests/core_headless/derived_tag_fanout.rs`.
+    # another one. This measured six groups as six subscriptions with no
+    # replacement of any kind. Engine-level ledgers for the same behaviour are
+    # in `crates/nmp-engine/tests/core_headless/derived_tag_fanout.rs` (A and
+    # C), which now pin the in-place replacement step for step.
     Given I administer 5 groups
     And the group state of every group I administer is open
     When I am made an admin of one more group
@@ -231,13 +297,16 @@ Feature: One subscription per relay, not one per thing you asked about
 
   @wip
   Scenario: Nothing already asked for is asked for again
-    # Found by this harness, not previously reported, and NOT specific to the
-    # tag axis: recompiling re-sends REQs whose subscription id AND filter
-    # are byte-identical to what is already live. Measured: two tag watches
-    # cost four REQs (two of them redundant); three author watches cost one
-    # redundant REQ even on the axis that otherwise behaves. Each one makes
-    # the relay re-run the query and re-stream everything it matches, so it
-    # is wire cost on top of the fan-out rather than a consequence of it.
+    # STILL OPEN, and confirmed independent of the collapse: recompiling
+    # re-sends REQs whose subscription id AND filter are byte-identical to
+    # what is already live. Re-measured after the collapse landed: the two tag
+    # watches below now cost ONE redundant REQ (the widened
+    # `{#p:[alice,bob]}` filter, sent twice) rather than two, so the collapse
+    # reduced this without removing it. It is `apply_replay` resending
+    # `EngineCore`'s full req list on `RelayConnected`
+    # (`docs/internals/subscriptions/identity-grouping-and-limits.md` §5.4),
+    # which is wire cost on top of the fan-out rather than a consequence of
+    # it, and it needs its own fix.
     When I watch for notes tagged "p" as "alice"
     And I watch for notes tagged "p" as "bob"
     Then relay "hub" was never asked for the same thing twice

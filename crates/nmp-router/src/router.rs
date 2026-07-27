@@ -416,7 +416,7 @@ impl Router {
         // one overwriting REQ) but it was not injective: two filters the
         // coalescer REFUSED to merge -- `neither_limited` poisons every rule
         // the moment either side carries a `limit`, and `dedup_only()` holds
-        // no `AuthorUnion` at all -- minted the SAME id, and `diff_plans`
+        // no author union at all -- minted the SAME id, and `diff_plans`
         // (keyed by `SubId`) then silently dropped one of them, forever.
         // Allocation buys back injectivity AND keeps in-place widening,
         // because the previous plan is the state that tells "this
