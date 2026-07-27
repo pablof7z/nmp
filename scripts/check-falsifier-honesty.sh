@@ -122,9 +122,17 @@ if [[ -n "$CLAIMS_FILE" ]]; then
     echo "check-falsifier-honesty: claims file not found: $CLAIMS_FILE" >&2
     exit 2
   fi
-  # (a) markdown sections whose heading mentions falsifier(s)
+  # (a) markdown sections whose heading mentions falsifier(s).
+  #
+  # `^#+ ` and NOT `^#{1,6} `. Interval expressions are an ERE extension that
+  # mawk does not implement, and mawk is /usr/bin/awk on Debian and on the
+  # ubuntu-latest runners this gate runs on. There, `/^#{1,6} /` matches the
+  # LITERAL text `#{1,6} ` and therefore nothing -- so this entire claim
+  # source silently produced no claims in CI, for every PR, since it was
+  # written. `#+` needs no intervals and is exact here: markdown caps headings
+  # at six `#` and a 7+ run is not a heading anyway.
   awk '
-      /^#{1,6} /       { in_section = ($0 ~ /[Ff]alsifier/) }
+      /^#+ /           { in_section = ($0 ~ /[Ff]alsifier/) }
       in_section       { print }
     ' "$CLAIMS_FILE" > "$tmp/claims_body.txt"
   # (b) single lines that label a falsifier list inline
@@ -147,16 +155,61 @@ SYMBOL_RE='^[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)*$'
 
 : > "$tmp/path_claims.txt"
 : > "$tmp/symbol_claims.txt"   # lines: <symbol-to-find>\t<original-span>
+: > "$tmp/unrecognised.txt"    # claim-shaped spans that parsed as neither
+
+# Is this span shaped like a claim someone MEANT to be checked? Used only to
+# decide whether falling through both parsers is worth reporting: prose spans
+# (`--release`, `Arc<T>`, `#[derive]`) are legitimately skipped and must stay
+# silent, but a span carrying a source extension or a `::` path was written as
+# a claim, and silently checking nothing is the #950 failure.
+looks_like_claim() {
+  [[ "$1" =~ \.(rs|swift|kt|kts|sh|py|toml|yml|yaml)($|::|:) ]] && return 0
+  [[ "$1" =~ ^[A-Za-z0-9_./-]+::[A-Za-z_] ]] && return 0
+  return 1
+}
+
 while IFS= read -r span; do
   [[ -z "$span" ]] && continue
   # spans with whitespace are commands/prose, not a single named mechanism
   [[ "$span" =~ [[:space:]] ]] && continue
   token="$span"
-  token="${token#.}"                    # .swiftCase -> swiftCase
+  # Strip a leading `.` ONLY for `.swiftEnumCase`. A token containing `/` is a
+  # path, and `.github/workflows/ci.yml` losing its dot became
+  # `github/workflows/ci.yml`, which the `(^|/)` anchor can never match
+  # against the real tracked path -- reporting NAMED-BUT-ABSENT for a file
+  # that exists (#946, #928).
+  [[ "$token" != */* ]] && token="${token#.}"
   token="${token%%(*}"                  # fn_name(...) / Case(assoc:) -> name
   token="${token%!}"                    # macro_name! -> macro_name
   token="${token%,}"; token="${token%;}"; token="${token%.}"
   [[ -z "$token" ]] && continue
+
+  # `path/to/file.rs::symbol` and `path/to/file.rs:123` -- the forms people
+  # actually write. Previously BOTH regexes rejected these (the `/` fails
+  # SYMBOL_RE; the trailing symbol/line fails PATH_EXT_RE's `$` anchor), so
+  # they fell through and were checked by NOTHING, silently. On PR #907 that
+  # skipped all three Rust falsifiers carrying the exact-bytes proof while the
+  # gate reported green (#950).
+  if [[ "$token" =~ ^([A-Za-z0-9_./-]+\.(rs|swift|kt|kts|sh|py|toml|yml|yaml))(::(.+)|:[0-9]+)$ ]]; then
+    printf '%s\t%s\n' "${BASH_REMATCH[1]}" "$span" >> "$tmp/path_claims.txt"
+    qualified_symbol="${BASH_REMATCH[4]:-}"
+    if [[ -n "$qualified_symbol" ]]; then
+      leaf="${qualified_symbol##*::}"
+      leaf="${leaf%%(*}"
+      # The leaf must be a PLAIN identifier. Without this, a span like
+      # `foo.rs::sym::extra<Generic>` yields the leaf `extra<Generic>`, which
+      # `git grep -w` can never match, turning a parser gap into a false
+      # NAMED-BUT-ABSENT against the author.
+      if [[ ! "$leaf" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        printf '%s\n' "$span" >> "$tmp/unrecognised.txt"
+      elif [[ ${#leaf} -ge 4 ]] \
+         && { [[ "$leaf" == *_* ]] || { [[ "$leaf" =~ [a-z] && "$leaf" =~ [A-Z] ]]; }; }; then
+        printf '%s\t%s\n' "$leaf" "$span" >> "$tmp/symbol_claims.txt"
+      fi
+    fi
+    continue
+  fi
+
   if [[ "$token" =~ $PATH_EXT_RE && "$token" =~ ^[A-Za-z0-9_./-]+$ ]]; then
     printf '%s\t%s\n' "$token" "$span" >> "$tmp/path_claims.txt"
     continue
@@ -169,14 +222,32 @@ while IFS= read -r span; do
        && { [[ "$leaf" == *_* ]] || { [[ "$leaf" =~ [a-z] && "$leaf" =~ [A-Z] ]]; }; }; then
       printf '%s\t%s\n' "$leaf" "$span" >> "$tmp/symbol_claims.txt"
     fi
+    continue
   fi
+  looks_like_claim "$token" && printf '%s\n' "$span" >> "$tmp/unrecognised.txt"
 done < "$tmp/spans.txt"
+
+sort -u "$tmp/unrecognised.txt" -o "$tmp/unrecognised.txt"
 
 sort -u "$tmp/path_claims.txt" -o "$tmp/path_claims.txt"
 sort -u "$tmp/symbol_claims.txt" -o "$tmp/symbol_claims.txt"
 
 path_total=$(wc -l < "$tmp/path_claims.txt" | tr -d ' ')
 symbol_total=$(wc -l < "$tmp/symbol_claims.txt" | tr -d ' ')
+unrecognised_total=$(wc -l < "$tmp/unrecognised.txt" | tr -d ' ')
+
+# Report claim-shaped spans this script could not parse. Silence here is the
+# #950 defect itself: an author writing a falsifier in a format the parsers
+# miss got a green tick having been checked on nothing, with no signal that it
+# had happened. This is deliberately a REPORT and not a failure -- a parser
+# gap is the gate's bug, not the author's, and failing the PR would punish the
+# wrong party. What it must not do is stay quiet.
+if [[ $unrecognised_total -gt 0 ]]; then
+  echo "check-falsifier-honesty: NOT CHECKED -- $unrecognised_total claim-shaped span(s) matched no parser:"
+  sed 's/^/    /' "$tmp/unrecognised.txt"
+  echo "    (these were counted as claims by nobody; if one names a real falsifier, the parser needs widening -- please report it)"
+  echo
+fi
 
 if [[ $path_total -eq 0 && $symbol_total -eq 0 ]]; then
   echo "check-falsifier-honesty: falsifier prose found, but no concretely-named symbol/path claims to verify (only checkable claims are enforced)."
