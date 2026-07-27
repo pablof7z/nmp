@@ -7032,6 +7032,79 @@ record Record {
 }
 
 record Record {
+    name: "FfiSimpleGroupEntry",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "group_id",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "host_relay",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "name",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "One tolerantly parsed Simple-groups item (#863, `nmp_nip51::\nSimpleGroupEntry` mirror) -- group id, host relay, optional name.\n`host_relay` is a canonically SPELLED observed string; it is not a\nrouting permission and no NIP-29 constructor accepts it implicitly.",
+    ),
+}
+
+record Record {
+    name: "FfiSimpleGroupsList",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "items",
+            type_: Sequence {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiSimpleGroupEntry",
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "relays_in_use",
+            type_: Sequence {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "malformed_item_count",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "has_private_content",
+            type_: Boolean,
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "NIP-51's tolerantly parsed Simple groups list (#863,\n`nmp_nip51::SimpleGroupsList` mirror), with every evidence field\npreserved across the FFI boundary. OBSERVATIONAL DATA ONLY: it may be\nproduced from a caller-constructed [`FfiRow`] of any kind, and it asserts\nno signature, canonical-store, provenance, routing, or mutation\nauthority. There is deliberately no observation-qualified wrapper,\nprojection error, or frame proof around it.",
+    ),
+}
+
+record Record {
     name: "FfiSourceEvidence",
     module_path: "nmp_ffi",
     remote: false,
@@ -7862,12 +7935,12 @@ function Function {
         is_object_free_function: false,
     },
     docstring: Some(
-        "Decode a delivered kind:10009 [`FfiRow`] into the composed remembered-\ngroups/host-relays value (#108). Infallible, mirroring\n`nmp_nip51::decode_simple_groups_list`'s own never-fails contract:\nmalformed individual items are dropped, never the whole decode.",
+        "Decode a delivered kind:10009 [`FfiRow`] into the composed remembered-\ngroups/host-relays value (#108). Infallible, mirroring\n`nmp_nip51::parse_simple_groups_list_tolerant`'s own never-fails contract:\nmalformed individual items are dropped, never the whole decode.",
     ),
     throws: None,
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_decode_remembered_groups",
     checksum: Some(
-        13946,
+        4253,
     ),
 }
 
@@ -8132,6 +8205,67 @@ function Function {
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_parse_nostr_content",
     checksum: Some(
         18165,
+    ),
+}
+
+function Function {
+    name: "parse_simple_groups_list_tolerant",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "row",
+            type_: Record {
+                module_path: "nmp_ffi",
+                name: "FfiRow",
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiSimpleGroupsList",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_parse_simple_groups_list_tolerant",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "row",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiRow",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiSimpleGroupsList",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Tolerantly parse Simple-groups-shaped public items out of a raw native\nrow (#863). Infallible, and deliberately kind-agnostic: `row` may carry\nany `kind`, an invented `sig`, and no `sources` at all.\n\nThe result preserves malformed-item and private-content evidence, and\ngrants NO signature, canonical-store, provenance, routing, or mutation\nauthority. To browse a NIP-29 group the app still passes an explicit host\nof its own choosing to `group_discovery_demand`/`group_content_demand`;\nnothing here authorizes a host on the app's behalf.",
+    ),
+    throws: None,
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_parse_simple_groups_list_tolerant",
+    checksum: Some(
+        57664,
     ),
 }
 
