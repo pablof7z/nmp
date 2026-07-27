@@ -997,7 +997,9 @@ fn event_to_ffi(event: nmp::Nip46ConnectionEvent) -> FfiNip46ConnectionEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::net::TcpListener;
+    use std::path::PathBuf;
     use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc;
     use std::thread;
@@ -1086,20 +1088,38 @@ mod tests {
 
     #[test]
     fn every_public_mailbox_entry_requires_compatibility_proof() {
-        let source = include_str!("signer.rs");
-        let signatures = source
-            .split("pub fn ")
-            .skip(1)
-            .map(|suffix| suffix.split_once('{').unwrap().0)
-            .filter(|signature| signature.contains("Arc<FfiSignerMailbox>"))
-            .collect::<Vec<_>>();
+        let mut pending = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")];
+        let mut signatures = Vec::new();
+        while let Some(path) = pending.pop() {
+            if path.is_dir() {
+                pending.extend(
+                    fs::read_dir(path)
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path()),
+                );
+                continue;
+            }
+            if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+                continue;
+            }
+
+            let source = fs::read_to_string(&path).unwrap();
+            signatures.extend(
+                source
+                    .split("pub fn ")
+                    .skip(1)
+                    .map(|suffix| suffix.split_once('{').unwrap().0)
+                    .filter(|signature| signature.contains("Arc<FfiSignerMailbox>"))
+                    .map(|signature| (path.clone(), signature.to_owned())),
+            );
+        }
 
         assert_eq!(
             signatures.len(),
             1,
-            "every public mailbox entry must remain one proof-bearing constructor"
+            "every public mailbox entry across the provider crate must remain one proof-bearing constructor: {signatures:?}"
         );
-        assert!(signatures[0].contains("Arc<FfiNip46CoreCompatibility>"));
+        assert!(signatures[0].1.contains("Arc<FfiNip46CoreCompatibility>"));
     }
 
     #[test]

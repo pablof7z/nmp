@@ -55,18 +55,18 @@ assert_unmanaged_refused() {
 }
 
 assert_unmanaged_refused core "$CORE_TARGET_DIR" \
-  cargo build --locked -p nmp-ffi --release
+  cargo build --locked -p nmp-ffi --release --target "$HOST_TARGET"
 assert_unmanaged_refused pair "$PAIR_TARGET_DIR" \
-  cargo build --locked -p nmp-ffi -p nmp-nip46-ffi --release
+  cargo build --locked -p nmp-ffi -p nmp-nip46-ffi --release --target "$HOST_TARGET"
 assert_unmanaged_refused workspace "$PAIR_TARGET_DIR" \
-  cargo build --locked --workspace --release
+  cargo build --locked --workspace --release --target "$HOST_TARGET"
 assert_unmanaged_refused all-targets "$CORE_TARGET_DIR" \
-  cargo build --locked -p nmp-ffi --all-targets --release
+  cargo build --locked -p nmp-ffi --all-targets --release --target "$HOST_TARGET"
 assert_unmanaged_refused test "$CORE_TARGET_DIR" \
-  cargo test --locked -p nmp-ffi --release --no-run
+  cargo test --locked -p nmp-ffi --release --target "$HOST_TARGET" --no-run
 assert_unmanaged_refused clippy "$CORE_TARGET_DIR" \
-  cargo clippy --locked -p nmp-ffi --release --no-deps
+  cargo clippy --locked -p nmp-ffi --release --target "$HOST_TARGET" --no-deps
 assert_unmanaged_refused bench "$CORE_TARGET_DIR" \
-  cargo build --locked -p nmp-ffi --profile bench
+  cargo build --locked -p nmp-ffi --profile bench --target "$HOST_TARGET"
 
 echo "component-identity-build: every unauthorized release-class shape refused inside packageable targets"

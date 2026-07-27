@@ -73,7 +73,7 @@ jobs:
       - name: Build core and provider bindings
         run: |
           scripts/build-kotlin-jvm.sh
-          cp target/nmp-component-build/core/release/libnmp_ffi.so \
+          cp target/nmp-component-build/core/x86_64-unknown-linux-gnu/release/libnmp_ffi.so \
             "$RUNNER_TEMP/libnmp_ffi-core-only.so"
           scripts/build-kotlin-nip46-jvm.sh
 
@@ -84,14 +84,14 @@ jobs:
         run: |
           scripts/check-nip46-component-identity.sh \
             "$RUNNER_TEMP/libnmp_ffi-core-only.so" \
-            target/nmp-component-build/nip46/release/libnmp_ffi.so \
-            target/nmp-component-build/nip46/release/libnmp_nip46_ffi.so
+            target/nmp-component-build/nip46/x86_64-unknown-linux-gnu/release/libnmp_ffi.so \
+            target/nmp-component-build/nip46/x86_64-unknown-linux-gnu/release/libnmp_nip46_ffi.so
 
       - name: Prove the provider is absent from the core link/resource maps
         run: |
           scripts/check-nip46-artifact-inventory.sh \
-            target/nmp-component-build/nip46/release/libnmp_ffi.so \
-            target/nmp-component-build/nip46/release/libnmp_nip46_ffi.so \
+            target/nmp-component-build/nip46/x86_64-unknown-linux-gnu/release/libnmp_ffi.so \
+            target/nmp-component-build/nip46/x86_64-unknown-linux-gnu/release/libnmp_nip46_ffi.so \
             Packages/NMPKotlin/src/main/kotlin/uniffi \
             Packages/NMPKotlin/nip46/src/main/kotlin/uniffi
 

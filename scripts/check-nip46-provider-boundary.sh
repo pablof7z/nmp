@@ -87,7 +87,7 @@ grep -qF 'validate_unit_graph_against_cargo' crates/nmp-ffi/build.rs ||
 grep -qF 'validated_release_marker' crates/nmp-ffi/build.rs ||
   fail "core release identity is not bound to an isolated component target"
 grep -qF 'NMP_FFI_COMPONENT_AUTH' crates/nmp-ffi/build.rs ||
-  fail "isolated component target lacks one-invocation builder authorization"
+  fail "isolated component target lacks per-build builder authorization"
 grep -qF 'features = ["nip46-provider-component"]' crates/nmp-nip46-ffi/Cargo.toml ||
   fail "NIP-46 provider does not make its presence observable to the nmp-ffi build"
 grep -qF 'scripts/test-component-identity-build.sh' .github/workflows/nip46-provider.yml ||
@@ -117,6 +117,9 @@ for builder in scripts/build-swift-xcframework.sh scripts/build-kotlin-jvm.sh; d
     fail "$builder still supplies declared graph content"
   fi
 done
+grep -qF 'cargo build --frozen "${CARGO_PACKAGE_ARGS[@]}" --release --target "$HOST_TARGET"' \
+  scripts/build-kotlin-jvm.sh ||
+  fail "Kotlin component build does not make its hashed host target explicit to Cargo"
 if grep -qF 'NMP_FFI_CARGO_UNIT_GRAPH' crates/nmp-ffi/build.rs; then
   fail "build script still accepts caller-declared graph content"
 fi

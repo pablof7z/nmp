@@ -101,7 +101,7 @@ about current code:
   and an unrelated external signer buildable. Supported native release builders
   fix the core-only or matched core/provider Cargo roots, use isolated target
   directories per package set, freeze the resolution after a locked fetch, and
-  mint a one-invocation authorization checked from the build script's actual
+  mint a per-build authorization checked from the build script's actual
   output-directory ancestry. Only within that fixed shape does the deterministic
   component identity self-derive and hash Cargo's exact resolved unit graph
   (package roots/edges, transitive features, profiles, and targets), every
@@ -114,7 +114,10 @@ about current code:
   crosses the component seam (#952). The build authorization is a working-
   discipline guard against accidental artifact substitution, not a secret
   against a caller deliberately replaying it; the native identity comparison is
-  the runtime authority. The Android AAR work in #831 still owns
+  the runtime authority. Supported builders always use the exact release
+  profile; custom/bench release-class builds are intentionally not a supported
+  packaging path and fail without that builder authorization. The Android AAR
+  work in #831 still owns
   publishing that same identity in provenance/Gradle metadata and
   emulator-qualifying a deliberately mismatched pair; the native check remains
   the final authority when packaging metadata is stale or tampered.

@@ -83,14 +83,15 @@ echo "== 1. cargo build (isolated release, host triple) =="
 cargo fetch --locked
 CARGO_TARGET_DIR="$COMPONENT_TARGET_DIR" \
 NMP_FFI_COMPONENT_AUTH="$COMPONENT_AUTH" \
-  cargo build --frozen "${CARGO_PACKAGE_ARGS[@]}" --release
+  cargo build --frozen "${CARGO_PACKAGE_ARGS[@]}" --release --target "$HOST_TARGET"
 
-HOST_LIB="$COMPONENT_TARGET_DIR/release/$LIB_NAME"
+HOST_RELEASE_DIR="$COMPONENT_TARGET_DIR/$HOST_TARGET/release"
+HOST_LIB="$HOST_RELEASE_DIR/$LIB_NAME"
 if [[ ! -f "$HOST_LIB" ]]; then
   echo "error: expected $HOST_LIB after cargo build -- check nmp-ffi's [lib] crate-type includes cdylib" >&2
   exit 1
 fi
-BINDGEN="$COMPONENT_TARGET_DIR/release/$BINDGEN_NAME"
+BINDGEN="$HOST_RELEASE_DIR/$BINDGEN_NAME"
 if [[ ! -x "$BINDGEN" ]]; then
   echo "error: expected executable $BINDGEN after cargo build" >&2
   exit 1
