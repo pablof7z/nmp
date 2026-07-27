@@ -1100,6 +1100,8 @@ mod persistence_failures;
 mod real_corpus_benchmark;
 #[path = "state_maintenance.rs"]
 mod state_maintenance;
+#[path = "subscription_budget.rs"]
+mod subscription_budget;
 #[path = "write_delivery.rs"]
 mod write_delivery;
 #[path = "write_scheduling.rs"]

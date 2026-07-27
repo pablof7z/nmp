@@ -1458,6 +1458,18 @@ impl<S: EventStore> EngineCore<S> {
             .get_coverage(nmp_store::coverage_key(atom), relay)
     }
 
+    /// The planning-relevant projection of one relay's retained NIP-11
+    /// evidence: exactly the pair [`Self::compile_budget`] reads, and
+    /// nothing else. Comparing this across a document resolution is what
+    /// tells a budget change apart from ordinary document churn.
+    fn advertised_planning_limits(&self, relay: &RelayUrl) -> (Option<u64>, Option<u64>) {
+        self.nip11_information
+            .get(relay)
+            .map_or((None, None), |information| {
+                (information.max_subscriptions, information.max_subid_length)
+            })
+    }
+
     /// Every bound the next `Router::compile` plans within: the operator's
     /// whole-demand relay ceiling, plus whatever each relay in the current
     /// read plan advertised about itself in NIP-11 (#931).

@@ -777,6 +777,15 @@ impl<S: EventStore> EngineCore<S> {
         // protected sessions retains no document and probes nothing.
         let public_session = RelaySessionKey::public(url.clone());
         let planned = self.router.plan().reqs.contains_key(&public_session);
+        // The PLANNING-relevant projection of this document, before and
+        // after (#931). NIP-11 acquisition is driven by connect, and connect
+        // happens after the compile that planned the relay -- so an
+        // advertised `max_subscriptions` is ALWAYS learned after a compile
+        // that could not consult it. Without a replan here an enforced
+        // budget would sit inert until some unrelated demand mutation
+        // happened along, which is advisory behavior wearing an enforced
+        // label.
+        let budget_before = self.advertised_planning_limits(&url);
         if planned {
             if let Some(information) = information {
                 self.nip11_information.insert(url.clone(), information);
@@ -791,6 +800,23 @@ impl<S: EventStore> EngineCore<S> {
             self.nip11_information.remove(&url);
         }
         let mut effects = Vec::new();
+        // Replan only when the numbers the PLANNER reads actually moved. A
+        // 304 revalidation, a changed `name`, or `supported_nips` churn must
+        // not cost a full recompile -- and this cannot loop, because
+        // resolution is driven by connect rather than by planning.
+        if self.advertised_planning_limits(&url) != budget_before {
+            self.recompile(&mut effects);
+            // A budget that binds REFUSES demand, and the app has to hear
+            // that from its own query rather than from a diagnostics screen:
+            // the refused atoms are `limited` in the new plan, which
+            // `acquisition_evidence` renders as `ShortfallFact::LocalLimit`.
+            // Only a handle/history refresh puts that in front of the
+            // subscriber -- the same pair `on_relay_connected` runs when a
+            // relay coming online changes a handle's evidence with no row
+            // change at all.
+            self.refresh_all_handles(&mut effects);
+            self.refresh_all_histories(&mut effects);
+        }
         if self.connected_relays.contains(&public_session)
             && self.router.plan().reqs.contains_key(&public_session)
             && advertises_nip77 != Some(false)
