@@ -940,6 +940,22 @@ fn apply_worker_event_with_verdict(
         });
     }
 
+    // Issue #883: an exact ephemeral terminal is ungated for exactly the same
+    // reason, and needs no slot lookup at all — the worker already named the
+    // exact `(session, generation)` the operation was submitted against, so
+    // nothing here can misattribute it to whatever the slot holds now.
+    if let WorkerEventKind::EphemeralHandoff { target, outcome } = event.kind {
+        return Some(PoolEvent::EphemeralHandoff {
+            operation: target.operation,
+            session: target.session,
+            handle: RelayHandle {
+                slot: event.slot,
+                generation: target.generation,
+            },
+            outcome,
+        });
+    }
+
     let state = inner.slots.get_mut(event.slot as usize)?;
     state.worker.as_ref()?;
     let same_worker = worker_id_of(event.generation) == worker_id_of(state.generation);
@@ -1095,6 +1111,9 @@ fn apply_worker_event_with_verdict(
         }
         WorkerEventKind::EventHandoff { .. } => {
             unreachable!("EventHandoff already returned above, before any slot lookup")
+        }
+        WorkerEventKind::EphemeralHandoff { .. } => {
+            unreachable!("EphemeralHandoff already returned above, before any slot lookup")
         }
         WorkerEventKind::Retired { .. } => {
             unreachable!("Retired already returned above, before any slot lookup")
@@ -1745,6 +1764,54 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// Issue #883 falsifier: reuse ONE relay URL across successive
+    /// generations of the same slot and prove an exact ephemeral terminal
+    /// still names the generation it was submitted against. The terminal is
+    /// ungated (a closed-and-reopened slot cannot swallow it) but it is never
+    /// re-identified from current slot state either — so a completion for the
+    /// dead generation can never be attributed to the live one.
+    #[test]
+    fn ephemeral_handoff_keeps_its_own_generation_across_a_reopened_slot() {
+        let (inner, _rx) = test_pool();
+        let mut guard = inner.lock().unwrap();
+        let url = RelayUrl::parse("wss://relay.example").unwrap();
+
+        let h1 = guard.ensure_open(&url);
+        assert!(guard.close(h1).is_some());
+        let h2 = guard.ensure_open(&url);
+        assert_ne!(h1.generation, h2.generation);
+
+        let session = RelaySessionKey::public(url);
+        let delivered = apply_worker_event(
+            &mut guard,
+            WorkerEvent {
+                slot: h1.slot,
+                generation: h1.generation,
+                kind: WorkerEventKind::EphemeralHandoff {
+                    target: crate::pool::worker::EphemeralTarget {
+                        session: session.clone(),
+                        generation: h1.generation,
+                        operation: crate::pool::EphemeralOperation(11),
+                    },
+                    outcome: crate::pool::EphemeralSendOutcome::Unavailable,
+                },
+            },
+        );
+        assert!(
+            matches!(
+                &delivered,
+                Some(PoolEvent::EphemeralHandoff {
+                    operation: crate::pool::EphemeralOperation(11),
+                    session: delivered_session,
+                    handle,
+                    outcome: crate::pool::EphemeralSendOutcome::Unavailable,
+                }) if *delivered_session == session && *handle == h1
+            ),
+            "the terminal must carry the exact submitted generation, not the reopened one, got \
+             {delivered:?}"
+        );
     }
 
     /// `Pool::send_durable` against a stale (superseded) handle must

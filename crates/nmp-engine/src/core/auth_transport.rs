@@ -515,29 +515,48 @@ impl<S: EventStore> EngineCore<S> {
         Vec::new()
     }
 
-    pub(super) fn on_auth_send_completed(
-        &mut self,
-        token: AuthOpToken,
-        outcome: AuthSendOutcome,
-    ) -> Vec<Effect> {
-        if !self.exact_current_auth_epoch(&token.epoch) {
+    /// Apply transport's one typed ephemeral terminal (issue #883).
+    ///
+    /// The reducer owns operation identity here: it matches the terminal's
+    /// exact `(session, handle)` target and opaque operation token against
+    /// the [`AuthOpToken`] this session is ALREADY awaiting, rather than
+    /// keeping a side table of in-flight completions or trusting a token
+    /// reconstructed off-thread. Anything that does not match the awaited
+    /// send — a superseded epoch, a replaced generation, a completion for a
+    /// different phase — is dropped without effect.
+    pub(super) fn on_auth_send_completed(&mut self, completion: AuthSendCompletion) -> Vec<Effect> {
+        let AuthSendCompletion {
+            handle,
+            session,
+            operation,
+            outcome,
+        } = completion;
+        let Some(state) = self.auth_sessions.get(&session) else {
+            return Vec::new();
+        };
+        let AuthSessionPhase::AwaitingSend {
+            token,
+            event_id,
+            early_ok,
+        } = &state.phase
+        else {
+            return Vec::new();
+        };
+        if token.sequence != operation
+            || token.epoch.handle != handle
+            || token.epoch.session != session
+        {
             return Vec::new();
         }
-        let session = token.epoch.session.clone();
-        let Some(mut state) = self.auth_sessions.remove(&session) else {
+        let (event_id, early_ok) = (*event_id, *early_ok);
+        let epoch = token.epoch.clone();
+        if !self.exact_current_auth_epoch(&epoch) {
             return Vec::new();
-        };
-        let (event_id, early_ok) = match &state.phase {
-            AuthSessionPhase::AwaitingSend {
-                token: current,
-                event_id,
-                early_ok,
-            } if *current == token => (*event_id, *early_ok),
-            _ => {
-                self.auth_sessions.insert(session, state);
-                return Vec::new();
-            }
-        };
+        }
+        let mut state = self
+            .auth_sessions
+            .remove(&session)
+            .expect("the awaiting session was just read under this exact key");
         let mut effects = Vec::new();
         match outcome {
             AuthSendOutcome::Accepted => {

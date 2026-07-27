@@ -455,6 +455,41 @@ pub enum AuthSendOutcome {
     Unavailable,
 }
 
+/// The one, ever, terminal of one exact AUTH send, translated verbatim from
+/// transport's `PoolEvent::EphemeralHandoff` (issue #883).
+///
+/// Transport never runs engine code: it emits this value on the ordinary pool
+/// event path and the reducer applies it on its own owner thread. The exact
+/// `(handle, session)` the frame was submitted against travels WITH the
+/// terminal, so `EngineCore::on_auth_send_completed` re-derives the awaiting
+/// [`AuthOpToken`] from state it already owns instead of keeping a side table
+/// of in-flight completions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthSendCompletion {
+    pub handle: TransportRelayHandle,
+    pub session: RelaySessionKey,
+    /// The opaque transport operation token this send was started with —
+    /// exactly [`AuthOpToken::sequence`], which is minted per engine and
+    /// never reused.
+    pub operation: u64,
+    pub outcome: AuthSendOutcome,
+}
+
+impl AuthSendCompletion {
+    /// The terminal for the exact send `token` started. Used where the token
+    /// is still in hand — transport's synchronous refusal path, and headless
+    /// reducer tests that drive a completion directly.
+    #[must_use]
+    pub fn for_operation(token: &AuthOpToken, outcome: AuthSendOutcome) -> Self {
+        Self {
+            handle: token.epoch.handle,
+            session: token.epoch.session.clone(),
+            operation: token.sequence,
+            outcome,
+        }
+    }
+}
+
 /// Capability whose removal/replacement invalidates AUTH truth for the
 /// frozen expected key. Runtime registries send this after their own exact
 /// registration identity check; the reducer never consults mutable current
@@ -569,7 +604,7 @@ pub enum EngineMsg {
         capability: AuthCapability,
         instance: AuthCapabilityInstance,
     },
-    AuthSendCompleted(AuthOpToken, AuthSendOutcome),
+    AuthSendCompleted(AuthSendCompletion),
     AuthCapabilityInvalidated(PublicKey, AuthCapability, AuthCapabilityInstance),
     /// Explicit pre-signature cancellation. Once promotion has committed,
     /// cancellation cannot retract a valid signed cache row.
@@ -1778,9 +1813,7 @@ impl<S: EventStore> EngineCore<S> {
                 capability,
                 instance,
             } => self.on_auth_capability_bound(token, capability, instance),
-            EngineMsg::AuthSendCompleted(token, outcome) => {
-                self.on_auth_send_completed(token, outcome)
-            }
+            EngineMsg::AuthSendCompleted(completion) => self.on_auth_send_completed(completion),
             EngineMsg::AuthCapabilityInvalidated(pubkey, capability, instance) => {
                 self.on_auth_capability_invalidated(pubkey, capability, instance)
             }

@@ -103,8 +103,8 @@ use nmp_transport::{
 #[doc(hidden)]
 pub use crate::core::ReceiptReplayCursor;
 use crate::core::{
-    self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg,
-    HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, HistorySink,
+    self, AcquisitionEvidence, AuthSendCompletion, DiagnosticsSnapshot, Effect, EngineCore,
+    EngineMsg, HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, HistorySink,
     ObservationEvidence, PublishError, ReattachOutcome, ReceiptId, ReceiptSinkRegistration,
     RelayAdmissionPolicy, Row, RowDelta, RowSink,
 };
@@ -3566,6 +3566,23 @@ fn translate_pool_event(event: PoolEvent) -> Option<EngineMsg> {
             correlation,
             result,
         } => Some(EngineMsg::EventHandoff(correlation, result)),
+        // Issue #883: the exact ephemeral lane is transport's AUTH send
+        // seam. The terminal already names its own exact `(session,
+        // handle)` target and opaque operation token, so this translation is
+        // total and stateless — no completion map, no callback. The reducer
+        // matches it against the send that session is actually awaiting and
+        // drops anything else.
+        PoolEvent::EphemeralHandoff {
+            operation,
+            session,
+            handle,
+            outcome,
+        } => Some(EngineMsg::AuthSendCompleted(AuthSendCompletion {
+            handle,
+            session,
+            operation: operation.0,
+            outcome: auth::auth_send_outcome(outcome),
+        })),
         PoolEvent::WorkerRetired => None,
     }
 }

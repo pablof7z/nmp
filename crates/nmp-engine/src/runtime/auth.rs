@@ -15,12 +15,14 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use nmp_signer::{SignerError, SignerOp};
-use nmp_transport::{EphemeralSendOutcome, EphemeralSendStart, Pool, WireFrame};
+use nmp_transport::{
+    EphemeralOperation, EphemeralSendOutcome, EphemeralSendStart, Pool, WireFrame,
+};
 use nostr::{ClientMessage, JsonUtil, PublicKey, RelayUrl};
 
 use crate::core::{
     AuthCapability, AuthCapabilityInstance, AuthEffect, AuthEpoch, AuthOpToken, AuthPolicyOutcome,
-    AuthSendOutcome, AuthSignerOutcome, EngineMsg,
+    AuthSendCompletion, AuthSendOutcome, AuthSignerOutcome, EngineMsg,
 };
 
 use super::{Cmd, SignerRegistry};
@@ -1018,23 +1020,21 @@ pub(super) fn dispatch(
             epoch,
             event,
         } => {
-            let completion_inbox = inbox.clone();
-            let completion_token = token.clone();
+            // Issue #883: the pool takes an opaque operation token, never a
+            // closure. An accepted operation resolves through the ordinary
+            // `PoolEvent::EphemeralHandoff` path (see
+            // `runtime::translate_pool_event`); only a synchronous refusal is
+            // reported from here, and the two are mutually exclusive by
+            // `EphemeralSendStart`'s construction.
             let start = pool.send_ephemeral_exact(
                 &epoch.session,
                 epoch.handle,
+                EphemeralOperation(token.sequence),
                 WireFrame::Text(ClientMessage::auth(*event).as_json()),
-                move |outcome| {
-                    let _ = completion_inbox.send(Cmd::Engine(EngineMsg::AuthSendCompleted(
-                        completion_token,
-                        auth_send_outcome(outcome),
-                    )));
-                },
             );
             if let EphemeralSendStart::Resolved(outcome) = start {
                 let _ = inbox.send(Cmd::Engine(EngineMsg::AuthSendCompleted(
-                    token,
-                    auth_send_outcome(outcome),
+                    AuthSendCompletion::for_operation(&token, auth_send_outcome(outcome)),
                 )));
             }
         }
@@ -1182,7 +1182,7 @@ impl<F: Future> Future for CatchUnwind<F> {
     }
 }
 
-fn auth_send_outcome(outcome: EphemeralSendOutcome) -> AuthSendOutcome {
+pub(super) fn auth_send_outcome(outcome: EphemeralSendOutcome) -> AuthSendOutcome {
     match outcome {
         EphemeralSendOutcome::Accepted => AuthSendOutcome::Accepted,
         EphemeralSendOutcome::Unavailable => AuthSendOutcome::Unavailable,
@@ -1728,10 +1728,14 @@ mod tests {
         );
         assert!(matches!(
             rx.recv().unwrap(),
-            Cmd::Engine(EngineMsg::AuthSendCompleted(
-                current,
-                AuthSendOutcome::Unavailable
-            )) if current == send_token
+            Cmd::Engine(EngineMsg::AuthSendCompleted(AuthSendCompletion {
+                ref session,
+                handle,
+                operation,
+                outcome: AuthSendOutcome::Unavailable,
+            })) if operation == send_token.sequence
+                && *session == send_token.epoch.session
+                && handle == send_token.epoch.handle
         ));
         tasks.shutdown();
         pool.shutdown();
@@ -1820,13 +1824,42 @@ mod tests {
             },
         );
 
+        // Issue #883: an accepted operation resolves ONLY through the typed
+        // pool event path. Nothing was pushed onto the engine inbox from a
+        // relay worker, and the terminal carries the exact target the send
+        // was submitted against.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let completion = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(!remaining.is_zero(), "no ephemeral terminal was emitted");
+            match pool_rx.recv_timeout(remaining).unwrap() {
+                event @ PoolEvent::EphemeralHandoff { .. } => break event,
+                _ => continue,
+            }
+        };
         assert!(matches!(
-            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
-            Cmd::Engine(EngineMsg::AuthSendCompleted(
-                current,
-                AuthSendOutcome::Accepted
-            )) if current == token
+            &completion,
+            PoolEvent::EphemeralHandoff {
+                operation: nmp_transport::EphemeralOperation(sequence),
+                session: completed_session,
+                handle,
+                outcome: EphemeralSendOutcome::Accepted,
+            } if *sequence == token.sequence
+                && *completed_session == token.epoch.session
+                && *handle == token.epoch.handle
         ));
+        assert!(matches!(
+            crate::runtime::translate_pool_event(completion),
+            Some(EngineMsg::AuthSendCompleted(AuthSendCompletion {
+                operation,
+                outcome: AuthSendOutcome::Accepted,
+                ..
+            })) if operation == token.sequence
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "an accepted operation must never also post to the engine inbox"
+        );
         let wire = wire_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(wire.starts_with("[\"AUTH\","));
         assert!(wire.contains("exact-challenge"));
