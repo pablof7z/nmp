@@ -2209,7 +2209,7 @@ enum Enum {
     },
     non_exhaustive: false,
     docstring: Some(
-        "[`decode_comment`]'s typed rejection (`nmp_nip22::CommentDecodeError`\nmirror). Exhaustive; every variant is constructed by a test\n(Reachability Gate).",
+        "[`decode_comment`]'s typed rejection (`nmp::nip22::CommentDecodeError`\nmirror). Exhaustive; every variant is constructed by a test\n(Reachability Gate).",
     ),
 }
 
@@ -2250,7 +2250,7 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "A comment's direct parent (`nmp_nip22::CommentParent` mirror).",
+        "A comment's direct parent (`nmp::nip22::CommentParent` mirror).",
     ),
 }
 
@@ -2342,7 +2342,7 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "The root of a NIP-22 comment thread (`nmp_nip22::CommentRoot` mirror).",
+        "The root of a NIP-22 comment thread (`nmp::nip22::CommentRoot` mirror).",
     ),
 }
 
@@ -3471,7 +3471,7 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "A validated NIP-73 external-content target (`nmp_nip22::Nip73Target`\nmirror).",
+        "A validated NIP-73 external-content target (`nmp::nip22::Nip73Target`\nmirror).",
     ),
 }
 
@@ -5203,7 +5203,7 @@ record Record {
         },
     ],
     docstring: Some(
-        "A successfully decoded, typed NIP-22 comment (`nmp_nip22::DecodedComment`\nmirror).",
+        "A successfully decoded, typed NIP-22 comment (`nmp::nip22::DecodedComment`\nmirror).",
     ),
 }
 
@@ -7045,7 +7045,7 @@ function Function {
         is_object_free_function: false,
     },
     docstring: Some(
-        "Compose an ordinary durable, author-outbox-routed [`FfiWriteIntent`] for a\nNIP-22 comment (`nmp_nip22::comment_intent` mirror). This function is\nengine-free: author and event time are explicit deterministic composition\ninputs. Publish the returned value through\n[`crate::facade::NmpEngine::publish`], the same generic write lifecycle as\nevery other ordinary intent. `correlation` (#591) passes straight through\nto `WriteIntent.correlation`; NIP-22 owns no separate correlation,\ntake-once, signing, routing, receipt, or retry machinery.",
+        "Compose an ordinary durable, author-outbox-routed [`FfiWriteIntent`] for a\nNIP-22 comment (`nmp::nip22::comment_intent` mirror). This function is\nengine-free: author and event time are explicit deterministic composition\ninputs. Publish the returned value through\n[`crate::facade::NmpEngine::publish`], the same generic write lifecycle as\nevery other ordinary intent. `correlation` (#591) passes straight through\nto `WriteIntent.correlation`; NIP-22 owns no separate correlation,\ntake-once, signing, routing, receipt, or retry machinery.",
     ),
     throws: Some(
         Enum {
@@ -7055,7 +7055,7 @@ function Function {
     ),
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_comment_intent",
     checksum: Some(
-        3762,
+        61498,
     ),
 }
 
@@ -7111,7 +7111,7 @@ function Function {
         is_object_free_function: false,
     },
     docstring: Some(
-        "The demand for an entire NIP-22 comment thread rooted at `root`:\n`kinds:[1111]`, scoped by the uppercase root reference on `#I`\n(`nmp_nip22::comment_thread_demand` mirror).",
+        "The demand for an entire NIP-22 comment thread rooted at `root`:\n`kinds:[1111]`, scoped by the uppercase root reference on `#I`\n(`nmp::nip22::comment_thread_demand` mirror).",
     ),
     throws: Some(
         Enum {
@@ -7121,7 +7121,7 @@ function Function {
     ),
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_comment_thread_demand",
     checksum: Some(
-        40171,
+        54986,
     ),
 }
 
@@ -7177,7 +7177,7 @@ function Function {
         is_object_free_function: false,
     },
     docstring: Some(
-        "Decode a delivered kind:1111 [`FfiRow`] into a typed\n[`FfiDecodedComment`] (`nmp_nip22::decode_comment` mirror). Fallible:\nmalformed or mismatched tag sets stay raw rows, they never become a\ntyped comment.",
+        "Decode a delivered kind:1111 [`FfiRow`] into a typed\n[`FfiDecodedComment`] (`nmp::nip22::decode_comment` mirror). Fallible:\nmalformed or mismatched tag sets stay raw rows, they never become a\ntyped comment.",
     ),
     throws: Some(
         Enum {
@@ -7187,7 +7187,7 @@ function Function {
     ),
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_decode_comment",
     checksum: Some(
-        13437,
+        24845,
     ),
 }
 

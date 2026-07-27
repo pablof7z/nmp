@@ -60,6 +60,13 @@ mod observation;
 mod relay_information;
 mod subscription;
 
+// #851: the NIP-22 comment vocabulary and its write operation, owned here so
+// direct Rust and `nmp-ffi` cannot end up with two owners of the same values.
+// Behind the `nip22` cargo feature: an app that never composes a comment does
+// not link the mechanism crate.
+#[cfg(feature = "nip22")]
+pub mod nip22;
+
 pub use auth::{
     AuthPolicy, AuthPolicyDecision, AuthPolicyError, AuthPolicyOp, AuthPolicyPendingSender,
     AuthPolicyRequest, AuthPolicyResolveError, AuthPolicyResult,
