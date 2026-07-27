@@ -106,12 +106,6 @@ fun publishReceipt(engine: NmpEngineInterface, intent: WriteIntent): Receipt =
 fun publishComposedReceipt(engine: NmpEngineInterface, intent: GroupSendIntent): Receipt =
     receiptFrom(nmpRethrowing { engine.publishComposed(intent.ffi) })
 
-/** Publish a [CommentIntent] from `commentIntent` (#572). Take-once -- see
- * [publishComposedReceipt]'s own doc; identical contract, just for the
- * NIP-22 composed intent, delivered pull-based over [Receipt.status] (#680). */
-fun publishComposedReceipt(engine: NmpEngineInterface, intent: CommentIntent): Receipt =
-    receiptFrom(nmpRethrowing { engine.publishComposed(intent.ffi) })
-
 /** Map the reattachment outcome without collapsing corrupt retained
  * evidence into the same result as an unknown id (#680). Extracted with an
  * injectable `attach` so the [ReceiptReattachment.NotFound] /

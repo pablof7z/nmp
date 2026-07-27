@@ -14,13 +14,33 @@ Swift `NMPUI` adds replaceable SwiftUI components and renderer overrides above `
 
 The current atomic follow/unfollow action is available in direct Rust protocol support and Swift. It first establishes an existing canonical contact-list base, preserves fields it does not own, and uses a replaceable precondition. It refuses a missing base; it does not silently create a first list containing only the new contact. The ergonomic Kotlin engine does not currently expose following actions.
 
+## NIP-22 comments
+
+NIP-22 owns typed kind:1111 comments over event, address, and NIP-73 external
+roots. Rust, FFI, Swift, and Kotlin expose root-thread demand, strict decode,
+and deterministic composition.
+
+The native composer is the top-level
+`commentIntent(root:parent:authorPubkey:createdAt:content:correlation:)`.
+It returns the ordinary `WriteIntent` with durable author-outbox routing.
+Publish that value through the generic engine `publish` door and observe its
+ordinary receipt. There is no `engine.commentIntent`, `CommentIntent` wrapper,
+NIP-22 `publishComposed`, or take-once lifecycle.
+
 ## NIP-29 groups
 
-NIP-29 helpers provide group discovery/content demand, remembered-group decoding, and a composed group-message intent pinned to the selected host. Swift/Kotlin apps obtain the pinned-host write transitively through protocol composition; they do not mint arbitrary pinned-host authority.
+NIP-29 helpers provide group discovery/content demand and remembered-group
+decoding. The live group-message path uses a pinned-host
+`FfiComposedWriteIntent` / `GroupSendIntent` and `publishComposed`; that
+parallel noun and lifecycle are architecturally unsound and pending #838's
+protocol-ownership correction. Do not use them as a model for new protocol work. The target is a
+protocol-owned immutable composer returning the ordinary `WriteIntent`, with
+non-forgeable payload-bound host authority and generic publication.
 
 Kotlin's current call map is `groupContentDemand(host, groupId)` -> `NMPDemand`, `engine.observe(demand)` -> cold timeline flow, `NMPContentClient(engine).session(...)` -> `NostrContentSession`, and `session.claim(...)` -> closeable `NostrContentClaim` for a parsed reference. Close claims before their session. For signer handoff use `engine.nip46Invitation(...)`, derive and cache `invitation.androidHandoff(signer)` while the invitation is still live, then call `engine.connectNip46(...)`, start state collection, and launch the cached explicit handoff. Wait for `Ready`, activate that user pubkey before unsigned writes, and close the exact connection.
 
-A composed intent is take-once. Compose a fresh intent for a new publication decision rather than reusing consumed state.
+While #838 remains open, the live composed group intent is take-once. That is
+current behavior to account for, not an accepted design contract.
 
 ## NIP-46 and local signers
 

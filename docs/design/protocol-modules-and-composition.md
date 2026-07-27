@@ -51,7 +51,8 @@ Illustrative, deliberately non-binding syntax:
 ```text
 asset   = Blossom.upload(file)
 photo   = Nip68.buildPhoto(asset)
-receipt = nip29.group(groupId, hostRelay).publish(photo)
+grouped = nip29.group(groupId, hostRelay).compose(photo)
+receipt = engine.publish(grouped)
 ```
 
 Responsibilities remain separate:
@@ -110,6 +111,22 @@ Module operations may use public engine capabilities, but capability access is
 bounded and typed. A module cannot obtain raw signer material, arbitrary store
 mutation, or unrestricted routing control.
 
+An operation that needs no engine capability does not receive an Engine
+receiver for symmetry. NIP-22 comment composition is the concrete model: the
+protocol owner takes explicit semantic input, author, timestamp, and optional
+correlation, then returns the ordinary write intent. FFI and both native SDKs
+project that as a protocol-owned free function; core publication remains the
+one generic `publish` → receipt lifecycle. A separate wrapper noun or
+protocol-specific publication overload would create a second owner of the
+same write.
+
+NIP-29's current `FfiComposedWriteIntent` / `GroupSendIntent` and
+`publishComposed` path violates that same rule. #838 supersedes #823 and owns
+the protocol-boundary correction and removal. Its
+pinned-host authority requirement is real, but it must become a
+non-forgeable, payload-bound part of the ordinary immutable `WriteIntent`, not
+a reason for a parallel noun or publication lifecycle.
+
 ## 7. Falsification
 
 Required proofs include:
@@ -123,4 +140,6 @@ Required proofs include:
 - disabling a module removes its code and semantic API without changing core;
 - Swift, Kotlin, and direct Rust produce byte-identical final unsigned bodies
   for the same composed operation;
+- an engine-free module composer remains absent from every generic Engine
+  facade while its protocol-owned free functions remain available; and
 - no module callback or hidden subscription lifecycle enters engine decisions.

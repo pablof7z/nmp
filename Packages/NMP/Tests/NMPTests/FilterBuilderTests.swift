@@ -224,4 +224,72 @@ final class FilterBuilderTests: XCTestCase {
         XCTAssertNil(intent.identityOverride)
         XCTAssertNil(intent.toFfi().identityOverride)
     }
+
+    func testWriteIntentReverseProjectionPreservesEveryGenericField() {
+        let unsigned = WriteIntent(
+            FfiWriteIntent(
+                payload: .unsigned(
+                    pubkey: String(repeating: "a", count: 64),
+                    createdAt: 42,
+                    kind: 1111,
+                    tags: [["I", "podcast:item:guid:42"]],
+                    content: "unsigned"
+                ),
+                durability: .atMostOnce,
+                routing: .authorOutbox,
+                identityOverride: String(repeating: "a", count: 64),
+                correlation: "correlation-42"
+            )
+        )
+        XCTAssertEqual(
+            unsigned.payload,
+            .unsigned(
+                pubkey: String(repeating: "a", count: 64),
+                createdAt: 42,
+                kind: 1111,
+                tags: [["I", "podcast:item:guid:42"]],
+                content: "unsigned"
+            )
+        )
+        XCTAssertEqual(unsigned.durability, .atMostOnce)
+        XCTAssertEqual(unsigned.routing, .authorOutbox)
+        XCTAssertEqual(unsigned.identityOverride, String(repeating: "a", count: 64))
+        XCTAssertEqual(unsigned.correlation, "correlation-42")
+
+        let signed = WriteIntent(
+            FfiWriteIntent(
+                payload: .signed(
+                    id: String(repeating: "b", count: 64),
+                    pubkey: String(repeating: "c", count: 64),
+                    createdAt: 43,
+                    kind: 1,
+                    tags: [["e", String(repeating: "d", count: 64)]],
+                    content: "signed",
+                    sig: String(repeating: "e", count: 128)
+                ),
+                durability: .ephemeral,
+                routing: .toInboxes(recipients: [String(repeating: "f", count: 64)]),
+                identityOverride: nil,
+                correlation: nil
+            )
+        )
+        XCTAssertEqual(
+            signed.payload,
+            .signed(
+                id: String(repeating: "b", count: 64),
+                pubkey: String(repeating: "c", count: 64),
+                createdAt: 43,
+                kind: 1,
+                tags: [["e", String(repeating: "d", count: 64)]],
+                content: "signed",
+                sig: String(repeating: "e", count: 128)
+            )
+        )
+        XCTAssertEqual(signed.durability, .ephemeral)
+        XCTAssertEqual(signed.routing, .toInboxes([String(repeating: "f", count: 64)]))
+        XCTAssertNil(signed.identityOverride)
+        XCTAssertNil(signed.correlation)
+
+        XCTAssertEqual(Durability(FfiDurability.durable), .durable)
+    }
 }

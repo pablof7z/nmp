@@ -28,6 +28,7 @@ use nmp_ffi::nip02::{
     FfiFollowActionStatus, FfiFollowAvailability, FfiFollowRelationship, FfiFollowSnapshot,
     NmpFollowActionStream, NmpFollowStream,
 };
+use nmp_ffi::nip22::{FfiCommentParent, FfiCommentRoot};
 use nmp_ffi::types::{
     FfiAcquisitionEvidence, FfiAuthPhase, FfiBinding, FfiCancelWriteOutcome,
     FfiDiagnosticsSnapshot, FfiDurability, FfiFilter, FfiReceiptReattachment, FfiRowDelta,
@@ -49,6 +50,113 @@ const REATTACH_TERMINAL_KIND: u16 = 9_995;
 const QUERY_CREATED_AT: u64 = 1_700_000_100;
 const WRITE_CREATED_AT: u64 = 1_700_000_200;
 const SECRET_KEY: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+
+#[test]
+fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
+    let author = fixed_keys().public_key();
+    let root_author = Keys::generate().public_key();
+    let root_event_id = nostr::EventId::from_slice(&[0x11; 32]).unwrap();
+    let parent_author = Keys::generate().public_key();
+    let parent_event_id = nostr::EventId::from_slice(&[0x22; 32]).unwrap();
+    let created_at = 1_700_000_300;
+    let content = "closed NIP-22 parity".to_string();
+    let correlation = "nip22-parity-correlation";
+
+    let direct = nmp_nip22::comment_intent(
+        &nmp_nip22::CommentRoot::Address {
+            author: root_author,
+            kind: 30_023,
+            identifier: "entry".to_string(),
+            event_id: Some(root_event_id),
+        },
+        nmp_nip22::CommentParent::Comment {
+            event_id: parent_event_id,
+            author: Some(parent_author),
+        },
+        author,
+        Timestamp::from(created_at),
+        content.clone(),
+        Some(CorrelationToken::try_from(correlation).unwrap()),
+    );
+    let ffi = nmp_ffi::nip22::comment_intent(
+        FfiCommentRoot::Address {
+            author_pubkey: root_author.to_hex(),
+            kind: 30_023,
+            identifier: "entry".to_string(),
+            event_id: Some(root_event_id.to_hex()),
+        },
+        FfiCommentParent::Comment {
+            event_id: parent_event_id.to_hex(),
+            author_pubkey: Some(parent_author.to_hex()),
+        },
+        author.to_hex(),
+        created_at,
+        content,
+        Some(correlation.to_string()),
+    )
+    .expect("the public FFI composer must accept the same closed inputs");
+
+    let direct_unsigned = match &direct.payload {
+        WritePayload::Unsigned(unsigned) => unsigned,
+        WritePayload::UnsignedReplaceableEdit { .. } | WritePayload::Signed(_) => {
+            panic!("NIP-22 must compose one ordinary unsigned payload")
+        }
+    };
+    let projected = nmp_ffi::convert::write_intent_from_ffi(ffi.clone())
+        .expect("the public FFI result must be accepted by generic publish");
+    let projected_unsigned = match &projected.payload {
+        WritePayload::Unsigned(unsigned) => unsigned,
+        WritePayload::UnsignedReplaceableEdit { .. } | WritePayload::Signed(_) => {
+            panic!("the public FFI result must stay an ordinary unsigned payload")
+        }
+    };
+    let mut direct_bytes = direct_unsigned.clone();
+    let mut projected_bytes = projected_unsigned.clone();
+    assert_eq!(
+        projected_bytes.id(),
+        direct_bytes.id(),
+        "direct Rust and public FFI must compute the same canonical event id"
+    );
+    assert_eq!(
+        projected_bytes.as_json(),
+        direct_bytes.as_json(),
+        "direct Rust and public FFI must produce byte-identical unsigned payloads"
+    );
+
+    let expected_tags = vec![
+        vec![
+            "A".to_string(),
+            format!("30023:{}:entry", root_author.to_hex()),
+        ],
+        vec!["K".to_string(), "30023".to_string()],
+        vec!["P".to_string(), root_author.to_hex()],
+        vec!["E".to_string(), root_event_id.to_hex()],
+        vec!["e".to_string(), parent_event_id.to_hex()],
+        vec!["k".to_string(), "1111".to_string()],
+        vec!["p".to_string(), parent_author.to_hex()],
+    ];
+    assert_eq!(
+        direct_unsigned
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect::<Vec<_>>(),
+        expected_tags,
+        "the address root revision and direct parent identity must remain closed"
+    );
+
+    assert!(matches!(direct.durability, Durability::Durable));
+    assert_eq!(ffi.durability, FfiDurability::Durable);
+    assert!(matches!(direct.routing, WriteRouting::AuthorOutbox));
+    assert_eq!(ffi.routing, FfiWriteRouting::AuthorOutbox);
+    assert!(direct.identity_override.is_none());
+    assert!(ffi.identity_override.is_none());
+    assert_eq!(
+        direct.correlation.as_ref().map(ToString::to_string),
+        Some(correlation.to_string())
+    );
+    assert_eq!(ffi.correlation.as_deref(), Some(correlation));
+}
 
 #[test]
 fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {

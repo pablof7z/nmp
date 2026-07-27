@@ -7483,6 +7483,145 @@ function Function {
 }
 
 function Function {
+    name: "comment_intent",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "root",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiCommentRoot",
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "parent",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiCommentParent",
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "author_pubkey",
+            type_: String,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "created_at",
+            type_: UInt64,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "content",
+            type_: String,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "correlation",
+            type_: Optional {
+                inner_type: String,
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiWriteIntent",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_comment_intent",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "root",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiCommentRoot",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+            FfiArgument {
+                name: "parent",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiCommentParent",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+            FfiArgument {
+                name: "author_pubkey",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+            FfiArgument {
+                name: "created_at",
+                type_: UInt64,
+            },
+            FfiArgument {
+                name: "content",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+            FfiArgument {
+                name: "correlation",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiWriteIntent",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Compose an ordinary durable, author-outbox-routed [`FfiWriteIntent`] for a\nNIP-22 comment (`nmp_nip22::comment_intent` mirror). This function is\nengine-free: author and event time are explicit deterministic composition\ninputs. Publish the returned value through\n[`crate::facade::NmpEngine::publish`], the same generic write lifecycle as\nevery other ordinary intent. `correlation` (#591) passes straight through\nto `WriteIntent.correlation`; NIP-22 owns no separate correlation,\ntake-once, signing, routing, receipt, or retry machinery.",
+    ),
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_comment_intent",
+    checksum: Some(
+        3762,
+    ),
+}
+
+function Function {
     name: "comment_thread_demand",
     module_path: "nmp_ffi",
     is_async: false,
@@ -10357,149 +10496,6 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_cancel",
             checksum: Some(
                 28491,
-            ),
-        },
-        Method {
-            name: "comment_intent",
-            object_name: "NmpEngine",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [
-                Argument {
-                    name: "root",
-                    type_: Enum {
-                        module_path: "nmp_ffi",
-                        name: "FfiCommentRoot",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-                Argument {
-                    name: "parent",
-                    type_: Enum {
-                        module_path: "nmp_ffi",
-                        name: "FfiCommentParent",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-                Argument {
-                    name: "author_pubkey",
-                    type_: String,
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-                Argument {
-                    name: "created_at",
-                    type_: UInt64,
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-                Argument {
-                    name: "content",
-                    type_: String,
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-                Argument {
-                    name: "correlation",
-                    type_: Optional {
-                        inner_type: String,
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-            ],
-            return_type: Some(
-                Object {
-                    module_path: "nmp_ffi",
-                    name: "FfiComposedWriteIntent",
-                    imp: Struct,
-                },
-            ),
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nmpengine_comment_intent",
-                is_async: false,
-                arguments: [
-                    FfiArgument {
-                        name: "ptr",
-                        type_: RustArcPtr(
-                            "NmpEngine",
-                        ),
-                    },
-                    FfiArgument {
-                        name: "root",
-                        type_: RustBuffer(
-                            Some(
-                                ExternalFfiMetadata {
-                                    name: "FfiCommentRoot",
-                                    module_path: "nmp_ffi",
-                                },
-                            ),
-                        ),
-                    },
-                    FfiArgument {
-                        name: "parent",
-                        type_: RustBuffer(
-                            Some(
-                                ExternalFfiMetadata {
-                                    name: "FfiCommentParent",
-                                    module_path: "nmp_ffi",
-                                },
-                            ),
-                        ),
-                    },
-                    FfiArgument {
-                        name: "author_pubkey",
-                        type_: RustBuffer(
-                            None,
-                        ),
-                    },
-                    FfiArgument {
-                        name: "created_at",
-                        type_: UInt64,
-                    },
-                    FfiArgument {
-                        name: "content",
-                        type_: RustBuffer(
-                            None,
-                        ),
-                    },
-                    FfiArgument {
-                        name: "correlation",
-                        type_: RustBuffer(
-                            None,
-                        ),
-                    },
-                ],
-                return_type: Some(
-                    RustArcPtr(
-                        "FfiComposedWriteIntent",
-                    ),
-                ),
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: Some(
-                "Compose a durable, author-outbox-routed NIP-22 comment `WriteIntent`\n(#572). Unlike [`Self::group_message_intent`], this needs no engine\nstate at all -- `nmp_nip22::comment_intent` takes author/time as\nexplicit caller parameters -- but lives here for the same \"engine\ndoor\" naming symmetry. `correlation` (#591) passes straight through\nto `WriteIntent.correlation`. Publish the returned take-once value\nthrough [`Self::publish_composed`].",
-            ),
-            throws: Some(
-                Enum {
-                    module_path: "nmp_ffi",
-                    name: "FfiError",
-                },
-            ),
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_comment_intent",
-            checksum: Some(
-                13206,
             ),
         },
         Method {
