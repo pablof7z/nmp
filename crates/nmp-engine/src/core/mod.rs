@@ -70,8 +70,8 @@ use nmp_resolver::{
     LocalAcceptResult, QueryHandle,
 };
 use nmp_router::{
-    DiscoveryKinds, Lane, LanedRelay, PubkeyHex, RelayDirectory, RelayPlan, Router, RuleRegistry,
-    SubId, WireDelta, WireOp, WireReq,
+    AdvertisedRelayLimits, CompileBudget, DiscoveryKinds, Lane, LanedRelay, PubkeyHex,
+    RelayDirectory, RelayPlan, Router, RuleRegistry, SubId, WireDelta, WireOp, WireReq,
 };
 use nmp_signer::SignerError;
 use nmp_store::{
@@ -1456,6 +1456,39 @@ impl<S: EventStore> EngineCore<S> {
         self.resolver
             .store()
             .get_coverage(nmp_store::coverage_key(atom), relay)
+    }
+
+    /// Every bound the next `Router::compile` plans within: the operator's
+    /// whole-demand relay ceiling, plus whatever each relay in the current
+    /// read plan advertised about itself in NIP-11 (#931).
+    ///
+    /// The advertisements come from `nip11_information`, which `recompile`
+    /// already prunes against the still-planned set and
+    /// `on_relay_information_resolved` already replaces or REMOVES on every
+    /// refresh — so the budget follows a re-published document with no
+    /// second cache to age out, and a relay that stops advertising becomes
+    /// unbudgeted again rather than keeping a number it has withdrawn.
+    ///
+    /// A refreshing document is exactly why nothing here may feed identity:
+    /// wire ids are allocated tokens, and a `max_subid_length` that moved an
+    /// established id would be identity instability
+    /// (`docs/internals/subscriptions/identity-grouping-and-limits.md` §6).
+    fn compile_budget(&self) -> CompileBudget {
+        CompileBudget::with_relay_cap(self.cap).advertising_all(
+            self.nip11_information.iter().map(|(relay, information)| {
+                (
+                    relay.clone(),
+                    AdvertisedRelayLimits {
+                        max_subscriptions: information
+                            .max_subscriptions
+                            .map(|value| usize::try_from(value).unwrap_or(usize::MAX)),
+                        max_subid_length: information
+                            .max_subid_length
+                            .map(|value| usize::try_from(value).unwrap_or(usize::MAX)),
+                    },
+                )
+            }),
+        )
     }
 
     /// The engine-global diagnostics projection (M5 plan §1.2 step 2) — "the

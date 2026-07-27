@@ -1952,6 +1952,10 @@ mod tests {
                 relay: relay.clone(),
                 access: GAccessContext::Public,
                 wire_sub_count: 2,
+                subscription_budget: Some(20),
+                subscriptions_refused: 0,
+                subid_length_limit: None,
+                subid_length_rejects_our_ids: false,
                 authors_served: 1,
                 by_lane: vec![(Lane::AppRelay, 2)],
                 filters: vec!["{\"kinds\":[9999]}".to_string()],
@@ -1981,6 +1985,7 @@ mod tests {
             dropped_merge_rules: vec!["limit"],
             discovered_private_relays_rejected: 0,
             sessions_rejected_over_cap: 0,
+            sessions_refused_by_subscription_budget: 0,
             store_degraded: None,
             transport_degraded: Some("signature verification worker unavailable".to_string()),
         });

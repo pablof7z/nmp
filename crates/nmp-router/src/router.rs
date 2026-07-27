@@ -14,10 +14,11 @@ use nmp_grammar::{
 };
 use nmp_store::{coverage_key, CoverageKey};
 
+use crate::budget::CompileBudget;
 use crate::coalesce::RuleRegistry;
 use crate::diag::{self, Diagnostics};
 use crate::facts::{DiscoveryKinds, PubkeyHex, RelayDirectory, RelayUrl};
-use crate::plan::{diff_plans, RelayPlan, SubId, WireDelta, WireReq};
+use crate::plan::{diff_plans, BudgetShortfall, RelayPlan, SubId, WireDelta, WireReq};
 use crate::route::{self, AtomClass, RouteKind, RouteProvenance, Skeleton};
 use crate::solver::{self, CoverageInput, Shortfall, ShortfallReason};
 use crate::wire_id;
@@ -133,6 +134,52 @@ fn apply_global_relay_cap(
     (limited, refused)
 }
 
+/// Cut `session_reqs` down to `allowed` subscriptions, returning the ones
+/// removed so the caller can report every coverage key they carried.
+///
+/// Selection is deterministic, coverage-biased, and — the property that
+/// matters most — STABLE across recompiles:
+///
+/// An INCUMBENT (a subscription the previous plan already carried under this
+/// same token) outranks every newcomer. Without that, a saturated relay
+/// would evict whatever the newest atom outranked, re-admit it next compile,
+/// and oscillate forever: a CLOSE plus a REQ per recompile, caused by the
+/// budget itself. Ranking incumbents first makes a bound budget quiet — the
+/// relay keeps serving what it is already serving, and the demand that
+/// cannot fit is refused explicitly rather than swapped in and out.
+///
+/// Below incumbency, the rank is the same coverage bias
+/// [`apply_global_relay_cap`] uses (most absorbed atoms, then most route
+/// facts), with the canonical filter hash as a stable final tie-break so the
+/// outcome never depends on mint order or map iteration.
+fn refuse_over_budget(
+    session_reqs: &mut Vec<WireReq>,
+    allowed: usize,
+    prev_plan: &RelayPlan,
+) -> Vec<WireReq> {
+    let incumbents: BTreeSet<&SubId> = prev_plan
+        .reqs
+        .values()
+        .flatten()
+        .map(|req| &req.sub_id)
+        .collect();
+    let mut ranked: Vec<WireReq> = std::mem::take(session_reqs);
+    ranked.sort_by(|a, b| {
+        incumbents
+            .contains(&b.sub_id)
+            .cmp(&incumbents.contains(&a.sub_id))
+            .then_with(|| b.absorbed.len().cmp(&a.absorbed.len()))
+            .then_with(|| b.provenance.len().cmp(&a.provenance.len()))
+            .then_with(|| a.filter.hash().cmp(&b.filter.hash()))
+    });
+    let refused = ranked.split_off(allowed.min(ranked.len()));
+    // Restore the plan's own ordering invariant: `reqs` is sorted by
+    // `SubId`, and `diff_plans` reads it back that way.
+    ranked.sort_by(|a, b| a.sub_id.cmp(&b.sub_id));
+    *session_reqs = ranked;
+    refused
+}
+
 /// Push `(filter, provenance, coverage_key(atom))` into `bag[relay][ctx]`
 /// for every `(relay, provenance)` pair in `routes` — the shared
 /// materialization step `compile` uses for every lane. A no-op when
@@ -195,12 +242,19 @@ impl Router {
     /// THE entry point. Recompile the whole per-relay plan from `demand`,
     /// diff vs the previous plan, store the new plan + diagnostics, return
     /// the surgical wire delta.
+    ///
+    /// `budget` carries every bound this compile plans within
+    /// ([`CompileBudget`]): the operator's whole-demand relay ceiling, and
+    /// whatever each relay advertised about itself in NIP-11. A bare
+    /// `usize` still means exactly what it always meant — that relay
+    /// ceiling, with no relay having advertised anything.
     pub fn compile(
         &mut self,
         demand: &BTreeSet<ContextualAtom>,
         dir: &dyn RelayDirectory,
-        cap: usize,
+        budget: impl Into<CompileBudget>,
     ) -> WireDelta {
+        let budget = budget.into();
         // Step 1: group demand by (Skeleton, AccessContext) (outbox) /
         // classify pinned -- classification is now by DECLARED
         // `SourceAuthority` (#106), never by filter shape alone. Grouping by
@@ -400,8 +454,8 @@ impl Router {
         // materialized bag. Nothing removed here can reach coalescing, the
         // plan, or the wire; its contextual coverage keys remain as exact
         // local-limit evidence.
-        let (limited, refused_sessions) =
-            apply_global_relay_cap(&mut bag, cap, &mut uncovered_authors);
+        let (mut limited, mut refused_sessions) =
+            apply_global_relay_cap(&mut bag, budget.relay_cap(), &mut uncovered_authors);
 
         // Step 5 + 6: per relay, PER CONTEXT PARTITION, dedup + widen-only
         // coalesce (`coalesce.rs` stays pure selection-only, Fable D "locus
@@ -424,6 +478,8 @@ impl Router {
         let mint_root = self.mint_root;
         let mut mint_counter = self.next_token;
         let mut reqs: BTreeMap<RelaySessionKey, Vec<WireReq>> = BTreeMap::new();
+        let mut subscription_shortfalls: BTreeMap<RelaySessionKey, BudgetShortfall> =
+            BTreeMap::new();
         for (session, by_source) in bag {
             let relay = session.relay.clone();
             let access = session.access;
@@ -465,6 +521,45 @@ impl Router {
                 ));
             }
             session_reqs.sort_by(|a, b| a.sub_id.cmp(&b.sub_id));
+
+            // Step 6b: the PER-RELAY SUBSCRIPTION BUDGET (#931). Enforced
+            // here, after coalescing and after token assignment, because
+            // both of those decide what the count actually IS: the collapse
+            // is what turns a 300-value catalog into one subscription, and
+            // the assignment is what tells an INCUMBENT subscription (one
+            // the previous plan already carried) apart from a newcomer.
+            //
+            // A relay that advertised nothing is unbudgeted -- see
+            // `crate::budget` for why absence is not a number.
+            let planned = session_reqs.len();
+            match budget.max_subscriptions(&relay) {
+                None => {}
+                Some(allowed) if planned <= allowed => {}
+                Some(allowed) => {
+                    let refused = refuse_over_budget(&mut session_reqs, allowed, &self.prev_plan);
+                    for req in &refused {
+                        limited.extend(req.absorbed.iter().copied());
+                    }
+                    subscription_shortfalls.insert(
+                        session.clone(),
+                        BudgetShortfall {
+                            budget: allowed,
+                            planned,
+                            refused: refused.len(),
+                        },
+                    );
+                    // A relay advertising ZERO concurrent subscriptions
+                    // cannot be planned at all. That is a whole-session
+                    // refusal, so it takes the same seam the whole-demand
+                    // ceiling uses and stays absent from `reqs` -- the
+                    // invariant every `refused_sessions` reader relies on.
+                    if session_reqs.is_empty() {
+                        refused_sessions.insert(session);
+                        continue;
+                    }
+                }
+            }
+
             reqs.insert(session, session_reqs);
         }
         self.next_token = mint_counter;
@@ -492,6 +587,7 @@ impl Router {
             reqs,
             limited,
             refused_sessions,
+            subscription_shortfalls,
         };
 
         // Step 7: diff vs previous plan.
@@ -499,6 +595,7 @@ impl Router {
 
         self.last_diag = diag::build(
             &next_plan,
+            &budget,
             uncovered_authors,
             self.rules.dropped_rules().to_vec(),
         );

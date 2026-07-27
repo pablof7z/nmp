@@ -91,7 +91,7 @@ impl<S: EventStore> EngineCore<S> {
         let previous_plan = self.router.plan().clone();
         let wire_delta: WireDelta =
             self.router
-                .compile(&admitted_demand, self.directory.as_ref(), self.cap);
+                .compile(&admitted_demand, self.directory.as_ref(), self.compile_budget());
         let planned = &self.router.plan().reqs;
         // NIP-11 evidence is retained for any URL that appears as SOME
         // planned session's relay (#8): the document is per-URL evidence,
@@ -286,7 +286,11 @@ impl<S: EventStore> EngineCore<S> {
             DiscoveryKinds::default(),
             RuleRegistry::default_widen_only(),
         );
-        let _ = router.compile(&admitted, self.directory.as_ref(), self.cap);
+        // The SAME budget the live recompile plans within, deliberately.
+        // A shadow plan feeds `plan_is_fresh_for`, which refuses to call a
+        // `limited` atom fresh -- so an unbudgeted shadow would call an atom
+        // fresh that the live plan had refused to request at all.
+        let _ = router.compile(&admitted, self.directory.as_ref(), self.compile_budget());
         router.plan().clone()
     }
 

@@ -319,6 +319,7 @@ mod tests {
             refused_sessions: BTreeSet::from([RelaySessionKey::public(
                 RelayUrl::parse("wss://refused.example").unwrap(),
             )]),
+            ..RelayPlan::default()
         };
 
         let evidence = acquisition_evidence(

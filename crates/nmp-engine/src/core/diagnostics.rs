@@ -51,6 +51,24 @@ pub struct RelayDiagnosticsSnapshot {
     /// Frozen access identity of the physical session this row describes.
     pub access: AccessContext,
     pub wire_sub_count: usize,
+    /// This relay's own advertised concurrent-subscription budget (NIP-11
+    /// `limitation.max_subscriptions`, #931). `None` means the relay
+    /// advertised nothing and is therefore UNBUDGETED — never a fabricated
+    /// default, because two of the eight major relays measured publish no
+    /// document at all and dropping their demand over a guess would be a
+    /// shortfall nobody asked for.
+    pub subscription_budget: Option<usize>,
+    /// Subscriptions this relay's advertised budget removed from the plan.
+    /// Non-zero means real demand did not reach the wire — and every atom it
+    /// carried also carries `ShortfallFact::LocalLimit`, so the app was told.
+    pub subscriptions_refused: usize,
+    /// This relay's advertised `limitation.max_subid_length`.
+    pub subid_length_limit: Option<usize>,
+    /// True iff that advertised length is shorter than the 64-character
+    /// subscription ids NMP sends, i.e. this relay rejects every REQ. A
+    /// diagnosis, never an input: shortening ids to fit would mean deriving
+    /// identity from a document that refreshes.
+    pub subid_length_rejects_our_ids: bool,
     /// Reverse coverage: distinct authors this relay covers.
     pub authors_served: usize,
     pub by_lane: Vec<(Lane, usize)>,
@@ -156,6 +174,14 @@ pub struct DiagnosticsSnapshot {
     /// A refused router candidate is absent from the executable plan and its
     /// affected query atom carries `ShortfallFact::LocalLimit`.
     pub sessions_rejected_over_cap: u64,
+    /// Sessions refused outright by a relay advertising ZERO concurrent
+    /// subscriptions (#931). Counted apart from `sessions_rejected_over_cap`
+    /// because they answer different questions — "the operator's plan was
+    /// too wide" versus "this relay will hold nothing open" — and a reader
+    /// that conflated them could not tell which bound to relax. A session
+    /// merely trimmed by its budget is NOT counted here: it is present in
+    /// `relays` with a non-zero `subscriptions_refused`.
+    pub sessions_refused_by_subscription_budget: u64,
     /// `Some(message)` once an ingest/read [`nmp_store::EventStore`] door has
     /// returned a [`nmp_store::PersistenceError`] (issue #122): the local
     /// cache has degraded to read-only and stopped accepting fresh
@@ -213,6 +239,10 @@ pub(crate) fn build(
             relay: session.relay.clone(),
             access: session.access,
             wire_sub_count: rd.wire_sub_count,
+            subscription_budget: rd.subscription_budget,
+            subscriptions_refused: rd.subscriptions_refused,
+            subid_length_limit: rd.subid_length_limit,
+            subid_length_rejects_our_ids: rd.subid_length_rejects_our_ids,
             authors_served: rd.authors_served,
             by_lane: rd.by_lane.iter().map(|(&l, &c)| (l, c)).collect(),
             filters,
@@ -235,6 +265,10 @@ pub(crate) fn build(
         dropped_merge_rules: diag.dropped_merge_rules.clone(),
         discovered_private_relays_rejected,
         sessions_rejected_over_cap: u64::try_from(diag.sessions_refused_by_cap).unwrap_or(u64::MAX),
+        sessions_refused_by_subscription_budget: u64::try_from(
+            diag.sessions_refused_by_subscription_budget,
+        )
+        .unwrap_or(u64::MAX),
         // Filled in by `EngineCore::diagnostics_snapshot` (which owns the
         // degrade flag); `build` itself is a pure projection of router/store
         // facts and has no notion of persistence health.

@@ -57,6 +57,20 @@ pub struct RelayDiagnosticsSnapshot {
     /// Frozen access identity of the physical session this row describes.
     pub access: AccessContext,
     pub wire_sub_count: usize,
+    /// This relay's advertised concurrent-subscription budget (NIP-11
+    /// `limitation.max_subscriptions`). `None` means the relay advertised
+    /// nothing, and an unadvertised relay is UNBUDGETED — never a
+    /// fabricated default.
+    pub subscription_budget: Option<usize>,
+    /// Subscriptions that budget removed from the plan. Non-zero means real
+    /// demand did not reach the wire, and the affected queries say so
+    /// through their own acquisition evidence.
+    pub subscriptions_refused: usize,
+    /// This relay's advertised `limitation.max_subid_length`.
+    pub subid_length_limit: Option<usize>,
+    /// True iff that advertised length is shorter than the 64-character
+    /// subscription ids NMP sends — this relay rejects every REQ.
+    pub subid_length_rejects_our_ids: bool,
     /// Reverse coverage: distinct authors this relay covers.
     pub authors_served: usize,
     pub by_lane: Vec<(Lane, usize)>,
@@ -93,6 +107,10 @@ impl RelayDiagnosticsSnapshot {
             relay,
             access,
             wire_sub_count,
+            subscription_budget,
+            subscriptions_refused,
+            subid_length_limit,
+            subid_length_rejects_our_ids,
             authors_served,
             by_lane,
             filters,
@@ -110,6 +128,10 @@ impl RelayDiagnosticsSnapshot {
             relay,
             access,
             wire_sub_count,
+            subscription_budget,
+            subscriptions_refused,
+            subid_length_limit,
+            subid_length_rejects_our_ids,
             authors_served,
             by_lane,
             filters,
@@ -241,6 +263,11 @@ pub struct DiagnosticsSnapshot {
     /// Relay session candidates refused by the single whole-demand ceiling,
     /// plus any defense-in-depth dial refusal at the transport boundary.
     pub sessions_rejected_over_cap: u64,
+    /// Relay sessions refused outright because the relay advertised ZERO
+    /// concurrent subscriptions. Kept apart from
+    /// `sessions_rejected_over_cap`: one says the plan was too wide for the
+    /// operator's ceiling, the other says this relay will hold nothing open.
+    pub sessions_refused_by_subscription_budget: u64,
     /// `Some(message)` once an ingest/read store door has degraded the local
     /// cache to read-only (issue #122). Observer-visible only — never a
     /// routing input.
@@ -259,6 +286,7 @@ impl DiagnosticsSnapshot {
             dropped_merge_rules,
             discovered_private_relays_rejected,
             sessions_rejected_over_cap,
+            sessions_refused_by_subscription_budget,
             store_degraded,
             transport_degraded,
         } = value;
@@ -275,6 +303,7 @@ impl DiagnosticsSnapshot {
             dropped_merge_rules,
             discovered_private_relays_rejected,
             sessions_rejected_over_cap,
+            sessions_refused_by_subscription_budget,
             store_degraded,
             transport_degraded,
         }
@@ -354,6 +383,10 @@ mod tests {
                 relay: relay.clone(),
                 access: AccessContext::Public,
                 wire_sub_count: 2,
+                subscription_budget: Some(20),
+                subscriptions_refused: 1,
+                subid_length_limit: Some(32),
+                subid_length_rejects_our_ids: true,
                 authors_served: 1,
                 by_lane: vec![(Lane::AppRelay, 2)],
                 filters: vec!["{\"kinds\":[9999]}".to_string()],
@@ -386,6 +419,7 @@ mod tests {
             dropped_merge_rules: vec!["limit"],
             discovered_private_relays_rejected: 5,
             sessions_rejected_over_cap: 6,
+            sessions_refused_by_subscription_budget: 2,
             store_degraded: Some("read-only".to_string()),
             transport_degraded: Some("verifier unavailable".to_string()),
         };
@@ -396,6 +430,10 @@ mod tests {
         assert_eq!(row.relay, relay);
         assert_eq!(row.access, AccessContext::Public);
         assert_eq!(row.wire_sub_count, 2);
+        assert_eq!(row.subscription_budget, Some(20));
+        assert_eq!(row.subscriptions_refused, 1);
+        assert_eq!(row.subid_length_limit, Some(32));
+        assert!(row.subid_length_rejects_our_ids);
         assert_eq!(row.authors_served, 1);
         assert_eq!(row.by_lane, vec![(Lane::AppRelay, 2)]);
         assert_eq!(row.filters, vec!["{\"kinds\":[9999]}".to_string()]);
@@ -437,6 +475,7 @@ mod tests {
         assert_eq!(facade.dropped_merge_rules, vec!["limit"]);
         assert_eq!(facade.discovered_private_relays_rejected, 5);
         assert_eq!(facade.sessions_rejected_over_cap, 6);
+        assert_eq!(facade.sessions_refused_by_subscription_budget, 2);
         assert_eq!(facade.store_degraded.as_deref(), Some("read-only"));
         assert_eq!(
             facade.transport_degraded.as_deref(),

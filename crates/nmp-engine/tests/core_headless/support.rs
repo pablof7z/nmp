@@ -989,6 +989,8 @@ fn nip11_evidence_until(
 ) -> nmp_engine::relay_information::RelayInformationCapabilityEvidence {
     nmp_engine::relay_information::RelayInformationCapabilityEvidence {
         supported_nips,
+        max_subscriptions: None,
+        max_subid_length: None,
         document_revision: "test-revision".to_string(),
         fresh_until,
         last_error: None,

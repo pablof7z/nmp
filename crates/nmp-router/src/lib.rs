@@ -13,6 +13,8 @@
 //! Module layout:
 //! - `facts` — `Lane`, `LanedRelay`, `RelayDirectory` trait, `FixtureDirectory`,
 //!   `DiscoveryKinds`.
+//! - `budget` — `CompileBudget`: the whole-demand relay ceiling plus each
+//!   relay's own advertised NIP-11 limits, the bounds `compile` plans within.
 //! - `route` — atom classification (outbox vs pinned) + candidate assembly +
 //!   pinned-route lookup.
 //! - `solver` — the 2-relay-min + cap coverage solver (greedy set-cover) +
@@ -31,6 +33,7 @@
 //! - `router` — `Router`: `compile(demand, dir) -> WireDelta`, owning
 //!   `prev_plan` + diagnostics + the wire-token mint counter.
 
+mod budget;
 mod coalesce;
 mod component;
 mod deliver;
@@ -42,6 +45,7 @@ mod router;
 mod solver;
 mod wire_id;
 
+pub use budget::{AdvertisedRelayLimits, CompileBudget, WIRE_SUB_ID_CHARS};
 pub use coalesce::{
     DiscardSecondOperand, MergeRule, RuleRegistry, StructuralUnion, MAX_IDS_PER_FILTER,
     MAX_TAG_VALUES_PER_FILTER,
@@ -52,7 +56,7 @@ pub use facts::{
     test_relay, DiscoveryKinds, FixtureDirectory, Lane, LanedRelay, LiveDirectory, PubkeyHex,
     RelayDirectory, RelayUrl,
 };
-pub use plan::{diff_plans, RelayPlan, SubId, WireDelta, WireOp, WireReq};
+pub use plan::{diff_plans, BudgetShortfall, RelayPlan, SubId, WireDelta, WireOp, WireReq};
 pub use route::{RouteKind, RouteProvenance, Skeleton};
 pub use router::Router;
 pub use solver::{solve, Coverage, CoverageInput, Shortfall, ShortfallReason};

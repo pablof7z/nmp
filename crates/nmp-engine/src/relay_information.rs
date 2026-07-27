@@ -315,6 +315,8 @@ impl RelayInformationSnapshot {
     pub(crate) fn capability_evidence(&self) -> RelayInformationCapabilityEvidence {
         RelayInformationCapabilityEvidence {
             supported_nips: self.document().supported_nips.clone(),
+            max_subscriptions: self.document().limitation.max_subscriptions,
+            max_subid_length: self.document().limitation.max_subid_length,
             document_revision: self.document_revision().to_owned(),
             fresh_until: self.fresh_until(),
             last_error: self.last_error().cloned(),
@@ -338,6 +340,17 @@ impl RelayInformationSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayInformationCapabilityEvidence {
     pub supported_nips: Option<Vec<u16>>,
+    /// `limitation.max_subscriptions` — concurrent subscriptions this relay
+    /// will hold open on one connection. `None` is "advertised nothing",
+    /// which the router reads as UNBUDGETED rather than as any number
+    /// (`nmp_router::budget`). Enforced planning input, not presentation.
+    pub max_subscriptions: Option<u64>,
+    /// `limitation.max_subid_length` — the longest subscription id this
+    /// relay accepts. DIAGNOSED only: NMP's wire ids are fixed 64-character
+    /// strings, and a relay advertising less rejects every REQ we send. It
+    /// must never feed id derivation, because this document refreshes and a
+    /// mutable derivation input is identity instability.
+    pub max_subid_length: Option<u64>,
     pub document_revision: String,
     /// Absolute Unix-seconds deadline. Diagnostics derives freshness from
     /// the engine clock instead of retaining a read-time label forever.
