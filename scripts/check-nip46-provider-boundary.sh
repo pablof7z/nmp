@@ -100,9 +100,21 @@ grep -qF 'compatibility: Arc<FfiNip46CoreCompatibility>' crates/nmp-nip46-ffi/sr
   fail "NIP-46 provider construction does not require a compatibility proof"
 grep -qF 'macro_metadata::extract_from_library' crates/nmp-nip46-ffi/metadata-audit.rs ||
   fail "mailbox-entry falsifier does not inspect UniFFI's compiled export authority"
+grep -qF 'if module_path == CORE_MODULE' crates/nmp-nip46-ffi/metadata-audit.rs ||
+  fail "compiled metadata audit does not cover linked non-core namespaces"
 grep -qF 'compiled UniFFI metadata must expose exactly one proof-bearing mailbox entry' \
   crates/nmp-nip46-ffi/metadata-audit.rs ||
   fail "compiled provider metadata does not enforce the single proof-bearing mailbox entry"
+for falsifier in \
+  exact_compiled_constructor_is_the_only_mailbox_entry \
+  missing_compiled_mailbox_entry_is_rejected \
+  exact_compiled_constructor_name_is_required \
+  missing_mailbox_metadata_positive_control_is_rejected \
+  missing_compatibility_metadata_positive_control_is_rejected \
+  foreign_namespace_mailbox_entry_is_not_hidden_from_audit; do
+  grep -qF "fn $falsifier" crates/nmp-nip46-ffi/metadata-audit.rs ||
+    fail "compiled metadata audit is missing falsifier $falsifier"
+done
 grep -qF -- '--bin nmp-nip46-metadata-audit' scripts/build-component-release.sh ||
   fail "managed provider builds do not audit compiled UniFFI metadata before packaging"
 grep -qF 'withVerifiedNip46Core(actual: nmpProviderCoreComponentIdentity())' \

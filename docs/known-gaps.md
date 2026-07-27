@@ -106,10 +106,17 @@ about current code:
   outputs into a fresh artifact snapshot; Swift/Kotlin packaging reads only
   that snapshot, never the mutable Cargo target. Before exposing the snapshot,
   the builder extracts UniFFI's compiled metadata from the provider library
-  and requires exactly one provider entry carrying the core mailbox, with the
-  compatibility proof in that constructor's inputs. This audits the same
-  authority bindgen consumes, independent of source location, macro expansion,
-  aliases, records, or other Rust spelling. `build.rs` canonicalizes both
+  and first requires positive metadata for both the core mailbox and provider
+  proof. It then audits every callable namespace in that library except the
+  canonical core namespace and requires exactly one entry carrying the core
+  mailbox, with the compatibility proof in that constructor's inputs. This
+  audits the same compiled authority bindgen consumes, independent of source
+  location, crate/module namespace, macro expansion, aliases, records, or
+  other Rust spelling. It cannot prove the meaning of a raw integer that
+  unsafe Rust later reinterprets as a mailbox pointer; such a `u64`/raw-handle
+  escape remains outside the audit's guarantee and is not a supported entry
+  shape.
+  `build.rs` canonicalizes both
   the component root and its actual `OUT_DIR`, then requires the exact
   `<target>/release/build/nmp-ffi-*/out` layout, so nested targets, `..`
   escapes, and custom profile directories cannot inherit the authorization.

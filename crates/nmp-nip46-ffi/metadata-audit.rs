@@ -135,7 +135,7 @@ struct Callable<'a> {
     signature: Vec<&'a Type>,
 }
 
-fn provider_callables(items: &[Metadata]) -> Vec<Callable<'_>> {
+fn provider_library_callables(items: &[Metadata]) -> Vec<Callable<'_>> {
     let mut callables = Vec::new();
     for item in items {
         let (module_path, label, inputs, return_type, throws) = match item {
@@ -195,7 +195,11 @@ fn provider_callables(items: &[Metadata]) -> Vec<Callable<'_>> {
             _ => continue,
         };
 
-        if module_path != PROVIDER_MODULE {
+        // The provider library statically links the canonical core namespace,
+        // whose mailbox-producing entries are the source of the opaque handle.
+        // Audit every other namespace in the artifact so a linked sidecar
+        // component cannot export a second, unproven mailbox entry.
+        if module_path == CORE_MODULE {
             continue;
         }
 
@@ -240,7 +244,7 @@ fn audit(items: &[Metadata]) -> Result<String, String> {
     }
 
     let mut mailbox_entries = Vec::new();
-    for callable in provider_callables(items) {
+    for callable in provider_library_callables(items) {
         let carries_mailbox = callable
             .signature
             .iter()
@@ -351,17 +355,42 @@ mod tests {
         ]
     }
 
-    fn function(name: &str, input: Type, return_type: Option<Type>) -> Metadata {
+    fn function_in_module(
+        module_path: &str,
+        name: &str,
+        inputs: Vec<Type>,
+        return_type: Option<Type>,
+    ) -> Metadata {
         Metadata::Func(FnMetadata {
-            module_path: PROVIDER_MODULE.to_string(),
+            module_path: module_path.to_string(),
             name: name.to_string(),
             is_async: false,
-            inputs: vec![FnParamMetadata::simple("value", input)],
+            inputs: inputs
+                .into_iter()
+                .enumerate()
+                .map(|(index, input)| FnParamMetadata::simple(&format!("value_{index}"), input))
+                .collect(),
             return_type,
             throws: None,
             checksum: None,
             docstring: None,
         })
+    }
+
+    fn provider_function(name: &str, input: Type, return_type: Option<Type>) -> Metadata {
+        function_in_module(PROVIDER_MODULE, name, vec![input], return_type)
+    }
+
+    fn proof_bearing_mailbox_function(module_path: &str, name: &str) -> Metadata {
+        function_in_module(
+            module_path,
+            name,
+            vec![
+                object_type(PROVIDER_MODULE, COMPATIBILITY_TYPE),
+                object_type(CORE_MODULE, MAILBOX_TYPE),
+            ],
+            None,
+        )
     }
 
     #[test]
@@ -381,7 +410,7 @@ mod tests {
             }],
             docstring: None,
         }));
-        items.push(function(
+        items.push(provider_function(
             "smuggled_mailbox",
             Type::Record {
                 module_path: PROVIDER_MODULE.to_string(),
@@ -398,7 +427,7 @@ mod tests {
     #[test]
     fn compiled_return_position_is_part_of_the_mailbox_boundary() {
         let mut items = valid_metadata();
-        items.push(function(
+        items.push(provider_function(
             "returns_mailbox",
             Type::String,
             Some(object_type(CORE_MODULE, MAILBOX_TYPE)),
@@ -410,6 +439,90 @@ mod tests {
 
     #[test]
     fn exact_compiled_constructor_is_the_only_mailbox_entry() {
+        let mut items = valid_metadata();
+        items.push(proof_bearing_mailbox_function(
+            PROVIDER_MODULE,
+            "second_mailbox_entry",
+        ));
+
+        let error = audit(&items).expect_err("a second proof-bearing mailbox entry must fail");
+        assert!(error.contains("must expose exactly one"));
+        assert!(error.contains("second_mailbox_entry"));
+    }
+
+    #[test]
+    fn missing_compiled_mailbox_entry_is_rejected() {
+        let mut items = valid_metadata();
+        items.retain(|item| !matches!(item, Metadata::Constructor(_)));
+
+        let error = audit(&items).expect_err("zero mailbox entries must fail");
+        assert!(error.contains("found []"));
+    }
+
+    #[test]
+    fn exact_compiled_constructor_name_is_required() {
+        let mut items = valid_metadata();
+        let Some(Metadata::Constructor(constructor)) = items
+            .iter_mut()
+            .find(|item| matches!(item, Metadata::Constructor(_)))
+        else {
+            panic!("valid metadata must contain the provider constructor");
+        };
+        constructor.name = "create".to_string();
+
+        let error = audit(&items).expect_err("renaming the required constructor must fail");
+        assert!(error.contains(REQUIRED_ENTRY));
+        assert!(error.contains("NmpNip46Provider::create"));
+    }
+
+    #[test]
+    fn missing_mailbox_metadata_positive_control_is_rejected() {
+        let mut items = valid_metadata();
+        items.retain(|item| {
+            !matches!(
+                item,
+                Metadata::Object(object)
+                    if object.module_path == CORE_MODULE && object.name == MAILBOX_TYPE
+            )
+        });
+
+        let error = audit(&items).expect_err("missing mailbox metadata must fail closed");
+        assert!(error.contains("FfiSignerMailbox positive control"));
+    }
+
+    #[test]
+    fn missing_compatibility_metadata_positive_control_is_rejected() {
+        let mut items = valid_metadata();
+        items.retain(|item| {
+            !matches!(
+                item,
+                Metadata::Object(object)
+                    if object.module_path == PROVIDER_MODULE
+                        && object.name == COMPATIBILITY_TYPE
+            )
+        });
+
+        let error = audit(&items).expect_err("missing compatibility metadata must fail closed");
+        assert!(error.contains("FfiNip46CoreCompatibility positive control"));
+    }
+
+    #[test]
+    fn foreign_namespace_mailbox_entry_is_not_hidden_from_audit() {
+        let mut items = valid_metadata();
+        items.push(function_in_module(
+            "nmp_nip46_sideload",
+            "sideload_take_mailbox",
+            vec![object_type(CORE_MODULE, MAILBOX_TYPE)],
+            None,
+        ));
+
+        let error = audit(&items).expect_err("linked non-core namespaces must be audited");
+        assert!(error.contains("nmp_nip46_sideload::sideload_take_mailbox"));
+        assert!(error.contains("without an input containing"));
+    }
+
+    #[test]
+    fn valid_compiled_constructor_passes_the_full_audit() {
         assert!(audit(&valid_metadata()).is_ok());
     }
 }
