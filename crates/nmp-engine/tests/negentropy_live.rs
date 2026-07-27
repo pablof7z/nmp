@@ -35,6 +35,14 @@ use nostr_relay_builder::prelude::{
     Timestamp as RelayTimestamp,
 };
 
+/// #765: `LocalKeySigner` now owns its scalar in one canonical zeroizing
+/// allocation and no longer accepts a `nostr::Keys`. These fixtures still
+/// build identities as `Keys`, so hand the raw scalar across exactly here.
+fn local_signer(keys: &Keys) -> LocalKeySigner {
+    LocalKeySigner::from_secret_bytes(keys.secret_key().as_secret_bytes())
+        .expect("fixture keys are valid secp256k1 scalars")
+}
+
 fn free_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
     listener.local_addr().expect("local_addr").port()
@@ -159,7 +167,7 @@ async fn subscribe_widens_via_negentropy_and_surfaces_the_backfilled_post() {
     )
     .expect("test engine thread construction");
     handle
-        .add_signer(LocalKeySigner::new(a.clone()))
+        .add_signer(local_signer(&a))
         .expect("local signer has a public key");
 
     // Bootstrap: a's own (empty) kind:1 feed -- this is what actually opens

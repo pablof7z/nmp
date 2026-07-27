@@ -64,6 +64,14 @@ fn expect_attached(result: ReceiptReattachment) -> FifoReceiver<WriteStatus> {
 
 use tungstenite::Message;
 
+/// #765: `LocalKeySigner` now owns its scalar in one canonical zeroizing
+/// allocation and no longer accepts a `nostr::Keys`. These fixtures still
+/// build identities as `Keys`, so hand the raw scalar across exactly here.
+fn local_signer(keys: &Keys) -> LocalKeySigner {
+    LocalKeySigner::from_secret_bytes(keys.secret_key().as_secret_bytes())
+        .expect("fixture keys are valid secp256k1 scalars")
+}
+
 /// Reserve an ephemeral backend port. The reconnect test's client-facing
 /// address is owned separately by [`ConnectionOwner`].
 fn free_port() -> u16 {
@@ -342,7 +350,7 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
     .expect("test engine thread construction");
 
     handle
-        .add_signer(LocalKeySigner::new(a.clone()))
+        .add_signer(local_signer(&a))
         .expect("local signer has a public key");
     handle.set_active_account(Some(a.public_key()));
 
@@ -1213,7 +1221,7 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
         }
     );
     handle
-        .add_signer(LocalKeySigner::new(keys.clone()))
+        .add_signer(local_signer(&keys))
         .expect("local signer has a public key");
     assert!(wait_for_status(
         &first,
@@ -1299,7 +1307,7 @@ fn runtime_boot_recovery_precedes_first_reattach_command() {
         }
     );
     handle
-        .add_signer(LocalKeySigner::new(keys))
+        .add_signer(local_signer(&keys))
         .expect("local signer has a public key");
     assert!(wait_for_status(
         &statuses,

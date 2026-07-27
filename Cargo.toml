@@ -107,6 +107,8 @@ reqwest = { version = "0.12.28", default-features = false, features = ["rustls-t
 base64 = "0.22"
 # `nmp-asset`'s exact-byte digest (#884). A protocol-neutral identity crate
 # cannot reach for `nostr::hashes`, so the hash comes from the RustCrypto
-# implementation directly; already at 0.10.9 in Cargo.lock via transitive
-# resolution.
+# implementation directly. Also the BIP-340 tagged hashing and NIP-44
+# HKDF/HMAC inside `nmp-signer`'s zeroizing local-key path (#765), which for
+# the same reason cannot route through `nostr`'s own hashing. Already at
+# 0.10.9 in Cargo.lock via transitive resolution.
 sha2 = "0.10"

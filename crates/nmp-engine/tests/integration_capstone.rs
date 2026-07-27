@@ -52,6 +52,14 @@ use nostr_relay_builder::prelude::{
     Event as RelayEvent, EventBuilder as RelayEventBuilder, FinalizeEvent, Keys as RelayKeys,
 };
 
+/// #765: `LocalKeySigner` now owns its scalar in one canonical zeroizing
+/// allocation and no longer accepts a `nostr::Keys`. These fixtures still
+/// build identities as `Keys`, so hand the raw scalar across exactly here.
+fn local_signer(keys: &Keys) -> LocalKeySigner {
+    LocalKeySigner::from_secret_bytes(keys.secret_key().as_secret_bytes())
+        .expect("fixture keys are valid secp256k1 scalars")
+}
+
 fn free_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
     listener.local_addr().expect("local_addr").port()
@@ -953,7 +961,7 @@ async fn same_event_from_two_relays_surfaces_as_exactly_one_row() {
     )
     .expect("test engine thread construction");
     handle
-        .add_signer(LocalKeySigner::new(a.clone()))
+        .add_signer(local_signer(&a))
         .expect("local signer has a public key");
     handle.set_active_account(Some(a.public_key()));
 
@@ -1031,7 +1039,7 @@ fn write_ack_per_relay_over_real_relays() {
     )
     .expect("test engine thread construction");
     let signer_registration = handle
-        .add_signer(LocalKeySigner::new(a.clone()))
+        .add_signer(local_signer(&a))
         .expect("local signer has a public key");
     let policy_registration = handle
         .add_auth_policy(a.public_key(), AllowAuth)
@@ -1227,7 +1235,7 @@ fn reconnect_requires_a_fresh_real_relay_challenge() {
     )
     .expect("test engine thread construction");
     let signer_registration = handle
-        .add_signer(LocalKeySigner::new(a.clone()))
+        .add_signer(local_signer(&a))
         .expect("local signer has a public key");
     let policy_registration = handle
         .add_auth_policy(a.public_key(), AllowAuth)
@@ -1384,7 +1392,7 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
     )
     .expect("test engine thread construction");
     let signer_registration = handle
-        .add_signer(LocalKeySigner::new(a.clone()))
+        .add_signer(local_signer(&a))
         .expect("local signer has a public key");
     let policy_registration = handle
         .add_auth_policy(a.public_key(), AllowAuth)
