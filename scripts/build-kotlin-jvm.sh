@@ -58,25 +58,39 @@ esac
 LIB_NAME="lib$LIB_STEM.$LIB_EXT"
 
 # Cargo resolves a relative CARGO_TARGET_DIR from its working directory. The
-# script runs Cargo at the repository root, so resolve the same path here when
-# locating the resulting host library.
+# script runs Cargo at the repository root. Treat it as a BASE only: release
+# artifacts live under a package-set-specific directory that ad-hoc Cargo
+# builds never write.
 TARGET_DIR_VALUE=${CARGO_TARGET_DIR:-target}
 if [[ "$TARGET_DIR_VALUE" == /* ]]; then
   TARGET_DIR="$TARGET_DIR_VALUE"
 else
   TARGET_DIR="$REPO_ROOT/$TARGET_DIR_VALUE"
 fi
+HOST_TARGET=$(rustc -vV | sed -n 's/^host: //p')
+if [[ -z "$HOST_TARGET" ]]; then
+  echo "error: rustc -vV did not report a host target" >&2
+  exit 1
+fi
+COMPONENT_BUILD=$(
+  "$REPO_ROOT/scripts/prepare-component-build.sh" \
+    "$TARGET_DIR" "${CARGO_PACKAGE_NAMES[*]}" "$HOST_TARGET"
+)
+COMPONENT_TARGET_DIR=${COMPONENT_BUILD%%$'\n'*}
+COMPONENT_AUTH=${COMPONENT_BUILD#*$'\n'}
 
-echo "== 1. cargo build (release, host triple) =="
-NMP_FFI_COMPONENT_BUILD=1 \
-  cargo build "${CARGO_PACKAGE_ARGS[@]}" --release
+echo "== 1. cargo build (isolated release, host triple) =="
+cargo fetch --locked
+CARGO_TARGET_DIR="$COMPONENT_TARGET_DIR" \
+NMP_FFI_COMPONENT_AUTH="$COMPONENT_AUTH" \
+  cargo build --frozen "${CARGO_PACKAGE_ARGS[@]}" --release
 
-HOST_LIB="$TARGET_DIR/release/$LIB_NAME"
+HOST_LIB="$COMPONENT_TARGET_DIR/release/$LIB_NAME"
 if [[ ! -f "$HOST_LIB" ]]; then
   echo "error: expected $HOST_LIB after cargo build -- check nmp-ffi's [lib] crate-type includes cdylib" >&2
   exit 1
 fi
-BINDGEN="$TARGET_DIR/release/$BINDGEN_NAME"
+BINDGEN="$COMPONENT_TARGET_DIR/release/$BINDGEN_NAME"
 if [[ ! -x "$BINDGEN" ]]; then
   echo "error: expected executable $BINDGEN after cargo build" >&2
   exit 1

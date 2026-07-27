@@ -94,7 +94,6 @@ fn main() {
 }
 
 fn hash_cargo_unit_graph(workspace: &Path, hasher: &mut blake3::Hasher) {
-    println!("cargo:rerun-if-env-changed=NMP_FFI_COMPONENT_BUILD");
     // Cargo exposes a build-script profile class here: `debug` or `release`.
     // Built-in `bench` is release-class too. Supported component builders use
     // exact `--release`; every unmanaged release-class invocation fails below.
@@ -103,13 +102,6 @@ fn hash_cargo_unit_graph(workspace: &Path, hasher: &mut blake3::Hasher) {
         profile == "debug" || profile == "release",
         "unknown Cargo build-script profile class: {profile}"
     );
-    if profile == "release" {
-        assert_eq!(
-            env::var("NMP_FFI_COMPONENT_BUILD").as_deref(),
-            Ok("1"),
-            "release native components must use the supported Swift or Kotlin builder"
-        );
-    }
 
     let cargo_has_provider_component =
         env::var_os("CARGO_FEATURE_NIP46_PROVIDER_COMPONENT").is_some();
@@ -121,6 +113,14 @@ fn hash_cargo_unit_graph(workspace: &Path, hasher: &mut blake3::Hasher) {
         unexpected_features.is_empty(),
         "component identity must explicitly resolve new nmp-ffi features: {unexpected_features:?}"
     );
+
+    if profile == "release" {
+        let marker = validated_release_marker(cargo_has_provider_component);
+        println!("cargo:rerun-if-changed={}", marker.display());
+        let marker_bytes = fs::read(&marker)
+            .unwrap_or_else(|error| panic!("read component marker {}: {error}", marker.display()));
+        add_field(hasher, "component-build-marker", &marker_bytes);
+    }
 
     let cargo = env::var_os("CARGO").expect("Cargo supplies CARGO");
     let target = env::var("TARGET").expect("Cargo supplies TARGET");
@@ -162,6 +162,58 @@ fn hash_cargo_unit_graph(workspace: &Path, hasher: &mut blake3::Hasher) {
     let canonical = serde_json::to_vec(&graph)
         .unwrap_or_else(|error| panic!("serialize canonical Cargo unit graph: {error}"));
     add_field(hasher, "cargo-unit-graph", &canonical);
+}
+
+fn validated_release_marker(cargo_has_provider_component: bool) -> PathBuf {
+    println!("cargo:rerun-if-env-changed=NMP_FFI_COMPONENT_AUTH");
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"));
+    let target = env::var("TARGET").expect("Cargo supplies TARGET");
+    let package_set = if cargo_has_provider_component {
+        "nip46"
+    } else {
+        "core"
+    };
+    let expected = format!(
+        "nmp-component-build-v1\npackage-set={package_set}\ntarget={target}\nprofile=release\n"
+    );
+
+    for component_root in out_dir.ancestors() {
+        if component_root.file_name().and_then(OsStr::to_str) != Some(package_set)
+            || component_root
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(OsStr::to_str)
+                != Some("nmp-component-build")
+        {
+            continue;
+        }
+        let marker = component_root.join(".nmp-component-build-v1").join(&target);
+        let Ok(actual) = fs::read_to_string(&marker) else {
+            continue;
+        };
+        assert_eq!(
+            actual, expected,
+            "release component marker disagrees with Cargo-observed package set or target"
+        );
+        let authorization = component_root
+            .join(".nmp-component-build-v1")
+            .join(".authorization");
+        println!("cargo:rerun-if-changed={}", authorization.display());
+        let expected_authorization = fs::read_to_string(&authorization).unwrap_or_else(|_| {
+            panic!(
+                "isolated component target has no live builder authorization: {}",
+                authorization.display()
+            )
+        });
+        assert_eq!(
+            env::var("NMP_FFI_COMPONENT_AUTH").as_deref(),
+            Ok(expected_authorization.trim()),
+            "release component authorization does not match its isolated target"
+        );
+        return marker;
+    }
+
+    panic!("release native components must use the isolated supported Swift or Kotlin builder");
 }
 
 fn hash_source_tree(workspace: &Path, directory: &Path, hasher: &mut blake3::Hasher) {

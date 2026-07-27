@@ -101,8 +101,9 @@ MACOS_CFLAGS="${CFLAGS:+$CFLAGS }-mmacosx-version-min=$MACOS_DEPLOYMENT_TARGET"
 MACOS_CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }-mmacosx-version-min=$MACOS_DEPLOYMENT_TARGET"
 
 # Cargo resolves a relative CARGO_TARGET_DIR from its working directory. The
-# script runs Cargo at the repository root, so resolve the same path here when
-# locating the resulting archives and storing packaging intermediates.
+# script runs Cargo at the repository root. Treat it as a BASE only: release
+# artifacts live under a package-set-specific directory that ad-hoc Cargo
+# builds never write.
 TARGET_DIR_VALUE=${CARGO_TARGET_DIR:-target}
 if [[ "$TARGET_DIR_VALUE" == /* ]]; then
   TARGET_DIR="$TARGET_DIR_VALUE"
@@ -110,30 +111,59 @@ else
   TARGET_DIR="$REPO_ROOT/$TARGET_DIR_VALUE"
 fi
 
-echo "== 1. cargo build (release) =="
+prepare_target() {
+  "$REPO_ROOT/scripts/prepare-component-build.sh" \
+    "$TARGET_DIR" "${CARGO_PACKAGE_NAMES[*]}" "$1"
+}
+
+echo "== 1. cargo build (isolated release) =="
+cargo fetch --locked
 if [[ "$MODE" != macos ]]; then
+  SIM_ARM_COMPONENT_BUILD=$(prepare_target "$SIM_ARM_TARGET")
+  SIM_ARM_COMPONENT_TARGET_DIR=${SIM_ARM_COMPONENT_BUILD%%$'\n'*}
+  SIM_ARM_COMPONENT_AUTH=${SIM_ARM_COMPONENT_BUILD#*$'\n'}
   env -u MACOSX_DEPLOYMENT_TARGET \
-    NMP_FFI_COMPONENT_BUILD=1 \
-    cargo build "${CARGO_PACKAGE_ARGS[@]}" --release --target "$SIM_ARM_TARGET"
+    CARGO_TARGET_DIR="$SIM_ARM_COMPONENT_TARGET_DIR" \
+    NMP_FFI_COMPONENT_AUTH="$SIM_ARM_COMPONENT_AUTH" \
+    cargo build --frozen "${CARGO_PACKAGE_ARGS[@]}" --release --target "$SIM_ARM_TARGET"
+  SIM_X86_COMPONENT_BUILD=$(prepare_target "$SIM_X86_TARGET")
+  SIM_X86_COMPONENT_TARGET_DIR=${SIM_X86_COMPONENT_BUILD%%$'\n'*}
+  SIM_X86_COMPONENT_AUTH=${SIM_X86_COMPONENT_BUILD#*$'\n'}
   env -u MACOSX_DEPLOYMENT_TARGET \
-    NMP_FFI_COMPONENT_BUILD=1 \
-    cargo build "${CARGO_PACKAGE_ARGS[@]}" --release --target "$SIM_X86_TARGET"
+    CARGO_TARGET_DIR="$SIM_X86_COMPONENT_TARGET_DIR" \
+    NMP_FFI_COMPONENT_AUTH="$SIM_X86_COMPONENT_AUTH" \
+    cargo build --frozen "${CARGO_PACKAGE_ARGS[@]}" --release --target "$SIM_X86_TARGET"
 fi
+MACOS_COMPONENT_BUILD=$(prepare_target "$MACOS_TARGET")
+MACOS_COMPONENT_TARGET_DIR=${MACOS_COMPONENT_BUILD%%$'\n'*}
+MACOS_COMPONENT_AUTH=${MACOS_COMPONENT_BUILD#*$'\n'}
 MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET" \
   CFLAGS="$MACOS_CFLAGS" \
   CXXFLAGS="$MACOS_CXXFLAGS" \
-  NMP_FFI_COMPONENT_BUILD=1 \
-  cargo build "${CARGO_PACKAGE_ARGS[@]}" --release --target "$MACOS_TARGET"
+  CARGO_TARGET_DIR="$MACOS_COMPONENT_TARGET_DIR" \
+  NMP_FFI_COMPONENT_AUTH="$MACOS_COMPONENT_AUTH" \
+  cargo build --frozen "${CARGO_PACKAGE_ARGS[@]}" --release --target "$MACOS_TARGET"
 if [[ "$MODE" == all ]]; then
+  DEVICE_COMPONENT_BUILD=$(prepare_target "$DEVICE_TARGET")
+  DEVICE_COMPONENT_TARGET_DIR=${DEVICE_COMPONENT_BUILD%%$'\n'*}
+  DEVICE_COMPONENT_AUTH=${DEVICE_COMPONENT_BUILD#*$'\n'}
   env -u MACOSX_DEPLOYMENT_TARGET \
-    NMP_FFI_COMPONENT_BUILD=1 \
-    cargo build "${CARGO_PACKAGE_ARGS[@]}" --release --target "$DEVICE_TARGET"
+    CARGO_TARGET_DIR="$DEVICE_COMPONENT_TARGET_DIR" \
+    NMP_FFI_COMPONENT_AUTH="$DEVICE_COMPONENT_AUTH" \
+    cargo build --frozen "${CARGO_PACKAGE_ARGS[@]}" --release --target "$DEVICE_TARGET"
 fi
 
-SIM_ARM_LIB="$TARGET_DIR/$SIM_ARM_TARGET/release/$LIB_NAME"
-SIM_X86_LIB="$TARGET_DIR/$SIM_X86_TARGET/release/$LIB_NAME"
-MACOS_LIB="$TARGET_DIR/$MACOS_TARGET/release/$LIB_NAME"
-DEVICE_LIB="$TARGET_DIR/$DEVICE_TARGET/release/$LIB_NAME"
+COMPONENT_TARGET_DIR="$TARGET_DIR/nmp-component-build/$(
+  if [[ "${CARGO_PACKAGE_NAMES[*]}" == "nmp-ffi" ]]; then
+    printf core
+  else
+    printf nip46
+  fi
+)"
+SIM_ARM_LIB="$COMPONENT_TARGET_DIR/$SIM_ARM_TARGET/release/$LIB_NAME"
+SIM_X86_LIB="$COMPONENT_TARGET_DIR/$SIM_X86_TARGET/release/$LIB_NAME"
+MACOS_LIB="$COMPONENT_TARGET_DIR/$MACOS_TARGET/release/$LIB_NAME"
+DEVICE_LIB="$COMPONENT_TARGET_DIR/$DEVICE_TARGET/release/$LIB_NAME"
 
 echo "== 1b. verify macOS deployment target ($MACOS_DEPLOYMENT_TARGET) =="
 "$DEPLOYMENT_CHECKER" "$MACOS_LIB"
@@ -154,7 +184,7 @@ fi
 echo "== 3. uniffi-bindgen (library mode) -> Swift bindings =="
 mkdir -p "$GEN_DIR"
 env -u MACOSX_DEPLOYMENT_TARGET \
-  cargo run -p "$CRATE" --bin "$BINDGEN_BIN" -- generate \
+  cargo run --locked -p "$CRATE" --bin "$BINDGEN_BIN" -- generate \
   --library "$BINDGEN_LIB" \
   --language swift \
   --out-dir "$GEN_DIR"

@@ -98,14 +98,23 @@ about current code:
   `Packages/NMPNip46`, and Kotlin `:nip46` components project Primal discovery,
   one-click launch, package-filtered Android discovery, and an exact
   URI/package handoff contract. Deleting those provider packages leaves core
-  and an unrelated external signer buildable. A deterministic native component
-  identity now self-derives Cargo's exact resolved unit graph (package
-  roots/edges, transitive features, profiles, and targets) inside the build,
-  binds every governed core/fixture input plus compiler/build inputs, and
-  refuses external path patches that cannot be reproduced from the repository;
-  Swift and Kotlin compare it before requesting the opaque mailbox, and a
+  and an unrelated external signer buildable. Supported native release builders
+  fix the core-only or matched core/provider Cargo roots, use isolated target
+  directories per package set, freeze the resolution after a locked fetch, and
+  mint a one-invocation authorization checked from the build script's actual
+  output-directory ancestry. Only within that fixed shape does the deterministic
+  component identity self-derive and hash Cargo's exact resolved unit graph
+  (package roots/edges, transitive features, profiles, and targets), every
+  governed core/fixture input, and compiler/build inputs. An ad-hoc release
+  invocation cannot accidentally write a packageable component; debug/IDE
+  builds remain available but are not packaging inputs. External path patches
+  that cannot be reproduced from the repository are refused. Swift and Kotlin
+  compare the embedded identities before requesting the opaque mailbox, and a
   mismatch is a typed construction failure before any external Rust object
-  crosses the component seam (#952). The Android AAR work in #831 still owns
+  crosses the component seam (#952). The build authorization is a working-
+  discipline guard against accidental artifact substitution, not a secret
+  against a caller deliberately replaying it; the native identity comparison is
+  the runtime authority. The Android AAR work in #831 still owns
   publishing that same identity in provenance/Gradle metadata and
   emulator-qualifying a deliberately mismatched pair; the native check remains
   the final authority when packaging metadata is stale or tampered.

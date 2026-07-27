@@ -33,7 +33,7 @@ jobs:
       - name: Build core and provider XCFrameworks
         run: |
           scripts/build-swift-xcframework.sh --sim-only
-          cp target/aarch64-apple-ios-sim/release/libnmp_ffi.a \
+          cp target/nmp-component-build/core/aarch64-apple-ios-sim/release/libnmp_ffi.a \
             "$RUNNER_TEMP/libnmp_ffi-core-only.a"
           scripts/build-swift-nip46-xcframework.sh --sim-only
 
@@ -41,14 +41,14 @@ jobs:
         run: |
           scripts/check-nip46-component-identity.sh \
             "$RUNNER_TEMP/libnmp_ffi-core-only.a" \
-            target/aarch64-apple-ios-sim/release/libnmp_ffi.a \
-            target/aarch64-apple-ios-sim/release/libnmp_nip46_ffi.a
+            target/nmp-component-build/nip46/aarch64-apple-ios-sim/release/libnmp_ffi.a \
+            target/nmp-component-build/nip46/aarch64-apple-ios-sim/release/libnmp_nip46_ffi.a
 
       - name: Prove the provider is absent from the core link/resource maps
         run: |
           scripts/check-nip46-artifact-inventory.sh \
-            target/aarch64-apple-ios-sim/release/libnmp_ffi.a \
-            target/aarch64-apple-ios-sim/release/libnmp_nip46_ffi.a \
+            target/nmp-component-build/nip46/aarch64-apple-ios-sim/release/libnmp_ffi.a \
+            target/nmp-component-build/nip46/aarch64-apple-ios-sim/release/libnmp_nip46_ffi.a \
             Packages/NMP/Sources/NMPFFI \
             Packages/NMPNip46/Sources/NMPNip46FFI
 
@@ -73,7 +73,8 @@ jobs:
       - name: Build core and provider bindings
         run: |
           scripts/build-kotlin-jvm.sh
-          cp target/release/libnmp_ffi.so "$RUNNER_TEMP/libnmp_ffi-core-only.so"
+          cp target/nmp-component-build/core/release/libnmp_ffi.so \
+            "$RUNNER_TEMP/libnmp_ffi-core-only.so"
           scripts/build-kotlin-nip46-jvm.sh
 
       - name: Refuse unmanaged release identity
@@ -83,14 +84,14 @@ jobs:
         run: |
           scripts/check-nip46-component-identity.sh \
             "$RUNNER_TEMP/libnmp_ffi-core-only.so" \
-            target/release/libnmp_ffi.so \
-            target/release/libnmp_nip46_ffi.so
+            target/nmp-component-build/nip46/release/libnmp_ffi.so \
+            target/nmp-component-build/nip46/release/libnmp_nip46_ffi.so
 
       - name: Prove the provider is absent from the core link/resource maps
         run: |
           scripts/check-nip46-artifact-inventory.sh \
-            target/release/libnmp_ffi.so \
-            target/release/libnmp_nip46_ffi.so \
+            target/nmp-component-build/nip46/release/libnmp_ffi.so \
+            target/nmp-component-build/nip46/release/libnmp_nip46_ffi.so \
             Packages/NMPKotlin/src/main/kotlin/uniffi \
             Packages/NMPKotlin/nip46/src/main/kotlin/uniffi
 

@@ -84,6 +84,10 @@ grep -qF '"--unit-graph"' crates/nmp-ffi/build.rs ||
   fail "core identity does not derive Cargo's resolved transitive unit graph"
 grep -qF 'validate_unit_graph_against_cargo' crates/nmp-ffi/build.rs ||
   fail "core identity does not validate its derived graph against Cargo's resolved marker"
+grep -qF 'validated_release_marker' crates/nmp-ffi/build.rs ||
+  fail "core release identity is not bound to an isolated component target"
+grep -qF 'NMP_FFI_COMPONENT_AUTH' crates/nmp-ffi/build.rs ||
+  fail "isolated component target lacks one-invocation builder authorization"
 grep -qF 'features = ["nip46-provider-component"]' crates/nmp-nip46-ffi/Cargo.toml ||
   fail "NIP-46 provider does not make its presence observable to the nmp-ffi build"
 grep -qF 'scripts/test-component-identity-build.sh' .github/workflows/nip46-provider.yml ||
@@ -103,14 +107,21 @@ for builder in scripts/build-swift-nip46-xcframework.sh scripts/build-kotlin-nip
     fail "$builder does not build core and provider under one package-set identity"
 done
 for builder in scripts/build-swift-xcframework.sh scripts/build-kotlin-jvm.sh; do
-  grep -qF 'NMP_FFI_COMPONENT_BUILD=1' "$builder" ||
-    fail "$builder does not enable the self-derived component identity"
+  grep -qF 'scripts/prepare-component-build.sh' "$builder" ||
+    fail "$builder does not isolate its exact package-set target"
+  grep -qF 'NMP_FFI_COMPONENT_AUTH=' "$builder" ||
+    fail "$builder does not authorize only its own isolated invocation"
+  grep -qF 'cargo build --frozen' "$builder" ||
+    fail "$builder does not freeze its isolated release resolution"
   if grep -qF 'NMP_FFI_CARGO_UNIT_GRAPH' "$builder"; then
     fail "$builder still supplies declared graph content"
   fi
 done
 if grep -qF 'NMP_FFI_CARGO_UNIT_GRAPH' crates/nmp-ffi/build.rs; then
   fail "build script still accepts caller-declared graph content"
+fi
+if grep -qF 'NMP_FFI_COMPONENT_BUILD' crates/nmp-ffi/build.rs; then
+  fail "build script still trusts the obsolete broad enablement variable"
 fi
 if grep -nE 'Arc<NmpEngine>|engine:[[:space:]]*Arc<nmp::Engine>|FfiSigning(Capability)?Callback|SigningCapabilityCallback' \
   crates/nmp-nip46-ffi/src/signer.rs; then

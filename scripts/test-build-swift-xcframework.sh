@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT=$(cd "$(dirname "$0")" && pwd)/build-swift-xcframework.sh
 CHECKER=$(cd "$(dirname "$0")" && pwd)/check-macos-deployment-target.sh
+PREPARE=$(cd "$(dirname "$0")" && pwd)/prepare-component-build.sh
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -11,6 +12,7 @@ BIN="$TMP/bin"
 mkdir -p "$REPO/scripts" "$REPO/Packages/NMP" "$BIN"
 cp "$SCRIPT" "$REPO/scripts/"
 cp "$CHECKER" "$REPO/scripts/"
+cp "$PREPARE" "$REPO/scripts/"
 git -C "$REPO" init -q
 
 cat > "$REPO/Packages/NMP/Package.swift" <<'SWIFT'
@@ -35,6 +37,8 @@ printf ' cxxflags=%q' "${CXXFLAGS-unset}" >> "$CALL_LOG"
 printf '\n' >> "$CALL_LOG"
 
 case "${1:-}" in
+  fetch)
+    ;;
   build)
     target=
     while [[ $# -gt 0 ]]; do
@@ -216,11 +220,11 @@ echo 'ok - help and argument rejection are side-effect-free'
 mac_log="$TMP/macos.log"
 shared_target="$TMP/shared-cache"
 run_script "$mac_log" "$shared_target" --macos-only >/dev/null
-grep -Fq 'cargo build -p nmp-ffi --release --target aarch64-apple-darwin' "$mac_log"
+grep -Fq 'cargo build --frozen -p nmp-ffi --release --target aarch64-apple-darwin' "$mac_log"
 grep -Fq -- '--target aarch64-apple-darwin deployment=13.0' "$mac_log"
 grep -Fq 'cflags=-mmacosx-version-min=99.0\ -mmacosx-version-min=13.0' "$mac_log"
 grep -Fq 'cxxflags=-mmacosx-version-min=99.0\ -mmacosx-version-min=13.0' "$mac_log"
-grep -Fq "$shared_target/aarch64-apple-darwin/release/libnmp_ffi.a" "$mac_log"
+grep -Fq "$shared_target/nmp-component-build/core/aarch64-apple-darwin/release/libnmp_ffi.a" "$mac_log"
 grep -Fq "$shared_target/ios-ffi-headers" "$mac_log"
 ! grep -Fq 'apple-ios' "$mac_log"
 ! grep -Fq 'lipo' "$mac_log"
@@ -231,7 +235,7 @@ echo 'ok - macOS-only plan uses the caller target directory and no simulator'
 # and packaging lookups.
 relative_log="$TMP/relative.log"
 run_script "$relative_log" relative-target --macos-only >/dev/null
-grep -Fq "$REPO/relative-target/aarch64-apple-darwin/release/libnmp_ffi.a" "$relative_log"
+grep -Fq "$REPO/relative-target/nmp-component-build/core/aarch64-apple-darwin/release/libnmp_ffi.a" "$relative_log"
 echo 'ok - relative CARGO_TARGET_DIR artifact lookup matches Cargo'
 
 # Preserve the historical sim-only and default target sets.
