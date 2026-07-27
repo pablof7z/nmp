@@ -3,34 +3,103 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    fold_context, AccessContext, ConcreteFilter, DescriptorHash, RelaySessionKey, SourceAuthority,
+    fold_byte, fold_context, AccessContext, ConcreteFilter, DescriptorHash, RelaySessionKey,
+    SourceAuthority,
 };
 use nmp_store::CoverageKey;
 
 use crate::facts::RelayUrl;
 use crate::route::{RouteProvenance, Skeleton};
 
-/// A stable subscription id, keyed by (relay, skeleton) so that
-/// adding/removing an author re-uses the same sub-id: on the wire that is
-/// ONE overwriting REQ, not close+reopen of every author (NIP-01: a REQ
-/// with an existing sub-id replaces that sub's filter).
+/// The 256-bit digest a [`SubId`] carries as its wire identity. `EngineCore`
+/// sends every REQ under this value's hex `Display` (64 characters — exactly
+/// NIP-01's `subscription_id` cap, never prefixed or truncated).
+///
+/// Two DIFFERENT kinds of value inhabit this type, and the difference is the
+/// whole of #899:
+///
+/// - For a **planned** `WireReq`, it is an ALLOCATED OPAQUE TOKEN
+///   ([`SubId::allocate`]) — minted at a filter's first appearance and carried
+///   forward across recompiles by structural-signature matching
+///   ([`crate::wire_id`]). It is NOT a function of the filter, and nothing may
+///   reconstruct it from one.
+/// - For an id DERIVED outside the plan — the negentropy prober
+///   (`nmp-engine::negentropy`) and the NIP-77 role ids folded off a plan
+///   token — it is still a content hash, in its own namespace.
+///
+/// The name is historical. It used to be exactly what it says: the hash of
+/// the filter's author-erased [`Skeleton`], which is precisely why two filters
+/// differing only in `authors` collided onto one subscription (#899).
 pub type SkeletonHash = DescriptorHash;
+
+/// Domain byte separating an ALLOCATED token's derivation from every DERIVED
+/// id sharing this type. Folded in before the counter, so an allocated token
+/// can never coincide with a `Skeleton`-derived one ([`SubId::for_wire`], the
+/// prober's namespace) even in principle.
+const ALLOCATED_DOMAIN: u8 = 0xa1;
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct SubId(pub RelayUrl, pub SkeletonHash, pub AccessContext);
 
 impl SubId {
-    /// Derive the sub-id for `filter` on `relay` from the filter's OWN
-    /// skeleton (authors erased) folded with its [`SourceAuthority`]/
-    /// [`AccessContext`] (#106, atlas's 3rd proof floor). An `AuthorUnion`
-    /// merge never changes a filter's skeleton (it only touches `authors`),
-    /// so this is automatically stable across author churn without any
-    /// external bookkeeping; a `KindUnion` merge produces a new, but still
-    /// deterministically reproducible, skeleton. Folding in context is what
-    /// keeps two DIFFERENT-context atoms sharing a relay+skeleton from
-    /// colliding onto the SAME sub-id: under equal-context-only coalescing
-    /// (Fable D) they never coalesce into one wire filter, so they must not
-    /// collapse onto one `SubId` either — doing so would re-alias their
+    /// Mint a FRESH, never-before-used wire token for `relay` under
+    /// `source`/`access`.
+    ///
+    /// `counter` is the router's own monotonic mint counter, so no token is
+    /// ever recycled within a `Router`'s lifetime — reuse would let a stale
+    /// in-flight EOSE for a closed subscription land on a reopened one's
+    /// attribution FIFO. A process restart is safe without any persistence:
+    /// connections drop, and `nmp-engine`'s `AttributionState::clear_session`
+    /// wipes every stale wire mapping for the session.
+    ///
+    /// `root` is a caller-supplied chain root (the router hoists
+    /// `ConcreteFilter::default().hash()` once, rather than paying a JSON
+    /// encode plus BLAKE3 per mint). It carries no filter meaning: the token's
+    /// uniqueness comes entirely from `counter`, and `root` merely gives the
+    /// `fold_byte` chain a `DescriptorHash` to start from without this crate
+    /// taking a direct `blake3` dependency.
+    ///
+    /// `fold_context` is applied LAST, exactly as [`Self::for_wire`] does, so
+    /// the #106 anti-alias property survives allocation: identical relay +
+    /// filter under different [`SourceAuthority`] can never share a token,
+    /// belt-and-braces on top of the assignment's own injectivity.
+    ///
+    /// Deliberately NOT derived from anything mutable the relay advertises:
+    /// no NIP-11 field (`max_subid_length` and friends) feeds this, so a relay
+    /// changing its advertisement can never move an established id.
+    pub(crate) fn allocate(
+        relay: RelayUrl,
+        source: &SourceAuthority,
+        access: AccessContext,
+        root: DescriptorHash,
+        counter: u64,
+    ) -> Self {
+        let mut hash = fold_byte(root, ALLOCATED_DOMAIN);
+        for byte in counter.to_be_bytes() {
+            hash = fold_byte(hash, byte);
+        }
+        SubId(relay, fold_context(hash, source, access), access)
+    }
+
+    /// DERIVE a sub-id for `filter` on `relay` from the filter's OWN skeleton
+    /// (authors erased) folded with its [`SourceAuthority`]/[`AccessContext`]
+    /// (#106, atlas's 3rd proof floor).
+    ///
+    /// **This is NO LONGER how planned subscriptions are identified.** The
+    /// plan allocates opaque tokens instead ([`Self::allocate`]), because
+    /// erasing `authors` from the identity is exactly what let two filters
+    /// the coalescer REFUSED to merge collide onto one subscription, with
+    /// `diff_plans` then silently dropping one of them (#899). Erasure bought
+    /// author-churn stability without previous-plan state; it paid for it
+    /// with injectivity, and injectivity is not optional.
+    ///
+    /// What still uses this: the negentropy PROBER
+    /// (`nmp-engine::negentropy::Prober::begin_probe`), which mints protocol-
+    /// support probe ids into its own `pending` map and never touches
+    /// coverage or attribution identity. That namespace is domain-separated
+    /// from allocated tokens by [`ALLOCATED_DOMAIN`]. Folding context in is
+    /// what keeps two DIFFERENT-context atoms sharing a relay+skeleton from
+    /// colliding onto the SAME sub-id — doing so would re-alias their
     /// inflight attribution FIFO (`nmp-engine::core::attribution
     /// ::AttributionState`) exactly the way the per-context `CoverageKey`
     /// widening was built to prevent.
@@ -63,6 +132,13 @@ impl SubId {
 pub struct WireReq {
     pub sub_id: SubId,
     pub filter: ConcreteFilter,
+    /// The declared wire authority this req was routed under. `SubId` already
+    /// carries the relay and the [`AccessContext`]; this is the missing half
+    /// of the identity context, and it is what makes the previous plan
+    /// re-partitionable for signature matching (`crate::wire_id`) — a
+    /// `Public`-sourced filter must never inherit an `AuthorOutboxes`-sourced
+    /// filter's token, which is the wire-side half of the #106 anti-alias.
+    pub source: SourceAuthority,
     pub provenance: Vec<RouteProvenance>,
     pub absorbed: BTreeSet<CoverageKey>,
 }
@@ -175,6 +251,7 @@ mod tests {
         let req = WireReq {
             sub_id,
             filter,
+            source: SourceAuthority::AuthorOutboxes,
             provenance: Vec::new(),
             absorbed: BTreeSet::new(),
         };
@@ -235,6 +312,7 @@ mod tests {
                     AccessContext::Public,
                 ),
                 filter: cf(1, &["bb", "cc"]),
+                source: SourceAuthority::AuthorOutboxes,
                 provenance: Vec::new(),
                 absorbed: BTreeSet::new(),
             }],

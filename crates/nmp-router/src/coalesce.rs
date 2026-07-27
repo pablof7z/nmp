@@ -315,7 +315,56 @@ impl RuleRegistry {
 
         // 2. Fixed-point pairwise merge across every registered rule.
         self.merge_fixed_point(&mut current);
+
+        // 3. Exact-canonical dedup AGAIN, over the SURVIVORS. Step 1 alone is
+        //    not enough: a merge can RE-CREATE a filter the pool already
+        //    holds, and no rule can then remove the duplicate, because every
+        //    rule requires its OWN axis to DIFFER (`same_except_authors`
+        //    needs `a.authors != b.authors`, `KindUnion` needs `a.kinds !=
+        //    b.kinds`, `IdUnion` needs `a.ids != b.ids`) -- byte-identical
+        //    entries match no rule and both survive the fixed point.
+        //    Reachable today: the per-author outbox entries `{authors:{a}}`
+        //    and `{authors:{b}}` alongside the additive app lane's full-set
+        //    entry `{authors:{a,b}}` on one relay; merging the first pair
+        //    reproduces the third.
+        //
+        //    This is a PREREQUISITE for allocated wire tokens (#899), not a
+        //    cosmetic tidy. Two byte-identical filters cannot be told apart by
+        //    ANY identity scheme, so the only correct outcome is one req.
+        //    Under the old derived identity they collided onto one id and
+        //    `diff_plans` quietly kept one. Under allocation they would each
+        //    get their OWN token and become two permanently-live duplicate
+        //    REQs -- the relay double-delivering every matching event forever,
+        //    with `absorbed` split across two entries so neither is fully
+        //    credited. Strictly worse than the bug it replaced.
+        //
+        //    Order-preserving: each duplicate folds into the FIRST entry
+        //    carrying its filter, so the fixed point's own output order (which
+        //    the differential oracle pins byte-for-byte) is untouched and the
+        //    only change is that duplicates are gone.
+        Self::dedup_survivors(&mut current);
         current
+    }
+
+    /// Fold byte-identical survivors into their first occurrence, unioning
+    /// `provenance` and `absorbed`. See `coalesce_with` step 3 for why this
+    /// exists and why it must preserve order.
+    fn dedup_survivors(entries: &mut Vec<Entry>) {
+        let mut first_index: BTreeMap<DescriptorHash, usize> = BTreeMap::new();
+        let mut out: Vec<Entry> = Vec::with_capacity(entries.len());
+        for (filter, provenance, absorbed) in std::mem::take(entries) {
+            match first_index.get(&filter.hash()) {
+                Some(&first) => {
+                    out[first].1.extend(provenance);
+                    out[first].2.extend(absorbed);
+                }
+                None => {
+                    first_index.insert(filter.hash(), out.len());
+                    out.push((filter, provenance, absorbed));
+                }
+            }
+        }
+        *entries = out;
     }
 
     /// Advance `current` to the AuthorUnion/KindUnion/IdUnion fixed point,

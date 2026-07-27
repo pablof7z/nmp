@@ -24,8 +24,10 @@
 //!   the differential oracle.
 //! - `diag` — `Diagnostics`: the four-lane, reverse-coverage, exact-filter
 //!   read-only projection of a compiled plan.
+//! - `wire_id` — structural-signature matching: which previously-allocated
+//!   wire subscription token a newly-compiled filter continues (#899).
 //! - `router` — `Router`: `compile(demand, dir) -> WireDelta`, owning
-//!   `prev_plan` + diagnostics.
+//!   `prev_plan` + diagnostics + the wire-token mint counter.
 
 mod coalesce;
 mod deliver;
@@ -35,6 +37,7 @@ mod plan;
 mod route;
 mod router;
 mod solver;
+mod wire_id;
 
 pub use coalesce::{
     AuthorUnion, DiscardSecondOperand, IdUnion, KindUnion, MergeRule, RuleRegistry,

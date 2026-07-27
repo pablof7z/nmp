@@ -191,7 +191,11 @@ fn churning_a_limited_atoms_author_set_overwrites_in_place() {
     let after = sub_ids(&router);
 
     println!("\n=== headline: LIMITED author churn overwrites in place ===");
-    println!("closes: {}  reqs: {}", count_closes(&delta), count_reqs(&delta));
+    println!(
+        "closes: {}  reqs: {}",
+        count_closes(&delta),
+        count_reqs(&delta)
+    );
 
     assert_eq!(planned(&router).len(), 1, "still one subscription");
     assert_eq!(
@@ -356,8 +360,16 @@ fn unlimited_author_growth_keeps_one_stable_sub_with_zero_closes() {
         planned(&router).len()
     );
 
-    assert_eq!(planned(&router).len(), 1, "one wire sub for the whole group");
-    assert_eq!(ids.len(), 1, "and that sub keeps ONE stable token throughout");
+    assert_eq!(
+        planned(&router).len(),
+        1,
+        "one wire sub for the whole group"
+    );
+    assert_eq!(
+        ids.len(),
+        1,
+        "and that sub keeps ONE stable token throughout"
+    );
     assert_eq!(closes, 0, "in-place widening never closes the subscription");
     assert_eq!(reqs, N as usize, "one overwriting REQ per growth step");
 }
@@ -448,7 +460,11 @@ fn since_churn_overwrites_in_place() {
     let before = sub_ids(&router);
     let delta = router.compile(&BTreeSet::from([windowed(200)]), &dir, CAP);
 
-    assert_eq!(before, sub_ids(&router), "the token is carried across a since move");
+    assert_eq!(
+        before,
+        sub_ids(&router),
+        "the token is carried across a since move"
+    );
     assert_eq!(count_closes(&delta), 0);
     assert_eq!(count_reqs(&delta), 1);
 }
@@ -506,9 +522,16 @@ fn compound_churn_closes_and_reopens() {
     let after = sub_ids(&router);
 
     println!("\n=== accepted cost: compound (2-component) churn ===");
-    println!("closes: {}  reqs: {}", count_closes(&delta), count_reqs(&delta));
+    println!(
+        "closes: {}  reqs: {}",
+        count_closes(&delta),
+        count_reqs(&delta)
+    );
 
-    assert_ne!(before, after, "ACCEPTED COST: a 2-diff is not a continuation");
+    assert_ne!(
+        before, after,
+        "ACCEPTED COST: a 2-diff is not a continuation"
+    );
     assert_eq!(count_closes(&delta), 1, "ACCEPTED COST: close");
     assert_eq!(count_reqs(&delta), 1, "ACCEPTED COST: and reopen");
 }
@@ -565,7 +588,10 @@ fn window_siblings_match_deterministically_without_closing() {
         "two freshly-constructed Routers must resolve the tie identically"
     );
     assert_eq!((closes_a, reqs_a), (closes_b, reqs_b));
-    assert_eq!(closes_a, 0, "neither window sibling closes -- both overwrite");
+    assert_eq!(
+        closes_a, 0,
+        "neither window sibling closes -- both overwrite"
+    );
     assert_eq!(reqs_a, 2, "one overwriting REQ each");
 }
 
@@ -582,6 +608,13 @@ fn window_siblings_match_deterministically_without_closing() {
 /// OTHER filters happen to share the compile — the neighbour-dependent
 /// identity this whole design exists to avoid. Like compound churn, this is an
 /// efficiency cost, not a correctness one, and it is deterministic.
+///
+/// Whether the pathology fires depends on the CANONICAL ORDER the sweep walks
+/// (`ConcreteFilter::hash()`), which is exactly what makes it a greedy
+/// artifact: with `N2` visited first it takes its only candidate `P2`, `N1`
+/// then takes `P1`, and the assignment is optimal. `N2`'s `limit` is tuned to
+/// `11` here specifically so `N1` sorts FIRST and the bad branch is the one
+/// under test — pinning the good branch would prove nothing.
 #[test]
 fn the_greedy_one_diff_sweep_can_strand_a_prior() {
     let (dir, mut router) = router();
@@ -590,14 +623,28 @@ fn the_greedy_one_diff_sweep_can_strand_a_prior() {
     router.compile(&BTreeSet::from([p1, p2]), &dir, CAP);
 
     let n1 = pinned_atom(kind1(&[0x22], Some(10)));
-    let n2 = pinned_atom(kind1(&[0x22, 0x33], Some(20)));
+    let n2 = pinned_atom(kind1(&[0x22, 0x33], Some(11)));
     let delta = router.compile(&BTreeSet::from([n1, n2]), &dir, CAP);
 
     println!("\n=== accepted cost: greedy sweep is not an assignment solve ===");
-    println!("closes: {}  reqs: {}", count_closes(&delta), count_reqs(&delta));
+    println!(
+        "closes: {}  reqs: {}",
+        count_closes(&delta),
+        count_reqs(&delta)
+    );
 
-    // Whatever the sweep decides, the plan stays injective and nothing is
-    // lost -- that is the correctness floor this cost is measured against.
+    // THE COST ITSELF. Without this assertion the test would stay green if
+    // someone added the augmenting-path repair the doc above says is
+    // deliberately excluded -- which would make it a test of nothing.
+    assert_eq!(
+        count_closes(&delta),
+        1,
+        "ACCEPTED COST: N1 takes P2 on overlap, so N2 mints and P1 is stranded \
+         and closed -- an optimal assignment (N1->P1, N2->P2) would pay zero closes"
+    );
+
+    // The correctness floor the cost is measured against: whatever the sweep
+    // decides, the plan stays injective and nothing is lost.
     assert_eq!(planned(&router).len(), 2);
     assert_eq!(sub_ids(&router).len(), 2);
     assert_eq!(
@@ -652,7 +699,8 @@ fn the_allocated_token_keeps_the_64_hex_wire_format() {
         let wire = sub_id.1.to_string();
         assert_eq!(wire.len(), 64, "NIP-01 caps subscription_id at 64 chars");
         assert!(
-            wire.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            wire.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
             "the wire id must stay lowercase hex, with no prefix: {wire}"
         );
     }
@@ -758,30 +806,57 @@ fn with_author_siblings(filters: Vec<ConcreteFilter>) -> BTreeSet<ContextualAtom
 /// assignment (not the id's content) is what carries injectivity forward.
 #[test]
 fn same_id_implies_merged_or_the_assignment_kept_them_distinct() {
-    fn check(router: &Router, delta: &WireDelta, label: &str) {
-        let mut total = 0usize;
+    /// What the relays are actually holding: `(session, sub_id) -> filter`,
+    /// built ONLY by applying emitted `WireDelta`s, never read from the plan.
+    type WireState = BTreeMap<(nmp_grammar::RelaySessionKey, SubId), ConcreteFilter>;
+
+    /// Apply `delta` to the wire model exactly as a relay would (NIP-01: a
+    /// REQ on an existing sub-id REPLACES that sub's filter; a CLOSE
+    /// withdraws it), then assert the wire and the plan agree.
+    ///
+    /// This is the sharp form of "nothing is silently dropped": a `WireReq`
+    /// that the plan holds but `diff_plans` never emitted -- the exact
+    /// failure mode of a non-injective id, where the delta's `BTreeMap`
+    /// keeps one of two colliding reqs -- shows up here as a plan entry with
+    /// no wire counterpart, on the compile it happens AND on every later one.
+    fn check(wire: &mut WireState, router: &Router, delta: &WireDelta, label: &str) {
+        for (session, ops) in &delta.ops {
+            for op in ops {
+                match op {
+                    WireOp::Close(sub_id) => {
+                        wire.remove(&(session.clone(), sub_id.clone()));
+                    }
+                    WireOp::Req(sub_id, filter) => {
+                        wire.insert((session.clone(), sub_id.clone()), filter.clone());
+                    }
+                }
+            }
+        }
+
+        let mut planned: WireState = BTreeMap::new();
         for (session, reqs) in &router.plan().reqs {
-            let ids: BTreeSet<_> = reqs.iter().map(|r| r.sub_id.clone()).collect();
-            assert_eq!(
-                ids.len(),
-                reqs.len(),
-                "{label}: {session:?} planned {} reqs under only {} tokens",
-                reqs.len(),
-                ids.len()
-            );
             let filters: BTreeSet<_> = reqs.iter().map(|r| r.filter.clone()).collect();
             assert_eq!(
                 filters.len(),
                 reqs.len(),
                 "{label}: {session:?} shipped byte-identical filters as separate reqs -- \
-                 no id scheme can distinguish those, the registry must have merged them"
+                 no id scheme can distinguish those, so the registry must have merged them"
             );
-            total += reqs.len();
+            for req in reqs {
+                assert!(
+                    planned
+                        .insert((session.clone(), req.sub_id.clone()), req.filter.clone())
+                        .is_none(),
+                    "{label}: {session:?} planned two reqs under one token {:?}",
+                    req.sub_id
+                );
+            }
         }
+
         assert_eq!(
-            count_reqs(delta),
-            total,
-            "{label}: a planned WireReq that never reaches the wire is silently dropped demand"
+            *wire, planned,
+            "{label}: the wire and the plan disagree -- a planned WireReq that never \
+             reached the wire is silently dropped demand"
         );
     }
 
@@ -801,19 +876,27 @@ fn same_id_implies_merged_or_the_assignment_kept_them_distinct() {
             RuleRegistry::dedup_only()
         };
         let mut router = Router::new(DiscoveryKinds::default(), rules);
+        let mut wire = WireState::new();
 
         let demand: BTreeSet<ContextualAtom> = with_author_siblings(first);
         let delta = router.compile(&demand, &dir, CAP);
-        check(&router, &delta, "first compile");
+        check(&mut wire, &router, &delta, "first compile");
 
         // A no-op recompile must emit nothing: zero-diff ranks first.
         let repeat = router.compile(&demand, &dir, CAP);
         prop_assert!(repeat.ops.is_empty(), "identical recompile must be a no-op");
+        check(&mut wire, &router, &repeat, "no-op recompile");
 
         // ... and injectivity must survive an arbitrary churn step, where the
         // assignment (not the id's content) is doing all the work.
         let churned: BTreeSet<ContextualAtom> = with_author_siblings(second);
         let delta = router.compile(&churned, &dir, CAP);
-        check(&router, &delta, "after churn");
+        check(&mut wire, &router, &delta, "after churn");
+
+        // Withdrawing everything must close every live subscription, leaving
+        // nothing stranded on the wire.
+        let drained = router.compile(&BTreeSet::new(), &dir, CAP);
+        check(&mut wire, &router, &drained, "after withdrawal");
+        prop_assert!(wire.is_empty(), "every subscription must have been closed");
     });
 }
