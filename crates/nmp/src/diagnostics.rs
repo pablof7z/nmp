@@ -40,8 +40,8 @@ pub struct FilterCoverageEntry {
 }
 
 impl FilterCoverageEntry {
-    fn from_engine(value: nmp_engine::core::FilterCoverageEntry) -> Self {
-        let nmp_engine::core::FilterCoverageEntry { filter, coverage } = value;
+    fn from_engine(value: crate::core::FilterCoverageEntry) -> Self {
+        let crate::core::FilterCoverageEntry { filter, coverage } = value;
         Self { filter, coverage }
     }
 }
@@ -99,11 +99,11 @@ pub struct RelayDiagnosticsSnapshot {
 }
 
 impl RelayDiagnosticsSnapshot {
-    fn from_engine(value: nmp_engine::core::RelayDiagnosticsSnapshot) -> Self {
+    fn from_engine(value: crate::core::RelayDiagnosticsSnapshot) -> Self {
         // Exhaustive destructure: a new engine diagnostics fact cannot be
         // silently dropped by this mirror — adding a field there breaks
         // this conversion until the mirror carries it too.
-        let nmp_engine::core::RelayDiagnosticsSnapshot {
+        let crate::core::RelayDiagnosticsSnapshot {
             relay,
             access,
             wire_sub_count,
@@ -179,8 +179,8 @@ pub struct AuthDiagnosticsSnapshot {
 }
 
 impl AuthDiagnosticsSnapshot {
-    fn from_engine(value: nmp_engine::core::AuthDiagnosticsSnapshot) -> Self {
-        let nmp_engine::core::AuthDiagnosticsSnapshot {
+    fn from_engine(value: crate::core::AuthDiagnosticsSnapshot) -> Self {
+        let crate::core::AuthDiagnosticsSnapshot {
             relay,
             access,
             transport_slot,
@@ -226,16 +226,16 @@ pub enum AuthDiagnosticsPhase {
 }
 
 impl AuthDiagnosticsPhase {
-    fn from_engine(value: nmp_engine::core::AuthDiagnosticsPhase) -> Self {
+    fn from_engine(value: crate::core::AuthDiagnosticsPhase) -> Self {
         match value {
-            nmp_engine::core::AuthDiagnosticsPhase::AwaitingChallenge => Self::AwaitingChallenge,
-            nmp_engine::core::AuthDiagnosticsPhase::AwaitingPolicy => Self::AwaitingPolicy,
-            nmp_engine::core::AuthDiagnosticsPhase::AwaitingSignature => Self::AwaitingSignature,
-            nmp_engine::core::AuthDiagnosticsPhase::AwaitingSend => Self::AwaitingSend,
-            nmp_engine::core::AuthDiagnosticsPhase::AwaitingRelayAck => Self::AwaitingRelayAck,
-            nmp_engine::core::AuthDiagnosticsPhase::Ready => Self::Ready,
-            nmp_engine::core::AuthDiagnosticsPhase::Denied => Self::Denied,
-            nmp_engine::core::AuthDiagnosticsPhase::Error => Self::Error,
+            crate::core::AuthDiagnosticsPhase::AwaitingChallenge => Self::AwaitingChallenge,
+            crate::core::AuthDiagnosticsPhase::AwaitingPolicy => Self::AwaitingPolicy,
+            crate::core::AuthDiagnosticsPhase::AwaitingSignature => Self::AwaitingSignature,
+            crate::core::AuthDiagnosticsPhase::AwaitingSend => Self::AwaitingSend,
+            crate::core::AuthDiagnosticsPhase::AwaitingRelayAck => Self::AwaitingRelayAck,
+            crate::core::AuthDiagnosticsPhase::Ready => Self::Ready,
+            crate::core::AuthDiagnosticsPhase::Denied => Self::Denied,
+            crate::core::AuthDiagnosticsPhase::Error => Self::Error,
         }
     }
 }
@@ -278,8 +278,8 @@ pub struct DiagnosticsSnapshot {
 }
 
 impl DiagnosticsSnapshot {
-    pub(crate) fn from_engine(value: nmp_engine::core::DiagnosticsSnapshot) -> Self {
-        let nmp_engine::core::DiagnosticsSnapshot {
+    pub(crate) fn from_engine(value: crate::core::DiagnosticsSnapshot) -> Self {
+        let crate::core::DiagnosticsSnapshot {
             relays,
             auth_sessions,
             uncovered_author_count,
@@ -315,9 +315,9 @@ mod tests {
     use super::*;
 
     fn engine_auth_session(
-        phase: nmp_engine::core::AuthDiagnosticsPhase,
-    ) -> nmp_engine::core::AuthDiagnosticsSnapshot {
-        nmp_engine::core::AuthDiagnosticsSnapshot {
+        phase: crate::core::AuthDiagnosticsPhase,
+    ) -> crate::core::AuthDiagnosticsSnapshot {
+        crate::core::AuthDiagnosticsSnapshot {
             relay: RelayUrl::parse("wss://auth.example.com").unwrap(),
             access: AccessContext::Nip42(
                 "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
@@ -344,7 +344,7 @@ mod tests {
     /// here rather than a silently dropped diagnostic fact.
     #[test]
     fn mirror_conversion_preserves_every_engine_fact_and_phase() {
-        use nmp_engine::core::AuthDiagnosticsPhase as EnginePhase;
+        use crate::core::AuthDiagnosticsPhase as EnginePhase;
         let phases = [
             (
                 EnginePhase::AwaitingChallenge,
@@ -378,8 +378,8 @@ mod tests {
         }
 
         let relay = RelayUrl::parse("wss://mirror.example.com").unwrap();
-        let engine = nmp_engine::core::DiagnosticsSnapshot {
-            relays: vec![nmp_engine::core::RelayDiagnosticsSnapshot {
+        let engine = crate::core::DiagnosticsSnapshot {
+            relays: vec![crate::core::RelayDiagnosticsSnapshot {
                 relay: relay.clone(),
                 access: AccessContext::Public,
                 wire_sub_count: 2,
@@ -392,14 +392,14 @@ mod tests {
                 filters: vec!["{\"kinds\":[9999]}".to_string()],
                 events_by_kind: vec![(9999, 3)],
                 coverage: vec![
-                    nmp_engine::core::FilterCoverageEntry {
+                    crate::core::FilterCoverageEntry {
                         filter: "proven".to_string(),
                         coverage: Some(CoverageInterval {
                             from: nostr::Timestamp::from(4),
                             through: nostr::Timestamp::from(9),
                         }),
                     },
-                    nmp_engine::core::FilterCoverageEntry {
+                    crate::core::FilterCoverageEntry {
                         filter: "unproven".to_string(),
                         coverage: None,
                     },
@@ -413,7 +413,7 @@ mod tests {
                 nip77_handoff: "reconciling",
             }],
             auth_sessions: vec![engine_auth_session(
-                nmp_engine::core::AuthDiagnosticsPhase::AwaitingRelayAck,
+                crate::core::AuthDiagnosticsPhase::AwaitingRelayAck,
             )],
             uncovered_author_count: 7,
             dropped_merge_rules: vec!["limit"],

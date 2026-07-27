@@ -72,7 +72,7 @@ impl Default for EngineConfig {
             fallback_relays: Vec::new(),
             allowed_local_relay_hosts: Vec::new(),
             max_relays: nmp_transport::DEFAULT_MAX_RELAYS,
-            max_auth_capabilities: nmp_engine::runtime::DEFAULT_MAX_AUTH_CAPABILITIES,
+            max_auth_capabilities: crate::runtime::DEFAULT_MAX_AUTH_CAPABILITIES,
         }
     }
 }
@@ -88,10 +88,8 @@ fn parse_relay_url(url: &str) -> Result<RelayUrl, EngineError> {
 /// to the secure default: a discovered private/loopback/onion relay is
 /// rejected. The runtime also threads this policy's normalized host set into
 /// the transport and NIP-11 resolved-IP guards.
-pub(crate) fn build_admission_policy(
-    config: &EngineConfig,
-) -> nmp_engine::core::RelayAdmissionPolicy {
-    nmp_engine::core::RelayAdmissionPolicy::new(config.allowed_local_relay_hosts.iter().cloned())
+pub(crate) fn build_admission_policy(config: &EngineConfig) -> crate::core::RelayAdmissionPolicy {
+    crate::core::RelayAdmissionPolicy::new(config.allowed_local_relay_hosts.iter().cloned())
 }
 
 pub(crate) fn build_directory(

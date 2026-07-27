@@ -5,7 +5,7 @@ REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$REPO"
 
 tree=$(cargo tree -p nmp-content -e normal --prefix none)
-for forbidden in nmp nmp-engine nmp-store nmp-router nmp-resolver nmp-transport; do
+for forbidden in nmp nmp-store nmp-router nmp-resolver nmp-transport; do
   if rg -q "^${forbidden} v" <<<"$tree"; then
     echo "error: nmp-content normal dependency tree contains forbidden engine/mechanism crate: $forbidden" >&2
     exit 1
