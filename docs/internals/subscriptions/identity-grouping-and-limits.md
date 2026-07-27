@@ -310,9 +310,22 @@ even drops the REQ**.
 This **violates the widen-only contract** — the single correctness property the
 whole module rests on. Events legitimately demanded are never requested.
 
-It survived because the property-test generator never pairs `None` with `Some`.
-`IdUnion` has the correct shape and refuses; the rules are mutually inconsistent
-on this point.
+It survived for **two** reasons, and the second is the subtler one:
+
+1. The property-test generator never paired `None` with `Some` — it built both
+   operands as `Some(non-empty)`, with `tags` always identical and empty.
+2. **A widening property over pairs no rule accepts is silently green.** Nothing
+   asserted that the rules ever *fired* during the run. A generator can drift
+   into producing only unmergeable pairs and the test still passes.
+
+The fix therefore carries **fire counters** as a hard failure: each rule must
+merge a minimum number of pairs per run (measured: AuthorUnion 17, KindUnion 23,
+IdUnion 20 per 256 cases). Vacuity is now a test failure, not a silent pass.
+
+`KindUnion` had the identical defect and `IdUnion` a narrower version of it
+(refusing `None` but accepting `Some(∅)`). All three now share one admission
+test. Notably the new generator found the `KindUnion` defect **unaided** — it was
+not written to look for it.
 
 ### 5.3 Tag fan-out exceeds relay limits (see §3.4, §6)
 
@@ -390,9 +403,40 @@ Two details are load-bearing:
 - **One component per tag NAME.** Tags are conjunctive across names, so
   `{#e:X}` and `{#p:Y}` must never merge — the result would demand both. Merging
   across tag *names* is a narrowing, not a widening.
-- **Refuse `None` vs `Some` on every axis.** This is the #900 fix, generalised. A
-  structural rule that preserved `AuthorUnion`'s `None` handling would ratify a
-  widening violation as the contract.
+- **Refuse an unconstrained operand on every axis.** This is the #900 fix,
+  generalised — but the *shape* of "unconstrained" differs per axis, and the
+  polarity on tags is **inverted**. See §3.5.
+
+### 3.5 What "unconstrained" means, per axis — MEASURED, counterintuitive
+
+Merging must refuse an operand that leaves the merged axis unconstrained,
+because unioning it away narrows the result. Which shapes are unconstrained is
+not uniform, and it is the opposite of what most readers assume.
+
+For `authors` / `kinds` / `ids`, **both** of these match every event:
+
+| shape | meaning |
+|---|---|
+| `None` | unconstrained |
+| `Some(∅)` | **also unconstrained** — `nostr`'s `match_event` treats an empty set as no constraint, NOT as "matches nothing" |
+
+So both must be refused. `Some(∅)` is constructible through the FFI option
+boundary, and it does **not** collide with `None` in `DescriptorHash` —
+`canonical_encoding` emits `null` versus `[]`.
+
+For **tags**, the polarity flips:
+
+| shape | meaning |
+|---|---|
+| tag name **absent** | unconstrained — matches everything |
+| tag name present with `∅` values | matches **nothing** — tagged and untagged events alike |
+
+So on tags the trap is folding an **absent** name into a present one; `{t: ∅}` is
+the harmless end. This is the reverse of the array axes, and it is why "refuse
+`None` vs `Some`" cannot be transplanted onto tags unexamined.
+
+Recorded because the structural rule (§7.1) has to get this right on four axes
+with two different polarities.
 
 ### 7.2 Identity: allocated ids, structural-signature matching
 
