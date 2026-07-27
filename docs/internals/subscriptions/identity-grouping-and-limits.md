@@ -687,18 +687,25 @@ stimulus (so "one more group" arrives after the first subscription is genuinely
 live), never to take an assertion.
 
 **It reaches further than the scenarios it was found on, and §6's own feature
-is in it.** Measured 2026-07-27 over six consecutive `cargo test -p nmp-bdd
---test bdd` runs on a branch carrying NO library changes: two runs red, four
-green. The failures were `relay "hub" is holding 1 subscription` in
-`features/routing/relay-subscription-limits.feature` ("A catalog of three
-hundred groups fits inside a limit of twenty"), reporting **2** live
-subscriptions where the end state holds 1, and `the subscriptions serving
-Alice are untouched` in `features/queries/reactive-follows.feature`. Same
-mechanism, same verdict: a transient second subscription exists between two
-compiles that did not group identically, the one-shot socket read lands in
-it, and the end state is correct. So the flake is a property of the harness's
-observation model rather than of any one feature — **a red run here is not
-evidence against the change under test until the same seed goes red twice.**
+is in it.** Measured 2026-07-27 over NINE completed `cargo test -p nmp-bdd
+--test bdd` runs on a branch carrying NO library changes: **three red, six
+green** — a third of runs, not an occasional blip. Two scenarios carry it:
+
+- `features/queries/reactive-follows.feature`, "Unfollowing one person
+  touches only that person's subscriptions" — red twice, on `the
+  subscriptions serving Alice and Bob are untouched`.
+- `features/routing/relay-subscription-limits.feature`, "A catalog of three
+  hundred groups fits inside a limit of twenty" — red once, reporting **2**
+  live subscriptions where the end state holds 1.
+
+Same mechanism, same verdict: a transient second subscription exists between
+two compiles that did not group identically, the one-shot socket read lands
+inside it, and the end state is correct every time. So the flake is a
+property of the harness's observation model rather than of any one feature —
+**a single red run here is not evidence against the change under test.** Note
+what the second scenario means for §6: the subscription-budget feature
+asserts a COUNT, which is exactly the quantity this interleaving perturbs, so
+it is structurally the most exposed assertion in the suite.
 
 ### 8.2 CLOSED — the Close/reopen straggler race (#932)
 
