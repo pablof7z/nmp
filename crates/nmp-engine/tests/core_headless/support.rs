@@ -1087,6 +1087,8 @@ fn all_row_deltas(effects: &[Effect]) -> Vec<&RowDelta> {
 
 #[path = "authentication.rs"]
 mod authentication;
+#[path = "derived_tag_fanout.rs"]
+mod derived_tag_fanout;
 #[path = "live_queries.rs"]
 mod live_queries;
 #[path = "negentropy.rs"]

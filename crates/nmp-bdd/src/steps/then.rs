@@ -5,12 +5,15 @@
 //! `relay_contacted`/`relay_untouched_since_snapshot`) -- never anything
 //! engine-internal.
 
+use std::collections::BTreeSet;
+
 use cucumber::then;
 
 use nmp_engine::outbox::WriteStatus;
 
-use crate::steps::parse_people;
+use crate::steps::{parse_people, parse_tag};
 use crate::world::NmpWorld;
+use nmp_test_support::relays::{WireRecord, WireReq};
 
 /// Parse the kind numbers a diagnostics filter's exact wire JSON asks for
 /// (`RelayDiagnosticsSnapshot::filters`/`FilterCoverageEntry::filter` are
@@ -269,5 +272,314 @@ async fn receipt_rejected_by(w: &mut NmpWorld, relay_name: String) {
     assert!(
         rejected,
         "expected the receipt to report rejected by {relay_name:?}"
+    );
+}
+
+// ---- wire subscription aggregation --------------------------------------
+//
+// A FIFTH observable channel, added for
+// `features/routing/subscription-collapse.feature`: the REQ/CLOSE frames NMP
+// actually put on a relay socket, decoded by the world's own scripted relay
+// (`relays::WireRecord`). It is deliberately NOT read out of engine
+// diagnostics -- the contract here is "what did the relay receive", and a
+// spec about wire economy must not take the thing under test as its witness.
+//
+// Every step below settles the wire first (`wire_settled`; see
+// `world::WIRE_QUIET`): each of these assertions is a COUNT, and a count read
+// while demand is still recompiling measures when it was taken, not the plan.
+
+/// The values `sub_id`'s CURRENT filter asks for under `tag`. NIP-01
+/// replacement means only a subscription's most recent REQ is live, so a
+/// value that was once asked for and has since been replaced away is
+/// correctly not counted.
+fn live_tag_values(record: &WireRecord, sub_id: &str, tag: char) -> BTreeSet<String> {
+    record
+        .latest_req_on(sub_id)
+        .map(|req| req.tag_values(tag))
+        .unwrap_or_default()
+}
+
+fn live_authors(record: &WireRecord, sub_id: &str) -> BTreeSet<String> {
+    record
+        .latest_req_on(sub_id)
+        .map(WireReq::authors)
+        .unwrap_or_default()
+}
+
+#[then(regex = r#"^relay "([^"]+)" serves every "([a-zA-Z])" watch with (\d+) subscriptions?$"#)]
+async fn relay_serves_tag_with_n_subscriptions(
+    w: &mut NmpWorld,
+    relay: String,
+    tag: String,
+    expected: usize,
+) {
+    w.wire_settled().await;
+    let tag = parse_tag(&tag);
+    let record = w.wire_record(&relay);
+    let ids = record.live_subscription_ids_naming_tag(tag);
+    assert_eq!(
+        ids.len(),
+        expected,
+        "relay {relay:?} is serving the #{tag} watches with {} live subscriptions, not \
+         {expected}: \
+         {} REQs carrying #{tag} arrived, each asking for {:?}",
+        ids.len(),
+        record.reqs_naming_tag(tag).len(),
+        record
+            .reqs_naming_tag(tag)
+            .iter()
+            .map(|r| r.tag_values(tag))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[then(
+    regex = r#"^one subscription on relay "([^"]+)" asks for every "([a-zA-Z])" value I watch$"#
+)]
+async fn one_subscription_carries_every_tag_value(w: &mut NmpWorld, relay: String, tag: String) {
+    w.wire_settled().await;
+    let tag = parse_tag(&tag);
+    let wanted = w.watched_tag_values(tag);
+    assert!(!wanted.is_empty(), "no #{tag} value is being watched");
+    let record = w.wire_record(&relay);
+    let carried: Vec<BTreeSet<String>> = record
+        .live_subscription_ids_naming_tag(tag)
+        .iter()
+        .map(|id| live_tag_values(&record, id, tag))
+        .collect();
+    assert!(
+        carried.iter().any(|values| values.is_superset(&wanted)),
+        "no single subscription on {relay:?} asks for all {} watched #{tag} values; \
+         the live subscriptions carry {carried:?}",
+        wanted.len()
+    );
+}
+
+#[then(
+    regex = r#"^every "([a-zA-Z])" value I watch is covered by some subscription on relay "([^"]+)"$"#
+)]
+async fn every_tag_value_is_covered(w: &mut NmpWorld, tag: String, relay: String) {
+    w.wire_settled().await;
+    let tag = parse_tag(&tag);
+    let wanted = w.watched_tag_values(tag);
+    let record = w.wire_record(&relay);
+    let covered: BTreeSet<String> = record
+        .live_subscription_ids()
+        .iter()
+        .flat_map(|id| live_tag_values(&record, id, tag))
+        .collect();
+    let missing: Vec<&String> = wanted.difference(&covered).collect();
+    assert!(
+        missing.is_empty(),
+        "{} watched #{tag} value(s) reach no live subscription on {relay:?} at all: {missing:?}",
+        missing.len()
+    );
+}
+
+#[then(
+    regex = r#"^no subscription on relay "([^"]+)" carries more than (\d+) "([a-zA-Z])" values$"#
+)]
+async fn no_subscription_exceeds_the_value_bound(
+    w: &mut NmpWorld,
+    relay: String,
+    bound: usize,
+    tag: String,
+) {
+    w.wire_settled().await;
+    let tag = parse_tag(&tag);
+    let record = w.wire_record(&relay);
+    for id in record.live_subscription_ids_naming_tag(tag) {
+        let carried = live_tag_values(&record, &id, tag).len();
+        assert!(
+            carried <= bound,
+            "a subscription on {relay:?} carries {carried} #{tag} values, over the bound of {bound}"
+        );
+    }
+}
+
+/// True iff some REQ on one of `ids` re-used an already-live subscription id
+/// -- the wire signature of a widen (or shrink) in place.
+fn widened_in_place(record: &WireRecord, ids: &[String]) -> bool {
+    record
+        .reqs
+        .iter()
+        .any(|req| req.replaces && ids.contains(&req.sub_id))
+}
+
+/// Which of `ids` the relay was asked to close. Scoped to the axis under
+/// test on purpose: a pinned demand also drives relay-list discovery of its
+/// authors, and THAT subscription is legitimately closed once it completes.
+/// A relay-wide "no CLOSE" assertion would intermittently catch it and make
+/// the author-axis regression guard flaky for a reason that has nothing to do
+/// with the contract.
+fn closes_among<'a>(record: &'a WireRecord, ids: &[String]) -> Vec<&'a String> {
+    record.closes.iter().filter(|id| ids.contains(id)).collect()
+}
+
+#[then(regex = r#"^relay "([^"]+)" widened the "([a-zA-Z])" subscription in place$"#)]
+async fn relay_widened_tag_in_place(w: &mut NmpWorld, relay: String, tag: String) {
+    w.wire_settled().await;
+    let tag = parse_tag(&tag);
+    let record = w.wire_record(&relay);
+    let ids = record.subscription_ids_naming_tag(tag);
+    assert!(
+        widened_in_place(&record, &ids),
+        "no REQ on {relay:?} ever re-used a live #{tag} subscription id -- nothing was \
+         widened in place; {} REQs opened {} distinct #{tag} subscriptions",
+        record.reqs_naming_tag(tag).len(),
+        ids.len()
+    );
+}
+
+#[then(regex = r#"^relay "([^"]+)" widened the author subscription in place$"#)]
+async fn relay_widened_authors_in_place(w: &mut NmpWorld, relay: String) {
+    w.wire_settled().await;
+    let record = w.wire_record(&relay);
+    let ids = record.subscription_ids_naming_authors();
+    assert!(
+        widened_in_place(&record, &ids),
+        "no REQ on {relay:?} ever re-used a live author subscription id -- nothing was \
+         widened in place; {} REQs opened {} distinct author subscriptions",
+        record.reqs_naming_authors().len(),
+        ids.len()
+    );
+}
+
+#[then(regex = r#"^relay "([^"]+)" was never asked to close a "([a-zA-Z])" subscription$"#)]
+async fn relay_closed_no_tag_subscription(w: &mut NmpWorld, relay: String, tag: String) {
+    w.wire_settled().await;
+    let tag = parse_tag(&tag);
+    let record = w.wire_record(&relay);
+    let closed = closes_among(&record, &record.subscription_ids_naming_tag(tag));
+    assert!(
+        closed.is_empty(),
+        "relay {relay:?} was asked to close {} #{tag} subscription(s) -- growing or \
+         shrinking a value set must replace a live subscription, never retire it",
+        closed.len()
+    );
+}
+
+#[then(regex = r#"^relay "([^"]+)" was never asked to close an author subscription$"#)]
+async fn relay_closed_no_author_subscription(w: &mut NmpWorld, relay: String) {
+    w.wire_settled().await;
+    let record = w.wire_record(&relay);
+    let closed = closes_among(&record, &record.subscription_ids_naming_authors());
+    assert!(
+        closed.is_empty(),
+        "relay {relay:?} was asked to close {} author subscription(s) -- growing or \
+         shrinking a value set must replace a live subscription, never retire it",
+        closed.len()
+    );
+}
+
+#[then(regex = r#"^relay "([^"]+)" was never asked for the same thing twice$"#)]
+async fn relay_never_asked_twice(w: &mut NmpWorld, relay: String) {
+    w.wire_settled().await;
+    let record = w.wire_record(&relay);
+    let redundant = record.redundant_reqs();
+    assert!(
+        redundant.is_empty(),
+        "relay {relay:?} received {} REQ(s) that re-sent a live subscription's filter \
+         unchanged -- the relay re-runs the query and re-streams its matches for nothing: {:?}",
+        redundant.len(),
+        redundant.iter().map(|r| &r.filters).collect::<Vec<_>>()
+    );
+}
+
+#[then(
+    regex = r#"^relay "([^"]+)" never received a request naming both "([a-zA-Z])" and "([a-zA-Z])"$"#
+)]
+async fn no_request_names_both_tags(w: &mut NmpWorld, relay: String, left: String, right: String) {
+    w.wire_settled().await;
+    let (left, right) = (parse_tag(&left), parse_tag(&right));
+    let record = w.wire_record(&relay);
+    for req in &record.reqs {
+        assert!(
+            !(req.names_tag(left) && req.names_tag(right)),
+            "a REQ on {relay:?} demands #{left} AND #{right} at once ({:?}); \
+             within one tag name a value list is a choice, but ACROSS tag names a \
+             filter is a conjunction -- such a merge matches neither original watch",
+            req.filters
+        );
+    }
+}
+
+#[then(regex = r#"^relay "([^"]+)" was never asked for everything of a kind$"#)]
+async fn relay_never_asked_unfiltered(w: &mut NmpWorld, relay: String) {
+    w.wire_settled().await;
+    let record = w.wire_record(&relay);
+    for req in &record.reqs {
+        assert!(
+            !req.narrows_by_kind_alone(),
+            "a REQ on {relay:?} narrows by kind alone -- an empty resolved set widened \
+             into 'send me everything': {:?}",
+            req.filters
+        );
+    }
+}
+
+#[then(regex = r#"^relay "([^"]+)" serves every author watch with (\d+) subscriptions?$"#)]
+async fn relay_serves_authors_with_n_subscriptions(
+    w: &mut NmpWorld,
+    relay: String,
+    expected: usize,
+) {
+    w.wire_settled().await;
+    let record = w.wire_record(&relay);
+    let ids = record.live_subscription_ids_naming_authors();
+    assert_eq!(
+        ids.len(),
+        expected,
+        "relay {relay:?} is serving the author watches with {} live subscriptions, not \
+         {expected}: \
+         {} REQs carrying authors arrived, each asking for {:?}",
+        ids.len(),
+        record.reqs_naming_authors().len(),
+        record
+            .reqs_naming_authors()
+            .iter()
+            .map(|r| r.authors().len())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[then(regex = r#"^one subscription on relay "([^"]+)" asks for every author I watch$"#)]
+async fn one_subscription_carries_every_author(w: &mut NmpWorld, relay: String) {
+    w.wire_settled().await;
+    let wanted = w.watched_authors();
+    assert!(!wanted.is_empty(), "no author is being watched");
+    let record = w.wire_record(&relay);
+    let carried: Vec<usize> = record
+        .live_subscription_ids()
+        .iter()
+        .map(|id| live_authors(&record, id).len())
+        .collect();
+    assert!(
+        record
+            .live_subscription_ids()
+            .iter()
+            .any(|id| live_authors(&record, id).is_superset(&wanted)),
+        "no single subscription on {relay:?} asks for all {} watched authors; \
+         the live subscriptions carry {carried:?} authors each",
+        wanted.len()
+    );
+}
+
+#[then(regex = r#"^every author I watch is covered by some subscription on relay "([^"]+)"$"#)]
+async fn every_author_is_covered(w: &mut NmpWorld, relay: String) {
+    w.wire_settled().await;
+    let wanted = w.watched_authors();
+    let record = w.wire_record(&relay);
+    let covered: BTreeSet<String> = record
+        .live_subscription_ids()
+        .iter()
+        .flat_map(|id| live_authors(&record, id))
+        .collect();
+    let missing: Vec<&String> = wanted.difference(&covered).collect();
+    assert!(
+        missing.is_empty(),
+        "{} watched author(s) reach no live subscription on {relay:?} at all: {missing:?} -- \
+         a demand was silently dropped, and nothing ever repairs it",
+        missing.len()
     );
 }
