@@ -268,7 +268,7 @@ final class FilterBuilderTests: XCTestCase {
                     sig: String(repeating: "e", count: 128)
                 ),
                 durability: .ephemeral,
-                routing: .toInboxes(recipients: [String(repeating: "f", count: 64)]),
+                routing: .authorOutbox,
                 identityOverride: nil,
                 correlation: nil
             )
@@ -286,7 +286,7 @@ final class FilterBuilderTests: XCTestCase {
             )
         )
         XCTAssertEqual(signed.durability, .ephemeral)
-        XCTAssertEqual(signed.routing, .toInboxes([String(repeating: "f", count: 64)]))
+        XCTAssertEqual(signed.routing, .authorOutbox)
         XCTAssertNil(signed.identityOverride)
         XCTAssertNil(signed.correlation)
 

@@ -51,8 +51,7 @@ sealed class WriteRouting {
     companion object {
         internal fun from(ffi: FfiWriteRouting): WriteRouting =
             when (ffi) {
-                is FfiWriteRouting.AuthorOutbox -> AuthorOutbox
-                is FfiWriteRouting.ToInboxes -> ToInboxes(ffi.recipients)
+                FfiWriteRouting.AUTHOR_OUTBOX -> AuthorOutbox
             }
     }
 }

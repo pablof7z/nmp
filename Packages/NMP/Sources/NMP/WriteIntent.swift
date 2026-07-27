@@ -45,7 +45,6 @@ public enum WriteRouting: Sendable, Hashable {
     init(_ ffi: FfiWriteRouting) {
         switch ffi {
         case .authorOutbox: self = .authorOutbox
-        case .toInboxes(let recipients): self = .toInboxes(recipients)
         }
     }
 }
