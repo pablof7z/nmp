@@ -12,12 +12,14 @@ default = []
 # into this thin integration layer.
 engine = ["dep:nmp"]
 
-# #63's dependency direction: optional nmp-nip29 -> nmp-nip51 (nmp-nip51
-# must contain no NIP-29 behavior; nmp-nip29 consumes its typed kind:10009
-# output transitively without claiming that schema). No router/resolver/
-# engine dependency in the default feature set, same discipline as nmp-nip51.
+# #858: nmp-nip29 does not depend on nmp-nip51 AT ALL. #63's ownership
+# boundary once read as "nip29 consumes nip51's typed output"; the only thing
+# it actually did with that output was rename its fields, so the wrapper is
+# gone and the dependency edge with it. An app decodes kind:10009 with
+# nmp-nip51 and hands the exact fields it selected (a host RelayUrl, a
+# group_id) to this crate's constructors. No router/resolver/engine
+# dependency in the default feature set, same discipline as nmp-nip51.
 [dependencies]
 nostr.workspace = true
 nmp-grammar.workspace = true
-nmp-nip51.workspace = true
 nmp = { workspace = true, optional = true }

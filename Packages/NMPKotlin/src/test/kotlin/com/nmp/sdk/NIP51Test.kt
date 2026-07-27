@@ -40,12 +40,27 @@ class NIP51Test {
         assertEquals(list, parseSimpleGroupsListTolerant(fabricatedRow(10009u)))
     }
 
+    @Test
+    fun activeAccountDemandTargetsKind10009() {
+        val demand = activeAccountDemand()
+        assertEquals(listOf<UShort>(10009u), demand.selection.kinds)
+    }
+
     /** Browsing a group takes a host the app explicitly supplies; the parsed
-     * value never becomes routing authority on its own. */
+     * value never becomes routing authority on its own.
+     *
+     * #858's Kotlin falsifier too: the selected [SimpleGroupEntry] feeds
+     * NIP-29's host-pinned constructors directly, field for field, with no
+     * NIP-29-owned copy of the NIP-51 value in between. */
     @Test
     fun groupBrowsingStillTakesAnExplicitlySuppliedHost() {
         val list = parseSimpleGroupsListTolerant(fabricatedRow(10009u))
-        val demand = groupDiscoveryDemand(list.items[0].hostRelay)
+        val selected = list.items[0]
+        val demand = groupDiscoveryDemand(selected.hostRelay)
         assertEquals(listOf<UShort>(39000u), demand.selection.kinds)
+
+        val content = groupContentDemand(selected.hostRelay, selected.groupId)
+        assertEquals(listOf<UShort>(9u, 30315u), content.selection.kinds)
+        assertEquals(demand.source, content.source)
     }
 }

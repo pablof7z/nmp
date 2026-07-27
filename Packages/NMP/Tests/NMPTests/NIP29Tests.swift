@@ -1,17 +1,11 @@
-// The read-only NIP-29 host-browser projection (#108) -- construction/
-// mapping tests only. No network: these are pure Demand constructors and
-// a pure decode.
+// The read-only NIP-29 host-browser projection (#108) -- construction tests
+// only. No network: these are pure Demand constructors. Decoding a
+// kind:10009 Simple-groups list is NIP-51's, and lives in NIP51Tests (#858).
 
 import XCTest
 @testable import NMP
-import NMPFFI
 
 final class NIP29Tests: XCTestCase {
-    func testActiveAccountDemandTargetsKind10009() {
-        let demand = NMP.activeAccountDemand()
-        XCTAssertEqual(demand.selection.kinds, [10009])
-    }
-
     func testGroupDiscoveryDemandPinsTheParsedHost() throws {
         let demand = try NMP.groupDiscoveryDemand(host: "wss://host-1.example.com")
         XCTAssertEqual(demand.selection.kinds, [39000])
@@ -33,22 +27,6 @@ final class NIP29Tests: XCTestCase {
     func testGroupContentDemandScopesByHTag() throws {
         let demand = try NMP.groupContentDemand(host: "wss://host-1.example.com", groupId: "group-a")
         XCTAssertEqual(demand.selection.kinds, [9, 30315])
-    }
-
-    func testDecodeRememberedGroupsComposesAKind10009Row() {
-        let row = Row(
-            FfiRow(
-                id: "id", pubkey: "pubkey", createdAt: 1, kind: 10009,
-                tags: [["group", "group-a", "wss://relay-a.example.com", "Group A"]],
-                content: "", sig: "sig", sources: []
-            )
-        )
-        let remembered = NMP.decodeRememberedGroups(row)
-        XCTAssertEqual(remembered.groups.count, 1)
-        XCTAssertEqual(remembered.groups[0].groupId, "group-a")
-        XCTAssertEqual(remembered.groups[0].host, "wss://relay-a.example.com")
-        XCTAssertEqual(remembered.groups[0].name, "Group A")
-        XCTAssertFalse(remembered.hasPrivateContent)
     }
 
     // MARK: - groupMessageIntent / publishComposed (#156)

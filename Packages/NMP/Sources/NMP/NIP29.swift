@@ -7,45 +7,14 @@
 // write-side counterpart. The app supplies semantic composer state; NMP owns
 // author/time/kind, NIP-27 mention materialization, `p`/reply-`e` tags, and
 // `h`/pinned-host composition.
+//
+// #858: nothing here re-labels NIP-51's value. A kind:10009 Simple-groups
+// list is decoded once, as itself, by `parseSimpleGroupsListTolerant(_:)` in
+// NIP51.swift; the app selects one `SimpleGroupEntry` and passes its exact
+// `hostRelay`/`groupId` to the constructors below. This file declares no
+// NIP-51 record type and no decode function of its own.
 
 import NMPFFI
-
-/// A remembered NIP-29 group reference (#108, `FfiGroupRef` mirror) --
-/// group id, host relay, and optional display name.
-public struct GroupRef: Sendable, Hashable {
-    public let groupId: String
-    public let host: String
-    public let name: String?
-
-    init(_ ffi: FfiGroupRef) {
-        groupId = ffi.groupId
-        host = ffi.host
-        name = ffi.name
-    }
-}
-
-/// The composed remembered-groups/host-relays value (#108,
-/// `FfiRememberedGroups` mirror) -- what `decodeRememberedGroups(_:)`
-/// returns from a delivered kind:10009 `Row`.
-public struct RememberedGroups: Sendable, Hashable {
-    public let groups: [GroupRef]
-    public let hostsInUse: [String]
-    public let hasPrivateContent: Bool
-
-    init(_ ffi: FfiRememberedGroups) {
-        groups = ffi.groups.map(GroupRef.init)
-        hostsInUse = ffi.hostsInUse
-        hasPrivateContent = ffi.hasPrivateContent
-    }
-}
-
-/// The signed-in account's remembered-groups demand (#108): `kinds:
-/// [10009]`, `AuthorOutboxes + Public`. Signed-out (no active account)
-/// resolves to zero rows through the ordinary reactive-binding empty-
-/// resolution path -- no special case needed on the caller's side.
-public func activeAccountDemand() -> NMPDemand {
-    NMPDemand(NMPFFI.activeAccountDemand())
-}
 
 /// Group discovery (kind:39000) pinned to `host` (#108). Throws
 /// `NMPError.invalidRelayUrl` if `host` doesn't parse.
@@ -60,17 +29,6 @@ public func groupContentDemand(host: String, groupId: String) throws -> NMPDeman
     try NMPDemand(
         nmpRethrowing { try NMPFFI.groupContentDemand(host: host, groupId: groupId) }
     )
-}
-
-/// Decode a delivered kind:10009 `Row` into the composed remembered-
-/// groups/host-relays value (#108). Infallible: malformed individual items
-/// are dropped internally, never the whole decode.
-public func decodeRememberedGroups(_ row: Row) -> RememberedGroups {
-    let ffiRow = FfiRow(
-        id: row.id, pubkey: row.pubkey, createdAt: row.createdAt, kind: row.kind,
-        tags: row.tags, content: row.content, sig: row.sig, sources: row.sources
-    )
-    return RememberedGroups(NMPFFI.decodeRememberedGroups(row: ffiRow))
 }
 
 /// A direct reply parent for a kind:9 group message. NMP turns this into the

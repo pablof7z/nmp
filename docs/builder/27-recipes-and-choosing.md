@@ -43,31 +43,39 @@ or any other feed policy to it.
 Apps and third-party packages may publish similar constructors over public
 values. A helper is not a new reactive primitive or hidden subscription.
 
-## Composed typed protocol queries
+## Composing across exact owners
 
-Some protocols reconstruct more than one raw event. A module may expose a
-typed live result while using ordinary demands underneath:
+Some app features span two protocols. They compose across module boundaries;
+they do not relabel one module's value inside another (#858):
 
 ```swift
-for await snapshot in nip29.observeRememberedGroups(using: engine) {
-    groups = snapshot.values
-    sourceFacts = snapshot.acquisition
-    shortfall = snapshot.shortfall
+for await snapshot in try engine.observe(activeAccountDemand()) {
+    // NIP-51 decodes its own kind:10009 list, as itself.
+    guard let list = snapshot.rows.first.map(parseSimpleGroupsListTolerant)
+    else { continue }
+    // The app selects one entry and browses its host with NIP-29.
+    guard let selected = list.items.first else { continue }
+    let content = try groupContentDemand(
+        host: selected.hostRelay, groupId: selected.groupId
+    )
 }
 ```
 
-This surface composes two exact owners:
+Two exact owners, no wrapper between them:
 
 - NIP-51 owns kind `10009` Simple groups, including its public/private list
-  codec, replacement construction, and typed list entries.
-- NIP-29 consumes those typed entries and adds NIP-29-facing group references
-  and host-scoped operations. It claims neither kind `10009` nor kind `30002`.
+  codec, replacement construction, and typed list entries — plus every
+  evidence field on the decode (malformed item count, private content).
+- NIP-29 owns its group metadata, membership, role, and moderation schemas and
+  its host-scoped operations. It accepts the exact fields an operation needs (a
+  host, a group id) and claims neither kind `10009` nor kind `30002`. It does
+  not depend on the NIP-51 package at all.
 
 The underlying kind `10009` demand is rooted at current pubkey and acquired
 through user-list authority, never through the currently selected group host.
-The selected group remains app state. Enabling the NIP-29 package may bring the
-NIP-51 codec transitively; that dependency does not transfer schema ownership.
-Neither module maintains a parallel cache or subscription lifecycle.
+The selected group remains app state. Neither module maintains a parallel
+cache, a second projection of the other's value, or its own subscription
+lifecycle.
 
 ## Semantic operations
 

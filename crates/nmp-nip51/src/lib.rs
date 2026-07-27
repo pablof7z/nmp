@@ -1,8 +1,9 @@
 //! `nmp-nip51` -- the exclusive schema owner, codec, and query home for
 //! NIP-51 kind:10009 (Simple groups list, #63/#108). No NIP-29 behavior
-//! lives here (#63's ownership boundary): `nmp-nip29` is the optional,
-//! one-directional consumer of this crate's typed output, never the other
-//! way around.
+//! lives here (#63's ownership boundary), and since #858 nothing wraps this
+//! crate's value either: `nmp-nip29` does not depend on `nmp-nip51`. An app
+//! decodes the list here and passes the exact fields it selected (a host
+//! `RelayUrl`, a `group_id`) into NIP-29's host-pinned demand constructors.
 //!
 //! Read/parse-only in this crate today: `rememberGroup`/`forgetGroup`
 //! replacement-write encoding stays gated on #50's source-scoped

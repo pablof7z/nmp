@@ -13,8 +13,8 @@ use nmp_grammar::{Binding, Demand, Filter, IdentityField};
 ///
 /// Signed-out (no active pubkey) resolves this to zero atoms through the
 /// ordinary `Reactive(ActivePubkey)` empty-resolution path (#106) -- no
-/// special case needed here; see the `nmp-nip29` crate's own test proving
-/// that reroot/reconstruct behavior end to end.
+/// special case needed here; `nmp-engine/tests/nip51_headless.rs` proves
+/// that signed-out/reroot/reconstruct behavior end to end.
 pub fn active_account_demand() -> Demand {
     Demand::from_filter(Filter {
         kinds: Some(BTreeSet::from([10009u16])),
