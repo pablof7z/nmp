@@ -29,18 +29,17 @@ NIP-22 `publishComposed`, or take-once lifecycle.
 
 ## NIP-29 groups
 
-NIP-29 helpers provide group discovery/content demand and remembered-group
-decoding. The live group-message path uses a pinned-host
-`FfiComposedWriteIntent` / `GroupSendIntent` and `publishComposed`; that
-parallel noun and lifecycle are architecturally unsound and pending #838's
-protocol-ownership correction. Do not use them as a model for new protocol work. The target is a
-protocol-owned immutable composer returning the ordinary `WriteIntent`, with
-non-forgeable payload-bound host authority and generic publication.
+Swift/Kotlin currently project only `groupDiscoveryDemand(host)`. NIP-29 does
+not supply a fixed group-content kind catalog: the app selects the independently
+enabled schema kinds and builds an ordinary `NMPDemand` scoped by `h` and a
+pinned source. Direct Rust additionally has pure
+`contextualize_group_event(host, groupId, completeDraft)`, which preserves the
+foreign schema and returns `GroupPublication`; this is not yet an
+engine-routable or native publication operation.
 
-Kotlin's current call map is `groupContentDemand(host, groupId)` -> `NMPDemand`, `engine.observe(demand)` -> cold timeline flow, `NMPContentClient(engine).session(...)` -> `NostrContentSession`, and `session.claim(...)` -> closeable `NostrContentClaim` for a parsed reference. Close claims before their session. For signer handoff use `engine.nip46Invitation(...)`, derive and cache `invitation.androidHandoff(signer)` while the invitation is still live, then call `engine.connectNip46(...)`, start state collection, and launch the cached explicit handoff. Wait for `Ready`, activate that user pubkey before unsigned writes, and close the exact connection.
-
-While #838 remains open, the live composed group intent is take-once. That is
-current behavior to account for, not an accepted design contract.
+`nmp-nipc7` independently owns pure kind:9 chat and `q` replies. It does not
+materialize mentions, notification `p` rows, NIP-29 `h`, or routing. No
+Swift/Kotlin C7 projection is claimed yet.
 
 ## NIP-46 and local signers
 

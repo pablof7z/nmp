@@ -2111,7 +2111,6 @@ dependencies = [
  "nmp-executor",
  "nmp-grammar",
  "nmp-network-policy",
- "nmp-nip29",
  "nmp-nip51",
  "nmp-resolver",
  "nmp-router",
@@ -2209,7 +2208,6 @@ dependencies = [
 name = "nmp-nip29"
 version = "0.1.0"
 dependencies = [
- "nmp",
  "nmp-grammar",
  "nostr 0.44.4",
 ]
@@ -2248,6 +2246,13 @@ version = "0.1.0"
 dependencies = [
  "nmp-asset",
  "nmp-blossom",
+ "nostr 0.44.4",
+]
+
+[[package]]
+name = "nmp-nipc7"
+version = "0.1.0"
+dependencies = [
  "nostr 0.44.4",
 ]
 

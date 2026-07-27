@@ -207,14 +207,6 @@ pub enum FfiError {
     /// two competing row ceilings (`nmp::EngineError::WindowSelectionHasLimit`
     /// mirror).
     WindowSelectionHasLimit,
-    /// #156: `NmpEngine::group_message_intent` requires an active account
-    /// because NMP, not the native caller, owns the unsigned event author.
-    NoActiveAccount,
-    /// #115: `NmpEngine::publish_composed` was called a second time on the
-    /// same `FfiComposedWriteIntent` handle -- it is take-once by design
-    /// (recompose via `group_message_intent` again is the correct retry path,
-    /// since NMP-owned event time must refresh).
-    IntentAlreadyConsumed,
     /// NIP-11 acquisition failed before any last-good document existed. Every
     /// `nmp::RelayInformationError` variant carries here as a typed
     /// `FfiRelayInformationErrorKind` instead of collapsing to a message
@@ -377,10 +369,6 @@ impl std::fmt::Display for FfiError {
             Self::WindowSelectionHasLimit => {
                 write!(f, "a windowed selection must not also declare a limit")
             }
-            Self::NoActiveAccount => write!(f, "group messages require an active account"),
-            Self::IntentAlreadyConsumed => {
-                write!(f, "this composed write intent was already published once")
-            }
             Self::RelayInformationUnavailable { kind } => {
                 write!(f, "relay information unavailable: {kind:?}")
             }
@@ -521,15 +509,6 @@ impl From<GDemandError> for FfiError {
                 Self::AuthorOutboxesRequiresBoundAuthors
             }
             GDemandError::PinnedRequiresNonemptyRelaySet => Self::EmptyPinnedRelaySet,
-        }
-    }
-}
-
-impl From<nmp_nip29::GroupMessageError> for FfiError {
-    fn from(err: nmp_nip29::GroupMessageError) -> Self {
-        match err {
-            nmp_nip29::GroupMessageError::Engine(error) => error.into(),
-            nmp_nip29::GroupMessageError::SignedOut => Self::NoActiveAccount,
         }
     }
 }
@@ -1787,15 +1766,13 @@ pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, Ffi
     // here -- see that (deleted) variant's removal note in `types.rs`. A
     // `WriteRouting::PrivateNarrow` intent is still constructible from
     // direct Rust (`nmp::WriteRouting::PrivateNarrow`), just not from raw
-    // FFI-supplied relay-URL strings. #115: `WriteRouting::PinnedHost`
-    // gets the identical treatment -- `FfiWriteRouting` has no matching
-    // variant at all. #839 also removes the former raw-recipient arm:
+    // FFI-supplied relay-URL strings. #838 deletes the former pinned-host
+    // write route rather than projecting it through a generic app-facing
+    // escape hatch. #839 also removes the former raw-recipient arm:
     // recipient semantics must be fixed by a protocol-owned operation
     // together with its complete body, never supplied beside an
     // independently constructed event. This single-variant match is the
-    // enforcement; an app can only reach a pinned-host write transitively
-    // through `NmpEngine::group_message_intent`'s opaque
-    // `FfiComposedWriteIntent`, never through this conversion path.
+    // enforcement.
     let routing = match intent.routing {
         FfiWriteRouting::AuthorOutbox => GWriteRouting::AuthorOutbox,
     };

@@ -118,16 +118,6 @@ sealed class NMPError(message: String) : Exception(message) {
     object WindowSelectionHasLimit :
         NMPError("windowed selection must not also declare a limit")
 
-    /** #156: `groupMessageIntent` has no active account from which NMP can
-     * derive the unsigned event author. */
-    object NoActiveAccount : NMPError("group messages require an active account")
-
-    /** #115: `publishComposed` was called a second time on the same
-     * `GroupSendIntent` -- it is take-once by design (call
-     * `groupMessageIntent` again for a retry). */
-    object IntentAlreadyConsumed :
-        NMPError("this composed write intent was already published once")
-
     data class RelayInformationUnavailable(val kind: RelayInformationErrorKind) :
         NMPError("relay information unavailable: ${kind.describe()}")
 
@@ -177,8 +167,6 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.WindowInitialExceedsMax ->
                     WindowInitialExceedsMax(ffi.initial, ffi.max)
                 is FfiException.WindowSelectionHasLimit -> WindowSelectionHasLimit
-                is FfiException.NoActiveAccount -> NoActiveAccount
-                is FfiException.IntentAlreadyConsumed -> IntentAlreadyConsumed
                 is FfiException.RelayInformationUnavailable ->
                     RelayInformationUnavailable(RelayInformationErrorKind.from(ffi.kind))
                 is FfiException.InvalidCorrelationToken ->

@@ -39,7 +39,7 @@ Everything below is shipped and tested; this spec extends it, it does not replac
 | Per-relay REQ partitioning, skeleton-stable `SubId` (author churn = one overwriting REQ), full-recompile-then-surgical-diff | `plan.rs`, `router.rs` |
 | Read-side typed provenance: every `WireReq` carries `Vec<RouteProvenance>` (relay, lane, covered authors, `OutboxSolved`\|`Pinned`) — no wire REQ without a traceable route | `route.rs::RouteProvenance` |
 | Self-bootstrapping outbox: `sync_discovery` opens a widen-only internal kind:10002 sub against indexers for authors with unknown write relays (wave 2 supersession) | `core/mod.rs::sync_discovery` |
-| Write outbox: durable `WriteIntent` → `WriteStatus` stream; app-facing routing is `AuthorOutbox` only; closed protocol operations can mint withheld `PrivateNarrow`, `PinnedHost`, or relay-list bootstrap routes; `NarrowOnly<T>` has no widen operation | `outbox/mod.rs`, `core/mod.rs::resolve_routes` |
+| Write outbox: durable `WriteIntent` → `WriteStatus` stream; app-facing routing is `AuthorOutbox` only; closed protocol operations can mint withheld `PrivateNarrow` or relay-list bootstrap routes; `NarrowOnly<T>` has no widen operation | `outbox/mod.rs`, `core/mod.rs::resolve_routes` |
 | Diagnostics: per-relay sub counts, by-lane counts, reverse coverage, exact filters, uncovered authors, dropped rules | `diag.rs` |
 
 Known deviations this spec resolves: the solver counts indexer/extra candidates toward the 2-min; there is no app-relay or fallback-relay concept; write routing is caller-chosen rather than policy-derived; no per-kind override seam; no kind-ownership boundary. The former generic recipient-routing deviation was removed outright by #839 rather than repaired.

@@ -14,10 +14,9 @@
 //! vocabulary + the structural mechanisms (§3.4, VISION §7 ledger #6/#9).
 //!
 //! #115 Fable ruling (Fork 3): `Durability`/`WritePayload`/`WriteIntent`/
-//! `WriteRouting`/`NarrowOnly`/`PrivateRoute`/`HostAuthority` relocated to
-//! `nmp-grammar` — a protocol module composing a `WriteIntent` (e.g.
-//! `nmp-nip29::compose_group_send`) must not gain an engine dependency to
-//! do so. `WriteStatus`/`Receipt`/`ReceiptSink` stay here: they reference
+//! `WriteRouting`/`NarrowOnly`/`PrivateRoute` relocated to `nmp-grammar` so a
+//! protocol module composing a `WriteIntent` does not gain an engine
+//! dependency. `WriteStatus`/`Receipt`/`ReceiptSink` stay here: they reference
 //! [`crate::core::ReceiptId`] and are runtime EVIDENCE an app only ever
 //! reads back, never intent vocab it constructs.
 

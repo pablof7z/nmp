@@ -50,35 +50,33 @@ Goal: show identity metadata and authored content without creating an app cache 
 
 This deliberately avoids a magic `loadProfileAndPosts` noun. NMP exposes composable live queries; the app owns the screen composition.
 
-## Pinned-host group timeline
+## NIP-29 group discovery and schema-owned timelines
 
-Goal: read and write one NIP-29 group without widening its host authority.
+Goal: discover groups on one host without letting NIP-29 invent a content
+catalog it does not own.
 
 The live read shape is:
 
 ```text
-groupContentDemand(host, groupId)
-engine.observe(demand)
-```
+groupDiscoveryDemand(host)
+engine.observe(discoveryDemand)
 
-The live write shape (`engine.groupMessageIntent` →
-`GroupSendIntent` → `publishComposed`) is an unsound extra noun and lifecycle,
-not a recipe to copy; #838 supersedes #823 and owns its removal. The target write shape, which is
-not yet available at this revision, is a protocol-owned immutable composer
-returning the ordinary `WriteIntent`, followed by generic `engine.publish`.
+# For content, the app selects its enabled schema kinds and builds an ordinary
+# h-scoped demand with SourceAuthority.pinned(host).
+```
 
 Rules:
 
 - Treat `(host, groupId)` as the group identity. Do not union events with the same group id from another relay.
-- Pinned authority must be non-forgeable and payload-bound inside the ordinary
-  write noun. Do not replace it with a generic filter plus app relay list.
+- The discovery helper returns pinned read authority.
+- Content kinds are selected by their real schema owners/app composition;
+  NIP-29 has no fixed `[9,30315]` catalog.
 - Sort the accumulated rows in the app. Preserve each row's source proof and the query evidence.
-- The protocol composer derives active author and time, protocol tags,
-  reply/recipient rows, previous-state provenance, and pinned routing. Do not
-  hand-build those fields in Swift/Kotlin.
-- Do not build around the current take-once wrapper; it is part of the #838
-  defect, not a lifecycle contract.
-- Keep the receipt id and observe all relay outcomes. One ACK is not universal delivery.
+- Direct Rust may build a complete foreign draft, then call
+  `nmp_nip29::contextualize_group_event`; NIP-29 adds only `h` and retains the
+  host. It emits no `previous`.
+- No engine/native NIP-29 group-publication operation is shipped yet. Do not
+  recreate the deleted composer from raw tags or generic routing.
 
 For rich rendering, use Swift `NMPContent` resources or Kotlin `NMPContentClient(engine).session(...) -> NostrContentSession` for only a bounded visible-plus-prefetch window keyed by stable event id. Session policy limits are per session, not engine-global. Enforce a separate aggregate app permit pool before claiming a distinct target: use the reference-demand plan's `1 + helpers.count` as that target's query cost (one canonical query plus its helper queries), and cap the number of open row sessions independently. `claim(referenceID:)` in Swift / `claim(referenceId)` in Kotlin accepts an occurrence id from that session's parsed document and may return `nil`/`null`; it is not a row id or target key. Record the permits with the claim, then cancel/close claims and release their permits before stopping/closing the row's session on eviction.
 
@@ -141,7 +139,9 @@ Goal: connect a remote signer without treating OS launch as readiness.
 1. Create an invitation and derive/cache its signer-specific URI or Android handoff while the invitation is still live. Invitation connection consumes it, so materializing the handoff afterward fails. Then begin `connectNip46`, start state observation, and only then launch the cached handoff.
 2. On iOS, query only declared schemes. On Android, use the exact package from `androidHandoff` and launch explicitly to that package.
 3. Observe connection states and wait for `ready`; a successful `open`/`startActivity` is only handoff evidence.
-4. Activate `ready`'s user pubkey with `setActiveAccount` before an unsigned operation such as `groupMessageIntent`. Signer registration does not select the active account.
+4. Activate `ready`'s user pubkey with `setActiveAccount` before publishing an
+   unsigned write that uses the active-account contract. Signer registration
+   does not select the active account.
 5. NIP-46 connection has no capacity or thread refusal; a genuine relay/session setup failure returns a typed `NMPNip46Failure`/`Nip46Error` with no returned handle. After a handle exists, inner session/relay failure arrives as streamed `failed(reason)`/`Failed` followed by closure; do not relabel it as a timeout or reconstruct a typed error from the reason.
 6. Keep the exact returned connection as the ownership token and close it deterministically. Closing an older replaced registration must not detach a newer one.
 7. Never log invitation secrets, bunker credentials, or full handoff URIs.

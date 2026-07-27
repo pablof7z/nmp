@@ -90,14 +90,6 @@ public enum NMPError: Error, Sendable, Equatable {
     /// second, competing bound on the wire filter is refused rather than
     /// silently reconciled.
     case windowSelectionHasLimit
-    /// #156: `groupMessageIntent` has no active account from which NMP can
-    /// derive the unsigned event author.
-    case noActiveAccount
-    /// #115: `publishComposed` was called a second time on the same
-    /// `GroupSendIntent` -- it is take-once by design (call
-    /// `groupMessageIntent` again for a retry, since NMP-owned time and
-    /// couriered evidence should refresh anyway).
-    case intentAlreadyConsumed
     /// No last-good NIP-11 document exists and acquisition failed.
     case relayInformationUnavailable(RelayInformationErrorKind)
     /// #591: `WriteIntent.correlation`/`reattachReceipt(correlation:)` was
@@ -147,8 +139,6 @@ public enum NMPError: Error, Sendable, Equatable {
         case .WindowInitialExceedsMax(let initial, let max):
             self = .windowInitialExceedsMax(initial: initial, max: max)
         case .WindowSelectionHasLimit: self = .windowSelectionHasLimit
-        case .NoActiveAccount: self = .noActiveAccount
-        case .IntentAlreadyConsumed: self = .intentAlreadyConsumed
         case .RelayInformationUnavailable(let kind):
             self = .relayInformationUnavailable(RelayInformationErrorKind(kind))
         case .InvalidCorrelationToken(let got, let reason):
@@ -235,10 +225,6 @@ extension NMPError: LocalizedError {
             "Window initial \(initial) exceeds max \(max)"
         case .windowSelectionHasLimit:
             "A windowed selection must not also declare a limit"
-        case .noActiveAccount:
-            "Group messages require an active account"
-        case .intentAlreadyConsumed:
-            "This composed write intent was already published once"
         case .relayInformationUnavailable(let kind):
             "Relay information unavailable: \(kind)"
         case .invalidCorrelationToken(let got, let reason):

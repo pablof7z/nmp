@@ -37,7 +37,7 @@ uniffi = { workspace = true, features = ["cli"] }
 # as `nmp-grammar` itself gets here.
 nmp-nip51.workspace = true
 nmp-nip02.workspace = true
-nmp-nip29 = { workspace = true, features = ["engine"] }
+nmp-nip29.workspace = true
 # #572: typed NIP-22 comments over NIP-73 external targets. Engine-free
 # (no `engine` feature exists on nmp-nip22 at all -- `comment_intent` takes
 # its author explicitly), same direct-dep bundling treatment as

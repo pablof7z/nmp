@@ -573,7 +573,9 @@ mod history_mutation_tests {
                     expected_base: Some(predecessor.id),
                 },
                 durability: Durability::Durable,
-                routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay)),
+                routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                    relays: NarrowOnly::new([relay]),
+                }),
                 identity_override: None,
                 correlation: None,
             },
