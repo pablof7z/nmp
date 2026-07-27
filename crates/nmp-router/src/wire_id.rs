@@ -38,7 +38,7 @@ use std::collections::BTreeSet;
 
 use nmp_grammar::{ConcreteFilter, DescriptorHash};
 
-use crate::component::{differing, Component};
+use crate::component::{sole_difference, Component};
 use crate::plan::SubId;
 
 /// The ordering key that picks ONE prior when several are a one-component
@@ -145,11 +145,10 @@ pub(crate) fn assign(
             if taken[p] {
                 continue;
             }
-            let diff = differing(prior_filter, &next[i]);
-            let [component] = diff.as_slice() else {
+            let Some(component) = sole_difference(prior_filter, &next[i]) else {
                 continue;
             };
-            let (overlap, distance) = affinity(component, prior_filter, &next[i]);
+            let (overlap, distance) = affinity(&component, prior_filter, &next[i]);
             let key = (Reverse(overlap), distance, prior_filter.hash(), prior_sub);
             if best.as_ref().is_none_or(|(_, best_key)| &key < best_key) {
                 best = Some((p, key));

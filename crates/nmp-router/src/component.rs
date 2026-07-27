@@ -124,6 +124,82 @@ pub(crate) fn differing(a: &ConcreteFilter, b: &ConcreteFilter) -> Vec<Component
     out
 }
 
+/// The ONE component `a` and `b` differ in — `None` when they agree entirely
+/// or disagree in more than one.
+///
+/// This is what both production callers actually want, and it SHORT-CIRCUITS
+/// on the second difference where [`differing`] builds the whole list. That
+/// matters: the merge path calls this O(n²) times per compile, the router
+/// recompiles the entire plan on every demand mutation (never incrementally),
+/// and a catalog resolving one value at a time therefore pays a fresh
+/// all-pairs sweep per value. Returning a heap-allocated `Vec` for a question
+/// usually settled by the second field was pure overhead — and it is overhead
+/// the collapse itself created, since before the union rule spanned four axes
+/// most of these pairs were rejected by a cheap field comparison.
+///
+/// [`differing`] stays as the exhaustive form: it is the readable statement of
+/// the model, it is what the tests assert against ("these two filters differ
+/// in TWO components"), and `sole_difference_agrees_with_differing` pins the
+/// two to each other so the fast path cannot drift from the definition.
+pub(crate) fn sole_difference(a: &ConcreteFilter, b: &ConcreteFilter) -> Option<Component> {
+    let ConcreteFilter {
+        kinds: a_kinds,
+        authors: a_authors,
+        ids: a_ids,
+        tags: a_tags,
+        since: a_since,
+        until: a_until,
+        limit: a_limit,
+    } = a;
+    let ConcreteFilter {
+        kinds: b_kinds,
+        authors: b_authors,
+        ids: b_ids,
+        tags: b_tags,
+        since: b_since,
+        until: b_until,
+        limit: b_limit,
+    } = b;
+
+    let mut found: Option<Component> = None;
+    // Two differences is already an answer, so every check below bails out
+    // rather than continuing to classify.
+    let mut record = |component: Component, differs: bool| -> bool {
+        if !differs {
+            return true;
+        }
+        if found.is_some() {
+            return false;
+        }
+        found = Some(component);
+        true
+    };
+
+    if !record(Component::Since, a_since != b_since)
+        || !record(Component::Until, a_until != b_until)
+        || !record(Component::Kinds, a_kinds != b_kinds)
+        || !record(Component::Authors, a_authors != b_authors)
+        || !record(Component::Ids, a_ids != b_ids)
+        || !record(Component::Limit, a_limit != b_limit)
+    {
+        return None;
+    }
+    // Tag names: the UNION of both sides' keys, since a name only one side
+    // carries is itself a difference. Walked over the two `BTreeMap`s rather
+    // than collected into a set, so this allocates nothing -- `b`'s keys are
+    // filtered to those `a` does not carry, or a shared differing name would
+    // be counted twice and read as two components.
+    for name in a_tags
+        .keys()
+        .chain(b_tags.keys().filter(|name| !a_tags.contains_key(*name)))
+    {
+        if !record(Component::Tag(*name), a_tags.get(name) != b_tags.get(name)) {
+            return None;
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,5 +303,93 @@ mod tests {
         let mut b = cf();
         b.tags = tag('p', &["y"]);
         assert_eq!(differing(&a, &b).len(), 2);
+    }
+
+    /// The fast path and the definition must agree on every pair, or the
+    /// short-circuit has silently become its own model of what a component
+    /// is. Exhaustive over a small filter space rather than sampled: the
+    /// space of interest is SHAPES (absent / empty / present, one tag name /
+    /// two / shared), and enumerating it leaves nothing to a generator's
+    /// luck.
+    #[test]
+    fn sole_difference_agrees_with_differing() {
+        let sets: [Option<BTreeSet<u16>>; 4] = [
+            None,
+            Some(BTreeSet::new()),
+            Some(BTreeSet::from([1])),
+            Some(BTreeSet::from([1, 2])),
+        ];
+        let scalars = [None, Some(1u64), Some(2u64)];
+        let tag_shapes: [BTreeMap<IndexedTagName, BTreeSet<String>>; 5] = [
+            BTreeMap::new(),
+            tag('e', &[]),
+            tag('e', &["x"]),
+            tag('p', &["y"]),
+            {
+                let mut both = tag('e', &["x"]);
+                both.extend(tag('p', &["y"]));
+                both
+            },
+        ];
+
+        let mut filters: Vec<ConcreteFilter> = Vec::new();
+        for kinds in &sets {
+            for since in &scalars {
+                for tags in &tag_shapes {
+                    filters.push(ConcreteFilter {
+                        kinds: kinds.clone(),
+                        since: *since,
+                        tags: tags.clone(),
+                        ..ConcreteFilter::default()
+                    });
+                }
+            }
+        }
+        assert!(
+            filters.len() > 50,
+            "the enumerated space must be non-trivial"
+        );
+
+        let mut agreed_on_one = 0usize;
+        for a in &filters {
+            for b in &filters {
+                let expected = match differing(a, b).as_slice() {
+                    [only] => Some(only.clone()),
+                    _ => None,
+                };
+                assert_eq!(
+                    sole_difference(a, b),
+                    expected,
+                    "the short-circuit disagrees with the full difference set\n                       a = {a:?}\n  b = {b:?}\n  differing = {:?}",
+                    differing(a, b)
+                );
+                if expected.is_some() {
+                    agreed_on_one += 1;
+                }
+            }
+        }
+        assert!(
+            agreed_on_one > 0,
+            "no enumerated pair differed in exactly one component -- the \
+             agreement is vacuous"
+        );
+    }
+
+    /// The specific trap the short-circuit invites: a tag name present on
+    /// BOTH sides with different values must count ONCE. Walking
+    /// `a.tags.keys().chain(b.tags.keys())` without filtering visits it
+    /// twice, which reads as two components and refuses a merge that should
+    /// have happened -- silently, since over-refusing is never a correctness
+    /// failure, only a missed collapse.
+    #[test]
+    fn a_shared_tag_name_with_different_values_counts_once() {
+        let mut a = cf();
+        a.tags = tag('d', &["group-1"]);
+        let mut b = cf();
+        b.tags = tag('d', &["group-2"]);
+        assert_eq!(
+            sole_difference(&a, &b),
+            Some(Component::Tag(IndexedTagName::new('d').unwrap()))
+        );
     }
 }

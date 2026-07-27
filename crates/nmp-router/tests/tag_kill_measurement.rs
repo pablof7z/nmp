@@ -240,11 +240,21 @@ fn tag_axis_stays_within_relay_subscription_limits_once_coalesced() {
     );
 }
 
-/// What the fix has to achieve, stated as arithmetic rather than prose: at
+/// The HEADROOM this catalog has, stated as arithmetic rather than prose: at
 /// `MAX_TAG_VALUES_PER_FILTER`, a catalog this size needs a handful of
 /// subscriptions per host, not one per group.
+///
+/// NOTE THE ARITHMETIC IS A FLOOR, NOT THE PACKING MODEL. `⌈n/cap⌉` is the
+/// fewest filters that could carry `n` values; the coalescer is a greedy
+/// pairwise fixed point and does not promise to reach it (see
+/// `docs/internals/subscriptions/identity-grouping-and-limits.md` §3.3 --
+/// 1200 values at a 500 cap produce four filters, not three). It happens to
+/// reach it here because 300 fits in one filter, and the test above measures
+/// that directly rather than inferring it. What this test is for is the
+/// HEADROOM number: how far the catalog can grow before chunking alone would
+/// push a host back over its subscription limit.
 #[test]
-fn a_bounded_tag_union_would_fit_the_catalog_in_a_single_subscription_per_host() {
+fn the_catalog_has_orders_of_magnitude_of_headroom_before_the_limit_returns() {
     let chunks = NUM_GROUPS.div_ceil(MAX_TAG_VALUES_PER_FILTER);
     println!(
         "\n{NUM_GROUPS} groups at {MAX_TAG_VALUES_PER_FILTER} values/filter → {chunks} \

@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use nmp_grammar::{ConcreteFilter, DescriptorHash};
 use nmp_store::CoverageKey;
 
-use crate::component::{differing, Component};
+use crate::component::{sole_difference, Component};
 use crate::route::RouteProvenance;
 
 /// One coalesce-in-progress entry: the filter plus the provenance/coverage
@@ -104,13 +104,10 @@ impl MergeRule for StructuralUnion {
             return None;
         }
 
-        let diff = differing(a, b);
-        let [component] = diff.as_slice() else {
-            // Zero components differ (exact duplicates -- `coalesce_with`'s
-            // hash dedup owns those, and a rule that "merged" them would spin
-            // the fixed point), or two or more do.
-            return None;
-        };
+        // `None` means zero components differ (exact duplicates --
+        // `coalesce_with`'s hash dedup owns those, and a rule that "merged"
+        // them would spin the fixed point) or that two or more do.
+        let component = &sole_difference(a, b)?;
 
         let mut merged = a.clone();
         match component {

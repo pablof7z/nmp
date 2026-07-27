@@ -1043,6 +1043,47 @@ impl NmpWorld {
         }
     }
 
+    /// Settle the wire, then keep re-reading `relay`'s record until `pred`
+    /// holds -- bounded by [`WIRE_SETTLE`], after which the caller's own
+    /// assertion runs on the last record read and reports the real failure.
+    ///
+    /// QUIESCENCE ALONE IS NOT ENOUGH for any assertion whose subject is
+    /// causally downstream of an INBOUND frame. `wait_wire_quiet` watches
+    /// CLIENT-TO-RELAY traffic only, so the sequence "seed a kind:39001 ->
+    /// relay pushes the EVENT -> the client ingests it, re-resolves the
+    /// derived set, recompiles and emits a replacing REQ" has a genuinely
+    /// quiet client wire in the MIDDLE of it. An assertion taken there
+    /// measures when it was taken rather than what the plan is, and it does
+    /// so load-sensitively: the derived-binding scenarios passed in
+    /// isolation and failed inside a longer suite run.
+    ///
+    /// This is the same bounded-eventually shape the other three observable
+    /// channels already use (`feed_eventually`, `receipt_eventually`,
+    /// `diagnostics_matching`); the wire channel was the only one asserting
+    /// one-shot.
+    ///
+    /// Only POSITIVE assertions poll -- a count reaching its expected value,
+    /// a value set becoming covered, a replacement appearing. A negative
+    /// ("was never asked to close") is already true at every earlier instant,
+    /// so polling it would return immediately and buy nothing; those steps
+    /// keep plain settling and rely on the positive step alongside them in
+    /// the same scenario having already advanced the clock.
+    pub async fn wire_record_when(
+        &self,
+        relay: &str,
+        pred: impl Fn(&WireRecord) -> bool,
+    ) -> WireRecord {
+        let deadline = Instant::now() + WIRE_SETTLE;
+        loop {
+            self.wire_settled().await;
+            let record = self.wire_record(relay);
+            if pred(&record) || Instant::now() >= deadline {
+                return record;
+            }
+            tokio::time::sleep(WIRE_QUIET).await;
+        }
+    }
+
     /// `Given I administer <n> groups` -- one kind:39001 (NIP-29 group
     /// admins) fixture per group, each naming me, staged at the watched
     /// relay. These are what the group-state query's inner demand resolves
@@ -1092,8 +1133,32 @@ impl NmpWorld {
     /// `When I am made an admin of one more group` -- a LIVE kind:39001,
     /// landing at the relay after the watch is already open, so the value set
     /// grows through the same ingest path a real admin grant would take.
+    ///
+    /// "AFTER THE WATCH IS ALREADY OPEN" IS ENFORCED HERE, not assumed. The
+    /// preceding step opens the watch and returns as soon as the subscription
+    /// is registered -- but the outer `#d` REQ is causally downstream of the
+    /// INNER subscription's results (the relay must push the already-seeded
+    /// kind:39001 rows, the client must ingest them and re-resolve the derived
+    /// set, and only then does an outer REQ exist). Seeding the new group
+    /// inside that gap makes it resolve alongside the original ones, so the
+    /// FIRST outer REQ already carries every value and there is nothing live
+    /// left to replace.
+    ///
+    /// That is not a wrong outcome -- one subscription carrying every value is
+    /// exactly the contract -- but it makes the REPLACEMENT this scenario
+    /// exists to observe unobservable, and it happens under load: measured at
+    /// roughly one run in eight. Waiting for an outer `#d` subscription to
+    /// actually be live first is what makes "one more" mean one more.
     pub async fn made_admin_of_one_more_group(&mut self) {
         self.ensure_started().await;
+        let relay = self
+            .watch_relay
+            .clone()
+            .expect("nmp-bdd: no relay has been named as the one I watch directly");
+        self.wire_record_when(&relay, |record| {
+            !record.live_subscription_ids_naming_tag('d').is_empty()
+        })
+        .await;
         self.group_counter += 1;
         let group = format!("group-{:04}", self.group_counter);
         self.watched_tag_values
