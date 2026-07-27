@@ -4765,26 +4765,11 @@ enum Enum {
             fields: [],
             docstring: None,
         },
-        Variant {
-            name: "ToInboxes",
-            discr: None,
-            fields: [
-                Field {
-                    name: "recipients",
-                    type_: Sequence {
-                        inner_type: String,
-                    },
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
     ],
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "`nmp::WriteRouting` mirror -- `PrivateNarrow` deliberately has NO wire\nform here (#22/#52). `nmp_grammar::NarrowOnly::new`'s\nown doc requires \"the caller must already have resolved and narrowed\nthis itself\" -- i.e. a trusted protocol module's own logic, not a raw\nrelay-URL string handed across the FFI boundary by an app with no way to\nprove those URLs are actually private. Minting `PrivateRoute` from\nFFI-supplied strings would be exactly the \"raw app-provided expanded\nrelay set\"/\"route escape hatch\" #22's canonical design rules out; the\n`nmp` facade itself withholds re-exporting `NarrowOnly`/`PrivateRoute`\nfor the identical reason (see `crates/nmp/src/lib.rs`'s doc). A\nvalidated, opaque private-route mint belongs in a protocol module built\non direct Rust, not this FFI surface -- `AuthorOutbox`/`ToInboxes`\nremain the only FFI-constructible routing choices for now.\n\n#115: `PinnedHost(HostAuthority)` gets the IDENTICAL treatment, for the\nIDENTICAL reason -- this enum deliberately gains NO variant for it, and\nno `HostAuthority` constructor is exported anywhere in this crate. An\napp can only ever obtain a pinned-host write transitively, through a\nprotocol module's already-composed intent (`NmpEngine::group_message_intent`\n-> the opaque `FfiComposedWriteIntent`) -- never by naming a host\nitself. This exhaustive two-variant match IS the enforcement: a new\n`WriteRouting` variant landing in `nmp-grammar` without a corresponding\nFfiWriteRouting decision is a compile error here, not a silent gap.",
+        "`nmp::WriteRouting` mirror -- `PrivateNarrow` deliberately has NO wire\nform here (#22/#52). `nmp_grammar::NarrowOnly::new`'s\nown doc requires \"the caller must already have resolved and narrowed\nthis itself\" -- i.e. a trusted protocol module's own logic, not a raw\nrelay-URL string handed across the FFI boundary by an app with no way to\nprove those URLs are actually private. Minting `PrivateRoute` from\nFFI-supplied strings would be exactly the \"raw app-provided expanded\nrelay set\"/\"route escape hatch\" #22's canonical design rules out; the\n`nmp` facade itself withholds re-exporting `NarrowOnly`/`PrivateRoute`\nfor the identical reason (see `crates/nmp/src/lib.rs`'s doc). A\nvalidated, opaque private-route mint belongs in a protocol module built\non direct Rust, not this FFI surface. `AuthorOutbox` is the only\nFFI-constructible routing choice.\n\n#115: `PinnedHost(HostAuthority)` gets the IDENTICAL treatment, for the\nIDENTICAL reason -- this enum deliberately gains NO variant for it, and\nno `HostAuthority` constructor is exported anywhere in this crate. An\napp can only ever obtain a pinned-host write transitively, through a\nprotocol module's already-composed intent (`NmpEngine::group_message_intent`\n-> the opaque `FfiComposedWriteIntent`) -- never by naming a host\nitself. #839 removes raw recipient routing for the same reason: a\ngeneric recipient array cannot prove that the event schema owns those\nrecipients or that its body agrees with them. This exhaustive\nsingle-variant match IS the enforcement: a new `WriteRouting` variant\nlanding in `nmp-grammar` without a corresponding `FfiWriteRouting`\ndecision is a compile error here, not a silent gap.",
     ),
 }
 

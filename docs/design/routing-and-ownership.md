@@ -10,6 +10,15 @@
   Likewise, historical "no `relays:` parameter" wording means no untyped route
   override on the default path; a live query may carry explicit typed source
   authority as specified in `query-demand-and-evidence.md`.
+- **2026-07-27 write-boundary correction (#839):** the generic
+  `ToInboxes(recipients)` route described below is removed. An independently
+  supplied recipient array cannot prove that the event schema owns those
+  recipients or that its body agrees with them. Recipient delivery may return
+  only through a protocol-owned operation that fixes the complete body,
+  recipient meaning, bounded derivation, and route together. Sections 2.3–2.6
+  retain the earlier design context, but their generic p-tag inbox fan-out is
+  superseded by #839; #842/#843 own the remaining safe-write/custom-schema
+  boundary.
 - **Anchors:** VISION P4 (routing is the mission, not optional), P5 (widen-only), §10 ("values in, code after"), bug-ledger #3/#4/#6; `docs/known-gaps.md` "DM inbox routing incorrect (M3-D)" (the `ToInboxes` gap this spec closes).
 - **Code ground truth:** `crates/nmp-router/src/{facts,route,router,solver,coalesce,plan,deliver,diag}.rs`, `crates/nmp-engine/src/core/mod.rs` (`sync_discovery`, `resolve_routes`, write outbox), `crates/nmp-engine/src/outbox/mod.rs`.
 
@@ -30,10 +39,10 @@ Everything below is shipped and tested; this spec extends it, it does not replac
 | Per-relay REQ partitioning, skeleton-stable `SubId` (author churn = one overwriting REQ), full-recompile-then-surgical-diff | `plan.rs`, `router.rs` |
 | Read-side typed provenance: every `WireReq` carries `Vec<RouteProvenance>` (relay, lane, covered authors, `OutboxSolved`\|`Pinned`) — no wire REQ without a traceable route | `route.rs::RouteProvenance` |
 | Self-bootstrapping outbox: `sync_discovery` opens a widen-only internal kind:10002 sub against indexers for authors with unknown write relays (wave 2 supersession) | `core/mod.rs::sync_discovery` |
-| Write outbox: durable `WriteIntent` → `WriteStatus` stream; `WriteRouting::{AuthorOutbox, ToInboxes, PrivateNarrow}`; `NarrowOnly<T>` (no widen op — ledger #6 fail-closed as a type) | `outbox/mod.rs`, `core/mod.rs::resolve_routes` |
+| Write outbox: durable `WriteIntent` → `WriteStatus` stream; app-facing routing is `AuthorOutbox` only; closed protocol operations can mint withheld `PrivateNarrow`, `PinnedHost`, or relay-list bootstrap routes; `NarrowOnly<T>` has no widen operation | `outbox/mod.rs`, `core/mod.rs::resolve_routes` |
 | Diagnostics: per-relay sub counts, by-lane counts, reverse coverage, exact filters, uncovered authors, dropped rules | `diag.rs` |
 
-Known deviations this spec resolves: `ToInboxes` falls back to recipients' *write* relays (flagged inline as NOT correct); the solver counts indexer/extra candidates toward the 2-min; there is no app-relay or fallback-relay concept; write routing is caller-chosen rather than policy-derived; no per-kind override seam; no kind-ownership boundary.
+Known deviations this spec resolves: the solver counts indexer/extra candidates toward the 2-min; there is no app-relay or fallback-relay concept; write routing is caller-chosen rather than policy-derived; no per-kind override seam; no kind-ownership boundary. The former generic recipient-routing deviation was removed outright by #839 rather than repaired.
 
 ---
 
@@ -67,6 +76,12 @@ An author with zero known relays and no app/fallback lane routes nowhere (never 
 
 ### 2.3 WRITE routing (event E: kind, author, p-tags)
 
+> **Superseded boundary (#839):** core no longer derives inbox fan-out from
+> arbitrary p-tags and no generic `ToInboxes` route exists. The numbered model
+> below records the earlier target, not a constructible current API. A selected
+> protocol operation must establish recipient semantics together with its
+> complete body before it can mint any recipient delivery.
+
 The default write route is **derived from the event**, not chosen by the caller (see §2.5). Union of:
 
 1. **Author's WRITE-marked relays** (kind:10002), all of them (a write fans out to every known write relay; no coverage solve — BUILT in `resolve_routes::AuthorOutbox`), 2-min semantics only in the fallback trigger sense below.
@@ -79,6 +94,11 @@ The default write route is **derived from the event**, not chosen by the caller 
 
 ### 2.4 The READ-marked / WRITE-marked kind:10002 distinction (closes the `ToInboxes` gap)
 
+> **Current scope (#839):** the read/write-marked NIP-65 distinction remains
+> useful directory truth, but generic writes no longer consume it for
+> recipient routing. A future protocol-owned recipient operation may use
+> read-marked inbox facts only under its own complete typed contract.
+
 The distinction now matters on both sides: reads consume authors' **write**-marked relays; the write path's p-tag inbox fan-out consumes recipients' **read**-marked relays. Mechanics:
 
 - `parse_nip65_write_relays` (engine) already drops `"read"`-marked entries. Add `parse_nip65_read_relays` (unmarked = both, per NIP-65).
@@ -87,7 +107,18 @@ The distinction now matters on both sides: reads consume authors' **write**-mark
 
 ### 2.5 Who picks `WriteRouting`
 
-Today the caller supplies `WriteRouting` on the intent. Under this spec the default is **`WriteRouting::Default`** (new variant): the engine derives §2.3's union from the signed event itself at route-resolution time (kind, author, p-tags are all on the event). `AuthorOutbox`/`ToInboxes` remain as internals the default resolves *into*; `PrivateNarrow` remains the fail-closed narrow type, minted by the layer that owns the operation's destination (Part B §3.1) — the app-facing publish surface takes an event + durability, nothing more. This is what makes "no `relays:` param" true on the write side too.
+> **Current scope (#839/#842):** FFI, Swift, and Kotlin can construct only
+> `AuthorOutbox`; direct Rust retains closed routes needed by protocol modules.
+> The raw event-body constructor itself remains pending removal under #842, so
+> the `Default` design below is not current authority.
+
+The earlier design proposed **`WriteRouting::Default`**: the engine would derive
+§2.3's union from the signed event at route-resolution time, with
+`AuthorOutbox` and `ToInboxes` as internal outputs. That proposal is
+superseded. `ToInboxes` is deleted, and `PrivateNarrow` remains a fail-closed
+route minted only by the layer that owns the complete operation's destination.
+The app-facing direction remains an event plus durability with no raw `relays:`
+parameter, but #842 owns the remaining constructor hard cut.
 
 ### 2.6 Acceptance scenarios (these are the tests)
 
