@@ -19,6 +19,7 @@ mod bunker;
 mod capability;
 mod catalog;
 mod local;
+mod local_crypto;
 mod nip46;
 mod op;
 
@@ -27,7 +28,7 @@ pub use bunker::{
 };
 pub use capability::{CryptoCapability, SigningCapability};
 pub use catalog::{known_local_signers, LocalSignerApp, LocalSignerProtocol};
-pub use local::LocalKeySigner;
+pub use local::{LocalKeySigner, LocalKeySignerError};
 pub use nip46::{
     Nip46Cancellation, Nip46ClientMetadata, Nip46ConnectionEvent, Nip46Error, Nip46Invitation,
     Nip46Origin, Nip46SessionCheckpoint, Nip46Signer,

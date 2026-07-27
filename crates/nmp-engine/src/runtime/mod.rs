@@ -1683,6 +1683,14 @@ mod reentrant_shutdown_tests {
     use nmp_store::MemoryStore;
     use nostr::{Keys, Kind};
 
+    /// #765: `LocalKeySigner` now owns its scalar in one canonical zeroizing
+    /// allocation and no longer accepts a `nostr::Keys`. These fixtures still
+    /// build identities as `Keys`, so hand the raw scalar across exactly here.
+    fn local_signer(keys: &Keys) -> LocalKeySigner {
+        LocalKeySigner::from_secret_bytes(keys.secret_key().as_secret_bytes())
+            .expect("fixture keys are valid secp256k1 scalars")
+    }
+
     fn runtime() -> (EngineThread, Handle) {
         // #680 removed the configurable native-task limit; the blocking-adapter
         // pool is a fixed internal capacity, so spawn takes no limit argument.
@@ -1711,7 +1719,7 @@ mod reentrant_shutdown_tests {
         let (engine, handle) = runtime();
         let keys = Keys::generate();
         handle
-            .add_signer(LocalKeySigner::new(keys.clone()))
+            .add_signer(local_signer(&keys))
             .expect("signer registration");
         handle.set_active_account(Some(keys.public_key()));
 
@@ -1733,7 +1741,7 @@ mod reentrant_shutdown_tests {
             .expect("completion callback must start");
         handle.shutdown();
         assert_eq!(
-            handle.add_signer(LocalKeySigner::new(Keys::generate())),
+            handle.add_signer(LocalKeySigner::generate()),
             Err(AddSignerError::EngineShuttingDown),
             "the external shutdown must enter its drain before callback-owned join"
         );
@@ -1749,7 +1757,7 @@ mod reentrant_shutdown_tests {
         let (engine, handle) = runtime();
         let keys = Keys::generate();
         handle
-            .add_signer(LocalKeySigner::new(keys.clone()))
+            .add_signer(local_signer(&keys))
             .expect("signer registration");
         handle.set_active_account(Some(keys.public_key()));
 
@@ -1768,7 +1776,7 @@ mod reentrant_shutdown_tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("completion callback must start");
         assert_eq!(
-            handle.add_signer(LocalKeySigner::new(Keys::generate())),
+            handle.add_signer(LocalKeySigner::generate()),
             Err(AddSignerError::EngineShuttingDown),
             "callback shutdown must enter its drain before external join"
         );
@@ -1796,7 +1804,7 @@ mod reentrant_shutdown_tests {
         let (engine, handle) = runtime();
         let keys = Keys::generate();
         handle
-            .add_signer(LocalKeySigner::new(keys.clone()))
+            .add_signer(local_signer(&keys))
             .expect("signer registration");
         handle.set_active_account(Some(keys.public_key()));
 
@@ -1816,7 +1824,7 @@ mod reentrant_shutdown_tests {
 
         handle.shutdown();
         assert_eq!(
-            handle.add_signer(LocalKeySigner::new(Keys::generate())),
+            handle.add_signer(LocalKeySigner::generate()),
             Err(AddSignerError::EngineShuttingDown),
             "external shutdown must enter its drain before the callback panics"
         );
@@ -1843,7 +1851,7 @@ mod reentrant_shutdown_tests {
         let (engine, handle) = runtime();
         let keys = Keys::generate();
         handle
-            .add_signer(LocalKeySigner::new(keys.clone()))
+            .add_signer(local_signer(&keys))
             .expect("signer registration");
         handle.set_active_account(Some(keys.public_key()));
 
@@ -3194,6 +3202,14 @@ mod auth_registry_admission_tests {
     use nmp_store::MemoryStore;
     use nmp_transport::RelayFrame;
     use nostr::{Keys, RelayMessage};
+
+    /// #765: `LocalKeySigner` now owns its scalar in one canonical zeroizing
+    /// allocation and no longer accepts a `nostr::Keys`. These fixtures still
+    /// build identities as `Keys`, so hand the raw scalar across exactly here.
+    fn local_signer(keys: &Keys) -> LocalKeySigner {
+        LocalKeySigner::from_secret_bytes(keys.secret_key().as_secret_bytes())
+            .expect("fixture keys are valid secp256k1 scalars")
+    }
     use std::borrow::Cow;
     use std::sync::Mutex;
 
@@ -3464,7 +3480,7 @@ mod auth_registry_admission_tests {
         assert_eq!(auth.phase, crate::core::AuthDiagnosticsPhase::Error);
         drop(diagnostics);
 
-        let signer = LocalKeySigner::new(keys.clone());
+        let signer = local_signer(&keys);
         let signer_registration = handle.add_signer(signer).unwrap();
         let policy_registration = handle
             .add_auth_policy(keys.public_key(), AllowPolicy)

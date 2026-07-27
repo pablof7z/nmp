@@ -1,52 +1,121 @@
 //! `LocalKeySigner` (§3.3): sufficient for M3 — remote-signer breadth is a
-//! seam only (§7 non-goal).
+//! seam only (§7 non-goal). One canonical long-lived secret owner (#765).
 
 use std::fmt;
 
-use nostr::nips::nip44;
-use nostr::{Event as SignedEvent, Keys, PublicKey, UnsignedEvent};
-use zeroize::Zeroizing;
+use bech32::primitives::decode::CheckedHrpstring;
+use bech32::Bech32;
+use nostr::secp256k1::rand::{rngs::OsRng, RngCore};
+use nostr::{Event as SignedEvent, PublicKey, UnsignedEvent};
 
 use crate::capability::{CryptoCapability, SigningCapability};
+use crate::local_crypto::{self, CanonicalSecret, LocalCryptoError};
 use crate::op::{SignerError, SignerOp};
 
-/// Implements both `SigningCapability` and `CryptoCapability` over a local
-/// `nostr::Keys`. `keys` is private — nothing outside this module needs it,
-/// and the raw secret is exposed only through `sign`/`nip44_*` (A3's impls
-/// below).
+/// Failure to construct a local signer from caller-supplied secret material.
 ///
-/// `nostr::Keys`/`SecretKey` already erase their own internal copies on drop
-/// (via `secp256k1`'s `non_secure_erase`), but that erase is explicitly
-/// documented upstream as *not* hardened against compiler elision.
-/// `secret_bytes` is a defense-in-depth raw copy of the same scalar, wrapped
-/// in `zeroize::Zeroizing`, matching the NIP-46 secret-hardening precedent
-/// (`Nip46Invitation::secret`): it guarantees a compiler-fenced wipe of this
-/// signer's copy the moment it drops, independent of upstream's own
-/// best-effort erase (docs/known-gaps.md's "old repo's raw-bytes/zeroize
-/// hardening", #47).
+/// Deliberately separate from [`SignerError`]: construction happens before any
+/// capability operation exists, so reporting it as an unavailable/rejected
+/// *signing operation* would conflate two lifecycle stages. Reachability Gate:
+/// every variant is constructed in this module's parsing/validation path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalKeySignerError {
+    /// The input was neither a valid 32-byte secp256k1 scalar nor its accepted
+    /// hex/`nsec` text representation.
+    InvalidSecretKey,
+}
+
+impl fmt::Display for LocalKeySignerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("invalid local secret key")
+    }
+}
+
+impl std::error::Error for LocalKeySignerError {}
+
+/// Implements both `SigningCapability` and `CryptoCapability` over exactly one
+/// long-lived secret owner.
+///
+/// #765: `secret` is a non-`Clone`, non-`Copy`, compiler-fenced owner whose
+/// `Drop` wipes the scalar. This type deliberately retains no parallel
+/// `nostr::Keys`, `nostr::SecretKey`, or `secp256k1::Keypair`: in the pinned
+/// `nostr 0.44.4`/`secp256k1 0.29.1` those are `Copy` and their only erasure
+/// is `non_secure_erase`, which upstream documents as giving no guarantee
+/// against compiler-created moves or copies. Every sign/encrypt/decrypt
+/// borrows `secret` into the shortest-lived zeroizing view instead
+/// (`local_crypto`).
 pub struct LocalKeySigner {
-    keys: Keys,
-    // Never read back by this signer itself (`keys`/`nip44::{encrypt,decrypt}`
-    // are the operational path) — held purely so its `Drop` glue zeroizes the
-    // raw scalar. `#[allow(dead_code)]` records that deliberately, matching
-    // `nmp-store`'s `OutboxIntentRecord` precedent for write-only-by-design
-    // fields.
-    #[allow(dead_code)]
-    secret_bytes: Zeroizing<[u8; 32]>,
+    public_key: PublicKey,
+    secret: CanonicalSecret,
 }
 
 impl LocalKeySigner {
-    /// Wrap an existing keypair.
-    #[must_use]
-    pub fn new(keys: Keys) -> Self {
-        let secret_bytes = Zeroizing::new(keys.secret_key().to_secret_bytes());
-        Self { keys, secret_bytes }
+    /// Copy a caller-owned 32-byte scalar into this signer's canonical
+    /// zeroizing owner. The borrowed input stays the caller's responsibility;
+    /// no additional long-lived operational representation is retained.
+    pub fn from_secret_bytes(secret: &[u8]) -> Result<Self, LocalKeySignerError> {
+        if secret.len() != 32 {
+            return Err(LocalKeySignerError::InvalidSecretKey);
+        }
+        let mut canonical = CanonicalSecret::zeroed();
+        canonical.copy_from_slice(secret);
+        Self::from_canonical(canonical)
+    }
+
+    /// Parse a 64-character hex scalar or an `nsec` value *directly* into the
+    /// canonical owner — no intermediate `nostr::SecretKey` is constructed.
+    pub fn parse(secret: &str) -> Result<Self, LocalKeySignerError> {
+        if secret.len() == 64 {
+            let mut canonical = CanonicalSecret::zeroed();
+            decode_hex_into(secret.as_bytes(), canonical.as_mut_bytes())?;
+            return Self::from_canonical(canonical);
+        }
+
+        let decoded = CheckedHrpstring::new::<Bech32>(secret)
+            .map_err(|_| LocalKeySignerError::InvalidSecretKey)?;
+        if decoded.hrp().as_str() != "nsec" || decoded.byte_iter().len() != 32 {
+            return Err(LocalKeySignerError::InvalidSecretKey);
+        }
+        let mut canonical = CanonicalSecret::zeroed();
+        for (target, source) in canonical.as_mut_bytes().iter_mut().zip(decoded.byte_iter()) {
+            *target = source;
+        }
+        Self::from_canonical(canonical)
     }
 
     /// Generate a fresh keypair via OS RNG — convenience for tests/tooling.
+    /// The scalar is drawn straight into its zeroizing owner.
     #[must_use]
     pub fn generate() -> Self {
-        Self::new(Keys::generate())
+        loop {
+            let mut canonical = CanonicalSecret::zeroed();
+            OsRng.fill_bytes(canonical.as_mut_bytes());
+            if let Ok(signer) = Self::from_canonical(canonical) {
+                return signer;
+            }
+        }
+    }
+
+    fn from_canonical(secret: CanonicalSecret) -> Result<Self, LocalKeySignerError> {
+        let public_key = local_crypto::validate_and_public_key(&secret)
+            .map_err(|_| LocalKeySignerError::InvalidSecretKey)?;
+        Ok(Self { public_key, secret })
+    }
+}
+
+fn decode_hex_into(input: &[u8], output: &mut [u8; 32]) -> Result<(), LocalKeySignerError> {
+    for (index, pair) in input.as_chunks::<2>().0.iter().enumerate() {
+        output[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
+    }
+    Ok(())
+}
+
+fn hex_nibble(byte: u8) -> Result<u8, LocalKeySignerError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(LocalKeySignerError::InvalidSecretKey),
     }
 }
 
@@ -55,33 +124,43 @@ impl LocalKeySigner {
 impl fmt::Debug for LocalKeySigner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LocalKeySigner")
-            .field("public_key", &self.keys.public_key())
+            .field("public_key", &self.public_key)
             .finish_non_exhaustive()
     }
 }
 
 impl SigningCapability for LocalKeySigner {
     fn public_key(&self) -> Option<PublicKey> {
-        Some(self.keys.public_key())
+        Some(self.public_key)
     }
 
     /// Signs synchronously — the local key never blocks on I/O, so this
     /// always resolves as `SignerOp::Ready`.
-    fn sign(&self, unsigned: UnsignedEvent) -> SignerOp<SignedEvent> {
+    fn sign(&self, mut unsigned: UnsignedEvent) -> SignerOp<SignedEvent> {
         // The engine is the only caller and always stamps `unsigned.pubkey`
         // from this signer's own `public_key()`; a mismatch means the
         // caller built the template for a different identity, which must
         // not silently produce an event under this signer's key.
-        if unsigned.pubkey != self.keys.public_key() {
+        if unsigned.pubkey != self.public_key {
             return SignerOp::err(SignerError::Rejected(format!(
                 "unsigned event pubkey {} does not match signer pubkey {}",
-                unsigned.pubkey,
-                self.keys.public_key()
+                unsigned.pubkey, self.public_key
             )));
         }
-        match unsigned.sign_with_keys(&self.keys) {
+
+        // `UnsignedEvent::id()` computes/reuses the frozen id; `add_signature`
+        // is upstream's verified attach path, so the signature still has to
+        // check out against the declared id and pubkey.
+        let id = unsigned.id();
+        let signature = match local_crypto::sign(&self.secret, &id.to_bytes()) {
+            Ok(signature) => signature,
+            Err(error) => {
+                return SignerOp::err(SignerError::Rejected(format!("sign failed: {error}")))
+            }
+        };
+        match unsigned.add_signature(signature) {
             Ok(event) => SignerOp::ok(event),
-            Err(e) => SignerOp::err(SignerError::Rejected(format!("sign failed: {e}"))),
+            Err(error) => SignerOp::err(SignerError::Rejected(format!("sign failed: {error}"))),
         }
     }
 }
@@ -91,35 +170,50 @@ impl SigningCapability for LocalKeySigner {
 /// requires the same secret material `sign` uses, so this capability lives
 /// on the same type rather than behind a separate app-facing door.
 impl CryptoCapability for LocalKeySigner {
-    /// NIP-44 encrypt via rust-nostr's `nostr::nips::nip44` — no scratch
-    /// crypto (memory rule).
+    /// NIP-44 v2 encrypt through the crate's own zeroizing operation path.
     fn nip44_encrypt(&self, peer: PublicKey, plaintext: &str) -> SignerOp<String> {
-        match nip44::encrypt(self.keys.secret_key(), &peer, plaintext, nip44::Version::V2) {
-            Ok(ciphertext) => SignerOp::ok(ciphertext),
-            Err(e) => SignerOp::err(SignerError::Rejected(format!("nip44 encrypt failed: {e}"))),
-        }
+        into_signer_op(
+            "nip44 encrypt",
+            local_crypto::nip44_encrypt(&self.secret, peer, plaintext),
+        )
     }
 
-    /// NIP-44 decrypt via rust-nostr. Turns gift-wrap/private-list
-    /// ciphertext into raw plaintext tokens — the caller (engine) owns any
-    /// further parsing; this capability never assumes the stored content
-    /// was plaintext to begin with.
+    /// NIP-44 v2 decrypt. Turns gift-wrap/private-list ciphertext into raw
+    /// plaintext tokens — the caller (engine) owns any further parsing; this
+    /// capability never assumes the stored content was plaintext to begin
+    /// with.
     fn nip44_decrypt(&self, peer: PublicKey, ciphertext: &str) -> SignerOp<String> {
-        match nip44::decrypt(self.keys.secret_key(), &peer, ciphertext) {
-            Ok(plaintext) => SignerOp::ok(plaintext),
-            Err(e) => SignerOp::err(SignerError::Rejected(format!("nip44 decrypt failed: {e}"))),
-        }
+        into_signer_op(
+            "nip44 decrypt",
+            local_crypto::nip44_decrypt(&self.secret, peer, ciphertext),
+        )
+    }
+}
+
+fn into_signer_op<T: Send + 'static>(
+    operation: &str,
+    result: Result<T, LocalCryptoError>,
+) -> SignerOp<T> {
+    match result {
+        Ok(value) => SignerOp::ok(value),
+        Err(error) => SignerOp::err(SignerError::Rejected(format!(
+            "{operation} failed: {error}"
+        ))),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{Kind, Timestamp};
+    use crate::local_crypto::{clear_wipe_audit, take_wipe_audit, SensitiveKind};
+    use base64::engine::{general_purpose::STANDARD as BASE64, Engine as _};
+    use bech32::{Bech32, Hrp};
+    use nostr::{EventId, Kind, Timestamp};
+    use zeroize::Zeroize;
 
     fn unsigned_for(signer: &LocalKeySigner, content: &str) -> UnsignedEvent {
         UnsignedEvent::new(
-            signer.keys.public_key(),
+            signer.public_key,
             Timestamp::now(),
             Kind::TextNote,
             Vec::new(),
@@ -127,31 +221,63 @@ mod tests {
         )
     }
 
+    fn ready<T: Send + 'static>(operation: SignerOp<T>) -> Result<T, SignerError> {
+        match operation {
+            SignerOp::Ready(result) => result,
+            SignerOp::Pending(_) => panic!("local signer must resolve synchronously"),
+        }
+    }
+
     #[test]
     fn sign_then_verify_round_trip() {
         let signer = LocalKeySigner::generate();
-        let unsigned = unsigned_for(&signer, "hello from nmp-signer");
-
-        let signed = match signer.sign(unsigned) {
-            SignerOp::Ready(Ok(event)) => event,
-            SignerOp::Ready(Err(e)) => panic!("sign failed: {e}"),
-            SignerOp::Pending(_) => panic!("local signer must resolve synchronously"),
-        };
-
-        assert_eq!(signed.pubkey, signer.keys.public_key());
+        let signed =
+            ready(signer.sign(unsigned_for(&signer, "hello from nmp-signer"))).expect("sign");
+        assert_eq!(signed.pubkey, signer.public_key);
         assert!(signed.verify().is_ok(), "signed event must verify");
+    }
+
+    /// Falsifier: the replacement signing path is the *same* BIP-340, proved
+    /// against the official test vector rather than only self-consistency.
+    #[test]
+    fn signing_matches_official_bip340_vector_zero() {
+        let signer = LocalKeySigner::parse(
+            "0000000000000000000000000000000000000000000000000000000000000003",
+        )
+        .expect("valid vector scalar");
+        let signature = local_crypto::sign_with_aux_rand(&signer.secret, &[0u8; 32], [0u8; 32])
+            .expect("sign official vector");
+
+        assert_eq!(
+            signature.to_string(),
+            "e907831f80848d1069a5371b402410364bdf1c5f8307b0084c55f1ce2dca821525f66a4a85ea8b71e482a74f382d2ce5ebeee8fdb2172f477df4900d310536c0"
+        );
     }
 
     #[test]
     fn sign_rejects_pubkey_mismatch() {
         let signer = LocalKeySigner::generate();
         let other = LocalKeySigner::generate();
-        let unsigned = unsigned_for(&other, "wrong identity");
+        assert!(matches!(
+            ready(signer.sign(unsigned_for(&other, "wrong identity"))),
+            Err(SignerError::Rejected(_))
+        ));
+    }
 
-        match signer.sign(unsigned) {
-            SignerOp::Ready(Err(SignerError::Rejected(_))) => {}
-            other => panic!("expected Rejected mismatch, got {other:?}"),
-        }
+    /// Falsifier: the error path releases every operation-scoped secret owner
+    /// too — cleanup rides `Drop`, not a success-only branch.
+    #[test]
+    fn signing_error_still_drops_operation_secrets() {
+        let signer = LocalKeySigner::generate();
+        let mut unsigned = unsigned_for(&signer, "invalid declared id");
+        unsigned.id = Some(EventId::all_zeros());
+        clear_wipe_audit();
+
+        assert!(ready(signer.sign(unsigned)).is_err());
+        let audit = take_wipe_audit();
+        assert!(audit.contains(&SensitiveKind::SigningOperationSecret));
+        assert!(audit.contains(&SensitiveKind::SigningNonce));
+        assert!(audit.contains(&SensitiveKind::SigningResultScalar));
     }
 
     #[test]
@@ -160,92 +286,224 @@ mod tests {
         let bob = LocalKeySigner::generate();
         let plaintext = "the quick brown fox — nip-44 round trip";
 
-        let ciphertext =
-            match CryptoCapability::nip44_encrypt(&alice, bob.keys.public_key(), plaintext) {
-                SignerOp::Ready(Ok(ct)) => ct,
-                SignerOp::Ready(Err(e)) => panic!("nip44 encrypt failed: {e}"),
-                SignerOp::Pending(_) => panic!("local signer must resolve synchronously"),
-            };
+        clear_wipe_audit();
+        let ciphertext = ready(alice.nip44_encrypt(bob.public_key, plaintext)).expect("encrypt");
+        let encrypt_audit = take_wipe_audit();
+        assert!(encrypt_audit.contains(&SensitiveKind::PaddedPlaintext));
+        assert!(encrypt_audit.contains(&SensitiveKind::SymmetricCipher));
+        assert!(encrypt_audit.contains(&SensitiveKind::HashState));
 
-        let decrypted =
-            match CryptoCapability::nip44_decrypt(&bob, alice.keys.public_key(), &ciphertext) {
-                SignerOp::Ready(Ok(pt)) => pt,
-                SignerOp::Ready(Err(e)) => panic!("nip44 decrypt failed: {e}"),
-                SignerOp::Pending(_) => panic!("local signer must resolve synchronously"),
-            };
-
+        clear_wipe_audit();
+        let decrypted = ready(bob.nip44_decrypt(alice.public_key, &ciphertext)).expect("decrypt");
         assert_eq!(decrypted, plaintext);
+        let decrypt_audit = take_wipe_audit();
+        assert!(decrypt_audit.contains(&SensitiveKind::DecryptedPlaintext));
+        assert!(decrypt_audit.contains(&SensitiveKind::SymmetricCipher));
+    }
+
+    /// Falsifier: wire compatibility with the replaced `nostr::nips::nip44`
+    /// path, proved against the official NIP-44 v2 vectors in both directions.
+    #[test]
+    fn decrypts_official_nip44_v2_vector() {
+        let signer = LocalKeySigner::parse(
+            "0000000000000000000000000000000000000000000000000000000000000002",
+        )
+        .expect("valid vector secret");
+        let peer =
+            PublicKey::from_hex("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+                .expect("valid vector public key");
+        let ciphertext = "AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABee0G5VSK0/9YypIObAtDKfYEAjD35uVkHyB0F4DwrcNaCXlCWZKaArsGrY6M9wnuTMxWfp1RTN9Xga8no+kF5Vsb";
+
+        assert_eq!(
+            ready(signer.nip44_decrypt(peer, ciphertext)).expect("decrypt official vector"),
+            "a"
+        );
     }
 
     #[test]
-    fn public_key_matches_keys() {
-        let signer = LocalKeySigner::generate();
-        assert_eq!(signer.public_key(), Some(signer.keys.public_key()));
+    fn encrypts_official_nip44_v2_vector() {
+        let signer = LocalKeySigner::parse(
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .expect("valid vector secret");
+        let peer =
+            PublicKey::from_hex("c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5")
+                .expect("valid vector public key");
+        let mut nonce = [0u8; 32];
+        nonce[31] = 1;
+
+        assert_eq!(
+            local_crypto::nip44_encrypt_with_test_nonce(&signer.secret, peer, "a", nonce)
+                .expect("encrypt official vector"),
+            "AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABee0G5VSK0/9YypIObAtDKfYEAjD35uVkHyB0F4DwrcNaCXlCWZKaArsGrY6M9wnuTMxWfp1RTN9Xga8no+kF5Vsb"
+        );
+    }
+
+    #[test]
+    fn invalid_nip44_mac_drops_keys_without_plaintext_output() {
+        let alice = LocalKeySigner::generate();
+        let bob = LocalKeySigner::generate();
+        let ciphertext = ready(alice.nip44_encrypt(bob.public_key, "wipe me")).expect("encrypt");
+        let mut payload = BASE64.decode(ciphertext).expect("base64");
+        *payload.last_mut().expect("mac") ^= 1;
+        let corrupted = BASE64.encode(payload);
+        clear_wipe_audit();
+
+        assert!(ready(bob.nip44_decrypt(alice.public_key, &corrupted)).is_err());
+        let audit = take_wipe_audit();
+        assert!(audit.contains(&SensitiveKind::Nip44OperationSecret));
+        assert!(audit.contains(&SensitiveKind::ConversationKey));
+        assert!(audit.contains(&SensitiveKind::MessageKeys));
+        assert!(!audit.contains(&SensitiveKind::DecryptedPlaintext));
+    }
+
+    #[test]
+    fn public_key_matches_known_secret() {
+        let signer = LocalKeySigner::parse(
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .expect("valid scalar");
+        assert_eq!(
+            signer.public_key.to_hex(),
+            "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        );
+    }
+
+    #[test]
+    fn nsec_parses_directly_and_invalid_scalars_are_rejected() {
+        let mut secret = [0u8; 32];
+        secret[31] = 1;
+        let mut nsec =
+            bech32::encode::<Bech32>(Hrp::parse("nsec").unwrap(), &secret).expect("encode nsec");
+        let signer = LocalKeySigner::parse(&nsec).expect("parse nsec");
+        assert_eq!(
+            signer.public_key.to_hex(),
+            "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        );
+        secret.zeroize();
+        nsec.zeroize();
+
+        clear_wipe_audit();
+        assert_eq!(
+            LocalKeySigner::from_secret_bytes(&[0u8; 32]).unwrap_err(),
+            LocalKeySignerError::InvalidSecretKey
+        );
+        let invalid_audit = take_wipe_audit();
+        assert!(invalid_audit.contains(&SensitiveKind::CanonicalSecret));
+        assert!(invalid_audit.contains(&SensitiveKind::SigningOperationSecret));
+        assert_eq!(
+            LocalKeySigner::parse(
+                "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141"
+            )
+            .unwrap_err(),
+            LocalKeySignerError::InvalidSecretKey
+        );
     }
 
     /// Falsifier: `{:?}` on `LocalKeySigner` must never leak the secret
-    /// scalar — neither its hex form nor the raw bytes — only the public
-    /// key, matching `Nip46Signer`/`Nip46Invitation`'s redacted `Debug`.
+    /// scalar — only the public key, matching `Nip46Signer`/`Nip46Invitation`.
     #[test]
     fn debug_output_redacts_secret_key() {
-        let signer = LocalKeySigner::generate();
-        let secret_hex = signer.keys.secret_key().to_secret_hex();
-        let secret_bytes = signer.keys.secret_key().to_secret_bytes();
-
+        let secret = "0000000000000000000000000000000000000000000000000000000000000001";
+        let signer = LocalKeySigner::parse(secret).expect("valid scalar");
         let debug = format!("{signer:?}");
-
-        assert!(
-            !debug.contains(&secret_hex),
-            "Debug output must not contain the secret key hex"
-        );
-        assert!(
-            !debug
-                .as_bytes()
-                .windows(secret_bytes.len())
-                .any(|w| w == secret_bytes),
-            "Debug output must not contain the raw secret bytes"
-        );
-        assert!(
-            debug.contains(&signer.keys.public_key().to_hex()),
-            "Debug output should still identify the signer by public key"
-        );
+        assert!(!debug.contains(secret));
+        assert!(debug.contains(&signer.public_key.to_hex()));
     }
 
-    /// Falsifier: dropping a `LocalKeySigner` wipes the raw secret-scalar
-    /// copy held for zeroization hardening (`secret_bytes`). This is as far
-    /// as the property is testable in safe Rust: we capture a raw pointer
-    /// into the `Zeroizing<[u8; 32]>` storage before drop and read it back
-    /// immediately after the owning scope ends (letting the compiler drop
-    /// `signer` in place, rather than moving it into a `drop(signer)` call —
-    /// a by-value move could relocate the bytes to a different stack slot
-    /// before `Drop` runs, which would make the pointer point at stale,
-    /// never-wiped memory and falsely fail). Reading through a pointer to a
-    /// value that has gone out of scope is technically into dead storage,
-    /// but nothing has reused the slot yet, and this is the standard way
-    /// `zeroize`-guarded types are falsified: it is the most direct proof
-    /// available that the wipe actually ran, not just that the type in
-    /// principle supports it.
+    /// Falsifier: formatted signing/crypto errors carry neither the secret
+    /// hex nor its raw bytes.
     #[test]
-    fn secret_bytes_zeroized_on_drop() {
-        let raw_ptr: *const [u8; 32];
-        let before_drop: [u8; 32];
-        {
-            let signer = LocalKeySigner::generate();
-            raw_ptr = &*signer.secret_bytes;
-            before_drop = unsafe { *raw_ptr };
-            // `signer` drops here, in place (never moved), which zeroizes
-            // `secret_bytes` through its `Zeroizing` `Drop` impl.
+    fn errors_redact_secret_material() {
+        let secret = "0000000000000000000000000000000000000000000000000000000000000001";
+        let secret_bytes = {
+            let mut bytes = [0u8; 32];
+            bytes[31] = 1;
+            bytes
+        };
+        let signer = LocalKeySigner::parse(secret).expect("valid scalar");
+        let mut unsigned = unsigned_for(&signer, "invalid declared id");
+        unsigned.id = Some(EventId::all_zeros());
+        let signing_error = ready(signer.sign(unsigned))
+            .expect_err("invalid id")
+            .to_string();
+        let crypto_error = ready(signer.nip44_decrypt(signer.public_key, "invalid"))
+            .expect_err("invalid payload")
+            .to_string();
+
+        for output in [signing_error, crypto_error] {
+            assert!(!output.contains(secret));
+            assert!(!output
+                .as_bytes()
+                .windows(secret_bytes.len())
+                .any(|window| window == secret_bytes));
         }
+    }
 
-        // Sanity: this was real, non-zero secret material before drop —
-        // otherwise the post-drop assertion below would be vacuous.
-        assert_ne!(before_drop, [0u8; 32]);
+    /// Falsifier for #765's core contract: the struct destructures to exactly
+    /// public identity plus the canonical owner, and the production source
+    /// carries no long-lived `Keys` field or upstream operational call.
+    #[test]
+    fn signer_has_exactly_one_long_lived_secret_field() {
+        let signer = LocalKeySigner::generate();
+        let LocalKeySigner {
+            public_key: _,
+            secret: _,
+        } = signer;
 
-        // SAFETY: see falsifier doc comment above.
-        let after_drop = unsafe { *raw_ptr };
+        let production_source = include_str!("local.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source");
+        assert!(!production_source.contains("keys: Keys"));
+        assert!(!production_source.contains("secret_bytes:"));
+        assert!(!production_source.contains("sign_with_keys"));
+        assert!(!production_source.contains("nip44::encrypt"));
+        assert!(!production_source.contains("nip44::decrypt"));
+    }
+
+    /// Falsifier: moving the signer never relocates the secret bytes, so the
+    /// wipe cannot leave an abandoned stack image behind. This also replaces
+    /// the old `secret_bytes_zeroized_on_drop` probe, which read dead stack
+    /// storage through a pointer whose value had gone out of scope.
+    #[test]
+    fn canonical_secret_allocation_does_not_relocate_with_signer() {
+        let signer = LocalKeySigner::generate();
+        let address = signer.secret.allocation_address();
+        let signer = (signer,);
+        assert_eq!(signer.0.secret.allocation_address(), address);
+        let signer = Box::new(signer.0);
+        assert_eq!(signer.secret.allocation_address(), address);
+    }
+
+    /// Falsifier: signer replacement and removal each release exactly one
+    /// canonical owner — no retained clone survives either path.
+    #[test]
+    fn drop_replacement_and_removal_each_release_canonical_owner_once() {
+        clear_wipe_audit();
+        let first = LocalKeySigner::generate();
+        let second = LocalKeySigner::generate();
+        clear_wipe_audit();
+        let mut slot = Some(first);
+        let displaced = slot.replace(second);
+        drop(displaced);
         assert_eq!(
-            after_drop, [0u8; 32],
-            "secret bytes must be zeroized once the signer drops"
+            take_wipe_audit()
+                .into_iter()
+                .filter(|kind| *kind == SensitiveKind::CanonicalSecret)
+                .count(),
+            1,
+            "replacement must drop exactly the displaced owner"
+        );
+        clear_wipe_audit();
+        slot.take();
+        assert_eq!(
+            take_wipe_audit()
+                .into_iter()
+                .filter(|kind| *kind == SensitiveKind::CanonicalSecret)
+                .count(),
+            1,
+            "removal must drop exactly the remaining owner"
         );
     }
 }
