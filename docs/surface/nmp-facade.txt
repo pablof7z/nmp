@@ -484,6 +484,7 @@ pub nmp::DiagnosticsSnapshot::auth_sessions: alloc::vec::Vec<nmp::AuthDiagnostic
 pub nmp::DiagnosticsSnapshot::discovered_private_relays_rejected: u64
 pub nmp::DiagnosticsSnapshot::dropped_merge_rules: alloc::vec::Vec<&'static str>
 pub nmp::DiagnosticsSnapshot::relays: alloc::vec::Vec<nmp::RelayDiagnosticsSnapshot>
+pub nmp::DiagnosticsSnapshot::sessions_refused_by_subscription_budget: u64
 pub nmp::DiagnosticsSnapshot::sessions_rejected_over_cap: u64
 pub nmp::DiagnosticsSnapshot::store_degraded: core::option::Option<alloc::string::String>
 pub nmp::DiagnosticsSnapshot::transport_degraded: core::option::Option<alloc::string::String>
@@ -643,6 +644,10 @@ pub nmp::RelayDiagnosticsSnapshot::nip77_advertisement: &'static str
 pub nmp::RelayDiagnosticsSnapshot::nip77_behavior: &'static str
 pub nmp::RelayDiagnosticsSnapshot::nip77_handoff: &'static str
 pub nmp::RelayDiagnosticsSnapshot::relay: nostr::types::url::RelayUrl
+pub nmp::RelayDiagnosticsSnapshot::subid_length_limit: core::option::Option<usize>
+pub nmp::RelayDiagnosticsSnapshot::subid_length_rejects_our_ids: bool
+pub nmp::RelayDiagnosticsSnapshot::subscription_budget: core::option::Option<usize>
+pub nmp::RelayDiagnosticsSnapshot::subscriptions_refused: usize
 pub nmp::RelayDiagnosticsSnapshot::wire_sub_count: usize
 impl core::clone::Clone for nmp::RelayDiagnosticsSnapshot
 pub fn nmp::RelayDiagnosticsSnapshot::clone(&self) -> nmp::RelayDiagnosticsSnapshot
