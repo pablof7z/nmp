@@ -50,6 +50,12 @@ use nmp_grammar::{ConcreteFilter, DescriptorHash, IndexedTagName};
 
 use crate::plan::SubId;
 
+/// The ordering key that picks ONE prior when several are a one-component
+/// continuation of the same new filter: most shared values on the differing
+/// component first, then a stable canonical tie-break so the choice never
+/// depends on iteration order.
+type TieBreak<'a> = (Reverse<usize>, u64, DescriptorHash, &'a SubId);
+
 /// One component of a filter's structural signature. `Tag` is per tag NAME.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Component {
@@ -192,7 +198,7 @@ pub(crate) fn assign(
         if out[i].is_some() {
             continue;
         }
-        let mut best: Option<(usize, (Reverse<usize>, u64, DescriptorHash, &SubId))> = None;
+        let mut best: Option<(usize, TieBreak<'_>)> = None;
         for (p, (prior_filter, prior_sub)) in priors.iter().enumerate() {
             if taken[p] {
                 continue;
@@ -301,10 +307,10 @@ mod tests {
     fn tag_values_are_one_component_per_tag_name() {
         let mut a = cf();
         a.tags = tag('e', &["x"]);
-        a.tags.extend(tag('p', &["y"]).into_iter());
+        a.tags.extend(tag('p', &["y"]));
         let mut b = cf();
         b.tags = tag('e', &["x2"]);
-        b.tags.extend(tag('p', &["y2"]).into_iter());
+        b.tags.extend(tag('p', &["y2"]));
 
         assert_eq!(
             differing(&a, &b).len(),
