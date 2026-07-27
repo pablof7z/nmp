@@ -5370,7 +5370,7 @@ record Record {
         },
     ],
     docstring: Some(
-        "A BUD-02 blob descriptor (`nmp_blossom::BlobDescriptor` mirror). When\nreturned by [`FfiBlossomClient::upload`]/[`FfiBlossomClient::mirror`]\nits `sha256` was PROVEN equal to the locally computed/authorized hash\n(the `VerifiedUpload` integrity gate); rows from\n[`FfiBlossomClient::list`] are strictly parsed but remain unverified\nserver claims, exactly as in the Rust crate.",
+        "A BUD-02 blob descriptor (`nmp_blossom::BlobDescriptor` mirror). When\nreturned by [`FfiBlossomClient::upload`] its `sha256` was PROVEN equal to\nthe hash of the exact bytes this client uploaded. A\n[`FfiBlossomClient::mirror`] result was checked only against the hash the\ncaller authorized -- this client never sees the mirrored bytes, so it\nmints no exact-byte proof (#884). Rows from [`FfiBlossomClient::list`] are\nstrictly parsed but remain unverified server claims, exactly as in the\nRust crate.",
     ),
 }
 

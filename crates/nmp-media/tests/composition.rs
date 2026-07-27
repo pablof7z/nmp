@@ -7,10 +7,10 @@
 
 use nostr::{JsonUtil, Keys, Kind, Tag, Timestamp};
 
+use nmp_asset::Sha256Hash;
 use nmp_blossom::{
     upload_authorization_draft, AuthDraftError, BlossomClient, BlossomClientConfig,
-    BlossomServerUrl, BlossomVerb, ExpectedAuthorization, Sha256Hash, SignedAuthorization,
-    UploadError,
+    BlossomServerUrl, BlossomVerb, ExpectedAuthorization, SignedAuthorization, UploadError,
 };
 use nmp_nip68::{ContentWarning, ImageDim, PictureBuildError, PictureImageError};
 

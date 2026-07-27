@@ -16,7 +16,7 @@
 
 use nostr::Event;
 
-use nmp_blossom::Sha256Hash;
+use nmp_asset::Sha256Hash;
 
 use crate::build::ContentWarning;
 use crate::image::ImageDim;

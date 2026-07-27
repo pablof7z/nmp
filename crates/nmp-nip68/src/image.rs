@@ -15,7 +15,8 @@
 //! `url` field and never parsed, resolved, or trusted -- only `sha256` is
 //! content-addressed provenance.
 
-use nmp_blossom::{BlobDescriptor, Sha256Hash, VerifiedUpload};
+use nmp_asset::Sha256Hash;
+use nmp_blossom::{BlobDescriptor, VerifiedUpload};
 
 /// An image's pixel dimensions, the imeta `dim` value. Wire form is exactly
 /// `WIDTHxHEIGHT` (decimal, single lowercase `x`).

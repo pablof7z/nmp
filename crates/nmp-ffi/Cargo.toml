@@ -48,6 +48,9 @@ nmp-content.workspace = true
 # direct-dep treatment as nmp-nip51/nmp-nip29 above -- nmp-ffi is the ONE
 # staticlib/cdylib every Swift/Kotlin app links, so it bundles the
 # projection without the crate joining the canonical `nmp` facade.
+# #884: the FFI boundary parses/formats `Sha256Hash` from its one
+# protocol-neutral owner.
+nmp-asset.workspace = true
 nmp-blossom.workspace = true
 # #555: `FfiBlossomAuthorization::validate_signed_event` reassembles an
 # `FfiSignedEvent` record into canonical event JSON for nostr's strict

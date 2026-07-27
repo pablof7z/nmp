@@ -51,12 +51,12 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use nmp_asset::{Sha256Hash, Sha256HexError};
 use nmp_blossom::{
     AuthDraftError, AuthValidationError, BlobDescriptor, BlossomClient, BlossomClientConfig,
     BlossomServerUrl, BlossomVerb, DeleteError, DescriptorError, ExpectedAuthorization, ListError,
-    ListPage, MirrorError, ServerUrlError, Sha256Hash, Sha256HexError, SignedAuthorization,
-    UploadError, DEFAULT_MAX_LIST_RESPONSE_BYTES, DEFAULT_MAX_RESPONSE_BYTES,
-    DEFAULT_REQUEST_DEADLINE,
+    ListPage, MirrorError, ServerUrlError, SignedAuthorization, UploadError,
+    DEFAULT_MAX_LIST_RESPONSE_BYTES, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_REQUEST_DEADLINE,
 };
 use nostr::{JsonUtil, PublicKey, Timestamp, UnsignedEvent};
 
@@ -92,11 +92,13 @@ fn verb_from_ffi(verb: FfiBlossomVerb) -> BlossomVerb {
 }
 
 /// A BUD-02 blob descriptor (`nmp_blossom::BlobDescriptor` mirror). When
-/// returned by [`FfiBlossomClient::upload`]/[`FfiBlossomClient::mirror`]
-/// its `sha256` was PROVEN equal to the locally computed/authorized hash
-/// (the `VerifiedUpload` integrity gate); rows from
-/// [`FfiBlossomClient::list`] are strictly parsed but remain unverified
-/// server claims, exactly as in the Rust crate.
+/// returned by [`FfiBlossomClient::upload`] its `sha256` was PROVEN equal to
+/// the hash of the exact bytes this client uploaded. A
+/// [`FfiBlossomClient::mirror`] result was checked only against the hash the
+/// caller authorized -- this client never sees the mirrored bytes, so it
+/// mints no exact-byte proof (#884). Rows from [`FfiBlossomClient::list`] are
+/// strictly parsed but remain unverified server claims, exactly as in the
+/// Rust crate.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct FfiBlobDescriptor {
     pub url: String,
@@ -1336,11 +1338,11 @@ impl FfiBlossomClient {
                     reason: error.reason,
                 }
             })?;
-            let verified = client
+            let descriptor = client
                 .mirror(&server, &source_url, expected, &auth.inner)
                 .await
                 .map_err(mirror_error_to_ffi)?;
-            Ok(descriptor_to_ffi(verified.into_descriptor()))
+            Ok(descriptor_to_ffi(descriptor))
         })
     }
 

@@ -14,7 +14,7 @@ use nostr::{
     UnsignedEvent,
 };
 
-use crate::sha256::Sha256Hash;
+use nmp_asset::Sha256Hash;
 
 /// The BUD-11 authorization verbs, modeled TOTALLY so the verb-string
 /// mapping can never drift per call site. Upload, delete, and list have
