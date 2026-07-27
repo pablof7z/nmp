@@ -46,7 +46,13 @@ impl EventStore for FailIngestStore {
         from: RelayObserved,
     ) -> Result<InsertOutcome, PersistenceError> {
         if self.fail_insert {
-            return Err(PersistenceError("injected ingest I/O failure".into()));
+            // Classified as the real backend would classify a disk-full
+            // write (#895): the originating I/O failure, durability unknown
+            // — never `invariant`, which would claim the write is absent.
+            return Err(PersistenceError::new(
+                PersistenceFault::Io,
+                "injected ingest I/O failure",
+            ));
         }
         self.inner.insert(event, from)
     }
@@ -141,6 +147,10 @@ impl EventStore for FailIngestStore {
 /// panicking. `MemoryStore` never fails, so the fault is entirely the
 /// injected one — this is the exact contract the redb backend now honors via
 /// `.map_err(persist_err)?` on every real redb operation.
+///
+/// It also pins #895's classification across the crate boundary: the fault
+/// and its durability outcome reach `nmp-engine` as types, so a consumer
+/// never has to read the message to learn whether the write may have landed.
 #[test]
 fn ingest_door_surfaces_io_failure_as_persistence_error_not_panic() {
     let a = Keys::generate();
@@ -151,10 +161,14 @@ fn ingest_door_surfaces_io_failure_as_persistence_error_not_panic() {
         Timestamp::from(1_000u64),
     );
     let outcome = store.insert(event, from);
-    assert!(
-        matches!(outcome, Err(PersistenceError(_))),
-        "an ingest-path I/O failure must surface as Err(PersistenceError), got {outcome:?}"
+    let error = outcome.expect_err("an ingest-path I/O failure must surface as Err");
+    assert_eq!(error.fault(), PersistenceFault::Io);
+    assert_eq!(
+        error.durability(),
+        DurabilityOutcome::Unknown,
+        "an I/O failure never claims the write is absent"
     );
+    assert!(error.fault().requires_reopen());
 }
 
 /// Engine-level falsifier (issue #122): a relay EVENT frame whose store
@@ -364,7 +378,9 @@ impl EventStore for WakeLaneProbeStore {
     ) -> Result<Vec<nmp_store::RecoveredLane>, PersistenceError> {
         if self.fail_next_bootstrap {
             self.fail_next_bootstrap = false;
-            return Err(PersistenceError("injected bootstrap failure".to_string()));
+            return Err(PersistenceError::invariant(
+                "injected bootstrap failure".to_string(),
+            ));
         }
         self.inner.bootstrap_outbox_lanes(intent_id)
     }

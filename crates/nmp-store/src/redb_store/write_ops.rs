@@ -497,7 +497,10 @@ pub(super) fn promote_signed(
             Some(intent_json) => {
                 let intent_record: OutboxIntentRecord = serde_json::from_str(&intent_json)
                     .map_err(|error| {
-                        PersistenceError(format!("decode outbox intent {}: {error}", intent_id.0))
+                        PersistenceError::invariant(format!(
+                            "decode outbox intent {}: {error}",
+                            intent_id.0
+                        ))
                     })?;
                 // No-second-transition guard (codex-nova finding): a
                 // repeat promotion (e.g. a duplicate signer completion)
@@ -731,7 +734,10 @@ pub(super) fn compensate_write_with_state(
             Some(intent_json) => {
                 let intent_record: OutboxIntentRecord = serde_json::from_str(&intent_json)
                     .map_err(|error| {
-                        PersistenceError(format!("decode outbox intent {}: {error}", intent_id.0))
+                        PersistenceError::invariant(format!(
+                            "decode outbox intent {}: {error}",
+                            intent_id.0
+                        ))
                     })?;
                 if intent_record.sig_state == IntentSigState::Signed {
                     // Pre-signature only (retraction doc §4.2's
@@ -740,7 +746,7 @@ pub(super) fn compensate_write_with_state(
                 } else {
                     let frozen_event =
                         Event::from_json(&intent_record.frozen_json).map_err(|error| {
-                            PersistenceError(format!(
+                            PersistenceError::invariant(format!(
                                 "decode frozen event for intent {}: {error}",
                                 intent_id.0
                             ))
@@ -806,7 +812,7 @@ pub(super) fn compensate_write_with_state(
                         let mut other_record =
                             stored_event_to_record(&try_decode_stored_event(&other_bytes)?);
                         let Some(mut local) = other_record.local.clone() else {
-                            return Err(PersistenceError(format!(
+                            return Err(PersistenceError::invariant(format!(
                                 "displaced event for intent {} lost local ownership",
                                 intent_id.0
                             )));
@@ -879,7 +885,7 @@ pub(super) fn compensate_write_with_state(
                     if let Some(claims_json) = claims_json {
                         let claims: Vec<SuppressClaimRecord> = serde_json::from_str(&claims_json)
                             .map_err(|error| {
-                            PersistenceError(format!(
+                            PersistenceError::invariant(format!(
                                 "decode suppression claims for intent {}: {error}",
                                 intent_id.0
                             ))
@@ -895,13 +901,13 @@ pub(super) fn compensate_write_with_state(
                                     // target's own id is everything
                                     // before the first `:`.
                                     let hex = id_key.split(':').next().ok_or_else(|| {
-                                        PersistenceError(format!(
+                                        PersistenceError::invariant(format!(
                                             "decode id suppression claim for intent {}",
                                             intent_id.0
                                         ))
                                     })?;
                                     Some(EventId::from_hex(hex).map_err(|error| {
-                                        PersistenceError(format!(
+                                        PersistenceError::invariant(format!(
                                             "decode id suppression claim for intent {}: {error}",
                                             intent_id.0
                                         ))
@@ -1008,15 +1014,16 @@ pub(super) fn cancel_ephemeral_receipt(
             return Ok(crate::CancelEphemeralOutcome::NotFound);
         };
         let mut record: OutboxReceiptRecord = serde_json::from_str(&json)
-            .map_err(|err| PersistenceError(format!("decode outbox receipt: {err}")))?;
+            .map_err(|err| PersistenceError::invariant(format!("decode outbox receipt: {err}")))?;
         if record.intent_id.is_some() {
             crate::CancelEphemeralOutcome::NotEphemeral
         } else {
             match record.state {
                 ReceiptState::Accepted => {
                     record.state = ReceiptState::Cancelled;
-                    let encoded = serde_json::to_string(&record)
-                        .map_err(|err| PersistenceError(format!("encode outbox receipt: {err}")))?;
+                    let encoded = serde_json::to_string(&record).map_err(|err| {
+                        PersistenceError::invariant(format!("encode outbox receipt: {err}"))
+                    })?;
                     receipts
                         .insert(key.as_str(), encoded.as_str())
                         .map_err(persist_err)?;
@@ -1050,13 +1057,14 @@ pub(super) fn mark_ephemeral_signed(
             return Ok(false);
         };
         let mut record: OutboxReceiptRecord = serde_json::from_str(&json)
-            .map_err(|err| PersistenceError(format!("decode outbox receipt: {err}")))?;
+            .map_err(|err| PersistenceError::invariant(format!("decode outbox receipt: {err}")))?;
         if record.intent_id.is_some() || record.state != ReceiptState::Accepted {
             false
         } else {
             record.state = ReceiptState::Signed;
-            let encoded = serde_json::to_string(&record)
-                .map_err(|err| PersistenceError(format!("encode outbox receipt: {err}")))?;
+            let encoded = serde_json::to_string(&record).map_err(|err| {
+                PersistenceError::invariant(format!("encode outbox receipt: {err}"))
+            })?;
             receipts
                 .insert(key.as_str(), encoded.as_str())
                 .map_err(persist_err)?;

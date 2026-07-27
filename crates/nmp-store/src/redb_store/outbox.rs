@@ -82,26 +82,27 @@ pub(super) fn deadline_upper(now: Timestamp) -> String {
 }
 
 pub(super) fn encode_json(value: &impl Serialize, what: &str) -> Result<String, PersistenceError> {
-    serde_json::to_string(value).map_err(|err| PersistenceError(format!("encode {what}: {err}")))
+    serde_json::to_string(value)
+        .map_err(|err| PersistenceError::invariant(format!("encode {what}: {err}")))
 }
 
 pub(super) fn decode_lane(key: &str, json: &str) -> Result<RecoveredLane, PersistenceError> {
     let lane: RecoveredLane = serde_json::from_str(json)
-        .map_err(|err| PersistenceError(format!("decode outbox lane: {err}")))?;
+        .map_err(|err| PersistenceError::invariant(format!("decode outbox lane: {err}")))?;
     if lane.version != 1 {
-        return Err(PersistenceError(format!(
+        return Err(PersistenceError::invariant(format!(
             "unsupported outbox lane version {}",
             lane.version
         )));
     }
     if lane_key(&lane.key) != key {
-        return Err(PersistenceError(
-            "outbox lane key does not match value".into(),
+        return Err(PersistenceError::invariant(
+            "outbox lane key does not match value",
         ));
     }
     if lane.revision == 0 {
-        return Err(PersistenceError(
-            "outbox lane revision must be non-zero".into(),
+        return Err(PersistenceError::invariant(
+            "outbox lane revision must be non-zero",
         ));
     }
     let state_ordinal = match &lane.state {
@@ -112,8 +113,8 @@ pub(super) fn decode_lane(key: &str, json: &str) -> Result<RecoveredLane, Persis
         _ => None,
     };
     if state_ordinal.is_some_and(|ordinal| ordinal != lane.last_ordinal) {
-        return Err(PersistenceError(
-            "outbox lane state ordinal disagrees with cursor".into(),
+        return Err(PersistenceError::invariant(
+            "outbox lane state ordinal disagrees with cursor",
         ));
     }
     if matches!(
@@ -123,8 +124,8 @@ pub(super) fn decode_lane(key: &str, json: &str) -> Result<RecoveredLane, Persis
             ..
         }
     ) {
-        return Err(PersistenceError(
-            "terminal lane cannot contain Started".into(),
+        return Err(PersistenceError::invariant(
+            "terminal lane cannot contain Started",
         ));
     }
     if matches!(
@@ -134,8 +135,8 @@ pub(super) fn decode_lane(key: &str, json: &str) -> Result<RecoveredLane, Persis
             ..
         } if reason.len() > 4_096
     ) {
-        return Err(PersistenceError(
-            "transient raw reason exceeds 4096 bytes".into(),
+        return Err(PersistenceError::invariant(
+            "transient raw reason exceeds 4096 bytes",
         ));
     }
     Ok(lane)
@@ -143,10 +144,10 @@ pub(super) fn decode_lane(key: &str, json: &str) -> Result<RecoveredLane, Persis
 
 pub(super) fn decode_deadline(key: &str, json: &str) -> Result<LaneDeadline, PersistenceError> {
     let deadline: LaneDeadline = serde_json::from_str(json)
-        .map_err(|err| PersistenceError(format!("decode outbox deadline: {err}")))?;
+        .map_err(|err| PersistenceError::invariant(format!("decode outbox deadline: {err}")))?;
     if deadline_key(&deadline) != key {
-        return Err(PersistenceError(
-            "outbox deadline key does not match value".into(),
+        return Err(PersistenceError::invariant(
+            "outbox deadline key does not match value",
         ));
     }
     Ok(deadline)
@@ -157,10 +158,10 @@ pub(super) fn decode_deadline_by_intent(
     json: &str,
 ) -> Result<LaneDeadline, PersistenceError> {
     let deadline: LaneDeadline = serde_json::from_str(json)
-        .map_err(|err| PersistenceError(format!("decode outbox deadline: {err}")))?;
+        .map_err(|err| PersistenceError::invariant(format!("decode outbox deadline: {err}")))?;
     if deadline_intent_key(&deadline) != key {
-        return Err(PersistenceError(
-            "outbox deadline-by-intent key does not match value".into(),
+        return Err(PersistenceError::invariant(
+            "outbox deadline-by-intent key does not match value",
         ));
     }
     Ok(deadline)
@@ -171,26 +172,26 @@ pub(super) fn decode_attempt_details(
     json: &str,
 ) -> Result<RecoveredAttemptDetails, PersistenceError> {
     let details: RecoveredAttemptDetails = serde_json::from_str(json)
-        .map_err(|err| PersistenceError(format!("decode attempt details: {err}")))?;
+        .map_err(|err| PersistenceError::invariant(format!("decode attempt details: {err}")))?;
     if details.version != 1 {
-        return Err(PersistenceError(format!(
+        return Err(PersistenceError::invariant(format!(
             "unsupported attempt details version {}",
             details.version
         )));
     }
     if attempt_key(details.intent_id, &details.relay, details.ordinal) != key {
-        return Err(PersistenceError(
-            "attempt detail key does not match value".into(),
+        return Err(PersistenceError::invariant(
+            "attempt detail key does not match value",
         ));
     }
     if details.terminal == Some(AttemptOutcome::Started) {
-        return Err(PersistenceError(
-            "attempt details terminal cannot contain Started".into(),
+        return Err(PersistenceError::invariant(
+            "attempt details terminal cannot contain Started",
         ));
     }
     if details.finished_at.is_some() && details.terminal.is_none() {
-        return Err(PersistenceError(
-            "attempt details finish time lacks terminal outcome".into(),
+        return Err(PersistenceError::invariant(
+            "attempt details finish time lacks terminal outcome",
         ));
     }
     if details
@@ -199,8 +200,8 @@ pub(super) fn decode_attempt_details(
         .and_then(|detail| detail.raw_reason.as_ref())
         .is_some_and(|reason| reason.len() > 4_096)
     {
-        return Err(PersistenceError(
-            "transient raw reason exceeds 4096 bytes".into(),
+        return Err(PersistenceError::invariant(
+            "transient raw reason exceeds 4096 bytes",
         ));
     }
     Ok(details)
@@ -236,10 +237,10 @@ pub(super) fn replace_lane_in_txn(
         .get(storage_key.as_str())
         .map_err(persist_err)?
         .map(|guard| guard.value().to_string())
-        .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+        .ok_or_else(|| PersistenceError::invariant("outbox lane not found"))?;
     let current = decode_lane(&storage_key, &json)?;
     if current.revision != expected_revision {
-        return Err(PersistenceError("stale outbox lane revision".into()));
+        return Err(PersistenceError::invariant("stale outbox lane revision"));
     }
     if let Some(old) = lane_deadline(&current) {
         deadlines
@@ -255,7 +256,7 @@ pub(super) fn replace_lane_in_txn(
         revision: current
             .revision
             .checked_add(1)
-            .ok_or_else(|| PersistenceError("outbox lane revision exhausted".into()))?,
+            .ok_or_else(|| PersistenceError::invariant("outbox lane revision exhausted"))?,
         last_ordinal: current.last_ordinal,
         state,
     };
@@ -302,16 +303,16 @@ pub(super) fn decode_route_revision(
     json: &str,
 ) -> Result<RecoveredRouteRevision, PersistenceError> {
     let record: OutboxRouteRevisionRecord = serde_json::from_str(json)
-        .map_err(|err| PersistenceError(format!("decode route revision: {err}")))?;
+        .map_err(|err| PersistenceError::invariant(format!("decode route revision: {err}")))?;
     if record.version != 1 {
-        return Err(PersistenceError(format!(
+        return Err(PersistenceError::invariant(format!(
             "unsupported route revision version {}",
             record.version
         )));
     }
     if route_revision_key(record.intent_id, record.ordinal) != key {
-        return Err(PersistenceError(
-            "route revision key does not match its value tuple".into(),
+        return Err(PersistenceError::invariant(
+            "route revision key does not match its value tuple",
         ));
     }
     Ok(RecoveredRouteRevision {
@@ -324,23 +325,23 @@ pub(super) fn decode_route_revision(
 
 pub(super) fn decode_attempt(key: &str, json: &str) -> Result<RecoveredAttempt, PersistenceError> {
     let record: OutboxAttemptRecord = serde_json::from_str(json)
-        .map_err(|err| PersistenceError(format!("decode outbox attempt: {err}")))?;
+        .map_err(|err| PersistenceError::invariant(format!("decode outbox attempt: {err}")))?;
     if record.version != 1 {
-        return Err(PersistenceError(format!(
+        return Err(PersistenceError::invariant(format!(
             "unsupported outbox attempt record version {}",
             record.version
         )));
     }
     if attempt_key(record.intent_id, &record.relay, record.ordinal) != key {
-        return Err(PersistenceError(
-            "outbox attempt key does not match its value tuple".into(),
+        return Err(PersistenceError::invariant(
+            "outbox attempt key does not match its value tuple",
         ));
     }
     let event = Event::from_json(&record.event_json)
-        .map_err(|err| PersistenceError(format!("decode attempt event: {err}")))?;
+        .map_err(|err| PersistenceError::invariant(format!("decode attempt event: {err}")))?;
     event
         .verify()
-        .map_err(|err| PersistenceError(format!("attempt event is invalid: {err}")))?;
+        .map_err(|err| PersistenceError::invariant(format!("attempt event is invalid: {err}")))?;
     Ok(RecoveredAttempt {
         version: record.version,
         intent_id: record.intent_id,
@@ -418,8 +419,8 @@ pub(super) fn alloc_receipt_id_in_txn(
 ) -> Result<u64, PersistenceError> {
     let id = alloc_counter_in_txn(outbox_meta, NEXT_RECEIPT_ID_KEY)?;
     if id >= (1u64 << 63) {
-        return Err(PersistenceError(
-            "durable receipt id namespace exhausted".into(),
+        return Err(PersistenceError::invariant(
+            "durable receipt id namespace exhausted",
         ));
     }
     Ok(id)
@@ -437,11 +438,11 @@ pub(super) fn alloc_counter_in_txn(
         .map_err(persist_err)?
         .map(|guard| guard.value().parse::<u64>())
         .transpose()
-        .map_err(|err| PersistenceError(format!("parse outbox_meta counter: {err}")))?
+        .map_err(|err| PersistenceError::invariant(format!("parse outbox_meta counter: {err}")))?
         .unwrap_or(1);
     let next = current
         .checked_add(1)
-        .ok_or_else(|| PersistenceError("outbox id counter exhausted".into()))?;
+        .ok_or_else(|| PersistenceError::invariant("outbox id counter exhausted"))?;
     let encoded = next.to_string();
     outbox_meta
         .insert(meta_key, encoded.as_str())
@@ -457,11 +458,13 @@ pub(super) fn increment_pending_ephemeral_in_txn(
         .map_err(persist_err)?
         .map(|guard| guard.value().parse::<u64>())
         .transpose()
-        .map_err(|err| PersistenceError(format!("parse pending ephemeral count: {err}")))?
+        .map_err(|err| {
+            PersistenceError::invariant(format!("parse pending ephemeral count: {err}"))
+        })?
         .unwrap_or(0);
     let next = current
         .checked_add(1)
-        .ok_or_else(|| PersistenceError("pending ephemeral receipt count exhausted".into()))?;
+        .ok_or_else(|| PersistenceError::invariant("pending ephemeral receipt count exhausted"))?;
     let encoded = next.to_string();
     outbox_meta
         .insert(PENDING_EPHEMERAL_RECEIPTS_KEY, encoded.as_str())
@@ -477,11 +480,13 @@ pub(super) fn decrement_pending_ephemeral_in_txn(
         .map_err(persist_err)?
         .map(|guard| guard.value().parse::<u64>())
         .transpose()
-        .map_err(|err| PersistenceError(format!("parse pending ephemeral count: {err}")))?
+        .map_err(|err| {
+            PersistenceError::invariant(format!("parse pending ephemeral count: {err}"))
+        })?
         .unwrap_or(0);
     let next = current
         .checked_sub(1)
-        .ok_or_else(|| PersistenceError("pending ephemeral receipt count underflow".into()))?;
+        .ok_or_else(|| PersistenceError::invariant("pending ephemeral receipt count underflow"))?;
     let encoded = next.to_string();
     outbox_meta
         .insert(PENDING_EPHEMERAL_RECEIPTS_KEY, encoded.as_str())
@@ -523,13 +528,15 @@ pub(super) fn update_outbox_receipt(
     let existing = outbox_receipts.get(key.as_str()).map_err(persist_err)?;
     let json = existing
         .map(|guard| guard.value().to_string())
-        .ok_or_else(|| PersistenceError(format!("missing outbox receipt {receipt_id}")))?;
+        .ok_or_else(|| {
+            PersistenceError::invariant(format!("missing outbox receipt {receipt_id}"))
+        })?;
     let mut record: OutboxReceiptRecord = serde_json::from_str(&json).map_err(|error| {
-        PersistenceError(format!("decode outbox receipt {receipt_id}: {error}"))
+        PersistenceError::invariant(format!("decode outbox receipt {receipt_id}: {error}"))
     })?;
     record.state = state;
     let encoded = serde_json::to_string(&record).map_err(|error| {
-        PersistenceError(format!("encode outbox receipt {receipt_id}: {error}"))
+        PersistenceError::invariant(format!("encode outbox receipt {receipt_id}: {error}"))
     })?;
     outbox_receipts
         .insert(key.as_str(), encoded.as_str())
@@ -639,7 +646,7 @@ pub(super) fn remove_claimant_in_txn(
         return Ok(());
     };
     let mut claimants: Vec<u64> = serde_json::from_str(&json)
-        .map_err(|error| PersistenceError(format!("decode claimant set: {error}")))?;
+        .map_err(|error| PersistenceError::invariant(format!("decode claimant set: {error}")))?;
     claimants.retain(|id| *id != intent_id.0);
     if claimants.is_empty() {
         table.remove(key).map_err(persist_err)?;
@@ -710,8 +717,9 @@ pub(super) fn remove_addr_claimant_in_txn(
     else {
         return Ok(());
     };
-    let mut claimants: Vec<AddrClaimant> = serde_json::from_str(&json)
-        .map_err(|error| PersistenceError(format!("decode address claimant set: {error}")))?;
+    let mut claimants: Vec<AddrClaimant> = serde_json::from_str(&json).map_err(|error| {
+        PersistenceError::invariant(format!("decode address claimant set: {error}"))
+    })?;
     claimants.retain(|c| c.intent_id != intent_id.0);
     if claimants.is_empty() {
         table.remove(key).map_err(persist_err)?;
@@ -738,8 +746,9 @@ pub(super) fn addr_has_covering_claimant_in_txn(
     else {
         return Ok(false);
     };
-    let claimants: Vec<AddrClaimant> = serde_json::from_str(&json)
-        .map_err(|error| PersistenceError(format!("decode address claimant set: {error}")))?;
+    let claimants: Vec<AddrClaimant> = serde_json::from_str(&json).map_err(|error| {
+        PersistenceError::invariant(format!("decode address claimant set: {error}"))
+    })?;
     Ok(claimants
         .iter()
         .any(|c| candidate_created_at.as_secs() <= c.ceiling))

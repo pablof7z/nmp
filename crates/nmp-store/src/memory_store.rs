@@ -367,14 +367,14 @@ impl MemoryStore {
         let current = self
             .get_lane(key)
             .cloned()
-            .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("outbox lane not found"))?;
         if current.revision != expected_revision {
-            return Err(PersistenceError("stale outbox lane revision".into()));
+            return Err(PersistenceError::invariant("stale outbox lane revision"));
         }
         let revision = current
             .revision
             .checked_add(1)
-            .ok_or_else(|| PersistenceError("outbox lane revision exhausted".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("outbox lane revision exhausted"))?;
         if let Some(old) = Self::lane_deadline(&current) {
             self.outbox_deadlines
                 .remove(&(old.at, key.intent_id, key.relay.clone()));
@@ -412,7 +412,7 @@ impl MemoryStore {
         self.next_intent_id = self
             .next_intent_id
             .checked_add(1)
-            .ok_or_else(|| PersistenceError("intent id exhausted".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("intent id exhausted"))?;
         Ok(IntentId(self.next_intent_id))
     }
 
@@ -421,10 +421,10 @@ impl MemoryStore {
         let next = self
             .next_receipt_id
             .checked_add(1)
-            .ok_or_else(|| PersistenceError("receipt id exhausted".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("receipt id exhausted"))?;
         if next >= (1u64 << 63) {
-            return Err(PersistenceError(
-                "durable receipt id namespace exhausted".into(),
+            return Err(PersistenceError::invariant(
+                "durable receipt id namespace exhausted",
             ));
         }
         self.next_receipt_id = next;
@@ -2163,7 +2163,7 @@ impl EventStore for MemoryStore {
         }
         let receipt_id = intent_record.receipt_id;
         if !self.outbox_receipts.contains_key(&receipt_id) {
-            return Err(PersistenceError(format!(
+            return Err(PersistenceError::invariant(format!(
                 "missing outbox receipt {receipt_id}"
             )));
         }
@@ -2375,7 +2375,9 @@ impl EventStore for MemoryStore {
         relays: BTreeSet<RelayUrl>,
     ) -> Result<RecoveredRouteRevision, PersistenceError> {
         if !self.outbox_intents.contains_key(&intent_id) {
-            return Err(PersistenceError("route revision intent is not open".into()));
+            return Err(PersistenceError::invariant(
+                "route revision intent is not open",
+            ));
         }
         let ordinal = self
             .outbox_route_revisions
@@ -2385,7 +2387,7 @@ impl EventStore for MemoryStore {
             .max()
             .unwrap_or(0)
             .checked_add(1)
-            .ok_or_else(|| PersistenceError("route revision ordinal exhausted".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("route revision ordinal exhausted"))?;
         let revision = RecoveredRouteRevision {
             version: 1,
             intent_id,
@@ -2442,7 +2444,9 @@ impl EventStore for MemoryStore {
         intent_id: IntentId,
     ) -> Result<Vec<RecoveredLane>, PersistenceError> {
         if !self.outbox_intents.contains_key(&intent_id) {
-            return Err(PersistenceError("lane bootstrap intent is not open".into()));
+            return Err(PersistenceError::invariant(
+                "lane bootstrap intent is not open",
+            ));
         }
         let mut relays = BTreeSet::new();
         for revision in self.outbox_route_revisions.values() {
@@ -2489,15 +2493,15 @@ impl EventStore for MemoryStore {
                         )
                     }))
             {
-                return Err(PersistenceError(
-                    "contradictory live v1 Started attempt history".into(),
+                return Err(PersistenceError::invariant(
+                    "contradictory live v1 Started attempt history",
                 ));
             }
             if let Some(existing) = self.get_lane(&key) {
                 let max = attempts.last().map_or(0, |attempt| attempt.ordinal);
                 if existing.last_ordinal != max {
-                    return Err(PersistenceError(
-                        "outbox lane cursor disagrees with retained attempt history".into(),
+                    return Err(PersistenceError::invariant(
+                        "outbox lane cursor disagrees with retained attempt history",
                     ));
                 }
                 match attempts.last() {
@@ -2508,14 +2512,14 @@ impl EventStore for MemoryStore {
                                 outcome: attempt.outcome.clone(),
                             })
                         {
-                            return Err(PersistenceError(
-                                "terminal attempt and lane state disagree".into(),
+                            return Err(PersistenceError::invariant(
+                                "terminal attempt and lane state disagree",
                             ));
                         }
                     }
                     _ if matches!(existing.state, LaneState::Terminal { .. }) => {
-                        return Err(PersistenceError(
-                            "terminal lane lacks matching terminal attempt".into(),
+                        return Err(PersistenceError::invariant(
+                            "terminal lane lacks matching terminal attempt",
                         ));
                     }
                     _ => {}
@@ -2564,7 +2568,9 @@ impl EventStore for MemoryStore {
         limit: usize,
     ) -> Result<Vec<LaneDeadline>, PersistenceError> {
         if limit > 1_024 {
-            return Err(PersistenceError("deadline read limit exceeds 1024".into()));
+            return Err(PersistenceError::invariant(
+                "deadline read limit exceeds 1024",
+            ));
         }
         let mut due = Vec::new();
         for (_, deadline) in self.outbox_deadlines.range(
@@ -2580,9 +2586,9 @@ impl EventStore for MemoryStore {
             }
             let lane = self
                 .get_lane(&deadline.key)
-                .ok_or_else(|| PersistenceError("deadline references missing lane".into()))?;
+                .ok_or_else(|| PersistenceError::invariant("deadline references missing lane"))?;
             if Self::lane_deadline(lane).as_ref() != Some(deadline) {
-                return Err(PersistenceError("deadline and lane disagree".into()));
+                return Err(PersistenceError::invariant("deadline and lane disagree"));
             }
             due.push(deadline.clone());
         }
@@ -2635,15 +2641,15 @@ impl EventStore for MemoryStore {
             .as_ref()
             .is_some_and(|reason| reason.len() > 4_096)
         {
-            return Err(PersistenceError(
-                "transient raw reason exceeds 4096 bytes".into(),
+            return Err(PersistenceError::invariant(
+                "transient raw reason exceeds 4096 bytes",
             ));
         }
         let lane = self
             .get_lane(key)
-            .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("outbox lane not found"))?;
         if ordinal != lane.last_ordinal {
-            return Err(PersistenceError("stale attempt ordinal".into()));
+            return Err(PersistenceError::invariant("stale attempt ordinal"));
         }
         if ordinal > 0
             && !self.outbox_attempt_details.contains_key(&(
@@ -2652,7 +2658,7 @@ impl EventStore for MemoryStore {
                 ordinal,
             ))
         {
-            return Err(PersistenceError("attempt detail row not found".into()));
+            return Err(PersistenceError::invariant("attempt detail row not found"));
         }
         let recovered = self.replace_lane(
             key,
@@ -2691,19 +2697,19 @@ impl EventStore for MemoryStore {
             .as_ref()
             .is_some_and(|reason| reason.len() > 4_096)
         {
-            return Err(PersistenceError(
-                "transient raw reason exceeds 4096 bytes".into(),
+            return Err(PersistenceError::invariant(
+                "transient raw reason exceeds 4096 bytes",
             ));
         }
         let lane = self
             .get_lane(key)
-            .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("outbox lane not found"))?;
         if lane.revision != expected_revision || lane.last_ordinal != ordinal || ordinal == 0 {
-            return Err(PersistenceError("stale suspended attempt".into()));
+            return Err(PersistenceError::invariant("stale suspended attempt"));
         }
         self.outbox_attempt_details
             .get(&(key.intent_id, key.relay.clone(), ordinal))
-            .ok_or_else(|| PersistenceError("attempt detail row not found".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("attempt detail row not found"))?;
         let recovered = self.replace_lane(
             key,
             expected_revision,
@@ -2734,31 +2740,31 @@ impl EventStore for MemoryStore {
         let lane = self
             .get_lane(key)
             .cloned()
-            .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("outbox lane not found"))?;
         if lane.revision != expected_revision || !matches!(lane.state, LaneState::Eligible { .. }) {
-            return Err(PersistenceError(
-                "lane is not expected eligible cursor".into(),
+            return Err(PersistenceError::invariant(
+                "lane is not expected eligible cursor",
             ));
         }
         lane.revision
             .checked_add(1)
-            .ok_or_else(|| PersistenceError("outbox lane revision exhausted".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("outbox lane revision exhausted"))?;
         let intent = self
             .outbox_intents
             .get(&key.intent_id)
-            .ok_or_else(|| PersistenceError("attempt intent is not open".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("attempt intent is not open"))?;
         if intent.sig_state != IntentSigState::Signed || intent.frozen != event {
-            return Err(PersistenceError(
-                "attempt bytes are not the intent's promoted signed bytes".into(),
+            return Err(PersistenceError::invariant(
+                "attempt bytes are not the intent's promoted signed bytes",
             ));
         }
-        event
-            .verify()
-            .map_err(|err| PersistenceError(format!("attempt event is invalid: {err}")))?;
+        event.verify().map_err(|err| {
+            PersistenceError::invariant(format!("attempt event is invalid: {err}"))
+        })?;
         let ordinal = lane
             .last_ordinal
             .checked_add(1)
-            .ok_or_else(|| PersistenceError("attempt ordinal exhausted".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("attempt ordinal exhausted"))?;
         let attempt = RecoveredAttempt {
             version: 1,
             intent_id: key.intent_id,
@@ -2811,7 +2817,7 @@ impl EventStore for MemoryStore {
                 ..
             }
         ) {
-            return Err(PersistenceError("Started is not terminal".into()));
+            return Err(PersistenceError::invariant("Started is not terminal"));
         }
         if matches!(
             &next,
@@ -2820,16 +2826,16 @@ impl EventStore for MemoryStore {
                 ..
             } if reason.len() > 4_096
         ) {
-            return Err(PersistenceError(
-                "transient raw reason exceeds 4096 bytes".into(),
+            return Err(PersistenceError::invariant(
+                "transient raw reason exceeds 4096 bytes",
             ));
         }
         let lane = self
             .get_lane(key)
             .cloned()
-            .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("outbox lane not found"))?;
         if lane.revision != expected_revision || lane.last_ordinal != ordinal {
-            return Err(PersistenceError("stale lane handoff".into()));
+            return Err(PersistenceError::invariant("stale lane handoff"));
         }
         if !matches!(
             lane.state,
@@ -2838,18 +2844,18 @@ impl EventStore for MemoryStore {
                 phase: InFlightPhase::AwaitingHandoff,
             } if current == ordinal
         ) {
-            return Err(PersistenceError("lane is not awaiting handoff".into()));
+            return Err(PersistenceError::invariant("lane is not awaiting handoff"));
         }
         lane.revision
             .checked_add(1)
-            .ok_or_else(|| PersistenceError("outbox lane revision exhausted".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("outbox lane revision exhausted"))?;
         let details = self
             .outbox_attempt_details
             .get_mut(&(key.intent_id, key.relay.clone(), ordinal))
-            .ok_or_else(|| PersistenceError("attempt detail row not found".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("attempt detail row not found"))?;
         if let Some(existing) = &details.handoff {
             if existing != &detail {
-                return Err(PersistenceError("conflicting handoff evidence".into()));
+                return Err(PersistenceError::invariant("conflicting handoff evidence"));
             }
         } else {
             details.handoff = Some(detail);
@@ -2877,7 +2883,7 @@ impl EventStore for MemoryStore {
                 finished_at,
             } => {
                 if outcome == AttemptOutcome::Started {
-                    return Err(PersistenceError("Started is not terminal".into()));
+                    return Err(PersistenceError::invariant("Started is not terminal"));
                 }
                 details.finished_at = Some(finished_at);
                 details.terminal = Some(outcome.clone());
@@ -2896,22 +2902,22 @@ impl EventStore for MemoryStore {
         finished_at: Timestamp,
     ) -> Result<RecoveredLane, PersistenceError> {
         if outcome == AttemptOutcome::Started {
-            return Err(PersistenceError("Started is not terminal".into()));
+            return Err(PersistenceError::invariant("Started is not terminal"));
         }
         let lane = self
             .get_lane(key)
             .cloned()
-            .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("outbox lane not found"))?;
         if lane.revision != expected_revision || lane.last_ordinal != ordinal {
-            return Err(PersistenceError("stale terminal attempt".into()));
+            return Err(PersistenceError::invariant("stale terminal attempt"));
         }
         lane.revision
             .checked_add(1)
-            .ok_or_else(|| PersistenceError("outbox lane revision exhausted".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("outbox lane revision exhausted"))?;
         let details = self
             .outbox_attempt_details
             .get_mut(&(key.intent_id, key.relay.clone(), ordinal))
-            .ok_or_else(|| PersistenceError("attempt detail row not found".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("attempt detail row not found"))?;
         if let Some(existing) = &details.terminal {
             if existing == &outcome
                 && details.finished_at == Some(finished_at)
@@ -2925,8 +2931,8 @@ impl EventStore for MemoryStore {
             {
                 return Ok(lane);
             }
-            return Err(PersistenceError(
-                "attempt already has conflicting terminal evidence".into(),
+            return Err(PersistenceError::invariant(
+                "attempt already has conflicting terminal evidence",
             ));
         }
         details.finished_at = Some(finished_at);
@@ -2963,8 +2969,8 @@ impl EventStore for MemoryStore {
                 .iter()
                 .any(|lane| !matches!(lane.state, LaneState::Terminal { .. }))
         {
-            return Err(PersistenceError(
-                "intent lanes are not non-empty and terminal".into(),
+            return Err(PersistenceError::invariant(
+                "intent lanes are not non-empty and terminal",
             ));
         }
         if let Some(rows) = self.outbox_deadlines_by_intent.remove(&intent_id) {

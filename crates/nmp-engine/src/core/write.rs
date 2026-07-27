@@ -2170,7 +2170,7 @@ impl<S: EventStore> EngineCore<S> {
                         pending.sign_request_in_flight = false;
                     }
                     self.degrade_store(
-                        PersistenceError(
+                        PersistenceError::invariant(
                             "accepted ephemeral receipt disappeared during signature promotion"
                                 .to_string(),
                         ),
