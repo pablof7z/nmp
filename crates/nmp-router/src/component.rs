@@ -42,6 +42,9 @@
 //! unconstrained; on tags an ABSENT name is unconstrained while a present
 //! name with an empty value set matches nothing (§3.5).
 
+// Only [`differing`] (test-only) and the tests themselves collect a set here;
+// `sole_difference` walks the two tag maps directly and allocates nothing.
+#[cfg(test)]
 use std::collections::BTreeSet;
 
 use nmp_grammar::{ConcreteFilter, IndexedTagName};
