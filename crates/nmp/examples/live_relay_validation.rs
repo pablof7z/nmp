@@ -33,7 +33,44 @@ const DEFAULT_RELAYS: &[&str] = &[
 
 /// Long enough for a real relay to accept the REQ and start streaming, short
 /// enough to stay a polite guest.
-const SETTLE: Duration = Duration::from_secs(12);
+///
+/// Override with `NMP_LIVE_SETTLE=<seconds>`. This matters more than it looks:
+/// routing resolves each author's NIP-65 relay list before its feed filter can
+/// be placed, so a short settle reports the fan-out MID-FLIGHT -- a snapshot
+/// taken while most of the corpus is still unrouted reads as a small
+/// subscription count and flatters the result. Any steady-state claim needs a
+/// settle long enough that the count has stopped climbing.
+const DEFAULT_SETTLE_SECS: u64 = 12;
+
+fn settle() -> Duration {
+    Duration::from_secs(
+        std::env::var("NMP_LIVE_SETTLE")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_SETTLE_SECS),
+    )
+}
+
+/// Number of entries in a wire filter's `authors` array.
+///
+/// Parsed from the `authors` array specifically rather than by counting
+/// `","` across the whole JSON: that older approach summed EVERY string array
+/// in the filter (`ids`, `#p`, `#e`, …), and returned 1 for a filter with no
+/// string arrays at all, so width-1 was ambiguous between "one author" and
+/// "no authors". Absent `authors` is reported as 0, which is distinct from a
+/// present-but-empty array only in that the latter cannot occur on the wire.
+fn authors_in(filter_json: &str) -> usize {
+    let Some(rest) = filter_json.split("\"authors\":[").nth(1) else {
+        return 0;
+    };
+    let Some(body) = rest.split(']').next() else {
+        return 0;
+    };
+    if body.trim().is_empty() {
+        return 0;
+    }
+    body.split(',').filter(|s| !s.trim().is_empty()).count()
+}
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -112,7 +149,8 @@ fn main() {
     // Let the wire settle against real relays, then take the newest snapshot.
     // `recv` blocks until a snapshot is published, so a bounded drain on a
     // background thread keeps this from hanging on a quiet network.
-    let deadline = Instant::now() + SETTLE;
+    let started = Instant::now();
+    let deadline = started + settle();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         while let Some(snapshot) = diagnostics.recv() {
@@ -122,13 +160,46 @@ fn main() {
         }
     });
     let mut latest = None;
+    // Trajectory of the peak subscription count, so "settled" is OBSERVED
+    // rather than assumed. A count still climbing at the deadline means the
+    // run ended mid-flight and its final number is a floor, not a steady state.
+    let mut trajectory: Vec<(u64, usize, usize)> = Vec::new();
     while Instant::now() < deadline {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(snapshot) => latest = Some(snapshot),
+            Ok(snapshot) => {
+                let peak = snapshot
+                    .relays
+                    .iter()
+                    .map(|r| r.wire_sub_count)
+                    .max()
+                    .unwrap_or(0);
+                let authors: usize = snapshot.relays.iter().map(|r| r.authors_served).sum();
+                let at = started.elapsed().as_secs();
+                match trajectory.last() {
+                    Some(&(_, p, a)) if p == peak && a == authors => {}
+                    _ => trajectory.push((at, peak, authors)),
+                }
+                latest = Some(snapshot);
+            }
             Err(_) => break,
         }
     }
     let snapshot = latest.expect("at least one diagnostics snapshot");
+
+    println!("--- settle trajectory (peak subs / authors served over time) ---");
+    for (at, peak, authors) in &trajectory {
+        println!("  t+{at:>3}s  peak_subs={peak:<5} authors_served={authors}");
+    }
+    let still_climbing = matches!(trajectory.last(), Some(&(_, peak, _))
+        if trajectory.iter().rev().take(2).any(|&(_, p, _)| p < peak) || trajectory.len() < 2);
+    if still_climbing {
+        println!(
+            "  WARNING: the count was still moving at the deadline. This run is a\n\
+             \x20 LOWER BOUND on the steady state, not a measurement of it. Raise\n\
+             \x20 NMP_LIVE_SETTLE until the trajectory flattens before quoting a number."
+        );
+    }
+    println!();
 
     println!(
         "{:<28} {:>5} {:>7} {:>9} {:>8}",
@@ -139,12 +210,7 @@ fn main() {
     let mut per_relay: BTreeMap<String, (usize, usize, u64)> = BTreeMap::new();
 
     for row in &snapshot.relays {
-        let widest = row
-            .filters
-            .iter()
-            .map(|f| f.matches("\",\"").count() + 1)
-            .max()
-            .unwrap_or(0);
+        let widest = row.filters.iter().map(|f| authors_in(f)).max().unwrap_or(0);
         let events: u64 = row.events_by_kind.iter().map(|(_, n)| n).sum();
         worst_subs = worst_subs.max(row.wire_sub_count);
         served += events;
@@ -161,9 +227,17 @@ fn main() {
 
     // Classify what the wire actually holds. `filters` is the exact wire JSON,
     // so shapes here are observed, not inferred.
-    println!("\n--- filter shapes per relay (kinds -> count, widest value array) ---");
+    //
+    // A DISTRIBUTION, not a maximum. Reporting only the widest filter cannot
+    // tell "64 filters each carrying 1055 authors" apart from "1 filter with
+    // 1055 authors plus 63 singletons" -- and those are different bugs with
+    // different fixes. The first would mean limited atoms merged on authors
+    // and something else multiplied them; the second is ordinary per-author
+    // `neither_limited` fan-out. #937 asserted the first from a max, which the
+    // instrument could not support.
+    println!("\n--- author-count distribution per (relay, kinds) group ---");
     for row in &snapshot.relays {
-        let mut shapes: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+        let mut shapes: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for f in &row.filters {
             let kinds = f
                 .split("\"kinds\":")
@@ -171,14 +245,60 @@ fn main() {
                 .and_then(|r| r.split(']').next())
                 .map(|k| format!("kinds:{k}]"))
                 .unwrap_or_else(|| "kinds:none".to_string());
-            let width = f.matches("\",\"").count() + 1;
-            let e = shapes.entry(kinds).or_insert((0, 0));
-            e.0 += 1;
-            e.1 = e.1.max(width);
+            shapes.entry(kinds).or_default().push(authors_in(f));
         }
         println!("  {}", row.relay);
-        for (k, (n, w)) in &shapes {
-            println!("     {n:>4} x {k:<32} widest={w}");
+        for (kinds, widths) in &shapes {
+            // Histogram over author-count, so a long tail of singletons is
+            // visible rather than hidden behind the one wide filter.
+            let mut hist: BTreeMap<usize, usize> = BTreeMap::new();
+            for w in widths {
+                *hist.entry(*w).or_insert(0) += 1;
+            }
+            let total: usize = widths.iter().sum();
+            println!(
+                "     {:>4} x {:<26} authors: total={total} distinct-widths={}",
+                widths.len(),
+                kinds,
+                hist.len()
+            );
+            for (width, count) in &hist {
+                println!("            {count:>4} filter(s) carrying {width:>5} author(s)");
+            }
+        }
+    }
+
+    // Raw wire JSON of a few filters from the largest group -- with dozens of
+    // near-identical filters the differing axis is visible in one pass, and
+    // guessing what the resolver "should" emit is not evidence.
+    if let Some(row) = snapshot
+        .relays
+        .iter()
+        .max_by_key(|r| r.filters.len())
+        .filter(|r| r.filters.len() > 1)
+    {
+        println!(
+            "\n--- one exemplar per distinct author-width on {} ---",
+            row.relay
+        );
+        // One example per width bucket, not the first N. The first N are all
+        // singletons and hide the wide filter entirely -- and whether that
+        // wide filter carries a `limit` is the whole question: a wide LIMITED
+        // filter means the feed is already served and the singletons are
+        // redundant; a wide UNLIMITED one means they are not.
+        let mut seen_widths: BTreeSet<usize> = BTreeSet::new();
+        for f in &row.filters {
+            let w = authors_in(f);
+            if !seen_widths.insert(w) {
+                continue;
+            }
+            let limited = f.contains("\"limit\":");
+            let shown: String = f.chars().take(200).collect();
+            let ellipsis = if f.chars().count() > 200 { " …" } else { "" };
+            println!(
+                "  width={w:<5} limited={:<5} {shown}{ellipsis}",
+                if limited { "YES" } else { "no" }
+            );
         }
     }
 
