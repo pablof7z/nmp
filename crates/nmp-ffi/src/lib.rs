@@ -29,6 +29,11 @@
 //!   engine, no network, no signing.
 //! - [`reference`] -- engine-free normalized targets and safe canonical/helper
 //!   demand plans. Planning returns values and never opens an observation.
+//! - [`nip51`] -- tolerant, observational NIP-51 Simple-groups parsing
+//!   (#863). A free function over a caller-constructible `FfiRow` returning
+//!   plain data; no observation-qualified wrapper, projection error, or
+//!   frame proof exists here, and none may be reintroduced
+//!   (`scripts/check-nip51-no-derived-authority.sh`).
 //! - [`nip29`] -- the read-only NIP-29 host-browser projection (#108):
 //!   `nmp-nip51`/`nmp-nip29`'s constructors/codec as top-level free
 //!   functions, same "no `NmpEngine` instance needed" shape as [`entity`].
@@ -58,6 +63,7 @@ pub mod facade;
 pub mod nip02;
 pub mod nip22;
 pub mod nip29;
+pub mod nip51;
 pub mod reference;
 pub mod signer;
 pub mod types;
