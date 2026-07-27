@@ -28,6 +28,10 @@
 //!   by [`describe_evidence`], so both halves of the read surface are closure-
 //!   checked from an `nmp`-only dependency rather than merely imported.
 //!   imported and left unused past one field read.
+//! - NIP-22 comment composition ([`build_comment_intent`]) -- the vocabulary
+//!   #851 moved behind this facade so `nmp-ffi` could drop its direct
+//!   `nmp-nip22` edge. It is the exact value the FFI projection composes,
+//!   proving one owner rather than two aligned by convention.
 //!
 //! The `#[cfg(test)]` module below additionally drives a real `Engine`
 //! end-to-end (construct, `add_account`, `observe`, `publish`,
@@ -133,6 +137,33 @@ pub fn describe_evidence(evidence: &AcquisitionEvidence) -> String {
         evidence.sources.len(),
         evidence.shortfall.len()
     )
+}
+
+/// Names the NIP-22 comment vocabulary and composes its write operation from
+/// `nmp` alone (#851): `nmp::nip22` is the ONE owner, so a direct-Rust app
+/// reaches exactly what `nmp-ffi`'s `comment_intent` projection reaches --
+/// neither needs an `nmp-nip22` line of its own. What comes back is an
+/// ordinary [`WriteIntent`] (#907), published through the same
+/// `Engine::publish` lifecycle as any other write. Uses an external NIP-73
+/// target so no NIP-01 core kind is baked into this proof, and takes its
+/// author and event time explicitly -- the vocabulary is engine-free, and
+/// this proof reads no ambient clock or active account.
+pub fn build_comment_intent(
+    author: PublicKey,
+    created_at: Timestamp,
+    guid: &str,
+    content: &str,
+) -> Result<WriteIntent, nmp::nip22::Nip73TargetError> {
+    let root =
+        nmp::nip22::CommentRoot::External(nmp::nip22::Nip73Target::podcast_episode_guid(guid)?);
+    Ok(nmp::nip22::comment_intent(
+        &root,
+        nmp::nip22::CommentParent::Root,
+        author,
+        created_at,
+        content.to_string(),
+        None,
+    ))
 }
 
 /// Names and reads the observation-scoped execution envelope from an

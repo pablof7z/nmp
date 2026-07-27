@@ -25,23 +25,29 @@ path = "uniffi-bindgen.rs"
 
 [dependencies]
 nostr.workspace = true
-nmp-grammar.workspace = true
-nmp.workspace = true
+# #851: every engine, query, receipt, signer and typed write value this crate
+# projects is reached through the canonical `nmp` facade -- `nmp-grammar` and
+# `nmp-signer` are transitive implementation detail behind it, not direct
+# normal edges. `nmp-ffi` is the ONE staticlib/cdylib every Swift and Kotlin
+# app links, so a direct mechanism edge here would let the native product
+# boundary bind a type the facade never projected or governed.
+#
+# The `nip22` feature is how this crate reaches the NIP-22 comment vocabulary
+# (#572/#907): one owner, turned on, rather than a second edge to
+# `nmp-nip22` alongside the facade. `scripts/check-ffi-facade-boundary.sh` is
+# the mechanism that keeps all of this true.
+nmp = { workspace = true, features = ["nip22"] }
 uniffi = { workspace = true, features = ["cli"] }
 # #108: the read-only NIP-29 host-browser projection. Direct deps here
 # (not proxied through the `nmp` facade) -- these stay opt-in, app-chosen
 # dependencies at the direct-Rust layer (#63/#45's "opt-in protocol
 # crate" framing), but `nmp-ffi` is the ONE staticlib/cdylib every Swift/
-# Kotlin app links, so it bundles the projection directly, same treatment
-# as `nmp-grammar` itself gets here.
+# Kotlin app links, so it bundles the projection directly. Unlike the
+# mechanism crates #851 closed off, these are app-chosen protocol modules,
+# not engine/query/signer/write concepts the canonical facade governs.
 nmp-nip51.workspace = true
 nmp-nip02.workspace = true
 nmp-nip29.workspace = true
-# #572: typed NIP-22 comments over NIP-73 external targets. Engine-free
-# (no `engine` feature exists on nmp-nip22 at all -- `comment_intent` takes
-# its author explicitly), same direct-dep bundling treatment as
-# nmp-nip51/nmp-nip29/nmp-blossom above.
-nmp-nip22.workspace = true
 nmp-content.workspace = true
 # #555 (epic #216 T15-A-BLOSSOM): the opt-in Blossom blob projection, same
 # direct-dep treatment as nmp-nip51/nmp-nip29 above -- nmp-ffi is the ONE
@@ -65,7 +71,15 @@ tokio = { version = "1", features = ["rt", "time", "net"] }
 # genuinely undecodable row directly into a real `RedbStore` file, the same
 # technique `nmp-engine`'s own restart/corruption tests use -- test-only.
 [dev-dependencies]
-nmp-signer.workspace = true
+# #851/#934: the ONE mechanism value this crate still reaches for, and only
+# from `#[cfg(test)]`. `nmp` re-exports `ShortfallFact`, whose
+# `NoPlannedSource`/`LocalLimit` variants carry an `atom: ConcreteFilter`
+# field the facade does not project -- so the acquisition-evidence falsifier
+# cannot build its own fixture atom through `nmp` alone. Filed as #934. A
+# dev-dependency is not a production edge: `cargo build -p nmp-ffi` cannot
+# resolve `nmp_grammar::` at all, so the compiler itself proves the
+# staticlib/cdylib binds nothing from it.
+nmp-grammar.workspace = true
 nmp-store.workspace = true
 redb = "4.1"
 tempfile = "3"

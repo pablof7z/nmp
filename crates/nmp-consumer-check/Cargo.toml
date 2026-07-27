@@ -12,5 +12,10 @@ publish.workspace = true
 # `use` line naming a mechanism crate or `nostr` itself, the facade's
 # re-export inventory has a gap -- this crate existing and compiling IS the
 # acceptance proof for #52's "an app's Cargo.toml names `nmp` alone".
+#
+# The `nip22` feature is switched on here for the same reason: #851 made
+# `nmp::nip22` the ONE owner of the NIP-22 comment vocabulary, so this crate
+# proves that vocabulary is reachable WITHOUT a second `nmp-nip22` line --
+# turning a facade feature on is still "names `nmp` alone".
 [dependencies]
-nmp.workspace = true
+nmp = { workspace = true, features = ["nip22"] }

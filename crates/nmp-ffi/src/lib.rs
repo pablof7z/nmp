@@ -42,16 +42,20 @@
 //!   taxonomy crossing as its own typed error enum.
 //! - [`nip22`] -- typed NIP-22 comments over NIP-73 external targets
 //!   (#572): root-thread demand and decode as top-level free functions
-//!   (`nmp-nip22` needs no engine dependency at all -- `comment_intent`
+//!   (`nmp::nip22` needs no engine dependency at all -- `comment_intent`
 //!   takes its author/time as explicit caller parameters). The composer
 //!   returns an ordinary [`types::FfiWriteIntent`]; generic
 //!   [`facade::NmpEngine::publish`] owns the receipt lifecycle.
 //!
-//! This crate has NO dependency on `nmp-engine` (or any other mechanism
-//! crate) at all -- every engine-side value type it mirrors is sourced
-//! through `nmp`'s own re-exports (#52 Unit B). `nmp-nip51`/`nmp-nip29`
-//! (see [`nip29`]'s own doc), `nmp-blossom` (#555, see [`blossom`]'s), and
-//! `nmp-nip22` (#572, see [`nip22`]'s own doc) are the opt-in protocol
+//! This crate has NO production dependency on `nmp-engine`, `nmp-grammar`,
+//! `nmp-signer`, or any other mechanism crate at all (#851) -- every
+//! engine, query, receipt, signer and typed write value it mirrors is
+//! sourced through `nmp`'s own re-exports (#52 Unit B), including the
+//! NIP-22 comment vocabulary, which it reaches by enabling the facade's
+//! `nip22` feature rather than by a second edge to `nmp-nip22`.
+//! `scripts/check-ffi-facade-boundary.sh` is the mechanism that keeps that
+//! true. `nmp-nip51`/`nmp-nip29` (see [`nip29`]'s own doc) and
+//! `nmp-blossom` (#555, see [`blossom`]'s) are the opt-in protocol
 //! dependencies projected by this boundary.
 
 pub mod auth;

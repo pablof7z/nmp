@@ -12,19 +12,16 @@ use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
 
 use nmp::{
-    AcquisitionEvidence, AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, AuthPhase,
-    CancelWriteError, CancelWriteOutcome, CoverageInterval, DiagnosticsSnapshot,
-    Durability as GDurability, FilterCoverageEntry, Frame, Lane, RelayDiagnosticsSnapshot,
-    RequestRowsError, Row, RowDelta, ShortfallFact, SourceEvidence, SourceStatus, Window,
-    WindowLoad, WriteIntent as GWriteIntent, WritePayload as GWritePayload,
-    WriteRouting as GWriteRouting, WriteStatus as GWriteStatus,
-};
-use nmp_grammar::{
-    AccessContext as GAccessContext, Binding as GBinding, CacheMode as GCacheMode,
-    Demand as GDemand, DemandError as GDemandError, Derived as GDerived, Filter as GFilter,
-    Freshness as GFreshness, IdentityField as GIdentityField, IndexedTagName,
-    Selector as GSelector, SetAlgebra as GSetAlgebra, SetOp as GSetOp,
-    SourceAuthority as GSourceAuthority,
+    AccessContext as GAccessContext, AcquisitionEvidence, AuthDiagnosticsPhase,
+    AuthDiagnosticsSnapshot, AuthPhase, Binding as GBinding, CacheMode as GCacheMode,
+    CancelWriteError, CancelWriteOutcome, CorrelationToken, CoverageInterval, Demand as GDemand,
+    DemandError as GDemandError, Derived as GDerived, DiagnosticsSnapshot,
+    Durability as GDurability, Filter as GFilter, FilterCoverageEntry, Frame,
+    Freshness as GFreshness, IdentityField as GIdentityField, IndexedTagName, Lane,
+    RelayDiagnosticsSnapshot, RequestRowsError, Row, RowDelta, Selector as GSelector,
+    SetAlgebra as GSetAlgebra, SetOp as GSetOp, ShortfallFact, SourceAuthority as GSourceAuthority,
+    SourceEvidence, SourceStatus, Window, WindowLoad, WriteIntent as GWriteIntent,
+    WritePayload as GWritePayload, WriteRouting as GWriteRouting, WriteStatus as GWriteStatus,
 };
 use nostr::secp256k1::schnorr::Signature;
 use nostr::{
@@ -1633,18 +1630,14 @@ fn parse_identity_override(input: &str) -> Result<PublicKey, FfiError> {
 
 /// #591: `FfiWriteIntent.correlation`'s dedicated parse (also used by the
 /// engine-free NIP-22 composer, hence `pub(crate)`). Delegates entirely
-/// to `nmp_grammar::CorrelationToken`'s `TryFrom<&str>` bounded/non-empty
+/// to `nmp::CorrelationToken`'s `TryFrom<&str>` bounded/non-empty
 /// validation; a rejection becomes a typed, synchronous
 /// [`FfiError::InvalidCorrelationToken`] naming both the offending input and
 /// the reason, BEFORE any engine call.
-pub(crate) fn parse_correlation_token(
-    input: &str,
-) -> Result<nmp_grammar::CorrelationToken, FfiError> {
-    nmp_grammar::CorrelationToken::try_from(input).map_err(|err| {
-        FfiError::InvalidCorrelationToken {
-            got: input.to_string(),
-            reason: err.to_string(),
-        }
+pub(crate) fn parse_correlation_token(input: &str) -> Result<CorrelationToken, FfiError> {
+    CorrelationToken::try_from(input).map_err(|err| FfiError::InvalidCorrelationToken {
+        got: input.to_string(),
+        reason: err.to_string(),
     })
 }
 
