@@ -416,13 +416,27 @@ pub enum PersistenceFault {
     /// vouch for what it did or did not write, so it is
     /// [`DurabilityOutcome::Unknown`]. A row that redb returned intact but
     /// whose bytes violate *this crate's* schema is the opposite situation:
-    /// the backend is healthy, the failure is raised while decoding, and
-    /// decoding always happens before the enclosing write transaction is
-    /// committed. So the requested mutation provably did not land, and
-    /// [`DurabilityOutcome::Absent`] is the true claim, not a convenient one.
-    /// Reporting such a row as `Corrupted` would additionally assert
-    /// [`Self::requires_reopen`], which is false: reopening the handle cannot
-    /// change what the row says.
+    /// the backend is healthy and the failure is raised while decoding.
+    /// Where decoding precedes the enclosing write transaction's commit —
+    /// which is every door but the one exception below — the requested
+    /// mutation provably did not land, and [`DurabilityOutcome::Absent`] is
+    /// the true claim, not a convenient one. Reporting such a row as
+    /// `Corrupted` would additionally assert [`Self::requires_reopen`],
+    /// which is false: reopening the handle cannot change what the row says.
+    ///
+    /// **Known exception, tracked by #909 — do not read `Absent` here as
+    /// universal.** `bootstrap_outbox_lanes` commits its write transaction
+    /// and *then* returns the result of a fallible read
+    /// (`redb_store/outbox_ops.rs`: the commit is followed by a
+    /// `recover_outbox_lanes` tail call, which decodes lane rows and can
+    /// raise this variant). On that one path an `Absent` returned from this
+    /// fault is false: the transaction has already committed. An independent
+    /// function-scoped sweep found it to be the only such door in
+    /// `RedbStore`; `MemoryStore::bootstrap_outbox_lanes` has the matching
+    /// per-relay atomicity hole. #909 restores the invariant by building and
+    /// validating the return value inside the transaction; this paragraph
+    /// goes away with it. Until then, a consumer must not treat `Absent` as
+    /// a general retry licence.
     Invariant,
 }
 
@@ -433,10 +447,16 @@ impl PersistenceFault {
     /// happen" — so only faults that can prove it get it. A latch is proven
     /// (the backend refused before acting); an oversized value is proven
     /// (redb rejects it on the way in and the transaction is dropped
-    /// uncommitted); an invariant is proven the same way. Corruption and a
-    /// poisoned lock are not: both can be reported by a thread that was
-    /// somewhere inside a commit, and neither says where. They join `Io` in
-    /// the conservative union rather than claim more than is known.
+    /// uncommitted); an invariant is proven the same way on every door but
+    /// the `bootstrap_outbox_lanes` exception documented on
+    /// [`Self::Invariant`] and tracked by #909, where the commit precedes the
+    /// decode and `Absent` is therefore returned untruthfully. Corruption and
+    /// a poisoned lock are not proven: both can be reported by a thread that
+    /// was somewhere inside a commit, and neither says where. They join `Io`
+    /// in the conservative union rather than claim more than is known.
+    ///
+    /// Until #909 lands, a consumer must not use `Absent` as a general retry
+    /// licence — acting on it at that one door duplicates a durable write.
     pub fn durability(self) -> DurabilityOutcome {
         match self {
             Self::Io | Self::Corrupted | Self::LockPoisoned => DurabilityOutcome::Unknown,
