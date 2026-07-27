@@ -108,6 +108,10 @@ selection and public, author-outbox, pinned, cache-only, consent-gated, or no
 acquisition. If it promotes authored relay hints, it also owns their URL
 validation, safety filtering, bounds, and scoped evidence.
 
+The shipped UI Gallery deliberately ignores authored hints in its example
+resolver. It can therefore search fewer relays than the removed generic
+planner; the example demonstrates explicit ownership, not equivalent reach.
+
 The app/component decides whether to open zero, one, or multiple observations
 and keeps every handle for exactly as long as its policy requires. Equal
 demands still coalesce in NMP Core. Two components receive independent handles,

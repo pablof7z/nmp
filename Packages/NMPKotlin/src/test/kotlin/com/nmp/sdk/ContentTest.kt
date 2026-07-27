@@ -26,7 +26,7 @@ class ContentTest {
     }
 
     @Test
-    fun parsingCreatesNoDemandOrEngineWork() {
+    fun parserPreservesBarePubkeyAndEventId() {
         val document = parseNostrContent("nostr:$npub nostr:$note")
         assertEquals(2, document.references.size)
         assertIs<NostrReferenceTarget.Pubkey>(document.references[0].target)

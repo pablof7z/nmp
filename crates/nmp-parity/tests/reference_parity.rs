@@ -107,21 +107,33 @@ fn shared_nip19_fixtures_preserve_exact_locators_across_rust_and_ffi() {
 #[test]
 fn bare_pubkey_and_authored_profile_remain_different_variants() {
     let corpus = reference_fixtures();
-    let npub = corpus
+    let npub_input = &corpus
         .cases
         .iter()
         .find(|fixture| fixture.name == "npub-public-key")
-        .and_then(|fixture| fixture.locator.as_ref())
-        .unwrap();
-    let nprofile = corpus
+        .expect("shared corpus must retain the bare-pubkey case")
+        .input;
+    let nprofile_input = &corpus
         .cases
         .iter()
         .find(|fixture| fixture.name == "nprofile-relay-hints")
-        .and_then(|fixture| fixture.locator.as_ref())
-        .unwrap();
+        .expect("shared corpus must retain the authored-profile case")
+        .input;
 
-    assert_eq!(npub.variant, "pubkey");
-    assert_eq!(nprofile.variant, "profile");
+    assert!(
+        matches!(
+            nmp::decode_nostr_entity(npub_input).unwrap(),
+            NostrEntity::Pubkey { .. }
+        ),
+        "the decoder must not promote a bare npub into a profile locator"
+    );
+    assert!(
+        matches!(
+            nmp::decode_nostr_entity(nprofile_input).unwrap(),
+            NostrEntity::Profile { .. }
+        ),
+        "the decoder must preserve an authored nprofile as a profile locator"
+    );
 }
 
 fn assert_non_actionable(name: &str, input: &str, outcome: ReferenceFixtureOutcome) {

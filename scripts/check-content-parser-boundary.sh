@@ -19,6 +19,13 @@ if rg -n \
   exit 1
 fi
 
+if rg -n \
+  'ReferenceDemandPlan|reference_demand_plan|FfiReferenceDemandPlan|NostrReferenceDemandPlan' \
+  crates Packages apps; then
+  echo "error: compatibility locator planner vocabulary still exists in active code" >&2
+  exit 1
+fi
+
 locator_paths=(
   crates/nmp-grammar/src/nip19.rs
   crates/nmp-ffi/src/entity.rs

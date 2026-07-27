@@ -56,8 +56,10 @@ final class GalleryModel: ObservableObject {
         engine.shutdown()
     }
 
-    /// Gallery-owned reference acquisition policy. Decoding and NMPUI do not
-    /// infer these kinds or authorities from a locator.
+    /// Gallery-owned reference acquisition policy. This demo deliberately
+    /// ignores authored hints, so it may search fewer relays than the removed
+    /// generic planner; decoding and NMPUI do not infer these kinds or
+    /// authorities from a locator.
     private static func referenceDemand(
         for target: NostrReferenceTarget
     ) throws -> NMPDemand {

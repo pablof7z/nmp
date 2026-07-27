@@ -30,8 +30,9 @@ public final class NMPReferenceObservationHandle: @unchecked Sendable {
 /// App-selected construction seam for an ordinary NMP observation.
 ///
 /// The app owns locator-to-demand policy inside this seam. NMPUI passes the
-/// exact authored locator and never infers kind:0, source authority, cache,
-/// freshness, relay admission, or hidden helper observations.
+/// exact authored locator and never chooses acquisition by inferring kind:0,
+/// source authority, cache, freshness, relay admission, or hidden helper
+/// observations.
 public struct NMPReferenceObservationFactory: @unchecked Sendable {
     public typealias Receive = @MainActor @Sendable (RowBatch) -> Void
     public typealias Open = @MainActor @Sendable (
