@@ -80,6 +80,9 @@ grep -qF 'pub struct FfiSignerMailbox' crates/nmp-ffi/src/signer.rs ||
   fail "core opaque signer mailbox is missing"
 grep -qF 'pub fn signer_mailbox(&self) -> Arc<FfiSignerMailbox>' crates/nmp-ffi/src/facade.rs ||
   fail "NmpEngine does not vend the opaque signer mailbox"
+grep -qF 'pub(crate) fn from_engine(engine: Arc<nmp::Engine>) -> Arc<Self>' \
+  crates/nmp-ffi/src/signer.rs ||
+  fail "opaque signer mailbox construction is not sealed inside core"
 grep -qF 'pub fn nmp_core_component_identity() -> String' crates/nmp-ffi/src/signer.rs ||
   fail "core does not export its plain native component identity"
 grep -qF '"--unit-graph"' crates/nmp-ffi/build.rs ||

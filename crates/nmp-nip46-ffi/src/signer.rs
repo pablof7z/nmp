@@ -1002,6 +1002,7 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
 
+    use nmp_ffi::facade::{NmpEngine, NmpEngineConfig};
     use nostr::Keys;
 
     struct CloseCountingObserver {
@@ -1080,10 +1081,6 @@ mod tests {
         }
     }
 
-    fn mailbox(engine: &Arc<nmp::Engine>) -> Arc<FfiSignerMailbox> {
-        FfiSignerMailbox::from_engine(Arc::clone(engine))
-    }
-
     #[test]
     fn catalog_keeps_probe_launch_package_and_provider_distinct() {
         let primal = nip46_signer_catalog()
@@ -1107,10 +1104,10 @@ mod tests {
 
     #[test]
     fn connection_close_and_drop_are_idempotent_and_stream_scoped() {
-        let engine = Arc::new(nmp::Engine::new(nmp::EngineConfig::default()).unwrap());
+        let engine = NmpEngine::new(NmpEngineConfig::default()).unwrap();
+        let mailbox = engine.signer_mailbox();
         let closed_a = Arc::new(AtomicUsize::new(0));
         let closed_b = Arc::new(AtomicUsize::new(0));
-        let mailbox = mailbox(&engine);
         let connection_a = Nip46Connection::new(
             Arc::clone(&mailbox),
             Arc::new(CloseCountingObserver {
@@ -1146,10 +1143,10 @@ mod tests {
     /// documents.
     #[test]
     fn checkpoint_before_ready_is_refused_at_the_ffi_boundary() {
-        let engine = Arc::new(nmp::Engine::new(nmp::EngineConfig::default()).unwrap());
+        let engine = NmpEngine::new(NmpEngineConfig::default()).unwrap();
+        let mailbox = engine.signer_mailbox();
         let closed = Arc::new(AtomicUsize::new(0));
-        let connection =
-            Nip46Connection::new(mailbox(&engine), Arc::new(CloseCountingObserver { closed }));
+        let connection = Nip46Connection::new(mailbox, Arc::new(CloseCountingObserver { closed }));
 
         assert!(matches!(
             connection.checkpoint(),
@@ -1162,13 +1159,14 @@ mod tests {
 
     #[test]
     fn observer_delivery_is_reentrant_and_closed_is_terminal() {
-        let engine = Arc::new(nmp::Engine::new(nmp::EngineConfig::default()).unwrap());
+        let engine = NmpEngine::new(NmpEngineConfig::default()).unwrap();
+        let mailbox = engine.signer_mailbox();
         let deliveries = Arc::new(Mutex::new(Vec::new()));
         let observer = Arc::new(ReentrantObserver {
             deliveries: Arc::clone(&deliveries),
             connection: Mutex::new(Weak::new()),
         });
-        let connection = Nip46Connection::new(mailbox(&engine), observer.clone());
+        let connection = Nip46Connection::new(mailbox, observer.clone());
         *observer
             .connection
             .lock()
@@ -1194,9 +1192,10 @@ mod tests {
 
     #[test]
     fn unavailable_before_attach_is_retained_as_attachment_state() {
-        let engine = Arc::new(nmp::Engine::new(nmp::EngineConfig::default()).unwrap());
+        let engine = NmpEngine::new(NmpEngineConfig::default()).unwrap();
+        let mailbox = engine.signer_mailbox();
         let connection = Nip46Connection::new(
-            mailbox(&engine),
+            mailbox,
             Arc::new(CloseCountingObserver {
                 closed: Arc::new(AtomicUsize::new(0)),
             }),
@@ -1231,10 +1230,12 @@ mod tests {
             closed_tx.send(()).unwrap();
         });
 
-        let engine = Arc::new(nmp::Engine::new(nmp::EngineConfig::default()).unwrap());
+        let engine = NmpEngine::new(NmpEngineConfig::default()).unwrap();
+        let mailbox = engine.signer_mailbox();
+        let adapter_runtime = mailbox.adapter_runtime().unwrap();
         let closed = Arc::new(AtomicUsize::new(0));
         let connection = Nip46Connection::new(
-            mailbox(&engine),
+            mailbox,
             Arc::new(CloseCountingObserver {
                 closed: Arc::clone(&closed),
             }),
@@ -1246,7 +1247,7 @@ mod tests {
             url::form_urlencoded::byte_serialize(relay.as_bytes()).collect::<String>()
         );
         spawn_bunker_connection(
-            engine.adapter_runtime().unwrap(),
+            adapter_runtime,
             weak.clone(),
             connection.cancellation.clone(),
             uri,

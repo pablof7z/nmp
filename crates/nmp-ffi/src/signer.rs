@@ -50,7 +50,13 @@ impl std::fmt::Debug for FfiSignerRegistration {
 /// Native provider components consume this external UniFFI object rather than
 /// importing or mirroring `NmpEngine`. Its Rust-only operations are the
 /// ordinary generic signer door and the engine-owned adapter runtime already
-/// used by supported provider sessions.
+/// used by supported provider sessions. Construction is sealed inside core:
+/// linked crates can receive this object only from
+/// [`NmpEngine::signer_mailbox`](crate::facade::NmpEngine::signer_mailbox).
+///
+/// ```compile_fail
+/// let _ = nmp_ffi::signer::FfiSignerMailbox::from_engine(panic!());
+/// ```
 #[derive(uniffi::Object)]
 pub struct FfiSignerMailbox {
     engine: Arc<nmp::Engine>,
@@ -59,7 +65,7 @@ pub struct FfiSignerMailbox {
 impl FfiSignerMailbox {
     #[doc(hidden)]
     #[must_use]
-    pub fn from_engine(engine: Arc<nmp::Engine>) -> Arc<Self> {
+    pub(crate) fn from_engine(engine: Arc<nmp::Engine>) -> Arc<Self> {
         Arc::new(Self { engine })
     }
 

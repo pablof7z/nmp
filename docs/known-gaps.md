@@ -112,7 +112,10 @@ about current code:
   `nmp_ffi::NmpEngine::signer_mailbox`, and requires exactly one other entry
   carrying the core mailbox, with the compatibility proof in that
   constructor's inputs. No namespace is exempt: a linked crate that claims
-  `nmp_ffi` is audited by callable shape like every other crate. This audits
+  `nmp_ffi` is audited by callable shape like every other crate. The mailbox
+  has private fields and its Rust constructor is crate-private, so even a
+  linked namespace impostor cannot mint a mailbox for its allowlisted return;
+  only the real core `NmpEngine` can vend one. This audits
   the same compiled authority bindgen consumes, independent of source
   location, claimed crate/module namespace, macro expansion, aliases, records,
   or other Rust spelling. It cannot prove the meaning of a raw integer that
