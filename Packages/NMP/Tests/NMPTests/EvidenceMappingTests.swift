@@ -45,6 +45,19 @@ final class EvidenceMappingTests: XCTestCase {
         )
     }
 
+    /// #489: the second-owner refusal must survive to the native surface as
+    /// its own fact, distinct from "the store could not be opened".
+    func testSecondStoreOwnerRefusalRemainsTypedAtTheNativeBoundary() {
+        XCTAssertEqual(
+            NMPError(.StoreAlreadyOpen(path: "/canonical/nmp.redb")),
+            .storeAlreadyOpen("/canonical/nmp.redb")
+        )
+        XCTAssertNotEqual(
+            NMPError(.StoreAlreadyOpen(path: "/canonical/nmp.redb")),
+            .storeOpenFailed("/canonical/nmp.redb")
+        )
+    }
+
     func testFiniteFactDeliveryFailuresRemainTypedAtTheNativeBoundary() {
         XCTAssertEqual(
             NMPError(.FactStreamLagged(receiptId: 42)),

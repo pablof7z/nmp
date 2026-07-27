@@ -102,12 +102,18 @@ pub enum FfiError {
     StoreOpenFailed {
         reason: String,
     },
-    /// The requested closed persistent store could not be removed.
+    /// `NmpEngine::new`'s `store_path` named a persistent store already owned
+    /// by this or another process. No second database owner and no partial
+    /// engine were created (#489).
+    StoreAlreadyOpen {
+        path: String,
+    },
+    /// The requested unowned persistent store could not be removed.
     StoreResetFailed {
         reason: String,
     },
-    /// Destructive reset was refused because a live engine in this process
-    /// owns the same canonical persistent-store path.
+    /// Destructive reset was refused because a live engine in this or any
+    /// other process owns the same canonical persistent-store path.
     StoreStillOpen {
         path: String,
     },
@@ -257,6 +263,7 @@ impl From<nmp::EngineError> for FfiError {
         match err {
             nmp::EngineError::InvalidRelayUrl { url } => Self::InvalidRelayUrl { got: url },
             nmp::EngineError::StoreOpenFailed { reason } => Self::StoreOpenFailed { reason },
+            nmp::EngineError::StoreAlreadyOpen { path } => Self::StoreAlreadyOpen { path },
             nmp::EngineError::StoreResetFailed { reason } => Self::StoreResetFailed { reason },
             nmp::EngineError::StoreStillOpen { path } => Self::StoreStillOpen { path },
             nmp::EngineError::EngineStartFailed { component, reason } => {
@@ -316,6 +323,9 @@ impl std::fmt::Display for FfiError {
                 write!(f, "receipt correlation id namespace exhausted")
             }
             Self::StoreOpenFailed { reason } => write!(f, "could not open store: {reason}"),
+            Self::StoreAlreadyOpen { path } => {
+                write!(f, "persistent store is already open: {path}")
+            }
             Self::StoreResetFailed { reason } => write!(f, "could not reset store: {reason}"),
             Self::StoreStillOpen { path } => {
                 write!(f, "persistent store is still open: {path}")
@@ -552,6 +562,23 @@ mod engine_error_tests {
         assert_eq!(
             error.to_string(),
             "persistent store is still open: /canonical/nmp.redb"
+        );
+    }
+
+    #[test]
+    fn second_store_open_refusal_remains_a_typed_ffi_error() {
+        let error = FfiError::from(nmp::EngineError::StoreAlreadyOpen {
+            path: "/canonical/nmp.redb".to_string(),
+        });
+        assert_eq!(
+            error,
+            FfiError::StoreAlreadyOpen {
+                path: "/canonical/nmp.redb".to_string(),
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "persistent store is already open: /canonical/nmp.redb"
         );
     }
 

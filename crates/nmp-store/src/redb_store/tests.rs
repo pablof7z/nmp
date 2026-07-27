@@ -18,7 +18,8 @@ fn v5_event_epoch_is_rejected_before_any_v6_table_is_created() {
     };
     assert!(matches!(
         error,
-        redb::Error::UpgradeRequired(version) if version == SCHEMA_VERSION as u8
+        RedbStoreOpenError::Database(redb::Error::UpgradeRequired(version))
+            if version == SCHEMA_VERSION as u8
     ));
 
     let db = Database::create(&path).unwrap();
@@ -51,7 +52,8 @@ fn v5_displaced_epoch_is_rejected_before_any_v6_table_is_created() {
     };
     assert!(matches!(
         error,
-        redb::Error::UpgradeRequired(version) if version == SCHEMA_VERSION as u8
+        RedbStoreOpenError::Database(redb::Error::UpgradeRequired(version))
+            if version == SCHEMA_VERSION as u8
     ));
 
     let db = Database::create(&path).unwrap();
@@ -2152,7 +2154,7 @@ fn malformed_cardinality_sample_key_fails_open() {
 
     assert!(matches!(
         RedbStore::open(&path),
-        Err(redb::Error::Corrupted(message))
+        Err(RedbStoreOpenError::Database(redb::Error::Corrupted(message)))
             if message == "invalid cardinality sample key length"
     ));
 }

@@ -181,11 +181,13 @@ public final class NMPEngine: Sendable {
     private let localAccountStore: (any NMPLocalAccountCheckpoint)?
     private let checkpointedPubkey = CheckpointTracker()
 
-    /// Destructively remove one closed persistent NMP store. A live engine in
-    /// this process using the same canonical path throws
+    /// Destructively remove one unowned persistent NMP store. A live engine in
+    /// this OR ANY OTHER process using the same canonical path throws
     /// `NMPError.storeStillOpen` without touching the file; call `shutdown()`
-    /// or release that engine first. This guard is process-local. The
-    /// configured local-account checkpoint is a separate file and is not
+    /// or release that engine first. The refusal is a cross-process exclusive
+    /// ownership lock (#489), not a process-local guard: constructing a second
+    /// `NMPEngine` over a live store path throws `NMPError.storeAlreadyOpen`.
+    /// The configured local-account checkpoint is a separate file and is not
     /// touched.
     public static func resetPersistentStore(at storePath: String) throws {
         try nmpRethrowing {
