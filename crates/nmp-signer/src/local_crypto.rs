@@ -566,14 +566,11 @@ fn chacha20_xor(key: &[u8], nonce: &[u8], buffer: &mut [u8]) {
     debug_assert_eq!(nonce.len(), 12);
     let mut state = Sensitive::new(SensitiveKind::SymmetricCipher, [0u32; 16]);
     state[..4].copy_from_slice(&[0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574]);
-    for (index, chunk) in key.chunks_exact(4).enumerate() {
-        state[4 + index] = u32::from(chunk[0])
-            | (u32::from(chunk[1]) << 8)
-            | (u32::from(chunk[2]) << 16)
-            | (u32::from(chunk[3]) << 24);
+    for (index, chunk) in key.as_chunks::<4>().0.iter().enumerate() {
+        state[4 + index] = u32::from_le_bytes(*chunk);
     }
-    for (index, chunk) in nonce.chunks_exact(4).enumerate() {
-        state[13 + index] = u32::from_le_bytes(chunk.try_into().expect("four-byte nonce chunk"));
+    for (index, chunk) in nonce.as_chunks::<4>().0.iter().enumerate() {
+        state[13 + index] = u32::from_le_bytes(*chunk);
     }
 
     for (counter, output) in buffer.chunks_mut(64).enumerate() {
@@ -596,11 +593,13 @@ fn chacha20_xor(key: &[u8], nonce: &[u8], buffer: &mut [u8]) {
         }
 
         let mut keystream = Sensitive::new(SensitiveKind::SymmetricCipher, [0u8; 64]);
-        for (chunk, word) in keystream.chunks_exact_mut(4).zip(working.iter()) {
-            chunk[0] = *word as u8;
-            chunk[1] = (*word >> 8) as u8;
-            chunk[2] = (*word >> 16) as u8;
-            chunk[3] = (*word >> 24) as u8;
+        for (chunk, word) in keystream[..]
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(working.iter())
+        {
+            *chunk = word.to_le_bytes();
         }
         for (byte, key_byte) in output.iter_mut().zip(keystream.iter()) {
             *byte ^= key_byte;

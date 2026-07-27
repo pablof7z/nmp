@@ -104,7 +104,7 @@ impl LocalKeySigner {
 }
 
 fn decode_hex_into(input: &[u8], output: &mut [u8; 32]) -> Result<(), LocalKeySignerError> {
-    for (index, pair) in input.chunks_exact(2).enumerate() {
+    for (index, pair) in input.as_chunks::<2>().0.iter().enumerate() {
         output[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
     }
     Ok(())
