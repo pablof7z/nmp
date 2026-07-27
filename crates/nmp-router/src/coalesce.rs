@@ -40,18 +40,47 @@ impl MergeRule for AuthorUnion {
     }
 
     fn try_merge(&self, a: &ConcreteFilter, b: &ConcreteFilter) -> Option<ConcreteFilter> {
-        if same_except_authors(a, b) {
-            let mut authors = a.authors.clone().unwrap_or_default();
-            authors.extend(b.authors.clone().unwrap_or_default());
-            if authors.is_empty() {
-                return None;
-            }
-            let mut merged = a.clone();
-            merged.authors = Some(authors);
-            Some(merged)
-        } else {
-            None
+        let (a_authors, b_authors) = both_constrain(&a.authors, &b.authors)?;
+        if !same_except_authors(a, b) {
+            return None;
         }
+        let mut authors = a_authors.clone();
+        authors.extend(b_authors.iter().cloned());
+        let mut merged = a.clone();
+        merged.authors = Some(authors);
+        Some(merged)
+    }
+}
+
+/// The union rules' shared admission test (#900): a set-valued component may
+/// only be UNIONED when BOTH operands actually constrain it — `Some` and
+/// non-empty.
+///
+/// `None` on `authors`/`kinds`/`ids` is not "the empty set", it is NO
+/// CONSTRAINT ON THIS AXIS: the filter matches every author / every kind /
+/// every id. `unwrap_or_default()` silently converts that into `∅`, so the
+/// union of an unconstrained operand with a constrained one came out equal
+/// to the constrained one — a filter matching strictly FEWER events than
+/// its own first input, and a direct violation of
+/// `matches(try_merge(a,b)) ⊇ matches(a) ∪ matches(b)`, this module's only
+/// correctness contract. `Some(∅)` is refused for the same reason and not
+/// as belt-and-braces: `nostr`'s `match_event` treats an empty
+/// authors/kinds/ids set as unconstrained too (measured in
+/// `tests/coalescing.rs`), so folding it into a constrained sibling narrows
+/// identically.
+///
+/// Refusing costs nothing. An operand that constrains nothing on the axis is
+/// ALREADY a superset of any sibling sharing its skeleton, so the merge
+/// bought no wire reduction that was correct to take; the pair simply ships
+/// as two REQs, which is this module's documented graceful-degradation
+/// behaviour.
+fn both_constrain<'a, T: Ord>(
+    a: &'a Option<BTreeSet<T>>,
+    b: &'a Option<BTreeSet<T>>,
+) -> Option<(&'a BTreeSet<T>, &'a BTreeSet<T>)> {
+    match (a, b) {
+        (Some(a), Some(b)) if !a.is_empty() && !b.is_empty() => Some((a, b)),
+        _ => None,
     }
 }
 
@@ -92,6 +121,10 @@ impl MergeRule for KindUnion {
     }
 
     fn try_merge(&self, a: &ConcreteFilter, b: &ConcreteFilter) -> Option<ConcreteFilter> {
+        // Same #900 admission test as `AuthorUnion`: `kinds: None` means
+        // EVERY kind, and is reachable — the FFI filter boundary carries
+        // `kinds` as an option and propagates it verbatim.
+        let (a_kinds, b_kinds) = both_constrain(&a.kinds, &b.kinds)?;
         let same_rest = a.authors == b.authors
             && a.ids == b.ids
             && a.tags == b.tags
@@ -102,11 +135,8 @@ impl MergeRule for KindUnion {
         if !same_rest {
             return None;
         }
-        let mut kinds = a.kinds.clone().unwrap_or_default();
-        kinds.extend(b.kinds.clone().unwrap_or_default());
-        if kinds.is_empty() {
-            return None;
-        }
+        let mut kinds = a_kinds.clone();
+        kinds.extend(b_kinds.iter().copied());
         let mut merged = a.clone();
         merged.kinds = Some(kinds);
         Some(merged)
@@ -129,9 +159,10 @@ impl MergeRule for IdUnion {
     }
 
     fn try_merge(&self, a: &ConcreteFilter, b: &ConcreteFilter) -> Option<ConcreteFilter> {
-        let (Some(a_ids), Some(b_ids)) = (&a.ids, &b.ids) else {
-            return None;
-        };
+        // Already refused `None` on either side before #900; `both_constrain`
+        // additionally refuses `Some(∅)`, which `nostr`'s matcher treats as
+        // unconstrained exactly like `None`.
+        let (a_ids, b_ids) = both_constrain(&a.ids, &b.ids)?;
         let same_rest = a.authors == b.authors
             && a.kinds == b.kinds
             && a.tags == b.tags
@@ -144,7 +175,7 @@ impl MergeRule for IdUnion {
         }
         let mut ids = a_ids.clone();
         ids.extend(b_ids.iter().cloned());
-        if ids.is_empty() || ids.len() > MAX_IDS_PER_FILTER {
+        if ids.len() > MAX_IDS_PER_FILTER {
             return None;
         }
         let mut merged = a.clone();
@@ -595,6 +626,80 @@ mod tests {
             merged.authors,
             Some(Set::from(["aa".to_string(), "bb".to_string()]))
         );
+    }
+
+    /// #900's exact reported case: an authorless (`authors: None`) atom and
+    /// an author-bearing sibling with the same skeleton. Before the fix,
+    /// `unwrap_or_default()` read `None` as `∅` and produced
+    /// `authors: {aa}` — a filter matching strictly FEWER events than its
+    /// own first operand, which matched every author alive. Reachable on
+    /// master: a `Public`-sourced pinned atom carries no authors, and #106
+    /// explicitly permits an author-bearing atom to declare `Public` too, so
+    /// both land in one relay's `SourceAuthority::Public` partition.
+    #[test]
+    fn author_union_refuses_an_unconstrained_authors_operand() {
+        let unconstrained = cf(&[1], &[]);
+        let bearing = cf(&[1], &["aa"]);
+        assert_eq!(unconstrained.authors, None, "fixture sanity");
+        assert!(
+            AuthorUnion.try_merge(&unconstrained, &bearing).is_none(),
+            "authors:None means EVERY author -- merging it into {{aa}} narrows"
+        );
+        assert!(
+            AuthorUnion.try_merge(&bearing, &unconstrained).is_none(),
+            "refusal must not depend on operand order"
+        );
+    }
+
+    /// `Some(∅)` is refused for the same reason: `nostr`'s matcher treats an
+    /// empty author set as unconstrained, not as "matches nothing".
+    #[test]
+    fn author_union_refuses_an_empty_authors_operand() {
+        let mut empty = cf(&[1], &["aa"]);
+        empty.authors = Some(Set::new());
+        let bearing = cf(&[1], &["aa"]);
+        assert!(AuthorUnion.try_merge(&empty, &bearing).is_none());
+        assert!(AuthorUnion.try_merge(&bearing, &empty).is_none());
+    }
+
+    /// Same defect, `KindUnion`'s axis. `kinds: None` means EVERY kind and
+    /// is reachable through the FFI filter boundary, which carries `kinds`
+    /// as an option and propagates it verbatim into `ConcreteFilter`.
+    #[test]
+    fn kind_union_refuses_an_unconstrained_or_empty_kinds_operand() {
+        let bearing = cf(&[1], &["aa"]);
+        let mut unconstrained = bearing.clone();
+        unconstrained.kinds = None;
+        assert!(KindUnion.try_merge(&unconstrained, &bearing).is_none());
+        assert!(KindUnion.try_merge(&bearing, &unconstrained).is_none());
+
+        let mut empty = bearing.clone();
+        empty.kinds = Some(Set::new());
+        assert!(KindUnion.try_merge(&empty, &bearing).is_none());
+        assert!(KindUnion.try_merge(&bearing, &empty).is_none());
+    }
+
+    /// `IdUnion` already refused `None`; it must also refuse `Some(∅)`.
+    #[test]
+    fn id_union_refuses_an_empty_ids_operand() {
+        let bearing = ConcreteFilter {
+            ids: Some(Set::from([format!("{:064x}", 1)])),
+            ..ConcreteFilter::default()
+        };
+        let mut empty = bearing.clone();
+        empty.ids = Some(Set::new());
+        assert!(IdUnion.try_merge(&empty, &bearing).is_none());
+        assert!(IdUnion.try_merge(&bearing, &empty).is_none());
+    }
+
+    /// End to end through the registry: the #900 pair ships as TWO REQs,
+    /// and the authorless one keeps its unconstrained `authors`.
+    #[test]
+    fn coalesce_ships_an_unconstrained_authors_filter_separately() {
+        let filters = Set::from([cf(&[1], &[]), cf(&[1], &["aa"])]);
+        let out = RuleRegistry::default_widen_only().coalesce(filters);
+        assert_eq!(out.len(), 2, "an unconstrained filter must not be absorbed");
+        assert!(out.iter().any(|f| f.authors.is_none()));
     }
 
     #[test]
