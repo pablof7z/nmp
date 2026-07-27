@@ -1,12 +1,13 @@
 use super::canonical::{
-    decode_stored_event_record, encode_stored_event, encode_stored_event_record,
-    record_to_stored_event, stored_event_to_record, try_decode_stored_event,
+    encode_stored_event, encode_stored_event_record, record_to_stored_event,
+    stored_event_to_record, try_decode_stored_event, try_decode_stored_event_record,
 };
 use super::ingest_txn::{GovernedIngestTxn, GovernedWrite};
 use super::mutation::{
     fan_out_signed_in_txn, find_any_displaced_key_by_event_id_in_txn,
-    find_displaced_key_by_event_id_in_txn, process_kind5_deletions_provisional_in_txn,
-    reinsert_stashed_in_txn, remove_row_in_txn, tombstone_refuses,
+    find_displaced_key_by_event_id_in_txn, missing_addr_index_target,
+    process_kind5_deletions_provisional_in_txn, reinsert_stashed_in_txn, remove_row_in_txn,
+    tombstone_refuses,
 };
 use super::outbox::{
     alloc_intent_id_in_txn, alloc_receipt_id_in_txn, decrement_pending_ephemeral_in_txn,
@@ -126,14 +127,14 @@ pub(super) fn accept_write(
             let receipt_id = alloc_receipt_id_in_txn(&mut outbox_meta)?;
             let mut existing_record = match &dup_loc {
                 DupLoc::Live(_event_key, stored) => stored_event_to_record(stored),
-                DupLoc::Stash(key) => decode_stored_event_record(
+                DupLoc::Stash(key) => try_decode_stored_event_record(
                     ingest
                         .outbox_displaced
                         .get(key.as_str())
                         .map_err(persist_err)?
                         .expect("just found this key")
                         .value(),
-                ),
+                )?,
             };
             // codex-nova ruling: a row with NO local provenance at
             // all is purely relay-observed — its event signature
@@ -344,13 +345,13 @@ pub(super) fn accept_write(
                             let current = ingest
                                 .canonical
                                 .load_by_key(current_key)?
-                                .expect("addr_index must always point at a stored event");
+                                .ok_or_else(|| missing_addr_index_target(current_key))?;
                             let current_event = &current.event;
 
                             if candidate_wins(&frozen, current_event) {
                                 let replaced =
                                     remove_row_in_txn(ingest, current_event.id, |_| true)?
-                                        .expect("addr_index must always point at a stored event");
+                                        .ok_or_else(|| missing_addr_index_target(current_key))?;
 
                                 let event_key = ingest
                                     .canonical
@@ -512,8 +513,13 @@ pub(super) fn promote_signed(
                 if intent_record.sig_state == IntentSigState::Signed {
                     return Ok(PromoteOutcome::NotFound);
                 }
-                let frozen_event = Event::from_json(&intent_record.frozen_json)
-                    .expect("redb: decode frozen event json");
+                let frozen_event =
+                    Event::from_json(&intent_record.frozen_json).map_err(|error| {
+                        PersistenceError::invariant(format!(
+                            "decode frozen event for intent {}: {error}",
+                            intent_id.0
+                        ))
+                    })?;
                 let frozen_id = frozen_event.id;
 
                 // Architecture review correction (load-bearing): is
@@ -561,7 +567,7 @@ pub(super) fn promote_signed(
                         .expect("just found this key")
                         .value()
                         .to_vec();
-                    let other_record = decode_stored_event_record(&other_bytes);
+                    let other_record = try_decode_stored_event_record(&other_bytes)?;
                     other_record
                         .local
                         .as_ref()
@@ -627,7 +633,7 @@ pub(super) fn promote_signed(
                         .expect("just found this key")
                         .value()
                         .to_vec();
-                    let mut other_record = decode_stored_event_record(&other_bytes);
+                    let mut other_record = try_decode_stored_event_record(&other_bytes)?;
                     if !already_signed {
                         other_record.event = signed_frozen_event.clone();
                         if let Some(local) = other_record.local.as_mut() {

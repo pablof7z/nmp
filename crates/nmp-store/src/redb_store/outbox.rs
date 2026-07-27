@@ -553,10 +553,10 @@ pub(super) fn update_outbox_receipt(
 /// does not allow mutating a table while iterating it.
 pub(super) fn reconcile_ephemeral_receipts_in_txn(
     outbox_receipts: &mut redb::Table<'_, &str, &str>,
-) -> usize {
+) -> Result<usize, PersistenceError> {
     let mut to_abandon: Vec<(String, OutboxReceiptRecord)> = Vec::new();
-    for entry in outbox_receipts.iter().expect("redb: iter outbox_receipts") {
-        let (key, value) = entry.expect("redb: read outbox_receipts entry");
+    for entry in outbox_receipts.iter().map_err(persist_err)? {
+        let (key, value) = entry.map_err(persist_err)?;
         let Ok(record) = serde_json::from_str::<OutboxReceiptRecord>(value.value()) else {
             // Preserve corrupt durable evidence verbatim. Reconciliation is
             // only allowed to advance a decodable ephemeral receipt; the
@@ -571,12 +571,14 @@ pub(super) fn reconcile_ephemeral_receipts_in_txn(
     let reconciled = to_abandon.len();
     for (key, mut record) in to_abandon {
         record.state = ReceiptState::Abandoned;
-        let encoded = serde_json::to_string(&record).expect("redb: encode outbox receipt");
+        let encoded = serde_json::to_string(&record).map_err(|error| {
+            PersistenceError::invariant(format!("encode outbox receipt {key}: {error}"))
+        })?;
         outbox_receipts
             .insert(key.as_str(), encoded.as_str())
-            .expect("redb: update outbox_receipts (ephemeral abandon)");
+            .map_err(persist_err)?;
     }
-    reconciled
+    Ok(reconciled)
 }
 
 /// One provisional kind:5 suppression claim, as persisted in
@@ -617,7 +619,12 @@ pub(super) fn add_claimant_in_txn(
     let mut claimants: Vec<u64> = table
         .get(key)
         .map_err(persist_err)?
-        .map(|guard| serde_json::from_str(guard.value()).expect("redb: decode claimant set"))
+        .map(|guard| {
+            serde_json::from_str(guard.value()).map_err(|error| {
+                PersistenceError::invariant(format!("decode claimant set {key}: {error}"))
+            })
+        })
+        .transpose()?
         .unwrap_or_default();
     if !claimants.contains(&intent_id.0) {
         claimants.push(intent_id.0);
@@ -689,7 +696,12 @@ pub(super) fn add_addr_claimant_in_txn(
     let mut claimants: Vec<AddrClaimant> = table
         .get(key)
         .map_err(persist_err)?
-        .map(|guard| serde_json::from_str(guard.value()).expect("redb: decode addr claimant set"))
+        .map(|guard| {
+            serde_json::from_str(guard.value()).map_err(|error| {
+                PersistenceError::invariant(format!("decode address claimant set {key}: {error}"))
+            })
+        })
+        .transpose()?
         .unwrap_or_default();
     claimants.retain(|c| c.intent_id != intent_id.0);
     claimants.push(AddrClaimant {

@@ -325,7 +325,7 @@ impl EventStore for FailOnceCompensationStore {
     fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
         self.inner.mark_ephemeral_signed(receipt_id)
     }
-    fn recover_outbox(&self) -> Vec<RecoveredIntent> {
+    fn recover_outbox(&self) -> Result<Vec<RecoveredIntent>, PersistenceError> {
         self.inner.recover_outbox()
     }
     fn reattach_receipt(
@@ -477,7 +477,7 @@ impl EventStore for SharedFailStartStore {
     ) -> Result<CompensateOutcome, PersistenceError> {
         self.inner.compensate_write(intent_id)
     }
-    fn recover_outbox(&self) -> Vec<RecoveredIntent> {
+    fn recover_outbox(&self) -> Result<Vec<RecoveredIntent>, PersistenceError> {
         self.inner.recover_outbox()
     }
     fn reattach_receipt(
@@ -638,7 +638,7 @@ impl EventStore for RedbFailStartStore {
     ) -> Result<CompensateOutcome, PersistenceError> {
         self.inner.compensate_write(intent_id)
     }
-    fn recover_outbox(&self) -> Vec<RecoveredIntent> {
+    fn recover_outbox(&self) -> Result<Vec<RecoveredIntent>, PersistenceError> {
         self.inner.recover_outbox()
     }
     fn reattach_receipt(

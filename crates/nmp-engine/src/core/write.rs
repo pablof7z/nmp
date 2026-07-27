@@ -764,8 +764,23 @@ impl<S: EventStore> EngineCore<S> {
     /// single row. Called exactly once by the runtime before its first
     /// command. Retry clocks are reconstructed only from persisted lane facts.
     pub fn recover_on_boot(&mut self) -> Vec<Effect> {
-        let recovered = self.resolver.store().recover_outbox();
         let mut effects = Vec::new();
+        // #790: the journal is now allowed to say "unreadable" instead of
+        // panicking the host mid-boot. An `Err` here is NOT "nothing is
+        // open": the durable obligation set could not be proven, so this
+        // fabricates nothing from it -- no receipt, no lane, no signer
+        // request, no route resolution, no wire effect -- and leaves
+        // `pending`/`lane_relay_index_degraded` in the untrustworthy state
+        // they must be in for a set that was never rebuilt. The one-shot
+        // #122 degradation is the whole visible outcome.
+        let recovered = match self.resolver.store().recover_outbox() {
+            Ok(recovered) => recovered,
+            Err(error) => {
+                self.lane_relay_index_degraded = true;
+                self.degrade_store(error, &mut effects);
+                return effects;
+            }
+        };
         let mut recovered_ids = Vec::new();
         // This is the one deterministic, from-scratch rebuild of `pending`
         // (and, with it, every index derived from `pending`) -- the exact

@@ -343,18 +343,37 @@ impl<'a> DictionaryView<'a> {
         })
     }
 
-    pub(super) fn validate(self) -> Result<Self, String> {
+    /// Constant-memory half of [`Self::validate`]: the entries are strictly
+    /// ordered by event key. This is the half the query path runs (#790),
+    /// because it is the half that costs nothing but a running maximum —
+    /// the issue requires packed validation on the production read boundary
+    /// *and* bounded query memory, and only this half satisfies both.
+    pub(super) fn validate_order(self) -> Result<Self, String> {
         let mut previous = None;
-        let mut ids = HashSet::with_capacity(self.count);
         for ordinal in 0..self.count {
-            let (event_key, id) = dictionary_entry(self.entries, ordinal);
+            let (event_key, _id) = dictionary_entry(self.entries, ordinal);
             if previous.is_some_and(|prior| prior >= event_key) {
                 return Err("dictionary keys are not strictly ordered".to_owned());
             }
+            previous = Some(event_key);
+        }
+        Ok(self)
+    }
+
+    /// Full validation: ordering plus id uniqueness. The uniqueness half
+    /// needs a set sized to the run's dictionary, so it belongs where the
+    /// dictionary is already being materialized entry by entry — compaction
+    /// and the integrity audit — never on a limit-bounded query. Every run
+    /// passes through compaction, so this remains a production check, not a
+    /// test-only stronger validator.
+    pub(super) fn validate(self) -> Result<Self, String> {
+        self.validate_order()?;
+        let mut ids = HashSet::with_capacity(self.count);
+        for ordinal in 0..self.count {
+            let (_event_key, id) = dictionary_entry(self.entries, ordinal);
             if !ids.insert(id) {
                 return Err("dictionary ids are not unique".to_owned());
             }
-            previous = Some(event_key);
         }
         Ok(self)
     }
@@ -494,7 +513,15 @@ impl<'a> SegmentView<'a> {
         Ok(None)
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    /// Prefix directory plus canonical posting order, in constant memory.
+    ///
+    /// Both halves are load-bearing for the query path and neither is
+    /// optional (#790). [`Self::prefix`] binary-searches the directory and
+    /// [`PostingListView::cursor`] binary-searches the posting list, so an
+    /// unsorted directory or an out-of-order posting list does not merely
+    /// read oddly — it silently lands the cursor in the wrong place and the
+    /// query returns a *false miss*. That is why this cannot be deferred to
+    /// the cursor as it walks: by then the search has already happened.
     pub(super) fn validate(self, dictionary: DictionaryView<'_>) -> Result<u64, String> {
         self.validate_prefix_directory()?;
         let mut postings = 0u64;
@@ -1170,7 +1197,10 @@ impl RunMeta {
     }
 }
 
-#[allow(dead_code)]
+/// The run catalog's own relational invariant: every run's metadata is
+/// individually well formed, run ids are unique, and event-key ranges do not
+/// overlap. Production, not audit-only (#790) — `scan_packed` and every
+/// packed publication validate the catalog through this before acting on it.
 pub(super) fn validate_run_metas(metas: &[RunMeta]) -> Result<(), String> {
     let mut ordered = metas.to_vec();
     ordered.sort_unstable_by_key(|meta| (meta.min_event_key, meta.max_event_key, meta.run_id));

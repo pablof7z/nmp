@@ -162,7 +162,7 @@ fn replaceable_base_precondition_rejects_a_concurrent_winner_atomically() {
                 actual: Some(concurrent.id),
             })
         );
-        assert!(store.recover_outbox().is_empty());
+        assert!(store.recover_outbox().expect("recover outbox").is_empty());
         let rows = store
             .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
             .unwrap();
@@ -215,7 +215,7 @@ fn replaceable_base_precondition_on_regular_event_fails_closed() {
             do_accept(store, guarded),
             AcceptOutcome::Refused(RefuseReason::ReplaceableBaseOnRegularEvent)
         );
-        assert!(store.recover_outbox().is_empty());
+        assert!(store.recover_outbox().expect("recover outbox").is_empty());
     });
 }
 
@@ -301,7 +301,7 @@ fn promote_signed_swaps_sig_in_place_zero_id_churn_and_clears_displaced() {
     }
 
     // Before promotion, the intent's displaced stash is still open.
-    let before = store.recover_outbox();
+    let before = store.recover_outbox().expect("recover outbox");
     let intent_before = before
         .iter()
         .find(|r| r.intent_id == intent_b)
@@ -335,7 +335,7 @@ fn promote_signed_swaps_sig_in_place_zero_id_churn_and_clears_displaced() {
 
     // R6: the displaced stash is durably cleared in the SAME promote
     // transaction — a boot after this point must never see it.
-    let after = store.recover_outbox();
+    let after = store.recover_outbox().expect("recover outbox");
     let intent_after = after.iter().find(|r| r.intent_id == intent_b).expect(
         "intent still open (not yet delivered — only compensate_write/full-delivery closes it)",
     );
@@ -439,7 +439,7 @@ fn refused_accept_leaves_no_journal_residue() {
         vec![Tag::expiration(Timestamp::from(10u64))],
     );
     do_accept(&mut store, accept(frozen, k.public_key(), 50));
-    assert!(store.recover_outbox().is_empty());
+    assert!(store.recover_outbox().expect("recover outbox").is_empty());
 }
 
 #[test]
@@ -529,7 +529,7 @@ fn accept_crash_is_all_or_nothing() {
 
     let ok_rows = store.query(&Filter::new().id(frozen_ok_id)).unwrap();
     assert_eq!(ok_rows.len(), 1, "the accepted row must survive reopen");
-    let recovered = store.recover_outbox();
+    let recovered = store.recover_outbox().expect("recover outbox");
     assert!(
         recovered.iter().any(|r| r.intent_id == ok_intent_id),
         "its journal entry must survive TOGETHER with the row (same transaction)"
@@ -568,7 +568,7 @@ fn recover_outbox_reconstructs_inflight_after_reopen() {
     };
 
     let store = RedbStore::open(&path).expect("reopen redb store");
-    let recovered = store.recover_outbox();
+    let recovered = store.recover_outbox().expect("recover outbox");
     assert_eq!(recovered.len(), 1);
     let intent = &recovered[0];
     assert_eq!(intent.intent_id, accepted_intent_id);
@@ -959,7 +959,7 @@ fn durable_id_counter_overflow_and_receipt_namespace_boundary_are_errors() {
             .accept_write(accept(frozen, k.public_key(), 106))
             .expect_err("counter boundary must reject acceptance atomically");
         assert!(err.to_string().contains(expected), "{err}");
-        assert!(store.recover_outbox().is_empty());
+        assert!(store.recover_outbox().expect("recover outbox").is_empty());
     }
 }
 
@@ -1000,14 +1000,14 @@ fn intent_id_never_reused_after_all_intents_terminate_and_restart() {
         // At this exact moment, `recover_outbox` sees NOTHING open — the
         // scenario a naive "seed past max open id" allocator would read as
         // "no id has ever been used".
-        assert!(store.recover_outbox().is_empty());
+        assert!(store.recover_outbox().expect("recover outbox").is_empty());
 
         (id1, id2)
     };
 
     // Restart — the open set is (still) empty.
     let mut store = RedbStore::open(&path).expect("reopen redb store");
-    assert!(store.recover_outbox().is_empty());
+    assert!(store.recover_outbox().expect("recover outbox").is_empty());
 
     let (frozen3, _signed3) = compose(&k, Kind::TextNote, "three", 300);
     let outcome3 = do_accept(&mut store, accept(frozen3, k.public_key(), 300));
@@ -1076,7 +1076,7 @@ fn receipt_id_never_reused_after_terminal_and_restart() {
         // Every intent's open-work row is gone, but all THREE receipts
         // remain durably RETAINED — the exact surviving-retained-set trap
         // a naive allocator could otherwise be seeded from.
-        assert!(store.recover_outbox().is_empty());
+        assert!(store.recover_outbox().expect("recover outbox").is_empty());
         assert!(store.reattach_receipt(receipt1).unwrap().is_some());
         assert!(store.reattach_receipt(receipt2).unwrap().is_some());
         assert!(store.reattach_receipt(receipt3).unwrap().is_some());
@@ -1086,7 +1086,7 @@ fn receipt_id_never_reused_after_terminal_and_restart() {
 
     // Restart — the retained receipts still answer, the open set is empty.
     let mut store = RedbStore::open(&path).expect("reopen redb store");
-    assert!(store.recover_outbox().is_empty());
+    assert!(store.recover_outbox().expect("recover outbox").is_empty());
     assert!(store.reattach_receipt(receipt1).unwrap().is_some());
     assert!(store.reattach_receipt(receipt2).unwrap().is_some());
     assert!(store
@@ -1163,7 +1163,7 @@ fn terminal_receipt_still_reattachable_after_recover() {
     // intent's open-work row legitimately still exists (out of this
     // unit's scope to close) — both receipts must reattach regardless.
     let store = RedbStore::open(&path).expect("reopen redb store");
-    let recovered = store.recover_outbox();
+    let recovered = store.recover_outbox().expect("recover outbox");
     assert!(
         !recovered.iter().any(|r| r.intent_id == intent_comp),
         "the compensated intent must not appear in open-work recovery"
@@ -1243,7 +1243,7 @@ fn ephemeral_persists_receipt_only_no_journal_no_pending_row_and_reattaches_afte
             .is_empty());
         // No open-work/journal row: `recover_outbox` (OUTBOX_INTENTS-only)
         // sees nothing.
-        assert!(store.recover_outbox().is_empty());
+        assert!(store.recover_outbox().expect("recover outbox").is_empty());
 
         // The receipt itself IS there, `Accepted`, receipt-only.
         let receipt = store
@@ -1266,7 +1266,7 @@ fn ephemeral_persists_receipt_only_no_journal_no_pending_row_and_reattaches_afte
         .query(&Filter::new().id(frozen_id))
         .unwrap()
         .is_empty());
-    assert!(store.recover_outbox().is_empty());
+    assert!(store.recover_outbox().expect("recover outbox").is_empty());
 
     // But the receipt is reattachable, now correctly `Abandoned` — the
     // boot-time reconciliation `RedbStore::open()` runs.
@@ -1289,7 +1289,7 @@ fn ephemeral_persists_receipt_only_no_journal_no_pending_row_and_reattaches_afte
         .accept_ephemeral(frozen2_id, k.public_key())
         .expect("accept_ephemeral persistence");
     assert!(mem.query(&Filter::new().id(frozen2_id)).unwrap().is_empty());
-    assert!(mem.recover_outbox().is_empty());
+    assert!(mem.recover_outbox().expect("recover outbox").is_empty());
     let mem_receipt = mem
         .reattach_receipt(receipt2_id)
         .expect("receipt lookup must be readable")
@@ -2924,7 +2924,7 @@ fn pending_kind5_cancel_and_promote_both_survive_real_redb_restart() {
         .query(&Filter::new().id(target_promote_id))
         .unwrap()
         .is_empty());
-    let recovered = store.recover_outbox();
+    let recovered = store.recover_outbox().expect("recover outbox");
     assert!(recovered.iter().any(|row| row.intent_id == intent_cancel));
     assert!(recovered.iter().any(|row| row.intent_id == intent_promote));
 
@@ -3318,7 +3318,7 @@ fn duplicate_ownership_survives_restart() {
     assert!(local.owners.contains(&intent_b));
     assert!(!local.owners.contains(&intent_a));
 
-    let recovered = store.recover_outbox();
+    let recovered = store.recover_outbox().expect("recover outbox");
     assert!(recovered.iter().any(|r| r.intent_id == intent_b));
     assert!(
         !recovered.iter().any(|r| r.intent_id == intent_a),
@@ -3644,7 +3644,7 @@ fn duplicate_accepted_while_stashed_survives_restart() {
     };
 
     let mut store = RedbStore::open(&path).expect("reopen redb store");
-    let recovered = store.recover_outbox();
+    let recovered = store.recover_outbox().expect("recover outbox");
     assert!(recovered.iter().any(|r| r.intent_id == intent_a));
     assert!(recovered.iter().any(|r| r.intent_id == intent_c));
     assert!(recovered.iter().any(|r| r.intent_id == intent_d));
@@ -4098,7 +4098,7 @@ fn redb_reopen_replays_cancelled_without_recovering_open_work() {
     };
 
     let store = RedbStore::open(&path).unwrap();
-    assert!(store.recover_outbox().is_empty());
+    assert!(store.recover_outbox().expect("recover outbox").is_empty());
     assert_eq!(
         store.reattach_receipt(receipt).unwrap().unwrap().state,
         ReceiptState::Cancelled

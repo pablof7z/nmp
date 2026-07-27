@@ -1,6 +1,7 @@
 use super::ingest_txn::GovernedIngestTxn;
 use super::mutation::{
-    fan_out_signed_in_txn, process_kind5_deletions, remove_row_in_txn, tombstone_refuses,
+    fan_out_signed_in_txn, missing_addr_index_target, process_kind5_deletions, remove_row_in_txn,
+    tombstone_refuses,
 };
 use super::query::expiration_key;
 use super::{
@@ -104,12 +105,12 @@ pub(super) fn insert_with_tables<T: GovernedIngestTxn>(
                         Some(current_key) => {
                             let replaced = tables
                                 .load_by_key(current_key)?
-                                .expect("addr_index must always point at a stored event");
+                                .ok_or_else(|| missing_addr_index_target(current_key))?;
                             let current_event = &replaced.event;
 
                             if candidate_wins(&event, current_event) {
                                 remove_row_in_txn(tables, current_event.id, |_| true)?
-                                    .expect("addr_index must always point at a stored event");
+                                    .ok_or_else(|| missing_addr_index_target(current_key))?;
                                 let event_key = tables.insert_new(&event, &provenance)?;
                                 tables.address_put(addr_key_str.as_str(), event_key)?;
                                 tables.insert_indexes(&event, event_key)?;

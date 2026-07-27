@@ -102,7 +102,7 @@ impl EventStore for FailIngestStore {
     ) -> Result<CompensateOutcome, PersistenceError> {
         self.inner.compensate_write(intent_id)
     }
-    fn recover_outbox(&self) -> Vec<RecoveredIntent> {
+    fn recover_outbox(&self) -> Result<Vec<RecoveredIntent>, PersistenceError> {
         self.inner.recover_outbox()
     }
     fn reattach_receipt(
@@ -341,7 +341,7 @@ impl EventStore for WakeLaneProbeStore {
     ) -> Result<CompensateOutcome, PersistenceError> {
         self.inner.compensate_write(intent_id)
     }
-    fn recover_outbox(&self) -> Vec<RecoveredIntent> {
+    fn recover_outbox(&self) -> Result<Vec<RecoveredIntent>, PersistenceError> {
         self.inner.recover_outbox()
     }
     fn reattach_receipt(

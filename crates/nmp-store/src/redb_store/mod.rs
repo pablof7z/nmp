@@ -9,14 +9,24 @@
 //! remain self-contained binary snapshots; other outbox/coverage metadata
 //! remains typed JSON.
 //!
-//! `redb`'s own errors (`TableError`/`StorageError`/…) are all invariant
-//! violations for this crate's purposes — a healthy embedded DB file does
-//! not fail to open a table it created itself, or fail to commit a
-//! transaction it started — so they are `.expect()`ed rather than threaded
-//! through `EventStore`'s trait signatures (which, matching `MemoryStore`,
-//! carry no `Result` at all). A real I/O error here means the on-disk file
-//! is corrupt, not a reachable, recoverable condition this crate's callers
-//! could usefully branch on today.
+//! Nothing here panics the embedding host over the contents of a file it
+//! did not write. `redb`'s own errors are classified and returned by
+//! [`schema::persist_err`], and — since #790 — every production decoder of a
+//! store-owned row does the same: a malformed, truncated, or
+//! schema-incompatible persisted value, and a broken relational invariant
+//! such as an index naming a canonical row that is missing or will not
+//! decode, both surface as `PersistenceError` through the owning
+//! `EventStore` door. They are classified [`crate::PersistenceFault::
+//! Invariant`] rather than `Corrupted`: the backend is healthy, and the
+//! decode happens before the enclosing write transaction commits, so
+//! `DurabilityOutcome::Absent` is provable rather than merely convenient
+//! (see that variant's doc). A decode failure is never allowed to become an
+//! empty result, a skipped row, or a defaulted value — a false miss is
+//! exactly the outcome the typed error exists to prevent.
+//!
+//! Two peek doors, `next_expiration` and `get_coverage`, are still infallible
+//! at the trait and therefore still `.expect()` at the end of an otherwise
+//! fallible chain. Widening them is #763's unit, not this one.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -262,7 +272,7 @@ impl EventStore for RedbStore {
         write_ops::mark_ephemeral_signed(self, receipt_id)
     }
 
-    fn recover_outbox(&self) -> Vec<RecoveredIntent> {
+    fn recover_outbox(&self) -> Result<Vec<RecoveredIntent>, PersistenceError> {
         outbox_ops::recover_outbox(self)
     }
 
@@ -439,6 +449,9 @@ impl EventStore for RedbStore {
         outbox_ops::accept_ephemeral(self, frozen_id, expected_pubkey)
     }
 }
+
+#[cfg(test)]
+mod corruption_tests;
 
 #[cfg(test)]
 mod crash_atomicity_tests;

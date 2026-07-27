@@ -47,19 +47,19 @@ pub(super) fn encode_stored_event(se: &StoredEvent) -> Vec<u8> {
 }
 
 /// Materialize one self-contained portable `OUTBOX_DISPLACED` value — the
-/// read-side counterpart of [`encode_stored_event`].
-pub(super) fn decode_stored_event(bytes: &[u8]) -> StoredEvent {
-    binary_event::decode(bytes).expect("redb: decode portable stored event")
-}
-
+/// read-side counterpart of [`encode_stored_event`]. Fallible (#790): these
+/// bytes come off disk, so a truncated or schema-incompatible snapshot is a
+/// typed refusal, never a panic in the embedding host.
 pub(super) fn try_decode_stored_event(bytes: &[u8]) -> Result<StoredEvent, PersistenceError> {
     binary_event::decode(bytes).map_err(|error| {
         PersistenceError::invariant(format!("decode portable stored event: {error:?}"))
     })
 }
 
-pub(super) fn decode_stored_event_record(bytes: &[u8]) -> StoredEventRecord {
-    stored_event_to_record(&decode_stored_event(bytes))
+pub(super) fn try_decode_stored_event_record(
+    bytes: &[u8],
+) -> Result<StoredEventRecord, PersistenceError> {
+    Ok(stored_event_to_record(&try_decode_stored_event(bytes)?))
 }
 
 pub(super) fn encode_stored_event_record(record: &StoredEventRecord) -> Vec<u8> {
@@ -268,13 +268,23 @@ impl<'txn> CanonicalWriteTables<'txn> {
         {
             let (encoded_key, at) = entry.map_err(persist_err)?;
             let relay_key = observation_relay_key(encoded_key.value());
+            // An observation naming a relay key the dictionary no longer
+            // holds is a broken relational invariant, not "unobserved":
+            // dropping it here would silently shrink exact source coverage.
             let relay = self
                 .relays
                 .get(relay_key)
                 .map_err(persist_err)?
-                .expect("redb: observation relay key exists");
-            let relay =
-                RelayUrl::parse(relay.value()).expect("redb: interned relay URL remains parseable");
+                .ok_or_else(|| {
+                    PersistenceError::invariant(format!(
+                        "observation for event {event_key} points at missing relay {relay_key}"
+                    ))
+                })?;
+            let relay = RelayUrl::parse(relay.value()).map_err(|error| {
+                PersistenceError::invariant(format!(
+                    "decode interned relay URL {relay_key}: {error}"
+                ))
+            })?;
             fold_seen_at(&mut seen, relay, Timestamp::from(at.value()));
         }
         Ok(seen)
@@ -334,7 +344,9 @@ impl<'txn> CanonicalWriteTables<'txn> {
             .relay_refs
             .get(relay_key)
             .map_err(persist_err)?
-            .expect("redb: interned relay has refcount")
+            .ok_or_else(|| {
+                PersistenceError::invariant(format!("interned relay {relay_key} has no refcount"))
+            })?
             .value();
         self.relay_ref_counts.insert(relay_key, current);
         Ok(current)
@@ -397,7 +409,11 @@ impl<'txn> CanonicalWriteTables<'txn> {
                 .relay_refs
                 .get(relay_key)
                 .map_err(persist_err)?
-                .expect("redb: interned relay has refcount")
+                .ok_or_else(|| {
+                    PersistenceError::invariant(format!(
+                        "interned relay {relay_key} has no refcount"
+                    ))
+                })?
                 .value();
             if effective > 0 {
                 if effective == persisted {
@@ -412,7 +428,11 @@ impl<'txn> CanonicalWriteTables<'txn> {
                 .relays
                 .get(relay_key)
                 .map_err(persist_err)?
-                .expect("redb: interned relay exists")
+                .ok_or_else(|| {
+                    PersistenceError::invariant(format!(
+                        "interned relay {relay_key} has a refcount but no URL row"
+                    ))
+                })?
                 .value()
                 .to_owned();
             self.relay_refs.remove(relay_key).map_err(persist_err)?;
@@ -578,7 +598,11 @@ impl<'txn> CanonicalWriteTables<'txn> {
                     .relay_keys
                     .get(relay.as_str())
                     .map_err(persist_err)?
-                    .expect("redb: observed relay remains interned")
+                    .ok_or_else(|| {
+                        PersistenceError::invariant(format!(
+                            "observed relay {relay} is no longer interned"
+                        ))
+                    })?
                     .value();
                 self.remove_observation(key, relay_key)?;
             }
