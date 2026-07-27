@@ -8,28 +8,18 @@
 //! filter's token and the relay sees ONE overwriting REQ — or something new,
 //! in which case a fresh token is minted.
 //!
-//! THE MATCHING KEY is a per-component structural signature:
-//!
-//! ```text
-//! since | until | kinds | authors | ids | one component PER TAG NAME | limit
-//! ```
+//! THE MATCHING KEY is the per-component structural signature defined by
+//! [`crate::component`] — `since | until | kinds | authors | ids | one
+//! component PER TAG NAME | limit`. That module is shared with
+//! [`crate::coalesce`] on purpose; see its doc for why one definition rather
+//! than two.
 //!
 //! A new filter continues the prior it differs from in EXACTLY ONE component.
-//! Two properties of that rule are load-bearing:
-//!
-//! - **Zero-diff ranks first.** An unchanged filter must match ITSELF before
-//!   any one-diff candidate is considered, or a no-op recompile would churn
-//!   the wire and a subscription's identity would depend on which siblings
-//!   happen to share the compile.
-//! - **Tag values are one component PER TAG NAME, never conflated.** Tags are
-//!   conjunctive across names (`nmp_grammar::ConcreteFilter::tags`), so one
-//!   lumped tag component would make `{#e:X,#p:Y}` and `{#e:X',#p:Y'}` look
-//!   like a single-component difference. That is unsound: they are two
-//!   unrelated selections, and treating them as a continuation would carry a
-//!   subscription across a filter that shares nothing with it.
-//!
-//! `ids` is a component in its own right: `ConcreteFilter` has FOUR array
-//! axes (`kinds`, `authors`, `ids`, `tags`), not three.
+//! One property of that rule is local to this module and load-bearing:
+//! **zero-diff ranks first.** An unchanged filter must match ITSELF before
+//! any one-diff candidate is considered, or a no-op recompile would churn the
+//! wire and a subscription's identity would depend on which siblings happen
+//! to share the compile.
 //!
 //! THE SIGNATURE IS COMPARED FIELD-BY-FIELD, not via per-component digests.
 //! Both sides are full `ConcreteFilter`s already in memory and the partitions
@@ -46,8 +36,9 @@
 use std::cmp::Reverse;
 use std::collections::BTreeSet;
 
-use nmp_grammar::{ConcreteFilter, DescriptorHash, IndexedTagName};
+use nmp_grammar::{ConcreteFilter, DescriptorHash};
 
+use crate::component::{differing, Component};
 use crate::plan::SubId;
 
 /// The ordering key that picks ONE prior when several are a one-component
@@ -55,55 +46,6 @@ use crate::plan::SubId;
 /// component first, then a stable canonical tie-break so the choice never
 /// depends on iteration order.
 type TieBreak<'a> = (Reverse<usize>, u64, DescriptorHash, &'a SubId);
-
-/// One component of a filter's structural signature. `Tag` is per tag NAME.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub(crate) enum Component {
-    Since,
-    Until,
-    Kinds,
-    Authors,
-    Ids,
-    Limit,
-    Tag(IndexedTagName),
-}
-
-/// Every signature component in which `a` and `b` disagree.
-///
-/// A field that is `None` in one filter and `Some` in the other DOES differ —
-/// including `authors: None` vs `authors: Some(∅)`, which are distinct
-/// selections (absent dimension vs a dimension constrained to nothing), and a
-/// tag name present in one filter and absent from the other.
-pub(crate) fn differing(a: &ConcreteFilter, b: &ConcreteFilter) -> Vec<Component> {
-    let mut out = Vec::new();
-    if a.since != b.since {
-        out.push(Component::Since);
-    }
-    if a.until != b.until {
-        out.push(Component::Until);
-    }
-    if a.kinds != b.kinds {
-        out.push(Component::Kinds);
-    }
-    if a.authors != b.authors {
-        out.push(Component::Authors);
-    }
-    if a.ids != b.ids {
-        out.push(Component::Ids);
-    }
-    if a.limit != b.limit {
-        out.push(Component::Limit);
-    }
-    // The UNION of both filters' tag names: a name only one side carries is
-    // itself a differing component.
-    let names: BTreeSet<&IndexedTagName> = a.tags.keys().chain(b.tags.keys()).collect();
-    for name in names {
-        if a.tags.get(name) != b.tags.get(name) {
-            out.push(Component::Tag(*name));
-        }
-    }
-    out
-}
 
 /// How strongly `a` and `b` are related ALONG the one component they differ
 /// in — the content-grounded tiebreak between several one-diff candidates.
@@ -236,7 +178,6 @@ pub(crate) fn assign(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
 
     use nmp_grammar::{AccessContext, SourceAuthority};
 
@@ -248,13 +189,6 @@ mod tests {
         }
     }
 
-    fn tag(c: char, values: &[&str]) -> BTreeMap<IndexedTagName, BTreeSet<String>> {
-        BTreeMap::from([(
-            IndexedTagName::new(c).unwrap(),
-            values.iter().map(|s| s.to_string()).collect(),
-        )])
-    }
-
     fn token(n: u64) -> SubId {
         SubId::allocate(
             crate::facts::test_relay(0),
@@ -263,70 +197,6 @@ mod tests {
             ConcreteFilter::default().hash(),
             n,
         )
-    }
-
-    #[test]
-    fn identical_filters_differ_in_nothing() {
-        assert!(differing(&cf(), &cf()).is_empty());
-    }
-
-    #[test]
-    fn each_axis_is_its_own_component() {
-        let mut b = cf();
-        b.authors = Some(BTreeSet::from(["bb".to_string()]));
-        assert_eq!(differing(&cf(), &b), vec![Component::Authors]);
-
-        let mut b = cf();
-        b.ids = Some(BTreeSet::from(["cc".to_string()]));
-        assert_eq!(
-            differing(&cf(), &b),
-            vec![Component::Ids],
-            "ids is a component in its own right -- ConcreteFilter has FOUR array axes"
-        );
-
-        let mut b = cf();
-        b.limit = Some(10);
-        assert_eq!(differing(&cf(), &b), vec![Component::Limit]);
-    }
-
-    /// `authors: None` and `authors: Some(∅)` are DIFFERENT selections: an
-    /// absent dimension versus a dimension constrained to nothing.
-    #[test]
-    fn absent_and_empty_author_sets_differ() {
-        let mut none = cf();
-        none.authors = None;
-        let mut empty = cf();
-        empty.authors = Some(BTreeSet::new());
-        assert_eq!(differing(&none, &empty), vec![Component::Authors]);
-    }
-
-    /// The unsoundness one lumped tag component would introduce: tags are
-    /// CONJUNCTIVE across names, so moving `#e` AND `#p` together is a
-    /// two-component move, not a one-component continuation.
-    #[test]
-    fn tag_values_are_one_component_per_tag_name() {
-        let mut a = cf();
-        a.tags = tag('e', &["x"]);
-        a.tags.extend(tag('p', &["y"]));
-        let mut b = cf();
-        b.tags = tag('e', &["x2"]);
-        b.tags.extend(tag('p', &["y2"]));
-
-        assert_eq!(
-            differing(&a, &b).len(),
-            2,
-            "{{#e:X,#p:Y}} vs {{#e:X',#p:Y'}} must be TWO components, never one"
-        );
-    }
-
-    #[test]
-    fn a_tag_name_present_on_only_one_side_is_a_difference() {
-        let mut b = cf();
-        b.tags = tag('e', &["x"]);
-        assert_eq!(
-            differing(&cf(), &b),
-            vec![Component::Tag(IndexedTagName::new('e').unwrap())]
-        );
     }
 
     /// Zero-diff ranks first even when a one-diff candidate would otherwise

@@ -2,6 +2,11 @@
 //! §4.2, §4.3, §5) — the widen-only property test per `MergeRule`, the
 //! local-refilter exactness property, and the non-widening-rule drop
 //! mechanism.
+//!
+//! `default_widen_only()` now holds ONE rule (`StructuralUnion`) spanning all
+//! four array axes, so the per-rule structure these tests once had has become
+//! PER-AXIS: the vacuity guard that matters is no longer "did the rule fire"
+//! but "did it fire on each axis it claims to cover".
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,9 +16,7 @@ use nostr::{EventBuilder, Keys, Kind, Tag};
 use proptest::prelude::*;
 
 use nmp_grammar::{ConcreteFilter, IndexedTagName};
-use nmp_router::{
-    deliver, AuthorUnion, DiscardSecondOperand, IdUnion, KindUnion, MergeRule, RuleRegistry,
-};
+use nmp_router::{deliver, DiscardSecondOperand, MergeRule, RuleRegistry, StructuralUnion};
 
 fn matches(cf: &ConcreteFilter, e: &nostr::Event) -> bool {
     cf.to_nostr().match_event(e, MatchEventOptions::new())
@@ -40,10 +43,10 @@ fn small_kind() -> impl Strategy<Value = u16> {
 //     matches every event), so folding it into a `Some` set narrows the
 //     same way.
 //   * tag components: disjoint tag-NAME sets, and one name present on one
-//     side and absent on the other. No rule unions tags TODAY (all three
-//     require `a.tags == b.tags`), so these pairs are currently refused --
-//     but the generator must produce them anyway, because they are the same
-//     class of trap on an axis whose union rule does not exist yet.
+//     side and absent on the other. These were the same class of trap on an
+//     axis that had no union rule at all; `StructuralUnion` now covers that
+//     axis, so the shapes these generators emit are exactly the ones its
+//     inverted polarity has to get right.
 //
 // The tag axis's polarity is INVERTED relative to kinds/authors/ids, which
 // is why it needs its own generator rather than another `component_shape`
@@ -56,9 +59,10 @@ fn small_kind() -> impl Strategy<Value = u16> {
 // `Some(∅)` are the trap.
 //
 // These helpers are deliberately RULE-AGNOSTIC: they describe the shape
-// space of a `ConcreteFilter`, not the domain of any one rule, so they keep
-// working when the AuthorUnion/KindUnion/IdUnion trio is replaced by a
-// single structural "exactly one array component differs" rule.
+// space of a `ConcreteFilter`, not the domain of any one rule -- which is
+// why they carried over unchanged when the AuthorUnion/KindUnion/IdUnion
+// trio was replaced by the single structural "exactly one array component
+// differs" rule.
 // ---------------------------------------------------------------------------
 
 /// Kind values shared by the generated filters and the event universe.
@@ -163,157 +167,61 @@ fn build_filter(
     }
 }
 
-/// Test 10: `merge_rule_widens` for `AuthorUnion` -- the load-bearing rule.
-/// Generator: same kind for `a`/`b` (so `try_merge` fires whenever the
-/// author subsets differ), authors + events drawn from a small pool so
-/// collisions are frequent.
-#[test]
-fn merge_rule_widens_author_union() {
-    let pool: Vec<Keys> = (0..4).map(|_| Keys::generate()).collect();
-    let pool_hex: Vec<String> = pool.iter().map(|k| k.public_key().to_hex()).collect();
-    let n = pool.len();
-
-    proptest!(|(
-        kind in small_kind(),
-        authors_a in prop::collection::btree_set(0..n, 1..=2),
-        authors_b in prop::collection::btree_set(0..n, 1..=2),
-        events in prop::collection::vec((small_kind(), 0..n), 0..6)
-    )| {
-        let a = ConcreteFilter {
-            kinds: Some(BTreeSet::from([kind])),
-            authors: Some(authors_a.iter().map(|&i| pool_hex[i].clone()).collect()),
-            ..ConcreteFilter::default()
-        };
-        let b = ConcreteFilter {
-            kinds: Some(BTreeSet::from([kind])),
-            authors: Some(authors_b.iter().map(|&i| pool_hex[i].clone()).collect()),
-            ..ConcreteFilter::default()
-        };
-        let evs: Vec<nostr::Event> = events
-            .into_iter()
-            .map(|(k, author_idx)| {
-                EventBuilder::new(Kind::from(k), "")
-                    .sign_with_keys(&pool[author_idx])
-                    .expect("test fixture event must sign cleanly")
-            })
-            .collect();
-
-        if let Some(m) = AuthorUnion.try_merge(&a, &b) {
-            for e in &evs {
-                if matches(&a, e) || matches(&b, e) {
-                    prop_assert!(matches(&m, e));
-                }
-            }
-        }
-    });
+/// The four array axes `StructuralUnion` spans, as a fire-counter key. One
+/// counter for the rule as a whole would be VACUITY BY ANOTHER NAME: the rule
+/// firing sixty times on `authors` proves nothing about `tags`, which is the
+/// axis that had no rule at all until now.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Axis {
+    Kinds,
+    Authors,
+    Ids,
+    Tags,
 }
 
-/// Test 10: `merge_rule_widens` for `KindUnion` -- the optional rule. Same
-/// structure, roles swapped: authors fixed (so `try_merge` fires whenever
-/// the kind sets differ).
-#[test]
-fn merge_rule_widens_kind_union() {
-    let pool: Vec<Keys> = (0..4).map(|_| Keys::generate()).collect();
-    let pool_hex: Vec<String> = pool.iter().map(|k| k.public_key().to_hex()).collect();
-    let n = pool.len();
+const AXES: [Axis; 4] = [Axis::Kinds, Axis::Authors, Axis::Ids, Axis::Tags];
 
-    proptest!(|(
-        author_idx in 0..n,
-        kind_a in small_kind(),
-        kind_b in small_kind(),
-        events in prop::collection::vec((small_kind(), 0..n), 0..6)
-    )| {
-        let author = pool_hex[author_idx].clone();
-        let a = ConcreteFilter {
-            kinds: Some(BTreeSet::from([kind_a])),
-            authors: Some(BTreeSet::from([author.clone()])),
-            ..ConcreteFilter::default()
-        };
-        let b = ConcreteFilter {
-            kinds: Some(BTreeSet::from([kind_b])),
-            authors: Some(BTreeSet::from([author])),
-            ..ConcreteFilter::default()
-        };
-        let evs: Vec<nostr::Event> = events
-            .into_iter()
-            .map(|(k, ai)| {
-                EventBuilder::new(Kind::from(k), "")
-                    .sign_with_keys(&pool[ai])
-                    .expect("test fixture event must sign cleanly")
-            })
-            .collect();
-
-        if let Some(m) = KindUnion.try_merge(&a, &b) {
-            for e in &evs {
-                if matches(&a, e) || matches(&b, e) {
-                    prop_assert!(matches(&m, e));
-                }
-            }
-        }
-    });
+/// Which array axis a successful merge actually widened, read off the OUTPUT
+/// rather than assumed from the generator: the merged filter differs from `a`
+/// on exactly the component that was unioned.
+fn widened_axis(a: &ConcreteFilter, merged: &ConcreteFilter) -> Option<Axis> {
+    if a.kinds != merged.kinds {
+        return Some(Axis::Kinds);
+    }
+    if a.authors != merged.authors {
+        return Some(Axis::Authors);
+    }
+    if a.ids != merged.ids {
+        return Some(Axis::Ids);
+    }
+    if a.tags != merged.tags {
+        return Some(Axis::Tags);
+    }
+    None
 }
 
-#[test]
-fn merge_rule_widens_id_union() {
-    let keys = Keys::generate();
-    let events: Vec<nostr::Event> = (0..8)
-        .map(|i| {
-            EventBuilder::new(Kind::TextNote, format!("event-{i}"))
-                .sign_with_keys(&keys)
-                .unwrap()
-        })
-        .collect();
-
-    proptest!(|(
-        ids_a in prop::collection::btree_set(0usize..events.len(), 1..=4),
-        ids_b in prop::collection::btree_set(0usize..events.len(), 1..=4)
-    )| {
-        let a = ConcreteFilter {
-            ids: Some(ids_a.iter().map(|&i| events[i].id.to_hex()).collect()),
-            ..ConcreteFilter::default()
-        };
-        let b = ConcreteFilter {
-            ids: Some(ids_b.iter().map(|&i| events[i].id.to_hex()).collect()),
-            ..ConcreteFilter::default()
-        };
-        if let Some(merged) = IdUnion.try_merge(&a, &b) {
-            for event in &events {
-                if matches(&a, event) || matches(&b, event) {
-                    prop_assert!(matches(&merged, event));
-                }
-            }
-        }
-    });
-}
-
-/// #900's durable guard, and the one test in this file that is not written
-/// against a specific rule: `matches(try_merge(a,b)) ⊇ matches(a) ∪
-/// matches(b)` for EVERY registered rule, over operand pairs drawn from the
-/// FULL component-shape space -- `None`, `Some(∅)` and `Some(non-empty)` on
-/// `kinds`/`authors`/`ids`, and present/absent/disjoint tag NAMES.
+/// Test 10: `merge_rule_widens`, over the FULL component-shape space --
+/// `None`, `Some(∅)` and `Some(non-empty)` on `kinds`/`authors`/`ids`, and
+/// present/absent/disjoint tag NAMES with possibly-empty value sets.
 ///
-/// The three `merge_rule_widens_*` tests above are the per-rule M2 contract
-/// tests; each pins one rule's own axis. This one exists because #900 was
-/// not a defect in any single rule's logic so much as a hole in what the
-/// generators could express: no generator in this file could produce an
-/// operand that left a component UNCONSTRAINED, so no generator could ever
-/// pair one against a constrained sibling -- the single pairing that makes a
-/// union rule narrow. It is deliberately written against `dyn MergeRule` so
-/// it keeps guarding the same class when these three rules are replaced.
+/// #900 lived because the generators could not express an UNCONSTRAINED
+/// operand, so no generator could ever pair one against a constrained sibling
+/// -- the single pairing that makes a union rule narrow. It is written
+/// against `dyn MergeRule` so it keeps guarding the same class if the
+/// registry ever holds more than one rule again.
 ///
-/// The fire counters are load-bearing: a widening property over pairs that
-/// no rule ever accepts is vacuously green, which is the failure mode that
-/// let #900 through in the first place.
+/// THE PER-AXIS FIRE COUNTERS ARE LOAD-BEARING. A widening property over
+/// pairs no rule accepts is vacuously green -- that is the second, subtler
+/// reason #900 survived. Collapsing three rules into one makes a single
+/// whole-rule counter weaker than what it replaced, because the rule can fire
+/// prolifically on `authors` while never once touching `tags`. Each of the
+/// four axes must be measured firing in its own right.
 #[test]
-fn every_merge_rule_widens_across_the_full_component_shape_space() {
+fn the_merge_rule_widens_across_the_full_component_shape_space() {
     let u = universe();
     let events = u.events.len();
-    let rules: Vec<Box<dyn MergeRule>> = vec![
-        Box::new(AuthorUnion),
-        Box::new(KindUnion),
-        Box::new(IdUnion),
-    ];
-    let fired: Vec<AtomicUsize> = rules.iter().map(|_| AtomicUsize::new(0)).collect();
+    let rules: Vec<Box<dyn MergeRule>> = vec![Box::new(StructuralUnion)];
+    let fired: Vec<AtomicUsize> = AXES.iter().map(|_| AtomicUsize::new(0)).collect();
 
     proptest!(|(
         kinds_a in component_shape(KIND_POOL.len(), 2),
@@ -324,9 +232,10 @@ fn every_merge_rule_widens_across_the_full_component_shape_space() {
         ids_b in component_shape(events, 2),
         tags_a in tag_shape(),
         tags_b in tag_shape(),
-        // Mostly vary exactly ONE component (the shape every union rule's
-        // domain requires, so merges actually fire), sometimes vary an
-        // arbitrary subset (so multi-axis pairs are covered too).
+        // Mostly vary exactly ONE component (the shape the rule's domain
+        // requires, so merges actually fire), sometimes vary an arbitrary
+        // subset (so multi-axis pairs are covered too and the two-component
+        // refusal is exercised).
         vary in prop_oneof![
             6 => (0usize..4).prop_map(|i| { let mut v = [false; 4]; v[i] = true; v }),
             1 => any::<[bool; 4]>(),
@@ -341,11 +250,14 @@ fn every_merge_rule_widens_across_the_full_component_shape_space() {
             if vary[3] { &tags_b } else { &tags_a },
         );
 
-        for (idx, rule) in rules.iter().enumerate() {
+        for rule in &rules {
             let Some(merged) = rule.try_merge(&a, &b) else {
                 continue;
             };
-            fired[idx].fetch_add(1, Ordering::Relaxed);
+            if let Some(axis) = widened_axis(&a, &merged) {
+                let idx = AXES.iter().position(|x| *x == axis).expect("known axis");
+                fired[idx].fetch_add(1, Ordering::Relaxed);
+            }
             for event in &u.events {
                 if matches(&a, event) || matches(&b, event) {
                     prop_assert!(
@@ -359,25 +271,24 @@ fn every_merge_rule_widens_across_the_full_component_shape_space() {
         }
     });
 
-    for (idx, rule) in rules.iter().enumerate() {
+    for (idx, axis) in AXES.iter().enumerate() {
         assert!(
             fired[idx].load(Ordering::Relaxed) > 0,
-            "the generator never produced a pair {} accepts -- the widening \
-             property is VACUOUS for it, which is exactly how #900 survived",
-            rule.name()
+            "the generator never produced a pair the rule accepts on the {axis:?} axis -- \
+             the widening property is VACUOUS there, which is exactly how #900 survived"
         );
     }
 }
 
 /// The #900 falsifier stated structurally, so it does not depend on the
-/// sampled event universe happening to contain a discriminating event: a
-/// union rule must REFUSE outright whenever either operand leaves the axis
-/// it unions unconstrained (`None` or `Some(∅)`). An unconstrained operand
-/// is already a superset of any constrained sibling with the same skeleton,
-/// so there is nothing to gain from the merge and the widening contract to
-/// lose.
+/// sampled event universe happening to contain a discriminating event: the
+/// rule must REFUSE outright whenever either operand leaves the axis it
+/// unions unconstrained (`None` or `Some(∅)` on `kinds`/`authors`/`ids`). An
+/// unconstrained operand is already a superset of any constrained sibling
+/// with the same skeleton, so there is nothing to gain from the merge and the
+/// widening contract to lose.
 #[test]
-fn union_rules_refuse_an_operand_that_leaves_the_merged_axis_unconstrained() {
+fn the_rule_refuses_an_operand_that_leaves_the_merged_axis_unconstrained() {
     let u = universe();
 
     // Index pool 3 is valid on every axis at once: 3 kinds in `KIND_POOL`,
@@ -392,32 +303,220 @@ fn union_rules_refuse_an_operand_that_leaves_the_merged_axis_unconstrained() {
         let none = None;
         let no_tags = BTreeMap::new();
 
-        // authors axis -- everything else identical, so only AuthorUnion's
-        // domain is in play.
+        // authors axis -- everything else identical, so `authors` is the
+        // single differing component and nothing else can be blamed.
         let a = build_filter(&u, &kind_shape, &shape_a, &none, &no_tags);
         let b = build_filter(&u, &kind_shape, &shape_b, &none, &no_tags);
-        prop_assert!(AuthorUnion.try_merge(&a, &b).is_none());
+        prop_assert!(StructuralUnion.try_merge(&a, &b).is_none());
 
         // kinds axis.
         let a = build_filter(&u, &shape_a, &none, &none, &no_tags);
         let b = build_filter(&u, &shape_b, &none, &none, &no_tags);
-        prop_assert!(KindUnion.try_merge(&a, &b).is_none());
+        prop_assert!(StructuralUnion.try_merge(&a, &b).is_none());
 
         // ids axis.
         let a = build_filter(&u, &none, &none, &shape_a, &no_tags);
         let b = build_filter(&u, &none, &none, &shape_b, &no_tags);
-        prop_assert!(IdUnion.try_merge(&a, &b).is_none());
+        prop_assert!(StructuralUnion.try_merge(&a, &b).is_none());
+    });
+}
+
+/// THE TAG AXIS'S OWN POLARITY TEST, and the reason the check above cannot
+/// simply be extended to tags. On `authors`/`kinds`/`ids` the unconstrained
+/// shapes are `None` and `Some(∅)`. On tags the polarity INVERTS:
+///
+/// - an ABSENT tag name is UNCONSTRAINED -- the filter matches every event on
+///   that axis, so folding it into a present name NARROWS, and must be
+///   refused;
+/// - a PRESENT name with an EMPTY value set matches NOTHING, so unioning it
+///   in is a widening and must be ACCEPTED.
+///
+/// Both halves are asserted, because a rule that got the polarity backwards
+/// would still pass a one-sided "refuses something" test.
+#[test]
+fn the_rule_refuses_an_absent_tag_name_but_accepts_an_empty_value_set() {
+    let u = universe();
+    let name = IndexedTagName::new(TAG_NAMES[0]).expect("TAG_NAMES are ASCII letters");
+
+    proptest!(|(
+        values in prop::collection::btree_set(0usize..TAG_VALUES.len(), 0..=TAG_VALUES.len()),
+        kind_shape in component_shape(KIND_POOL.len(), 2),
+    )| {
+        let none = None;
+        let present = BTreeMap::from([(TAG_NAMES[0], values.clone())]);
+        let absent = BTreeMap::new();
+
+        let bearing = build_filter(&u, &kind_shape, &none, &none, &present);
+        let unconstrained = build_filter(&u, &kind_shape, &none, &none, &absent);
+
+        // The DANGEROUS end. An absent name matches everything; the merge
+        // would constrain it to a value list.
+        prop_assert!(StructuralUnion.try_merge(&unconstrained, &bearing).is_none());
+        prop_assert!(StructuralUnion.try_merge(&bearing, &unconstrained).is_none());
+
+        // The HARMLESS end. `{t:∅}` matches nothing, so the union of it with
+        // any sibling under the same name is a widening -- and must actually
+        // be taken, or the rule is over-refusing on a shape it could have
+        // collapsed.
+        let empty = build_filter(
+            &u,
+            &kind_shape,
+            &none,
+            &none,
+            &BTreeMap::from([(TAG_NAMES[0], BTreeSet::new())]),
+        );
+        if empty != bearing {
+            let merged = StructuralUnion
+                .try_merge(&empty, &bearing)
+                .expect("{t:∅} matches nothing, so unioning it in only widens");
+            prop_assert_eq!(
+                merged.tags.get(&name),
+                bearing.tags.get(&name),
+                "the union with the empty set is the non-empty set itself"
+            );
+            for event in &u.events {
+                if matches(&empty, event) || matches(&bearing, event) {
+                    prop_assert!(matches(&merged, event));
+                }
+            }
+        }
+    });
+}
+
+/// TAGS ARE CONJUNCTIVE ACROSS NAMES, and this is the most dangerous mistake
+/// available on the new axis: had the rule treated `tags` as ONE component,
+/// `{#t:X}` unioned with `{#d:Y}` would have produced a filter demanding BOTH
+/// -- matching NEITHER operand. That is a narrowing, and no amount of value
+/// overlap makes it safe.
+///
+/// Asserted structurally (the rule must refuse) AND semantically (no event
+/// matching either operand may be lost), so it holds whether or not the
+/// sampled universe contains a discriminating event.
+#[test]
+fn the_rule_never_merges_across_two_tag_names() {
+    let u = universe();
+
+    proptest!(|(
+        values_a in prop::collection::btree_set(0usize..TAG_VALUES.len(), 1..=TAG_VALUES.len()),
+        values_b in prop::collection::btree_set(0usize..TAG_VALUES.len(), 1..=TAG_VALUES.len()),
+        kind_shape in component_shape(KIND_POOL.len(), 2),
+    )| {
+        let none = None;
+        let a = build_filter(
+            &u,
+            &kind_shape,
+            &none,
+            &none,
+            &BTreeMap::from([(TAG_NAMES[0], values_a)]),
+        );
+        let b = build_filter(
+            &u,
+            &kind_shape,
+            &none,
+            &none,
+            &BTreeMap::from([(TAG_NAMES[1], values_b)]),
+        );
+        prop_assert!(
+            StructuralUnion.try_merge(&a, &b).is_none(),
+            "#{} and #{} are TWO components -- merging them demands both at once",
+            TAG_NAMES[0],
+            TAG_NAMES[1]
+        );
+        prop_assert!(StructuralUnion.try_merge(&b, &a).is_none());
+    });
+}
+
+/// The relay-truncation falsifier the per-event widening property can never
+/// catch: `match_event` is a PREDICATE, so it cannot express "a relay only
+/// returns the first `limit` rows" -- a merged filter can satisfy the
+/// per-event widening property and STILL under-fetch once a real relay
+/// truncates the result count. The actual fix is structural (exclude any
+/// limited filter from merging), so this checks the structural invariant
+/// directly.
+///
+/// THE GENERATOR IS CONSTRAINED TO PAIRS THAT WOULD OTHERWISE MERGE. Varying
+/// two axes at once would make the pair a two-component refusal regardless of
+/// `limit`, and the property would prove nothing about limits at all -- the
+/// same vacuity trap as an unfired rule. Here exactly one array axis differs,
+/// so the ONLY thing that can refuse the pair is the limit.
+#[test]
+fn the_rule_never_merges_a_filter_that_carries_a_limit() {
+    let pool: Vec<Keys> = (0..4).map(|_| Keys::generate()).collect();
+    let pool_hex: Vec<String> = pool.iter().map(|k| k.public_key().to_hex()).collect();
+    let n = pool.len();
+    let merged_without_limits = AtomicUsize::new(0);
+
+    proptest!(|(
+        kind in small_kind(),
+        authors_a in prop::collection::btree_set(0..n, 1..=2),
+        authors_b in prop::collection::btree_set(0..n, 1..=2),
+        limit_a in prop::option::of(1usize..500),
+        limit_b in prop::option::of(1usize..500),
+    )| {
+        prop_assume!(limit_a.is_some() || limit_b.is_some());
+        prop_assume!(authors_a != authors_b);
+        let build = |authors: &BTreeSet<usize>, limit| ConcreteFilter {
+            kinds: Some(BTreeSet::from([kind])),
+            authors: Some(authors.iter().map(|&i| pool_hex[i].clone()).collect()),
+            limit,
+            ..ConcreteFilter::default()
+        };
+        let a = build(&authors_a, limit_a);
+        let b = build(&authors_b, limit_b);
+        prop_assert!(StructuralUnion.try_merge(&a, &b).is_none());
+
+        // ANTI-VACUITY: the SAME pair without limits must merge. Without
+        // this, a generator drifting into pairs that refuse for some other
+        // reason (two components differing, an unconstrained operand) would
+        // keep the property green while proving nothing about `limit`.
+        let unlimited_a = build(&authors_a, None);
+        let unlimited_b = build(&authors_b, None);
+        prop_assert!(
+            StructuralUnion.try_merge(&unlimited_a, &unlimited_b).is_some(),
+            "the fixture pair must be mergeable BUT FOR the limit, or this \
+             property is vacuous"
+        );
+        merged_without_limits.fetch_add(1, Ordering::Relaxed);
+    });
+
+    assert!(
+        merged_without_limits.load(Ordering::Relaxed) > 0,
+        "no generated pair was ever mergeable-but-for-the-limit"
+    );
+}
+
+/// Two components moving at once is the CARTESIAN-CORNER refusal, and it is a
+/// ratified hard rule rather than a conservative default:
+/// `{k:[1],a:[A]} + {k:[2],a:[B]} → {k:[1,2],a:[A,B]}` also fetches kind 2
+/// from A and kind 1 from B, events neither operand asked for, with unbounded
+/// waste on sparse inputs. Guarded as a property so no future "improvement"
+/// can quietly relax it.
+#[test]
+fn the_rule_never_merges_two_components_at_once() {
+    let u = universe();
+
+    proptest!(|(
+        kinds_a in prop::collection::btree_set(0..KIND_POOL.len(), 1..=2),
+        kinds_b in prop::collection::btree_set(0..KIND_POOL.len(), 1..=2),
+        authors_a in prop::collection::btree_set(0usize..3, 1..=2),
+        authors_b in prop::collection::btree_set(0usize..3, 1..=2),
+    )| {
+        prop_assume!(kinds_a != kinds_b);
+        prop_assume!(authors_a != authors_b);
+        let no_tags = BTreeMap::new();
+        let a = build_filter(&u, &Some(kinds_a), &Some(authors_a), &None, &no_tags);
+        let b = build_filter(&u, &Some(kinds_b), &Some(authors_b), &None, &no_tags);
+        prop_assert!(StructuralUnion.try_merge(&a, &b).is_none());
     });
 }
 
 /// Test 11: `local_refilter_is_exact` -- ties widen-only + the local
-/// re-filter together end to end. `AuthorUnion`-merges atom X (author A)
-/// and atom Y (author B) into wire filter M; a relay serving M would return
-/// every event in the universe matching M (a strict superset of X's own
-/// matches, since M widens). `deliver(wire_events, X)` must recover EXACTLY
-/// the events X's own filter matches out of the full universe -- no
-/// over-delivery (B's-only events excluded) and no under-delivery (every
-/// A event present).
+/// re-filter together end to end. Merges atom X (author A) and atom Y
+/// (author B) into wire filter M; a relay serving M would return every event
+/// in the universe matching M (a strict superset of X's own matches, since M
+/// widens). `deliver(wire_events, X)` must recover EXACTLY the events X's own
+/// filter matches out of the full universe -- no over-delivery (B's-only
+/// events excluded) and no under-delivery (every A event present).
 #[test]
 fn local_refilter_is_exact() {
     let pool: Vec<Keys> = (0..4).map(|_| Keys::generate()).collect();
@@ -440,7 +539,7 @@ fn local_refilter_is_exact() {
             authors: Some(BTreeSet::from([pool_hex[author_y].clone()])),
             ..ConcreteFilter::default()
         };
-        let merged = AuthorUnion
+        let merged = StructuralUnion
             .try_merge(&x, &y)
             .expect("same kind, different single author -- must merge");
 
@@ -471,46 +570,57 @@ fn local_refilter_is_exact() {
     });
 }
 
-/// The relay-truncation falsifier the original widen-only property test
-/// could never catch (ledger's own admitted gap): `matches()`/`match_event`
-/// is a per-event PREDICATE, so it cannot express "a relay only returns the
-/// first `limit` rows" -- a merged filter can satisfy the per-event
-/// widening property and STILL under-fetch once a real relay truncates the
-/// result count. The actual fix is structural (exclude any limited filter
-/// from the union rules), so this property test checks the structural
-/// invariant directly rather than trying to model truncation: for ANY pair
-/// where at least one side carries a `limit`, `AuthorUnion`/`KindUnion` must
-/// refuse to merge, full stop -- regardless of kind/author overlap.
+/// The same exactness on the TAG axis, which is what the merge rule newly
+/// touches: two `#t` watches merge into one wire filter, and each watch's own
+/// re-filter must recover exactly its own value's events out of what the
+/// relay returns for the union. This is the mechanism that makes tag merging
+/// a bandwidth trade rather than a correctness one.
 #[test]
-fn union_rules_never_merge_a_filter_that_carries_a_limit() {
-    let pool: Vec<Keys> = (0..4).map(|_| Keys::generate()).collect();
-    let pool_hex: Vec<String> = pool.iter().map(|k| k.public_key().to_hex()).collect();
-    let n = pool.len();
+fn local_refilter_is_exact_on_the_tag_axis() {
+    let u = universe();
+    let name = IndexedTagName::new(TAG_NAMES[0]).expect("TAG_NAMES are ASCII letters");
 
-    proptest!(|(
-        kind_a in small_kind(),
-        kind_b in small_kind(),
-        authors_a in prop::collection::btree_set(0..n, 1..=2),
-        authors_b in prop::collection::btree_set(0..n, 1..=2),
-        limit_a in prop::option::of(1usize..500),
-        limit_b in prop::option::of(1usize..500),
-    )| {
-        prop_assume!(limit_a.is_some() || limit_b.is_some());
-        let a = ConcreteFilter {
-            kinds: Some(BTreeSet::from([kind_a])),
-            authors: Some(authors_a.iter().map(|&i| pool_hex[i].clone()).collect()),
-            limit: limit_a,
-            ..ConcreteFilter::default()
-        };
-        let b = ConcreteFilter {
-            kinds: Some(BTreeSet::from([kind_b])),
-            authors: Some(authors_b.iter().map(|&i| pool_hex[i].clone()).collect()),
-            limit: limit_b,
-            ..ConcreteFilter::default()
-        };
-        prop_assert!(AuthorUnion.try_merge(&a, &b).is_none());
-        prop_assert!(KindUnion.try_merge(&a, &b).is_none());
-    });
+    let tagged = |value: &str| ConcreteFilter {
+        kinds: Some(KIND_POOL.iter().copied().collect()),
+        tags: BTreeMap::from([(name, BTreeSet::from([value.to_string()]))]),
+        ..ConcreteFilter::default()
+    };
+    let x = tagged(TAG_VALUES[0]);
+    let y = tagged(TAG_VALUES[1]);
+    let merged = StructuralUnion
+        .try_merge(&x, &y)
+        .expect("same everything but one tag name's values -- must merge");
+
+    let wire_events: Vec<nostr::Event> = u
+        .events
+        .iter()
+        .filter(|e| matches(&merged, e))
+        .cloned()
+        .collect();
+    assert!(
+        !wire_events.is_empty(),
+        "the fixture universe must contain events the merged filter matches"
+    );
+
+    for own in [&x, &y] {
+        let delivered: BTreeSet<nostr::EventId> =
+            deliver(&wire_events, own).into_iter().map(|e| e.id).collect();
+        let expected: BTreeSet<nostr::EventId> = u
+            .events
+            .iter()
+            .filter(|e| matches(own, e))
+            .map(|e| e.id)
+            .collect();
+        assert!(
+            !expected.is_empty(),
+            "each single-value watch must match something, or this proves nothing"
+        );
+        assert_eq!(
+            delivered, expected,
+            "the local re-filter must recover exactly this watch's own events \
+             out of the widened wire result"
+        );
+    }
 }
 
 /// Test 13: `non_widening_rule_is_dropped_and_ships_separately`.
@@ -520,9 +630,9 @@ fn non_widening_rule_is_dropped_and_ships_separately() {
         RuleRegistry::default_widen_only().register(Box::new(DiscardSecondOperand), false);
     assert_eq!(registry.dropped_rules(), &["DiscardSecondOperand"]);
 
-    // Same `kinds`, different `since` -- outside AuthorUnion/KindUnion's
-    // domain, but squarely inside DiscardSecondOperand's unsound
-    // applicability predicate.
+    // Same `kinds`, different `since` -- outside StructuralUnion's domain (a
+    // differing scalar is a refusal), but squarely inside
+    // DiscardSecondOperand's unsound applicability predicate.
     let a = ConcreteFilter {
         kinds: Some(BTreeSet::from([1u16])),
         since: Some(100),

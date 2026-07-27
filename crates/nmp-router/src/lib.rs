@@ -17,6 +17,8 @@
 //!   pinned-route lookup.
 //! - `solver` — the 2-relay-min + cap coverage solver (greedy set-cover) +
 //!   shortfall reporting.
+//! - `component` — the structural component model of a `ConcreteFilter`,
+//!   shared by `coalesce` (what may merge) and `wire_id` (what continues what).
 //! - `coalesce` — exact-canonical dedup + the widen-only `MergeRule` registry.
 //! - `plan` — `RelayPlan`, `WireReq`, `SubId`, `WireOp`/`WireDelta`, plan
 //!   diffing.
@@ -30,6 +32,7 @@
 //!   `prev_plan` + diagnostics + the wire-token mint counter.
 
 mod coalesce;
+mod component;
 mod deliver;
 mod diag;
 mod facts;
@@ -40,8 +43,8 @@ mod solver;
 mod wire_id;
 
 pub use coalesce::{
-    AuthorUnion, DiscardSecondOperand, IdUnion, KindUnion, MergeRule, RuleRegistry,
-    MAX_IDS_PER_FILTER,
+    DiscardSecondOperand, MergeRule, RuleRegistry, StructuralUnion, MAX_IDS_PER_FILTER,
+    MAX_TAG_VALUES_PER_FILTER,
 };
 pub use deliver::deliver;
 pub use diag::{Diagnostics, RelayDiagnostics};

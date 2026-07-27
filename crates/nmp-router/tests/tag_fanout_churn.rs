@@ -1,10 +1,13 @@
 //! The cost comparison behind mosaico #693: what a growing `#d` value set
 //! actually costs on the wire, measured three ways.
 //!
-//! Today NMP fans a derived tag binding out into one atom per value
+//! NMP fans a derived tag binding out into one atom per value
 //! (`nmp_resolver::graph::Graph::compute_atoms` takes the cartesian product
-//! of every bound field's resolved elements). This file measures what that
-//! costs against the two alternatives, at the layer where a fix would live.
+//! of every bound field's resolved elements) and that is CORRECT — narrow
+//! atoms are the ratified identity for coverage, evidence and routing. The
+//! fix belongs on the wire, not on the atoms. This file measures that it now
+//! is there: per-value atoms and a pre-batched atom compile to the same
+//! plan.
 //!
 //! Run narrated with:
 //! `cargo test -p nmp-router --test tag_fanout_churn -- --nocapture`
@@ -21,9 +24,9 @@ fn relays() -> BTreeSet<RelayUrl> {
     BTreeSet::from([RelayUrl::parse("wss://relay0.example.com").unwrap()])
 }
 
-/// One pinned atom over `groups` — a singleton set reproduces today's
-/// per-value fan-out; a multi-value set is the batched shape a
-/// `TagValueUnion` merge rule would produce.
+/// One pinned atom over `groups` — a singleton set reproduces the resolver's
+/// per-value fan-out; a multi-value set is the batched shape the merge rule
+/// produces from it.
 fn atom(groups: &[String]) -> ContextualAtom {
     ContextualAtom {
         filter: ConcreteFilter {
@@ -44,7 +47,7 @@ fn group(n: usize) -> String {
     format!("group-{n}")
 }
 
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 struct Ops {
     reqs: usize,
     closes: usize,
@@ -107,20 +110,30 @@ fn grow(n: usize, batched: bool) -> (Vec<Ops>, Ops, usize) {
     (per_step, total, live_reqs(&router))
 }
 
-/// H — today's fan-out vs a naive batched filter, both compiled by the real
+/// H — resolver fan-out vs a pre-batched filter, both compiled by the real
 /// router, over identical incremental growth.
 ///
-/// The result that matters: batching is NOT free. Because `Skeleton::of`
-/// erases `authors` and nothing else, a widened `#d` filter mints a NEW
-/// `SubId` on every growth step, so each added value costs a Close plus a
-/// Req instead of a single Req. Steady-state subs drop from N to 1;
-/// cumulative wire messages roughly DOUBLE.
+/// FULLY INVERTED, in two stages, and the two stages are the two halves of
+/// the design (`docs/internals/subscriptions/identity-grouping-and-limits.md`
+/// §7.3).
 ///
-/// That is why a `TagValueUnion` merge rule alone would not reproduce
-/// `AuthorUnion`'s behavior — the rule needs the matching skeleton erasure
-/// for the unioned tag, or it trades one cost for another.
+/// This file originally measured a gap that no longer exists. It asserted
+/// that fan-out held N live subscriptions while batching held 1 but paid a
+/// Close plus a Req per growth step, because `SubId::for_wire` erased
+/// `authors` and nothing else, so a widened `#d` filter minted a new id every
+/// time it grew. #899's allocated tokens removed the churn half (a grown
+/// value set is a one-component difference that overwrites the same token in
+/// place). `StructuralUnion` removes the remaining half: the router now
+/// coalesces the fan-out into the batched shape ITSELF, so the two columns
+/// are no longer two shapes at all -- they are the same plan reached from two
+/// different demand encodings.
+///
+/// The assertion that carries the weight is therefore the EQUALITY of the two
+/// columns. A regression in either half separates them again: lose the merge
+/// and fan-out's live count climbs back to N; lose in-place continuation and
+/// the batched column's Closes reappear.
 #[test]
-fn batching_a_growing_tag_set_trades_sub_count_for_wire_churn() {
+fn resolver_fan_out_and_a_pre_batched_filter_compile_to_the_same_plan() {
     const N: usize = 8;
     let (fan_steps, fan_total, fan_live) = grow(N, false);
     let (batch_steps, batch_total, batch_live) = grow(N, true);
@@ -128,7 +141,7 @@ fn batching_a_growing_tag_set_trades_sub_count_for_wire_churn() {
     println!("\n=== H. growing a #d set from 1 to {N} values, compiled by the real router ===");
     println!(
         "{:<8} {:>18} {:>20}",
-        "step", "fan-out (today)", "batched (widened)"
+        "step", "fan-out (atoms)", "batched (one atom)"
     );
     for i in 0..N {
         println!(
@@ -146,12 +159,16 @@ fn batching_a_growing_tag_set_trades_sub_count_for_wire_churn() {
     );
     println!("live subs at end   fan-out: {fan_live}   batched: {batch_live}");
 
-    assert_eq!(fan_live, N, "fan-out holds one live sub per value");
-    assert_eq!(batch_live, 1, "a widened filter holds exactly one live sub");
+    // INVERTED by `StructuralUnion`. This asserted `fan_live == N` -- one
+    // live subscription per resolved value, which at catalog scale is the
+    // 300-against-a-ceiling-of-20 defect. The coalescer now folds the N
+    // singleton atoms into ONE filter carrying N values, because they differ
+    // in exactly one array component (`#d`'s value set).
     assert_eq!(
-        fan_total.closes, 0,
-        "fan-out never closes a sub as the set grows"
+        fan_live, 1,
+        "the resolver's per-value atoms must coalesce onto ONE wire sub"
     );
+    assert_eq!(batch_live, 1, "a pre-batched filter holds exactly one live sub");
 
     // INVERTED when allocated ids landed (#899). Under derived ids a widened
     // filter's SubId moved on every growth step, so batching bought one live
@@ -160,26 +177,36 @@ fn batching_a_growing_tag_set_trades_sub_count_for_wire_churn() {
     // structural signature instead, so a grown value set is a one-component
     // difference that overwrites the SAME token in place.
     assert_eq!(
-        batch_total.closes, 0,
-        "a widened filter must now grow in place: allocated ids do not move \
-         when a value set grows"
+        fan_total.closes, 0,
+        "growth must never close a sub -- a widening value set is a \
+         one-component difference that replaces in place"
     );
     assert_eq!(
-        batch_total.total(),
+        batch_total.closes, 0,
+        "a widened filter must grow in place: allocated ids do not move \
+         when a value set grows"
+    );
+
+    // THE assertion: the two encodings are indistinguishable on the wire.
+    assert_eq!(
+        fan_steps, batch_steps,
+        "step for step, per-value atoms and a pre-batched atom must produce \
+         the SAME wire ops -- the router does the batching, so how the demand \
+         was encoded stops being visible to the relay"
+    );
+    assert_eq!(
         fan_total.total(),
-        "batching now costs the SAME wire messages as fan-out ({} vs {}) while \
-         holding {} live sub instead of {} -- that is the whole point of the fix",
-        batch_total.total(),
-        fan_total.total(),
-        batch_live,
-        fan_live
+        N,
+        "one in-place REQ per growth step, no closes -- the cheapest shape \
+         available, and the one the author axis already had"
     );
 }
 
-/// The control: the SAME growth in the `authors` slot. `AuthorUnion` widens
-/// the atoms into one filter AND `Skeleton::of` erases `authors`, so the
-/// sub-id is stable — one live sub, one in-place REQ per step, zero closes.
-/// This is the behavior a tag union should aim at, proven to exist already.
+/// The control: the SAME growth in the `authors` slot. This is the behaviour
+/// the tag axis had to reach, and it is now reached by the same mechanism
+/// rather than by a parallel one -- `StructuralUnion` treats `authors` and a
+/// tag name as two instances of one case. The two tests must agree exactly;
+/// if they ever diverge, one axis has grown a special case.
 #[test]
 fn the_authors_slot_already_achieves_one_stable_sub_with_no_churn() {
     const N: usize = 8;
@@ -219,11 +246,11 @@ fn the_authors_slot_already_achieves_one_stable_sub_with_no_churn() {
     assert_eq!(
         live_reqs(&router),
         1,
-        "AuthorUnion collapses every author atom onto one wire sub"
+        "the union collapses every author atom onto one wire sub"
     );
     assert_eq!(
         total.closes, 0,
-        "the erased-authors skeleton keeps the sub-id stable, so growth never closes"
+        "a one-component difference replaces in place, so growth never closes"
     );
     assert_eq!(
         total.reqs, N,
@@ -239,8 +266,8 @@ fn the_authors_slot_already_achieves_one_stable_sub_with_no_churn() {
 /// dropped, and the next compile is a no-op, so it never repairs.
 ///
 /// INVERTED when allocated ids landed (#899). This test previously asserted
-/// the DEFECT: `Skeleton::of` erased `authors`, which was only safe while
-/// `AuthorUnion` was TOTAL over the partition, and `neither_limited` makes it
+/// the DEFECT: `Skeleton::of` erased `authors`, which was only safe while the
+/// author union was TOTAL over the partition, and `neither_limited` makes it
 /// partial — so two atoms identical except `authors`, both carrying a `limit`,
 /// refused to merge and then collided on the erased skeleton, with one REQ
 /// silently never reaching the relay.
@@ -328,7 +355,7 @@ fn limited_identical_except_authors_atoms_each_reach_the_wire() {
 }
 
 /// The control that proves the collision is caused by `limit` blocking the
-/// merge, not by the two-author shape itself: drop the limit and `AuthorUnion`
+/// merge, not by the two-author shape itself: drop the limit and the union
 /// merges them into one REQ carrying both authors — no loss.
 #[test]
 fn unlimited_identical_except_authors_atoms_merge_instead_of_colliding() {
@@ -359,7 +386,7 @@ fn unlimited_identical_except_authors_atoms_merge_instead_of_colliding() {
         .flat_map(|reqs| reqs.iter())
         .cloned()
         .collect();
-    assert_eq!(planned.len(), 1, "AuthorUnion merges the unlimited pair");
+    assert_eq!(planned.len(), 1, "the union merges the unlimited pair");
     assert_eq!(
         planned[0].filter.authors.as_ref().map(|a| a.len()),
         Some(2),
