@@ -176,10 +176,12 @@ standard signer providers/vaults." Two layers, one Rust seam.
 ### 3.1 What "obligation, not secret" means precisely
 
 - **In-memory registry** (`SignerRegistry`) holds live `SigningCapability`
-  objects — a `LocalKeySigner` *does* hold `nostr::Keys` in memory, and must, to
-  sign. That is not a durable secret; it is a runtime capability the app
-  attaches. (The `nmp-signer` zeroize hardening from known-gaps "Secret
-  zeroization" is a companion cleanup — flagged, not owned here.)
+  objects — a `LocalKeySigner` *does* hold the secret scalar in memory, and
+  must, to sign. That is not a durable secret; it is a runtime capability the
+  app attaches. (The `nmp-signer` zeroize hardening from known-gaps "Secret
+  zeroization" is a companion cleanup — flagged, not owned here. #765 later
+  made that in-memory owner one canonical zeroizing allocation rather than a
+  long-lived `nostr::Keys`.)
 - **Durable journal** (`OUTBOX_INTENTS`) persists **only** `expected_pubkey` +
   an opaque `signing_identity_ref` — never a secret key, never a bunker
   connection secret (#6: "a stable provider/identity reference, not raw

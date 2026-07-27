@@ -37,7 +37,7 @@ use nmp_resolver::LiveQuery;
 use nmp_store::{MemoryStore, RedbStore, RedbStoreResetError};
 use nmp_transport::PoolConfig;
 use nostr::RelayUrl;
-use nostr::{EventId, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
+use nostr::{EventId, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
 use crate::auth::{AuthPolicy, EngineAuthPolicyAdapter};
 use crate::config::{build_admission_policy, build_directory, EngineConfig};
@@ -578,10 +578,13 @@ impl Engine {
     /// `SigningCapability`, which the `unstable-mechanism`-gated
     /// `add_signer` covers instead).
     pub fn add_account(&self, secret_key: &str) -> Result<AccountRegistration, EngineError> {
-        let keys = Keys::parse(secret_key).map_err(|_| EngineError::InvalidSecretKey)?;
+        // #765: parse straight into the signer's canonical zeroizing owner --
+        // no intermediate `nostr::Keys`/`SecretKey` lives on this path.
+        let signer = nmp_signer::LocalKeySigner::parse(secret_key)
+            .map_err(|_| EngineError::InvalidSecretKey)?;
         let registration = self.with_handle(|handle| {
             handle
-                .add_signer(nmp_signer::LocalKeySigner::new(keys))
+                .add_signer(signer)
                 .map_err(EngineError::from_add_signer_error)
         })??;
         Ok(AccountRegistration {
@@ -871,6 +874,7 @@ mod tests {
     use std::task::{Context, Poll, Wake, Waker};
 
     use super::*;
+    use nostr::Keys;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct ThreadWake(std::thread::Thread);

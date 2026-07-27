@@ -31,6 +31,14 @@ use nmp_signer::{LocalKeySigner, SignerError, SignerOp, SigningCapability};
 use nmp_store::{EventStore, MemoryStore, RelayObserved};
 use nostr::{Event, EventId, Keys, Kind, PublicKey, RelayUrl, Timestamp, UnsignedEvent};
 
+/// #765: `LocalKeySigner` now owns its scalar in one canonical zeroizing
+/// allocation and no longer accepts a `nostr::Keys`. These fixtures still
+/// build identities as `Keys`, so hand the raw scalar across exactly here.
+fn local_signer(keys: &Keys) -> LocalKeySigner {
+    LocalKeySigner::from_secret_bytes(keys.secret_key().as_secret_bytes())
+        .expect("fixture keys are valid secp256k1 scalars")
+}
+
 struct CountingSigner {
     pubkey: PublicKey,
     calls: Arc<AtomicUsize>,
@@ -187,10 +195,10 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
     .expect("test engine thread construction");
 
     let registration_a = handle
-        .add_signer(LocalKeySigner::new(a.clone()))
+        .add_signer(local_signer(&a))
         .expect("LocalKeySigner always reports a public key");
     let registration_b = handle
-        .add_signer(LocalKeySigner::new(b.clone()))
+        .add_signer(local_signer(&b))
         .expect("LocalKeySigner always reports a public key");
     let pk_a = registration_a.public_key();
     let pk_b = registration_b.public_key();
@@ -320,7 +328,7 @@ fn no_active_account_cannot_select_an_arbitrary_registered_signer() {
 
     // Register a signer but NEVER activate it.
     handle
-        .add_signer(LocalKeySigner::new(a.clone()))
+        .add_signer(local_signer(&a))
         .expect("local signer has a public key");
 
     let unsigned = UnsignedEvent::new(
@@ -361,10 +369,10 @@ fn active_a_rejects_b_authored_default_even_when_b_is_registered() {
     )
     .expect("test engine thread construction");
     handle
-        .add_signer(LocalKeySigner::new(a.clone()))
+        .add_signer(local_signer(&a))
         .expect("local signer has a public key");
     handle
-        .add_signer(LocalKeySigner::new(b.clone()))
+        .add_signer(local_signer(&b))
         .expect("local signer has a public key");
     handle.set_active_account(Some(a.public_key()));
 
@@ -505,7 +513,7 @@ fn attaching_matching_signer_rearms_awaiting_intent() {
     ));
 
     handle
-        .add_signer(LocalKeySigner::new(a))
+        .add_signer(local_signer(&a))
         .expect("local signer has a public key");
     assert!(
         wait_for_status(&receipt, Duration::from_secs(5), |status| {
@@ -531,7 +539,7 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
     )
     .expect("test engine thread construction");
     handle
-        .add_signer(LocalKeySigner::new(a.clone()))
+        .add_signer(local_signer(&a))
         .expect("local signer has a public key");
     handle.set_active_account(Some(b.public_key()));
 
@@ -563,7 +571,7 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
 
     handle.set_active_account(Some(a.public_key()));
     handle
-        .add_signer(LocalKeySigner::new(b))
+        .add_signer(local_signer(&b))
         .expect("local signer has a public key");
     assert!(
         wait_for_status(&receipt, Duration::from_secs(5), |status| {
@@ -591,10 +599,10 @@ fn stale_registration_cannot_detach_replacement_for_same_pubkey() {
     // Exact replacement-race order: install A, install B for the same key,
     // detach stale A, then prove B still signs accepted work.
     let registration_a = handle
-        .add_signer(LocalKeySigner::new(keys.clone()))
+        .add_signer(local_signer(&keys))
         .expect("local signer A has a public key");
     let registration_b = handle
-        .add_signer(LocalKeySigner::new(keys.clone()))
+        .add_signer(local_signer(&keys))
         .expect("local signer B has a public key");
     assert_eq!(registration_a.public_key(), registration_b.public_key());
     assert!(
@@ -682,10 +690,10 @@ fn identity_override_signs_as_registered_secondary_without_rerooting_active() {
     )
     .expect("test engine thread construction");
     handle
-        .add_signer(LocalKeySigner::new(a.clone()))
+        .add_signer(local_signer(&a))
         .expect("local signer has a public key");
     handle
-        .add_signer(LocalKeySigner::new(b.clone()))
+        .add_signer(local_signer(&b))
         .expect("local signer has a public key");
     handle.set_active_account(Some(a.public_key()));
 
@@ -798,7 +806,7 @@ fn unregistered_override_parks_durably_and_never_retargets_on_account_switch() {
     .expect("test engine thread construction");
     // Only A's capability exists; B is the override target with none.
     handle
-        .add_signer(LocalKeySigner::new(a.clone()))
+        .add_signer(local_signer(&a))
         .expect("local signer has a public key");
     handle.set_active_account(Some(a.public_key()));
 
@@ -840,7 +848,7 @@ fn unregistered_override_parks_durably_and_never_retargets_on_account_switch() {
 
     // Registering the override key resumes the SAME intent as B.
     handle
-        .add_signer(LocalKeySigner::new(b))
+        .add_signer(local_signer(&b))
         .expect("local signer has a public key");
     assert!(
         wait_for_status(&receipt, Duration::from_secs(5), |status| {
@@ -870,7 +878,7 @@ fn identity_override_signs_while_logged_out() {
     )
     .expect("test engine thread construction");
     handle
-        .add_signer(LocalKeySigner::new(b.clone()))
+        .add_signer(local_signer(&b))
         .expect("local signer has a public key");
     handle.set_active_account(None);
 

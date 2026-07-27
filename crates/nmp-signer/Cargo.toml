@@ -25,6 +25,19 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
 zeroize = "1"
+# #765: `LocalKeySigner` owns its secret scalar in one compiler-fenced
+# zeroizing allocation and never constructs a long-lived `nostr::Keys`,
+# `nostr::SecretKey`, or `secp256k1::Keypair` — those are `Copy` and only
+# offer `non_secure_erase`. The operation-scoped BIP-340/NIP-44 path in
+# `local_crypto.rs` is therefore built over `k256`'s `Zeroize`-aware
+# scalar/point types plus `sha2`/`base64`, so every NMP-owned secret buffer
+# has an explicit wiping owner.
+base64.workspace = true
+sha2.workspace = true
+# `nsec` decoding straight into that owner, without an intermediate
+# `nostr::SecretKey`.
+bech32 = "0.11"
+k256 = { version = "0.13.4", default-features = false, features = ["arithmetic", "ecdh", "std"] }
 
 [dev-dependencies]
 tungstenite = "0.29"

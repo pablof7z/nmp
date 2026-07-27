@@ -34,6 +34,14 @@ use nmp_transport::PoolConfig;
 
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay, WireRecord};
 
+/// #765: `LocalKeySigner` now owns its scalar in one canonical zeroizing
+/// allocation and no longer accepts a `nostr::Keys`. These fixtures still
+/// build identities as `Keys`, so hand the raw scalar across exactly here.
+fn local_signer(keys: &Keys) -> LocalKeySigner {
+    LocalKeySigner::from_secret_bytes(keys.secret_key().as_secret_bytes())
+        .expect("fixture keys are valid secp256k1 scalars")
+}
+
 /// Bounded wait for a positive ("eventually true") assertion.
 pub const EVENTUALLY: Duration = Duration::from_secs(5);
 /// Bounded wait for a negative ("never becomes true") assertion -- shorter
@@ -675,7 +683,7 @@ impl NmpWorld {
         if let Some(active) = self.active_person.clone() {
             let keys = self.person(&active);
             handle
-                .add_signer(LocalKeySigner::new(keys.clone()))
+                .add_signer(local_signer(&keys))
                 .expect("local signer has a public key");
             handle.set_active_account(Some(keys.public_key()));
         }
@@ -789,7 +797,7 @@ impl NmpWorld {
         self.ensure_started().await;
         let keys = self.person(person);
         self.handle()
-            .add_signer(LocalKeySigner::new(keys.clone()))
+            .add_signer(local_signer(&keys))
             .expect("BDD local signer always exposes its public key");
         self.handle().set_active_account(Some(keys.public_key()));
         self.active_person = Some(person.to_string());
@@ -820,7 +828,7 @@ impl NmpWorld {
                 .await;
         }
         self.handle()
-            .add_signer(LocalKeySigner::new(keys.clone()))
+            .add_signer(local_signer(&keys))
             .expect("BDD local signer always exposes its public key");
         self.handle().set_active_account(Some(keys.public_key()));
         self.active_person = Some(name);

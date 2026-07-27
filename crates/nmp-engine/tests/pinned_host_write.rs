@@ -27,6 +27,14 @@ use nostr_relay_builder::prelude::{
     BoxedFuture, Event as RelayEvent, MachineReadablePrefix, WritePolicy, WritePolicyResult,
 };
 
+/// #765: `LocalKeySigner` now owns its scalar in one canonical zeroizing
+/// allocation and no longer accepts a `nostr::Keys`. These fixtures still
+/// build identities as `Keys`, so hand the raw scalar across exactly here.
+fn local_signer(keys: &Keys) -> LocalKeySigner {
+    LocalKeySigner::from_secret_bytes(keys.secret_key().as_secret_bytes())
+        .expect("fixture keys are valid secp256k1 scalars")
+}
+
 fn free_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
     listener.local_addr().expect("local_addr").port()
@@ -145,7 +153,7 @@ async fn pinned_host_send_reaches_only_the_host_and_round_trips_unchanged() {
     )
     .expect("test engine thread construction");
     handle
-        .add_signer(LocalKeySigner::new(author.clone()))
+        .add_signer(local_signer(&author))
         .expect("local signer has a public key");
     handle.set_active_account(Some(author.public_key()));
 
@@ -265,7 +273,7 @@ async fn pinned_host_rejection_surfaces_as_a_typed_status_never_silence() {
     )
     .expect("test engine thread construction");
     handle
-        .add_signer(LocalKeySigner::new(author.clone()))
+        .add_signer(local_signer(&author))
         .expect("local signer has a public key");
     handle.set_active_account(Some(author.public_key()));
 

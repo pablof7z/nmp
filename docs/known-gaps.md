@@ -394,7 +394,7 @@ about current code:
 
 ## Security hardening deferred
 
-- **Secret zeroization and platform signer-provider boundary are not complete.** NIP-46 URI/session secrets use redacted debug output and zeroizing memory, and the durable event/outbox store persists only the expected pubkey plus an opaque identity reference. `LocalKeySigner` still holds `nostr::Keys` without the old repo's raw-bytes/zeroize hardening, and Swift/Kotlin do not yet ship standard secure-storage-backed providers that restore sessions automatically. Owner: security/signing workstream (#47).
+- **Secret zeroization is deliberately bounded, not system-wide.** `LocalKeySigner` has one fixed-allocation canonical zeroizing secret owner (moving the signer relocates only a pointer) and constructs only operation-scoped wiping BIP-340/NIP-44 owners, including padded/decrypted plaintext and hash/cipher state; it retains no `nostr::Keys`/`SecretKey`/`Keypair`, whose pinned upstream erasure is only `non_secure_erase` (#765). NIP-46 URI/session secrets use redacted debug output and zeroizing memory, and the durable event/outbox store persists only the expected pubkey plus an opaque identity reference. This claims nothing about OS-locked memory, register erasure, or dependency-internal stack frames. NIP-46 *transport*-key copies are a separate residual owned by #766. Owner: security/signing workstream (#47).
 
 ## Protocol modules
 
