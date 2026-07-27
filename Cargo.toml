@@ -5,10 +5,6 @@ members = [
     # public/local classification, whole-answer-set DNS admission. No I/O.
     "crates/nmp-network-policy",
     "crates/nmp-grammar",
-    "crates/nmp-ownership",
-    # workspace-wide kind-ownership audit (routing-and-ownership.md §4.2
-    # layer 2); tests only, nothing depends on it.
-    "crates/nmp-audit",
     "crates/nmp-store",
     "crates/nmp-resolver",
     "crates/nmp-router",
@@ -72,7 +68,6 @@ hickory-resolver = "0.26.1"
 httpdate = "1"
 nmp-network-policy = { path = "crates/nmp-network-policy" }
 nmp-grammar = { path = "crates/nmp-grammar" }
-nmp-ownership = { path = "crates/nmp-ownership" }
 nmp-store = { path = "crates/nmp-store" }
 nmp-resolver = { path = "crates/nmp-resolver" }
 nmp-router = { path = "crates/nmp-router" }

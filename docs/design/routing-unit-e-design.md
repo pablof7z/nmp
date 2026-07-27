@@ -1,12 +1,20 @@
 # Routing Unit E — the design note (RoutePolicy + RelaySource + claim-table routing)
 
 - **Date:** 2026-07-11
-- **Status:** Design note (pre-build), the load-bearing back-half of milestone
-  MR. Fans out to builders. Writes no code.
-- **Promotion correction:** the landed `nmp-ownership` facts below remain
-  authoritative. The unbuilt Unit E plan applies only to schema-wide policy for
-  exact claimed schemas. It is superseded wherever it implies that a contextual
-  protocol owns a foreign event kind; §1.5 records the corrected boundary.
+- **Status: CANCELLED 2026-07-27 (#859). HISTORICAL RECORD ONLY — do not
+  build from this note.** Everything below designs a `RoutePolicy` /
+  `RelaySource` / `RouteClass` claim-table routing layer on top of
+  `crates/nmp-ownership`. That crate is deleted, along with `crates/nmp-audit`
+  and every protocol crate's `claims()` export; #757 and #758, which would have
+  wired this design into routing, are closed NOT_PLANNED. The "LANDED
+  `nmp-ownership` facts" this note treats as ground truth no longer exist in the
+  tree. The corrected boundary is
+  `docs/design/routing-and-ownership.md` Parts B/C and bug-class-ledger rows 14
+  and 22: route resolution derives the route inside the layer that owns the
+  operation or query, and there is no global protocol vocabulary to register
+  against. Retained unedited below because it is the most complete record of
+  why the sealed-value approach looked sound, which is worth reading before
+  anyone proposes a registry again.
 - **Source of truth (do not re-litigate):** `docs/design/routing-and-ownership.md`
   Parts B/C + §9 RESOLVED decisions; `docs/design/routing-build-plan.md` §3
   (Unit E), §7.1 resolutions (Q6, Q7). Where those are silent, §5 below

@@ -2040,23 +2040,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nmp-audit"
-version = "0.1.0"
-dependencies = [
- "nmp-blossom",
- "nmp-media",
- "nmp-nip02",
- "nmp-nip22",
- "nmp-nip29",
- "nmp-nip51",
- "nmp-nip65",
- "nmp-nip68",
- "nmp-ownership",
- "nmp-router",
- "serde_json",
-]
-
-[[package]]
 name = "nmp-bdd"
 version = "0.1.0"
 dependencies = [
@@ -2081,7 +2064,6 @@ dependencies = [
  "hickory-resolver",
  "nmp-asset",
  "nmp-network-policy",
- "nmp-ownership",
  "nostr 0.44.4",
  "reqwest",
  "serde",
@@ -2196,7 +2178,6 @@ dependencies = [
  "nmp-asset",
  "nmp-blossom",
  "nmp-nip68",
- "nmp-ownership",
  "nostr 0.44.4",
  "tokio",
 ]
@@ -2211,7 +2192,6 @@ version = "0.1.0"
 dependencies = [
  "nmp",
  "nmp-grammar",
- "nmp-ownership",
  "nostr 0.44.4",
  "tempfile",
  "tokio",
@@ -2222,7 +2202,6 @@ name = "nmp-nip22"
 version = "0.1.0"
 dependencies = [
  "nmp-grammar",
- "nmp-ownership",
  "nostr 0.44.4",
 ]
 
@@ -2233,7 +2212,6 @@ dependencies = [
  "nmp",
  "nmp-grammar",
  "nmp-nip51",
- "nmp-ownership",
  "nostr 0.44.4",
 ]
 
@@ -2242,7 +2220,6 @@ name = "nmp-nip51"
 version = "0.1.0"
 dependencies = [
  "nmp-grammar",
- "nmp-ownership",
  "nostr 0.44.4",
 ]
 
@@ -2252,7 +2229,6 @@ version = "0.1.0"
 dependencies = [
  "nmp",
  "nmp-grammar",
- "nmp-ownership",
  "nostr 0.44.4",
  "nostr-relay-builder",
  "tempfile",
@@ -2273,13 +2249,8 @@ version = "0.1.0"
 dependencies = [
  "nmp-asset",
  "nmp-blossom",
- "nmp-ownership",
  "nostr 0.44.4",
 ]
-
-[[package]]
-name = "nmp-ownership"
-version = "0.1.0"
 
 [[package]]
 name = "nmp-parity"

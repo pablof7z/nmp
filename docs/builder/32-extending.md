@@ -3,9 +3,11 @@
 This chapter is for library authors adding NIP-aware functionality, not for
 ordinary apps using NMP.
 
-## Claim exact protocol ownership
+## Own exactly the schemas your protocol defines
 
-A module declares only the exact schemas and kinds its protocol defines. It
+A module implements only the exact schemas and kinds its protocol defines —
+"owns" here means "is the crate that defines, builds, and parses it", which is a
+fact about the code and its dependents, not a declaration made to a registry. It
 may own:
 
 - typed event builders and parsers;
@@ -17,7 +19,12 @@ may own:
 - bounded use of signer, AUTH, encrypt, or decrypt capabilities.
 
 Sparse NIP kind sets remain sparse. A convenience range is not ownership.
-Ownership collisions are errors.
+
+Two crates parsing the same numeric kind is not, by itself, a collision — the
+runtime authority boundary is the complete operation, not global ownership of a
+number. The collision worth catching in review is two public operations claiming
+the same semantic responsibility, or generic core code branching on protocol
+meaning.
 
 ## Do not claim participating content
 
@@ -88,27 +95,28 @@ An upload failure, draft-validation failure, AUTH failure, signer denial,
 acceptance failure, and relay rejection are different facts. A module maps only
 the failures it owns and preserves core receipt/source evidence for the rest.
 
-## Assemble static claims without a registration framework
+## Compose modules by dependency, not by registration
 
-Module presence is a build/dependency choice. The one app/platform composition
-root passes each enabled module's immutable `ModuleRegistration` claims into
-engine construction. The router depends on the shared claim vocabulary, never
-on concrete module crates.
+Module presence is a build/dependency choice, and that is the entire mechanism.
+The one app/platform composition root links the modules it enables. Nothing is
+passed into engine construction to announce them: there is no claim vocabulary,
+no `ModuleRegistration`, no callback registry, and no global module container.
+#859 deleted that design, and #757/#758 (which would have wired it into routing)
+are closed NOT_PLANNED — the router must not depend on a shared protocol
+vocabulary any more than it depends on concrete module crates.
 
-This static list is not a callback registry or global module container. Modules
-perform no startup work and require no navigation, scene, or application
+Modules perform no startup work and require no navigation, scene, or application
 lifecycle hooks.
 
 Rust crates/features and SwiftPM/Gradle products may differ mechanically, but
 they project one semantic module over the canonical facade. Disabling the module
-removes its code, semantic API, and claims while leaving the raw core facade
-usable.
+removes its code and semantic API while leaving the raw core facade usable.
 
 ## Required falsifiers
 
 A module is ready only when tests prove:
 
-- it cannot claim an unowned schema;
+- it neither redefines nor re-parses a schema another crate already owns;
 - its reusable binding prints exactly like the raw expansion;
 - reconstructed state uses canonical store/query semantics;
 - source/routing authority cannot be forged from app relay arrays;

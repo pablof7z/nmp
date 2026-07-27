@@ -14,7 +14,6 @@ nostr.workspace = true
 # #884: exact-byte asset identity (`Sha256Hash`, `VerifiedAsset`) is owned by
 # the protocol-neutral `nmp-asset` crate, not privately re-implemented here.
 nmp-asset.workspace = true
-nmp-ownership.workspace = true
 # #885: the one pure destination-admission owner every Blossom dial uses.
 nmp-network-policy.workspace = true
 serde.workspace = true
