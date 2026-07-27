@@ -1111,6 +1111,7 @@ mod tests {
 
         fn signature_type_names(signature: &syn::Signature) -> TypeNames {
             let mut names = TypeNames::default();
+            names.visit_generics(&signature.generics);
             for argument in &signature.inputs {
                 if let syn::FnArg::Typed(argument) = argument {
                     names.visit_type(&argument.ty);
@@ -1123,7 +1124,9 @@ mod tests {
             path: PathBuf,
             mailbox_entries: Vec<(PathBuf, String, bool)>,
             mailbox_aliases: Vec<(PathBuf, String)>,
+            item_macros: Vec<(PathBuf, String)>,
             inside_uniffi_export_impl: bool,
+            inside_public_or_uniffi_export_trait: bool,
         }
 
         impl PublicEntryVisitor {
@@ -1138,16 +1141,17 @@ mod tests {
                 })
             }
 
-            fn inspect_signature(
-                &mut self,
-                visibility: &syn::Visibility,
-                signature: &syn::Signature,
-                explicitly_exported: bool,
-            ) {
-                if !matches!(visibility, syn::Visibility::Public(_))
-                    && !explicitly_exported
-                    && !self.inside_uniffi_export_impl
-                {
+            fn macro_name(mac: &syn::Macro) -> String {
+                mac.path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::")
+            }
+
+            fn inspect_signature(&mut self, signature: &syn::Signature, publicly_reachable: bool) {
+                if !publicly_reachable {
                     return;
                 }
                 let names = signature_type_names(signature);
@@ -1164,20 +1168,30 @@ mod tests {
         impl<'ast> Visit<'ast> for PublicEntryVisitor {
             fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
                 self.inspect_signature(
-                    &function.vis,
                     &function.sig,
-                    Self::has_uniffi_export(&function.attrs),
+                    matches!(function.vis, syn::Visibility::Public(_))
+                        || Self::has_uniffi_export(&function.attrs),
                 );
                 syn::visit::visit_item_fn(self, function);
             }
 
             fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
                 self.inspect_signature(
-                    &function.vis,
                     &function.sig,
-                    Self::has_uniffi_export(&function.attrs),
+                    matches!(function.vis, syn::Visibility::Public(_))
+                        || Self::has_uniffi_export(&function.attrs)
+                        || self.inside_uniffi_export_impl,
                 );
                 syn::visit::visit_impl_item_fn(self, function);
+            }
+
+            fn visit_trait_item_fn(&mut self, function: &'ast syn::TraitItemFn) {
+                self.inspect_signature(
+                    &function.sig,
+                    Self::has_uniffi_export(&function.attrs)
+                        || self.inside_public_or_uniffi_export_trait,
+                );
+                syn::visit::visit_trait_item_fn(self, function);
             }
 
             fn visit_item_impl(&mut self, implementation: &'ast syn::ItemImpl) {
@@ -1186,6 +1200,15 @@ mod tests {
                     prior || Self::has_uniffi_export(&implementation.attrs);
                 syn::visit::visit_item_impl(self, implementation);
                 self.inside_uniffi_export_impl = prior;
+            }
+
+            fn visit_item_trait(&mut self, item_trait: &'ast syn::ItemTrait) {
+                let prior = self.inside_public_or_uniffi_export_trait;
+                self.inside_public_or_uniffi_export_trait = prior
+                    || matches!(item_trait.vis, syn::Visibility::Public(_))
+                    || Self::has_uniffi_export(&item_trait.attrs);
+                syn::visit::visit_item_trait(self, item_trait);
+                self.inside_public_or_uniffi_export_trait = prior;
             }
 
             fn visit_item_type(&mut self, alias: &'ast syn::ItemType) {
@@ -1205,11 +1228,39 @@ mod tests {
                 }
                 syn::visit::visit_use_rename(self, rename);
             }
+
+            fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
+                let name = Self::macro_name(&item.mac);
+                let is_required_uniffi_scaffolding =
+                    item.ident.is_none() && name == "uniffi::setup_scaffolding";
+                if !is_required_uniffi_scaffolding {
+                    self.item_macros.push((
+                        self.path.clone(),
+                        item.ident
+                            .as_ref()
+                            .map_or(name, |ident| format!("macro_rules! {ident}")),
+                    ));
+                }
+                syn::visit::visit_item_macro(self, item);
+            }
+
+            fn visit_impl_item_macro(&mut self, item: &'ast syn::ImplItemMacro) {
+                self.item_macros
+                    .push((self.path.clone(), Self::macro_name(&item.mac)));
+                syn::visit::visit_impl_item_macro(self, item);
+            }
+
+            fn visit_trait_item_macro(&mut self, item: &'ast syn::TraitItemMacro) {
+                self.item_macros
+                    .push((self.path.clone(), Self::macro_name(&item.mac)));
+                syn::visit::visit_trait_item_macro(self, item);
+            }
         }
 
         let mut pending = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")];
         let mut mailbox_entries = Vec::new();
         let mut mailbox_aliases = Vec::new();
+        let mut item_macros = Vec::new();
         while let Some(path) = pending.pop() {
             if path.is_dir() {
                 pending.extend(
@@ -1231,13 +1282,20 @@ mod tests {
                 path,
                 mailbox_entries: Vec::new(),
                 mailbox_aliases: Vec::new(),
+                item_macros: Vec::new(),
                 inside_uniffi_export_impl: false,
+                inside_public_or_uniffi_export_trait: false,
             };
             visitor.visit_file(&syntax);
             mailbox_entries.append(&mut visitor.mailbox_entries);
             mailbox_aliases.append(&mut visitor.mailbox_aliases);
+            item_macros.append(&mut visitor.item_macros);
         }
 
+        assert!(
+            item_macros.is_empty(),
+            "provider item macros could generate an uninspected mailbox entry; only uniffi::setup_scaffolding! is allowed: {item_macros:?}"
+        );
         assert!(
             mailbox_aliases.is_empty(),
             "the external core mailbox type may not be hidden behind an alias: {mailbox_aliases:?}"
