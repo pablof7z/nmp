@@ -246,7 +246,7 @@ pub(crate) fn build(
 /// The exact common interval proven for a (possibly coalesced) wire request.
 /// Attribution persists evidence under every narrow atom key in
 /// `WireReq::absorbed`, never under the widened filter's own hash. A wide
-/// AuthorUnion/KindUnion request is therefore proven only over the
+/// coalesced request is therefore proven only over the
 /// intersection shared by ALL absorbed atoms; an absent atom row or disjoint
 /// intervals yields `None` rather than fabricating a wire-filter watermark.
 fn request_coverage(

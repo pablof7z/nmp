@@ -327,14 +327,18 @@ fn coalesced_wire_diagnostics_reads_absorbed_atom_evidence() {
 
     let before = core.diagnostics_snapshot();
     let entry = &before.relays[0];
-    assert_eq!(entry.coverage.len(), 1, "AuthorUnion must be one wire REQ");
+    assert_eq!(
+        entry.coverage.len(),
+        1,
+        "the author union must be one wire REQ"
+    );
     assert!(entry.filters[0].contains(&a_hex));
     assert!(entry.filters[0].contains(&b_hex));
     assert!(entry.coverage[0].coverage.is_none());
 
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(25)));
     // The same sub-id has two in-flight REQs: the original single-author
-    // request and its AuthorUnion overwrite. The first EOSE can only credit
+    // request and its author-union overwrite. The first EOSE can only credit
     // their safe intersection (A); the second terminates the wide request
     // and credits both absorbed atom keys.
     let _ = core.handle(EngineMsg::RelayFrame(

@@ -9,7 +9,16 @@
 //! ```
 //!
 //! The relay's own log is the evidence — not this program's output, and not
-//! anything read out of the router. Optional args:
+//! anything read out of the router.
+//!
+//! What to expect: ONE REQ per mode, widened in place as each subscription
+//! opens, in BOTH modes. This probe was written when the tag mode produced
+//! one REQ per value (20 demands -> 23 REQs, one value each) against an
+//! author mode that accumulated `[A]` -> `[A,B]` -> `[A,B,C]` on a single
+//! subscription id; `nmp_router::StructuralUnion` made the two modes the same
+//! measurement. If they diverge again, the tag axis has lost its merge.
+//!
+//! Optional args:
 //!
 //! ```text
 //! tag_fanout_live <relay-url> [count] [gap-millis] [mode]
