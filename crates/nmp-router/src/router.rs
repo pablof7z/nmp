@@ -155,11 +155,10 @@ fn apply_global_relay_cap(
 fn refuse_over_budget(
     session_reqs: &mut Vec<WireReq>,
     allowed: usize,
-    prev_plan: &RelayPlan,
+    prior_reqs: Option<&Vec<WireReq>>,
 ) -> Vec<WireReq> {
-    let incumbents: BTreeSet<&SubId> = prev_plan
-        .reqs
-        .values()
+    let incumbents: BTreeSet<&SubId> = prior_reqs
+        .into_iter()
         .flatten()
         .map(|req| &req.sub_id)
         .collect();
@@ -536,7 +535,11 @@ impl Router {
                 None => {}
                 Some(allowed) if planned <= allowed => {}
                 Some(allowed) => {
-                    let refused = refuse_over_budget(&mut session_reqs, allowed, &self.prev_plan);
+                    let refused = refuse_over_budget(
+                        &mut session_reqs,
+                        allowed,
+                        self.prev_plan.reqs.get(&session),
+                    );
                     for req in &refused {
                         limited.extend(req.absorbed.iter().copied());
                     }
