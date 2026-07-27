@@ -1169,11 +1169,14 @@ order:
 - **a floor discipline proven never to produce a disjoint coverage merge**
   (§11.3 #2) — satisfiable, but it must be proven rather than assumed.
 
-Four of those six are changes to invariants that landed this week, and the
-first one is load-bearing for all the rest: every variant that survives
-scrutiny gets there by making the split coverage-driven planned demand, and
-then pays that whole list. That convergence — not the subscription count, not
-the budget ranking — is the verdict's foundation.
+**Two** of those six break invariants that landed this week, and both are
+from the identity work: the zero-diff recompile (#899) and the compound-churn
+exemption (§7.2/§8.1). The rest are older properties, a mechanism that does
+not exist yet, and one scope decision. But the count is not the argument —
+the first bullet is. Every variant that survives scrutiny gets there by
+making the split coverage-driven planned demand, and then pays the whole
+list. That convergence — not the subscription count, not the budget ranking —
+is the verdict's foundation.
 
 Two smaller arguments are recorded here but are NOT load-bearing, and a
 future revisit should not have to refute them: the 20x subscription bill
