@@ -143,19 +143,51 @@ pub struct WireReq {
     pub absorbed: BTreeSet<CoverageKey>,
 }
 
+/// One session's per-relay subscription-budget shortfall (#931): what the
+/// relay advertised, what the compile wanted, and how much of it was refused.
+///
+/// A shortfall is recorded ONLY when the budget actually bound. Its absence
+/// is the normal case and means "everything planned reached the wire" — not
+/// "no budget applies", which [`crate::Diagnostics`] reports separately.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BudgetShortfall {
+    /// The relay's own advertised `max_subscriptions`.
+    pub budget: usize,
+    /// Subscriptions this compile would have opened without the budget.
+    pub planned: usize,
+    /// `planned - budget`: subscriptions removed, every one of them also
+    /// reported through `RelayPlan::limited`.
+    pub refused: usize,
+}
+
 /// The full per-relay plan for the CURRENT demand set.
 #[derive(Clone, Default, Debug)]
 pub struct RelayPlan {
     pub reqs: BTreeMap<RelaySessionKey, Vec<WireReq>>,
-    /// Narrow demand atoms for which the whole-demand relay ceiling removed
-    /// at least one otherwise-routable source. Kept as coverage keys so the
-    /// engine can join the fact back to the exact contextual atom without
-    /// weakening descriptor identity.
+    /// Narrow demand atoms for which a local bound removed at least one
+    /// otherwise-routable source — the whole-demand relay ceiling, or a
+    /// relay's own advertised concurrent-subscription budget (#931). Kept as
+    /// coverage keys so the engine can join the fact back to the exact
+    /// contextual atom without weakening descriptor identity.
+    ///
+    /// This is the seam that makes a bound budget impossible to mistake for
+    /// a complete acquisition: `plan_is_fresh_for` refuses to call a limited
+    /// atom fresh, and `acquisition_evidence` reports it to the app as
+    /// `ShortfallFact::LocalLimit`.
     pub limited: BTreeSet<CoverageKey>,
-    /// Distinct relay candidates refused by the whole-demand ceiling. This
-    /// is diagnostics evidence, not a second routing input: only `reqs` may
-    /// reach the wire.
+    /// Distinct relay candidates refused ENTIRELY — by the whole-demand
+    /// ceiling, or by a relay advertising zero concurrent subscriptions.
+    /// This is diagnostics evidence, not a second routing input: only `reqs`
+    /// may reach the wire, and a refused session is absent from `reqs` by
+    /// construction.
+    ///
+    /// A session merely TRIMMED by its subscription budget is NOT here: it
+    /// is still planned and still serving, so it keeps its `reqs` row and
+    /// reports through `subscription_shortfalls` instead.
     pub refused_sessions: BTreeSet<RelaySessionKey>,
+    /// Per-session evidence for every relay whose advertised subscription
+    /// budget actually bound this compile.
+    pub subscription_shortfalls: BTreeMap<RelaySessionKey, BudgetShortfall>,
 }
 
 /// A single wire operation. `Req` is open-or-replace (same sub-id

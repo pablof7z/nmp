@@ -103,6 +103,31 @@ async fn watch_tag_value_limited(w: &mut NmpWorld, limit: usize, tag: String, va
     .await;
 }
 
+/// The delayed form of the limited watch above -- demand arriving at an
+/// already-saturated relay some time after the first subscriptions are live,
+/// which is what a subscription limit has to stay quiet under.
+#[when(
+    regex = r#"^(\d+)ms later I watch for the latest (\d+) notes tagged "([a-zA-Z])" as "([^"]+)"$"#
+)]
+async fn watch_tag_value_limited_after(
+    w: &mut NmpWorld,
+    delay_ms: u64,
+    limit: usize,
+    tag: String,
+    value: String,
+) {
+    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+    w.watch_tag_value_shaped(
+        parse_tag(&tag),
+        &value,
+        WatchShape {
+            limit: Some(limit),
+            ..WatchShape::default()
+        },
+    )
+    .await;
+}
+
 /// A watch narrowed to a time window. `since` is a co-pinned bound, not a
 /// value list, so two windows never union -- the scenarios using this step
 /// assert that two tag watches under DIFFERENT windows stay two

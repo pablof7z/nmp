@@ -989,6 +989,8 @@ fn nip11_evidence_until(
 ) -> nmp_engine::relay_information::RelayInformationCapabilityEvidence {
     nmp_engine::relay_information::RelayInformationCapabilityEvidence {
         supported_nips,
+        max_subscriptions: None,
+        max_subid_length: None,
         document_revision: "test-revision".to_string(),
         fresh_until,
         last_error: None,
@@ -1098,6 +1100,8 @@ mod persistence_failures;
 mod real_corpus_benchmark;
 #[path = "state_maintenance.rs"]
 mod state_maintenance;
+#[path = "subscription_budget.rs"]
+mod subscription_budget;
 #[path = "write_delivery.rs"]
 mod write_delivery;
 #[path = "write_scheduling.rs"]

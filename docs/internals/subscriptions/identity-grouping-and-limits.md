@@ -31,8 +31,9 @@ down. Read §5 first if you only want the failure modes.
 
 **Status is marked per section.** Sections marked BUILT describe shipped
 behaviour; sections marked OPEN are unresolved. §7's design is now built —
-§7.1 as `nmp_router::StructuralUnion`, §7.2 as `nmp_router::wire_id`. What
-remains unbuilt is §6's per-relay subscription budget, and §8.1b/§8.2.
+§7.1 as `nmp_router::StructuralUnion`, §7.2 as `nmp_router::wire_id` — and
+§6's per-relay subscription budget is built as `nmp_router::CompileBudget`.
+What remains unbuilt is §8.1b/§8.2.
 
 ---
 
@@ -387,7 +388,7 @@ client-side; the relay does re-run the query. Not a plan-diff bypass.
 
 ---
 
-## 6. Relay limits — parsed, and enforced nowhere
+## 6. Relay limits — BUILT (#931)
 
 Relays cap **concurrent subscriptions** at roughly 20 (sometimes up to 200), and
 accept **arrays of ~500 values** without complaint. Fan-out inverts exactly the
@@ -418,10 +419,58 @@ Sequencing is load-bearing: pre-collapse, a budget over 300-vs-20 only forces
 triage that drops 280 atoms' coverage — fail-closed but useless. **Land the
 collapse first**, then the budget is a guard rail rather than a guillotine.
 
-Note also `max_subid_length`: parsed, unread. A relay advertising `< 64` would
-reject our fixed-length ids and nothing would notice. Worth a diagnostic. It must
-**never** feed id derivation — NIP-11 documents refresh, and a mutable derivation
-input is identity instability.
+### 6.1 As built
+
+`Router::compile` takes a `CompileBudget` (`nmp-router/src/budget.rs`) instead
+of a bare relay cap: the operator's whole-demand relay ceiling, plus each
+relay's own `AdvertisedRelayLimits`. A bare `usize` still converts into one, so
+every existing caller says exactly what it always said.
+
+The engine builds it from `nip11_information`, the same map diagnostics already
+reads and `recompile` already prunes — no second cache to age out. Enforcement
+runs per session AFTER coalescing and AFTER wire-token assignment
+(`refuse_over_budget`), because both decide what the count actually is.
+
+**Absence is not a number.** A relay that advertised nothing is UNBUDGETED.
+Two of the eight relays measured on 2026-07-27 (relay.nostr.band,
+relay.snort.social) publish no document at all; a fabricated default would drop
+their demand over a guess, and would flap damus between 200 and that guess
+whenever one HTTP GET failed. What guards an unadvertised relay instead is the
+per-session subscription COUNT in diagnostics and in
+`features/routing/relay-subscription-limits.feature` — a fan-out escape is a
+defect for CI to catch, not a reason to refuse a user's demand in production.
+(Fable, consulted adversarially on fail-open versus a guessed default, reached
+the same verdict independently.)
+
+**Refusal is loud.** Every refused subscription's `absorbed` keys join
+`RelayPlan::limited`, so `plan_is_fresh_for` refuses to call those atoms fresh
+and `acquisition_evidence` reports `ShortfallFact::LocalLimit` to the app.
+`RelayPlan::subscription_shortfalls` carries the per-session (budget, planned,
+refused) triple, and diagnostics carries `subscription_budget` /
+`subscriptions_refused` per session. A relay advertising ZERO joins
+`refused_sessions` instead, which preserves that field's "absent from the plan
+by construction" invariant; a merely-trimmed session stays planned.
+
+**Incumbents outrank newcomers.** Ranking by coverage alone would evict an
+established subscription whenever a newer one outranked it, re-admit it next
+compile, and oscillate — churn caused by the budget itself. A subscription the
+previous plan already carried wins.
+
+**Refresh.** NIP-11 acquisition is driven by connect, so an advertisement is
+always learned AFTER the compile that planned the relay. Resolution therefore
+recompiles — but only when the pair `(max_subscriptions, max_subid_length)`
+actually moved, never on revalidation or `supported_nips` churn — and then
+refreshes handles so the shortfall reaches the subscriber. Nothing advertised
+feeds identity: wire ids are allocated tokens (§7.2), and the budget is
+deliberately not among their inputs.
+
+### 6.2 `max_subid_length` — diagnosed, never derived from
+
+Parsed and unread until now. A relay advertising `< 64` would reject our
+fixed-length ids and nothing would notice. It is now reported per session
+(`subid_length_rejects_our_ids`) and enforces nothing. It must **never** feed id
+derivation — NIP-11 documents refresh, and a mutable derivation input is
+identity instability.
 
 ---
 
