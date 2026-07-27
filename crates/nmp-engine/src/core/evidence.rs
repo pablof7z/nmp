@@ -309,6 +309,7 @@ mod tests {
         let req = WireReq {
             sub_id: SubId::for_wire(relay.clone(), &atom.filter, &atom.source, atom.access),
             filter: atom.filter.clone(),
+            source: atom.source.clone(),
             provenance: Vec::new(),
             absorbed: BTreeSet::from([key]),
         };
@@ -378,6 +379,7 @@ mod tests {
                 vec![WireReq {
                     sub_id: SubId::for_wire(relay, &atom.filter, &atom.source, atom.access),
                     filter: atom.filter.clone(),
+                    source: atom.source.clone(),
                     provenance: Vec::new(),
                     absorbed: BTreeSet::from([key]),
                 }],

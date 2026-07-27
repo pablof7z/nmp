@@ -20,6 +20,7 @@ use crate::facts::{DiscoveryKinds, PubkeyHex, RelayDirectory, RelayUrl};
 use crate::plan::{diff_plans, RelayPlan, SubId, WireDelta, WireReq};
 use crate::route::{self, AtomClass, RouteKind, RouteProvenance, Skeleton};
 use crate::solver::{self, CoverageInput, Shortfall, ShortfallReason};
+use crate::wire_id;
 
 /// The equal-context-only coalescing gate (Fable D, "locus fixed"): two
 /// atoms only ever share wire work if their FULL context matches. Bagged
@@ -167,6 +168,16 @@ pub struct Router {
     rules: RuleRegistry,
     prev_plan: RelayPlan,
     last_diag: Diagnostics,
+    /// Monotonic wire-token mint counter (#899). Never reset and never
+    /// rewound, so no token is recycled within this `Router`'s lifetime.
+    /// Deliberately NOT seeded randomly: the whole crate is a pure function of
+    /// its inputs and the repo pins that reproducibility, while token
+    /// uniqueness only ever has to hold WITHIN one router's wire namespace.
+    next_token: u64,
+    /// Hoisted chain root for [`SubId::allocate`], so minting costs a handful
+    /// of `fold_byte` calls rather than a JSON encode plus BLAKE3 each time.
+    /// Carries no filter meaning -- see `SubId::allocate`.
+    mint_root: nmp_grammar::DescriptorHash,
 }
 
 impl Router {
@@ -176,6 +187,8 @@ impl Router {
             rules,
             prev_plan: RelayPlan::default(),
             last_diag: Diagnostics::default(),
+            next_token: 0,
+            mint_root: ConcreteFilter::default().hash(),
         }
     }
 
@@ -394,27 +407,85 @@ impl Router {
         // coalesce (`coalesce.rs` stays pure selection-only, Fable D "locus
         // fixed" -- partitioning by `ContextKey` here is what makes
         // coalescing equal-context-only, never a change to the rule
-        // engine itself), then assign stable sub-ids (context-folded,
-        // `SubId::for_wire` — atlas's 3rd proof floor / Fable D's wire
-        // consequence).
+        // engine itself), then ALLOCATE each survivor's wire token by
+        // matching it against the previous plan's filters for the SAME
+        // partition (`wire_id::assign`, #899).
+        //
+        // Wire ids used to be DERIVED from the filter's author-erased
+        // `Skeleton`. That made author churn free (same skeleton, same id,
+        // one overwriting REQ) but it was not injective: two filters the
+        // coalescer REFUSED to merge -- `neither_limited` poisons every rule
+        // the moment either side carries a `limit`, and `dedup_only()` holds
+        // no `AuthorUnion` at all -- minted the SAME id, and `diff_plans`
+        // (keyed by `SubId`) then silently dropped one of them, forever.
+        // Allocation buys back injectivity AND keeps in-place widening,
+        // because the previous plan is the state that tells "this
+        // subscription churned" apart from "a sibling appeared".
+        let mint_root = self.mint_root;
+        let mut mint_counter = self.next_token;
         let mut reqs: BTreeMap<RelaySessionKey, Vec<WireReq>> = BTreeMap::new();
         for (session, by_source) in bag {
             let relay = session.relay.clone();
             let access = session.access;
-            let session_reqs = reqs.entry(session).or_default();
+            let mut session_reqs: Vec<WireReq> = Vec::new();
             for (source, entries) in by_source {
                 let merged = self.rules.coalesce_with(entries);
-                session_reqs.extend(merged.into_iter().map(|(filter, provenance, absorbed)| {
-                    let sub_id = SubId::for_wire(relay.clone(), &filter, &source, access);
-                    WireReq {
+                let filters: Vec<ConcreteFilter> =
+                    merged.iter().map(|(filter, _, _)| filter.clone()).collect();
+
+                // The matching partition: this exact relay session AND this
+                // exact declared authority. Reading it back out of
+                // `prev_plan` is what makes the matching state pruned by
+                // construction -- there is no separate table to age out.
+                let priors: Vec<(ConcreteFilter, SubId)> = self
+                    .prev_plan
+                    .reqs
+                    .get(&session)
+                    .into_iter()
+                    .flatten()
+                    .filter(|req| req.source == source)
+                    .map(|req| (req.filter.clone(), req.sub_id.clone()))
+                    .collect();
+
+                let assigned = wire_id::assign(&priors, &filters, || {
+                    let sub_id =
+                        SubId::allocate(relay.clone(), &source, access, mint_root, mint_counter);
+                    mint_counter += 1;
+                    sub_id
+                });
+
+                session_reqs.extend(merged.into_iter().zip(assigned).map(
+                    |((filter, provenance, absorbed), sub_id)| WireReq {
                         sub_id,
                         filter,
+                        source: source.clone(),
                         provenance,
                         absorbed,
-                    }
-                }));
+                    },
+                ));
             }
             session_reqs.sort_by(|a, b| a.sub_id.cmp(&b.sub_id));
+            reqs.insert(session, session_reqs);
+        }
+        self.next_token = mint_counter;
+
+        // The invariant the whole change exists to establish, checked in
+        // RELEASE builds too (a `debug_assert!` compiles out of exactly the
+        // builds that ship). Under allocation it can never fire -- each prior
+        // token is assigned to at most one filter and every mint is unique --
+        // which is precisely what makes it cheap enough to leave in. If it
+        // ever does fire, `diff_plans` would have dropped a `WireReq` that
+        // never reached the wire and never would have.
+        {
+            let mut seen: BTreeSet<&SubId> = BTreeSet::new();
+            for req in reqs.values().flatten() {
+                assert!(
+                    seen.insert(&req.sub_id),
+                    "wire sub-id injectivity violated: two WireReqs share {:?} -- \
+                     diff_plans keys by SubId, so one of them could never reach the wire",
+                    req.sub_id
+                );
+            }
         }
 
         let next_plan = RelayPlan {

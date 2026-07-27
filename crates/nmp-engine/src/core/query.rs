@@ -156,14 +156,28 @@ impl<S: EventStore> EngineCore<S> {
             for op in ops {
                 match op {
                     WireOp::Req(sub_id, filter) => {
-                        let absorbed = self
+                        // Union across EVERY planned req carrying this
+                        // sub-id, never the first match. The router now
+                        // guarantees at most one (`Router::compile`'s
+                        // release-mode injectivity assert, #899), so this is
+                        // a fold over exactly one entry today. Taking the
+                        // FIRST match is what turned that router-side
+                        // invariant into a SILENT under-credit here: any
+                        // second entry's coverage keys were simply never
+                        // attributed, so its atoms refetched forever. Folding
+                        // instead of picking means this door reports the truth
+                        // about whatever the plan actually holds, rather than
+                        // depending on an invariant proved somewhere else.
+                        let absorbed: BTreeSet<CoverageKey> = self
                             .router
                             .plan()
                             .reqs
                             .get(session)
-                            .and_then(|reqs| reqs.iter().find(|r| &r.sub_id == sub_id))
-                            .map(|r| r.absorbed.clone())
-                            .unwrap_or_default();
+                            .into_iter()
+                            .flatten()
+                            .filter(|r| &r.sub_id == sub_id)
+                            .flat_map(|r| r.absorbed.iter().copied())
+                            .collect();
 
                         // "Small exact result" (a `limit`) always stays REQ
                         // -- a bounded, terminating fetch is not what
@@ -249,6 +263,16 @@ impl<S: EventStore> EngineCore<S> {
     /// cap path as a live recompile, without mutating live wire,
     /// attribution, diagnostics, or any handle. Used once for `MaxAge` and
     /// for staged history projection.
+    ///
+    /// TRAP, since wire ids became allocated tokens (#899): this builds a
+    /// FRESH `Router`, whose mint counter also starts at zero, so its plan's
+    /// `SubId`s collide BY VALUE with the live router's tokens while
+    /// identifying entirely unrelated filters. That is benign only because
+    /// every consumer of a retained shadow plan (`plan_is_fresh_for`, and
+    /// `acquisition_evidence` via `HandleAcquisition::CoverageSatisfied`)
+    /// reads sessions, `absorbed`, and `limited` — never `sub_id`. Correlating
+    /// a shadow plan's `sub_id` with a live one would alias silently; if that
+    /// is ever needed, give this router its own token namespace first.
     pub(super) fn shadow_plan_for(&self, demand: BTreeSet<ContextualAtom>) -> RelayPlan {
         let admitted = demand
             .into_iter()
