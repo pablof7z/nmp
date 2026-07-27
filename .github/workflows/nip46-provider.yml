@@ -33,13 +33,42 @@ jobs:
       - name: Build core and provider XCFrameworks
         run: |
           scripts/build-swift-xcframework.sh --sim-only
+          core_only=$(
+            find Packages/NMP/NMP.xcframework -type f -name libnmp_ffi.a |
+              grep simulator | sort | head -n 1
+          )
+          test -n "$core_only"
+          cp "$core_only" "$RUNNER_TEMP/libnmp_ffi-core-only.a"
           scripts/build-swift-nip46-xcframework.sh --sim-only
+
+      - name: Prove matched identity and package-set mismatch
+        run: |
+          matched_core=$(
+            find Packages/NMP/NMP.xcframework -type f -name libnmp_ffi.a |
+              grep simulator | sort | head -n 1
+          )
+          matched_provider=$(
+            find Packages/NMPNip46/NMPNip46.xcframework -type f -name libnmp_nip46_ffi.a |
+              grep simulator | sort | head -n 1
+          )
+          scripts/check-nip46-component-identity.sh \
+            "$RUNNER_TEMP/libnmp_ffi-core-only.a" \
+            "$matched_core" \
+            "$matched_provider"
 
       - name: Prove the provider is absent from the core link/resource maps
         run: |
+          matched_core=$(
+            find Packages/NMP/NMP.xcframework -type f -name libnmp_ffi.a |
+              grep simulator | sort | head -n 1
+          )
+          matched_provider=$(
+            find Packages/NMPNip46/NMPNip46.xcframework -type f -name libnmp_nip46_ffi.a |
+              grep simulator | sort | head -n 1
+          )
           scripts/check-nip46-artifact-inventory.sh \
-            target/aarch64-apple-ios-sim/release/libnmp_ffi.a \
-            target/aarch64-apple-ios-sim/release/libnmp_nip46_ffi.a \
+            "$matched_core" \
+            "$matched_provider" \
             Packages/NMP/Sources/NMPFFI \
             Packages/NMPNip46/Sources/NMPNip46FFI
 
@@ -64,13 +93,25 @@ jobs:
       - name: Build core and provider bindings
         run: |
           scripts/build-kotlin-jvm.sh
+          cp Packages/NMPKotlin/src/main/resources/linux-x86-64/libnmp_ffi.so \
+            "$RUNNER_TEMP/libnmp_ffi-core-only.so"
           scripts/build-kotlin-nip46-jvm.sh
+
+      - name: Refuse unmanaged release identity
+        run: scripts/test-component-identity-build.sh
+
+      - name: Prove matched identity and package-set mismatch
+        run: |
+          scripts/check-nip46-component-identity.sh \
+            "$RUNNER_TEMP/libnmp_ffi-core-only.so" \
+            Packages/NMPKotlin/src/main/resources/linux-x86-64/libnmp_ffi.so \
+            Packages/NMPKotlin/nip46/src/main/resources/linux-x86-64/libnmp_nip46_ffi.so
 
       - name: Prove the provider is absent from the core link/resource maps
         run: |
           scripts/check-nip46-artifact-inventory.sh \
-            target/release/libnmp_ffi.so \
-            target/release/libnmp_nip46_ffi.so \
+            Packages/NMPKotlin/src/main/resources/linux-x86-64/libnmp_ffi.so \
+            Packages/NMPKotlin/nip46/src/main/resources/linux-x86-64/libnmp_nip46_ffi.so \
             Packages/NMPKotlin/src/main/kotlin/uniffi \
             Packages/NMPKotlin/nip46/src/main/kotlin/uniffi
 

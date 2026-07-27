@@ -98,7 +98,63 @@ about current code:
   `Packages/NMPNip46`, and Kotlin `:nip46` components project Primal discovery,
   one-click launch, package-filtered Android discovery, and an exact
   URI/package handoff contract. Deleting those provider packages leaves core
-  and an unrelated external signer buildable. Connections own scoped
+  and an unrelated external signer buildable. Supported native release builders
+  fix the core-only or matched core/provider Cargo roots, use an isolated
+  reusable target per package set, freeze the resolution after a locked fetch,
+  and hold a per-build authorization only inside the managed Cargo subprocess.
+  Before that authorization is revoked, the managed builder copies the exact
+  outputs into a fresh artifact snapshot; Swift/Kotlin packaging reads only
+  that snapshot, never the mutable Cargo target. Before exposing the snapshot,
+  the builder extracts UniFFI's compiled metadata from the provider library
+  and first requires positive metadata for both the core mailbox and provider
+  proof. It then audits every callable namespace in that library, permits only
+  the exact outward-only core source
+  `nmp_ffi::NmpEngine::signer_mailbox`, and requires exactly one other entry
+  carrying the core mailbox, with the compatibility proof in that
+  constructor's inputs. No namespace is exempt: a linked crate that claims
+  `nmp_ffi` is audited by callable shape like every other crate. The mailbox
+  has private fields and its Rust constructor is crate-private, so even a
+  linked namespace impostor cannot mint a mailbox for its allowlisted return;
+  only the real core `NmpEngine` can vend one. UniFFI derives the audit label
+  and no-mangle scaffolding symbol from the same module/type/function tuple,
+  so a linked crate forging that exact return label collides with core at link
+  time; the audit independently requires exactly one such source. This audits
+  the same compiled authority bindgen consumes, independent of source
+  location, claimed crate/module namespace, macro expansion, aliases, records,
+  or other Rust spelling. It cannot prove the meaning of a raw integer that
+  unsafe Rust later reinterprets as a mailbox pointer; such a `u64`/raw-handle
+  escape remains outside the audit's guarantee and is not a supported entry
+  shape.
+  `build.rs` canonicalizes both
+  the component root and its actual `OUT_DIR`, then requires the exact
+  `<target>/release/build/nmp-ffi-*/out` layout, so nested targets, `..`
+  escapes, and custom profile directories cannot inherit the authorization.
+  Only within that fixed shape does the deterministic
+  component identity self-derive and hash Cargo's exact resolved unit graph
+  (package roots/edges, transitive features, profiles, and targets), every
+  governed core/fixture input, and compiler/build inputs. An ad-hoc release
+  invocation cannot accidentally write or replace a package input; concurrent
+  managed builds of one package set refuse with a specific lock error rather
+  than rotating each other's authorization. The kernel-held lock remains owned
+  by any surviving Cargo/rustc descendants after a killed shell and releases
+  automatically when the last holder exits; stale lock-file bytes alone never
+  block a later build. Debug/IDE builds remain available
+  but are not packaging inputs. External path patches
+  that cannot be reproduced from the repository are refused. Swift and Kotlin
+  compare the embedded identities before requesting the opaque mailbox, and a
+  mismatch is a typed construction failure before any external Rust object
+  crosses the component seam (#952). The build authorization is a working-
+  discipline guard against accidental artifact substitution, not a secret
+  against a caller deliberately forging the marker or reading/replaying the
+  in-flight token; the native identity comparison is the runtime authority.
+  The managed builder never returns or prints that token. Supported builders always use the exact release
+  profile; custom/bench release-class builds are intentionally not a supported
+  packaging path and fail without that builder authorization. The Android AAR
+  work in #831 still owns
+  publishing that same identity in provenance/Gradle metadata and
+  emulator-qualifying a deliberately mismatched pair; the native check remains
+  the final authority when packaging metadata is stale or tampered.
+  Connections own scoped
   registrations, so a stale session cannot detach its replacement, and
   close/drop deterministically finishes only that session. An explicitly
   insecure SDK-owned plaintext file checkpoint now provides opt-in
@@ -110,6 +166,11 @@ about current code:
   diagnostics. The existing NIP-46 teardown, foreign-capability mailbox,
   pull-delivery, and process-global-runtime corrections remain separately
   tracked by #770/#783/#784/#871; this ownership split does not claim them.
+  The governed UniFFI component snapshot still covers only core `nmp-ffi`;
+  the separately selectable `nmp-nip46-ffi` provider namespace has no
+  committed surface snapshot yet. #954 owns adding it through the protected
+  governance bootstrap before the provider is published independently by
+  #831.
   The sign-only operation now projects across Rust, FFI, Swift, and Kotlin:
   it binds an immutable request to the active registered signer, validates the
   exact returned event, remains bounded/cancellable, and creates no

@@ -176,7 +176,13 @@ scripts/build-kotlin-nip46-jvm.sh
 The provider builder refreshes the core bindings/library first and builds both
 native components in one Cargo resolution, preserving the external mailbox's
 exact native type identity. `build-kotlin-jvm.sh` remains the independent
-core-only path.
+core-only path. Each native artifact embeds a deterministic
+`nmp-core-component-v1-*` identity over the governed core source, lockfile,
+compiler, target/profile, feature set, and selected Cargo package set. The
+`:nip46` wrapper compares that provider requirement with the loaded core before
+requesting a mailbox; skew throws `NMPError.NativeComponentMismatch`, and the
+mailbox-producing body is never evaluated. The native provider constructor
+also requires the opaque compatibility proof minted by that comparison.
 
 Generating the provider binding is what makes the optional `:nip46` Gradle
 project selectable; a core-only build does not configure it. CI proves both

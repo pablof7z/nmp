@@ -7338,6 +7338,36 @@ function Function {
 }
 
 function Function {
+    name: "nmp_core_component_identity",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [],
+    return_type: Some(
+        String,
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_nmp_core_component_identity",
+        is_async: false,
+        arguments: [],
+        return_type: Some(
+            RustBuffer(
+                None,
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Return the loaded core library's exact native component identity.\n\nThis value is plain data by design: a provider can compare it before\nrequesting or lowering [`FfiSignerMailbox`].",
+    ),
+    throws: None,
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_nmp_core_component_identity",
+    checksum: Some(
+        14080,
+    ),
+}
+
+function Function {
     name: "parse_nostr_content",
     module_path: "nmp_ffi",
     is_async: false,
@@ -9141,7 +9171,7 @@ object Object {
     },
     ffi_init_callback: None,
     docstring: Some(
-        "Opaque provider mailbox bound to one exact core engine.\n\nNative provider components consume this external UniFFI object rather than\nimporting or mirroring `NmpEngine`. Its Rust-only operations are the\nordinary generic signer door and the engine-owned adapter runtime already\nused by supported provider sessions.",
+        "Opaque provider mailbox bound to one exact core engine.\n\nNative provider components consume this external UniFFI object rather than\nimporting or mirroring `NmpEngine`. Its Rust-only operations are the\nordinary generic signer door and the engine-owned adapter runtime already\nused by supported provider sessions. Construction is sealed inside core:\nlinked crates can receive this object only from\n[`NmpEngine::signer_mailbox`](crate::facade::NmpEngine::signer_mailbox).\n\n```compile_fail\nlet _ = nmp_ffi::signer::FfiSignerMailbox::from_engine(panic!());\n```",
     ),
 }
 

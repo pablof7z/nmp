@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT=$(cd "$(dirname "$0")" && pwd)/build-kotlin-jvm.sh
+COMPONENT_BUILDER=$(cd "$(dirname "$0")" && pwd)/build-component-release.sh
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -11,6 +12,8 @@ mkdir -p "$REPO/scripts" "$BIN"
 REPO=$(cd "$REPO" && pwd -P)
 BIN=$(cd "$BIN" && pwd -P)
 cp "$SCRIPT" "$REPO/scripts/"
+cp "$COMPONENT_BUILDER" "$REPO/scripts/"
+chmod +x "$REPO/scripts/"*.sh
 git -C "$REPO" init -q
 
 cat > "$BIN/uname" <<'SHIM'
@@ -36,13 +39,24 @@ if [[ $target_dir != /* ]]; then
 fi
 
 case "${1:-}" in
+  fetch)
+    ;;
   build)
-    mkdir -p "$target_dir/release"
+    target=
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --target) target=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    [[ -n "$target" ]]
+    release_dir="$target_dir/$target/release"
+    mkdir -p "$release_dir"
     if [[ ${FAKE_OMIT_LIBRARY:-0} != 1 ]]; then
-      printf '%s\n' "$target_dir" > "$target_dir/release/libnmp_ffi.so"
+      printf '%s\n' "$target_dir" > "$release_dir/libnmp_ffi.so"
     fi
     if [[ ${FAKE_OMIT_BINDGEN:-0} != 1 ]]; then
-      cat > "$target_dir/release/uniffi-bindgen" <<'BINDGEN'
+      cat > "$release_dir/uniffi-bindgen" <<'BINDGEN'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'bindgen %q' "$0" >> "$CALL_LOG"
@@ -61,7 +75,7 @@ done
 mkdir -p "$out_dir/uniffi/nmp_ffi"
 printf 'generated from %s\n' "$library" > "$out_dir/uniffi/nmp_ffi/nmp_ffi.kt"
 BINDGEN
-      chmod +x "$target_dir/release/uniffi-bindgen"
+      chmod +x "$release_dir/uniffi-bindgen"
     fi
     ;;
   *) exit 64 ;;
@@ -104,6 +118,7 @@ run_failure() {
 
 assert_single_plan() {
   local log=$1
+  [[ $(grep -c '^cargo fetch ' "$log") -eq 1 ]]
   [[ $(grep -c '^cargo build ' "$log") -eq 1 ]]
   [[ $(grep -c '^bindgen ' "$log") -eq 1 ]]
   ! grep -q '^cargo run ' "$log"
@@ -122,16 +137,20 @@ assert_outputs() {
   local target_dir=$1
   local generated="$REPO/Packages/NMPKotlin/src/main/kotlin/uniffi/nmp_ffi/nmp_ffi.kt"
   local resource="$REPO/Packages/NMPKotlin/src/main/resources/linux-x86-64/libnmp_ffi.so"
-  assert_contains "generated from $target_dir/release/libnmp_ffi.so" "$generated"
-  assert_contains "$target_dir" "$resource"
+  assert_contains \
+    "generated from $target_dir/nmp-component-artifacts/core/$HOST_TARGET." \
+    "$generated"
+  assert_contains "$target_dir/nmp-component-build/core" "$resource"
 }
+
+HOST_TARGET=$(rustc -vV | sed -n 's/^host: //p')
+[[ -n "$HOST_TARGET" ]]
 
 # With no override, preserve the historical repository-local target directory.
 default_log="$TMP/default.log"
 run_script "$default_log"
 assert_single_plan "$default_log"
-assert_contains "$REPO/target/release/libnmp_ffi.so" "$default_log"
-assert_contains "$REPO/target/release/uniffi-bindgen" "$default_log"
+assert_contains "$REPO/target/nmp-component-artifacts/core/$HOST_TARGET." "$default_log"
 assert_outputs "$REPO/target"
 echo 'ok - default target directory remains repository-local'
 
@@ -142,8 +161,7 @@ absolute_target="$TMP/shared-cache"
 rm -rf "$REPO/target" "$REPO/Packages" "$REPO/gen-kotlin"
 run_script "$absolute_log" "$absolute_target"
 assert_single_plan "$absolute_log"
-assert_contains "$absolute_target/release/libnmp_ffi.so" "$absolute_log"
-assert_contains "$absolute_target/release/uniffi-bindgen" "$absolute_log"
+assert_contains "$absolute_target/nmp-component-artifacts/core/$HOST_TARGET." "$absolute_log"
 ! grep -Fq "$REPO/target/release" "$absolute_log"
 [[ ! -e $REPO/target ]]
 assert_outputs "$absolute_target"
@@ -157,8 +175,7 @@ relative_target="$REPO/$relative_value"
 rm -rf "$REPO/target" "$REPO/Packages" "$REPO/gen-kotlin" "$relative_target"
 run_script "$relative_log" "$relative_value"
 assert_single_plan "$relative_log"
-assert_contains "$relative_target/release/libnmp_ffi.so" "$relative_log"
-assert_contains "$relative_target/release/uniffi-bindgen" "$relative_log"
+assert_contains "$relative_target/nmp-component-artifacts/core/$HOST_TARGET." "$relative_log"
 ! grep -Fq "$REPO/target/release" "$relative_log"
 [[ ! -e $REPO/target ]]
 assert_outputs "$relative_target"
@@ -176,7 +193,7 @@ if run_failure \
   exit 1
 fi
 assert_contains \
-  "error: expected $missing_library_target/release/libnmp_ffi.so after cargo build" \
+  "component-build: expected a release library for nmp_ffi under $missing_library_target/nmp-component-build/core/$HOST_TARGET/release" \
   "$missing_library_output"
 [[ $(grep -c '^cargo build ' "$missing_library_log") -eq 1 ]]
 ! grep -q '^bindgen ' "$missing_library_log"
@@ -190,8 +207,12 @@ if run_failure \
   echo 'missing release bindgen unexpectedly passed' >&2
   exit 1
 fi
+assert_contains "error: expected executable" "$missing_bindgen_output"
 assert_contains \
-  "error: expected executable $missing_bindgen_target/release/uniffi-bindgen after cargo build" \
+  "$missing_bindgen_target/nmp-component-artifacts/core/$HOST_TARGET." \
+  "$missing_bindgen_output"
+assert_contains \
+  "/uniffi-bindgen in the sealed component snapshot" \
   "$missing_bindgen_output"
 [[ $(grep -c '^cargo build ' "$missing_bindgen_log") -eq 1 ]]
 ! grep -q '^bindgen ' "$missing_bindgen_log"
