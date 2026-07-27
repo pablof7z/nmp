@@ -152,32 +152,6 @@ fn authenticate(
     ))
 }
 
-fn strip_additive_lane_rows(path: &std::path::Path, intent: nmp_store::IntentId, relay: &RelayUrl) {
-    let db = Database::open(path).unwrap();
-    let write = db.begin_write().unwrap();
-    {
-        let details: TableDefinition<&str, &str> = TableDefinition::new("outbox_attempt_details");
-        let lanes: TableDefinition<&str, &str> = TableDefinition::new("outbox_lanes");
-        let mut details = write.open_table(details).unwrap();
-        let mut lanes = write.open_table(lanes).unwrap();
-        let attempt_prefix = format!(
-            "{:020}:{:020}:{}",
-            intent.0,
-            relay.as_str().len(),
-            relay.as_str()
-        );
-        let canonical: &nostr::Url = relay.into();
-        let canonical = canonical.as_str();
-        let lane_key = format!("{:020}:{:020}:{canonical}", intent.0, canonical.len());
-        assert!(details
-            .remove(format!("{attempt_prefix}:{:020}", 1).as_str())
-            .unwrap()
-            .is_some());
-        assert!(lanes.remove(lane_key.as_str()).unwrap().is_some());
-    }
-    write.commit().unwrap();
-}
-
 #[test]
 fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_accepting_again() {
     let tmp = tempfile::tempdir().unwrap();
@@ -224,7 +198,6 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
         .unwrap()
         .intent_id
         .unwrap();
-    strip_additive_lane_rows(&path, intent, &relay);
 
     let store = RedbStore::open(&path).unwrap();
     let mut core = EngineCore::new(
@@ -391,7 +364,6 @@ fn at_most_once_started_attempt_becomes_outcome_unknown_and_is_never_resent() {
             .intent_id
             .unwrap()
     };
-    strip_additive_lane_rows(&path, intent_id, &relay);
 
     let store = RedbStore::open(&path).unwrap();
     let mut core = EngineCore::new(

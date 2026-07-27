@@ -1,4 +1,4 @@
-use super::{EventId, PersistenceError, PublicKey, TableDefinition};
+use super::{EventId, Path, PersistenceError, PublicKey, RedbStoreOpenError, TableDefinition};
 use crate::PersistenceFault;
 
 /// Wrap any `redb` operation error as a [`PersistenceError`] (architecture
@@ -50,6 +50,29 @@ fn classify(error: &redb::Error) -> PersistenceFault {
     }
 }
 
+/// The ONE refusal for durable bytes that are not the exact current schema
+/// epoch (#867).
+///
+/// Every nonempty store that does not carry exactly [`SCHEMA_VERSION`] ends
+/// here — there is no second refusal, no per-epoch decoder to try first, and
+/// no migration/adoption/alias/reset door behind it. This is the ONLY
+/// construction site of [`RedbStoreOpenError::UnsupportedSchema`], and it is
+/// reachable only from [`crate::RedbStore::open`]'s epoch probe, so the
+/// refusal is returned before a store handle is exposed and before any byte
+/// is written.
+///
+/// Corruption of the CURRENT epoch is deliberately NOT routed here: it stays
+/// `RedbStoreOpenError::Database(redb::Error::Corrupted(..))`, so an operator
+/// can never read "unsupported schema" and conclude their current-epoch data
+/// was merely old.
+pub(super) fn unsupported_schema(target: &Path, found: Option<u64>) -> RedbStoreOpenError {
+    RedbStoreOpenError::UnsupportedSchema {
+        path: target.to_path_buf(),
+        expected: SCHEMA_VERSION,
+        found,
+    }
+}
+
 pub(super) type EventKey = u64;
 pub(super) type RelayKey = u32;
 
@@ -75,24 +98,20 @@ pub(super) const NEXT_RELAY_KEY: &str = "next_relay_key";
 /// greatest observation timestamp in seconds.
 pub(super) const EVENT_OBSERVATIONS: TableDefinition<&[u8; 12], u64> =
     TableDefinition::new("event_observations_v6");
-pub(super) const LEGACY_EVENT_TABLES: [&str; 9] = [
-    "events",
-    "events_v2",
-    "events_v3",
-    "events_v4",
-    "events_v5",
-    "outbox_displaced_v2",
-    "outbox_displaced_v3",
-    "outbox_displaced_v4",
-    "outbox_displaced_v5",
-];
 pub(super) const SCHEMA_META: TableDefinition<&str, u64> = TableDefinition::new("schema_meta_v6");
 pub(super) const SCHEMA_VERSION_KEY: &str = "version";
-pub(super) const COVERAGE_MAX_EVICTION_REPAIR_KEY: &str = "coverage_max_eviction_repair";
-pub(super) const COVERAGE_MAX_EVICTION_REPAIR_VERSION: u64 = 1;
-pub(super) const LEGACY_SCHEMA_VERSION: u64 = 6;
-pub(super) const PREVIOUS_SCHEMA_VERSION: u64 = 7;
-pub(super) const SCHEMA_VERSION: u64 = 8;
+/// The ONE exact current schema epoch (#867). NMP carries no persistent-schema
+/// compatibility obligation in this architecture cut: there is no pre-current
+/// decoder, no migration, no adoption, and no destructive reset door. A
+/// nonempty store whose marker is not exactly this value is refused at
+/// [`crate::RedbStore::open`] before any table is created or any byte is
+/// mutated.
+///
+/// This value covers the whole durable model together — events, coverage,
+/// accepted writes, lanes, attempts, receipts, and route facts — because they
+/// share one `redb::Database` transaction boundary and are therefore one
+/// epoch, not seven independently-versioned ones.
+pub(super) const SCHEMA_VERSION: u64 = 9;
 /// Bound redb's process-private page cache for mobile/desktop clients.
 ///
 /// redb 4.1 defaults this cache to 1 GiB. A million-event sequential ingest
@@ -132,16 +151,23 @@ pub(super) const EXPIRATION_INDEX: TableDefinition<&[u8; 40], EventKey> =
 /// Binary ordered indexes all end in the same sortable suffix:
 /// `created_at:u64-be | !event_id:[u8;32]`. Reverse scans therefore yield
 /// `created_at DESC, event_id ASC` and can stop exactly at the visible limit.
+///
+/// Comparison-only: packed postings own the current query layout, so
+/// [`crate::RedbStore`] never creates or reads these row indexes. They survive
+/// solely so benchmark variants can measure the alternative physical shape.
+#[cfg(feature = "bench-instrumentation")]
 pub(super) const BY_CREATED_AT: TableDefinition<&[u8; 40], EventKey> =
     TableDefinition::new("by_created_at_v6");
+#[cfg(feature = "bench-instrumentation")]
 pub(super) const BY_AUTHOR: TableDefinition<&[u8; 72], EventKey> =
     TableDefinition::new("by_author_time_v6");
+#[cfg(feature = "bench-instrumentation")]
 pub(super) const BY_KIND: TableDefinition<&[u8; 42], EventKey> =
     TableDefinition::new("by_kind_time_v6");
-/// Removed from the v7 production query layout. Kept only so the v6 -> v7
-/// migration can atomically delete the old table and benchmark-only historical
-/// comparisons can name the retired physical shape.
-pub(super) const LEGACY_BY_AUTHOR_KIND: TableDefinition<&[u8; 74], EventKey> =
+/// Comparison-only historical index shape used by benchmark variants; never
+/// opened by [`crate::RedbStore`] and not part of the current schema epoch.
+#[cfg(feature = "bench-instrumentation")]
+pub(super) const COMPARISON_BY_AUTHOR_KIND: TableDefinition<&[u8; 74], EventKey> =
     TableDefinition::new("by_author_kind_time_v6");
 /// NIP-01 single-letter tag index, borrowing nostrdb's clustered
 /// `(tag,value,created_at)` layout. The binary key is:
@@ -155,10 +181,12 @@ pub(super) const LEGACY_BY_AUTHOR_KIND: TableDefinition<&[u8; 74], EventKey> =
 /// parsing hex.
 /// Values are compact event keys, so a hit dereferences the immutable note
 /// directly without rebuilding or hex-encoding its NIP-01 id.
+///
+/// Comparison-only, exactly like [`BY_CREATED_AT`].
+#[cfg(feature = "bench-instrumentation")]
 pub(super) const BY_TAG: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_tag_v6");
-/// Immutable packed ordered-postings artifacts. These tables are dual-written
-/// while the v7 row indexes remain query-authoritative; the v8 migration flips
-/// authority only after exact differential validation.
+/// Immutable packed ordered-postings artifacts. Packed postings are the
+/// current query-authoritative representation.
 pub(super) const POSTINGS_SEGMENTS: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("postings_segments_v8");
 pub(super) const POSTINGS_DICTIONARIES: TableDefinition<u64, &[u8]> =
@@ -216,7 +244,7 @@ pub(super) const OUTBOX_DISPLACED: TableDefinition<&str, &[u8]> =
 /// it (Fable checkpoint R2: folding attempt eligibility into
 /// `next_deadline` here is a busy-loop spin hazard — that fold ships with
 /// the retry-owner follow-up, not this frame) and `recover_outbox` does not
-/// read it — it is created purely for forward schema compatibility.
+/// read it — it is part of the one current store schema.
 #[allow(dead_code)]
 pub(super) const OUTBOX_ATTEMPTS: TableDefinition<&str, &str> =
     TableDefinition::new("outbox_attempts");

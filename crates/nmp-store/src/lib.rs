@@ -1121,11 +1121,6 @@ pub enum LaneState {
         cause: TransientCause,
         raw_reason: Option<String>,
     },
-    /// A v1 `Started` fact discovered during additive-schema bootstrap.
-    /// The engine, not the store, decides how durability resolves it.
-    LegacyInFlight {
-        ordinal: u64,
-    },
     Terminal {
         ordinal: u64,
         outcome: AttemptOutcome,
@@ -1187,9 +1182,9 @@ pub struct AttemptTransientDetail {
     pub raw_reason: Option<String>,
 }
 
-/// Additive evidence beside a v1 attempt row. New rows are immutable
-/// `Started` facts; upgrade reads also accept terminal rows written by the
-/// pre-detail implementation.
+/// The current evidence row beside an immutable `Started` attempt row. Every
+/// attempt in the current schema has exactly one of these; there is no
+/// pre-detail attempt shape to adopt or synthesize a shell for (#867).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoveredAttemptDetails {
     pub version: u8,
@@ -1269,10 +1264,9 @@ pub struct RecoveredRouteRevision {
     pub relays: BTreeSet<RelayUrl>,
 }
 
-/// Effective attempt state. New v1 rows record `Started` before the engine
-/// emits `PublishEvent` and are never rewritten; terminal variants are
-/// overlaid from additive details. Upgrade reads also preserve legacy terminal
-/// v1 rows written before the additive detail table existed.
+/// Effective attempt state. Base rows record `Started` before the engine emits
+/// `PublishEvent` and are never rewritten; terminal variants are overlaid from
+/// the required detail row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AttemptOutcome {
     Started,

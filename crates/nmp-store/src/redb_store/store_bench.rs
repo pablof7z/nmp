@@ -21,8 +21,8 @@ use super::query::{
     kind_cardinality_key, tag_cardinality_key, tag_index_key,
 };
 use super::schema::{
-    BY_AUTHOR, BY_CREATED_AT, BY_KIND, BY_TAG, EVENTS, EVENT_IDS, EVENT_OBSERVATIONS,
-    INDEX_CARDINALITY, LEGACY_BY_AUTHOR_KIND, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_REFS,
+    BY_AUTHOR, BY_CREATED_AT, BY_KIND, BY_TAG, COMPARISON_BY_AUTHOR_KIND, EVENTS, EVENT_IDS,
+    EVENT_OBSERVATIONS, INDEX_CARDINALITY, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_REFS,
 };
 use super::*;
 
@@ -475,7 +475,7 @@ fn init_reduced_database(path: &Path, variant: StoreBenchVariant) -> Result<Data
     }
     if variant.has_author_kind() {
         write_txn
-            .open_table(LEGACY_BY_AUTHOR_KIND)
+            .open_table(COMPARISON_BY_AUTHOR_KIND)
             .map_err(|error| error.to_string())?;
     }
     if variant.has_tag() {
@@ -566,7 +566,7 @@ fn run_reduced(
             .map_err(|error| error.to_string())?;
         let mut by_author_kind = variant
             .has_author_kind()
-            .then(|| write_txn.open_table(LEGACY_BY_AUTHOR_KIND))
+            .then(|| write_txn.open_table(COMPARISON_BY_AUTHOR_KIND))
             .transpose()
             .map_err(|error| error.to_string())?;
         let mut by_tag = variant
@@ -1169,7 +1169,7 @@ pub fn run_prepared_redb_store_bench(
             .open_table(BY_KIND)
             .map_err(|error| error.to_string())?;
         let mut by_author_kind = write_txn
-            .open_table(LEGACY_BY_AUTHOR_KIND)
+            .open_table(COMPARISON_BY_AUTHOR_KIND)
             .map_err(|error| error.to_string())?;
         let mut by_tag = write_txn
             .open_table(BY_TAG)
@@ -1343,7 +1343,7 @@ pub fn run_prepared_redb_store_bench(
             .map_err(|e| e.to_string())?
             .len(),
         read_txn
-            .open_table(LEGACY_BY_AUTHOR_KIND)
+            .open_table(COMPARISON_BY_AUTHOR_KIND)
             .map_err(|e| e.to_string())?
             .len(),
         read_txn

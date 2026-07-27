@@ -34,16 +34,15 @@ use nostr::filter::MatchEventOptions;
 use nostr::{Event, Timestamp};
 use serde::{Deserialize, Serialize};
 
-/// The `CoverageKey` schema version (#106, Fable's refinement of atlas's C
-/// recommendation): folded into every key's HASH (below) and PREFIXED onto
-/// its durable row key (`RedbStore::coverage_row_key`) — two independent
-/// signals, so a legacy row is detectable both by string prefix (cheap,
-/// what `gc`'s legacy-purge pass actually greps for) and would fail to
-/// collide even if a caller somehow bypassed the prefix. v1 was the
-/// pre-#106 scheme: bare `ConcreteFilter`, no context. v2 widens the
-/// identity to a full [`ContextualAtom`] (`source`/`access` folded in) so
-/// two Demands differing only in intended authority never share a coverage
-/// row (bug-class ledger #18's store-side twin of the atom-refcount fix).
+/// The `CoverageKey` schema version (#106): folded into every key's HASH
+/// (below) and PREFIXED onto its durable row key
+/// (`RedbStore::coverage_row_key`). The current identity is the full
+/// [`ContextualAtom`] (`source`/`access` folded in), so two Demands differing
+/// only in intended authority never share a coverage row (bug-class ledger
+/// #18's store-side twin of the atom-refcount fix).
+///
+/// It is a schema tag, not a compatibility discriminator: no reader decodes a
+/// different version, and `gc` has no purge pass for one (#867).
 pub const COVERAGE_KEY_VERSION: u8 = 2;
 
 /// The coverage identity of a narrow demand atom: its [`ContextualAtom`]
@@ -356,16 +355,6 @@ pub struct GcReport {
     pub coverage_rows_shrunk: usize,
     /// Coverage rows deleted because the shrink emptied their interval.
     pub coverage_rows_deleted: usize,
-    /// Legacy-schema coverage rows purged outright (#106, Fable's C
-    /// refinement): a row whose durable key predates the current
-    /// `CoverageKey` schema version is permanently orphaned (nothing will
-    /// ever compute a matching key for it again), so `gc` deletes it
-    /// unconditionally rather than let it linger. Disjoint from
-    /// `coverage_rows_deleted` (which is specifically shrink-emptied
-    /// current-schema rows) so a test/operator can distinguish "ordinary
-    /// GC deleted this" from "this was a leftover from before a schema
-    /// migration".
-    pub legacy_coverage_rows_purged: usize,
 }
 
 /// A window-erased `ConcreteFilter` shape, JSON-encodable for durable

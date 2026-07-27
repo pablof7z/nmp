@@ -290,7 +290,7 @@ pub(super) fn bootstrap_outbox_lanes(
             .map_err(persist_err)?;
         let attempts_table = write_txn.open_table(OUTBOX_ATTEMPTS).map_err(persist_err)?;
         let mut lanes = write_txn.open_table(OUTBOX_LANES).map_err(persist_err)?;
-        let mut details = write_txn
+        let details = write_txn
             .open_table(OUTBOX_ATTEMPT_DETAILS)
             .map_err(persist_err)?;
         let (lower, upper) = prefix_range(intent_row_prefix(intent_id));
@@ -338,29 +338,34 @@ pub(super) fn bootstrap_outbox_lanes(
             let revision = decode_route_revision(key.value(), value.value())?;
             relays.extend(revision.relays);
         }
-        for attempt in &attempts {
-            relays.insert(attempt.relay.clone());
-        }
+        // #867: the current schema writes an attempt's base row, its detail
+        // row, and its route revision together. Bootstrap therefore VERIFIES
+        // that shape instead of adopting a pre-detail one — a missing detail
+        // row is corruption of the current epoch, not an older writer to be
+        // accommodated with a synthesized shell.
+        let attempt_keys: BTreeSet<_> = attempts
+            .iter()
+            .map(|attempt| (attempt.relay.clone(), attempt.ordinal))
+            .collect();
         for attempt in &attempts {
             if !details_by_key.contains_key(&(attempt.relay.clone(), attempt.ordinal)) {
-                let shell = RecoveredAttemptDetails {
-                    version: 1,
-                    intent_id,
-                    relay: attempt.relay.clone(),
-                    ordinal: attempt.ordinal,
-                    started_at: None,
-                    handoff: None,
-                    transient: None,
-                    finished_at: None,
-                    terminal: None,
-                };
-                details
-                    .insert(
-                        attempt_key(intent_id, &attempt.relay, attempt.ordinal).as_str(),
-                        encode_json(&shell, "attempt details")?.as_str(),
-                    )
-                    .map_err(persist_err)?;
+                return Err(PersistenceError::invariant(
+                    "attempt row is missing its detail row",
+                ));
             }
+            if !relays.contains(&attempt.relay) {
+                return Err(PersistenceError::invariant(
+                    "attempt relay is absent from every route revision",
+                ));
+            }
+        }
+        if details_by_key
+            .keys()
+            .any(|detail_key| !attempt_keys.contains(detail_key))
+        {
+            return Err(PersistenceError::invariant(
+                "attempt detail row has no base attempt row",
+            ));
         }
         for relay in relays {
             let key = LaneKey { intent_id, relay };
@@ -388,7 +393,7 @@ pub(super) fn bootstrap_outbox_lanes(
                     }))
             {
                 return Err(PersistenceError::invariant(
-                    "contradictory live v1 Started attempt history",
+                    "contradictory live attempt history",
                 ));
             }
             if let Some(existing) = lanes.get(storage_key.as_str()).map_err(persist_err)? {
@@ -421,25 +426,20 @@ pub(super) fn bootstrap_outbox_lanes(
                 }
                 continue;
             }
-            let last_ordinal = lane_attempts.last().map_or(0, |attempt| attempt.ordinal);
-            let state = match lane_attempts.last() {
-                None => LaneState::WaitingConnection,
-                Some(attempt) if attempt.outcome == AttemptOutcome::Started => {
-                    LaneState::LegacyInFlight {
-                        ordinal: attempt.ordinal,
-                    }
-                }
-                Some(attempt) => LaneState::Terminal {
-                    ordinal: attempt.ordinal,
-                    outcome: attempt.outcome.clone(),
-                },
-            };
+            // The current schema commits a lane row before any attempt on it
+            // may start, so attempt history without a lane is corruption, not
+            // an older layout to reconstruct a state for.
+            if !lane_attempts.is_empty() {
+                return Err(PersistenceError::invariant(
+                    "attempt history exists without its lane row",
+                ));
+            }
             let lane = RecoveredLane {
                 version: 1,
                 key,
                 revision: 1,
-                last_ordinal,
-                state,
+                last_ordinal: 0,
+                state: LaneState::WaitingConnection,
             };
             let encoded = encode_json(&lane, "outbox lane")?;
             lanes

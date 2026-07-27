@@ -1,28 +1,22 @@
 use super::canonical::{fold_seen_at, observation_key, observation_range, observation_relay_key};
-use super::event_ops::CoverageRowRecord;
 use super::outbox::{
     is_suppressed_in_txn, reconcile_ephemeral_receipts_in_txn, replace_lane_in_txn,
     OUTBOX_KIND5_CLAIMS, OUTBOX_SUPPRESS_BY_ADDR, OUTBOX_SUPPRESS_BY_ID,
 };
 use super::postings::Family;
-#[cfg(test)]
-use super::postings_store::crash_if_postings;
-use super::postings_store::{rebuild_from_canonical, scan_packed, PackedScan};
-use super::query::{rebuild_index_cardinality_from_events, OrderedIndex, OrderedPlan};
+use super::postings_store::{scan_packed, PackedScan};
+use super::query::{OrderedIndex, OrderedPlan};
 use super::schema::{
-    persist_err, EventKey, RelayKey, ADDR_INDEX, ADDR_TOMBSTONES, BY_AUTHOR, BY_CREATED_AT,
-    BY_KIND, BY_TAG, COVERAGE, COVERAGE_MAX_EVICTION_REPAIR_KEY,
-    COVERAGE_MAX_EVICTION_REPAIR_VERSION, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS,
-    EVENT_STORE_META, EXPIRATION_INDEX, INDEX_CARDINALITY, INDEX_CARDINALITY_META,
-    INDEX_CARDINALITY_SAMPLE_KEY, INDEX_CARDINALITY_SAMPLE_META, INDEX_CARDINALITY_VERSION,
-    INDEX_CARDINALITY_VERSION_KEY, LEGACY_BY_AUTHOR_KIND, LEGACY_EVENT_TABLES,
-    LEGACY_SCHEMA_VERSION, OUTBOX_ATTEMPTS, OUTBOX_ATTEMPT_DETAILS, OUTBOX_CORRELATIONS,
-    OUTBOX_DEADLINES, OUTBOX_DEADLINES_BY_INTENT, OUTBOX_DISPLACED, OUTBOX_INTENTS, OUTBOX_LANES,
-    OUTBOX_META, OUTBOX_RECEIPTS, OUTBOX_ROUTE_REVISIONS, PENDING_EPHEMERAL_RECEIPTS_KEY,
-    POSTINGS_DEAD_KEYS, POSTINGS_DICTIONARIES, POSTINGS_META, POSTINGS_READY, POSTINGS_RUN_BY_MIN,
-    POSTINGS_RUN_META, POSTINGS_SEGMENTS, PREVIOUS_SCHEMA_VERSION, REDB_CACHE_BYTES, RELAYS,
-    RELAY_KEYS, RELAY_META, RELAY_REFS, SCHEMA_META, SCHEMA_VERSION, SCHEMA_VERSION_KEY,
-    TOMBSTONES,
+    persist_err, unsupported_schema, EventKey, RelayKey, ADDR_INDEX, ADDR_TOMBSTONES, COVERAGE,
+    EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS, EVENT_STORE_META, EXPIRATION_INDEX,
+    INDEX_CARDINALITY, INDEX_CARDINALITY_META, INDEX_CARDINALITY_SAMPLE_KEY,
+    INDEX_CARDINALITY_SAMPLE_META, INDEX_CARDINALITY_VERSION, INDEX_CARDINALITY_VERSION_KEY,
+    OUTBOX_ATTEMPTS, OUTBOX_ATTEMPT_DETAILS, OUTBOX_CORRELATIONS, OUTBOX_DEADLINES,
+    OUTBOX_DEADLINES_BY_INTENT, OUTBOX_DISPLACED, OUTBOX_INTENTS, OUTBOX_LANES, OUTBOX_META,
+    OUTBOX_RECEIPTS, OUTBOX_ROUTE_REVISIONS, PENDING_EPHEMERAL_RECEIPTS_KEY, POSTINGS_DEAD_KEYS,
+    POSTINGS_DICTIONARIES, POSTINGS_META, POSTINGS_READY, POSTINGS_RUN_BY_MIN, POSTINGS_RUN_META,
+    POSTINGS_SEGMENTS, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_META, RELAY_REFS, SCHEMA_META,
+    SCHEMA_VERSION, SCHEMA_VERSION_KEY, TOMBSTONES,
 };
 #[cfg(any(test, feature = "bench-instrumentation"))]
 use super::AtomicU64;
@@ -36,7 +30,7 @@ use super::{
     PreparedFilter, Provenance, RecoveredLane, RedbStoreOpenError, RelayUrl, StoreOwnership,
     StoredEvent, StoredEventView, Timestamp,
 };
-use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableHandle};
+use redb::{ReadableDatabase, ReadableTableMetadata, TableHandle};
 
 /// A persistent, `redb`-backed `EventStore`. One database, MVCC, ACID; the
 /// same insert door and coverage/GC contract as [`crate::MemoryStore`], the
@@ -160,15 +154,22 @@ impl RedbStore {
 
     /// Open (creating if absent) a `redb` database file at `path`.
     ///
-    /// A healthy v7 database takes only a read transaction: the explicit
-    /// schema marker proves every table exists, and one exact metadata count
-    /// tells us whether crash-abandoned ephemeral receipts need recovery.
+    /// A healthy current-schema database takes only a read transaction: the
+    /// explicit schema marker proves every table exists, and one exact
+    /// metadata count tells us whether crash-abandoned ephemeral receipts need
+    /// recovery.
+    ///
     /// The returned store owns one nonblocking cross-process exclusive lock
     /// on the resolved target for as long as it lives; a second owner —
     /// through this path, a relative alias, or any symlink alias, in this
     /// process or another — is refused with
     /// [`RedbStoreOpenError::StoreAlreadyOpen`] before a second database
     /// handle exists.
+    ///
+    /// Any nonempty database that is not exactly the current schema epoch is
+    /// refused with [`RedbStoreOpenError::UnsupportedSchema`] before a store
+    /// is exposed and before any byte is mutated. There is no migration,
+    /// adoption, alias, or destructive-reset path.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, RedbStoreOpenError> {
         Self::open_inner(path, BenchmarkDurability::Immediate, |path| {
             Database::builder()
@@ -237,6 +238,8 @@ impl RedbStore {
         let path = path.as_ref();
         // Ownership first: nothing may create, expose, or mutate the database
         // before this process holds the one exclusive lock for the target.
+        // #867 depends on this order — a store refused for its schema epoch is
+        // never inspected by a process that does not own it.
         let ownership = acquire_for_open(path)?;
         // Create through the RESOLVED target, never the possibly-retargeted
         // alias the caller supplied — the same canonical identity selected
@@ -246,66 +249,63 @@ impl RedbStore {
         // A retarget racing the create fails closed: `db` and `ownership`
         // both drop here, so nothing is exposed and the lock is released.
         ownership.revalidate(path)?;
-        // Schema v6 deliberately carried no event-row migration. Refuse any
-        // older NMP event epoch before creating a single v7 table: otherwise
-        // canonical events would appear empty while unversioned durable
-        // outbox/coverage/tombstone facts from the old epoch remained live.
-        // A caller opting into this breaking release must recreate the whole
-        // database, never unknowingly run a split-brain mixture.
-        let (table_count, has_schema_marker, has_legacy_epoch) = {
+        // #867: the explicit schema marker is the SOLE schema authority.
+        // There is no table-name inventory of older epochs to consult, because
+        // there is nothing this store could do with the answer: no pre-current
+        // decoder exists, so any nonempty store that is not exactly the
+        // current epoch is refused outright — before a `RedbStore` exists and
+        // before a single table is created or a single byte mutated.
+        let (table_count, has_schema_marker) = {
             let read_txn = db.begin_read()?;
             let mut table_count = 0usize;
             let mut has_schema_marker = false;
-            let mut has_legacy_epoch = false;
             for table in read_txn.list_tables()? {
                 table_count += 1;
-                let name = table.name();
-                has_schema_marker |= name == SCHEMA_META.name();
-                has_legacy_epoch |= LEGACY_EVENT_TABLES.contains(&name);
+                has_schema_marker |= table.name() == SCHEMA_META.name();
             }
-            (table_count, has_schema_marker, has_legacy_epoch)
+            (table_count, has_schema_marker)
         };
-        if has_legacy_epoch {
-            return Err(redb::Error::UpgradeRequired(SCHEMA_VERSION as u8).into());
-        }
 
         let mut _open_write_transactions = 0;
         if has_schema_marker {
-            let (
-                needs_schema_migration,
-                needs_legacy_index_removal,
-                needs_cardinality_rebuild,
-                needs_coverage_max_repair,
-                pending_ephemeral,
-            ) = {
+            let pending_ephemeral = {
                 let read_txn = db.begin_read()?;
                 let schema_meta = read_txn.open_table(SCHEMA_META)?;
                 let version = schema_meta
                     .get(SCHEMA_VERSION_KEY)?
                     .map(|guard| guard.value());
-                if !matches!(
-                    version,
-                    Some(SCHEMA_VERSION | PREVIOUS_SCHEMA_VERSION | LEGACY_SCHEMA_VERSION)
-                ) {
-                    return Err(redb::Error::UpgradeRequired(SCHEMA_VERSION as u8).into());
+                // Exactly one accepted epoch. Anything else — older, newer, or
+                // absent — is the single refusal; the caller recreates the
+                // store deliberately rather than having their bytes silently
+                // upgraded, adopted, or reset underneath them.
+                if version != Some(SCHEMA_VERSION) {
+                    return Err(unsupported_schema(ownership.target(), version));
                 }
-                let needs_schema_migration = version != Some(SCHEMA_VERSION);
-                let needs_legacy_index_removal = version == Some(LEGACY_SCHEMA_VERSION);
-                let needs_coverage_max_repair = schema_meta
-                    .get(COVERAGE_MAX_EVICTION_REPAIR_KEY)?
-                    .map(|guard| guard.value())
-                    != Some(COVERAGE_MAX_EVICTION_REPAIR_VERSION);
                 let cardinality_meta = read_txn.open_table(INDEX_CARDINALITY_META)?;
-                let cardinality_version = cardinality_meta
+                // Inside the current epoch these rows are an invariant, not a
+                // compatibility question: the create path writes both in the
+                // same transaction as the schema marker. A marker that says
+                // "current" while they disagree is corruption of the current
+                // epoch, and must stay typed as corruption so it is never
+                // mistaken for an old epoch or silently rebuilt.
+                if cardinality_meta
                     .get(INDEX_CARDINALITY_VERSION_KEY)?
-                    .map(|guard| guard.value());
-                let cardinality_sample_meta = read_txn.open_table(INDEX_CARDINALITY_SAMPLE_META)?;
-                let cardinality_sample_key_len = cardinality_sample_meta
-                    .get(INDEX_CARDINALITY_SAMPLE_KEY)?
-                    .map(|value| value.value().len());
-                if cardinality_sample_key_len.is_some_and(|len| len != 32) {
+                    .map(|guard| guard.value())
+                    != Some(INDEX_CARDINALITY_VERSION)
+                {
                     return Err(redb::Error::Corrupted(
-                        "invalid cardinality sample key length".to_owned(),
+                        "current schema is missing its index-cardinality epoch".to_owned(),
+                    )
+                    .into());
+                }
+                let cardinality_sample_meta = read_txn.open_table(INDEX_CARDINALITY_SAMPLE_META)?;
+                if cardinality_sample_meta
+                    .get(INDEX_CARDINALITY_SAMPLE_KEY)?
+                    .map(|value| value.value().len())
+                    != Some(32)
+                {
+                    return Err(redb::Error::Corrupted(
+                        "current schema is missing its cardinality sample key".to_owned(),
                     )
                     .into());
                 }
@@ -320,129 +320,37 @@ impl RedbStore {
                         ))
                     })?
                     .unwrap_or(0);
-                (
-                    needs_schema_migration,
-                    needs_legacy_index_removal,
-                    needs_legacy_index_removal
-                        || cardinality_version != Some(INDEX_CARDINALITY_VERSION)
-                        || cardinality_sample_key_len.is_none(),
-                    needs_coverage_max_repair,
-                    pending_ephemeral,
-                )
+                pending_ephemeral
             };
-            if needs_schema_migration
-                || needs_cardinality_rebuild
-                || needs_coverage_max_repair
-                || pending_ephemeral > 0
-            {
+            // The one remaining write on the reopen path is CURRENT-epoch
+            // crash recovery (crash-abandoned ephemeral receipts), not schema
+            // work: it reconciles rows this exact schema wrote and is bounded
+            // by a count this exact schema maintains.
+            if pending_ephemeral > 0 {
                 let write_txn = db.begin_write()?;
                 {
-                    if needs_schema_migration {
-                        if needs_legacy_index_removal {
-                            write_txn.delete_table(LEGACY_BY_AUTHOR_KIND)?;
-                        }
-                        rebuild_from_canonical(&write_txn)
-                            .map_err(|error| redb::Error::Corrupted(error.message().to_owned()))?;
-                        let mut schema_meta = write_txn.open_table(SCHEMA_META)?;
-                        schema_meta.insert(SCHEMA_VERSION_KEY, SCHEMA_VERSION)?;
+                    let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS)?;
+                    let reconciled =
+                        reconcile_ephemeral_receipts_in_txn(&mut outbox_receipts) as u64;
+                    if reconciled != pending_ephemeral {
+                        return Err(redb::Error::Corrupted(format!(
+                            "pending ephemeral receipt count is {pending_ephemeral}, found {reconciled} recoverable rows"
+                        ))
+                        .into());
                     }
-                    if needs_cardinality_rebuild {
-                        let mut cardinality_sample_meta =
-                            write_txn.open_table(INDEX_CARDINALITY_SAMPLE_META)?;
-                        let existing_sample_key = cardinality_sample_meta
-                            .get(INDEX_CARDINALITY_SAMPLE_KEY)?
-                            .map(|value| value.value().to_vec());
-                        let sample_key = match existing_sample_key {
-                            Some(value) => value.as_slice().try_into().map_err(|_| {
-                                redb::Error::Corrupted(
-                                    "invalid cardinality sample key length".to_owned(),
-                                )
-                            })?,
-                            None => {
-                                let key = nostr::SecretKey::generate().to_secret_bytes();
-                                cardinality_sample_meta
-                                    .insert(INDEX_CARDINALITY_SAMPLE_KEY, key.as_slice())?;
-                                key
-                            }
-                        };
-                        drop(cardinality_sample_meta);
-                        let events = write_txn.open_table(EVENTS)?;
-                        let mut cardinality = write_txn.open_table(INDEX_CARDINALITY)?;
-                        rebuild_index_cardinality_from_events(
-                            &events,
-                            &mut cardinality,
-                            &sample_key,
-                        )?;
-                        let mut cardinality_meta = write_txn.open_table(INDEX_CARDINALITY_META)?;
-                        cardinality_meta
-                            .insert(INDEX_CARDINALITY_VERSION_KEY, INDEX_CARDINALITY_VERSION)?;
-                    }
-                    if needs_coverage_max_repair {
-                        let mut coverage = write_txn.open_table(COVERAGE)?;
-                        let mut stale = Vec::new();
-                        for entry in coverage.iter()? {
-                            let (key, value) = entry?;
-                            let record: CoverageRowRecord = serde_json::from_str(value.value())
-                                .map_err(|error| {
-                                    redb::Error::Corrupted(format!(
-                                        "invalid coverage row during MAX-boundary repair: {error}"
-                                    ))
-                                })?;
-                            if record.from == u64::MAX && record.through == u64::MAX {
-                                stale.push(key.value().to_owned());
-                            }
-                        }
-                        for key in stale {
-                            coverage.remove(key.as_str())?;
-                        }
-                        drop(coverage);
-                        let mut schema_meta = write_txn.open_table(SCHEMA_META)?;
-                        schema_meta.insert(
-                            COVERAGE_MAX_EVICTION_REPAIR_KEY,
-                            COVERAGE_MAX_EVICTION_REPAIR_VERSION,
-                        )?;
-                    }
-                    if needs_schema_migration {
-                        write_txn.delete_table(BY_CREATED_AT)?;
-                        write_txn.delete_table(BY_AUTHOR)?;
-                        write_txn.delete_table(BY_KIND)?;
-                        write_txn.delete_table(BY_TAG)?;
-                    }
-                    if pending_ephemeral > 0 {
-                        let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS)?;
-                        let reconciled =
-                            reconcile_ephemeral_receipts_in_txn(&mut outbox_receipts) as u64;
-                        if reconciled != pending_ephemeral {
-                            return Err(redb::Error::Corrupted(format!(
-                                "pending ephemeral receipt count is {pending_ephemeral}, found {reconciled} recoverable rows"
-                            ))
-                            .into());
-                        }
-                        let mut outbox_meta = write_txn.open_table(OUTBOX_META)?;
-                        outbox_meta.insert(PENDING_EPHEMERAL_RECEIPTS_KEY, "0")?;
-                    }
-                }
-                #[cfg(test)]
-                if needs_coverage_max_repair {
-                    crash_if_postings("coverage-repair-before-commit");
+                    let mut outbox_meta = write_txn.open_table(OUTBOX_META)?;
+                    outbox_meta.insert(PENDING_EPHEMERAL_RECEIPTS_KEY, "0")?;
                 }
                 write_txn.commit()?;
-                #[cfg(test)]
-                if needs_schema_migration {
-                    crash_if_postings("postings-after-migration-commit");
-                }
-                #[cfg(test)]
-                if needs_coverage_max_repair {
-                    crash_if_postings("coverage-repair-after-commit");
-                }
                 _open_write_transactions += 1;
             }
         } else {
-            // A non-empty database without the v6 marker is never treated as
-            // fresh: doing so could combine old unversioned governed facts
-            // with an empty canonical epoch.
+            // A nonempty database without the exact current marker is never
+            // treated as fresh and is never mutated: initializing over it
+            // would combine unversioned durable outbox/coverage/tombstone
+            // facts with an empty canonical epoch.
             if table_count != 0 {
-                return Err(redb::Error::UpgradeRequired(SCHEMA_VERSION as u8).into());
+                return Err(unsupported_schema(ownership.target(), None));
             }
             let write_txn = db.begin_write()?;
             {
@@ -492,10 +400,6 @@ impl RedbStore {
                 write_txn.open_table(OUTBOX_CORRELATIONS)?;
                 let mut schema_meta = write_txn.open_table(SCHEMA_META)?;
                 schema_meta.insert(SCHEMA_VERSION_KEY, SCHEMA_VERSION)?;
-                schema_meta.insert(
-                    COVERAGE_MAX_EVICTION_REPAIR_KEY,
-                    COVERAGE_MAX_EVICTION_REPAIR_VERSION,
-                )?;
             }
             write_txn.commit()?;
             _open_write_transactions += 1;
@@ -599,12 +503,11 @@ impl RedbStore {
         )
     }
 
-    /// The current schema-version row-key PREFIX (#106, Fable's C
-    /// refinement): distinguishes a v2 (context-aware `ContextualAtom`)
-    /// row from a legacy v1 (bare `ConcreteFilter`, pre-#106) row by a
-    /// cheap string check, independent of `CoverageKey`'s own hash-level
-    /// version tag (`nmp-store::coverage::COVERAGE_KEY_VERSION`) -- `gc`'s
-    /// legacy-purge pass greps for the ABSENCE of this exact prefix.
+    /// The current coverage-key schema prefix, mirroring `CoverageKey`'s own
+    /// hash-level version tag (`nmp-store::coverage::COVERAGE_KEY_VERSION`).
+    /// It is part of the durable key, not a compatibility discriminator: no
+    /// reader tests for its absence, because a row lacking it cannot exist in
+    /// the one current epoch.
     pub(super) const COVERAGE_ROW_KEY_PREFIX: &'static str = "d2:";
 
     pub(super) fn coverage_row_key(key: CoverageKey, relay: &RelayUrl) -> String {
