@@ -1,4 +1,4 @@
-# Architecture review gates -- the two mechanical checks from
+# Architecture review gates -- the mechanical checks from
 # docs/design/architecture-review-gates.md (issue #496):
 #
 #   gate 5  Cross-SDK parity: the hand-written Swift and Kotlin SDK surfaces
@@ -8,15 +8,19 @@
 #           field or "Falsifiers" section concretely names must exist in the
 #           tree the PR produces (scripts/check-falsifier-honesty.sh).
 #
+# Alongside them live the narrow, per-boundary structural checks that enforce
+# one specific ownership contract each (currently #863's NIP-51
+# observational-parsing rule). Same character, same trust properties.
+#
 # This is a separate workflow file on purpose: .github/workflows/ci.yml is a
 # protected surface-governance program (scripts/check-surface-governance.sh
-# rejects ordinary-PR edits to it), while these two checks are plain
+# rejects ordinary-PR edits to it), while these checks are plain
 # shell-over-git with no toolchain, no secrets, and no pull_request_target
 # trust decisions -- an ordinary reviewable workflow is the right home.
 #
-# Both jobs are intended to be branch-protection REQUIRED checks (an
-# owner/admin setting; see the gate doc). They gate on content only and never
-# execute PR-provided code beyond these two repo scripts.
+# Gates 5 and 6 are intended to be branch-protection REQUIRED checks (an
+# owner/admin setting; see the gate doc). Every job here gates on content only
+# and never executes PR-provided code beyond these repo scripts.
 
 name: Architecture gates
 
@@ -36,6 +40,22 @@ jobs:
 
       - name: Diff Swift/Kotlin SDK vocabulary against the Rust FFI export surface
         run: bash scripts/check-sdk-parity.sh
+
+  # #863: NIP-51 Simple-groups parsing is tolerant/observational, and the two
+  # withdrawn shapes (an authoritative-sounding `decode_*` door and a public
+  # observation-qualified `ObservedSimpleGroupsList`) must be excluded by a
+  # mechanism, not by reviewer memory. Same "plain shell over repo content,
+  # no toolchain, no secrets" character as the two gates above.
+  nip51-no-derived-authority:
+    name: NIP-51 observational parsing (no derived authority)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Forbid derived NIP-51 authority and authoritative-sounding parser names
+        run: bash scripts/check-nip51-no-derived-authority.sh
 
   falsifier-honesty:
     name: Falsifier honesty (gate 6)

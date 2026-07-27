@@ -1,7 +1,14 @@
-//! Typed remembered-group/host composition over `nmp_nip51`'s decoded
-//! kind:10009 output (#63/#108). A PURE mapping -- no second subscription,
-//! no re-acquisition; the SAME kind:10009 `Demand` `nmp-nip51` already
-//! declares is the only read involved.
+//! Typed remembered-group/host composition over `nmp_nip51`'s tolerantly
+//! parsed kind:10009 output (#63/#108). A PURE mapping -- no second
+//! subscription, no re-acquisition; the SAME kind:10009 `Demand` `nmp-nip51`
+//! already declares is the only read involved.
+//!
+//! This mapping inherits its input's non-authority (#863): a `GroupRef.host`
+//! is an observed string, never a routing permission. Every NIP-29 demand
+//! constructor takes its host as an EXPLICIT typed parameter the app chose
+//! (`group_discovery_demand(host: RelayUrl)`, `group_content_demand(host:
+//! RelayUrl, ..)`); none of them read a host out of a parsed Simple-groups
+//! value.
 
 use nostr::RelayUrl;
 

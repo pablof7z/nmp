@@ -72,11 +72,11 @@ pub fn group_content_demand(host: String, group_id: String) -> Result<FfiDemand,
 
 /// Decode a delivered kind:10009 [`FfiRow`] into the composed remembered-
 /// groups/host-relays value (#108). Infallible, mirroring
-/// `nmp_nip51::decode_simple_groups_list`'s own never-fails contract:
+/// `nmp_nip51::parse_simple_groups_list_tolerant`'s own never-fails contract:
 /// malformed individual items are dropped, never the whole decode.
 #[uniffi::export]
 pub fn decode_remembered_groups(row: FfiRow) -> FfiRememberedGroups {
-    let list = nmp_nip51::decode_simple_groups_list_from_raw_tags(
+    let list = nmp_nip51::parse_simple_groups_list_from_raw_tags_tolerant(
         row.tags.iter().map(|t| t.as_slice()),
         &row.content,
     );

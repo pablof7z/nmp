@@ -4,15 +4,25 @@
 //! one-directional consumer of this crate's typed output, never the other
 //! way around.
 //!
-//! Read/decode-only in this crate today: `rememberGroup`/`forgetGroup`
+//! Read/parse-only in this crate today: `rememberGroup`/`forgetGroup`
 //! replacement-write encoding stays gated on #50's source-scoped
 //! base-version contract and is out of scope here.
+//!
+//! Parsing here is TOLERANT and OBSERVATIONAL (#863). The exported
+//! `parse_simple_groups_list_tolerant`/
+//! `parse_simple_groups_list_from_raw_tags_tolerant` accept untrusted input
+//! and return plain data -- no signature, canonical-store, provenance,
+//! routing, or mutation authority. The kind:10009 read stays an ordinary
+//! `Demand`/`LiveQuery`; this crate exports no observation handle, frame
+//! proof, witness, or qualified "observed" wrapper, and
+//! `scripts/check-nip51-no-derived-authority.sh` fails the build if one
+//! reappears.
 
 mod demand;
 mod simple_groups;
 
 pub use demand::active_account_demand;
 pub use simple_groups::{
-    decode_simple_groups_list, decode_simple_groups_list_from_raw_tags, SimpleGroupEntry,
-    SimpleGroupsList,
+    parse_simple_groups_list_from_raw_tags_tolerant, parse_simple_groups_list_tolerant,
+    SimpleGroupEntry, SimpleGroupsList,
 };
