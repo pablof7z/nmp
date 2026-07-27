@@ -33,8 +33,9 @@
 //!   frame proof exists here, and none may be reintroduced
 //!   (`scripts/check-nip51-no-derived-authority.sh`).
 //! - [`nip29`] -- the read-only NIP-29 host-browser projection (#108):
-//!   `nmp-nip51`/`nmp-nip29`'s constructors/codec as top-level free
-//!   functions, same "no `NmpEngine` instance needed" shape as [`entity`].
+//!   `nmp-nip29`'s group-discovery constructor as a top-level free function,
+//!   same "no `NmpEngine` instance needed" shape as [`entity`]. NIP-29 does
+//!   not project a fixed content catalog or a kind:9 composer (#838).
 //! - [`blossom`] -- the opt-in Blossom blob projection (#555): kind:24242
 //!   authorization drafts/validation and the blocking BUD-02/04/12 client,
 //!   engine-less like [`entity`]/[`nip29`], with each operation's failure

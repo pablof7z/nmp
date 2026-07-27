@@ -63,7 +63,6 @@ final class NMPErrorLocalizedDescriptionTests: XCTestCase {
             (.windowZeroRows, "Window initial/max must be representable nonzero row counts"),
             (.windowInitialExceedsMax(initial: 31, max: 7), "Window initial 31 exceeds max 7"),
             (.windowSelectionHasLimit, "A windowed selection must not also declare a limit"),
-            (.noActiveAccount, "Group messages require an active account"),
             (.intentAlreadyConsumed, "This composed write intent was already published once"),
             (
                 .relayInformationUnavailable(.http(reason: "sentinel-http")),

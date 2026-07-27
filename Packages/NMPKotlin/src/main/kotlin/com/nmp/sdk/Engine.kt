@@ -316,27 +316,11 @@ class NMPEngine(
     /** Enqueue a write and return its stable id plus status stream. */
     fun publish(intent: WriteIntent): Receipt = publishReceipt(ffi, intent)
 
-    /** Compose an ordinary kind:9 NIP-29 group message from semantic native
-     * state. NMP derives the active author/time, mention content, protocol
-     * tags, engine-owned host provenance, and pinned-host routing. */
-    fun groupMessageIntent(
-        host: String,
-        groupId: String,
-        content: String,
-        recipients: List<String> = emptyList(),
-        reply: GroupReplyParent? = null,
-    ): GroupSendIntent =
-        composeGroupMessageIntent(ffi, host, groupId, content, recipients, reply)
-
-    /** Publish a [GroupSendIntent] from `groupMessageIntent` (#156). Take-once
-     * -- see [publishComposedReceipt]'s own doc. */
-    fun publishComposed(intent: GroupSendIntent): Receipt = publishComposedReceipt(ffi, intent)
-
     /** Attach to retained facts without conflating corruption with absence. */
     fun reattachReceipt(id: ULong): ReceiptReattachment = reattachReceipt(ffi, id)
 
     /** #591: recover a receipt after a crash that happened BEFORE the app
-     * could durably persist the receipt id `publish`/`publishComposed`
+     * could durably persist the receipt id `publish`
      * returned -- looked up by the caller's own crash-safe correlation
      * token instead. Otherwise identical to [reattachReceipt] (the by-id
      * overload). */

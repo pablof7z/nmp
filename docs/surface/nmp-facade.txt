@@ -29611,55 +29611,6 @@ reexport nmp::WriteIntent => nmp_grammar::write::WriteIntent
                                             "struct_field": {
                                               "resolved_path": {
                                                 "args": null,
-                                                "path": "HostAuthority",
-                                                "resolved_item": {
-                                                  "definition": {
-                                                    "attrs": [],
-                                                    "inner": {
-                                                      "struct": {
-                                                        "generics": {
-                                                          "params": [],
-                                                          "where_predicates": []
-                                                        },
-                                                        "kind": {
-                                                          "plain": {
-                                                            "fields": [],
-                                                            "has_stripped_fields": true
-                                                          }
-                                                        }
-                                                      }
-                                                    },
-                                                    "name": "HostAuthority",
-                                                    "visibility": "public"
-                                                  },
-                                                  "path": "nmp_grammar::write::HostAuthority"
-                                                }
-                                              }
-                                            }
-                                          },
-                                          "name": "0",
-                                          "visibility": "default"
-                                        }
-                                      ]
-                                    }
-                                  }
-                                },
-                                "name": "PinnedHost",
-                                "visibility": "default"
-                              },
-                              {
-                                "attrs": [],
-                                "inner": {
-                                  "variant": {
-                                    "discriminant": null,
-                                    "kind": {
-                                      "tuple": [
-                                        {
-                                          "attrs": [],
-                                          "inner": {
-                                            "struct_field": {
-                                              "resolved_path": {
-                                                "args": null,
                                                 "path": "RelayListBootstrapAuthority",
                                                 "resolved_item": {
                                                   "definition": {

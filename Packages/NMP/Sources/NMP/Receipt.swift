@@ -123,19 +123,6 @@ extension NMPEngine {
         return Receipt(handle: handle)
     }
 
-    /// Publish a `GroupSendIntent` from `groupMessageIntent` (#156). Take-once:
-    /// `intent` is consumed by this call -- a second `publishComposed` on
-    /// the SAME `GroupSendIntent` throws `NMPError.intentAlreadyConsumed`
-    /// rather than silently re-publishing a stale template (recompose via
-    /// `groupMessageIntent` again for a retry). Otherwise identical to
-    /// `publish(_:)`'s receipt-stream bridge.
-    public func publishComposed(_ intent: GroupSendIntent) async throws -> Receipt {
-        let handle = try nmpRethrowing {
-            try ffi.publishComposed(intent: intent.ffi)
-        }
-        return Receipt(handle: handle)
-    }
-
     /// Attach a fresh pull stream to retained receipt facts (#680): the
     /// `.attached` result carries a new `NmpReceiptStream` that transparently
     /// traverses the durable `WriteStatus` history in finite pages and then
@@ -156,7 +143,7 @@ extension NMPEngine {
     }
 
     /// #591: recover a receipt after a crash that happened BEFORE the app
-    /// could durably persist the receipt id `publish`/`publishComposed`
+    /// could durably persist the receipt id `publish`
     /// returned -- looked up by the caller's own crash-safe correlation
     /// token instead. Otherwise identical to `reattachReceipt(id:)`.
     public func reattachReceipt(correlation: String) throws -> ReceiptReattachment {

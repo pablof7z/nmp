@@ -450,50 +450,6 @@ impl NmpEngine {
         Ok(NmpReceiptStream::new(receipt))
     }
 
-    /// Compose an ordinary kind:9 NIP-29 message from semantic inputs
-    /// (#156). The caller supplies no author, timestamp, kind, bech32
-    /// encoding, or raw tags: NMP reads the active account, owns event time,
-    /// materializes ordered/deduplicated `nostr:npub…` content references,
-    /// and composes `p`/reply-`e`/`h` plus pinned-host routing. `previous` is
-    /// temporarily omitted until NMP can prove a live host acceptance window;
-    /// no caller row or provenance claim enters the path.
-    /// Publish the returned take-once value through [`Self::publish_composed`].
-    pub fn group_message_intent(
-        &self,
-        host: String,
-        group_id: String,
-        content: String,
-        recipient_pubkeys: Vec<String>,
-        reply_to: Option<crate::nip29::FfiGroupReplyParent>,
-    ) -> Result<Arc<crate::nip29::FfiComposedWriteIntent>, FfiError> {
-        crate::nip29::group_message_intent(
-            &self.engine,
-            host,
-            group_id,
-            content,
-            recipient_pubkeys,
-            reply_to,
-        )
-    }
-
-    /// Publish a `nmp_nip29::compose_group_send`-composed intent (#115).
-    /// Take-once: `intent` is consumed by this call (`FfiComposedWriteIntent
-    /// ::take`) -- a second call on the SAME handle fails closed with
-    /// `FfiError::IntentAlreadyConsumed` rather than silently re-publishing
-    /// a stale template. Otherwise identical to [`Self::publish`]'s body
-    /// (same pull-based receipt stream); `write_intent_from_ffi`
-    /// never runs for this path -- the intent was already composed
-    /// directly, never round-tripped through the raw `FfiWriteRouting`
-    /// conversion (which withholds `PinnedHost` entirely).
-    pub fn publish_composed(
-        &self,
-        intent: Arc<crate::nip29::FfiComposedWriteIntent>,
-    ) -> Result<Arc<NmpReceiptStream>, FfiError> {
-        let write_intent = intent.take()?;
-        let receipt = self.engine.publish_tracked(write_intent)?;
-        Ok(NmpReceiptStream::new(receipt))
-    }
-
     /// Attach to a retained receipt without collapsing corrupt durable
     /// evidence into the same result as an unknown id (#680). The `Attached`
     /// variant carries an [`NmpReceiptStream`] that transparently traverses
@@ -522,7 +478,7 @@ impl NmpEngine {
     }
 
     /// #591: recover a receipt after a crash that happened BEFORE the app
-    /// could durably persist the receipt id `publish`/`publish_composed`
+    /// could durably persist the receipt id `publish`
     /// returned -- looked up by the caller's own crash-safe correlation
     /// token instead. Otherwise identical to [`Self::reattach_receipt`],
     /// except the caller cannot already know the receipt id (that is
@@ -691,8 +647,8 @@ impl Drop for NmpDiagnosticsStream {
     }
 }
 
-/// The app-facing pull-based receipt stream (returned by [`NmpEngine::publish`]/
-/// [`NmpEngine::publish_composed`], and the `Attached` reattachment, #680). It
+/// The app-facing pull-based receipt stream (returned by [`NmpEngine::publish`]
+/// and the `Attached` reattachment, #680). It
 /// exposes the stable store-issued receipt id via [`Self::id`] and delivers
 /// ordered `WriteStatus` facts via `async fn next()`. Live delivery is a finite
 /// FIFO that reports typed lag. Receipt facts are durable: the persisted
@@ -1737,108 +1693,6 @@ mod tests {
         );
     }
 
-    /// #156 account-switch falsifier through the public native boundary.
-    /// Composition snapshots A, but switching to B is serialized ahead of
-    /// publish. Acceptance must reject the stale A draft before `Accepted` or
-    /// any canonical/durable residue.
-    #[tokio::test]
-    async fn ffi_group_message_composed_as_a_cannot_publish_after_switching_to_b() {
-        use redb::{ReadableDatabase, ReadableTableMetadata};
-
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("stale-account.redb");
-        let engine = NmpEngine::new(NmpEngineConfig {
-            store_path: Some(path.to_string_lossy().into_owned()),
-            ..NmpEngineConfig::default()
-        })
-        .expect("engine must build");
-        let a = engine
-            .add_account(format!("{:064x}", 1u8))
-            .expect("A must register through the public FFI surface");
-        let b = engine
-            .add_account(format!("{:064x}", 2u8))
-            .expect("B must register through the public FFI surface");
-
-        engine
-            .set_active_account(Some(a.public_key()))
-            .expect("A must activate");
-        let intent = engine
-            .group_message_intent(
-                "wss://group-host.example.com".to_string(),
-                "group-a".to_string(),
-                "stale A message".to_string(),
-                vec![],
-                None,
-            )
-            .expect("composition as active A must succeed");
-        engine
-            .set_active_account(Some(b.public_key()))
-            .expect("B must activate before publish");
-
-        let receipt = engine
-            .publish_composed(intent)
-            .expect("pre-acceptance failure still has a stream-local correlation id");
-        let receipt_id = receipt.id();
-        match next_status(&receipt)
-            .await
-            .expect("stale author must fail deterministically")
-        {
-            FfiWriteStatus::Failed { reason } => assert_eq!(
-                reason,
-                "unsigned draft author does not match current active account"
-            ),
-            other => panic!("Failed must be first, before Accepted; got {other:?}"),
-        }
-        assert!(
-            next_status(&receipt).await.is_none(),
-            "Failed must be the sole receipt fact"
-        );
-        // Reuse the protocol selection but ask the empty configured Public
-        // lane, so this is a canonical-cache assertion with no relay dial.
-        let mut cache_probe = nmp_nip29::group_content_demand(
-            nostr::RelayUrl::parse("wss://group-host.example.com").unwrap(),
-            "group-a",
-        );
-        cache_probe.source = nmp::SourceAuthority::Public;
-        let subscription = engine
-            .engine
-            .observe(nmp::LiveQuery(cache_probe), None)
-            .expect("canonical query must open");
-        let frame = subscription
-            .recv_timeout(Duration::from_secs(5))
-            .expect("canonical query must deliver its current empty snapshot");
-        assert!(
-            !frame
-                .deltas
-                .iter()
-                .any(|delta| matches!(delta, nmp::RowDelta::Added(_))),
-            "a pre-acceptance rejection must create no canonical row"
-        );
-        drop(subscription);
-
-        let outcome = engine
-            .reattach_receipt(receipt_id)
-            .expect("reattach lookup must succeed");
-        assert!(
-            matches!(outcome, FfiReceiptReattachment::NotFound),
-            "a pre-acceptance rejection retains no durable receipt"
-        );
-        engine.shutdown();
-
-        let db = redb::Database::open(&path).expect("reopen store for residue audit");
-        let read = db.begin_read().expect("begin residue audit");
-        for table_name in ["outbox_intents", "outbox_receipts", "outbox_meta"] {
-            let definition: redb::TableDefinition<&str, &str> =
-                redb::TableDefinition::new(table_name);
-            let table = read.open_table(definition).expect("open outbox table");
-            assert_eq!(
-                table.len().expect("count outbox rows"),
-                0,
-                "pre-acceptance rejection left journal residue in {table_name}"
-            );
-        }
-    }
-
     #[test]
     fn active_account_projects_the_rust_authority_and_closed_state() {
         let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
@@ -2210,49 +2064,4 @@ mod tests {
         engine.shutdown();
     }
 
-    /// #156: `publish_composed` takes its `FfiComposedWriteIntent` exactly once.
-    /// A second call on the identical `Arc<FfiComposedWriteIntent>` must fail
-    /// closed with `FfiError::IntentAlreadyConsumed`.
-    #[tokio::test]
-    async fn ffi_publish_composed_takes_the_intent_exactly_once() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
-        let keys = nostr::Keys::generate();
-        engine
-            .set_active_account(Some(keys.public_key().to_hex()))
-            .expect("account must activate");
-
-        let intent = engine
-            .group_message_intent(
-                "wss://group-host.example.com".to_string(),
-                "group-a".to_string(),
-                "hi".to_string(),
-                vec![],
-                None,
-            )
-            .expect("a well-formed group message must compose");
-
-        let receipt = engine
-            .publish_composed(intent.clone())
-            .expect("the first publish_composed call must consume the intent and succeed");
-        assert!(
-            receipt.id() > 0,
-            "publish_composed must expose a receipt id"
-        );
-        assert!(matches!(
-            next_status(&receipt).await,
-            Some(FfiWriteStatus::Accepted)
-        ));
-
-        match engine.publish_composed(intent) {
-            Err(FfiError::IntentAlreadyConsumed) => {}
-            Err(other) => {
-                panic!("expected FfiError::IntentAlreadyConsumed on the second call, got {other:?}")
-            }
-            Ok(_) => {
-                panic!("a second publish_composed must not re-publish the consumed intent")
-            }
-        }
-
-        engine.shutdown();
-    }
 }

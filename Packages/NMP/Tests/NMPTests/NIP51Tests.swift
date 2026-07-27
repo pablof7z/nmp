@@ -42,7 +42,7 @@ final class NIP51Tests: XCTestCase {
     /// value never becomes routing authority on its own.
     ///
     /// #858's Swift falsifier too: the selected `SimpleGroupEntry` feeds
-    /// NIP-29's host-pinned constructors directly, field for field, with no
+    /// NIP-29's host-pinned discovery constructor directly, with no
     /// NIP-29-owned copy of the NIP-51 value in between.
     func testGroupBrowsingStillTakesAnExplicitlySuppliedHost() throws {
         let list = NMP.parseSimpleGroupsListTolerant(fabricatedRow(kind: 10009))
@@ -50,10 +50,6 @@ final class NIP51Tests: XCTestCase {
         let demand = try NMP.groupDiscoveryDemand(host: selected.hostRelay)
         XCTAssertEqual(demand.selection.kinds, [39000])
 
-        let content = try NMP.groupContentDemand(
-            host: selected.hostRelay, groupId: selected.groupId
-        )
-        XCTAssertEqual(content.selection.kinds, [9, 30315])
-        XCTAssertEqual(content.source, demand.source)
+        XCTAssertEqual(selected.groupId, "group-a")
     }
 }

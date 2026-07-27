@@ -64,6 +64,11 @@ Responsibilities remain separate:
 - Core validates the final draft, resolves the chosen signer, signs exactly
   once, persists it, and publishes it.
 
+Current implementation status (#838): `nmp-nip29` ships the pure
+draft-to-`GroupPublication` contextualization seam and `nmp-nipc7` separately
+ships kind:9/`q` construction. The engine/native publication step in the
+illustration above is still a required composition proof, not a shipped API.
+
 Upload failure and Nostr publication failure are distinct results. NIP-29's
 contextual publication does not transfer schema ownership of the photo to
 NIP-29.
@@ -133,8 +138,9 @@ Required proofs include:
 
 - enabling no protocol module retains a useful raw two-noun engine;
 - a module cannot claim a kind it does not define without an ownership failure;
-- NIP-29 can publish a foreign-owned draft with `h` and host routing while the
-  foreign schema owner remains unchanged;
+- NIP-29 preserves a foreign-owned draft while adding only `h` and retaining
+  its selected host; the later engine publication proof must preserve that
+  same ownership boundary;
 - composition is deterministic and the core signs once;
 - a reusable fragment prints the same graph as its raw construction;
 - disabling a module removes its code and semantic API without changing core;

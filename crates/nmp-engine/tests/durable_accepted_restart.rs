@@ -11,8 +11,8 @@ use nmp_engine::core::{
 };
 use nmp_engine::outbox::{ReceiptSink, WriteStatus};
 use nmp_grammar::{
-    AccessContext, Durability, HostAuthority, RelayListBootstrapAuthority, RelaySessionKey,
-    WriteIntent, WritePayload, WriteRouting,
+    AccessContext, Durability, RelayListBootstrapAuthority, RelaySessionKey, WriteIntent,
+    WritePayload, WriteRouting,
 };
 use nmp_router::FixtureDirectory;
 use nmp_store::{
@@ -1187,89 +1187,6 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
         1,
         "the cancellation transaction must roll back its pending-row retraction"
     );
-}
-
-/// #115, cedar's flagged gap: the ruling text only said "resolve_routes
-/// gains ONE arm," but a `PinnedHost`-routed pending write also has to
-/// survive the reattach/restart path -- `routing_snapshot` (encode) is
-/// wildcard-free so a missing arm there is a compile error, but
-/// `parse_routing_snapshot` (decode) falls through to `None` on an
-/// unrecognized prefix, which would silently mis-resolve a pinned-host
-/// write on reboot without ever touching `resolve_routes` or a live relay
-/// (invisible to `pinned_host_write.rs`'s falsifiers, which never cross a
-/// restart boundary). This proves both snapshot arms actually exist and
-/// round-trip: a `PinnedHost` write, restarted, still resolves to its
-/// EXACT host, never any other relay, and never re-accepts.
-#[test]
-fn pinned_host_routing_round_trips_across_a_restart() {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("pinned-host.redb");
-    let keys = Keys::generate();
-    let host = RelayUrl::parse("wss://pinned-host.example").unwrap();
-    let event = signed(&keys, "pinned", 600);
-    let session = signer_session(&host, event.pubkey);
-
-    let id = {
-        let store = RedbStore::open(&path).unwrap();
-        // Deliberately empty: `PinnedHost` routing must never consult the
-        // directory (#115) -- if it ever did, this publish would have no
-        // route to fall back on and this test would never see
-        // `Effect::PublishEvent` at all.
-        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
-        let handle = RelayHandle {
-            slot: 0,
-            generation: 1,
-        };
-        core.handle(EngineMsg::RelayConnected(handle, session.clone()));
-        authenticate(&mut core, handle, &session, &keys);
-        let effects = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Signed(event.clone()),
-                durability: Durability::Durable,
-                routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(host.clone())),
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(Sink::default()),
-        ));
-        assert!(effects.iter().any(|effect| matches!(effect,
-            Effect::PublishEvent(r, e, _) if r == &session && e == &event
-        )));
-        receipt_id(&effects)
-    };
-
-    // Restart: drop the whole reducer/store, reopen the SAME file.
-    let store = RedbStore::open(&path).unwrap();
-    let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
-    let recovery = core.recover_on_boot();
-    assert!(recovery
-        .iter()
-        .any(|effect| matches!(effect, Effect::EnsureWriteRelay(r) if r == &session)));
-    let handle = RelayHandle {
-        slot: 0,
-        generation: 1,
-    };
-    core.handle(EngineMsg::RelayConnected(handle, session.clone()));
-    let recovery = authenticate(&mut core, handle, &session, &keys);
-    assert!(
-        recovery.iter().any(|effect| matches!(effect,
-            Effect::PublishEvent(r, e, _) if r == &session && e == &event
-        )),
-        "a PinnedHost-routed pending write must still resolve to its exact host after a \
-         restart -- parse_routing_snapshot must decode the persisted `pinned-host-hex:` \
-         snapshot back into WriteRouting::PinnedHost, not just have routing_snapshot encode it"
-    );
-    assert!(
-        !recovery
-            .iter()
-            .any(|effect| matches!(effect, Effect::EmitReceipt(_, WriteStatus::Accepted))),
-        "boot recovery must not accept the write a second time"
-    );
-
-    let replay = Sink::default();
-    assert!(core
-        .reattach_receipt(id, Box::new(replay.clone()))
-        .is_attached());
 }
 
 /// #719: the first kind:10002's exact bootstrap relay set is part of the

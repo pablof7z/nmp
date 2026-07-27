@@ -97,15 +97,6 @@ private fun receiptStatusFlow(stream: NmpReceiptStream): Flow<WriteStatus> =
 fun publishReceipt(engine: NmpEngineInterface, intent: WriteIntent): Receipt =
     receiptFrom(nmpRethrowing { engine.publish(intent.toFfi()) })
 
-/** Publish a [GroupSendIntent] from `groupMessageIntent` (#156). Take-once:
- * `intent` is consumed by this call -- a second `publishComposed` on the
- * SAME [GroupSendIntent] throws `NMPError.IntentAlreadyConsumed` rather
- * than silently re-publishing a stale template (recompose via
- * `groupMessageIntent` again for a retry). Otherwise identical to
- * [publishReceipt]. */
-fun publishComposedReceipt(engine: NmpEngineInterface, intent: GroupSendIntent): Receipt =
-    receiptFrom(nmpRethrowing { engine.publishComposed(intent.ffi) })
-
 /** Map the reattachment outcome without collapsing corrupt retained
  * evidence into the same result as an unknown id (#680). Extracted with an
  * injectable `attach` so the [ReceiptReattachment.NotFound] /
@@ -127,7 +118,7 @@ fun reattachReceipt(engine: NmpEngineInterface, id: ULong): ReceiptReattachment 
     mapReceiptReattachment(nmpRethrowing { engine.reattachReceipt(id) }, ::receiptFrom)
 
 /** #591: recover a receipt after a crash that happened BEFORE the app could
- * durably persist the receipt id `publish`/`publishComposed` returned --
+ * durably persist the receipt id `publish` returned --
  * looked up by the caller's own crash-safe correlation token instead.
  * Otherwise identical to [reattachReceipt] (the by-id overload). The resolved
  * receipt id (#591) rides along on the attached stream handle itself

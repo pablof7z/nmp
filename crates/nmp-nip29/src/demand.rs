@@ -13,7 +13,7 @@
 
 use std::collections::BTreeSet;
 
-use nmp_grammar::{AccessContext, Binding, Demand, Filter, IndexedTagName, SourceAuthority};
+use nmp_grammar::{AccessContext, Demand, Filter, SourceAuthority};
 use nostr::RelayUrl;
 
 /// Group discovery on a selected host: `kinds:[39000]`, pinned to exactly
@@ -24,24 +24,6 @@ pub fn group_discovery_demand(host: RelayUrl) -> Demand {
     pinned_demand(
         Filter {
             kinds: Some(BTreeSet::from([39000u16])),
-            ..Filter::default()
-        },
-        host,
-    )
-}
-
-/// Group content on a selected host, scoped by the group's `h` tag:
-/// `kinds:[9, 30315]`. INFALLIBLE, same reasoning as
-/// [`group_discovery_demand`].
-pub fn group_content_demand(host: RelayUrl, group_id: &str) -> Demand {
-    let h = IndexedTagName::new('h').expect("'h' is an ASCII letter");
-    pinned_demand(
-        Filter {
-            kinds: Some(BTreeSet::from([9u16, 30315u16])),
-            tags: std::collections::BTreeMap::from([(
-                h,
-                Binding::Literal(BTreeSet::from([group_id.to_string()])),
-            )]),
             ..Filter::default()
         },
         host,
@@ -87,42 +69,5 @@ mod tests {
             SourceAuthority::Pinned(BTreeSet::from([host(1)]))
         );
         assert_eq!(demand.access, AccessContext::Public);
-    }
-
-    #[test]
-    fn group_content_demand_scopes_by_h_tag_and_pins_host() {
-        let demand = group_content_demand(host(1), "group-a");
-        assert_eq!(
-            demand.selection.kinds,
-            Some(BTreeSet::from([9u16, 30315u16]))
-        );
-        let h = IndexedTagName::new('h').unwrap();
-        assert_eq!(
-            demand.selection.tags.get(&h),
-            Some(&Binding::Literal(BTreeSet::from(["group-a".to_string()])))
-        );
-        assert_eq!(
-            demand.source,
-            SourceAuthority::Pinned(BTreeSet::from([host(1)]))
-        );
-    }
-
-    /// #108 Done-when: "Equal group filters on different hosts retain
-    /// separate identity" -- the protocol-level instance of #107's own
-    /// R1-vs-R2 engine falsifier: the identical group_id on two different
-    /// hosts must produce two DIFFERENT `Demand`s (different `source`,
-    /// hence different `atom_context()`/identity), never one aliased onto
-    /// the other.
-    #[test]
-    fn identical_group_content_on_different_hosts_yields_distinct_demands() {
-        let on_host_1 = group_content_demand(host(1), "group-a");
-        let on_host_2 = group_content_demand(host(2), "group-a");
-        assert_eq!(on_host_1.selection, on_host_2.selection);
-        assert_ne!(on_host_1.source, on_host_2.source);
-        assert_ne!(
-            on_host_1.atom_context(),
-            on_host_2.atom_context(),
-            "same selection, different pinned host, must never alias identity"
-        );
     }
 }

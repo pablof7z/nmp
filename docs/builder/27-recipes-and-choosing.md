@@ -53,11 +53,11 @@ for await snapshot in try engine.observe(activeAccountDemand()) {
     // NIP-51 decodes its own kind:10009 list, as itself.
     guard let list = snapshot.rows.first.map(parseSimpleGroupsListTolerant)
     else { continue }
-    // The app selects one entry and browses its host with NIP-29.
+    // The app selects one entry and discovers groups on its host with NIP-29.
     guard let selected = list.items.first else { continue }
-    let content = try groupContentDemand(
-        host: selected.hostRelay, groupId: selected.groupId
-    )
+    let discovery = try groupDiscoveryDemand(host: selected.hostRelay)
+    // Content selection is schema/app-owned; NIP-29 does not invent a fixed
+    // group content-kind catalog.
 }
 ```
 

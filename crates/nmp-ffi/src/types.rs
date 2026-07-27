@@ -548,13 +548,9 @@ pub enum FfiDurability {
 /// on direct Rust, not this FFI surface. `AuthorOutbox` is the only
 /// FFI-constructible routing choice.
 ///
-/// #115: `PinnedHost(HostAuthority)` gets the IDENTICAL treatment, for the
-/// IDENTICAL reason -- this enum deliberately gains NO variant for it, and
-/// no `HostAuthority` constructor is exported anywhere in this crate. An
-/// app can only ever obtain a pinned-host write transitively, through a
-/// protocol module's already-composed intent (`NmpEngine::group_message_intent`
-/// -> the opaque `FfiComposedWriteIntent`) -- never by naming a host
-/// itself. #839 removes raw recipient routing for the same reason: a
+/// #838 deletes the former pinned-host write route instead of exposing a
+/// generic host-authority escape hatch. #839 removes raw recipient routing
+/// for the same reason: a
 /// generic recipient array cannot prove that the event schema owns those
 /// recipients or that its body agrees with them. This exhaustive
 /// single-variant match IS the enforcement: a new `WriteRouting` variant

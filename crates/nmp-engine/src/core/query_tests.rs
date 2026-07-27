@@ -69,11 +69,13 @@ mod affected_handle_invalidation_tests {
         })
     }
 
-    fn pinned_signed_intent(event: SignedEvent, relay: &RelayUrl) -> WriteIntent {
+    fn exact_signed_intent(event: SignedEvent, relay: &RelayUrl) -> WriteIntent {
         WriteIntent {
             payload: WritePayload::Signed(event),
             durability: Durability::Durable,
-            routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay.clone())),
+            routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                relays: NarrowOnly::new([relay.clone()]),
+            }),
             identity_override: None,
             correlation: None,
         }
@@ -132,7 +134,7 @@ mod affected_handle_invalidation_tests {
 
         let arriving = room_event(&keys, 7, 1, 12);
         let effects = core.on_publish(
-            pinned_signed_intent(arriving.clone(), &relay),
+            exact_signed_intent(arriving.clone(), &relay),
             Box::new(CapturingReceiptSink::default()),
         );
 
@@ -193,7 +195,7 @@ mod affected_handle_invalidation_tests {
 
         let contact_list = nmp_resolver::testkit::kind3(&author, &[followed.public_key()], 20);
         let effects = core.on_publish(
-            pinned_signed_intent(contact_list, &relay),
+            exact_signed_intent(contact_list, &relay),
             Box::new(CapturingReceiptSink::default()),
         );
 
@@ -236,7 +238,9 @@ mod affected_handle_invalidation_tests {
             WriteIntent {
                 payload: WritePayload::Unsigned(unsigned),
                 durability: Durability::Durable,
-                routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay)),
+                routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                    relays: NarrowOnly::new([relay]),
+                }),
                 identity_override: None,
                 correlation: None,
             },
@@ -325,7 +329,9 @@ mod affected_handle_invalidation_tests {
                     "newest pending",
                 )),
                 durability: Durability::Durable,
-                routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay.clone())),
+                routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                    relays: NarrowOnly::new([relay.clone()]),
+                }),
                 identity_override: None,
                 correlation: None,
             },
@@ -412,7 +418,9 @@ mod affected_handle_invalidation_tests {
                     expected_base: Some(predecessor.id),
                 },
                 durability: Durability::Durable,
-                routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay)),
+                routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                    relays: NarrowOnly::new([relay]),
+                }),
                 identity_override: None,
                 correlation: None,
             },
@@ -495,7 +503,9 @@ mod affected_handle_invalidation_tests {
                     "",
                 )),
                 durability: Durability::Durable,
-                routing: WriteRouting::PinnedHost(HostAuthority::from_selected_host(relay)),
+                routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                    relays: NarrowOnly::new([relay]),
+                }),
                 identity_override: None,
                 correlation: None,
             },
