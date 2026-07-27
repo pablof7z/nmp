@@ -45,6 +45,16 @@ fn small_kind() -> impl Strategy<Value = u16> {
 //     but the generator must produce them anyway, because they are the same
 //     class of trap on an axis whose union rule does not exist yet.
 //
+// The tag axis's polarity is INVERTED relative to kinds/authors/ids, which
+// is why it needs its own generator rather than another `component_shape`
+// (measured, not assumed): an ABSENT tag name is the unconstrained shape
+// (matches every event), while a PRESENT name with an empty value set
+// (`{t: ∅}`) matches NOTHING -- it lowers to `generic_tags: {t: {}}`, which
+// `match_event` fails for tagged and untagged events alike. So a future
+// tag-union rule's trap is folding an ABSENT name into a present one, and
+// `{t: ∅}` is the harmless end; on `authors`/`kinds`/`ids` BOTH `None` and
+// `Some(∅)` are the trap.
+//
 // These helpers are deliberately RULE-AGNOSTIC: they describe the shape
 // space of a `ConcreteFilter`, not the domain of any one rule, so they keep
 // working when the AuthorUnion/KindUnion/IdUnion trio is replaced by a
