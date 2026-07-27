@@ -294,10 +294,11 @@ ways for apps to assemble a partially-correct engine.
 
 This ownership table does not require each app to rebuild the open-ended Nostr
 content renderer. Optional content/UI packages may consume the same public
-facade to provide reusable parsing, scoped reference sessions, native
-primitives, and styled source-installable components. They remain replaceable
-consumers above the engine, never a third engine noun or a source of routing,
-store, navigation, or product-policy truth. See
+facade to provide reusable parsing, exact locator values, component-scoped
+ordinary observations, native primitives, and styled source-installable
+components. They remain replaceable consumers above the engine, never a third
+engine noun or a source of routing, store, navigation, or product-policy truth.
+See
 `docs/design/ui-components-strategy.md`.
 
 ## 8. Public-surface governance

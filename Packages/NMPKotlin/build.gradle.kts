@@ -52,7 +52,7 @@ tasks.test {
     useJUnitPlatform()
     systemProperty(
         "nmp.referenceFixturePath",
-        rootProject.projectDir.resolve("../../fixtures/reference-plans.json").canonicalPath,
+        rootProject.projectDir.resolve("../../fixtures/reference-locators.json").canonicalPath,
     )
     // Live-relay test only, same discipline as LiveRelayTests.swift -- every
     // wait inside the test itself is already bounded (~30s), this is just a

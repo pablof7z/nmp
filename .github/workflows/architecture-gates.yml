@@ -8,15 +8,16 @@
 #           field or "Falsifiers" section concretely names must exist in the
 #           tree the PR produces (scripts/check-falsifier-honesty.sh).
 #
-# Alongside them live the narrow, per-boundary structural checks that enforce
-# one specific ownership contract each (currently #863's NIP-51
-# observational-parsing rule). Same character, same trust properties.
+# Alongside them live narrow, per-boundary structural checks that enforce one
+# specific ownership contract each (currently #863's NIP-51 observational
+# parsing rule and #879's pure content/locator boundary). Same character, same
+# trust properties.
 #
 # This is a separate workflow file on purpose: .github/workflows/ci.yml is a
 # protected surface-governance program (scripts/check-surface-governance.sh
-# rejects ordinary-PR edits to it), while these checks are plain
-# shell-over-git with no toolchain, no secrets, and no pull_request_target
-# trust decisions -- an ordinary reviewable workflow is the right home.
+# rejects ordinary-PR edits to it), while these checks require no secrets and
+# make no pull_request_target trust decisions -- an ordinary reviewable
+# workflow is the right home.
 #
 # Gates 5 and 6 are intended to be branch-protection REQUIRED checks (an
 # owner/admin setting; see the gate doc). Every job here gates on content only
@@ -40,6 +41,23 @@ jobs:
 
       - name: Diff Swift/Kotlin SDK vocabulary against the Rust FFI export surface
         run: bash scripts/check-sdk-parity.sh
+
+  # #879: NIP-19/NIP-21 decoding preserves exact authored locator data and
+  # must never regain engine, acquisition-policy, or compatibility-planner
+  # ownership.
+  content-parser-boundary:
+    name: Pure content/locator boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Select the repository Rust toolchain
+        run: rustup show
+
+      - name: Forbid acquisition policy and engine dependencies in locator parsing
+        run: bash scripts/check-content-parser-boundary.sh
 
   # #863: NIP-51 Simple-groups parsing is tolerant/observational, and the two
   # withdrawn shapes (an authoritative-sounding `decode_*` door and a public

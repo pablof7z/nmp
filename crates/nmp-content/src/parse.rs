@@ -1,7 +1,7 @@
 use std::ops::Range;
 use std::sync::OnceLock;
 
-use nmp_grammar::{decode_nostr_entity, reference::ReferenceTarget};
+use nmp_grammar::decode_nostr_entity;
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use regex::Regex;
 
@@ -473,7 +473,7 @@ fn tokenize_inline(
                     occurrence: ReferenceOccurrence {
                         id: stable_id(source, 20),
                         original: original.to_string(),
-                        target: ReferenceTarget::from_entity(entity),
+                        target: entity,
                         source,
                         placement: ReferencePlacement::Inline,
                     },
@@ -658,7 +658,10 @@ mod tests {
             &source[reference.source.start as usize..reference.source.end as usize],
             reference.original
         );
-        assert!(matches!(reference.target, ReferenceTarget::Profile { .. }));
+        assert!(matches!(
+            reference.target,
+            nmp_grammar::NostrEntity::Pubkey { .. }
+        ));
         assert!(document.blocks[0].inlines.iter().any(|node| matches!(
             node,
             InlineNode::Hashtag { hashtag, .. } if hashtag == "nostr"
@@ -682,12 +685,12 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_occurrences_share_target_key_but_not_occurrence_id() {
+    fn duplicate_occurrences_share_exact_locator_but_not_occurrence_id() {
         let document = parse_content(&format!("{NPUB} and {NPUB}"), ContentSyntax::PlainText);
         let references = document.references();
         assert_eq!(references.len(), 2);
         assert_ne!(references[0].id, references[1].id);
-        assert_eq!(references[0].target.key(), references[1].target.key());
+        assert_eq!(references[0].target, references[1].target);
     }
 
     #[test]
