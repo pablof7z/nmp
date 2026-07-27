@@ -6,6 +6,25 @@
 use super::*;
 
 impl<S: EventStore> EngineCore<S> {
+    /// Mint a NIP-77 role wire id nobody has ever been handed before (#932).
+    ///
+    /// Every call advances [`Self::next_nip77_incarnation`], so re-deriving a
+    /// role subscription for the same plan id, role, and filter after the
+    /// previous one was closed and discarded yields a DIFFERENT 64-hex wire
+    /// string. A straggler EOSE addressed to the closed incarnation therefore
+    /// resolves to nothing instead of popping the reopened request's fresh
+    /// attribution FIFO -- see [`nip77_role_sub_id`] for the full reasoning.
+    fn mint_nip77_role_sub_id(
+        &mut self,
+        plan_sub_id: &SubId,
+        role: u8,
+        filter: &ConcreteFilter,
+    ) -> SubId {
+        let incarnation = self.next_nip77_incarnation;
+        self.next_nip77_incarnation = self.next_nip77_incarnation.wrapping_add(1);
+        nip77_role_sub_id(plan_sub_id, role, filter, incarnation)
+    }
+
     // ---- subscribe / unsubscribe / re-root ------------------------------
 
     pub(super) fn on_subscribe(&mut self, query: LiveQuery, sink: Box<dyn RowSink>) -> Vec<Effect> {
@@ -597,7 +616,7 @@ impl<S: EventStore> EngineCore<S> {
             limit: Some(0),
             ..filter.clone()
         };
-        let live_sub_id = nip77_role_sub_id(&plan_sub_id, NIP77_LIVE_ROLE, &live_filter);
+        let live_sub_id = self.mint_nip77_role_sub_id(&plan_sub_id, NIP77_LIVE_ROLE, &live_filter);
         let public_session = RelaySessionKey::public(probed.url().clone());
         self.record_observed_request(
             &public_session,
@@ -660,6 +679,26 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
 
+        self.retire_temporary_reqs_for_plan(plan_sub_id, &mut closes);
+
+        closes.into_iter().map(WireOp::Close).collect()
+    }
+
+    /// Withdraw every temporary repair REQ owned by `plan_sub_id`, adding
+    /// each subscription that must leave the wire to `closes`.
+    ///
+    /// Shared by [`Self::cancel_nip77_repair_for_plan`] and
+    /// [`Self::start_backlog_req`] rather than written twice, because a
+    /// `BacklogActivatesLive` entry owns a NESTED live candidate (and
+    /// sometimes its predecessor) that lives in no other map at all -- a
+    /// second, hand-rolled teardown that forgot that nesting would leak the
+    /// candidate on the wire forever and leave a wire id a late EOSE could
+    /// still resolve through.
+    fn retire_temporary_reqs_for_plan(
+        &mut self,
+        plan_sub_id: &SubId,
+        closes: &mut BTreeSet<SubId>,
+    ) {
         let temporary: Vec<SubId> = self
             .pending_backfills
             .iter()
@@ -719,8 +758,6 @@ impl<S: EventStore> EngineCore<S> {
             self.attribution.discard_sub(&sub_id);
             closes.insert(sub_id);
         }
-
-        closes.into_iter().map(WireOp::Close).collect()
     }
 
     pub(super) fn close_nip77_plan(
@@ -817,7 +854,7 @@ impl<S: EventStore> EngineCore<S> {
             .collect();
         let (reconciler, initial_hex) = Reconciler::open(&local_ids);
 
-        let neg_sub_id = nip77_role_sub_id(&plan_sub_id, NIP77_NEG_ROLE, &neg_filter);
+        let neg_sub_id = self.mint_nip77_role_sub_id(&plan_sub_id, NIP77_NEG_ROLE, &neg_filter);
 
         let attribution_send = self.attribution.record_send(
             &RelaySessionKey::public(probed.url().clone()),
@@ -923,7 +960,8 @@ impl<S: EventStore> EngineCore<S> {
             // sub carries no coverage credit of its own anyway (`absorbed`
             // is empty below; its typed `TemporaryReq::MissingIds` owner
             // unlocks `sub_id`'s credit at EOSE).
-            let backfill_sub = nip77_role_sub_id(&plan_sub_id, NIP77_MISSING_ROLE, &backfill);
+            let backfill_sub =
+                self.mint_nip77_role_sub_id(&plan_sub_id, NIP77_MISSING_ROLE, &backfill);
             self.pending_backfills.insert(
                 backfill_sub.clone(),
                 TemporaryReq::MissingIds {
@@ -1011,17 +1049,25 @@ impl<S: EventStore> EngineCore<S> {
             limit: None,
             ..filter
         };
-        let backlog_sub_id = nip77_role_sub_id(&plan_sub_id, NIP77_FALLBACK_ROLE, &filter);
         let relay = plan_sub_id.0.clone();
-        let mut ops = Vec::new();
-        if self
-            .pending_backfills
-            .insert(backlog_sub_id.clone(), request)
-            .is_some()
-        {
-            self.attribution.discard_sub(&backlog_sub_id);
-            ops.push(WireOp::Close(backlog_sub_id.clone()));
-        }
+        // Displace any repair REQ this plan subscription still owns before
+        // opening a new one. It used to be enough to notice that the newly
+        // derived id COLLIDED with a pending entry's, but role ids are now
+        // reincarnated per mint (#932), so an identical shape no longer
+        // yields an identical key and a key collision can never be observed
+        // again. A plan carries at most one repair phase at a time -- every
+        // route into here first removes its own phase, and every route into a
+        // NEW phase goes through `cancel_nip77_repair_for_plan` -- so this
+        // sweep is expected to find nothing; it exists so that if that
+        // invariant is ever broken the stale repair is retired (nested live
+        // candidate included) instead of leaking on the wire.
+        let mut displaced = BTreeSet::new();
+        self.retire_temporary_reqs_for_plan(&plan_sub_id, &mut displaced);
+        let mut ops: Vec<WireOp> = displaced.into_iter().map(WireOp::Close).collect();
+        let backlog_sub_id =
+            self.mint_nip77_role_sub_id(&plan_sub_id, NIP77_FALLBACK_ROLE, &filter);
+        self.pending_backfills
+            .insert(backlog_sub_id.clone(), request);
         self.record_observed_request(
             &RelaySessionKey::public(relay.clone()),
             &backlog_sub_id,

@@ -313,6 +313,26 @@ pub struct WireRecord {
 }
 
 impl WireRecord {
+    /// Subscription ids this client REVIVED: named by a REQ, allowed to go
+    /// dead, then named by a fresh REQ again (#932).
+    ///
+    /// `replaces` already distinguishes "this REQ replaced a subscription
+    /// that was still live" (an in-place widen, which is normal and cheap)
+    /// from "this REQ opened a subscription that was not live". A REQ of the
+    /// second kind naming an id the relay has seen before is a revival — and
+    /// a revival is what lets an answer the relay is still sending for the
+    /// FIRST request be mistaken for the answer to the second.
+    pub fn revived_subscription_ids(&self) -> Vec<String> {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        let mut revived = Vec::new();
+        for req in &self.reqs {
+            if !req.replaces && !seen.insert(req.sub_id.as_str()) {
+                revived.push(req.sub_id.clone());
+            }
+        }
+        revived
+    }
+
     /// Distinct subscription ids, in first-seen order.
     pub fn subscription_ids(&self) -> Vec<String> {
         let mut seen = BTreeSet::new();

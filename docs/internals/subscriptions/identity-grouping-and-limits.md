@@ -683,19 +683,108 @@ quiet socket. Until then the polling helper stays, used only to SEQUENCE a
 stimulus (so "one more group" arrives after the first subscription is genuinely
 live), never to take an assertion.
 
-### 8.2 OPEN — the Close/reopen straggler race
+### 8.2 CLOSED — the Close/reopen straggler race (#932)
 
 The coverage ruling assumed a Close leaves pending snapshots to be "harmlessly
-popped never-attributed." The code now **discards** the inflight FIFO and wire
-mapping at Close. So: Close at compile N, re-open the same skeleton at N+1
-re-registers the same wire string with a fresh FIFO, and a straggler EOSE from
-the pre-Close REQ mints coverage for a request the relay has not finished
-serving.
+popped never-attributed." The code instead **discards** the inflight FIFO and
+the wire mapping at Close. So: Close at compile N, re-open the same skeleton at
+N+1 re-registers the same wire string with a fresh FIFO, and a straggler EOSE
+from the pre-Close REQ mints coverage for a request the relay has not finished
+serving. Coverage is durable and is what `plan_is_fresh_for` trusts, so this
+over-claims acquisition outright — the engine believes it holds data that never
+arrived.
 
 Correct layer: the wire string is a **per-connection namespace** owned by
 `EngineCore`; the router `SubId` is a **plan identity**. Incarnation freshness
-belongs at the engine's wire-string boundary. §7.2's never-recycle rule closes
-this as a by-product; if that design is not taken, this needs its own fix.
+belongs at the engine's wire-string boundary, never in router identity.
+
+§7.2's never-recycle rule closed this for the plan-identity path. It did not
+close it everywhere, and the audit below is what established where the residue
+actually was.
+
+#### 8.2.1 The audit: every path that registers a wire string
+
+Attribution's `(session, wire string) -> SubId` map is written in exactly one
+place, `AttributionState::record_send`, reached either directly or through
+`EngineCore::record_observed_request`. Every caller, and whether a later
+incarnation could repeat a string a `discard_sub` had already dropped:
+
+**Planned REQ, ordinary recompile** (`apply_wire_delta`). SAFE. The id is the
+router's allocated token; the mint counter is monotonic for the `Router`'s
+lifetime and the one-diff sweep only ever assigns tokens drawn from the
+PREVIOUS plan, so a token that left the plan is never handed out again.
+
+**Planned REQ, replay on connect** (`on_relay_connected`). SAFE, twice over:
+the same allocated token, and `AttributionState::clear_session` wipes the whole
+session's map immediately before the replay, so no pre-disconnect string
+survives to be repeated.
+
+**Planned REQ, replay on the AUTH ready transition** (`finish_auth_ok`). SAFE.
+Same allocated token, and it appends to the SAME FIFO rather than a fresh one —
+that is the ruling's intersection rule operating normally, not a reincarnation.
+
+**NIP-77 live candidate**, `nip77_role_sub_id(plan, 0x71, filter)`. WAS THE
+RESIDUE. Content-derived from a plan token that structural-signature matching
+deliberately CARRIES FORWARD across recompiles, so a filter that churns away
+and back re-derives an identical string after the first was closed and
+discarded. `limit:0` poisons its coverage, so the observable is the handoff
+barrier itself: a straggler tripped `activate_live_and_open_neg` for a
+candidate the relay never acknowledged.
+
+**NIP-77 NEG session**, `nip77_role_sub_id(plan, 0x72, filter)`. WAS THE
+RESIDUE, same mechanism. Unlimited and carrying the demand's real absorbed
+keys, so a straggler EOSE on a repeated string mints coverage directly.
+
+**NIP-77 missing-ids backfill**, `nip77_role_sub_id(plan, 0x73, ids)`. WAS THE
+RESIDUE, same mechanism. Its own `absorbed` is empty, but its EOSE is what
+unlocks the deferred NEG credit, so a straggler released that credit early.
+
+**NIP-77 fallback backlog**, `nip77_role_sub_id(plan, 0x74, filter)`. WAS THE
+RESIDUE and the sharpest instance: unlimited (nothing poisons it) and carrying
+the demand's real absorbed keys. The falsifier drives exactly this one and
+watches durable `RecordCoverage` intervals appear for a request the relay had
+not finished serving.
+
+**Negentropy prober**, `SubId::for_wire(relay, probe_filter(), Public,
+Public)`. SAFE, and worth stating explicitly because the string is maximally
+reproducible — a fixed filter makes it constant per relay. It is never
+registered in attribution at all: `Prober::begin_probe` keys it into the
+prober's own `pending` map, and no probe ever calls `record_send`. It measures
+protocol support and touches no coverage identity.
+
+**`SubId::for_wire` in `core/evidence.rs`**. SAFE. Test fixtures only, inside
+`#[cfg(test)]`.
+
+#### 8.2.2 The fix
+
+`nip77_role_sub_id` takes a monotonic incarnation minted by `EngineCore`
+(`next_nip77_incarnation`), folded into the digest after the role byte and the
+filter hash. Every derivation therefore yields a string nobody has been handed
+before, and a straggler for a closed role subscription resolves to nothing —
+the derived-namespace counterpart of what §7.2 does for planned subscriptions.
+
+The counter only ever increments. It survives recompiles, `clear_session`, and
+reconnects untouched; a counter that reset would re-mint a string a straggler
+could still be addressed to, which is the whole defect.
+
+It is folded IN, never appended — see §4.4. The wire string stays at exactly 64
+hex characters, and the falsifier asserts that length rather than trusting it.
+
+Why not mint at `record_send`, as the ruling's own example suggested: the plan
+path must NOT be incarnated. `Effect::Replay` ships `WireReq`s straight out of
+the router's plan and `on_wire_request_handoff` keys on `(session, sub_id)`, so
+a blanket mint at send time would break that router-to-engine correspondence.
+Only ids the engine both mints and stores itself can carry an incarnation, and
+the four NIP-77 roles are exactly those ids.
+
+One consequence to know about: `start_backlog_req` used to displace a prior
+backlog by noticing that the newly derived id COLLIDED with a pending entry's
+key. Fresh ids make that collision unobservable, so the displacement is now an
+explicit plan-scoped sweep — shared with `cancel_nip77_repair_for_plan` rather
+than written twice, because a `BacklogActivatesLive` entry owns a nested live
+candidate that lives in no other map. A plan carries at most one repair phase
+at a time, so the sweep is expected to find nothing; a reachability probe
+across the whole engine suite confirmed the old collision branch never fired.
 
 ### 8.3 Rejected, with reasons
 
@@ -733,6 +822,9 @@ Everything asserted above is measured, not reasoned. Reproduce with:
 | author-axis limits under `AuthorUnion` (the pre-existing twin) | `crates/nmp-router/tests/kill_measurement.rs` |
 | live REQ frames against a real relay | `crates/nmp/examples/tag_fanout_live.rs` |
 | intended behaviour, `@wip` | `features/routing/subscription-collapse.feature` |
+| §8.2 the Close/reopen straggler, role path: durable coverage minted by a straggler, plus the positive leg | `crates/nmp-engine/tests/core_headless/negentropy.rs` (`a_reopened_backlog_req_never_inherits_a_closed_incarnations_eose`, `a_reopened_live_candidate_never_inherits_a_closed_incarnations_eose`) |
+| §8.2 the same race on the plan path, green by §7.2 alone | `crates/nmp-engine/tests/core_headless/live_queries.rs` (`a_reopened_plan_subscription_never_inherits_a_closed_tokens_eose`) |
+| §8.2 observed at the relay, in the product's own voice | `features/coverage/reopened-requests.feature` |
 
 The live probe is the strongest evidence and the cheapest to re-run:
 

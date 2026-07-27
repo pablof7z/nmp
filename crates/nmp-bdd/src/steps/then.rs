@@ -531,6 +531,21 @@ async fn relay_closed_no_author_subscription(w: &mut NmpWorld, relay: String) {
     );
 }
 
+#[then(regex = r#"^relay "([^"]+)" never revives a request it was told to stop$"#)]
+async fn relay_never_revives_a_stopped_request(w: &mut NmpWorld, relay: String) {
+    w.wire_settled().await;
+    let record = w.wire_record(&relay);
+    let revived = record.revived_subscription_ids();
+    assert!(
+        revived.is_empty(),
+        "relay {relay:?} was asked to reopen {} request(s) it had already been \
+         told to stop ({revived:?}) -- an answer still on its way for the \
+         stopped one would then be indistinguishable from an answer to the new \
+         one, and the query would claim it holds data that never arrived",
+        revived.len()
+    );
+}
+
 #[then(regex = r#"^relay "([^"]+)" was never asked for the same thing twice$"#)]
 async fn relay_never_asked_twice(w: &mut NmpWorld, relay: String) {
     w.wire_settled().await;
