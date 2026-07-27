@@ -1,0 +1,33 @@
+[package]
+name = "nmp-nip46"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# NIP-46 supplies the typed message/event helpers; the adapter still parses
+# the current URI/handshake additions itself because rust-nostr 0.44 models
+# the older connect shape.
+nostr = { workspace = true, features = ["nip46"] }
+nmp-signer.workspace = true
+nmp-transport.workspace = true
+# #885: the bunker-relay pool dials under the shared destination policy.
+nmp-network-policy.workspace = true
+# #704: the standalone provider runtime and transport threads share NMP's
+# process-wide OS-thread instrumentation.
+nmp-executor.workspace = true
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+zeroize = "1"
+
+[dev-dependencies]
+nmp-engine.workspace = true
+nmp-grammar.workspace = true
+nmp-resolver.workspace = true
+nmp-router.workspace = true
+nmp-store.workspace = true
+tempfile = "3"
+tungstenite = "0.29"

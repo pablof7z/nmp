@@ -7,57 +7,46 @@ import kotlinx.coroutines.flow.transformWhile
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
-import uniffi.nmp_ffi.FfiBunkerParseError
-import uniffi.nmp_ffi.FfiLocalSignerApp
-import uniffi.nmp_ffi.FfiLocalSignerProtocol
-import uniffi.nmp_ffi.FfiNip46ClientMetadata
-import uniffi.nmp_ffi.FfiNip46ConnectionEvent
-import uniffi.nmp_ffi.FfiNip46Failure
-import uniffi.nmp_ffi.FfiNip46Invitation
-import uniffi.nmp_ffi.Nip46Connection
-import uniffi.nmp_ffi.Nip46ConnectionObserver
-import uniffi.nmp_ffi.localSignerCatalog
+import uniffi.nmp_nip46_ffi.FfiBunkerParseError
+import uniffi.nmp_nip46_ffi.FfiNip46ClientMetadata
+import uniffi.nmp_nip46_ffi.FfiNip46ConnectionEvent
+import uniffi.nmp_nip46_ffi.FfiNip46Failure
+import uniffi.nmp_nip46_ffi.FfiNip46Invitation
+import uniffi.nmp_nip46_ffi.FfiNip46ProviderException
+import uniffi.nmp_nip46_ffi.FfiNip46SignerApp
+import uniffi.nmp_nip46_ffi.Nip46Connection
+import uniffi.nmp_nip46_ffi.Nip46ConnectionObserver
+import uniffi.nmp_nip46_ffi.NmpNip46Provider
+import uniffi.nmp_nip46_ffi.nip46SignerCatalog
 
-enum class NMPLocalSignerProtocol { Nip46, Nip55 }
-
-/** Rust-owned local-signer facts. Android code should query the exact
+/** Rust-owned NIP-46 signer facts. Android code should query the exact
  * [androidDetectionUri], filter handlers by [androidPackageId], then launch
- * the Rust-generated handoff URI. A shared `nostrsigner:` scheme is never an
- * app identity. */
-data class NMPLocalSigner(
+ * the Rust-generated handoff URI. */
+data class NMPNip46Signer(
     val id: String,
     val displayName: String,
-    val protocols: Set<NMPLocalSignerProtocol>,
     val iosDetectionUri: String?,
     val nip46LaunchScheme: String?,
     val androidDetectionUri: String?,
     val androidPackageId: String?,
-    val androidProviderAuthority: String?,
 ) {
-    internal constructor(ffi: FfiLocalSignerApp) : this(
+    internal constructor(ffi: FfiNip46SignerApp) : this(
         id = ffi.id,
         displayName = ffi.displayName,
-        protocols = ffi.protocols.mapTo(mutableSetOf()) {
-            when (it) {
-                FfiLocalSignerProtocol.NIP46 -> NMPLocalSignerProtocol.Nip46
-                FfiLocalSignerProtocol.NIP55 -> NMPLocalSignerProtocol.Nip55
-            }
-        },
         iosDetectionUri = ffi.iosDetectionUri,
         nip46LaunchScheme = ffi.nip46LaunchScheme,
         androidDetectionUri = ffi.androidDetectionUri,
         androidPackageId = ffi.androidPackageId,
-        androidProviderAuthority = ffi.androidProviderAuthority,
     )
 }
 
-object NMPLocalSignerDiscovery {
-    val known: List<NMPLocalSigner>
-        get() = localSignerCatalog().map(::NMPLocalSigner)
+object NMPNip46SignerDiscovery {
+    val known: List<NMPNip46Signer>
+        get() = nip46SignerCatalog().map(::NMPNip46Signer)
 
     /** Pure package-filtered projection for an Android host that has already
      * executed PackageManager queries and reports raw package IDs. */
-    fun installedAndroid(packageIds: Set<String>): List<NMPLocalSigner> =
+    fun installedAndroid(packageIds: Set<String>): List<NMPNip46Signer> =
         known.filter { signer -> signer.androidPackageId in packageIds }
 }
 
@@ -234,7 +223,7 @@ class NMPNip46Connection internal constructor(
     fun checkpoint(): NMPNip46SessionCheckpoint {
         val connection = ffiConnection
             ?: throw NMPError.InvalidSigner("no underlying NIP-46 connection to checkpoint")
-        return NMPNip46SessionCheckpoint(nmpRethrowing { connection.checkpoint() })
+        return NMPNip46SessionCheckpoint(nip46Rethrowing { connection.checkpoint() })
     }
 
     /** Idempotently detach this exact signer session and emit [NMPNip46ConnectionState.Closed]. */
@@ -247,18 +236,15 @@ class NMPNip46Connection internal constructor(
 
 class NMPNip46Invitation internal constructor(internal val ffi: FfiNip46Invitation) {
     /** Generic chooser URI, or an app-specific URI when [signer] is supplied. */
-    fun uri(signer: NMPLocalSigner? = null): String =
-        nmpRethrowing { ffi.uri(signer?.id) }
+    fun uri(signer: NMPNip46Signer? = null): String =
+        nip46Rethrowing { ffi.uri(signer?.id) }
 
     /** Exact Android one-click handoff. The host launches [uri] with
      * `Intent.setPackage(packageName)`; OS acceptance is not signer readiness,
      * which is reported later as [NMPNip46ConnectionState.Ready]. */
-    fun androidHandoff(signer: NMPLocalSigner): NMPAndroidSignerHandoff {
-        val canonical = NMPLocalSignerDiscovery.known.singleOrNull { it.id == signer.id }
+    fun androidHandoff(signer: NMPNip46Signer): NMPAndroidSignerHandoff {
+        val canonical = NMPNip46SignerDiscovery.known.singleOrNull { it.id == signer.id }
             ?: throw NMPError.InvalidSigner("unknown local signer id ${signer.id}")
-        if (NMPLocalSignerProtocol.Nip46 !in canonical.protocols) {
-            throw NMPError.InvalidSigner("${canonical.displayName} does not support NIP-46")
-        }
         val packageName = canonical.androidPackageId
             ?: throw NMPError.InvalidSigner("${canonical.displayName} has no Android package")
         return NMPAndroidSignerHandoff(uri = uri(canonical), packageName = packageName)
@@ -267,12 +253,18 @@ class NMPNip46Invitation internal constructor(internal val ffi: FfiNip46Invitati
 
 data class NMPAndroidSignerHandoff(val uri: String, val packageName: String)
 
+@OptIn(NMPProviderComponentApi::class)
+private fun NMPEngine.nip46Provider(): NmpNip46Provider =
+    NmpNip46Provider(signerProviderMailbox())
+
 fun NMPEngine.nip46Invitation(
     relays: List<String>,
     permissions: String? = null,
     metadata: NMPNip46ClientMetadata = NMPNip46ClientMetadata(),
 ): NMPNip46Invitation = NMPNip46Invitation(
-    nmpRethrowing { ffi.nip46Invitation(relays, permissions, metadata.toFfi()) },
+    nip46Rethrowing {
+        nip46Provider().nip46Invitation(relays, permissions, metadata.toFfi())
+    },
 )
 
 fun NMPEngine.connectNip46(
@@ -280,8 +272,8 @@ fun NMPEngine.connectNip46(
     timeout: Duration = 60.seconds,
 ): NMPNip46Connection {
     val observer = NMPNip46Observer()
-    val ffiConnection = nmpRethrowing {
-        ffi.connectNip46Bunker(
+    val ffiConnection = nip46Rethrowing {
+        nip46Provider().connectNip46Bunker(
             bunkerUri,
             timeout.inWholeMilliseconds.coerceAtLeast(0).toULong(),
             observer,
@@ -295,8 +287,8 @@ fun NMPEngine.connectNip46(
     timeout: Duration = 60.seconds,
 ): NMPNip46Connection {
     val observer = NMPNip46Observer()
-    val ffiConnection = nmpRethrowing {
-        ffi.connectNip46Invitation(
+    val ffiConnection = nip46Rethrowing {
+        nip46Provider().connectNip46Invitation(
             invitation.ffi,
             timeout.inWholeMilliseconds.coerceAtLeast(0).toULong(),
             observer,
@@ -329,8 +321,8 @@ fun NMPEngine.restoreNip46Session(
     timeout: Duration = 60.seconds,
 ): NMPNip46Connection {
     val observer = NMPNip46Observer()
-    val ffiConnection = nmpRethrowing {
-        ffi.restoreNip46Session(
+    val ffiConnection = nip46Rethrowing {
+        nip46Provider().restoreNip46Session(
             checkpoint.toFfi(),
             timeout.inWholeMilliseconds.coerceAtLeast(0).toULong(),
             observer,
@@ -364,8 +356,8 @@ fun NMPEngine.importNip46Session(
         origin = origin,
     )
     val observer = NMPNip46Observer()
-    val ffiConnection = nmpRethrowing {
-        ffi.nip46SessionFromParts(
+    val ffiConnection = nip46Rethrowing {
+        nip46Provider().nip46SessionFromParts(
             parts.toFfi(),
             timeout.inWholeMilliseconds.coerceAtLeast(0).toULong(),
             observer,
@@ -373,3 +365,19 @@ fun NMPEngine.importNip46Session(
     }
     return NMPNip46Connection(observer, ffiConnection)
 }
+
+private inline fun <T> nip46Rethrowing(body: () -> T): T =
+    try {
+        body()
+    } catch (error: FfiNip46ProviderException) {
+        throw when (error) {
+            is FfiNip46ProviderException.InvalidSecretKey -> NMPError.InvalidSecretKey
+            is FfiNip46ProviderException.InvalidPublicKey ->
+                NMPError.InvalidPublicKey(error.field)
+            is FfiNip46ProviderException.InvalidRelay ->
+                NMPError.InvalidRelayUrl(error.relay)
+            is FfiNip46ProviderException.InvalidSigner ->
+                NMPError.InvalidSigner(error.reason)
+            is FfiNip46ProviderException.EngineClosed -> NMPError.EngineClosed
+        }
+    }

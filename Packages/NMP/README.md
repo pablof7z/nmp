@@ -44,11 +44,16 @@ The composer returns the ordinary `WriteIntent`. It does not live on
 `NMPEngine`, introduce a `CommentIntent` wrapper, or add another publication
 lifecycle.
 
-NIP-46 remote signers are also projected directly:
+NIP-46 is deliberately not linked or nameable from this core package. Apps
+that need it add the sibling `Packages/NMPNip46` product and import
+`NMPNip46`; that package consumes the core engine's opaque signer mailbox and
+contributes an ordinary signer without creating another engine lifecycle:
 
 ```swift
 // Host Info.plist: LSApplicationQueriesSchemes = ["primalconnect"]
-guard let primal = NMPLocalSignerDiscovery.installed().first(where: { $0.id == "primal" })
+import NMPNip46
+
+guard let primal = NMPNip46SignerDiscovery.installed().first(where: { $0.id == "primal" })
 else { throw NMPError.invalidSigner("Primal is not installed") }
 let connection = try await nmp.oneClickConnectNip46(
     signer: primal,
@@ -61,11 +66,11 @@ for await state in connection.states {
 }
 ```
 
-The library starts the relay listener before opening Primal. OS handoff success
+The optional provider starts the relay listener before opening Primal. OS handoff success
 does not mean connected; `.ready` follows only after the NIP-46 handshake and
 engine attachment. Generic `nostrconnect://` invitations and pasted
-`bunker://` tokens use `nip46Invitation` / `connectNip46` directly. Amber is
-Android/NIP-55-only and is not falsely offered as an iOS NIP-46 signer.
+`bunker://` tokens use `nip46Invitation` / `connectNip46` directly. Unrelated
+signer protocols are absent from this component's catalog.
 `close()` is idempotent; it detaches only that exact session and finishes the
 state stream. Dropping the last connection reference has the same effect.
 
@@ -129,7 +134,14 @@ public UniFFI surface (new/changed exported types or methods) -- the
 generated bindings and the compiled staticlib both need to stay in sync
 with the Rust source.
 
-CI proves this exact path from a clean checkout on every push/PR (see
-`.github/workflows/ci.yml`'s `swift-package` job) -- it fails loudly if
-`NMP.xcframework` or `Sources/NMPFFI` are ever needed but missing, so this
-can't silently regress again.
+The optional signer component has its own corresponding build:
+
+```sh
+scripts/build-swift-xcframework.sh --sim-only
+scripts/build-swift-nip46-xcframework.sh --sim-only
+swift test --package-path Packages/NMPNip46
+```
+
+CI proves the core-only and selected-provider paths from clean checkouts in
+`.github/workflows/ci.yml` and `.github/workflows/nip46-provider.yml`; missing
+generated bindings or binary artifacts fail loudly.

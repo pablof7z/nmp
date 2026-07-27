@@ -1,0 +1,15 @@
+[package]
+name = "nmp-local-signer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+nmp-signer.workspace = true
+nostr.workspace = true
+zeroize = "1"
+base64 = "0.22"
+sha2.workspace = true
+bech32 = "0.11"
+k256 = { version = "0.13.4", default-features = false, features = ["arithmetic", "ecdh", "std"] }

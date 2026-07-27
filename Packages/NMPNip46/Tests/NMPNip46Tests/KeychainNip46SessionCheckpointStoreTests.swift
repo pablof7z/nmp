@@ -1,7 +1,7 @@
 import Foundation
 import Security
 import XCTest
-@testable import NMP
+@testable import NMPNip46
 
 /// Mirrors `KeychainAccountStoreTests`'s save -> restore -> clear round
 /// trip and environment-unavailable skip discipline, but against

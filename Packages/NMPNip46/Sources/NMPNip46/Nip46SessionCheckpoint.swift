@@ -1,5 +1,5 @@
 import Foundation
-import NMPFFI
+import NMPNip46FFI
 
 /// Distinguishes a NIP-46 session paired via `nostrconnect://` from one
 /// dialed via `bunker://` (#571). Restore mechanics are identical either

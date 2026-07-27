@@ -30,9 +30,11 @@ set -euo pipefail
 REPO_ROOT=$(git rev-parse --show-toplevel)
 cd "$REPO_ROOT"
 
-CRATE=nmp-ffi
-GEN_DIR=gen-kotlin
-KOTLIN_PKG_DIR=Packages/NMPKotlin
+CRATE=${NMP_FFI_CRATE:-nmp-ffi}
+LIB_STEM=${NMP_FFI_LIB_STEM:-nmp_ffi}
+BINDGEN_NAME=${NMP_UNIFFI_BINDGEN_BIN:-uniffi-bindgen}
+GEN_DIR=${NMP_KOTLIN_GEN_DIR:-gen-kotlin}
+KOTLIN_PKG_DIR=${NMP_KOTLIN_MODULE_DIR:-Packages/NMPKotlin}
 
 case "$(uname -s)" in
   Darwin) LIB_EXT=dylib ;;
@@ -43,7 +45,7 @@ case "$(uname -s)" in
     ;;
 esac
 
-LIB_NAME="libnmp_ffi.$LIB_EXT"
+LIB_NAME="lib$LIB_STEM.$LIB_EXT"
 
 # Cargo resolves a relative CARGO_TARGET_DIR from its working directory. The
 # script runs Cargo at the repository root, so resolve the same path here when
@@ -63,7 +65,7 @@ if [[ ! -f "$HOST_LIB" ]]; then
   echo "error: expected $HOST_LIB after cargo build -- check nmp-ffi's [lib] crate-type includes cdylib" >&2
   exit 1
 fi
-BINDGEN="$TARGET_DIR/release/uniffi-bindgen"
+BINDGEN="$TARGET_DIR/release/$BINDGEN_NAME"
 if [[ ! -x "$BINDGEN" ]]; then
   echo "error: expected executable $BINDGEN after cargo build" >&2
   exit 1
@@ -78,10 +80,10 @@ mkdir -p "$GEN_DIR"
   --out-dir "$GEN_DIR"
 
 echo "== 3. copy generated bindings into the Gradle module =="
-KOTLIN_SOURCES_DIR="$KOTLIN_PKG_DIR/src/main/kotlin/uniffi/nmp_ffi"
+KOTLIN_SOURCES_DIR="$KOTLIN_PKG_DIR/src/main/kotlin/uniffi/$LIB_STEM"
 rm -rf "$KOTLIN_SOURCES_DIR"
 mkdir -p "$KOTLIN_SOURCES_DIR"
-cp "$GEN_DIR/uniffi/nmp_ffi/nmp_ffi.kt" "$KOTLIN_SOURCES_DIR/"
+cp "$GEN_DIR/uniffi/$LIB_STEM/$LIB_STEM.kt" "$KOTLIN_SOURCES_DIR/"
 
 echo "== 4. copy the native lib into a JNA-resolvable resource path =="
 # JNA's resource-prefix naming (Platform.RESOURCE_PREFIX): "<os>-<arch>".
@@ -112,6 +114,6 @@ fi
 
 echo "== done =="
 echo "Raw bindgen output:    $GEN_DIR/"
-echo "Kotlin bindings source: $KOTLIN_SOURCES_DIR/nmp_ffi.kt"
+echo "Kotlin bindings source: $KOTLIN_SOURCES_DIR/$LIB_STEM.kt"
 echo "Native lib resource:    $RESOURCE_DIR/$LIB_NAME (JNA prefix: $JNA_PREFIX)"
 echo "Run the smoke test with: (cd $KOTLIN_PKG_DIR && ./gradlew test)"

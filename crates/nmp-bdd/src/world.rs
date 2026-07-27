@@ -26,9 +26,9 @@ use nmp_engine::runtime::{DiagnosticsHandle, EngineThread, Handle, QueryHandle, 
 use nmp_grammar::{AccessContext, IndexedTagName, SourceAuthority};
 use nmp_grammar::{Binding, Demand, Derived, Filter, IdentityField, Selector};
 use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
+use nmp_local_signer::LocalKeySigner;
 use nmp_resolver::LiveQuery;
 use nmp_router::{Lane, LanedRelay, LiveDirectory, RelayDirectory, RelayUrl};
-use nmp_signer::LocalKeySigner;
 use nmp_store::MemoryStore;
 use nmp_transport::PoolConfig;
 

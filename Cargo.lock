@@ -2021,6 +2021,7 @@ version = "0.1.0"
 dependencies = [
  "nmp-engine",
  "nmp-grammar",
+ "nmp-local-signer",
  "nmp-resolver",
  "nmp-router",
  "nmp-signer",
@@ -2046,9 +2047,9 @@ dependencies = [
  "cucumber",
  "nmp-engine",
  "nmp-grammar",
+ "nmp-local-signer",
  "nmp-resolver",
  "nmp-router",
- "nmp-signer",
  "nmp-store",
  "nmp-test-support",
  "nmp-transport",
@@ -2110,6 +2111,7 @@ dependencies = [
  "negentropy",
  "nmp-executor",
  "nmp-grammar",
+ "nmp-local-signer",
  "nmp-network-policy",
  "nmp-nip51",
  "nmp-resolver",
@@ -2171,6 +2173,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nmp-local-signer"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "bech32",
+ "k256",
+ "nmp-signer",
+ "nostr 0.44.4",
+ "sha2",
+ "zeroize",
+]
+
+[[package]]
 name = "nmp-media"
 version = "0.1.0"
 dependencies = [
@@ -2210,6 +2225,44 @@ version = "0.1.0"
 dependencies = [
  "nmp-grammar",
  "nostr 0.44.4",
+]
+
+[[package]]
+name = "nmp-nip46"
+version = "0.1.0"
+dependencies = [
+ "nmp-engine",
+ "nmp-executor",
+ "nmp-grammar",
+ "nmp-network-policy",
+ "nmp-resolver",
+ "nmp-router",
+ "nmp-signer",
+ "nmp-store",
+ "nmp-transport",
+ "nostr 0.44.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tungstenite 0.29.0",
+ "url",
+ "zeroize",
+]
+
+[[package]]
+name = "nmp-nip46-ffi"
+version = "0.1.0"
+dependencies = [
+ "nmp",
+ "nmp-ffi",
+ "nmp-nip46",
+ "nostr 0.44.4",
+ "tempfile",
+ "tokio",
+ "tungstenite 0.29.0",
+ "uniffi",
+ "url",
 ]
 
 [[package]]
@@ -2298,23 +2351,6 @@ dependencies = [
 [[package]]
 name = "nmp-signer"
 version = "0.1.0"
-dependencies = [
- "base64",
- "bech32",
- "crossbeam-channel",
- "k256",
- "nmp-executor",
- "nmp-network-policy",
- "nmp-transport",
- "nostr 0.44.4",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tungstenite 0.29.0",
- "url",
- "zeroize",
-]
 
 [[package]]
 name = "nmp-store"

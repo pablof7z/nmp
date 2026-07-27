@@ -1,8 +1,9 @@
 //! `nmp` -- THE supported Rust product surface (#52,
 //! `docs/design/canonical-facade-52-plan.md`). Every direct-Rust app and
 //! `nmp-ffi` both depend on this crate alone; the mechanism crates
-//! (`nmp-store`, `nmp-router`, `nmp-transport`, `nmp-resolver`, `nmp-signer`)
-//! are internal implementation detail behind it, present only transitively.
+//! (`nmp-store`, `nmp-router`, `nmp-transport`, `nmp-resolver`, `nmp-signer`,
+//! `nmp-local-signer`) are internal implementation detail behind it, present
+//! only transitively.
 //!
 //! Two nouns, one construction call:
 //!
@@ -203,12 +204,12 @@ pub use nmp_store::CoverageInterval;
 // already re-exported below).
 pub use nostr::{Event, EventId, Kind, PublicKey, RelayUrl, Tag, Timestamp, UnsignedEvent};
 
-// Supported signer/provider surface. The engine's promotion boundary now
-// validates every external signer result against the frozen accepted event.
+// Protocol-neutral signer/provider surface. The engine's promotion boundary
+// validates every external signer result against the frozen accepted event;
+// concrete providers remain optional crates and are not re-exported here.
 pub use nmp_signer::{
-    known_local_signers, LocalSignerApp, LocalSignerProtocol, Nip46ClientMetadata,
-    Nip46ConnectionEvent, Nip46Error, Nip46Invitation, Nip46Signer, PendingSignerResolveError,
-    PendingSignerSender, SignerError, SignerOp, SigningCapability,
+    CryptoCapability, PendingSignerResolveError, PendingSignerSender, SignerError, SignerOp,
+    SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability,
 };
 
 // The concrete mechanism types are internal by default (#52's "internal or

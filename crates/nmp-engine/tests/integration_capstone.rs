@@ -35,9 +35,9 @@ use nmp_grammar::{
     SourceAuthority,
 };
 use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
+use nmp_local_signer::LocalKeySigner;
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
-use nmp_signer::LocalKeySigner;
 use nmp_store::RedbStore;
 use nmp_transport::PoolConfig;
 use nostr::filter::MatchEventOptions;

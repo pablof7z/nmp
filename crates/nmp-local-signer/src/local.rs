@@ -1,16 +1,17 @@
-//! `LocalKeySigner` (§3.3): sufficient for M3 — remote-signer breadth is a
-//! seam only (§7 non-goal). One canonical long-lived secret owner (#765).
+//! `LocalKeySigner`: one canonical long-lived secret owner (#765).
 
 use std::fmt;
 
 use bech32::primitives::decode::CheckedHrpstring;
 use bech32::Bech32;
+use nmp_signer::{
+    CryptoCapability, SignerError, SignerOp, SignerPublicKey, SignerSignedEvent,
+    SignerUnsignedEvent, SigningCapability,
+};
 use nostr::secp256k1::rand::{rngs::OsRng, RngCore};
-use nostr::{Event as SignedEvent, PublicKey, UnsignedEvent};
+use nostr::{Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
-use crate::capability::{CryptoCapability, SigningCapability};
 use crate::local_crypto::{self, CanonicalSecret, LocalCryptoError};
-use crate::op::{SignerError, SignerOp};
 
 /// Failure to construct a local signer from caller-supplied secret material.
 ///
@@ -119,8 +120,8 @@ fn hex_nibble(byte: u8) -> Result<u8, LocalKeySignerError> {
     }
 }
 
-/// Redacted: never prints secret key material, matching `Nip46Signer`'s
-/// `Debug` precedent of exposing only the public identity.
+/// Redacted: never prints secret key material, matching remote-provider
+/// checkpoint precedent by exposing only the public identity.
 impl fmt::Debug for LocalKeySigner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LocalKeySigner")
@@ -130,23 +131,45 @@ impl fmt::Debug for LocalKeySigner {
 }
 
 impl SigningCapability for LocalKeySigner {
-    fn public_key(&self) -> Option<PublicKey> {
-        Some(self.public_key)
+    fn public_key(&self) -> Option<SignerPublicKey> {
+        Some(SignerPublicKey::new(self.public_key.to_bytes()))
     }
 
     /// Signs synchronously — the local key never blocks on I/O, so this
     /// always resolves as `SignerOp::Ready`.
-    fn sign(&self, mut unsigned: UnsignedEvent) -> SignerOp<SignedEvent> {
+    fn sign(&self, unsigned: SignerUnsignedEvent) -> SignerOp<SignerSignedEvent> {
         // The engine is the only caller and always stamps `unsigned.pubkey`
         // from this signer's own `public_key()`; a mismatch means the
         // caller built the template for a different identity, which must
         // not silently produce an event under this signer's key.
-        if unsigned.pubkey != self.public_key {
+        if unsigned.public_key().as_bytes() != &self.public_key.to_bytes() {
             return SignerOp::err(SignerError::Rejected(format!(
                 "unsigned event pubkey {} does not match signer pubkey {}",
-                unsigned.pubkey, self.public_key
+                unsigned.public_key(),
+                self.public_key
             )));
         }
+
+        let (_, created_at, kind, tags, content) = unsigned.into_parts();
+        let tags = match tags
+            .into_iter()
+            .map(Tag::parse)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(tags) => tags,
+            Err(error) => {
+                return SignerOp::err(SignerError::Rejected(format!(
+                    "unsigned event contains an invalid tag: {error}"
+                )))
+            }
+        };
+        let mut unsigned = UnsignedEvent::new(
+            self.public_key,
+            Timestamp::from(created_at),
+            Kind::from(kind),
+            tags,
+            content,
+        );
 
         // `UnsignedEvent::id()` computes/reuses the frozen id; `add_signature`
         // is upstream's verified attach path, so the signature still has to
@@ -159,7 +182,15 @@ impl SigningCapability for LocalKeySigner {
             }
         };
         match unsigned.add_signature(signature) {
-            Ok(event) => SignerOp::ok(event),
+            Ok(event) => SignerOp::ok(SignerSignedEvent::new(
+                event.id.to_bytes(),
+                SignerPublicKey::new(event.pubkey.to_bytes()),
+                event.created_at.as_secs(),
+                event.kind.as_u16(),
+                event.tags.to_vec().into_iter().map(Tag::to_vec).collect(),
+                event.content,
+                event.sig.serialize(),
+            )),
             Err(error) => SignerOp::err(SignerError::Rejected(format!("sign failed: {error}"))),
         }
     }
@@ -171,7 +202,10 @@ impl SigningCapability for LocalKeySigner {
 /// on the same type rather than behind a separate app-facing door.
 impl CryptoCapability for LocalKeySigner {
     /// NIP-44 v2 encrypt through the crate's own zeroizing operation path.
-    fn nip44_encrypt(&self, peer: PublicKey, plaintext: &str) -> SignerOp<String> {
+    fn nip44_encrypt(&self, peer: SignerPublicKey, plaintext: &str) -> SignerOp<String> {
+        let Ok(peer) = PublicKey::from_slice(peer.as_bytes()) else {
+            return SignerOp::err(SignerError::Rejected("invalid peer public key".to_string()));
+        };
         into_signer_op(
             "nip44 encrypt",
             local_crypto::nip44_encrypt(&self.secret, peer, plaintext),
@@ -182,7 +216,10 @@ impl CryptoCapability for LocalKeySigner {
     /// plaintext tokens — the caller (engine) owns any further parsing; this
     /// capability never assumes the stored content was plaintext to begin
     /// with.
-    fn nip44_decrypt(&self, peer: PublicKey, ciphertext: &str) -> SignerOp<String> {
+    fn nip44_decrypt(&self, peer: SignerPublicKey, ciphertext: &str) -> SignerOp<String> {
+        let Ok(peer) = PublicKey::from_slice(peer.as_bytes()) else {
+            return SignerOp::err(SignerError::Rejected("invalid peer public key".to_string()));
+        };
         into_signer_op(
             "nip44 decrypt",
             local_crypto::nip44_decrypt(&self.secret, peer, ciphertext),
@@ -208,16 +245,16 @@ mod tests {
     use crate::local_crypto::{clear_wipe_audit, take_wipe_audit, SensitiveKind};
     use base64::engine::{general_purpose::STANDARD as BASE64, Engine as _};
     use bech32::{Bech32, Hrp};
-    use nostr::{EventId, Kind, Timestamp};
+    use nmp_signer::SignerSignedEventParts;
     use zeroize::Zeroize;
 
-    fn unsigned_for(signer: &LocalKeySigner, content: &str) -> UnsignedEvent {
-        UnsignedEvent::new(
-            signer.public_key,
-            Timestamp::now(),
-            Kind::TextNote,
+    fn unsigned_for(signer: &LocalKeySigner, content: &str) -> SignerUnsignedEvent {
+        SignerUnsignedEvent::new(
+            SignerPublicKey::new(signer.public_key.to_bytes()),
+            Timestamp::now().as_secs(),
+            Kind::TextNote.as_u16(),
             Vec::new(),
-            content,
+            content.to_string(),
         )
     }
 
@@ -233,7 +270,31 @@ mod tests {
         let signer = LocalKeySigner::generate();
         let signed =
             ready(signer.sign(unsigned_for(&signer, "hello from nmp-signer"))).expect("sign");
-        assert_eq!(signed.pubkey, signer.public_key);
+        assert_eq!(
+            signed.public_key(),
+            SignerPublicKey::new(signer.public_key.to_bytes())
+        );
+        let SignerSignedEventParts {
+            id,
+            public_key,
+            created_at,
+            kind,
+            tags,
+            content,
+            signature,
+        } = signed.into_parts();
+        let signed = nostr::Event::new(
+            nostr::EventId::from_slice(&id).unwrap(),
+            PublicKey::from_slice(public_key.as_bytes()).unwrap(),
+            Timestamp::from(created_at),
+            Kind::from(kind),
+            tags.into_iter()
+                .map(Tag::parse)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            content,
+            nostr::secp256k1::schnorr::Signature::from_slice(&signature).unwrap(),
+        );
         assert!(signed.verify().is_ok(), "signed event must verify");
     }
 
@@ -264,20 +325,19 @@ mod tests {
         ));
     }
 
-    /// Falsifier: the error path releases every operation-scoped secret owner
-    /// too — cleanup rides `Drop`, not a success-only branch.
+    /// Falsifier: an input refusal happens before any operation-scoped secret
+    /// owner is created.
     #[test]
-    fn signing_error_still_drops_operation_secrets() {
+    fn signing_input_refusal_creates_no_operation_secrets() {
         let signer = LocalKeySigner::generate();
-        let mut unsigned = unsigned_for(&signer, "invalid declared id");
-        unsigned.id = Some(EventId::all_zeros());
+        let other = LocalKeySigner::generate();
         clear_wipe_audit();
 
-        assert!(ready(signer.sign(unsigned)).is_err());
+        assert!(ready(signer.sign(unsigned_for(&other, "wrong identity"))).is_err());
         let audit = take_wipe_audit();
-        assert!(audit.contains(&SensitiveKind::SigningOperationSecret));
-        assert!(audit.contains(&SensitiveKind::SigningNonce));
-        assert!(audit.contains(&SensitiveKind::SigningResultScalar));
+        assert!(!audit.contains(&SensitiveKind::SigningOperationSecret));
+        assert!(!audit.contains(&SensitiveKind::SigningNonce));
+        assert!(!audit.contains(&SensitiveKind::SigningResultScalar));
     }
 
     #[test]
@@ -287,14 +347,20 @@ mod tests {
         let plaintext = "the quick brown fox — nip-44 round trip";
 
         clear_wipe_audit();
-        let ciphertext = ready(alice.nip44_encrypt(bob.public_key, plaintext)).expect("encrypt");
+        let ciphertext =
+            ready(alice.nip44_encrypt(SignerPublicKey::new(bob.public_key.to_bytes()), plaintext))
+                .expect("encrypt");
         let encrypt_audit = take_wipe_audit();
         assert!(encrypt_audit.contains(&SensitiveKind::PaddedPlaintext));
         assert!(encrypt_audit.contains(&SensitiveKind::SymmetricCipher));
         assert!(encrypt_audit.contains(&SensitiveKind::HashState));
 
         clear_wipe_audit();
-        let decrypted = ready(bob.nip44_decrypt(alice.public_key, &ciphertext)).expect("decrypt");
+        let decrypted = ready(bob.nip44_decrypt(
+            SignerPublicKey::new(alice.public_key.to_bytes()),
+            &ciphertext,
+        ))
+        .expect("decrypt");
         assert_eq!(decrypted, plaintext);
         let decrypt_audit = take_wipe_audit();
         assert!(decrypt_audit.contains(&SensitiveKind::DecryptedPlaintext));
@@ -315,7 +381,8 @@ mod tests {
         let ciphertext = "AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABee0G5VSK0/9YypIObAtDKfYEAjD35uVkHyB0F4DwrcNaCXlCWZKaArsGrY6M9wnuTMxWfp1RTN9Xga8no+kF5Vsb";
 
         assert_eq!(
-            ready(signer.nip44_decrypt(peer, ciphertext)).expect("decrypt official vector"),
+            ready(signer.nip44_decrypt(SignerPublicKey::new(peer.to_bytes()), ciphertext,))
+                .expect("decrypt official vector"),
             "a"
         );
     }
@@ -343,13 +410,19 @@ mod tests {
     fn invalid_nip44_mac_drops_keys_without_plaintext_output() {
         let alice = LocalKeySigner::generate();
         let bob = LocalKeySigner::generate();
-        let ciphertext = ready(alice.nip44_encrypt(bob.public_key, "wipe me")).expect("encrypt");
+        let ciphertext =
+            ready(alice.nip44_encrypt(SignerPublicKey::new(bob.public_key.to_bytes()), "wipe me"))
+                .expect("encrypt");
         let mut payload = BASE64.decode(ciphertext).expect("base64");
         *payload.last_mut().expect("mac") ^= 1;
         let corrupted = BASE64.encode(payload);
         clear_wipe_audit();
 
-        assert!(ready(bob.nip44_decrypt(alice.public_key, &corrupted)).is_err());
+        assert!(ready(bob.nip44_decrypt(
+            SignerPublicKey::new(alice.public_key.to_bytes()),
+            &corrupted,
+        ))
+        .is_err());
         let audit = take_wipe_audit();
         assert!(audit.contains(&SensitiveKind::Nip44OperationSecret));
         assert!(audit.contains(&SensitiveKind::ConversationKey));
@@ -401,7 +474,7 @@ mod tests {
     }
 
     /// Falsifier: `{:?}` on `LocalKeySigner` must never leak the secret
-    /// scalar — only the public key, matching `Nip46Signer`/`Nip46Invitation`.
+    /// scalar — only the public key, matching the remote-provider boundary.
     #[test]
     fn debug_output_redacts_secret_key() {
         let secret = "0000000000000000000000000000000000000000000000000000000000000001";
@@ -422,14 +495,16 @@ mod tests {
             bytes
         };
         let signer = LocalKeySigner::parse(secret).expect("valid scalar");
-        let mut unsigned = unsigned_for(&signer, "invalid declared id");
-        unsigned.id = Some(EventId::all_zeros());
-        let signing_error = ready(signer.sign(unsigned))
-            .expect_err("invalid id")
+        let other = LocalKeySigner::generate();
+        let signing_error = ready(signer.sign(unsigned_for(&other, "wrong identity")))
+            .expect_err("identity mismatch")
             .to_string();
-        let crypto_error = ready(signer.nip44_decrypt(signer.public_key, "invalid"))
-            .expect_err("invalid payload")
-            .to_string();
+        let crypto_error = ready(signer.nip44_decrypt(
+            SignerPublicKey::new(signer.public_key.to_bytes()),
+            "invalid",
+        ))
+        .expect_err("invalid payload")
+        .to_string();
 
         for output in [signing_error, crypto_error] {
             assert!(!output.contains(secret));

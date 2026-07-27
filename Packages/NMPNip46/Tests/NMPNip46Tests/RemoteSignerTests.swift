@@ -1,24 +1,20 @@
+import NMP
 import XCTest
-@testable import NMP
+@testable import NMPNip46
 
 final class RemoteSignerTests: XCTestCase {
-    func testCatalogSeparatesDetectionLaunchPackageAndProviderFacts() {
-        let primal = NMPLocalSignerDiscovery.known.first { $0.id == "primal" }
+    func testCatalogContainsOnlyNip46DetectionLaunchAndPackageFacts() {
+        let primal = NMPNip46SignerDiscovery.known.first { $0.id == "primal" }
         XCTAssertEqual(primal?.iosDetectionURI, "primalconnect://probe")
         XCTAssertEqual(primal?.nip46LaunchScheme, "primalconnect")
         XCTAssertEqual(primal?.androidDetectionURI, "primal://signer")
         XCTAssertEqual(primal?.androidPackageID, "net.primal.android")
-        XCTAssertEqual(primal?.androidProviderAuthority, "net.primal.android")
-        XCTAssertEqual(primal?.protocols, [.nip46, .nip55])
-
-        let amber = NMPLocalSignerDiscovery.known.first { $0.id == "amber" }
-        XCTAssertNil(amber?.iosDetectionURI)
-        XCTAssertEqual(amber?.protocols, [.nip55])
+        XCTAssertEqual(NMPNip46SignerDiscovery.known.map(\.id), ["primal"])
     }
 
     func testInjectedIOSProbeNeverInventsAmberAndFindsPrimalByExactURI() {
         var probed: [String] = []
-        let installed = NMPLocalSignerDiscovery.matchingIOSApps { url in
+        let installed = NMPNip46SignerDiscovery.matchingIOSApps { url in
             probed.append(url.absoluteString)
             return url.absoluteString == "primalconnect://probe"
         }
@@ -31,7 +27,7 @@ final class RemoteSignerTests: XCTestCase {
         defer { engine.shutdown() }
         let invitation = try engine.nip46Invitation(relays: ["wss://relay.example"])
         let generic = try invitation.uri()
-        let primal = try XCTUnwrap(NMPLocalSignerDiscovery.known.first { $0.id == "primal" })
+        let primal = try XCTUnwrap(NMPNip46SignerDiscovery.known.first { $0.id == "primal" })
         let appSpecific = try invitation.uri(for: primal)
         XCTAssertTrue(generic.hasPrefix("nostrconnect://"))
         XCTAssertTrue(appSpecific.hasPrefix("primalconnect://"))

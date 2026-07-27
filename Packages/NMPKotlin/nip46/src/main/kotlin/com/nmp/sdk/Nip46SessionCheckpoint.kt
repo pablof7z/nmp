@@ -1,8 +1,8 @@
 package com.nmp.sdk
 
 import java.nio.charset.StandardCharsets
-import uniffi.nmp_ffi.FfiNip46Origin
-import uniffi.nmp_ffi.FfiNip46SessionCheckpoint
+import uniffi.nmp_nip46_ffi.FfiNip46Origin
+import uniffi.nmp_nip46_ffi.FfiNip46SessionCheckpoint
 
 /** Distinguishes a NIP-46 session paired via `nostrconnect://` from one
  * dialed via `bunker://` (#571). Restore mechanics are identical either way

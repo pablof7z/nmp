@@ -2523,7 +2523,7 @@ mod tests {
 
     /// A real signed event (`EventBuilder::sign_with_keys`), rendered field-
     /// for-field into a `FfiWritePayload::Signed` the same way an app would
-    /// after receiving one from an external signer / NIP-46 bunker.
+    /// after receiving one from an external signer provider.
     fn signed_write_intent() -> (nostr::Event, FfiWriteIntent) {
         let keys = nostr::Keys::generate();
         let event = nostr::EventBuilder::new(nostr::Kind::TextNote, "presigned")

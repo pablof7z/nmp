@@ -1928,102 +1928,6 @@ enum Enum {
 }
 
 enum Enum {
-    name: "FfiBunkerParseError",
-    module_path: "nmp_ffi",
-    remote: false,
-    discr_type: None,
-    variants: [
-        Variant {
-            name: "Empty",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-        Variant {
-            name: "TooLong",
-            discr: None,
-            fields: [
-                Field {
-                    name: "len",
-                    type_: UInt64,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "WrongScheme",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-        Variant {
-            name: "MissingRemoteSignerKey",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-        Variant {
-            name: "InvalidRemoteSignerKey",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-        Variant {
-            name: "MissingRelay",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-        Variant {
-            name: "TooManyRelays",
-            discr: None,
-            fields: [
-                Field {
-                    name: "count",
-                    type_: UInt64,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "InvalidRelay",
-            discr: None,
-            fields: [
-                Field {
-                    name: "relay",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "Malformed",
-            discr: None,
-            fields: [
-                Field {
-                    name: "reason",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-    ],
-    shape: Enum,
-    non_exhaustive: false,
-    docstring: Some(
-        "`nmp_signer::BunkerParseError` mirror (#494) -- strict `bunker://` token\nparsing, carried instead of collapsing into `Nip46Error::InvalidBunkerUri`'s\nown `.to_string()`.",
-    ),
-}
-
-enum Enum {
     name: "FfiCacheMode",
     module_path: "nmp_ffi",
     remote: false,
@@ -3526,267 +3430,6 @@ enum Enum {
 }
 
 enum Enum {
-    name: "FfiLocalSignerProtocol",
-    module_path: "nmp_ffi",
-    remote: false,
-    discr_type: None,
-    variants: [
-        Variant {
-            name: "Nip46",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-        Variant {
-            name: "Nip55",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-    ],
-    shape: Enum,
-    non_exhaustive: false,
-    docstring: None,
-}
-
-enum Enum {
-    name: "FfiNip46ConnectionEvent",
-    module_path: "nmp_ffi",
-    remote: false,
-    discr_type: None,
-    variants: [
-        Variant {
-            name: "Connecting",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-        Variant {
-            name: "Available",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-        Variant {
-            name: "Unavailable",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-        Variant {
-            name: "RelayAuthentication",
-            discr: None,
-            fields: [
-                Field {
-                    name: "relay",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "AuthorizationRequired",
-            discr: None,
-            fields: [
-                Field {
-                    name: "url",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "Connected",
-            discr: None,
-            fields: [
-                Field {
-                    name: "user_public_key",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-    ],
-    shape: Enum,
-    non_exhaustive: false,
-    docstring: None,
-}
-
-enum Enum {
-    name: "FfiNip46Failure",
-    module_path: "nmp_ffi",
-    remote: false,
-    discr_type: None,
-    variants: [
-        Variant {
-            name: "InvalidBunkerUri",
-            discr: None,
-            fields: [
-                Field {
-                    name: "source",
-                    type_: Enum {
-                        module_path: "nmp_ffi",
-                        name: "FfiBunkerParseError",
-                    },
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "MissingRelay",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-        Variant {
-            name: "TooManyRelays",
-            discr: None,
-            fields: [
-                Field {
-                    name: "count",
-                    type_: UInt64,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "InvitationTooLong",
-            discr: None,
-            fields: [
-                Field {
-                    name: "len",
-                    type_: UInt64,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "InvalidLaunchScheme",
-            discr: None,
-            fields: [
-                Field {
-                    name: "scheme",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "Timeout",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-        Variant {
-            name: "Disconnected",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-        Variant {
-            name: "Rejected",
-            discr: None,
-            fields: [
-                Field {
-                    name: "reason",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "InvalidResponse",
-            discr: None,
-            fields: [
-                Field {
-                    name: "reason",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "SignerMissingPublicKey",
-            discr: None,
-            fields: [],
-            docstring: Some(
-                "`nmp::Engine::add_signer` maps every internal `AddSignerError` to\n`EngineError::SignerMissingPublicKey` (crates/nmp/src/engine.rs). This\nis the signer-side engine-attach failure; the other reachable\n`add_signer` outcome, `EngineError::EngineClosed` (engine shut down\nmid-handshake), is surfaced as `Disconnected` instead so the two are\nnot conflated. It is not a `Nip46Error` variant; it crosses a different\ninternal taxonomy (`nmp::EngineError`) at the same observer seam.",
-            ),
-        },
-        Variant {
-            name: "RestoredIdentityMismatch",
-            discr: None,
-            fields: [
-                Field {
-                    name: "expected",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "actual",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: Some(
-                "A restore/import's live `get_public_key` answer did not match the\ncheckpoint's expected identity (#571). No signer was attached under\nthe wrong pubkey.",
-            ),
-        },
-    ],
-    shape: Enum,
-    non_exhaustive: false,
-    docstring: Some(
-        "`nmp_signer::Nip46Error` mirror (#494) -- every live discriminant a NIP-46\nconnection attempt can fail with, so a native caller can branch on\n\"auth required\" vs. \"timeout\" vs. \"malformed\" instead of parsing English.\n`Nip46Error::InvalidRelay`/`InvalidInvitation`/`SecretMismatch` are not\nmirrored: nothing in the workspace ever constructs them (see that type's\nown doc).",
-    ),
-}
-
-enum Enum {
-    name: "FfiNip46Origin",
-    module_path: "nmp_ffi",
-    remote: false,
-    discr_type: None,
-    variants: [
-        Variant {
-            name: "ClientInitiated",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-        Variant {
-            name: "Bunker",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-    ],
-    shape: Enum,
-    non_exhaustive: false,
-    docstring: Some(
-        "`nmp_signer::Nip46Origin` mirror (#571): distinguishes a session paired\nvia `nostrconnect://` from one dialed via `bunker://`. Restore mechanics\nare identical either way -- kept because \"absence of a reusable client\ncheckpoint is observable rather than guessed from partial metadata\" is a\nhard requirement, not because restore branches on it.",
-    ),
-}
-
-enum Enum {
     name: "FfiNip73Target",
     module_path: "nmp_ffi",
     remote: false,
@@ -4733,7 +4376,7 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "The event payload of a write intent (`nmp::WritePayload` mirror). VISION\nP: signing and publishing are ORTHOGONAL stages -- `Unsigned` is a\ntemplate the engine signs internally (\"the key lives in the engine\",\nledger #12); `Signed` (#32, the M5 unlock) is a caller that already\nholds a validly-signed event -- an external signer / NIP-46 bunker, or a\nverbatim republish -- and hands its fields across as-is. `Signed`'s\nfields are field-for-field [`FfiRow`] (the read-side mirror of a signed\n`nostr::Event`) plus `sig`, deliberately: the write side stays symmetric\nwith the read side rather than introducing a JSON-blob shape.\n\n`Signed`'s fields are PARSED at this FFI boundary (typed hex/signature-\nshape errors, see `convert::signed_event_from_ffi`) but NOT verified\nhere (#52 Unit B) -- `nostr::Event::verify` runs at\n`nmp-engine::core::EngineCore::on_publish`'s acceptance boundary (Unit\nA0/#56) instead, so the guarantee holds for every entry point, not only\nthis one. A tampered `Signed` event still parses fine here and is\nrejected downstream, surfacing as `WriteStatus::Failed` on the receipt\nstream rather than a synchronous `FfiError`. The engine itself never\nre-signs, mutates a tag, or recomputes an id for this variant.",
+        "The event payload of a write intent (`nmp::WritePayload` mirror). VISION\nP: signing and publishing are ORTHOGONAL stages -- `Unsigned` is a\ntemplate the engine signs internally (\"the key lives in the engine\",\nledger #12); `Signed` (#32, the M5 unlock) is a caller that already\nholds a validly-signed event -- an external signer provider, or a\nverbatim republish -- and hands its fields across as-is. `Signed`'s\nfields are field-for-field [`FfiRow`] (the read-side mirror of a signed\n`nostr::Event`) plus `sig`, deliberately: the write side stays symmetric\nwith the read side rather than introducing a JSON-blob shape.\n\n`Signed`'s fields are PARSED at this FFI boundary (typed hex/signature-\nshape errors, see `convert::signed_event_from_ffi`) but NOT verified\nhere (#52 Unit B) -- `nostr::Event::verify` runs at\n`nmp-engine::core::EngineCore::on_publish`'s acceptance boundary (Unit\nA0/#56) instead, so the guarantee holds for every entry point, not only\nthis one. A tampered `Signed` event still parses fine here and is\nrejected downstream, surfacing as `WriteStatus::Failed` on the receipt\nstream rather than a synchronous `FfiError`. The engine itself never\nre-signs, mutates a tag, or recomputes an id for this variant.",
     ),
 }
 
@@ -5940,157 +5583,6 @@ record Record {
     ],
     docstring: Some(
         "One lane's wire-req count within a relay's diagnostics (M5 plan §1.1;\n`nmp::Lane` mirror, rendered as a string -- see\n`convert::lane_to_ffi_string`).",
-    ),
-}
-
-record Record {
-    name: "FfiLocalSignerApp",
-    module_path: "nmp_ffi",
-    remote: false,
-    fields: [
-        Field {
-            name: "id",
-            type_: String,
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "display_name",
-            type_: String,
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "protocols",
-            type_: Sequence {
-                inner_type: Enum {
-                    module_path: "nmp_ffi",
-                    name: "FfiLocalSignerProtocol",
-                },
-            },
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "ios_detection_uri",
-            type_: Optional {
-                inner_type: String,
-            },
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "nip46_launch_scheme",
-            type_: Optional {
-                inner_type: String,
-            },
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "android_detection_uri",
-            type_: Optional {
-                inner_type: String,
-            },
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "android_package_id",
-            type_: Optional {
-                inner_type: String,
-            },
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "android_provider_authority",
-            type_: Optional {
-                inner_type: String,
-            },
-            default: None,
-            docstring: None,
-        },
-    ],
-    docstring: None,
-}
-
-record Record {
-    name: "FfiNip46ClientMetadata",
-    module_path: "nmp_ffi",
-    remote: false,
-    fields: [
-        Field {
-            name: "name",
-            type_: Optional {
-                inner_type: String,
-            },
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "url",
-            type_: Optional {
-                inner_type: String,
-            },
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "image",
-            type_: Optional {
-                inner_type: String,
-            },
-            default: None,
-            docstring: None,
-        },
-    ],
-    docstring: None,
-}
-
-record Record {
-    name: "FfiNip46SessionCheckpoint",
-    module_path: "nmp_ffi",
-    remote: false,
-    fields: [
-        Field {
-            name: "client_secret_key",
-            type_: String,
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "user_public_key",
-            type_: String,
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "remote_signer_public_key",
-            type_: String,
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "relays",
-            type_: Sequence {
-                inner_type: String,
-            },
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "origin",
-            type_: Enum {
-                module_path: "nmp_ffi",
-                name: "FfiNip46Origin",
-            },
-            default: None,
-            docstring: None,
-        },
-    ],
-    docstring: Some(
-        "`nmp_signer::Nip46SessionCheckpoint` mirror (#571) -- the minimum secrets\nand descriptor needed to reconnect an already-authorized NIP-46 client\nsession without another pairing handshake. `client_secret_key` crosses\nthis boundary once, matching `add_account`'s existing precedent; native\ncallers must never log, print, serialize to diagnostics, or otherwise\nsurface it outside their own secure checkpoint store.",
     ),
 }
 
@@ -7846,39 +7338,6 @@ function Function {
 }
 
 function Function {
-    name: "local_signer_catalog",
-    module_path: "nmp_ffi",
-    is_async: false,
-    arguments: [],
-    return_type: Some(
-        Sequence {
-            inner_type: Record {
-                module_path: "nmp_ffi",
-                name: "FfiLocalSignerApp",
-            },
-        },
-    ),
-    ffi_func: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_func_local_signer_catalog",
-        is_async: false,
-        arguments: [],
-        return_type: Some(
-            RustBuffer(
-                None,
-            ),
-        ),
-        has_rust_call_status_arg: true,
-        is_object_free_function: false,
-    },
-    docstring: None,
-    throws: None,
-    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_local_signer_catalog",
-    checksum: Some(
-        51811,
-    ),
-}
-
-function Function {
     name: "parse_nostr_content",
     module_path: "nmp_ffi",
     is_async: false,
@@ -9429,114 +8888,6 @@ object Object {
 }
 
 object Object {
-    name: "FfiNip46Invitation",
-    imp: Struct,
-    module_path: "nmp_ffi",
-    remote: false,
-    constructors: [],
-    methods: [
-        Method {
-            name: "uri",
-            object_name: "FfiNip46Invitation",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [
-                Argument {
-                    name: "signer_id",
-                    type_: Optional {
-                        inner_type: String,
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-            ],
-            return_type: Some(
-                String,
-            ),
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_ffinip46invitation_uri",
-                is_async: false,
-                arguments: [
-                    FfiArgument {
-                        name: "ptr",
-                        type_: RustArcPtr(
-                            "FfiNip46Invitation",
-                        ),
-                    },
-                    FfiArgument {
-                        name: "signer_id",
-                        type_: RustBuffer(
-                            None,
-                        ),
-                    },
-                ],
-                return_type: Some(
-                    RustBuffer(
-                        None,
-                    ),
-                ),
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: Some(
-                "Produce the generic chooser URI or the app-specific launch URI for a\ncatalog signer id such as `primal`.",
-            ),
-            throws: Some(
-                Enum {
-                    module_path: "nmp_ffi",
-                    name: "FfiError",
-                },
-            ),
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffinip46invitation_uri",
-            checksum: Some(
-                45482,
-            ),
-        },
-    ],
-    uniffi_traits: [],
-    trait_impls: [],
-    ffi_func_clone: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_clone_ffinip46invitation",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "ptr",
-                type_: RustArcPtr(
-                    "FfiNip46Invitation",
-                ),
-            },
-        ],
-        return_type: Some(
-            RustArcPtr(
-                "FfiNip46Invitation",
-            ),
-        ),
-        has_rust_call_status_arg: true,
-        is_object_free_function: false,
-    },
-    ffi_func_free: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_free_ffinip46invitation",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "ptr",
-                type_: RustArcPtr(
-                    "FfiNip46Invitation",
-                ),
-            },
-        ],
-        return_type: None,
-        has_rust_call_status_arg: true,
-        is_object_free_function: true,
-    },
-    ffi_init_callback: None,
-    docstring: None,
-}
-
-object Object {
     name: "FfiSetOp",
     imp: Struct,
     module_path: "nmp_ffi",
@@ -9746,127 +9097,41 @@ object Object {
 }
 
 object Object {
-    name: "Nip46Connection",
+    name: "FfiSignerMailbox",
     imp: Struct,
     module_path: "nmp_ffi",
     remote: false,
     constructors: [],
-    methods: [
-        Method {
-            name: "checkpoint",
-            object_name: "Nip46Connection",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [],
-            return_type: Some(
-                Record {
-                    module_path: "nmp_ffi",
-                    name: "FfiNip46SessionCheckpoint",
-                },
-            ),
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nip46connection_checkpoint",
-                is_async: false,
-                arguments: [
-                    FfiArgument {
-                        name: "ptr",
-                        type_: RustArcPtr(
-                            "Nip46Connection",
-                        ),
-                    },
-                ],
-                return_type: Some(
-                    RustBuffer(
-                        Some(
-                            ExternalFfiMetadata {
-                                name: "FfiNip46SessionCheckpoint",
-                                module_path: "nmp_ffi",
-                            },
-                        ),
-                    ),
-                ),
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: Some(
-                "Read out this session's checkpoint (#571): the minimum secrets and\ndescriptor needed to reconnect without another pairing handshake.\nRefused with a typed error before this connection has reached ready\n(its signer attached to this engine) -- checkpointing a session that\nnever authenticated would persist meaningless material.",
-            ),
-            throws: Some(
-                Enum {
-                    module_path: "nmp_ffi",
-                    name: "FfiError",
-                },
-            ),
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nip46connection_checkpoint",
-            checksum: Some(
-                39441,
-            ),
-        },
-        Method {
-            name: "disconnect",
-            object_name: "Nip46Connection",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [],
-            return_type: None,
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nip46connection_disconnect",
-                is_async: false,
-                arguments: [
-                    FfiArgument {
-                        name: "ptr",
-                        type_: RustArcPtr(
-                            "Nip46Connection",
-                        ),
-                    },
-                ],
-                return_type: None,
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: Some(
-                "Idempotently end this connection and detach only its exact signer\nregistration. An older session cannot remove a newer replacement.",
-            ),
-            throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nip46connection_disconnect",
-            checksum: Some(
-                5631,
-            ),
-        },
-    ],
+    methods: [],
     uniffi_traits: [],
     trait_impls: [],
     ffi_func_clone: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_clone_nip46connection",
+        name: "uniffi_nmp_ffi_fn_clone_ffisignermailbox",
         is_async: false,
         arguments: [
             FfiArgument {
                 name: "ptr",
                 type_: RustArcPtr(
-                    "Nip46Connection",
+                    "FfiSignerMailbox",
                 ),
             },
         ],
         return_type: Some(
             RustArcPtr(
-                "Nip46Connection",
+                "FfiSignerMailbox",
             ),
         ),
         has_rust_call_status_arg: true,
         is_object_free_function: false,
     },
     ffi_func_free: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_free_nip46connection",
+        name: "uniffi_nmp_ffi_fn_free_ffisignermailbox",
         is_async: false,
         arguments: [
             FfiArgument {
                 name: "ptr",
                 type_: RustArcPtr(
-                    "Nip46Connection",
+                    "FfiSignerMailbox",
                 ),
             },
         ],
@@ -9876,7 +9141,56 @@ object Object {
     },
     ffi_init_callback: None,
     docstring: Some(
-        "Owns one remote-signer session. The native connection handle, not the\nengine, owns this value: `disconnect()`/drop therefore detach\ndeterministically instead of accumulating sessions until engine shutdown.\nConnection workers and callbacks retain only `Weak` references, avoiding\nboth an ownership cycle and a pending-handshake keepalive.",
+        "Opaque provider mailbox bound to one exact core engine.\n\nNative provider components consume this external UniFFI object rather than\nimporting or mirroring `NmpEngine`. Its Rust-only operations are the\nordinary generic signer door and the engine-owned adapter runtime already\nused by supported provider sessions.",
+    ),
+}
+
+object Object {
+    name: "FfiSignerRegistration",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [],
+    methods: [],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_ffisignerregistration",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiSignerRegistration",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiSignerRegistration",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_ffisignerregistration",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiSignerRegistration",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "Opaque proof for one exact provider capability installation.\n\nThe value is intentionally provider-neutral. A provider retains it only\nlong enough to detach the exact installation it created; it cannot select\nanother signer or remove a replacement registered for the same key.",
     ),
 }
 
@@ -10325,180 +9639,6 @@ object Object {
             ),
         },
         Method {
-            name: "connect_nip46_bunker",
-            object_name: "NmpEngine",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [
-                Argument {
-                    name: "bunker_uri",
-                    type_: String,
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-                Argument {
-                    name: "timeout_millis",
-                    type_: UInt64,
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-                Argument {
-                    name: "observer",
-                    type_: CallbackInterface {
-                        module_path: "nmp_ffi",
-                        name: "Nip46ConnectionObserver",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-            ],
-            return_type: Some(
-                Object {
-                    module_path: "nmp_ffi",
-                    name: "Nip46Connection",
-                    imp: Struct,
-                },
-            ),
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nmpengine_connect_nip46_bunker",
-                is_async: false,
-                arguments: [
-                    FfiArgument {
-                        name: "ptr",
-                        type_: RustArcPtr(
-                            "NmpEngine",
-                        ),
-                    },
-                    FfiArgument {
-                        name: "bunker_uri",
-                        type_: RustBuffer(
-                            None,
-                        ),
-                    },
-                    FfiArgument {
-                        name: "timeout_millis",
-                        type_: UInt64,
-                    },
-                    FfiArgument {
-                        name: "observer",
-                        type_: UInt64,
-                    },
-                ],
-                return_type: Some(
-                    RustArcPtr(
-                        "Nip46Connection",
-                    ),
-                ),
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: None,
-            throws: Some(
-                Enum {
-                    module_path: "nmp_ffi",
-                    name: "FfiError",
-                },
-            ),
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_connect_nip46_bunker",
-            checksum: Some(
-                6328,
-            ),
-        },
-        Method {
-            name: "connect_nip46_invitation",
-            object_name: "NmpEngine",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [
-                Argument {
-                    name: "invitation",
-                    type_: Object {
-                        module_path: "nmp_ffi",
-                        name: "FfiNip46Invitation",
-                        imp: Struct,
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-                Argument {
-                    name: "timeout_millis",
-                    type_: UInt64,
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-                Argument {
-                    name: "observer",
-                    type_: CallbackInterface {
-                        module_path: "nmp_ffi",
-                        name: "Nip46ConnectionObserver",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-            ],
-            return_type: Some(
-                Object {
-                    module_path: "nmp_ffi",
-                    name: "Nip46Connection",
-                    imp: Struct,
-                },
-            ),
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nmpengine_connect_nip46_invitation",
-                is_async: false,
-                arguments: [
-                    FfiArgument {
-                        name: "ptr",
-                        type_: RustArcPtr(
-                            "NmpEngine",
-                        ),
-                    },
-                    FfiArgument {
-                        name: "invitation",
-                        type_: RustArcPtr(
-                            "FfiNip46Invitation",
-                        ),
-                    },
-                    FfiArgument {
-                        name: "timeout_millis",
-                        type_: UInt64,
-                    },
-                    FfiArgument {
-                        name: "observer",
-                        type_: UInt64,
-                    },
-                ],
-                return_type: Some(
-                    RustArcPtr(
-                        "Nip46Connection",
-                    ),
-                ),
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: None,
-            throws: Some(
-                Enum {
-                    module_path: "nmp_ffi",
-                    name: "FfiError",
-                },
-            ),
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_connect_nip46_invitation",
-            checksum: Some(
-                40603,
-            ),
-        },
-        Method {
             name: "follow",
             object_name: "NmpEngine",
             object_module_path: "nmp_ffi",
@@ -10553,199 +9693,6 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_follow",
             checksum: Some(
                 20611,
-            ),
-        },
-        Method {
-            name: "nip46_invitation",
-            object_name: "NmpEngine",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [
-                Argument {
-                    name: "relays",
-                    type_: Sequence {
-                        inner_type: String,
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-                Argument {
-                    name: "permissions",
-                    type_: Optional {
-                        inner_type: String,
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-                Argument {
-                    name: "metadata",
-                    type_: Record {
-                        module_path: "nmp_ffi",
-                        name: "FfiNip46ClientMetadata",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-            ],
-            return_type: Some(
-                Object {
-                    module_path: "nmp_ffi",
-                    name: "FfiNip46Invitation",
-                    imp: Struct,
-                },
-            ),
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nmpengine_nip46_invitation",
-                is_async: false,
-                arguments: [
-                    FfiArgument {
-                        name: "ptr",
-                        type_: RustArcPtr(
-                            "NmpEngine",
-                        ),
-                    },
-                    FfiArgument {
-                        name: "relays",
-                        type_: RustBuffer(
-                            None,
-                        ),
-                    },
-                    FfiArgument {
-                        name: "permissions",
-                        type_: RustBuffer(
-                            None,
-                        ),
-                    },
-                    FfiArgument {
-                        name: "metadata",
-                        type_: RustBuffer(
-                            Some(
-                                ExternalFfiMetadata {
-                                    name: "FfiNip46ClientMetadata",
-                                    module_path: "nmp_ffi",
-                                },
-                            ),
-                        ),
-                    },
-                ],
-                return_type: Some(
-                    RustArcPtr(
-                        "FfiNip46Invitation",
-                    ),
-                ),
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: None,
-            throws: Some(
-                Enum {
-                    module_path: "nmp_ffi",
-                    name: "FfiError",
-                },
-            ),
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_nip46_invitation",
-            checksum: Some(
-                49553,
-            ),
-        },
-        Method {
-            name: "nip46_session_from_parts",
-            object_name: "NmpEngine",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [
-                Argument {
-                    name: "parts",
-                    type_: Record {
-                        module_path: "nmp_ffi",
-                        name: "FfiNip46SessionCheckpoint",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-                Argument {
-                    name: "timeout_millis",
-                    type_: UInt64,
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-                Argument {
-                    name: "observer",
-                    type_: CallbackInterface {
-                        module_path: "nmp_ffi",
-                        name: "Nip46ConnectionObserver",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-            ],
-            return_type: Some(
-                Object {
-                    module_path: "nmp_ffi",
-                    name: "Nip46Connection",
-                    imp: Struct,
-                },
-            ),
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nmpengine_nip46_session_from_parts",
-                is_async: false,
-                arguments: [
-                    FfiArgument {
-                        name: "ptr",
-                        type_: RustArcPtr(
-                            "NmpEngine",
-                        ),
-                    },
-                    FfiArgument {
-                        name: "parts",
-                        type_: RustBuffer(
-                            Some(
-                                ExternalFfiMetadata {
-                                    name: "FfiNip46SessionCheckpoint",
-                                    module_path: "nmp_ffi",
-                                },
-                            ),
-                        ),
-                    },
-                    FfiArgument {
-                        name: "timeout_millis",
-                        type_: UInt64,
-                    },
-                    FfiArgument {
-                        name: "observer",
-                        type_: UInt64,
-                    },
-                ],
-                return_type: Some(
-                    RustArcPtr(
-                        "Nip46Connection",
-                    ),
-                ),
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: Some(
-                "Brownfield migration door (#571): import a pre-NMP legacy client\nsession (for example Pod0's Keychain-persisted `nostrconnect://`\nmaterial) directly from its raw parts, without an NMP-owned\ncheckpoint ever having been written. Same reconnect-and-validate\nmechanics as [`Self::restore_nip46_session`] -- a mismatch/corrupt\nimport never attaches under another pubkey and never deletes or\noverwrites the caller's legacy material (this function reads its\ninput by value and touches no external storage itself).",
-            ),
-            throws: Some(
-                Enum {
-                    module_path: "nmp_ffi",
-                    name: "FfiError",
-                },
-            ),
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_nip46_session_from_parts",
-            checksum: Some(
-                54568,
             ),
         },
         Method {
@@ -11435,101 +10382,6 @@ object Object {
             ),
         },
         Method {
-            name: "restore_nip46_session",
-            object_name: "NmpEngine",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [
-                Argument {
-                    name: "checkpoint",
-                    type_: Record {
-                        module_path: "nmp_ffi",
-                        name: "FfiNip46SessionCheckpoint",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-                Argument {
-                    name: "timeout_millis",
-                    type_: UInt64,
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-                Argument {
-                    name: "observer",
-                    type_: CallbackInterface {
-                        module_path: "nmp_ffi",
-                        name: "Nip46ConnectionObserver",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-            ],
-            return_type: Some(
-                Object {
-                    module_path: "nmp_ffi",
-                    name: "Nip46Connection",
-                    imp: Struct,
-                },
-            ),
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nmpengine_restore_nip46_session",
-                is_async: false,
-                arguments: [
-                    FfiArgument {
-                        name: "ptr",
-                        type_: RustArcPtr(
-                            "NmpEngine",
-                        ),
-                    },
-                    FfiArgument {
-                        name: "checkpoint",
-                        type_: RustBuffer(
-                            Some(
-                                ExternalFfiMetadata {
-                                    name: "FfiNip46SessionCheckpoint",
-                                    module_path: "nmp_ffi",
-                                },
-                            ),
-                        ),
-                    },
-                    FfiArgument {
-                        name: "timeout_millis",
-                        type_: UInt64,
-                    },
-                    FfiArgument {
-                        name: "observer",
-                        type_: UInt64,
-                    },
-                ],
-                return_type: Some(
-                    RustArcPtr(
-                        "Nip46Connection",
-                    ),
-                ),
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: Some(
-                "Restore an already-authorized NIP-46 client session from `checkpoint`\n(#571) -- reconnects the SAME client transport identity to the SAME\nremote signer with NO re-pairing handshake, returning an ordinary\n[`Nip46Connection`] that reuses the existing observer/attachment\nlifecycle: `.ready(user_public_key)` fires only once the checkpoint's\nexpected identity is validated against a live answer and the signer\nis attached to this engine. A corrupt/malformed `checkpoint` is\nrefused synchronously; a live mismatch/unavailable/disconnected\noutcome surfaces asynchronously as a typed `on_failed`, exactly like\n`connect_nip46_bunker`/`connect_nip46_invitation`.",
-            ),
-            throws: Some(
-                Enum {
-                    module_path: "nmp_ffi",
-                    name: "FfiError",
-                },
-            ),
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_restore_nip46_session",
-            checksum: Some(
-                49651,
-            ),
-        },
-        Method {
             name: "set_active_account",
             object_name: "NmpEngine",
             object_module_path: "nmp_ffi",
@@ -11684,6 +10536,49 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_sign_event",
             checksum: Some(
                 26885,
+            ),
+        },
+        Method {
+            name: "signer_mailbox",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "FfiSignerMailbox",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_signer_mailbox",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiSignerMailbox",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Return the protocol-neutral, opaque attachment mailbox consumed by\noptional signer-provider components. The mailbox shares this exact\nengine lifecycle; it is not another engine or a provider registry.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_signer_mailbox",
+            checksum: Some(
+                59488,
             ),
         },
         Method {
@@ -12614,159 +11509,6 @@ callback CallbackInterface {
                 type_: Reference(
                     Struct(
                         "VTableCallbackInterfaceFfiAuthPolicyCallback",
-                    ),
-                ),
-            },
-        ],
-        return_type: None,
-        has_rust_call_status_arg: false,
-        is_object_free_function: false,
-    },
-    docstring: None,
-}
-
-callback CallbackInterface {
-    name: "Nip46ConnectionObserver",
-    module_path: "nmp_ffi",
-    methods: [
-        Method {
-            name: "on_event",
-            object_name: "Nip46ConnectionObserver",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [
-                Argument {
-                    name: "event",
-                    type_: Enum {
-                        module_path: "nmp_ffi",
-                        name: "FfiNip46ConnectionEvent",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-            ],
-            return_type: None,
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nip46connectionobserver_on_event",
-                is_async: false,
-                arguments: [],
-                return_type: None,
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: None,
-            throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nip46connectionobserver_on_event",
-            checksum: Some(
-                55839,
-            ),
-        },
-        Method {
-            name: "on_ready",
-            object_name: "Nip46ConnectionObserver",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [
-                Argument {
-                    name: "user_public_key",
-                    type_: String,
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-            ],
-            return_type: None,
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nip46connectionobserver_on_ready",
-                is_async: false,
-                arguments: [],
-                return_type: None,
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: Some(
-                "The relay handshake is complete and the signer has been attached to\nthis engine. A callback/deep-link alone never produces this fact.",
-            ),
-            throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nip46connectionobserver_on_ready",
-            checksum: Some(
-                12583,
-            ),
-        },
-        Method {
-            name: "on_failed",
-            object_name: "Nip46ConnectionObserver",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [
-                Argument {
-                    name: "failure",
-                    type_: Enum {
-                        module_path: "nmp_ffi",
-                        name: "FfiNip46Failure",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-            ],
-            return_type: None,
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nip46connectionobserver_on_failed",
-                is_async: false,
-                arguments: [],
-                return_type: None,
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: None,
-            throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nip46connectionobserver_on_failed",
-            checksum: Some(
-                6563,
-            ),
-        },
-        Method {
-            name: "on_closed",
-            object_name: "Nip46ConnectionObserver",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [],
-            return_type: None,
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nip46connectionobserver_on_closed",
-                is_async: false,
-                arguments: [],
-                return_type: None,
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: None,
-            throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nip46connectionobserver_on_closed",
-            checksum: Some(
-                21348,
-            ),
-        },
-    ],
-    ffi_init_callback: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_init_callback_vtable_nip46connectionobserver",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "vtable",
-                type_: Reference(
-                    Struct(
-                        "VTableCallbackInterfaceNip46ConnectionObserver",
                     ),
                 ),
             },

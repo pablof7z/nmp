@@ -36,6 +36,7 @@ use crate::convert::{
     write_status_to_ffi, FfiError, FfiRequestRowsError, WriteStatusRef,
 };
 use crate::nip02::{NmpFollowActionStream, NmpFollowStream};
+use crate::signer::FfiSignerMailbox;
 use crate::types::{
     FfiCancelWriteError, FfiCancelWriteOutcome, FfiCorrelationReattachment, FfiDemand,
     FfiDiagnosticsSnapshot, FfiFilter, FfiFrame, FfiReceiptReattachment, FfiRelayInformation,
@@ -276,6 +277,13 @@ impl NmpEngine {
         registration: Arc<FfiAccountRegistration>,
     ) -> Result<bool, FfiError> {
         Ok(self.engine.remove_account(&registration.inner)?)
+    }
+
+    /// Return the protocol-neutral, opaque attachment mailbox consumed by
+    /// optional signer-provider components. The mailbox shares this exact
+    /// engine lifecycle; it is not another engine or a provider registry.
+    pub fn signer_mailbox(&self) -> Arc<FfiSignerMailbox> {
+        FfiSignerMailbox::from_engine(Arc::clone(&self.engine))
     }
 
     /// Install a native-owned authorization policy for one exact account.
@@ -893,6 +901,41 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
+    fn signer_public_key(public_key: nostr::PublicKey) -> nmp_signer::SignerPublicKey {
+        nmp_signer::SignerPublicKey::new(public_key.to_bytes())
+    }
+
+    fn signer_unsigned_to_nostr(unsigned: nmp_signer::SignerUnsignedEvent) -> nostr::UnsignedEvent {
+        let (public_key, created_at, kind, tags, content) = unsigned.into_parts();
+        nostr::UnsignedEvent::new(
+            nostr::PublicKey::from_slice(public_key.as_bytes()).unwrap(),
+            nostr::Timestamp::from(created_at),
+            nostr::Kind::from(kind),
+            tags.into_iter()
+                .map(nostr::Tag::parse)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            content,
+        )
+    }
+
+    fn nostr_signed_to_signer(event: nostr::Event) -> nmp_signer::SignerSignedEvent {
+        nmp_signer::SignerSignedEvent::new(
+            event.id.to_bytes(),
+            signer_public_key(event.pubkey),
+            event.created_at.as_secs(),
+            event.kind.as_u16(),
+            event
+                .tags
+                .to_vec()
+                .into_iter()
+                .map(nostr::Tag::to_vec)
+                .collect(),
+            event.content,
+            event.sig.serialize(),
+        )
+    }
+
     // #680 replaced push/callback observers with pull-based async stream handles:
     // `observe`/`observe_demand`/`observe_diagnostics`/`publish`/`sign_event` take
     // no observer argument and return `Arc<Nmp*Stream>`/`Arc<NmpSignEventHandle>`
@@ -1278,11 +1321,15 @@ mod tests {
     }
 
     impl nmp_signer::SigningCapability for MismatchedFfiSigner {
-        fn public_key(&self) -> Option<nostr::PublicKey> {
-            Some(self.reported)
+        fn public_key(&self) -> Option<nmp_signer::SignerPublicKey> {
+            Some(signer_public_key(self.reported))
         }
 
-        fn sign(&self, unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
+        fn sign(
+            &self,
+            unsigned: nmp_signer::SignerUnsignedEvent,
+        ) -> nmp_signer::SignerOp<nmp_signer::SignerSignedEvent> {
+            let unsigned = signer_unsigned_to_nostr(unsigned);
             let substituted = nostr::UnsignedEvent::new(
                 self.actual.public_key(),
                 unsigned.created_at,
@@ -1290,22 +1337,27 @@ mod tests {
                 unsigned.tags,
                 unsigned.content,
             );
-            nmp_signer::SignerOp::ok(substituted.sign_with_keys(&self.actual).unwrap())
+            nmp_signer::SignerOp::ok(nostr_signed_to_signer(
+                substituted.sign_with_keys(&self.actual).unwrap(),
+            ))
         }
     }
 
     struct PendingFfiSigner {
         public_key: nostr::PublicKey,
         cancellations: Arc<AtomicUsize>,
-        completion: Mutex<Option<nmp_signer::PendingSignerSender<nostr::Event>>>,
+        completion: Mutex<Option<nmp_signer::PendingSignerSender<nmp_signer::SignerSignedEvent>>>,
     }
 
     impl nmp_signer::SigningCapability for PendingFfiSigner {
-        fn public_key(&self) -> Option<nostr::PublicKey> {
-            Some(self.public_key)
+        fn public_key(&self) -> Option<nmp_signer::SignerPublicKey> {
+            Some(signer_public_key(self.public_key))
         }
 
-        fn sign(&self, _unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
+        fn sign(
+            &self,
+            _unsigned: nmp_signer::SignerUnsignedEvent,
+        ) -> nmp_signer::SignerOp<nmp_signer::SignerSignedEvent> {
             let cancellations = Arc::clone(&self.cancellations);
             let (sender, operation) =
                 nmp_signer::SignerOp::pending_channel_with_cancel(move || {

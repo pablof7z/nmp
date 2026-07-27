@@ -27,7 +27,6 @@ path = "uniffi-bindgen.rs"
 nostr.workspace = true
 nmp-grammar.workspace = true
 nmp.workspace = true
-nmp-signer.workspace = true
 uniffi = { workspace = true, features = ["cli"] }
 # #108: the read-only NIP-29 host-browser projection. Direct deps here
 # (not proxied through the `nmp` facade) -- these stay opt-in, app-chosen
@@ -66,6 +65,7 @@ tokio = { version = "1", features = ["rt", "time", "net"] }
 # genuinely undecodable row directly into a real `RedbStore` file, the same
 # technique `nmp-engine`'s own restart/corruption tests use -- test-only.
 [dev-dependencies]
+nmp-signer.workspace = true
 nmp-store.workspace = true
 redb = "4.1"
 tempfile = "3"
