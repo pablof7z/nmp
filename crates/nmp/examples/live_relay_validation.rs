@@ -151,16 +151,29 @@ fn main() {
         ..Filter::default()
     });
 
-    // NO window on purpose. A bounded window lowers to a wire `limit`, and a
-    // limited filter can never merge with anything (`neither_limited`) --
-    // because two `limit:200` REQs promise 200 rows each while their union
-    // promises 200 total, so merging would silently under-fetch. Asking for a
-    // bounded feed here would therefore measure the limit guard rather than
-    // the collapse, and would report fan-out that is correct behaviour.
     // `NMP_LIVE_WINDOW=<n>` bounds the feed, which lowers to a wire `limit`.
-    // That is the interesting negative case: a limited filter can never merge
+    // Default is unbounded.
+    //
+    // This comment used to claim that a bounded feed measures the limit guard
+    // rather than the collapse, "because a limited filter can never merge
     // (`neither_limited`), so the collapse does not apply and the fan-out
-    // returns. Default is unbounded.
+    // returns". THAT IS WRONG, and the probe's own output disproves it: a
+    // bounded run puts `{1055 authors, kinds:[1], limit:200}` on the wire.
+    //
+    // `neither_limited` governs `coalesce`, but the author axis of an OUTBOX
+    // atom never reaches it. `Router::compile` groups outbox demand by
+    // `route::Skeleton`, and `Skeleton::of` erases ONLY `authors` -- `limit`
+    // stays in the skeleton. So all 1055 per-author atoms of a `limit:200`
+    // feed share one skeleton, are coverage-solved together, and
+    // `Skeleton::with_authors` rebuilds one filter per relay carrying every
+    // author routed there, limit intact. The collapse happens in ROUTING,
+    // upstream of the merge registry, and `neither_limited` never sees it.
+    //
+    // What a bounded run does still show is a per-author tail of
+    // `{one author, kinds:[1], limit:200}` filters beside that wide one. Those
+    // are not outbox-solved atoms -- outbox atoms collapse, as above -- so
+    // they arrive by another class or lane, and that tail is what exhausts the
+    // relay's subscription budget (#937).
     let window = std::env::var("NMP_LIVE_WINDOW")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
