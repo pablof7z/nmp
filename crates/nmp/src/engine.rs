@@ -34,7 +34,7 @@ use nmp_engine::runtime::{
 };
 use nmp_grammar::WriteIntent;
 use nmp_resolver::LiveQuery;
-use nmp_store::{MemoryStore, RedbStore, RedbStoreResetError};
+use nmp_store::{MemoryStore, RedbStore, RedbStoreOpenError, RedbStoreResetError};
 use nmp_transport::PoolConfig;
 use nostr::RelayUrl;
 use nostr::{EventId, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
@@ -248,19 +248,19 @@ impl Engine {
     /// This clears NMP's canonical events, pending writes, receipts,
     /// coverage/evidence, and all other state held in that store. It does not
     /// touch any separately configured platform signer-provider checkpoint.
-    /// A live in-process engine using the same canonical path is refused with
-    /// [`EngineError::StoreStillOpen`] without touching the file. Call
-    /// [`Engine::shutdown`] (or drop the engine) first. A missing path is
-    /// already reset and succeeds. Cross-process exclusion is not provided.
+    /// A live engine in THIS OR ANY OTHER process using the same canonical
+    /// path is refused with [`EngineError::StoreStillOpen`] without touching
+    /// the file. Call [`Engine::shutdown`] (or drop the engine) first. A
+    /// missing path is already reset and succeeds.
     pub fn reset_persistent_store(path: impl AsRef<std::path::Path>) -> Result<(), EngineError> {
         match RedbStore::reset(path) {
             Ok(()) => Ok(()),
             Err(RedbStoreResetError::StoreStillOpen { path }) => Err(EngineError::StoreStillOpen {
                 path: path.to_string_lossy().into_owned(),
             }),
-            Err(RedbStoreResetError::ResetFailed { reason }) => {
-                Err(EngineError::StoreResetFailed { reason })
-            }
+            Err(error) => Err(EngineError::StoreResetFailed {
+                reason: error.to_string(),
+            }),
         }
     }
 
@@ -283,8 +283,15 @@ impl Engine {
         };
         let (engine_thread, handle) = match &config.store_path {
             Some(path) => {
-                let store = RedbStore::open(path).map_err(|e| EngineError::StoreOpenFailed {
-                    reason: e.to_string(),
+                let store = RedbStore::open(path).map_err(|error| match error {
+                    RedbStoreOpenError::StoreAlreadyOpen { path } => {
+                        EngineError::StoreAlreadyOpen {
+                            path: path.to_string_lossy().into_owned(),
+                        }
+                    }
+                    error => EngineError::StoreOpenFailed {
+                        reason: error.to_string(),
+                    },
                 })?;
                 EngineThread::spawn_with_runtime_config(
                     store,
@@ -1108,6 +1115,19 @@ mod tests {
             before,
             "refused reset must not touch the live store file"
         );
+        let second_open = Engine::new(config.clone())
+            .err()
+            .expect("a second persistent engine owner must be refused");
+        assert_eq!(
+            second_open,
+            EngineError::StoreAlreadyOpen {
+                path: path
+                    .canonicalize()
+                    .expect("live store path must canonicalize")
+                    .to_string_lossy()
+                    .into_owned(),
+            }
+        );
 
         engine.shutdown();
 
@@ -1121,7 +1141,7 @@ mod tests {
         let reopened = Engine::new(config).expect("reset path must open as a fresh store");
         drop(reopened);
         Engine::reset_persistent_store(&path)
-            .expect("dropping an engine must release its store registration");
+            .expect("dropping an engine must release its store ownership");
     }
 
     #[test]
@@ -1138,7 +1158,7 @@ mod tests {
         assert!(matches!(error, EngineError::StoreOpenFailed { .. }));
 
         Engine::reset_persistent_store(&path)
-            .expect("failed construction must release its path registration");
+            .expect("failed construction must release its store ownership");
         assert!(!path.exists(), "reset must remove the failed-open store");
     }
 

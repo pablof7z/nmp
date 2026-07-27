@@ -40,7 +40,7 @@ use crate::coverage::{
     GcVictimIndex, ShapeRecord,
 };
 use crate::persistent_store_lifetime::{
-    open_and_register, reset_store, OpenStoreRegistration, RegisteredOpen,
+    acquire_for_open, reset_store, RedbStoreOpenError, StoreOwnership,
 };
 use crate::{
     AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome, AttemptTransientDetail,

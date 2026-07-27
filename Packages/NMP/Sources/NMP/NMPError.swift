@@ -37,6 +37,10 @@ public enum NMPError: Error, Sendable, Equatable {
     case invalidSignerOutput(String)
     case receiptCorrelationIdExhausted
     case storeOpenFailed(String)
+    /// #489: `NmpEngineConfig.storePath` names a persistent store already
+    /// owned by this or another process. No second database owner and no
+    /// partial engine were created.
+    case storeAlreadyOpen(String)
     case storeResetFailed(String)
     case storeStillOpen(String)
     /// The engine could not be constructed (`NmpEngine.init`): a genuine
@@ -121,6 +125,7 @@ public enum NMPError: Error, Sendable, Equatable {
         case .InvalidSignRequest(let reason): self = .invalidSignRequest(reason)
         case .ReceiptCorrelationIdExhausted: self = .receiptCorrelationIdExhausted
         case .StoreOpenFailed(let reason): self = .storeOpenFailed(reason)
+        case .StoreAlreadyOpen(let path): self = .storeAlreadyOpen(path)
         case .StoreResetFailed(let reason): self = .storeResetFailed(reason)
         case .StoreStillOpen(let path): self = .storeStillOpen(path)
         case .EngineStartFailed(let component, let reason):
@@ -192,6 +197,8 @@ extension NMPError: LocalizedError {
             "Receipt correlation ID namespace exhausted"
         case .storeOpenFailed(let reason):
             "Could not open store: \(reason)"
+        case .storeAlreadyOpen(let path):
+            "Persistent store is already open: \(path)"
         case .storeResetFailed(let reason):
             "Could not reset store: \(reason)"
         case .storeStillOpen(let path):

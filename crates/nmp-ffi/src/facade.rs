@@ -138,11 +138,11 @@ impl Default for NmpEngineConfig {
 
 /// Destructively reset a closed persistent NMP store. This removes all
 /// canonical engine state at `store_path`, while leaving any separately
-/// configured native account checkpoint untouched. A live engine in this
-/// process using the same canonical path is refused with
+/// configured native account checkpoint untouched. A live engine in this OR
+/// ANY OTHER process using the same canonical path is refused with
 /// `FfiError::StoreStillOpen` without touching the file. Shut down or drop
 /// that engine first. The operation is idempotent when the store does not
-/// exist; cross-process exclusion is not provided.
+/// exist.
 #[uniffi::export]
 pub fn reset_persistent_store(store_path: String) -> Result<(), FfiError> {
     nmp::Engine::reset_persistent_store(store_path)?;
@@ -1303,6 +1303,19 @@ mod tests {
             std::fs::read(&path).expect("refused FFI reset must leave the store readable"),
             before,
             "refused FFI reset must not touch the store file"
+        );
+        let second_open = NmpEngine::new(config.clone())
+            .err()
+            .expect("a second FFI engine owner must be refused");
+        assert_eq!(
+            second_open,
+            FfiError::StoreAlreadyOpen {
+                path: path
+                    .canonicalize()
+                    .expect("live FFI store must canonicalize")
+                    .to_string_lossy()
+                    .into_owned(),
+            }
         );
 
         engine.shutdown();

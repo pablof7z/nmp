@@ -209,6 +209,8 @@ pub nmp::EngineError::ObservationUnavailable
 pub nmp::EngineError::ObservationUnavailable::reason: alloc::string::String
 pub nmp::EngineError::ReceiptCorrelationIdExhausted
 pub nmp::EngineError::SignerMissingPublicKey
+pub nmp::EngineError::StoreAlreadyOpen
+pub nmp::EngineError::StoreAlreadyOpen::path: alloc::string::String
 pub nmp::EngineError::StoreOpenFailed
 pub nmp::EngineError::StoreOpenFailed::reason: alloc::string::String
 pub nmp::EngineError::StoreResetFailed

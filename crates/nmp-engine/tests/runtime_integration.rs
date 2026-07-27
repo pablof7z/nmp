@@ -196,7 +196,7 @@ fn subscribe_ticks_wall_clock_before_the_one_time_max_age_decision() {
 
 /// #489: store-layer ownership must survive the lowest supported raw runtime
 /// path. Moving `RedbStore` directly into `EngineThread` cannot bypass live
-/// reset refusal, and joining the thread releases the final registration.
+/// reset refusal, and joining the thread releases the exclusive lock.
 #[test]
 fn raw_engine_thread_owns_persistent_reset_guard_until_join() {
     let fixture = tempfile::tempdir().unwrap();
@@ -211,12 +211,11 @@ fn raw_engine_thread_owns_persistent_reset_guard_until_join() {
     )
     .unwrap();
 
-    assert_eq!(
+    assert!(matches!(
         RedbStore::reset(&path),
-        Err(RedbStoreResetError::StoreStillOpen {
-            path: path.canonicalize().unwrap(),
-        })
-    );
+        Err(RedbStoreResetError::StoreStillOpen { path: refused })
+            if refused == path.canonicalize().unwrap()
+    ));
     assert!(
         path.exists(),
         "typed refusal must leave raw-engine bytes intact"

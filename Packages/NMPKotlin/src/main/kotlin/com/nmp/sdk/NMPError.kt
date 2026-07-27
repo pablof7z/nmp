@@ -46,6 +46,11 @@ sealed class NMPError(message: String) : Exception(message) {
     object ReceiptCorrelationIdExhausted :
         NMPError("receipt correlation id namespace exhausted")
     data class StoreOpenFailed(val reason: String) : NMPError("store open failed: $reason")
+    /** #489: the configured `storePath` names a persistent store already owned
+     * by this or another process. No second database owner and no partial
+     * engine were created. */
+    data class StoreAlreadyOpen(val path: String) :
+        NMPError("persistent store is already open: $path")
     data class StoreResetFailed(val reason: String) : NMPError("store reset failed: $reason")
     data class StoreStillOpen(val path: String) : NMPError("persistent store is still open: $path")
     /** The engine could not be constructed (`NmpEngine` creation): a genuine
@@ -153,6 +158,7 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.InvalidSignRequest -> InvalidSignRequest(ffi.reason)
                 is FfiException.ReceiptCorrelationIdExhausted -> ReceiptCorrelationIdExhausted
                 is FfiException.StoreOpenFailed -> StoreOpenFailed(ffi.reason)
+                is FfiException.StoreAlreadyOpen -> StoreAlreadyOpen(ffi.path)
                 is FfiException.StoreResetFailed -> StoreResetFailed(ffi.reason)
                 is FfiException.StoreStillOpen -> StoreStillOpen(ffi.path)
                 is FfiException.EngineStartFailed -> EngineStartFailed(ffi.component, ffi.reason)

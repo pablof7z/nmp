@@ -95,6 +95,15 @@ class EvidenceMappingTest {
         )
     }
 
+    /** #489: the second-owner refusal must survive to the native surface as
+     * its own fact, distinct from "the store could not be opened". */
+    @Test
+    fun secondStoreOwnerRefusalRemainsTypedAtTheNativeBoundary() {
+        val refusal = NMPError.from(FfiException.StoreAlreadyOpen("/canonical/nmp.redb"))
+        assertEquals(NMPError.StoreAlreadyOpen("/canonical/nmp.redb"), refusal)
+        assertTrue(refusal != NMPError.StoreOpenFailed("/canonical/nmp.redb"))
+    }
+
     @Test
     fun finiteFactDeliveryFailuresRemainTypedAtTheNativeBoundary() {
         assertEquals(

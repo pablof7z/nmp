@@ -1,28 +1,14 @@
-//! Process-local ownership for destructive persistent-store reset (#489).
+//! Cross-process exclusive ownership for persistent stores (#489).
 //!
-//! This lives below every engine/facade construction path: a `RedbStore`
-//! itself owns the registration, so moving it through `Engine::from_parts`
-//! or a raw `EngineThread` cannot bypass the guard.
+//! The database door and the destructive-reset door acquire the same durable
+//! sidecar file lock. The lock is owned by the [`RedbStore`](crate::RedbStore)
+//! value itself, so no process-global registry, caller convention, or
+//! engine-only construction path can bypass it: one resolved store target has
+//! exactly one owner at a time, in this process and every other one.
 
-use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, OnceLock};
-
-static OPEN_STORES: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
-
-fn open_stores() -> &'static Mutex<HashMap<PathBuf, usize>> {
-    OPEN_STORES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// A prior panic cannot turn the corruption guard into a second panic. Every
-/// governed operation recovers the protected map and re-establishes its own
-/// invariant while holding the mutex.
-fn lock_open_stores() -> MutexGuard<'static, HashMap<PathBuf, usize>> {
-    open_stores()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-}
 
 /// Resolve the stable target identity used by both open and reset. Existing
 /// files (and existing final symlinks) canonicalize completely. A missing
@@ -69,79 +55,294 @@ fn resolve_store_path(path: &Path) -> io::Result<PathBuf> {
     ))
 }
 
-/// RAII ownership attached directly to every successfully opened
-/// `RedbStore`. The store's database field is declared before this field, so
-/// database teardown completes before the last count can be released.
-pub(crate) struct OpenStoreRegistration {
-    path: PathBuf,
+/// The sidecar deliberately outlives the database file, including across a
+/// destructive reset. Keeping one stable inode per canonical target is
+/// load-bearing: deleting and recreating the database file must not mint a
+/// second lock identity while an older database handle is still alive.
+///
+/// The sidecar is mechanism state — it holds no store content, has no schema,
+/// and is never read.
+fn ownership_sidecar_path(target: &Path) -> io::Result<PathBuf> {
+    let parent = target.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "persistent store target has no parent directory",
+        )
+    })?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(target.as_os_str().as_encoded_bytes());
+    Ok(parent.join(format!(
+        ".nmp-store-owner-{}.lock",
+        hasher.finalize().to_hex()
+    )))
 }
 
-impl Drop for OpenStoreRegistration {
-    fn drop(&mut self) {
-        let mut open = lock_open_stores();
-        let remove = match open.get_mut(&self.path) {
-            Some(count) if *count > 1 => {
-                *count -= 1;
-                false
-            }
-            Some(_) => true,
-            None => false,
-        };
-        if remove {
-            open.remove(&self.path);
+/// Every way acquiring exclusive ownership of one target can fail. Both
+/// public door errors project this one set, so open and reset cannot drift
+/// into differently-shaped refusals for the same mechanism.
+#[derive(Debug)]
+pub(crate) enum StoreOwnershipError {
+    Resolve { path: PathBuf, source: io::Error },
+    SidecarOpen { path: PathBuf, source: io::Error },
+    AlreadyOpen { path: PathBuf },
+    Lock { path: PathBuf, source: io::Error },
+    TargetChanged { expected: PathBuf, actual: PathBuf },
+}
+
+/// The one exclusive owner of a resolved persistent-store target.
+///
+/// This value deliberately contains the live locked file handle rather than
+/// an in-memory registration token. Dropping it releases the OS lock in every
+/// process, including on unwind, on partial construction, and on process
+/// death — none of which an in-process registry could have covered.
+pub(crate) struct StoreOwnership {
+    target: PathBuf,
+    _sidecar: File,
+}
+
+impl StoreOwnership {
+    /// The canonical target this ownership protects. Callers open and delete
+    /// exactly this path, never the alias they were handed.
+    pub(crate) fn target(&self) -> &Path {
+        &self.target
+    }
+
+    /// Re-resolve the caller path after the lock is held, after database
+    /// open, and immediately before destructive removal. A symlink retarget
+    /// racing acquisition cannot make the lock protect one target while the
+    /// operation touches another.
+    pub(crate) fn revalidate(&self, path: &Path) -> Result<(), StoreOwnershipError> {
+        let actual = resolve_store_path(path).map_err(|source| StoreOwnershipError::Resolve {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if actual == self.target {
+            Ok(())
+        } else {
+            Err(StoreOwnershipError::TargetChanged {
+                expected: self.target.clone(),
+                actual,
+            })
         }
     }
 }
 
-/// A value opened and registered under one uninterrupted registry lock.
-/// Field order is load-bearing: on any later construction error, `value`
-/// (the live database) drops before `registration` releases reset.
-pub(crate) struct RegisteredOpen<T> {
-    pub(crate) value: T,
-    pub(crate) registration: OpenStoreRegistration,
+fn acquire_ownership(path: &Path) -> Result<StoreOwnership, StoreOwnershipError> {
+    acquire_ownership_with_hooks(path, || {})
 }
 
-/// Hold the shared registry mutex across pre-resolution, create/open,
-/// post-open canonicalization, and registration. `open` receives the exact
-/// caller path so a dangling final symlink is followed by the OS; the
-/// post-open identity names the actual created target.
-pub(crate) fn open_and_register<T, E>(
+fn acquire_ownership_with_hooks(
     path: &Path,
-    open: impl FnOnce(&Path) -> Result<T, E>,
-) -> Result<RegisteredOpen<T>, E>
-where
-    E: From<io::Error>,
-{
-    let mut stores = lock_open_stores();
-    let pre_open_identity = resolve_store_path(path).map_err(E::from)?;
-    let value = open(path)?;
-    let path = resolve_store_path(path).map_err(E::from)?;
-    if path != pre_open_identity {
-        return Err(E::from(io::Error::other(format!(
-            "persistent store target changed during open: {} -> {}",
-            pre_open_identity.display(),
-            path.display()
-        ))));
-    }
-    let count = stores.entry(path.clone()).or_default();
-    *count = count.checked_add(1).ok_or_else(|| {
-        E::from(io::Error::other(
-            "persistent store registration count exhausted",
-        ))
+    after_lock: impl FnOnce(),
+) -> Result<StoreOwnership, StoreOwnershipError> {
+    let target = resolve_store_path(path).map_err(|source| StoreOwnershipError::Resolve {
+        path: path.to_path_buf(),
+        source,
     })?;
-    let registration = OpenStoreRegistration { path };
-    drop(stores);
-    Ok(RegisteredOpen {
-        value,
-        registration,
-    })
+    let sidecar_path =
+        ownership_sidecar_path(&target).map_err(|source| StoreOwnershipError::Resolve {
+            path: target.clone(),
+            source,
+        })?;
+    let sidecar = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&sidecar_path)
+        .map_err(|source| StoreOwnershipError::SidecarOpen {
+            path: sidecar_path.clone(),
+            source,
+        })?;
+    // Nonblocking by construction: a live owner is a typed refusal, never a
+    // caller that silently waits behind another process.
+    match sidecar.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            return Err(StoreOwnershipError::AlreadyOpen { path: target });
+        }
+        Err(std::fs::TryLockError::Error(source)) => {
+            return Err(StoreOwnershipError::Lock {
+                path: sidecar_path,
+                source,
+            });
+        }
+    }
+    after_lock();
+    // The handle is bound to `target` before revalidation so that a failing
+    // revalidation drops it — releasing the lock exactly once — instead of
+    // leaking an orphan owner.
+    let ownership = StoreOwnership {
+        target,
+        _sidecar: sidecar,
+    };
+    ownership.revalidate(path)?;
+    Ok(ownership)
 }
 
-/// Typed store-layer result for destructive reset.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Every reachable failure from opening one persistent database.
+#[derive(Debug)]
+pub enum RedbStoreOpenError {
+    /// Another live owner — in this process or any other — holds the same
+    /// canonical store target. No second database owner was created.
+    StoreAlreadyOpen { path: PathBuf },
+    /// The caller path could not be resolved to a stable target identity.
+    PathResolutionFailed { path: PathBuf, source: io::Error },
+    /// The durable ownership sidecar could not be created or opened.
+    LockFileOpenFailed { path: PathBuf, source: io::Error },
+    /// The OS refused the exclusive lock for a reason other than contention.
+    LockFailed { path: PathBuf, source: io::Error },
+    /// The caller path resolved to a different target while the operation was
+    /// in flight. Nothing was exposed and the partial ownership was released.
+    TargetChanged { expected: PathBuf, actual: PathBuf },
+    /// The database itself refused the open (schema epoch, corruption, I/O).
+    Database(redb::Error),
+}
+
+impl RedbStoreOpenError {
+    /// redb's own single-process exclusion is a second owner refusing a
+    /// second owner. Project it as the same typed fact rather than leaking a
+    /// mechanism-specific error for the case the sidecar already covers.
+    pub(crate) fn database(error: redb::Error, target: &Path) -> Self {
+        if matches!(error, redb::Error::DatabaseAlreadyOpen) {
+            Self::StoreAlreadyOpen {
+                path: target.to_path_buf(),
+            }
+        } else {
+            Self::Database(error)
+        }
+    }
+}
+
+impl From<redb::Error> for RedbStoreOpenError {
+    fn from(error: redb::Error) -> Self {
+        Self::Database(error)
+    }
+}
+
+macro_rules! redb_open_error_from {
+    ($($error:ty),+ $(,)?) => {
+        $(
+            impl From<$error> for RedbStoreOpenError {
+                fn from(error: $error) -> Self {
+                    Self::Database(error.into())
+                }
+            }
+        )+
+    };
+}
+
+redb_open_error_from!(
+    redb::CommitError,
+    redb::DatabaseError,
+    redb::StorageError,
+    redb::TableError,
+    redb::TransactionError,
+);
+
+impl From<StoreOwnershipError> for RedbStoreOpenError {
+    fn from(error: StoreOwnershipError) -> Self {
+        match error {
+            StoreOwnershipError::Resolve { path, source } => {
+                Self::PathResolutionFailed { path, source }
+            }
+            StoreOwnershipError::SidecarOpen { path, source } => {
+                Self::LockFileOpenFailed { path, source }
+            }
+            StoreOwnershipError::AlreadyOpen { path } => Self::StoreAlreadyOpen { path },
+            StoreOwnershipError::Lock { path, source } => Self::LockFailed { path, source },
+            StoreOwnershipError::TargetChanged { expected, actual } => {
+                Self::TargetChanged { expected, actual }
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for RedbStoreOpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StoreAlreadyOpen { path } => {
+                write!(f, "persistent store is already open: {}", path.display())
+            }
+            Self::PathResolutionFailed { path, source } => write!(
+                f,
+                "could not resolve persistent store target {}: {source}",
+                path.display()
+            ),
+            Self::LockFileOpenFailed { path, source } => write!(
+                f,
+                "could not open persistent store ownership lock {}: {source}",
+                path.display()
+            ),
+            Self::LockFailed { path, source } => write!(
+                f,
+                "could not acquire persistent store ownership lock {}: {source}",
+                path.display()
+            ),
+            Self::TargetChanged { expected, actual } => write!(
+                f,
+                "persistent store target changed during open: {} -> {}",
+                expected.display(),
+                actual.display()
+            ),
+            Self::Database(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for RedbStoreOpenError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::PathResolutionFailed { source, .. }
+            | Self::LockFileOpenFailed { source, .. }
+            | Self::LockFailed { source, .. } => Some(source),
+            Self::Database(error) => Some(error),
+            Self::StoreAlreadyOpen { .. } | Self::TargetChanged { .. } => None,
+        }
+    }
+}
+
+/// Acquire the one exclusive owner token a `RedbStore` holds for its
+/// lifetime. Nothing may open the database before this succeeds.
+pub(crate) fn acquire_for_open(path: &Path) -> Result<StoreOwnership, RedbStoreOpenError> {
+    acquire_ownership(path).map_err(Into::into)
+}
+
+/// Every reachable failure from destructively resetting one store.
+#[derive(Debug)]
 pub enum RedbStoreResetError {
+    /// A live owner — in this process or any other — still holds the target.
+    /// Nothing was removed.
     StoreStillOpen { path: PathBuf },
-    ResetFailed { reason: String },
+    /// The caller path could not be resolved to a stable target identity.
+    PathResolutionFailed { path: PathBuf, source: io::Error },
+    /// The durable ownership sidecar could not be created or opened.
+    LockFileOpenFailed { path: PathBuf, source: io::Error },
+    /// The OS refused the exclusive lock for a reason other than contention.
+    LockFailed { path: PathBuf, source: io::Error },
+    /// The caller path resolved to a different target while reset held its
+    /// lock. Nothing was deleted.
+    TargetChanged { expected: PathBuf, actual: PathBuf },
+    /// The exclusive owner could not remove the resolved target.
+    RemoveFailed { path: PathBuf, source: io::Error },
+}
+
+impl From<StoreOwnershipError> for RedbStoreResetError {
+    fn from(error: StoreOwnershipError) -> Self {
+        match error {
+            StoreOwnershipError::Resolve { path, source } => {
+                Self::PathResolutionFailed { path, source }
+            }
+            StoreOwnershipError::SidecarOpen { path, source } => {
+                Self::LockFileOpenFailed { path, source }
+            }
+            StoreOwnershipError::AlreadyOpen { path } => Self::StoreStillOpen { path },
+            StoreOwnershipError::Lock { path, source } => Self::LockFailed { path, source },
+            StoreOwnershipError::TargetChanged { expected, actual } => {
+                Self::TargetChanged { expected, actual }
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for RedbStoreResetError {
@@ -150,36 +351,69 @@ impl std::fmt::Display for RedbStoreResetError {
             Self::StoreStillOpen { path } => {
                 write!(f, "persistent store is still open: {}", path.display())
             }
-            Self::ResetFailed { reason } => write!(f, "could not reset store: {reason}"),
+            Self::PathResolutionFailed { path, source } => write!(
+                f,
+                "could not resolve persistent store target {}: {source}",
+                path.display()
+            ),
+            Self::LockFileOpenFailed { path, source } => write!(
+                f,
+                "could not open persistent store ownership lock {}: {source}",
+                path.display()
+            ),
+            Self::LockFailed { path, source } => write!(
+                f,
+                "could not acquire persistent store ownership lock {}: {source}",
+                path.display()
+            ),
+            Self::TargetChanged { expected, actual } => write!(
+                f,
+                "persistent store target changed during reset: {} -> {}",
+                expected.display(),
+                actual.display()
+            ),
+            Self::RemoveFailed { path, source } => write!(
+                f,
+                "could not remove persistent store {}: {source}",
+                path.display()
+            ),
         }
     }
 }
 
-impl std::error::Error for RedbStoreResetError {}
-
-pub(crate) fn reset_store(path: &Path) -> Result<(), RedbStoreResetError> {
-    reset_store_with_hooks(path, || {}, || {})
+impl std::error::Error for RedbStoreResetError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::PathResolutionFailed { source, .. }
+            | Self::LockFileOpenFailed { source, .. }
+            | Self::LockFailed { source, .. }
+            | Self::RemoveFailed { source, .. } => Some(source),
+            Self::StoreStillOpen { .. } | Self::TargetChanged { .. } => None,
+        }
+    }
 }
 
+pub(crate) fn reset_store(path: &Path) -> Result<(), RedbStoreResetError> {
+    reset_store_with_hooks(path, || {})
+}
+
+/// Reset acquires the SAME exclusive ownership an open would and holds it
+/// through removal. There is no check-then-delete window: the owner token is
+/// still live when `remove_file` runs and is released only afterwards.
 fn reset_store_with_hooks(
     path: &Path,
-    before_lock: impl FnOnce(),
     before_remove: impl FnOnce(),
 ) -> Result<(), RedbStoreResetError> {
-    before_lock();
-    let stores = lock_open_stores();
-    let path = resolve_store_path(path).map_err(|error| RedbStoreResetError::ResetFailed {
-        reason: error.to_string(),
-    })?;
-    if stores.contains_key(&path) {
-        return Err(RedbStoreResetError::StoreStillOpen { path });
-    }
+    let ownership = acquire_ownership(path)?;
+    ownership.revalidate(path)?;
     before_remove();
-    match std::fs::remove_file(&path) {
+    let target = ownership.target().to_path_buf();
+    match std::fs::remove_file(&target) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(RedbStoreResetError::ResetFailed {
-            reason: error.to_string(),
+        Err(source) => Err(RedbStoreResetError::RemoveFailed {
+            path: target,
+            source,
         }),
     }
 }
@@ -187,151 +421,89 @@ fn reset_store_with_hooks(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
+    use std::io::{BufRead, Read, Write};
+    use std::process::{Command, Stdio};
+    use std::sync::{mpsc, Arc, Barrier};
     use std::thread;
 
-    fn create_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
-        std::fs::write(path, bytes)
-    }
-
     #[test]
-    fn open_and_reset_interleavings_are_serialized_in_both_directions() {
+    fn one_owner_refuses_second_open_and_reset_until_drop() {
         let fixture = tempfile::tempdir().unwrap();
-        let path = fixture.path().join("interleaving.redb");
+        let path = fixture.path().join("one-owner.redb");
+        let owner = crate::RedbStore::open(&path).unwrap();
 
-        // A reset that begins while create/open is paused cannot observe the
-        // file before registration. It resumes only afterward and refuses.
-        let (created_tx, created_rx) = mpsc::sync_channel(0);
-        let (finish_open_tx, finish_open_rx) = mpsc::sync_channel(0);
-        let open_path = path.clone();
-        let opener = thread::spawn(move || {
-            open_and_register::<(), io::Error>(&open_path, |path| {
-                create_bytes(path, b"opened-before-registration")?;
-                created_tx.send(()).unwrap();
-                finish_open_rx.recv().unwrap();
-                Ok(())
-            })
-            .unwrap()
-        });
-        created_rx.recv().unwrap();
-        let (reset_started_tx, reset_started_rx) = mpsc::sync_channel(0);
-        let reset_path = path.clone();
-        let resetter = thread::spawn(move || {
-            reset_store_with_hooks(&reset_path, || reset_started_tx.send(()).unwrap(), || {})
-        });
-        reset_started_rx.recv().unwrap();
-        finish_open_tx.send(()).unwrap();
-        let owner = opener.join().unwrap();
-        assert_eq!(
-            resetter.join().unwrap(),
-            Err(RedbStoreResetError::StoreStillOpen {
-                path: path.canonicalize().unwrap(),
-            })
-        );
-        assert_eq!(std::fs::read(&path).unwrap(), b"opened-before-registration");
-        drop(owner);
+        assert!(matches!(
+            crate::RedbStore::open(&path),
+            Err(RedbStoreOpenError::StoreAlreadyOpen { .. })
+        ));
+        assert!(matches!(
+            reset_store(&path),
+            Err(RedbStoreResetError::StoreStillOpen { .. })
+        ));
+        assert!(path.exists(), "a refused reset must not touch the target");
 
-        // Conversely, reset holds the same mutex from its closed check
-        // through removal. A concurrent open starts only after deletion and
-        // therefore creates fresh bytes rather than losing a live file.
-        create_bytes(&path, b"old-store").unwrap();
-        let (checked_tx, checked_rx) = mpsc::sync_channel(0);
-        let (finish_reset_tx, finish_reset_rx) = mpsc::sync_channel(0);
-        let reset_path = path.clone();
-        let resetter = thread::spawn(move || {
-            reset_store_with_hooks(
-                &reset_path,
-                || {},
-                || {
-                    checked_tx.send(()).unwrap();
-                    finish_reset_rx.recv().unwrap();
-                },
-            )
-        });
-        checked_rx.recv().unwrap();
-        let (open_started_tx, open_started_rx) = mpsc::sync_channel(0);
-        let open_path = path.clone();
-        let opener = thread::spawn(move || {
-            open_started_tx.send(()).unwrap();
-            open_and_register::<(), io::Error>(&open_path, |path| {
-                assert!(!path.exists(), "reset must remove before open proceeds");
-                create_bytes(path, b"fresh-store")?;
-                Ok(())
-            })
-            .unwrap()
-        });
-        open_started_rx.recv().unwrap();
-        finish_reset_tx.send(()).unwrap();
-        resetter.join().unwrap().unwrap();
-        let owner = opener.join().unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), b"fresh-store");
         drop(owner);
+        let replacement = crate::RedbStore::open(&path).unwrap();
+        drop(replacement);
         reset_store(&path).unwrap();
+        assert!(!path.exists());
     }
 
     #[test]
-    fn two_live_owners_require_the_last_registration_to_close() {
+    fn a_relative_alias_of_a_live_store_is_refused() {
         let fixture = tempfile::tempdir().unwrap();
-        let path = fixture.path().join("two-owners.redb");
-        let first = open_and_register::<(), io::Error>(&path, |path| create_bytes(path, b"stable"))
-            .unwrap();
-        let second = open_and_register::<(), io::Error>(&path, |_| Ok(())).unwrap();
+        let path = fixture.path().join("relative-alias.redb");
+        let owner = crate::RedbStore::open(&path).unwrap();
+        let alias = fixture.path().join(".").join("relative-alias.redb");
 
         assert!(matches!(
-            reset_store(&path),
-            Err(RedbStoreResetError::StoreStillOpen { .. })
+            crate::RedbStore::open(&alias),
+            Err(RedbStoreOpenError::StoreAlreadyOpen { .. })
         ));
-        drop(first);
         assert!(matches!(
-            reset_store(&path),
+            reset_store(&alias),
             Err(RedbStoreResetError::StoreStillOpen { .. })
         ));
-        drop(second);
-        reset_store(&path).expect("last owner must release reset");
+        drop(owner);
+        reset_store(&alias).unwrap();
+        assert!(!path.exists());
     }
 
     #[cfg(unix)]
     #[test]
-    fn existing_and_dangling_final_symlinks_resolve_to_the_store_target() {
+    fn existing_and_dangling_final_symlinks_share_the_target_owner() {
         use std::os::unix::fs::symlink;
 
         let fixture = tempfile::tempdir().unwrap();
         let target = fixture.path().join("target.redb");
         let existing_alias = fixture.path().join("existing-alias.redb");
-        drop(crate::RedbStore::open(&target).unwrap());
+        let owner = crate::RedbStore::open(&target).unwrap();
         symlink(&target, &existing_alias).unwrap();
-        let owner = crate::RedbStore::open(&existing_alias).unwrap();
-        assert_eq!(
-            reset_store(&existing_alias),
-            Err(RedbStoreResetError::StoreStillOpen {
-                path: target.canonicalize().unwrap(),
-            })
-        );
         assert!(matches!(
-            reset_store(&target),
+            crate::RedbStore::open(&existing_alias),
+            Err(RedbStoreOpenError::StoreAlreadyOpen { .. })
+        ));
+        assert!(matches!(
+            reset_store(&existing_alias),
             Err(RedbStoreResetError::StoreStillOpen { .. })
         ));
         drop(owner);
         reset_store(&existing_alias).unwrap();
 
+        // A pre-create dangling final symlink must select the SAME owner
+        // identity the created target later resolves to.
         let dangling_target = fixture.path().join("created-through-target.redb");
         let dangling_alias = fixture.path().join("dangling-alias.redb");
         symlink("created-through-target.redb", &dangling_alias).unwrap();
         let owner = crate::RedbStore::open(&dangling_alias).unwrap();
-        let canonical_target = dangling_target.canonicalize().unwrap();
-        assert_eq!(
-            reset_store(&dangling_alias),
-            Err(RedbStoreResetError::StoreStillOpen {
-                path: canonical_target.clone(),
-            })
-        );
-        assert_eq!(
+        assert!(matches!(
+            crate::RedbStore::open(&dangling_target),
+            Err(RedbStoreOpenError::StoreAlreadyOpen { .. })
+        ));
+        assert!(matches!(
             reset_store(&dangling_target),
-            Err(RedbStoreResetError::StoreStillOpen {
-                path: canonical_target,
-            })
-        );
-        assert!(dangling_target.exists());
+            Err(RedbStoreResetError::StoreStillOpen { .. })
+        ));
         drop(owner);
         reset_store(&dangling_alias).unwrap();
         assert!(!dangling_target.exists());
@@ -341,29 +513,124 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn poisoned_registry_recovers_for_later_governed_operations() {
-        let poisoned = thread::spawn(|| {
-            let _guard = open_stores().lock().unwrap();
-            panic!("poison registry for deterministic recovery proof");
-        });
-        assert!(poisoned.join().is_err());
+    fn target_retargeted_during_lock_acquisition_fails_closed() {
+        use std::os::unix::fs::symlink;
 
         let fixture = tempfile::tempdir().unwrap();
-        let path = fixture.path().join("after-poison.redb");
-        let owner =
-            open_and_register::<(), io::Error>(&path, |path| create_bytes(path, b"after poison"))
-                .expect("open must recover poisoned registry");
+        let first = fixture.path().join("first.redb");
+        let second = fixture.path().join("second.redb");
+        let alias = fixture.path().join("alias.redb");
+        symlink(&first, &alias).unwrap();
+
+        let result = acquire_ownership_with_hooks(&alias, || {
+            std::fs::remove_file(&alias).unwrap();
+            symlink(&second, &alias).unwrap();
+        });
         assert!(matches!(
-            reset_store(&path),
-            Err(RedbStoreResetError::StoreStillOpen { .. })
+            result,
+            Err(StoreOwnershipError::TargetChanged { expected, actual })
+                if expected == resolve_store_path(&first).unwrap()
+                    && actual == resolve_store_path(&second).unwrap()
         ));
+        assert!(
+            !first.exists() && !second.exists(),
+            "a fail-closed acquisition creates no database"
+        );
+
+        // The failed acquisition released its lock exactly once, so the same
+        // target is immediately ownable.
+        let owner = acquire_ownership(&first).expect("failed acquisition released its lock");
         drop(owner);
-        reset_store(&path).expect("reset must recover poisoned registry");
     }
 
     #[test]
-    fn post_create_schema_failure_releases_registration_after_database_drop() {
+    fn concurrent_openers_have_exactly_one_owner() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = Arc::new(fixture.path().join("raced.redb"));
+        let start = Arc::new(Barrier::new(9));
+        let release = Arc::new(Barrier::new(2));
+        let (winner_tx, winner_rx) = mpsc::sync_channel(1);
+        let threads = (0..8)
+            .map(|_| {
+                let path = Arc::clone(&path);
+                let start = Arc::clone(&start);
+                let release = Arc::clone(&release);
+                let winner_tx = winner_tx.clone();
+                thread::spawn(move || {
+                    start.wait();
+                    match crate::RedbStore::open(path.as_path()) {
+                        Ok(store) => {
+                            winner_tx.send(()).unwrap();
+                            release.wait();
+                            drop(store);
+                            true
+                        }
+                        Err(RedbStoreOpenError::StoreAlreadyOpen { .. }) => false,
+                        Err(error) => panic!("unexpected open result: {error}"),
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        drop(winner_tx);
+        start.wait();
+        winner_rx.recv().unwrap();
+        assert!(winner_rx.try_recv().is_err());
+        release.wait();
+        let winners = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .filter(|won| *won)
+            .count();
+        assert_eq!(winners, 1);
+    }
+
+    #[test]
+    fn racing_open_against_reset_leaves_one_owner_and_no_lost_bytes() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = Arc::new(fixture.path().join("open-vs-reset.redb"));
+        drop(crate::RedbStore::open(path.as_path()).unwrap());
+        let start = Arc::new(Barrier::new(2));
+
+        let open_path = Arc::clone(&path);
+        let open_start = Arc::clone(&start);
+        let opener = thread::spawn(move || {
+            open_start.wait();
+            crate::RedbStore::open(open_path.as_path())
+        });
+        let reset_path = Arc::clone(&path);
+        let reset_start = Arc::clone(&start);
+        let resetter = thread::spawn(move || {
+            reset_start.wait();
+            reset_store(reset_path.as_path())
+        });
+
+        let opened = opener.join().unwrap();
+        let reset = resetter.join().unwrap();
+        match (opened, reset) {
+            // Reset ran first: the file was removed, then recreated by the
+            // opener. Never a half-deleted store handed to a live owner.
+            (Ok(store), Ok(())) => {
+                assert!(path.exists());
+                drop(store);
+            }
+            (Ok(store), Err(RedbStoreResetError::StoreStillOpen { .. })) => {
+                assert!(path.exists(), "a refused reset must leave the bytes");
+                drop(store);
+            }
+            (Err(RedbStoreOpenError::StoreAlreadyOpen { .. }), Ok(())) => {
+                assert!(!path.exists(), "the winning reset removed the target");
+            }
+            (opened, reset) => panic!(
+                "exactly one side must own the target: open={} reset={reset:?}",
+                if opened.is_ok() { "ok" } else { "err" }
+            ),
+        }
+    }
+
+    #[test]
+    fn schema_failure_releases_database_and_sidecar_ownership() {
         const FOREIGN_TABLE: redb::TableDefinition<&str, &str> =
             redb::TableDefinition::new("foreign_table");
 
@@ -377,10 +644,101 @@ mod tests {
 
         assert!(matches!(
             crate::RedbStore::open(&path),
-            Err(redb::Error::UpgradeRequired(8))
+            Err(RedbStoreOpenError::Database(redb::Error::UpgradeRequired(
+                _
+            )))
         ));
-        reset_store(&path)
-            .expect("post-create schema refusal must release database then registration");
+        reset_store(&path).expect("schema refusal must release database then sidecar ownership");
         assert!(!path.exists());
+    }
+
+    /// Child-only body driven by
+    /// `subprocess_owner_is_refused_through_direct_relative_and_symlink_aliases`.
+    /// Under an ordinary test run the environment variable is absent and this
+    /// returns immediately.
+    #[test]
+    fn subprocess_owner_helper() {
+        let Some(path) = std::env::var_os("NMP_STORE_OWNER_HELPER_PATH") else {
+            return;
+        };
+        let _store = crate::RedbStore::open(PathBuf::from(path)).unwrap();
+        println!("NMP_STORE_OWNER_READY");
+        std::io::stdout().flush().unwrap();
+        // Hold ownership until the parent closes our stdin.
+        let mut byte = [0u8; 1];
+        let _ = std::io::stdin().read(&mut byte);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn subprocess_owner_is_refused_through_direct_relative_and_symlink_aliases() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let target = fixture.path().join("cross-process.redb");
+        let alias = fixture.path().join("alias.redb");
+        symlink("cross-process.redb", &alias).unwrap();
+
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("persistent_store_lifetime::tests::subprocess_owner_helper")
+            .arg("--nocapture")
+            .current_dir(fixture.path())
+            // A relative path in the child: the owner identity must not
+            // depend on the spelling either side used.
+            .env("NMP_STORE_OWNER_HELPER_PATH", "cross-process.redb")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let mut lines = std::io::BufReader::new(stdout).lines();
+        loop {
+            let line = lines
+                .next()
+                .expect("child exited before taking ownership")
+                .unwrap();
+            if line.contains("NMP_STORE_OWNER_READY") {
+                break;
+            }
+        }
+
+        let before = std::fs::read(&target).expect("the child's store must be readable");
+        assert!(matches!(
+            crate::RedbStore::open(&target),
+            Err(RedbStoreOpenError::StoreAlreadyOpen { .. })
+        ));
+        assert!(matches!(
+            crate::RedbStore::open(&alias),
+            Err(RedbStoreOpenError::StoreAlreadyOpen { .. })
+        ));
+        assert!(matches!(
+            reset_store(&alias),
+            Err(RedbStoreResetError::StoreStillOpen { .. })
+        ));
+        assert!(matches!(
+            reset_store(&target),
+            Err(RedbStoreResetError::StoreStillOpen { .. })
+        ));
+        assert_eq!(
+            std::fs::read(&target).expect("a refused reset must leave the store readable"),
+            before,
+            "a refused cross-process reset must not touch the bytes"
+        );
+
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+
+        // Once the owning process exits, exactly one new opener succeeds and
+        // reset succeeds only after that owner is gone in turn.
+        let reopened = crate::RedbStore::open(&alias).unwrap();
+        assert!(matches!(
+            crate::RedbStore::open(&target),
+            Err(RedbStoreOpenError::StoreAlreadyOpen { .. })
+        ));
+        drop(reopened);
+        reset_store(&target).unwrap();
+        assert!(!target.exists());
     }
 }
