@@ -72,6 +72,29 @@ fn authors_in(filter_json: &str) -> usize {
     body.split(',').filter(|s| !s.trim().is_empty()).count()
 }
 
+/// Replace the `authors` array with `<N authors>` so the filter's structural
+/// fields stay visible.
+///
+/// Head-truncating a 1055-author filter shows nothing but pubkeys and hides
+/// `since`/`until`/`limit` entirely -- which is what decides what the filter
+/// means. An unlimited wide filter with `since == until` is a tie-second
+/// demand covering ONE second (its authors merged precisely because the
+/// scalars are equal), not coverage of the feed.
+fn elide_authors(filter_json: &str) -> String {
+    let n = authors_in(filter_json);
+    let Some(start) = filter_json.find("\"authors\":[") else {
+        return filter_json.to_string();
+    };
+    let Some(end_rel) = filter_json[start..].find(']') else {
+        return filter_json.to_string();
+    };
+    format!(
+        "{}\"authors\":<{n} authors>{}",
+        &filter_json[..start],
+        &filter_json[start + end_rel + 1..]
+    )
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let authors_path = args
@@ -286,19 +309,30 @@ fn main() {
         // wide filter carries a `limit` is the whole question: a wide LIMITED
         // filter means the feed is already served and the singletons are
         // redundant; a wide UNLIMITED one means they are not.
-        let mut seen_widths: BTreeSet<usize> = BTreeSet::new();
+        // Keyed on (kinds, width), NOT width alone. A relay-wide width key
+        // lets the kind:10002 NIP-65 lookup -- also 1055 authors wide -- claim
+        // the `width=1055` slot and suppress the kind:1 filter of the same
+        // width, which is the one actually in question. Two filters can share
+        // an author count and mean entirely different things.
+        let mut seen: BTreeSet<(String, usize)> = BTreeSet::new();
         for f in &row.filters {
             let w = authors_in(f);
-            if !seen_widths.insert(w) {
+            let kinds = f
+                .split("\"kinds\":")
+                .nth(1)
+                .and_then(|r| r.split(']').next())
+                .map(|k| format!("kinds:{k}]"))
+                .unwrap_or_else(|| "kinds:none".to_string());
+            if !seen.insert((kinds, w)) {
                 continue;
             }
-            let limited = f.contains("\"limit\":");
-            let shown: String = f.chars().take(200).collect();
-            let ellipsis = if f.chars().count() > 200 { " …" } else { "" };
-            println!(
-                "  width={w:<5} limited={:<5} {shown}{ellipsis}",
-                if limited { "YES" } else { "no" }
-            );
+            // Elide the authors array rather than truncating the string. A
+            // head-truncated 1055-author filter shows nothing but pubkeys,
+            // hiding `since`/`until`/`limit` -- and those decide what the
+            // filter MEANS. An unlimited wide filter with `since == until` is
+            // a tie-second demand covering ONE second (the authors axis merged
+            // because the scalars are equal), not coverage of the feed.
+            println!("  width={w:<5} {}", elide_authors(f));
         }
     }
 
