@@ -796,11 +796,11 @@ fn with_author_siblings(filters: Vec<ConcreteFilter>) -> BTreeSet<ContextualAtom
 ///
 /// Stated operationally over a compiled plan, because those are the only two
 /// ways two demands may legally share a wire subscription:
-/// 1. they were MERGED, so exactly one `WireReq` exists and no two planned
-///    reqs in a session carry byte-identical filters; and
-/// 2. every surviving `WireReq` carries its OWN token, so no two distinct
-///    filters share an id — and therefore every planned req reaches the wire
-///    rather than being silently dropped by `diff_plans`' `BTreeMap`.
+/// either they were MERGED, so exactly one `WireReq` exists and no two
+/// planned reqs in a session carry byte-identical filters; or every surviving
+/// `WireReq` carries its OWN token, so no two distinct filters share an id —
+/// and therefore every planned req reaches the wire rather than being
+/// silently dropped by `diff_plans`' `BTreeMap`.
 /// Checked under BOTH registries, since mergeability is a property of the
 /// registry in play and not of the filter, and across a CHURN step, since the
 /// assignment (not the id's content) is what carries injectivity forward.
