@@ -543,6 +543,9 @@ mod tests {
 
     #[cfg(unix)]
     fn reap_descriptor_holder(child: libc::pid_t) {
+        // Never signal 0 or a negative pid: those mean "my process group" and
+        // "some other group", either of which would take down the test run.
+        assert!(child > 0, "not a forked descriptor holder: {child}");
         unsafe {
             libc::kill(child, libc::SIGKILL);
             libc::waitpid(child, std::ptr::null_mut(), 0);
