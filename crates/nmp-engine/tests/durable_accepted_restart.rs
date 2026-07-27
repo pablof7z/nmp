@@ -788,6 +788,7 @@ fn malformed_persisted_routing_fails_closed_without_dropping_the_obligation() {
     let store = RedbStore::open(&path).unwrap();
     assert!(store
         .recover_outbox()
+        .expect("recover outbox")
         .iter()
         .any(|intent| intent.intent_id == intent_id));
     assert!(store.recover_attempts(intent_id).unwrap().is_empty());
@@ -890,7 +891,7 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
 
     drop(core);
     let store = RedbStore::open(&path).unwrap();
-    assert!(store.recover_outbox().is_empty());
+    assert!(store.recover_outbox().expect("recover outbox").is_empty());
     let mut reopened = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
     assert!(reopened.recover_on_boot().is_empty());
     let replay = Sink::default();
@@ -932,7 +933,7 @@ fn signed_ephemeral_receipt_replays_signed_and_refuses_cancellation_after_reopen
     };
 
     let store = RedbStore::open(&path).unwrap();
-    assert!(store.recover_outbox().is_empty());
+    assert!(store.recover_outbox().expect("recover outbox").is_empty());
     let mut reopened = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
     assert!(reopened.recover_on_boot().is_empty());
     let replay = Sink::default();
@@ -1042,6 +1043,7 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
     assert!(RedbStore::open(&path)
         .unwrap()
         .recover_outbox()
+        .expect("recover outbox")
         .iter()
         .any(|intent| intent.intent_id == intent_id));
 }
@@ -1158,6 +1160,7 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
     let store = RedbStore::open(&path).unwrap();
     let recovered = store
         .recover_outbox()
+        .expect("recover outbox")
         .into_iter()
         .find(|intent| intent.intent_id == intent_id)
         .expect("failed cancellation must retain open work");
@@ -1383,6 +1386,117 @@ fn corrupt_route_lane_evidence_is_unreadable_not_absent() {
     assert!(RedbStore::open(&path)
         .unwrap()
         .recover_outbox()
+        .expect("recover outbox")
         .iter()
         .any(|intent| intent.intent_id == intent_id));
+}
+
+/// #790 boot falsifier: an unreadable durable journal degrades explicitly
+/// instead of panicking the host or silently booting as "nothing open".
+///
+/// Before #790 `recover_outbox` returned a bare `Vec` and `.expect()`ed the
+/// row decode, so this exact file aborted the process inside
+/// `recover_on_boot` — the one moment an embedding app is least able to
+/// survive it. The contract now: exactly one #122 degradation effect, and
+/// not one fabricated fact. No receipt, no lane wake, no signer request, no
+/// publish. A partial prefix of the journal is not a safe answer either, so
+/// the corrupt row fails the whole call rather than shortening the
+/// obligation set.
+#[test]
+fn boot_degrades_explicitly_when_the_durable_journal_will_not_decode() {
+    const OUTBOX_INTENTS: TableDefinition<&str, &str> = TableDefinition::new("outbox_intents");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("unreadable-journal.redb");
+    let keys = Keys::generate();
+    let relay = RelayUrl::parse("wss://unreadable-journal.example").unwrap();
+    let event = signed(&keys, "unreadable journal", 991);
+    {
+        let mut store = RedbStore::open(&path).unwrap();
+        store
+            .accept_write(AcceptWrite {
+                frozen: nostr::Event::new(
+                    event.id,
+                    event.pubkey,
+                    event.created_at,
+                    event.kind,
+                    event.tags.clone(),
+                    event.content.clone(),
+                    sentinel_signature(),
+                ),
+                replaceable_base: None,
+                expected_pubkey: keys.public_key(),
+                signing_identity_ref: "local".to_string(),
+                durability: WriteDurability::Durable,
+                routing: "author-outbox".to_string(),
+                sig_state: IntentSigState::Pending,
+                accepted_at: Timestamp::from(991),
+                correlation: None,
+            })
+            .expect("accept_write");
+    }
+
+    // Corrupt the one journal row through a raw handle; no store door can
+    // write these bytes, which is exactly why this class needs a falsifier.
+    let db = Database::open(&path).unwrap();
+    let tx = db.begin_write().unwrap();
+    let key = {
+        let table = tx.open_table(OUTBOX_INTENTS).unwrap();
+        let key = table
+            .first()
+            .unwrap()
+            .expect("one journaled intent")
+            .0
+            .value()
+            .to_owned();
+        key
+    };
+    {
+        let mut table = tx.open_table(OUTBOX_INTENTS).unwrap();
+        table.insert(key.as_str(), "{ not json").unwrap();
+    }
+    tx.commit().unwrap();
+    drop(db);
+
+    let store = RedbStore::open(&path).unwrap();
+    assert!(
+        store.recover_outbox().is_err(),
+        "an undecodable journal row is an error, never an empty recovery"
+    );
+    let mut core = EngineCore::new(
+        store,
+        Box::new(directory(keys.public_key(), relay.clone())),
+        10,
+    );
+    let effects = core.recover_on_boot();
+
+    let degradations: Vec<_> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::EmitDiagnostics(snapshot) => snapshot.store_degraded.clone(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        degradations.len(),
+        1,
+        "boot degrades exactly once: {effects:?}"
+    );
+    assert!(
+        degradations[0].contains("decode outbox intent"),
+        "the degradation names the unreadable row: {}",
+        degradations[0]
+    );
+    assert!(
+        !effects.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(..)
+                | Effect::EnsureWriteRelay(_)
+                | Effect::EnsureReadRelay(_)
+                | Effect::PublishEvent(..)
+                | Effect::RequestSign(..)
+        )),
+        "no receipt, lane wake, publish, or signer request may be fabricated \
+         from a journal that could not be read: {effects:?}"
+    );
 }

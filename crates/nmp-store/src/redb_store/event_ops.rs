@@ -31,12 +31,21 @@ pub(super) struct CoverageRowRecord {
     pub(super) through: u64,
 }
 
-pub(super) fn decode_interval(json: &str) -> CoverageInterval {
-    let record: CoverageRowRecord = serde_json::from_str(json).expect("redb: decode coverage row");
-    CoverageInterval::new(
+/// Decode one `COVERAGE` row into its proven interval. Fallible (#790):
+/// `record_coverage`/`gc` merge and shrink against this value inside an
+/// open write transaction, so a malformed row must refuse the whole
+/// mutation rather than silently merge against a defaulted window.
+pub(super) fn decode_interval(json: &str) -> Result<CoverageInterval, PersistenceError> {
+    let record: CoverageRowRecord = decode_coverage_row(json)?;
+    Ok(CoverageInterval::new(
         Timestamp::from(record.from),
         Timestamp::from(record.through),
-    )
+    ))
+}
+
+pub(super) fn decode_coverage_row(json: &str) -> Result<CoverageRowRecord, PersistenceError> {
+    serde_json::from_str(json)
+        .map_err(|error| PersistenceError::invariant(format!("decode coverage row: {error}")))
 }
 
 pub(super) fn insert(
@@ -129,12 +138,19 @@ pub(super) fn query(
             else {
                 continue;
             };
-            let value = events
-                .get(event_key)
-                .map_err(persist_err)?
-                .expect("event_ids must always point at a stored event");
-            let view = StoredEventView::from_trusted(value.value())
-                .expect("redb: decode portable stored event view");
+            // An id map naming a canonical row that is gone is corruption,
+            // not a miss: answering `continue` here would report the event
+            // as absent from a store that still claims to hold it.
+            let value = events.get(event_key).map_err(persist_err)?.ok_or_else(|| {
+                PersistenceError::invariant(format!(
+                    "raw id map points at missing canonical event {event_key}"
+                ))
+            })?;
+            let view = StoredEventView::from_trusted(value.value()).map_err(|error| {
+                PersistenceError::invariant(format!(
+                    "decode canonical event view {event_key}: {error:?}"
+                ))
+            })?;
             if !view.matches_prepared_filter_after_index(&prepared_filter, IndexedMatch::None) {
                 continue;
             }
@@ -482,7 +498,8 @@ pub(super) fn record_coverage(
         let existing = coverage
             .get(row_key.as_str())
             .map_err(persist_err)?
-            .map(|guard| decode_interval(guard.value()));
+            .map(|guard| decode_interval(guard.value()))
+            .transpose()?;
 
         let merged = merge_interval(existing, proven);
         let record = CoverageRowRecord {
@@ -510,7 +527,16 @@ pub(super) fn get_coverage(
     coverage
         .get(row_key.as_str())
         .expect("redb: get coverage row")
-        .map(|guard| decode_interval(guard.value()))
+        .map(|guard| {
+            // The one surviving persisted-decode `.expect()` in this file,
+            // and it is here only because the trait door above it is still
+            // infallible. Widening `get_coverage` (and `next_expiration`)
+            // is #763's unit, which owns the caller changes; #790 must not
+            // pre-empt it, and answering `None` here would be strictly
+            // worse -- a corrupt watermark would read as "no coverage
+            // proven", the false miss this issue exists to forbid.
+            decode_interval(guard.value()).expect("redb: decode coverage row (see #763)")
+        })
 }
 
 pub(super) fn gc(store: &mut RedbStore, claims: &ClaimSet) -> Result<GcReport, PersistenceError> {
@@ -532,19 +558,32 @@ pub(super) fn gc(store: &mut RedbStore, claims: &ClaimSet) -> Result<GcReport, P
         let mut victims: Vec<Event> = Vec::new();
         for entry in txn.canonical.events.iter().map_err(persist_err)? {
             let (key, value) = entry.map_err(persist_err)?;
+            let event_key = key.value();
             let event = StoredEventView::from_trusted(value.value())
-                .expect("redb: decode canonical event view")
+                .map_err(|error| {
+                    PersistenceError::invariant(format!(
+                        "decode canonical event view {event_key}: {error:?}"
+                    ))
+                })?
                 .materialize_event()
-                .expect("redb: materialize canonical event");
+                .map_err(|error| {
+                    PersistenceError::invariant(format!(
+                        "materialize canonical event {event_key}: {error:?}"
+                    ))
+                })?;
             let local = txn
                 .canonical
                 .local
-                .get(key.value())
+                .get(event_key)
                 .map_err(persist_err)?
                 .map(|value| {
-                    binary_event::decode_local(value.value())
-                        .expect("redb: decode canonical local state")
-                });
+                    binary_event::decode_local(value.value()).map_err(|error| {
+                        PersistenceError::invariant(format!(
+                            "decode canonical local state {event_key}: {error:?}"
+                        ))
+                    })
+                })
+                .transpose()?;
             if address_key_for(&event).is_none()
                 && !matches!(
                     local,
@@ -565,8 +604,12 @@ pub(super) fn gc(store: &mut RedbStore, claims: &ClaimSet) -> Result<GcReport, P
         }
 
         for event in &victims {
-            remove_row_in_txn(txn, event.id, |_| true)?
-                .expect("gc victim must remain present until removal");
+            remove_row_in_txn(txn, event.id, |_| true)?.ok_or_else(|| {
+                PersistenceError::invariant(format!(
+                    "gc victim {} vanished before its own removal",
+                    event.id
+                ))
+            })?;
             report.events_evicted += 1;
         }
 
@@ -588,8 +631,7 @@ pub(super) fn gc(store: &mut RedbStore, claims: &ClaimSet) -> Result<GcReport, P
         for entry in coverage.iter().map_err(persist_err)? {
             let (row_key, value) = entry.map_err(persist_err)?;
 
-            let mut record: CoverageRowRecord =
-                serde_json::from_str(value.value()).expect("redb: decode coverage row");
+            let mut record: CoverageRowRecord = decode_coverage_row(value.value())?;
             let shape: ConcreteFilter = (&record.shape).into();
             let interval = CoverageInterval::new(
                 Timestamp::from(record.from),

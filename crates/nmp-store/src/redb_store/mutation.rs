@@ -5,7 +5,7 @@ use super::outbox::{
     AddrClaimant, OutboxIntentRecord, OutboxReceiptRecord, SuppressClaimRecord,
 };
 use super::query::{expiration_key, AddrTombstoneRecord};
-use super::schema::{id_tombstone_key, persist_err};
+use super::schema::{id_tombstone_key, persist_err, EventKey};
 use super::{
     address_key_for, address_key_for_coordinate, candidate_wins, BTreeSet, Event, EventId, HashMap,
     HashSet, IntentId, IntentSigState, Kind, LocalOrigin, PersistenceError, ReceiptState,
@@ -13,6 +13,18 @@ use super::{
 };
 use nostr::JsonUtil;
 use redb::ReadableTable;
+
+/// The address index naming a canonical row that is gone (#790). This used
+/// to be an `.expect()` on every one of the six sites that dereference
+/// `ADDR_INDEX`; it is a broken relational invariant between two persisted
+/// tables, which is exactly the class the issue says must become a typed
+/// refusal. Returning `None`/skipping instead would turn a corrupt index
+/// into a silent wrong answer at the address — the false miss this closes.
+pub(super) fn missing_addr_index_target(event_key: EventKey) -> PersistenceError {
+    PersistenceError::invariant(format!(
+        "address index points at missing canonical event {event_key}"
+    ))
+}
 
 /// Read-side tombstone check shared by `insert`
 /// (retraction-and-negative-deltas.md §2): `true` iff `event` must be
@@ -37,8 +49,9 @@ pub(super) fn tombstone_refuses<T: GovernedIngestTxn>(
         if let Some(encoded) =
             txn.string_get(GovernedStringMap::AddrTombstones, key_str.as_str())?
         {
-            let rec: AddrTombstoneRecord =
-                serde_json::from_str(&encoded).expect("store: decode addr tombstone");
+            let rec: AddrTombstoneRecord = serde_json::from_str(&encoded).map_err(|error| {
+                PersistenceError::invariant(format!("decode address tombstone {key_str}: {error}"))
+            })?;
             if event.created_at.as_secs() <= rec.ceiling {
                 return Ok(true);
             }
@@ -138,10 +151,15 @@ pub(super) fn process_kind5_deletions<T: GovernedIngestTxn>(
         let existing_ceiling = txn
             .string_get(GovernedStringMap::AddrTombstones, key_str.as_str())?
             .map(|encoded| {
-                let rec: AddrTombstoneRecord =
-                    serde_json::from_str(&encoded).expect("store: decode addr tombstone");
-                rec.ceiling
-            });
+                serde_json::from_str::<AddrTombstoneRecord>(&encoded)
+                    .map(|rec| rec.ceiling)
+                    .map_err(|error| {
+                        PersistenceError::invariant(format!(
+                            "decode address tombstone {key_str}: {error}"
+                        ))
+                    })
+            })
+            .transpose()?;
         let new_ceiling = deleting.created_at.as_secs();
         if existing_ceiling.is_none_or(|ceiling| new_ceiling > ceiling) {
             let record = AddrTombstoneRecord {
@@ -161,7 +179,7 @@ pub(super) fn process_kind5_deletions<T: GovernedIngestTxn>(
         if let Some(current_key) = current_key {
             let current = txn
                 .load_by_key(current_key)?
-                .expect("addr_index must always point at a stored event");
+                .ok_or_else(|| missing_addr_index_target(current_key))?;
             let current_id = current.event.id;
             if let Some(removed) = remove_row_in_txn(txn, current_id, |se| {
                 se.event.created_at <= deleting.created_at
@@ -267,8 +285,13 @@ pub(super) fn fan_out_signed_in_txn<T: GovernedIngestTxn>(
         let owner_intent_json =
             txn.string_get(GovernedStringMap::OutboxIntents, owner_key.as_str())?;
         if let Some(owner_intent_json) = owner_intent_json {
-            let mut owner_record: OutboxIntentRecord =
-                serde_json::from_str(&owner_intent_json).expect("redb: decode outbox intent");
+            let mut owner_record: OutboxIntentRecord = serde_json::from_str(&owner_intent_json)
+                .map_err(|error| {
+                    PersistenceError::invariant(format!(
+                        "decode outbox intent {}: {error}",
+                        owner_id.0
+                    ))
+                })?;
             if owner_record.sig_state != IntentSigState::Signed {
                 owner_record.sig_state = IntentSigState::Signed;
                 owner_record.frozen_json = canonical_json.clone();
@@ -288,7 +311,12 @@ pub(super) fn fan_out_signed_in_txn<T: GovernedIngestTxn>(
                 txn.string_remove(GovernedStringMap::OutboxKind5Claims, owner_key.as_str())?;
             if let Some(claims_json) = claims_json {
                 let claims: Vec<SuppressClaimRecord> =
-                    serde_json::from_str(&claims_json).expect("redb: decode claims");
+                    serde_json::from_str(&claims_json).map_err(|error| {
+                        PersistenceError::invariant(format!(
+                            "decode suppression claims for intent {}: {error}",
+                            owner_id.0
+                        ))
+                    })?;
                 for claim in claims {
                     match claim {
                         SuppressClaimRecord::Id(id_key) => {
@@ -359,7 +387,7 @@ pub(super) fn process_kind5_deletions_provisional_in_txn(
                 let current_id = txn
                     .canonical
                     .load_by_key(current_key)?
-                    .expect("addr_index must always point at a stored event")
+                    .ok_or_else(|| missing_addr_index_target(current_key))?
                     .event
                     .id;
                 if seen_candidates.insert(current_id) {
@@ -630,13 +658,13 @@ pub(super) fn reinsert_stashed_in_txn(
                     let current_event = txn
                         .canonical
                         .load_by_key(current_key)?
-                        .expect("addr_index must always point at a stored event")
+                        .ok_or_else(|| missing_addr_index_target(current_key))?
                         .event;
 
                     if candidate_wins(&se.event, &current_event) {
                         let current_id = current_event.id;
                         remove_row_in_txn(txn, current_id, |_| true)?
-                            .expect("addr_index must always point at a stored event");
+                            .ok_or_else(|| missing_addr_index_target(current_key))?;
 
                         let event_key = txn.canonical.insert_new(&se.event, &se.provenance)?;
                         txn.addr_index

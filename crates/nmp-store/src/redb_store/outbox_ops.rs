@@ -1,4 +1,4 @@
-use super::canonical::decode_stored_event;
+use super::canonical::try_decode_stored_event;
 use super::outbox::{
     alloc_receipt_id_in_txn, attempt_key, deadline_intent_key, deadline_key, deadline_upper,
     decode_attempt, decode_attempt_details, decode_deadline, decode_deadline_by_intent,
@@ -27,31 +27,44 @@ use super::{
 use nostr::JsonUtil;
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
 
-pub(super) fn recover_outbox(store: &RedbStore) -> Vec<RecoveredIntent> {
-    let read_txn = store.db.begin_read().expect("redb: begin_read");
-    let outbox_intents = read_txn
-        .open_table(OUTBOX_INTENTS)
-        .expect("redb: open outbox_intents");
-    let outbox_displaced = read_txn
-        .open_table(OUTBOX_DISPLACED)
-        .expect("redb: open outbox_displaced");
+/// Replay every still-open intent (#3 §2.3), fallible end to end (#790).
+///
+/// Every step — begin, open, iterate, key parse, intent JSON, frozen event
+/// JSON, displaced snapshot — reports the exact table and key it failed on
+/// rather than panicking the host mid-boot. There is deliberately no
+/// skip-the-bad-row branch and no good-prefix return: an intent that cannot
+/// be decoded is still an obligation this store accepted, and quietly
+/// dropping it would let the engine rebuild a `pending` set that is missing
+/// real durable work.
+pub(super) fn recover_outbox(store: &RedbStore) -> Result<Vec<RecoveredIntent>, PersistenceError> {
+    let read_txn = store.db.begin_read().map_err(persist_err)?;
+    let outbox_intents = read_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?;
+    let outbox_displaced = read_txn.open_table(OUTBOX_DISPLACED).map_err(persist_err)?;
 
     let mut out = Vec::new();
-    for entry in outbox_intents.iter().expect("redb: iter outbox_intents") {
-        let (key, value) = entry.expect("redb: read outbox_intents entry");
-        let intent_id = IntentId(
-            key.value()
-                .parse::<u64>()
-                .expect("redb: parse outbox_intents key"),
-        );
-        let record: OutboxIntentRecord =
-            serde_json::from_str(value.value()).expect("redb: decode outbox intent");
-        let frozen = Event::from_json(&record.frozen_json).expect("redb: decode frozen event json");
+    for entry in outbox_intents.iter().map_err(persist_err)? {
+        let (key, value) = entry.map_err(persist_err)?;
+        let intent_id = IntentId(key.value().parse::<u64>().map_err(|error| {
+            PersistenceError::invariant(format!(
+                "decode outbox intent key {:?}: {error}",
+                key.value()
+            ))
+        })?);
+        let record: OutboxIntentRecord = serde_json::from_str(value.value()).map_err(|error| {
+            PersistenceError::invariant(format!("decode outbox intent {}: {error}", intent_id.0))
+        })?;
+        let frozen = Event::from_json(&record.frozen_json).map_err(|error| {
+            PersistenceError::invariant(format!(
+                "decode frozen event for intent {}: {error}",
+                intent_id.0
+            ))
+        })?;
 
         let displaced = outbox_displaced
             .get(key.value())
-            .expect("redb: get outbox_displaced")
-            .map(|guard| decode_stored_event(guard.value()));
+            .map_err(persist_err)?
+            .map(|guard| try_decode_stored_event(guard.value()))
+            .transpose()?;
 
         out.push(RecoveredIntent {
             intent_id,
@@ -66,7 +79,7 @@ pub(super) fn recover_outbox(store: &RedbStore) -> Vec<RecoveredIntent> {
             accepted_at: record.accepted_at,
         });
     }
-    out
+    Ok(out)
 }
 
 pub(super) fn reattach_receipt(

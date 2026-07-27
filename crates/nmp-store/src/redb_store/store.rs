@@ -330,8 +330,9 @@ impl RedbStore {
                 let write_txn = db.begin_write()?;
                 {
                     let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS)?;
-                    let reconciled =
-                        reconcile_ephemeral_receipts_in_txn(&mut outbox_receipts) as u64;
+                    let reconciled = reconcile_ephemeral_receipts_in_txn(&mut outbox_receipts)
+                        .map_err(|error| redb::Error::Corrupted(error.message().to_owned()))?
+                        as u64;
                     if reconciled != pending_ephemeral {
                         return Err(redb::Error::Corrupted(format!(
                             "pending ephemeral receipt count is {pending_ephemeral}, found {reconciled} recoverable rows"
@@ -537,9 +538,15 @@ impl RedbStore {
         relays: &redb::ReadOnlyTable<RelayKey, &'static str>,
         relay_cache: &mut HashMap<RelayKey, RelayUrl>,
     ) -> Result<Provenance, PersistenceError> {
-        let local = local_bytes.map(|bytes| {
-            binary_event::decode_local(bytes).expect("redb: decode canonical local state")
-        });
+        let local = local_bytes
+            .map(|bytes| {
+                binary_event::decode_local(bytes).map_err(|error| {
+                    PersistenceError::invariant(format!(
+                        "decode canonical local state {event_key}: {error:?}"
+                    ))
+                })
+            })
+            .transpose()?;
         let (lower, upper) = observation_range(event_key);
         let mut seen = BTreeMap::new();
         for entry in observations
@@ -557,8 +564,11 @@ impl RedbStore {
                             "observation points at missing relay {relay_key}"
                         ))
                     })?;
-                let relay = RelayUrl::parse(encoded_relay.value())
-                    .expect("redb: interned relay URL remains parseable");
+                let relay = RelayUrl::parse(encoded_relay.value()).map_err(|error| {
+                    PersistenceError::invariant(format!(
+                        "decode interned relay URL {relay_key}: {error}"
+                    ))
+                })?;
                 relay_cache.insert(relay_key, relay.clone());
                 relay
             };
@@ -579,9 +589,11 @@ impl RedbStore {
         #[cfg(any(test, feature = "bench-instrumentation"))]
         self.examined_rows.fetch_add(1, Ordering::Relaxed);
         Ok(StoredEvent {
-            event: view
-                .materialize_event()
-                .expect("redb: materialize validated portable event"),
+            event: view.materialize_event().map_err(|error| {
+                PersistenceError::invariant(format!(
+                    "materialize canonical event {event_key}: {error:?}"
+                ))
+            })?,
             provenance: self.read_provenance(
                 event_key,
                 local_bytes,
@@ -639,17 +651,22 @@ impl RedbStore {
                     "ordered index points at missing canonical event {event_key}"
                 )));
             };
-            let view = StoredEventView::from_trusted(value.value())
-                .expect("redb: decode portable stored event view");
+            let view = StoredEventView::from_trusted(value.value()).map_err(|error| {
+                PersistenceError::invariant(format!(
+                    "decode canonical event view {event_key}: {error:?}"
+                ))
+            })?;
             if !view.matches_prepared_filter_after_index(&prepared_filter, plan.index.matched()) {
                 return Ok(None);
             }
             if suppression_possible {
                 #[cfg(any(test, feature = "bench-instrumentation"))]
                 self.examined_rows.fetch_add(1, Ordering::Relaxed);
-                let event = view
-                    .materialize_event()
-                    .expect("redb: materialize validated portable event");
+                let event = view.materialize_event().map_err(|error| {
+                    PersistenceError::invariant(format!(
+                        "materialize canonical event {event_key}: {error:?}"
+                    ))
+                })?;
                 if is_suppressed_in_txn(&outbox_suppress_by_id, &outbox_suppress_by_addr, &event)? {
                     return Ok(None);
                 }
@@ -735,8 +752,11 @@ impl RedbStore {
                     "ordered index points at missing canonical event {event_key}"
                 )));
             };
-            let view = StoredEventView::from_trusted(value.value())
-                .expect("redb: decode portable stored event view");
+            let view = StoredEventView::from_trusted(value.value()).map_err(|error| {
+                PersistenceError::invariant(format!(
+                    "decode canonical event view {event_key}: {error:?}"
+                ))
+            })?;
             if !view.matches_prepared_filter_after_index(&prepared_filter, plan.index.matched()) {
                 return Ok(None);
             }

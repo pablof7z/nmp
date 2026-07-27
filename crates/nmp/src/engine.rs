@@ -1353,7 +1353,7 @@ mod tests {
             "sign-only must not create a canonical row"
         );
         assert!(
-            store.recover_outbox().is_empty(),
+            store.recover_outbox().expect("recover outbox").is_empty(),
             "sign-only must not create an intent, receipt, or outbox lane"
         );
     }

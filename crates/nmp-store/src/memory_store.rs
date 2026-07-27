@@ -2348,11 +2348,13 @@ impl EventStore for MemoryStore {
         Ok(true)
     }
 
-    fn recover_outbox(&self) -> Vec<RecoveredIntent> {
+    fn recover_outbox(&self) -> Result<Vec<RecoveredIntent>, PersistenceError> {
         // Fable checkpoint Q4: crash-safety is a `RedbStore`-only backend
         // property. Nothing here survives a real process crash, so there
-        // is nothing to recover, by construction.
-        Vec::new()
+        // is nothing to recover, by construction. This backend owns no
+        // encoded rows either, so the #790 fallible signature is answered
+        // with the honest positive fact "nothing open", never an `Err`.
+        Ok(Vec::new())
     }
 
     fn reattach_receipt(

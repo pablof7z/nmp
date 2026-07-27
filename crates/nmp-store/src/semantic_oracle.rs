@@ -381,6 +381,7 @@ fn normalized_state(
 fn normalized_recovery_state(store: &dyn EventStore, context: &OracleContext) -> String {
     let intents = store
         .recover_outbox()
+        .expect("crash-oracle recover_outbox")
         .into_iter()
         .map(|intent| {
             json!({
@@ -427,6 +428,7 @@ pub(crate) fn recovered_semantic_digest(store: &dyn EventStore) -> String {
     );
     let intents = store
         .recover_outbox()
+        .expect("crash-oracle recover_outbox")
         .into_iter()
         .map(|intent| {
             json!({

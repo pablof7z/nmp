@@ -219,7 +219,7 @@ fn redb_crash_worker() {
             let mut store =
                 RedbStore::open_with_crash_point(path, RedbCrashPoint::PromoteBeforeCommit)
                     .expect("open worker store");
-            let intent = store.recover_outbox()[0].intent_id;
+            let intent = store.recover_outbox().expect("recover outbox")[0].intent_id;
             let _ = store.promote_signed(intent, signed.sig);
         }
         "compensate-before-commit" => {
@@ -228,6 +228,7 @@ fn redb_crash_worker() {
                     .expect("open worker store");
             let intent = store
                 .recover_outbox()
+                .expect("recover outbox")
                 .last()
                 .expect("latest intent")
                 .intent_id;
@@ -239,6 +240,7 @@ fn redb_crash_worker() {
                     .expect("open worker store");
             let intent = store
                 .recover_outbox()
+                .expect("recover outbox")
                 .last()
                 .expect("latest intent")
                 .intent_id;
@@ -286,21 +288,21 @@ fn redb_crash_worker() {
             let mut store =
                 RedbStore::open_with_crash_point(path, RedbCrashPoint::RouteRevisionBeforeCommit)
                     .expect("open worker store");
-            let intent = store.recover_outbox()[0].intent_id;
+            let intent = store.recover_outbox().expect("recover outbox")[0].intent_id;
             let _ = store.record_route_revision(intent, BTreeSet::from([relay]));
         }
         "lane-bootstrap-before-commit" => {
             let mut store =
                 RedbStore::open_with_crash_point(path, RedbCrashPoint::LaneBootstrapBeforeCommit)
                     .expect("open worker store");
-            let intent = store.recover_outbox()[0].intent_id;
+            let intent = store.recover_outbox().expect("recover outbox")[0].intent_id;
             let _ = store.bootstrap_outbox_lanes(intent);
         }
         "lane-transition-before-commit" => {
             let mut store =
                 RedbStore::open_with_crash_point(path, RedbCrashPoint::LaneTransitionBeforeCommit)
                     .expect("open worker store");
-            let intent = store.recover_outbox()[0].intent_id;
+            let intent = store.recover_outbox().expect("recover outbox")[0].intent_id;
             let lane = store.recover_outbox_lanes(intent).unwrap().remove(0);
             let _ = store.set_lane_transient(
                 &lane.key,
@@ -315,7 +317,7 @@ fn redb_crash_worker() {
             let mut store =
                 RedbStore::open_with_crash_point(path, RedbCrashPoint::LaneStartBeforeCommit)
                     .expect("open worker store");
-            let recovered = store.recover_outbox().remove(0);
+            let recovered = store.recover_outbox().expect("recover outbox").remove(0);
             let intent = recovered.intent_id;
             let lane = store.recover_outbox_lanes(intent).unwrap().remove(0);
             store
@@ -331,7 +333,7 @@ fn redb_crash_worker() {
             let mut store =
                 RedbStore::open_with_crash_point(path, RedbCrashPoint::LaneHandoffBeforeCommit)
                     .expect("open worker store");
-            let intent = store.recover_outbox()[0].intent_id;
+            let intent = store.recover_outbox().expect("recover outbox")[0].intent_id;
             let lane = store.recover_outbox_lanes(intent).unwrap().remove(0);
             let _ = store.record_lane_handoff(
                 &lane.key,
@@ -350,14 +352,14 @@ fn redb_crash_worker() {
             let mut store =
                 RedbStore::open_with_crash_point(path, RedbCrashPoint::LaneCloseBeforeCommit)
                     .expect("open worker store");
-            let intent = store.recover_outbox()[0].intent_id;
+            let intent = store.recover_outbox().expect("recover outbox")[0].intent_id;
             let _ = store.close_terminal_intent(intent);
         }
         "lane-finish-before-commit" => {
             let mut store =
                 RedbStore::open_with_crash_point(path, RedbCrashPoint::FinishAttemptBeforeCommit)
                     .expect("open worker store");
-            let intent = store.recover_outbox()[0].intent_id;
+            let intent = store.recover_outbox().expect("recover outbox")[0].intent_id;
             let lane = store.recover_outbox_lanes(intent).unwrap().remove(0);
             store
                 .finish_lane_attempt(
@@ -399,7 +401,10 @@ fn accept_is_all_or_nothing_at_both_internal_transaction_boundaries() {
             .query(&Filter::new().id(frozen.id))
             .unwrap()
             .is_empty());
-        assert!(reopened.recover_outbox().is_empty());
+        assert!(reopened
+            .recover_outbox()
+            .expect("recover outbox")
+            .is_empty());
         assert!(reopened.reattach_receipt(1).unwrap().is_none());
 
         let outcome = reopened
@@ -408,7 +413,7 @@ fn accept_is_all_or_nothing_at_both_internal_transaction_boundaries() {
         assert_eq!(outcome.journaled_intent_id(), Some(IntentId(1)));
         assert_eq!(outcome.journaled_receipt_id(), Some(1));
         assert_eq!(reopened.query(&Filter::new()).unwrap().len(), 1);
-        assert_eq!(reopened.recover_outbox().len(), 1);
+        assert_eq!(reopened.recover_outbox().expect("recover outbox").len(), 1);
         drop(reopened);
         assert_path_canonical_integrity(&path);
     }
@@ -744,7 +749,10 @@ fn promotion_and_displaced_compensation_are_atomic_across_process_death() {
     crash(&path, "promote-before-commit");
     {
         let mut store = RedbStore::open(&path).expect("reopen promotion crash");
-        assert_eq!(store.recover_outbox()[0].sig_state, IntentSigState::Pending);
+        assert_eq!(
+            store.recover_outbox().expect("recover outbox")[0].sig_state,
+            IntentSigState::Pending
+        );
         assert_eq!(
             store.query(&Filter::new().id(frozen.id)).unwrap()[0]
                 .event
@@ -790,7 +798,7 @@ fn promotion_and_displaced_compensation_are_atomic_across_process_death() {
         let mut store = RedbStore::open(&path).expect("reopen compensation crash");
         assert_eq!(store.query(&Filter::new().id(newer_id)).unwrap().len(), 1);
         assert!(store.query(&Filter::new().id(older_id)).unwrap().is_empty());
-        assert_eq!(store.recover_outbox().len(), 2);
+        assert_eq!(store.recover_outbox().expect("recover outbox").len(), 2);
         assert!(matches!(
             store.compensate_write(intent).unwrap(),
             CompensateOutcome::Compensated { .. }
@@ -799,7 +807,7 @@ fn promotion_and_displaced_compensation_are_atomic_across_process_death() {
     let store = RedbStore::open(&path).expect("reopen compensated state");
     assert!(store.query(&Filter::new().id(newer_id)).unwrap().is_empty());
     assert_eq!(store.query(&Filter::new().id(older_id)).unwrap().len(), 1);
-    assert_eq!(store.recover_outbox().len(), 1);
+    assert_eq!(store.recover_outbox().expect("recover outbox").len(), 1);
     assert_eq!(
         store.reattach_receipt(receipt).unwrap().unwrap().state,
         ReceiptState::Compensated
@@ -821,7 +829,10 @@ fn cancellation_crash_cannot_claim_a_terminal_fact_before_compensation_commits()
             store.reattach_receipt(receipt).unwrap().unwrap().state,
             ReceiptState::Accepted
         );
-        assert_eq!(store.recover_outbox()[0].intent_id, intent);
+        assert_eq!(
+            store.recover_outbox().expect("recover outbox")[0].intent_id,
+            intent
+        );
         assert!(matches!(
             store.cancel_write(intent).unwrap(),
             CompensateOutcome::Compensated { .. }
@@ -832,7 +843,7 @@ fn cancellation_crash_cannot_claim_a_terminal_fact_before_compensation_commits()
         store.reattach_receipt(receipt).unwrap().unwrap().state,
         ReceiptState::Cancelled
     );
-    assert!(store.recover_outbox().is_empty());
+    assert!(store.recover_outbox().expect("recover outbox").is_empty());
 }
 
 #[test]
@@ -956,7 +967,7 @@ fn lane_cursor_detail_deadline_and_close_are_atomic_across_process_death() {
 
     crash(&path, "lane-close-before-commit");
     let mut store = RedbStore::open(&path).expect("reopen close crash");
-    assert_eq!(store.recover_outbox().len(), 1);
+    assert_eq!(store.recover_outbox().expect("recover outbox").len(), 1);
     assert_eq!(store.recover_outbox_lanes(intent).unwrap().len(), 1);
     assert_eq!(store.recover_attempts(intent).unwrap().len(), 1);
     assert_eq!(store.recover_attempt_details(intent).unwrap().len(), 1);
@@ -967,7 +978,7 @@ fn lane_cursor_detail_deadline_and_close_are_atomic_across_process_death() {
     drop(store);
 
     let store = RedbStore::open(&path).expect("final reopen");
-    assert!(store.recover_outbox().is_empty());
+    assert!(store.recover_outbox().expect("recover outbox").is_empty());
     assert_eq!(store.recover_outbox_lanes(intent).unwrap().len(), 1);
     assert_eq!(
         store.recover_attempts(intent).unwrap()[0].outcome,
@@ -990,7 +1001,7 @@ fn committed_pending_row_and_journal_survive_real_reopen_as_one_fact() {
     let local = rows[0].provenance.local.as_ref().expect("local provenance");
     assert_eq!(local.sig_state, SigState::Pending);
     assert_eq!(local.owners, BTreeSet::from([intent]));
-    let recovered = store.recover_outbox();
+    let recovered = store.recover_outbox().expect("recover outbox");
     assert_eq!(
         (
             recovered.len(),

@@ -9,11 +9,8 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet};
 use std::sync::Arc;
 
-use redb::ReadableTable;
-#[cfg(test)]
-use redb::ReadableTableMetadata;
+use redb::{ReadableTable, ReadableTableMetadata};
 
-#[cfg(test)]
 use super::postings::validate_run_metas;
 use super::postings::{
     compact_segment, encode_dictionary, encode_run, merge_dead_blocks, shard_for,
@@ -311,6 +308,9 @@ pub(super) fn scan_packed<T>(
     let run_meta = read_txn
         .open_table(POSTINGS_RUN_META)
         .map_err(persist_err)?;
+    let by_min = read_txn
+        .open_table(POSTINGS_RUN_BY_MIN)
+        .map_err(persist_err)?;
     let dictionaries = read_txn
         .open_table(POSTINGS_DICTIONARIES)
         .map_err(persist_err)?;
@@ -325,35 +325,52 @@ pub(super) fn scan_packed<T>(
         .iter()
         .map(|prefix| shard_for(scan.family, prefix))
         .collect();
+    // #790: the bounded run catalog and its `POSTINGS_RUN_BY_MIN` mirror are
+    // validated as one relationship before a single prefix directory is
+    // consulted. A wrong-id, duplicate-range, or orphan catalog entry is not
+    // a run this scan may quietly skip.
+    let catalog = load_run_catalog(&run_meta, &by_min)?;
     let mut loaded = Vec::new();
-    for row in run_meta.iter().map_err(persist_err)? {
-        let (run_id, value) = row.map_err(persist_err)?;
-        let meta = RunMeta::decode(value.value()).map_err(packed_err)?;
-        if meta.run_id != run_id.value() {
-            return Err(packed_err("run metadata key disagrees with its value"));
-        }
-        let mut run_segments = Vec::new();
+    for meta in &catalog {
+        let mut candidates = Vec::new();
         for &shard in &shards {
             let key = segment_key(scan.family, shard, meta.run_id);
-            let Some(value) = segments.get(key.as_slice()).map_err(persist_err)? else {
-                continue;
-            };
-            let segment = SegmentView::parse(value.value()).map_err(packed_err)?;
-            let mut matches = false;
-            for prefix in scan.prefixes {
-                matches |= segment.prefix(prefix).map_err(packed_err)?.is_some();
-            }
-            if matches {
-                run_segments.push(value);
+            if let Some(value) = segments.get(key.as_slice()).map_err(persist_err)? {
+                candidates.push(value);
             }
         }
-        if run_segments.is_empty() {
+        if candidates.is_empty() {
             continue;
         }
         let dictionary = dictionaries
             .get(meta.run_id)
             .map_err(persist_err)?
-            .ok_or_else(|| packed_err("run has no dictionary"))?;
+            .ok_or_else(|| packed_err(format!("run {} has no dictionary", meta.run_id)))?;
+        // Validate the dictionary once and every candidate segment against
+        // it BEFORE `prefix` binary-searches the directory or a cursor
+        // binary-searches a posting list. Both searches assume sorted input;
+        // on unsorted input they land in the wrong place and answer "no
+        // such prefix"/"no such row" — a false miss, not an error.
+        let mut run_segments = Vec::new();
+        {
+            let dictionary = DictionaryView::parse(dictionary.value())
+                .and_then(DictionaryView::validate_order)
+                .map_err(packed_err)?;
+            for value in candidates {
+                let segment = SegmentView::parse(value.value()).map_err(packed_err)?;
+                segment.validate(dictionary).map_err(packed_err)?;
+                let mut matches = false;
+                for prefix in scan.prefixes {
+                    matches |= segment.prefix(prefix).map_err(packed_err)?.is_some();
+                }
+                if matches {
+                    run_segments.push(value);
+                }
+            }
+        }
+        if run_segments.is_empty() {
+            continue;
+        }
         let mut blocks = Vec::new();
         for level in 0..MAX_DEATH_BLOCKS {
             let key = death_key(meta.run_id, level);
@@ -372,6 +389,8 @@ pub(super) fn scan_packed<T>(
         .map(|cursor| (cursor.created_at.as_secs(), *cursor.event_id.as_bytes()));
     let mut sources = Vec::new();
     for (dictionary, segments, dead) in &loaded {
+        // Already parsed and validated above; this is the borrow the cursors
+        // actually hold, not a second decoded copy of the index.
         let dictionary = DictionaryView::parse(dictionary.value()).map_err(packed_err)?;
         for bytes in segments {
             let segment = SegmentView::parse(bytes.value()).map_err(packed_err)?;
@@ -424,13 +443,118 @@ fn packed_err(error: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::invariant(format!("packed postings: {error}"))
 }
 
+/// Decode the whole packed run catalog and prove its relational invariants
+/// before anything acts on it (#790).
+///
+/// Three separate facts, none of which any individual row can carry: each
+/// `POSTINGS_RUN_META` value decodes and agrees with its own key; the runs
+/// have unique ids and non-overlapping event-key ranges
+/// ([`validate_run_metas`]); and `POSTINGS_RUN_BY_MIN` is an exact bijection
+/// with them — no missing entry, no duplicate range, no wrong id, no orphan.
+/// Bounded by the live run count, which levelled compaction keeps small.
+fn load_run_catalog(
+    run_meta: &impl ReadableTable<u64, &'static [u8]>,
+    by_min: &impl ReadableTable<u64, u64>,
+) -> Result<Vec<RunMeta>, PersistenceError> {
+    let mut metas = Vec::new();
+    for row in run_meta.iter().map_err(persist_err)? {
+        let (run_id, value) = row.map_err(persist_err)?;
+        let meta = RunMeta::decode(value.value()).map_err(packed_err)?;
+        if meta.run_id != run_id.value() {
+            return Err(packed_err("run metadata key disagrees with its value"));
+        }
+        metas.push(meta);
+    }
+    validate_run_metas(&metas).map_err(packed_err)?;
+    if by_min.len().map_err(persist_err)? != metas.len() as u64 {
+        return Err(packed_err(
+            "packed run-range index does not match the run catalog",
+        ));
+    }
+    for meta in &metas {
+        let mapped = by_min
+            .get(meta.min_event_key)
+            .map_err(persist_err)?
+            .map(|guard| guard.value())
+            .ok_or_else(|| packed_err(format!("run {} has no run-range entry", meta.run_id)))?;
+        if mapped != meta.run_id {
+            return Err(packed_err(format!(
+                "run-range entry for {} names run {mapped}",
+                meta.min_event_key
+            )));
+        }
+    }
+    Ok(metas)
+}
+
+/// Allocate the next packed run id, proving first that doing so cannot
+/// overwrite live packed state (#790).
+///
+/// Every byte involved is a well-typed `u64`, so decoder-level validation
+/// cannot see this class at all: a missing or rewound `POSTINGS_NEXT_RUN_ID`
+/// in a non-empty catalog hands back an id a live run already owns, and the
+/// dictionary/segment/catalog inserts that follow silently overwrite it
+/// inside an otherwise valid transaction. The allocator and the catalog are
+/// therefore checked as one relational invariant, before any run-owned row
+/// is written:
+///
+/// - a missing allocator is legal only against an empty catalog, where the
+///   canonical initial next id is `1`;
+/// - against a non-empty catalog it must be present, non-zero, and strictly
+///   greater than every live run id;
+/// - `u64::MAX` stays typed exhaustion — never wrap, never reuse.
 fn allocate_run_id(write_txn: &redb::WriteTransaction) -> Result<u64, PersistenceError> {
+    let highest_live = {
+        let run_meta = write_txn
+            .open_table(POSTINGS_RUN_META)
+            .map_err(persist_err)?;
+        let by_min = write_txn
+            .open_table(POSTINGS_RUN_BY_MIN)
+            .map_err(persist_err)?;
+        let catalog = load_run_catalog(&run_meta, &by_min)?;
+        let dictionaries = write_txn
+            .open_table(POSTINGS_DICTIONARIES)
+            .map_err(persist_err)?;
+        // One dictionary per live run, and no dictionary that outlives its
+        // run: an orphan here is a run id the allocator could hand out again
+        // while its bytes are still on disk.
+        if dictionaries.len().map_err(persist_err)? != catalog.len() as u64 {
+            return Err(packed_err(
+                "packed dictionaries do not match the run catalog",
+            ));
+        }
+        for meta in &catalog {
+            if dictionaries
+                .get(meta.run_id)
+                .map_err(persist_err)?
+                .is_none()
+            {
+                return Err(packed_err(format!("run {} has no dictionary", meta.run_id)));
+            }
+        }
+        catalog.iter().map(|meta| meta.run_id).max()
+    };
     let mut meta = write_txn.open_table(POSTINGS_META).map_err(persist_err)?;
-    let run_id = meta
+    let stored = meta
         .get(POSTINGS_NEXT_RUN_ID)
         .map_err(persist_err)?
-        .map(|guard| guard.value())
-        .unwrap_or(1);
+        .map(|guard| guard.value());
+    let run_id = match (stored, highest_live) {
+        (None, None) => 1,
+        (None, Some(highest)) => {
+            return Err(packed_err(format!(
+                "packed run allocator is missing while run {highest} is live"
+            )));
+        }
+        (Some(0), _) => return Err(packed_err("packed run allocator is zero")),
+        (Some(next), None) => next,
+        (Some(next), Some(highest)) if next > highest => next,
+        (Some(next), Some(highest)) => {
+            return Err(packed_err(format!(
+                "packed run allocator {next} would reuse live run id {highest}"
+            )));
+        }
+    };
     let next = run_id
         .checked_add(1)
         .ok_or_else(|| packed_err("run id space exhausted"))?;
@@ -621,7 +745,9 @@ fn apply_deaths(
             };
             let run_id = candidate.1.value();
             let Some(value) = run_meta.get(run_id).map_err(persist_err)? else {
-                return Err(packed_err("run-range entry has no metadata"));
+                return Err(packed_err(format!(
+                    "run-range entry names run {run_id}, which has no metadata"
+                )));
             };
             let meta = RunMeta::decode(value.value()).map_err(packed_err)?;
             if event_key <= meta.max_event_key {
