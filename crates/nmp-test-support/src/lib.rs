@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use tokio::io::{copy_bidirectional, AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::io::{copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::task::{JoinHandle, JoinSet};
@@ -243,10 +243,29 @@ fn looks_like_http_request(head: &[u8]) -> bool {
     head.starts_with(b"GET ") || head.starts_with(b"HEAD ") || head.starts_with(b"OPTIONS ")
 }
 
+fn request_head_len(head: &[u8]) -> Option<usize> {
+    head.windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
+}
+
 /// Answer one plain HTTP request with `document`, or `404` when this relay
 /// publishes none. Redirects, proxies and retries are all disabled in the
 /// engine's own fetcher, so exactly one clean response is what it needs.
-async fn answer_relay_document(mut stream: TcpStream, document: Option<&String>) -> io::Result<()> {
+async fn answer_relay_document(
+    mut stream: TcpStream,
+    request_head_len: usize,
+    document: Option<&String>,
+) -> io::Result<()> {
+    // `peek_request_head` deliberately leaves the request untouched so the
+    // websocket path can remain a byte-for-byte proxy. The plain-HTTP path
+    // owns the connection instead, and must consume the request before
+    // closing it: dropping a TCP socket with unread receive bytes produces a
+    // reset on Darwin, so an otherwise complete NIP-11 response is reported
+    // to the client as `ConnectionReset`.
+    let mut request_head = vec![0; request_head_len];
+    stream.read_exact(&mut request_head).await?;
+
     let response = match document {
         Some(body) => format!(
             "HTTP/1.1 200 OK\r\n\
@@ -289,8 +308,14 @@ async fn run(
                     // frames and would be poisoned by an HTTP request, nor
                     // the wire log every `wait_wire_quiet` reads.
                     if looks_like_http_request(&head) && !is_websocket_upgrade(&head) {
-                        return answer_relay_document(downstream, relay_document.as_ref().as_ref())
+                        if let Some(request_head_len) = request_head_len(&head) {
+                            return answer_relay_document(
+                                downstream,
+                                request_head_len,
+                                relay_document.as_ref().as_ref(),
+                            )
                             .await;
+                        }
                     }
                     let mut downstream = Tapped {
                         inner: downstream,
