@@ -20,6 +20,10 @@ final class NMPErrorLocalizedDescriptionTests: XCTestCase {
             (.invalidSignerOutput("sentinel-output"), "Invalid signer output: sentinel-output"),
             (.receiptCorrelationIdExhausted, "Receipt correlation ID namespace exhausted"),
             (.storeOpenFailed("sentinel-open"), "Could not open store: sentinel-open"),
+            (
+                .storeAlreadyOpen("/sentinel/store"),
+                "Persistent store is already open: /sentinel/store"
+            ),
             (.storeResetFailed("sentinel-reset"), "Could not reset store: sentinel-reset"),
             (.storeStillOpen("/sentinel/store"), "Persistent store is still open: /sentinel/store"),
             (

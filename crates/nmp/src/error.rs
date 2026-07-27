@@ -24,11 +24,15 @@ pub enum EngineError {
     /// [`EngineConfig::store_path`](crate::EngineConfig::store_path) pointed
     /// at a file the on-disk store could not open.
     StoreOpenFailed { reason: String },
+    /// [`EngineConfig::store_path`](crate::EngineConfig::store_path) names a
+    /// persistent store already owned by this or another process. No second
+    /// database owner and no partial engine were created (#489).
+    StoreAlreadyOpen { path: String },
     /// [`Engine::reset_persistent_store`](crate::Engine::reset_persistent_store)
-    /// could not remove the requested closed persistent store.
+    /// could not remove the requested unowned persistent store.
     StoreResetFailed { reason: String },
-    /// Destructive reset was refused because an engine in this process still
-    /// owns the same canonical persistent-store path.
+    /// Destructive reset was refused because an engine in this or any other
+    /// process still owns the same canonical persistent-store path.
     StoreStillOpen { path: String },
     /// The engine could not be constructed: the OS refused one engine-owned
     /// transport/runtime thread, or the configured relay budget could not be
@@ -81,6 +85,9 @@ impl std::fmt::Display for EngineError {
         match self {
             Self::InvalidRelayUrl { url } => write!(f, "invalid relay url: {url:?}"),
             Self::StoreOpenFailed { reason } => write!(f, "could not open store: {reason}"),
+            Self::StoreAlreadyOpen { path } => {
+                write!(f, "persistent store is already open: {path}")
+            }
             Self::StoreResetFailed { reason } => write!(f, "could not reset store: {reason}"),
             Self::StoreStillOpen { path } => {
                 write!(f, "persistent store is still open: {path}")

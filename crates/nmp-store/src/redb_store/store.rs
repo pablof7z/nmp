@@ -31,9 +31,9 @@ use super::AtomicU8;
 #[cfg(any(test, feature = "bench-instrumentation"))]
 use super::Ordering;
 use super::{
-    binary_event, open_and_register, reset_store, BTreeMap, BTreeSet, CoverageKey, Database,
-    EventCursor, EventId, Filter, HashMap, LaneKey, LaneState, OpenStoreRegistration, Path,
-    PersistenceError, PreparedFilter, Provenance, RecoveredLane, RegisteredOpen, RelayUrl,
+    acquire_for_open, binary_event, reset_store, BTreeMap, BTreeSet, CoverageKey, Database,
+    EventCursor, EventId, Filter, HashMap, LaneKey, LaneState, Path, PersistenceError,
+    PreparedFilter, Provenance, RecoveredLane, RedbStoreOpenError, RelayUrl, StoreOwnership,
     StoredEvent, StoredEventView, Timestamp,
 };
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableHandle};
@@ -63,9 +63,10 @@ pub(super) enum RedbCrashPoint {
 
 pub struct RedbStore {
     pub(super) db: Database,
-    // Field order is load-bearing: Rust drops `db` before this registration,
-    // so reset cannot proceed until the database handle is fully closed.
-    pub(super) _open_registration: OpenStoreRegistration,
+    // Field order is load-bearing: Rust drops `db` before this ownership
+    // token, so no process can open or reset the target until this database
+    // handle has finished closing.
+    pub(super) _ownership: StoreOwnership,
     /// Application-level write transactions performed by `open`; the
     /// healthy v6 reopen falsifier asserts this stays zero.
     #[cfg(test)]
@@ -162,7 +163,13 @@ impl RedbStore {
     /// A healthy v7 database takes only a read transaction: the explicit
     /// schema marker proves every table exists, and one exact metadata count
     /// tells us whether crash-abandoned ephemeral receipts need recovery.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, redb::Error> {
+    /// The returned store owns one nonblocking cross-process exclusive lock
+    /// on the resolved target for as long as it lives; a second owner —
+    /// through this path, a relative alias, or any symlink alias, in this
+    /// process or another — is refused with
+    /// [`RedbStoreOpenError::StoreAlreadyOpen`] before a second database
+    /// handle exists.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, RedbStoreOpenError> {
         Self::open_inner(path, BenchmarkDurability::Immediate, |path| {
             Database::builder()
                 .set_cache_size(REDB_CACHE_BYTES)
@@ -188,7 +195,7 @@ impl RedbStore {
     pub(super) fn open_with_backend(
         path: impl AsRef<Path>,
         backend: impl redb::StorageBackend,
-    ) -> Result<Self, redb::Error> {
+    ) -> Result<Self, RedbStoreOpenError> {
         let mut backend = Some(backend);
         Self::open_inner(path, BenchmarkDurability::Immediate, move |_| {
             Database::builder()
@@ -196,7 +203,7 @@ impl RedbStore {
                 .create_with_backend(
                     backend
                         .take()
-                        .expect("open_and_register calls the database factory exactly once"),
+                        .expect("open_inner calls the database factory exactly once"),
                 )
         })
     }
@@ -210,7 +217,7 @@ impl RedbStore {
     /// maintenance-inclusive evidence cannot hide the deferred durability
     /// work. Schema creation and reopen repair remain immediately durable.
     #[cfg(feature = "bench-instrumentation")]
-    pub fn open_benchmark_nondurable(path: impl AsRef<Path>) -> Result<Self, redb::Error> {
+    pub fn open_benchmark_nondurable(path: impl AsRef<Path>) -> Result<Self, RedbStoreOpenError> {
         Self::open_inner(
             path,
             BenchmarkDurability::NoneThenImmediateCheckpoint,
@@ -226,9 +233,19 @@ impl RedbStore {
         path: impl AsRef<Path>,
         _benchmark_durability: BenchmarkDurability,
         create: impl FnOnce(&Path) -> Result<Database, redb::DatabaseError>,
-    ) -> Result<Self, redb::Error> {
-        let registered = open_and_register(path.as_ref(), create)?;
-        let db = &registered.value;
+    ) -> Result<Self, RedbStoreOpenError> {
+        let path = path.as_ref();
+        // Ownership first: nothing may create, expose, or mutate the database
+        // before this process holds the one exclusive lock for the target.
+        let ownership = acquire_for_open(path)?;
+        // Create through the RESOLVED target, never the possibly-retargeted
+        // alias the caller supplied — the same canonical identity selected
+        // the sidecar lock above.
+        let db = create(ownership.target())
+            .map_err(|error| RedbStoreOpenError::database(error.into(), ownership.target()))?;
+        // A retarget racing the create fails closed: `db` and `ownership`
+        // both drop here, so nothing is exposed and the lock is released.
+        ownership.revalidate(path)?;
         // Schema v6 deliberately carried no event-row migration. Refuse any
         // older NMP event epoch before creating a single v7 table: otherwise
         // canonical events would appear empty while unversioned durable
@@ -249,7 +266,7 @@ impl RedbStore {
             (table_count, has_schema_marker, has_legacy_epoch)
         };
         if has_legacy_epoch {
-            return Err(redb::Error::UpgradeRequired(SCHEMA_VERSION as u8));
+            return Err(redb::Error::UpgradeRequired(SCHEMA_VERSION as u8).into());
         }
 
         let mut _open_write_transactions = 0;
@@ -270,7 +287,7 @@ impl RedbStore {
                     version,
                     Some(SCHEMA_VERSION | PREVIOUS_SCHEMA_VERSION | LEGACY_SCHEMA_VERSION)
                 ) {
-                    return Err(redb::Error::UpgradeRequired(SCHEMA_VERSION as u8));
+                    return Err(redb::Error::UpgradeRequired(SCHEMA_VERSION as u8).into());
                 }
                 let needs_schema_migration = version != Some(SCHEMA_VERSION);
                 let needs_legacy_index_removal = version == Some(LEGACY_SCHEMA_VERSION);
@@ -289,7 +306,8 @@ impl RedbStore {
                 if cardinality_sample_key_len.is_some_and(|len| len != 32) {
                     return Err(redb::Error::Corrupted(
                         "invalid cardinality sample key length".to_owned(),
-                    ));
+                    )
+                    .into());
                 }
                 let outbox_meta = read_txn.open_table(OUTBOX_META)?;
                 let pending_ephemeral = outbox_meta
@@ -397,7 +415,8 @@ impl RedbStore {
                         if reconciled != pending_ephemeral {
                             return Err(redb::Error::Corrupted(format!(
                                 "pending ephemeral receipt count is {pending_ephemeral}, found {reconciled} recoverable rows"
-                            )));
+                            ))
+                            .into());
                         }
                         let mut outbox_meta = write_txn.open_table(OUTBOX_META)?;
                         outbox_meta.insert(PENDING_EPHEMERAL_RECEIPTS_KEY, "0")?;
@@ -423,7 +442,7 @@ impl RedbStore {
             // fresh: doing so could combine old unversioned governed facts
             // with an empty canonical epoch.
             if table_count != 0 {
-                return Err(redb::Error::UpgradeRequired(SCHEMA_VERSION as u8));
+                return Err(redb::Error::UpgradeRequired(SCHEMA_VERSION as u8).into());
             }
             let write_txn = db.begin_write()?;
             {
@@ -481,13 +500,9 @@ impl RedbStore {
             write_txn.commit()?;
             _open_write_transactions += 1;
         }
-        let RegisteredOpen {
-            value: db,
-            registration,
-        } = registered;
         Ok(Self {
             db,
-            _open_registration: registration,
+            _ownership: ownership,
             #[cfg(test)]
             open_write_transactions: _open_write_transactions,
             #[cfg(test)]
@@ -507,14 +522,14 @@ impl RedbStore {
         })
     }
 
-    /// Destructively remove one closed persistent store target. The same
-    /// process-global mutex serializes this operation with every
-    /// [`RedbStore::open`] path, including stores later moved through raw
-    /// engine construction. Existing and dangling final symlink aliases
-    /// resolve to the actual store target; the alias inode is not removed.
-    /// A live target is a typed refusal. This is deliberately process-local:
-    /// arbitrary external retargeting and cross-process reset require a
-    /// separate advisory-lock contract.
+    /// Destructively remove one unowned persistent store target.
+    ///
+    /// Reset acquires the SAME nonblocking cross-process exclusive ownership
+    /// [`RedbStore::open`] does, and holds it through the removal — there is
+    /// no check-then-delete window. A live owner in this or any other process
+    /// is [`crate::RedbStoreResetError::StoreStillOpen`] and the target is not
+    /// touched. Existing and dangling final symlink aliases resolve to the
+    /// actual store target; the alias inode is not removed.
     pub fn reset(path: impl AsRef<Path>) -> Result<(), crate::RedbStoreResetError> {
         reset_store(path.as_ref())
     }
@@ -523,7 +538,7 @@ impl RedbStore {
     pub(super) fn open_with_crash_point(
         path: impl AsRef<Path>,
         crash_point: RedbCrashPoint,
-    ) -> Result<Self, redb::Error> {
+    ) -> Result<Self, RedbStoreOpenError> {
         let store = Self::open(path)?;
         store
             .crash_point

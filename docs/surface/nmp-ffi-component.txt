@@ -2721,6 +2721,21 @@ enum Enum {
             ),
         },
         Variant {
+            name: "StoreAlreadyOpen",
+            discr: None,
+            fields: [
+                Field {
+                    name: "path",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "`NmpEngine::new`'s `store_path` named a persistent store already owned\nby this or another process. No second database owner and no partial\nengine were created (#489).",
+            ),
+        },
+        Variant {
             name: "StoreResetFailed",
             discr: None,
             fields: [
@@ -2732,7 +2747,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "The requested closed persistent store could not be removed.",
+                "The requested unowned persistent store could not be removed.",
             ),
         },
         Variant {
@@ -2747,7 +2762,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "Destructive reset was refused because a live engine in this process\nowns the same canonical persistent-store path.",
+                "Destructive reset was refused because a live engine in this or any\nother process owns the same canonical persistent-store path.",
             ),
         },
         Variant {
@@ -8214,7 +8229,7 @@ function Function {
         is_object_free_function: false,
     },
     docstring: Some(
-        "Destructively reset a closed persistent NMP store. This removes all\ncanonical engine state at `store_path`, while leaving any separately\nconfigured native account checkpoint untouched. A live engine in this\nprocess using the same canonical path is refused with\n`FfiError::StoreStillOpen` without touching the file. Shut down or drop\nthat engine first. The operation is idempotent when the store does not\nexist; cross-process exclusion is not provided.",
+        "Destructively reset a closed persistent NMP store. This removes all\ncanonical engine state at `store_path`, while leaving any separately\nconfigured native account checkpoint untouched. A live engine in this OR\nANY OTHER process using the same canonical path is refused with\n`FfiError::StoreStillOpen` without touching the file. Shut down or drop\nthat engine first. The operation is idempotent when the store does not\nexist.",
     ),
     throws: Some(
         Enum {
@@ -8224,7 +8239,7 @@ function Function {
     ),
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_reset_persistent_store",
     checksum: Some(
-        56595,
+        52986,
     ),
 }
 

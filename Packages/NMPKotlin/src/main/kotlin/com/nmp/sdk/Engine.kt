@@ -73,11 +73,14 @@ class NMPEngine(
     private val localAccountStore: NMPLocalAccountCheckpoint? = null,
 ) : AutoCloseable {
     companion object {
-        /** Destructively remove one closed persistent NMP store. A live engine
-         * in this process using the same canonical path throws
+        /** Destructively remove one unowned persistent NMP store. A live engine
+         * in this OR ANY OTHER process using the same canonical path throws
          * [NMPError.StoreStillOpen] without touching the file; call
-         * [shutdown] or [close] first. This guard is process-local. A separate
-         * local-account checkpoint is not touched. */
+         * [shutdown] or [close] first. The refusal is a cross-process exclusive
+         * ownership lock (#489), not a process-local guard: constructing a
+         * second [NMPEngine] over a live store path throws
+         * [NMPError.StoreAlreadyOpen]. A separate local-account checkpoint is
+         * not touched. */
         fun resetPersistentStore(storePath: String) =
             nmpRethrowing { ffiResetPersistentStore(storePath) }
     }
