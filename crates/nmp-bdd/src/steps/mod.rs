@@ -20,9 +20,33 @@ pub fn parse_people(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// The single ASCII letter a `"p"`/`"d"`/`"e"` step names. Its own helper so
+/// every tag-shaped step rejects a non-letter the same way, with the same
+/// message, instead of each one unwrapping an `Option` inline.
+pub fn parse_tag(raw: &str) -> char {
+    let mut chars = raw.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if c.is_ascii_alphabetic() => c,
+        _ => panic!("nmp-bdd: {raw:?} is not a single-letter tag name"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_people;
+    use super::parse_tag;
+
+    #[test]
+    fn a_single_letter_is_a_tag_name() {
+        assert_eq!(parse_tag("p"), 'p');
+        assert_eq!(parse_tag("A"), 'A');
+    }
+
+    #[test]
+    #[should_panic(expected = "is not a single-letter tag name")]
+    fn a_multi_character_name_is_not_an_indexed_tag() {
+        parse_tag("pp");
+    }
 
     #[test]
     fn splits_a_three_person_oxford_comma_list() {
