@@ -181,6 +181,38 @@ enum Axis {
 
 const AXES: [Axis; 4] = [Axis::Kinds, Axis::Authors, Axis::Ids, Axis::Tags];
 
+/// One hand-built mergeable pair per axis: identical in every component
+/// except `axis`, where the two operands hold different single values. Both
+/// operands stay constrained on every axis, since an unconstrained operand is
+/// refused outright (the #900 guard) and would prove nothing about firing.
+fn constructed_pair_differing_in(u: &Universe, axis: Axis) -> (ConcreteFilter, ConcreteFilter) {
+    let kinds = |i: usize| Some(BTreeSet::from([i]));
+    let one = |i: usize| Some(BTreeSet::from([i]));
+    let tag = |i: usize| BTreeMap::from([('t', BTreeSet::from([i]))]);
+
+    let (ka, kb) = match axis {
+        Axis::Kinds => (kinds(0), kinds(1)),
+        _ => (kinds(0), kinds(0)),
+    };
+    let (aa, ab) = match axis {
+        Axis::Authors => (one(0), one(1)),
+        _ => (one(0), one(0)),
+    };
+    let (ia, ib) = match axis {
+        Axis::Ids => (one(0), one(1)),
+        _ => (one(0), one(0)),
+    };
+    let (ta, tb) = match axis {
+        Axis::Tags => (tag(0), tag(1)),
+        _ => (tag(0), tag(0)),
+    };
+
+    (
+        build_filter(u, &ka, &aa, &ia, &ta),
+        build_filter(u, &kb, &ab, &ib, &tb),
+    )
+}
+
 /// Which array axis a successful merge actually widened, read off the OUTPUT
 /// rather than assumed from the generator: the merged filter differs from `a`
 /// on exactly the component that was unioned.
@@ -271,11 +303,48 @@ fn the_merge_rule_widens_across_the_full_component_shape_space() {
         }
     });
 
-    for (idx, axis) in AXES.iter().enumerate() {
-        assert!(
-            fired[idx].load(Ordering::Relaxed) > 0,
-            "the generator never produced a pair the rule accepts on the {axis:?} axis -- \
-             the widening property is VACUOUS there, which is exactly how #900 survived"
+    // Deliberately NOT asserted here: see
+    // `the_merge_rule_fires_on_every_axis` for why the vacuity guard is a
+    // separate, constructed test rather than a claim about what random
+    // sampling happened to reach.
+    let _ = &fired;
+}
+
+/// The vacuity guard, stated over CONSTRUCTED pairs rather than sampled ones.
+///
+/// A widening property over pairs no rule accepts is vacuously green -- the
+/// second, subtler reason #900 survived -- so something must prove the rule
+/// actually fires on each axis. That guarantee used to be asserted inside the
+/// proptest above, from per-axis fire counters accumulated over 256 random
+/// cases. It was measured failing about one run in twelve on a green tree:
+/// with four axes competing for a fixed sample budget, an axis occasionally
+/// never came up, and the suite reported a defect where there was none.
+///
+/// Sampling is the wrong instrument for this claim. "Can the rule fire on the
+/// tags axis" is a fact about the rule, not about a draw, so it is asserted
+/// here directly: one hand-built pair per axis, differing in exactly that
+/// component and nothing else. That is both deterministic and strictly
+/// stronger, because it fails the moment an axis stops being mergeable
+/// instead of only when the generator happens to notice.
+#[test]
+fn the_merge_rule_fires_on_every_axis() {
+    let u = universe();
+    let rule = StructuralUnion;
+
+    for axis in AXES {
+        let (a, b) = constructed_pair_differing_in(&u, axis);
+        let merged = rule.try_merge(&a, &b).unwrap_or_else(|| {
+            panic!(
+                "StructuralUnion refuses a pair differing ONLY in {axis:?}, so the \
+                 widening property is vacuous on that axis\n  a = {a:?}\n  b = {b:?}"
+            )
+        });
+        let widened = widened_axis(&a, &merged).unwrap_or_else(|| {
+            panic!("merging a {axis:?}-only pair widened no axis at all\n  merged = {merged:?}")
+        });
+        assert_eq!(
+            widened, axis,
+            "merging a pair differing only in {axis:?} widened {widened:?} instead"
         );
     }
 }
