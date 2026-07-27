@@ -6,7 +6,7 @@
 
 use serde::Deserialize;
 
-use crate::sha256::{Sha256Hash, Sha256HexError};
+use nmp_asset::{Sha256Hash, Sha256HexError};
 
 /// Standalone fail-closed bound on descriptor JSON. The upload client
 /// already caps response bytes before parsing, but this parser must remain

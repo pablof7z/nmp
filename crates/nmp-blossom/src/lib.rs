@@ -17,6 +17,14 @@
 //! Its HTTP client reimplements the engine's NIP-11 admission discipline
 //! from `nmp-transport`'s public pure classifiers (see `client.rs`).
 //!
+//! Exact-byte identity is NOT owned here (#884): [`nmp_asset::Sha256Hash`]
+//! and the [`nmp_asset::VerifiedAsset`] witness live in the protocol-neutral
+//! `nmp-asset` crate, and this crate re-exports neither. Only
+//! [`BlossomClient::upload`] observes the exact bytes, so only `upload` can
+//! mint a [`VerifiedUpload`] carrying that witness; `mirror` (which never
+//! sees the bytes) returns the server's integrity-gated [`BlobDescriptor`]
+//! and nothing stronger.
+//!
 //! This unit covers the BUD-11 verbs (upload, BUD-04 mirror, BUD-12
 //! delete/list); the `get`/`media` endpoints, platform projection, and
 //! the NIP-68/composition layers are tracked follow-ups under epic #216
@@ -25,7 +33,6 @@
 mod auth;
 mod client;
 mod descriptor;
-mod sha256;
 
 pub use auth::{
     delete_authorization_draft, list_authorization_draft, upload_authorization_draft,
@@ -37,7 +44,6 @@ pub use client::{
     DEFAULT_MAX_LIST_RESPONSE_BYTES, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_REQUEST_DEADLINE,
 };
 pub use descriptor::{BlobDescriptor, DescriptorError, MAX_DESCRIPTOR_BYTES};
-pub use sha256::{Sha256Hash, Sha256HexError};
 
 use nmp_ownership::{KindClaim, KindScope, ModuleId};
 

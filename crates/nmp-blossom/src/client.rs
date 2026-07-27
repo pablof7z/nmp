@@ -17,11 +17,11 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use nmp_asset::{Sha256Hash, VerifiedAsset};
 use nmp_network_policy::{DestinationPolicy, DestinationRefusal};
 
 use crate::auth::{BlossomVerb, SignedAuthorization};
 use crate::descriptor::{BlobDescriptor, DescriptorError};
-use crate::sha256::Sha256Hash;
 
 /// Default cap on a blob-descriptor response body.
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 65536;
@@ -324,25 +324,43 @@ impl std::fmt::Display for UploadError {
 
 impl std::error::Error for UploadError {}
 
-/// A blob descriptor whose `sha256` was PROVEN equal to the locally
-/// computed hash of the exact uploaded bytes. Private field + no public
-/// constructor: this type exists only via [`BlossomClient::upload`]'s
-/// integrity gate (type-over-convention).
+/// The result of an upload whose bytes THIS client observed: the server's
+/// integrity-checked BUD-02 descriptor plus the protocol-neutral
+/// [`VerifiedAsset`] proof computed from those exact bytes (#884).
+///
+/// Private fields + no public constructor, and only [`BlossomClient::upload`]
+/// builds one. [`BlossomClient::mirror`] deliberately cannot: a mirroring
+/// client never sees the mirrored bytes, so it has nothing from which to
+/// mint an exact-byte witness (type-over-convention -- the impossibility is
+/// structural, not a review note).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedUpload {
     descriptor: BlobDescriptor,
+    asset: VerifiedAsset,
 }
 
 impl VerifiedUpload {
     /// The server's descriptor, integrity-checked against the uploaded
-    /// bytes.
+    /// bytes. Still the SERVER's claim vocabulary -- `url`/`mime_type` are
+    /// untrusted text.
     pub fn descriptor(&self) -> &BlobDescriptor {
         &self.descriptor
+    }
+
+    /// The exact-byte proof computed locally from the uploaded bytes,
+    /// independent of Blossom.
+    pub fn asset(&self) -> &VerifiedAsset {
+        &self.asset
     }
 
     /// Consume into the verified descriptor.
     pub fn into_descriptor(self) -> BlobDescriptor {
         self.descriptor
+    }
+
+    /// Consume into the protocol-neutral exact-byte proof.
+    pub fn into_asset(self) -> VerifiedAsset {
+        self.asset
     }
 }
 
@@ -396,8 +414,8 @@ pub enum MirrorError {
     /// The success body is not a valid BUD-02 blob descriptor.
     DescriptorInvalid(DescriptorError),
     /// INTEGRITY GATE: the 2xx descriptor names a different sha256 than
-    /// the hash this client authorized -- fail closed, no
-    /// [`VerifiedUpload`] escapes.
+    /// the hash this client authorized -- fail closed, no descriptor
+    /// escapes.
     Sha256Mismatch {
         expected: Sha256Hash,
         returned: Sha256Hash,
@@ -815,7 +833,14 @@ impl BlossomClient {
                 returned: descriptor.sha256,
             });
         }
-        Ok(VerifiedUpload { descriptor })
+        // The bytes are RIGHT HERE, so the exact-byte witness is minted from
+        // them -- never from `descriptor.sha256`, which is the server's
+        // claim. `url`/`mime_type` ride along as explicitly untrusted
+        // presentation text (#884).
+        let asset =
+            VerifiedAsset::from_bytes(blob, descriptor.url.clone(), descriptor.mime_type.clone());
+        debug_assert_eq!(asset.sha256(), descriptor.sha256);
+        Ok(VerifiedUpload { descriptor, asset })
     }
 
     /// `PUT /mirror` (BUD-04, #551): ask `server` to download the blob at
@@ -832,16 +857,22 @@ impl BlossomClient {
     /// 5. map every non-success status into the separated taxonomy -- 409
     ///    (server refused: mirrored hash != authorized `x`) and 502
     ///    (server could not fetch the origin) each keep their own variant;
-    /// 6. integrity-gate the 200/201 descriptor's sha256 against
-    ///    `expected` -- the SAME [`VerifiedUpload`] witness as `upload`,
-    ///    constructible only behind this gate.
+    /// 6. integrity-gate the 200/201 descriptor's sha256 against `expected`.
+    ///
+    /// The result is the server's descriptor and NOTHING stronger (#884).
+    /// This client never observes the mirrored bytes -- the destination
+    /// server fetches them -- so a successful mirror cannot mint an
+    /// exact-byte [`nmp_asset::VerifiedAsset`], and therefore cannot return
+    /// a [`VerifiedUpload`]. The gate above still proves the returned
+    /// descriptor names the hash the caller authorized; it does not prove
+    /// anyone hashed real bytes here.
     pub async fn mirror(
         &self,
         server: &BlossomServerUrl,
         source_url: &str,
         expected: Sha256Hash,
         auth: &SignedAuthorization,
-    ) -> Result<VerifiedUpload, MirrorError> {
+    ) -> Result<BlobDescriptor, MirrorError> {
         if auth.verb() != BlossomVerb::Upload || auth.blob() != Some(expected) {
             return Err(MirrorError::AuthorizationBlobMismatch {
                 expected,
@@ -919,7 +950,7 @@ impl BlossomClient {
                 returned: descriptor.sha256,
             });
         }
-        Ok(VerifiedUpload { descriptor })
+        Ok(descriptor)
     }
 
     /// `DELETE /<sha256>` (BUD-12, #551):

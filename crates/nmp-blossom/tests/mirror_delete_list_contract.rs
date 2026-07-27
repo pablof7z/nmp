@@ -11,11 +11,12 @@ use std::net::TcpListener;
 
 use nostr::{Alphabet, EventBuilder, Keys, Kind, Tag, TagKind, Timestamp};
 
+use nmp_asset::{Sha256Hash, Sha256HexError};
 use nmp_blossom::{
     delete_authorization_draft, list_authorization_draft, upload_authorization_draft,
     AuthValidationError, BlossomClient, BlossomClientConfig, BlossomServerUrl, BlossomVerb,
     DeleteError, DescriptorError, ExpectedAuthorization, ListError, ListPage, MirrorError,
-    Sha256Hash, Sha256HexError, SignedAuthorization,
+    SignedAuthorization,
 };
 
 /// The scripted HTTP/1.1 test double shared with `upload_contract.rs`;

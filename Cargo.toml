@@ -27,6 +27,10 @@ members = [
     "crates/nmp-nip65",
     "crates/nmp-nip65-consumer-check",
     "crates/nmp-nip29",
+    # Protocol-neutral exact-byte asset identity/proof (#884): the ONE owner of
+    # `Sha256Hash` and the `VerifiedAsset` witness, shared by the storage
+    # protocol crates without dragging any protocol vocabulary along.
+    "crates/nmp-asset",
     # Blossom (BUD-01/02/11) blob-upload core (#545, epic #216 T15-A-BLOSSOM).
     "crates/nmp-blossom",
     # NIP-68 picture-first (kind:20) schema owner (#558, epic #216 T15-B-NIP68-IMETA).
@@ -83,6 +87,7 @@ nmp-nip51 = { path = "crates/nmp-nip51" }
 nmp-nip02 = { path = "crates/nmp-nip02" }
 nmp-nip65 = { path = "crates/nmp-nip65" }
 nmp-nip29 = { path = "crates/nmp-nip29" }
+nmp-asset = { path = "crates/nmp-asset" }
 nmp-blossom = { path = "crates/nmp-blossom" }
 nmp-nip68 = { path = "crates/nmp-nip68" }
 nmp-media = { path = "crates/nmp-media" }
@@ -100,3 +105,8 @@ reqwest = { version = "0.12.28", default-features = false, features = ["rustls-t
 # BUD-11 `Authorization: Nostr <base64url-no-padding(event JSON)>` encoding
 # (#545); already at 0.22.1 in Cargo.lock via transitive resolution.
 base64 = "0.22"
+# `nmp-asset`'s exact-byte digest (#884). A protocol-neutral identity crate
+# cannot reach for `nostr::hashes`, so the hash comes from the RustCrypto
+# implementation directly; already at 0.10.9 in Cargo.lock via transitive
+# resolution.
+sha2 = "0.10"

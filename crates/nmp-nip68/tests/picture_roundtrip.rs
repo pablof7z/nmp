@@ -2,7 +2,8 @@
 //! epic #216 T15-B-NIP68-IMETA). Each test names the invariant it would
 //! falsify.
 
-use nmp_blossom::{BlobDescriptor, Sha256Hash};
+use nmp_asset::Sha256Hash;
+use nmp_blossom::BlobDescriptor;
 use nmp_nip68::{
     build_picture, decode_picture, ContentWarning, ImageDim, PictureBuildError, PictureDiagnostic,
     PictureImage, PictureImageError, PictureSpec, PICTURE_KIND,

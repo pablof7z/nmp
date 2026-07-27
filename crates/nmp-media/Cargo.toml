@@ -22,6 +22,10 @@ default = []
 # (composition is not kind ownership, routing-and-ownership.md §3.2.1).
 [dependencies]
 nostr.workspace = true
+# #884: exact-byte asset identity (`Sha256Hash`, `VerifiedAsset`) comes from
+# the one protocol-neutral owner, never from a storage protocol's private
+# vocabulary.
+nmp-asset.workspace = true
 nmp-ownership.workspace = true
 nmp-blossom.workspace = true
 nmp-nip68.workspace = true
