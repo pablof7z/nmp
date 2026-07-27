@@ -1789,19 +1789,15 @@ pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, Ffi
     // direct Rust (`nmp::WriteRouting::PrivateNarrow`), just not from raw
     // FFI-supplied relay-URL strings. #115: `WriteRouting::PinnedHost`
     // gets the identical treatment -- `FfiWriteRouting` has no matching
-    // variant at all, so this `match` staying exhaustive over exactly
-    // `{AuthorOutbox, ToInboxes}` IS the enforcement; an app can only reach
-    // a pinned-host write transitively through `NmpEngine::group_message_intent`'s
-    // opaque `FfiComposedWriteIntent`, never through this conversion path.
+    // variant at all. #839 also removes the former raw-recipient arm:
+    // recipient semantics must be fixed by a protocol-owned operation
+    // together with its complete body, never supplied beside an
+    // independently constructed event. This single-variant match is the
+    // enforcement; an app can only reach a pinned-host write transitively
+    // through `NmpEngine::group_message_intent`'s opaque
+    // `FfiComposedWriteIntent`, never through this conversion path.
     let routing = match intent.routing {
         FfiWriteRouting::AuthorOutbox => GWriteRouting::AuthorOutbox,
-        FfiWriteRouting::ToInboxes { recipients } => {
-            let pks = recipients
-                .iter()
-                .map(|hex| parse_pubkey(hex))
-                .collect::<Result<Vec<_>, _>>()?;
-            GWriteRouting::ToInboxes(pks)
-        }
     };
 
     Ok(GWriteIntent {

@@ -598,16 +598,15 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
 }
 
 #[test]
-fn inbox_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_volatile() {
+fn author_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_volatile() {
     let author = Keys::generate();
-    let recipient = Keys::generate();
-    let old = RelayUrl::parse("wss://old-inbox.example").unwrap();
-    let new = RelayUrl::parse("wss://new-inbox.example").unwrap();
+    let old = RelayUrl::parse("wss://old-outbox.example").unwrap();
+    let new = RelayUrl::parse("wss://new-outbox.example").unwrap();
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("inbox-route.redb");
+    let path = dir.path().join("author-route.redb");
     let receipt = {
         let directory =
-            FixtureDirectory::new().with_read(recipient.public_key().to_hex(), [old.clone()]);
+            FixtureDirectory::new().with_write(author.public_key().to_hex(), [old.clone()]);
         let mut core = EngineCore::new(
             RedbFailStartStore::open(&path, [old.clone()]),
             Box::new(directory),
@@ -617,9 +616,9 @@ fn inbox_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vol
         activate(&mut core, &author);
         let accepted = core.handle(EngineMsg::Publish(
             WriteIntent {
-                payload: WritePayload::Unsigned(unsigned(&author, 87, "dynamic inbox route")),
+                payload: WritePayload::Unsigned(unsigned(&author, 87, "dynamic author route")),
                 durability: Durability::Durable,
-                routing: WriteRouting::ToInboxes(vec![recipient.public_key()]),
+                routing: WriteRouting::AuthorOutbox,
                 identity_override: None,
                 correlation: None,
             },
@@ -639,7 +638,7 @@ fn inbox_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vol
     // already-durable old obligation may still start and publish.
     {
         let changed =
-            FixtureDirectory::new().with_read(recipient.public_key().to_hex(), [new.clone()]);
+            FixtureDirectory::new().with_write(author.public_key().to_hex(), [new.clone()]);
         let mut core = EngineCore::new(
             RedbFailStartStore::open_with_route_failure(&path),
             Box::new(changed),
@@ -714,7 +713,7 @@ fn inbox_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vol
     // Once a later boot can persist the changed revision, `new` starts. The
     // old lane is retained in route history but is already terminal (Acked),
     // so it is correctly not published again.
-    let changed = FixtureDirectory::new().with_read(recipient.public_key().to_hex(), [new.clone()]);
+    let changed = FixtureDirectory::new().with_write(author.public_key().to_hex(), [new.clone()]);
     let mut core = EngineCore::new(RedbFailStartStore::open(&path, []), Box::new(changed), 10);
     core.recover_on_boot();
     connect_signer(&mut core, 0, &new, author.public_key());

@@ -2424,14 +2424,6 @@ impl<S: EventStore> EngineCore<S> {
     pub(super) fn routing_snapshot(routing: &WriteRouting) -> String {
         match routing {
             WriteRouting::AuthorOutbox => "author-outbox".to_string(),
-            WriteRouting::ToInboxes(recipients) => format!(
-                "to-inboxes:{}",
-                recipients
-                    .iter()
-                    .map(PublicKey::to_hex)
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ),
             WriteRouting::PrivateNarrow(route) => format!(
                 "private-narrow-hex:{}",
                 route
@@ -2457,17 +2449,6 @@ impl<S: EventStore> EngineCore<S> {
     pub(super) fn parse_routing_snapshot(snapshot: &str) -> Option<WriteRouting> {
         if snapshot == "author-outbox" {
             return Some(WriteRouting::AuthorOutbox);
-        }
-        if let Some(keys) = snapshot.strip_prefix("to-inboxes:") {
-            let recipients = if keys.is_empty() {
-                Vec::new()
-            } else {
-                keys.split(',')
-                    .map(PublicKey::from_hex)
-                    .collect::<Result<Vec<_>, _>>()
-                    .ok()?
-            };
-            return Some(WriteRouting::ToInboxes(recipients));
         }
         if let Some(encoded) = snapshot.strip_prefix("private-narrow-hex:") {
             let relays = if encoded.is_empty() {
@@ -2607,19 +2588,6 @@ impl<S: EventStore> EngineCore<S> {
     /// relay set is exactly whatever the caller pre-narrowed into the
     /// `NarrowOnly` set, empty or not (ledger #6's fail-closed mechanism).
     ///
-    /// `ToInboxes` fans a p-tagged inbox write out to each recipient's
-    /// NIP-65 READ-marked relays (`RelayDirectory::read_relays`, lane
-    /// `Nip65Read`) — the read side of the SAME kind:10002 winner the read
-    /// path consults for authors' write relays (`routing-and-ownership.md`
-    /// §2.4). It NEVER consults a recipient's `write_relays`/`extra_relays`:
-    /// addressing inbox traffic to a recipient's write relays under-delivers
-    /// and leaks metadata (issue #19). A recipient whose read/inbox relays
-    /// are unknown — never seen a kind:10002, or one that declares only
-    /// write-marked relays — fails the whole intent CLOSED with a typed
-    /// `Failed` before any `PublishEvent`, rather than guessing a relay;
-    /// recipient discovery rides the existing kind:10002 `sync_discovery`
-    /// machinery, so a later winner simply makes the retry routable.
-    ///
     /// `PinnedHost` (#115) also never consults the directory — like
     /// `PrivateNarrow`, its one relay is exactly whatever the caller
     /// asserted via `HostAuthority::from_selected_host`. Unlike
@@ -2647,34 +2615,6 @@ impl<S: EventStore> EngineCore<S> {
                     .collect();
                 if relays.is_empty() {
                     Err(format!("no write relays known for author {author_hex}"))
-                } else {
-                    Ok(relays)
-                }
-            }
-            WriteRouting::ToInboxes(recipients) => {
-                let mut relays = BTreeSet::new();
-                for pk in recipients {
-                    let hex = pk.to_hex();
-                    // Read/inbox relays ONLY (lane `Nip65Read`) — never a
-                    // recipient's write/extra relays. Fail CLOSED per
-                    // recipient: an unknown or write-only recipient has no
-                    // inbox relay, and guessing one would leak/under-deliver.
-                    let inbox: Vec<RelayUrl> = self
-                        .directory
-                        .read_relays(&hex)
-                        .into_iter()
-                        .map(|lr| lr.url)
-                        .collect();
-                    if inbox.is_empty() {
-                        return Err(format!(
-                            "no NIP-65 read/inbox relays known for recipient {hex} -- \
-                             inbox route fails closed, never falls back to write relays"
-                        ));
-                    }
-                    relays.extend(inbox);
-                }
-                if relays.is_empty() {
-                    Err("ToInboxes routing has no recipients".to_string())
                 } else {
                     Ok(relays)
                 }
