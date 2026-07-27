@@ -61,7 +61,7 @@ sealed class WriteRouting {
  * template whose `pubkey` names the account being published as (see
  * `NMPEngine.setActiveAccount`); the key lives engine-side and signs it
  * there. `Signed` (#32, the M5 unlock) is a caller that already holds a
- * validly-signed event -- an external signer / NIP-46 bunker, or a
+ * validly-signed event -- an external signer provider, or a
  * verbatim republish -- and hands its fields across as-is: the engine
  * verifies then publishes it exactly as given, never re-signing, mutating
  * a tag, or recomputing an id. */

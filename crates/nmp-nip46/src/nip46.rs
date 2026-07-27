@@ -18,15 +18,16 @@ use nmp_transport::{
 use nostr::nips::nip44;
 use nostr::{
     ClientMessage, Event, EventBuilder, Filter, JsonUtil, Keys, Kind, PublicKey, RelayMessage,
-    RelayUrl, SubscriptionId, Tag, UnsignedEvent,
+    RelayUrl, SubscriptionId, Tag,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zeroize::Zeroizing;
 
-use crate::{
-    parse_bunker_uri, BunkerParseError, CryptoCapability, PendingSignerSender, SignerError,
-    SignerOp, SigningCapability, MAX_BUNKER_URI_LEN, MAX_NIP46_RELAYS,
+use crate::{parse_bunker_uri, BunkerParseError, MAX_BUNKER_URI_LEN, MAX_NIP46_RELAYS};
+use nmp_signer::{
+    CryptoCapability, PendingSignerSender, SignerError, SignerOp, SignerPublicKey,
+    SignerSignedEvent, SignerUnsignedEvent, SigningCapability,
 };
 
 const DEFAULT_PERMISSIONS: &str = "sign_event,nip44_encrypt,nip44_decrypt";
@@ -904,21 +905,21 @@ impl Nip46Signer {
 }
 
 impl SigningCapability for Nip46Signer {
-    fn public_key(&self) -> Option<PublicKey> {
-        Some(self.user_public_key)
+    fn public_key(&self) -> Option<SignerPublicKey> {
+        Some(SignerPublicKey::new(self.user_public_key.to_bytes()))
     }
 
     fn is_available(&self) -> bool {
         self.session.is_available()
     }
 
-    fn sign(&self, unsigned: UnsignedEvent) -> SignerOp<Event> {
+    fn sign(&self, unsigned: SignerUnsignedEvent) -> SignerOp<SignerSignedEvent> {
         let expected = unsigned.clone();
         let body = serde_json::json!({
-            "kind": unsigned.kind.as_u16(),
-            "created_at": unsigned.created_at.as_secs(),
-            "tags": unsigned.tags,
-            "content": unsigned.content,
+            "kind": unsigned.kind(),
+            "created_at": unsigned.created_at(),
+            "tags": unsigned.tags(),
+            "content": unsigned.content(),
         })
         .to_string();
         let user_public_key = self.user_public_key;
@@ -940,23 +941,41 @@ impl SigningCapability for Nip46Signer {
                 }
                 // The engine repeats this check at the promotion boundary;
                 // rejecting here also gives direct users a typed failure.
-                if event.created_at != expected.created_at
-                    || event.kind != expected.kind
-                    || event.tags != expected.tags
-                    || event.content != expected.content
+                if event.created_at.as_secs() != expected.created_at()
+                    || event.kind.as_u16() != expected.kind()
+                    || event
+                        .tags
+                        .clone()
+                        .to_vec()
+                        .into_iter()
+                        .map(Tag::to_vec)
+                        .collect::<Vec<_>>()
+                        != expected.tags()
+                    || event.content != expected.content()
                 {
                     return Err(SignerError::InvalidResponse(
                         "sign_event mutated the frozen template".to_string(),
                     ));
                 }
-                Ok(event)
+                Ok(SignerSignedEvent::new(
+                    event.id.to_bytes(),
+                    SignerPublicKey::new(event.pubkey.to_bytes()),
+                    event.created_at.as_secs(),
+                    event.kind.as_u16(),
+                    event.tags.to_vec().into_iter().map(Tag::to_vec).collect(),
+                    event.content,
+                    event.sig.serialize(),
+                ))
             },
         )
     }
 }
 
 impl CryptoCapability for Nip46Signer {
-    fn nip44_encrypt(&self, peer: PublicKey, plaintext: &str) -> SignerOp<String> {
+    fn nip44_encrypt(&self, peer: SignerPublicKey, plaintext: &str) -> SignerOp<String> {
+        let Ok(peer) = PublicKey::from_slice(peer.as_bytes()) else {
+            return SignerOp::err(SignerError::Rejected("invalid peer public key".to_string()));
+        };
         request_string(
             &self.session,
             "nip44_encrypt",
@@ -964,7 +983,10 @@ impl CryptoCapability for Nip46Signer {
         )
     }
 
-    fn nip44_decrypt(&self, peer: PublicKey, ciphertext: &str) -> SignerOp<String> {
+    fn nip44_decrypt(&self, peer: SignerPublicKey, ciphertext: &str) -> SignerOp<String> {
+        let Ok(peer) = PublicKey::from_slice(peer.as_bytes()) else {
+            return SignerOp::err(SignerError::Rejected("invalid peer public key".to_string()));
+        };
         request_string(
             &self.session,
             "nip44_decrypt",

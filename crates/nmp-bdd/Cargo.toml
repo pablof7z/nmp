@@ -26,7 +26,7 @@ nmp-store.workspace = true
 nmp-resolver.workspace = true
 nmp-router.workspace = true
 nmp-transport.workspace = true
-nmp-signer.workspace = true
+nmp-local-signer.workspace = true
 nmp-engine.workspace = true
 nmp-test-support.workspace = true
 

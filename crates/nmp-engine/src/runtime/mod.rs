@@ -88,11 +88,14 @@ use nmp_grammar::{ConcreteFilter, DescriptorHash};
 use nmp_network_policy::DestinationPolicy;
 use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{RelayDirectory, SubId, WireDelta, WireOp, WireReq};
-use nmp_signer::{PendingSignerOp, SignerOp, SigningCapability};
+use nmp_signer::{
+    PendingSignerOp, SignerOp, SignerPublicKey, SignerSignedEvent, SignerSignedEventParts,
+    SignerUnsignedEvent, SigningCapability,
+};
 use nmp_store::EventStore;
 use nostr::{
     ClientMessage, Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayMessage, RelayUrl,
-    SubscriptionId, Timestamp, UnsignedEvent,
+    SubscriptionId, Tag, Timestamp, UnsignedEvent,
 };
 
 use nmp_transport::{
@@ -140,8 +143,9 @@ struct EnginePoolRuntime {
     pool: Pool,
     stop: cb::Sender<()>,
     /// #704: the engine-owned multi-thread tokio runtime that hosts every
-    /// adapter task (signer/AUTH completion awaits, NIP-11 fetches, NIP-46
-    /// sessions, follow-action). Replaces the deleted blocking-adapter executor.
+    /// adapter task (signer/AUTH completion awaits, NIP-11 fetches, optional
+    /// provider sessions, follow-action). Replaces the deleted blocking-adapter
+    /// executor.
     runtime: Arc<tokio::runtime::Runtime>,
     relay_information: RelayInformationService,
     max_auth_capabilities: usize,
@@ -953,7 +957,7 @@ fn spawn_sign_event_completion(
     terminal: Arc<SignEventTerminal>,
     unsigned: UnsignedEvent,
     expected_id: EventId,
-    signer_result: Option<Result<SignedEvent, nmp_signer::SignerError>>,
+    signer_result: Option<Result<SignerSignedEvent, nmp_signer::SignerError>>,
     completion: SignEventCompletion,
 ) {
     let thread_inbox = inbox.clone();
@@ -968,6 +972,7 @@ fn spawn_sign_event_completion(
                 };
                 let result = match signer_result {
                     Some(result) if terminal.resolve() => result
+                        .and_then(decode_signed_event)
                         .map_err(signer_error)
                         .and_then(|signed| validate_signer_output(&unsigned, expected_id, signed)),
                     Some(_) | None => Err(SignEventError::Cancelled),
@@ -997,7 +1002,7 @@ struct SignEventCompletionDispatch {
     unsigned: UnsignedEvent,
     expected_id: EventId,
     completion: Option<SignEventCompletion>,
-    signer_result: Option<Result<SignedEvent, nmp_signer::SignerError>>,
+    signer_result: Option<Result<SignerSignedEvent, nmp_signer::SignerError>>,
 }
 
 impl Drop for SignEventCompletionDispatch {
@@ -1055,6 +1060,60 @@ fn signer_error(error: nmp_signer::SignerError) -> SignEventError {
             reason: other.to_string(),
         },
     }
+}
+
+fn encode_unsigned_event(unsigned: &UnsignedEvent) -> SignerUnsignedEvent {
+    SignerUnsignedEvent::new(
+        SignerPublicKey::new(unsigned.pubkey.to_bytes()),
+        unsigned.created_at.as_secs(),
+        unsigned.kind.as_u16(),
+        unsigned
+            .tags
+            .clone()
+            .to_vec()
+            .into_iter()
+            .map(Tag::to_vec)
+            .collect(),
+        unsigned.content.clone(),
+    )
+}
+
+fn decode_signed_event(signed: SignerSignedEvent) -> Result<SignedEvent, nmp_signer::SignerError> {
+    let SignerSignedEventParts {
+        id,
+        public_key,
+        created_at,
+        kind,
+        tags,
+        content,
+        signature,
+    } = signed.into_parts();
+    let id = EventId::from_slice(&id).map_err(|error| {
+        nmp_signer::SignerError::InvalidResponse(format!("invalid event id: {error}"))
+    })?;
+    let public_key = PublicKey::from_slice(public_key.as_bytes()).map_err(|error| {
+        nmp_signer::SignerError::InvalidResponse(format!("invalid event public key: {error}"))
+    })?;
+    let tags = tags
+        .into_iter()
+        .map(Tag::parse)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            nmp_signer::SignerError::InvalidResponse(format!("invalid event tag: {error}"))
+        })?;
+    let signature =
+        nostr::secp256k1::schnorr::Signature::from_slice(&signature).map_err(|error| {
+            nmp_signer::SignerError::InvalidResponse(format!("invalid event signature: {error}"))
+        })?;
+    Ok(SignedEvent::new(
+        id,
+        public_key,
+        Timestamp::from(created_at),
+        nostr::Kind::from(kind),
+        tags,
+        content,
+        signature,
+    ))
 }
 
 fn validate_sign_request(unsigned: &UnsignedEvent) -> Result<EventId, SignEventError> {
@@ -1202,13 +1261,13 @@ impl SignerRegistry {
 
     /// Resolve the signer frozen into this exact accepted template. An
     /// account switch cannot redirect already-accepted work.
-    fn sign(&self, unsigned: UnsignedEvent) -> Option<SignerOp<SignedEvent>> {
+    fn sign(&self, unsigned: UnsignedEvent) -> Option<SignerOp<SignerSignedEvent>> {
         self.signers.get(&unsigned.pubkey).map(|entry| {
             entry
                 .signer
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
-                .sign(unsigned)
+                .sign(encode_unsigned_event(&unsigned))
         })
     }
 
@@ -1539,10 +1598,11 @@ impl EngineThread {
     }
 
     /// #704: the engine-owned adapter runtime handle. Protocol adapters
-    /// (NIP-02 follow-action, NIP-46 connect handshakes) spawn their async
-    /// tasks here instead of reserving a slot on the deleted blocking-adapter
-    /// executor. Exposed on [`EngineThread`] (not the narrow app-facing
-    /// [`Handle`]) so it stays hidden mechanism, never an app scheduling verb.
+    /// (follow-action and optional signer-provider handshakes) spawn their
+    /// async tasks here instead of reserving a slot on the deleted
+    /// blocking-adapter executor. Exposed on [`EngineThread`] (not the narrow
+    /// app-facing [`Handle`]) so it stays hidden mechanism, never an app
+    /// scheduling verb.
     #[must_use]
     pub fn adapter_runtime(&self) -> tokio::runtime::Handle {
         self.runtime.handle().clone()
@@ -1678,8 +1738,8 @@ mod receipt_sink_lifecycle_tests {
 #[cfg(test)]
 mod reentrant_shutdown_tests {
     use super::*;
+    use nmp_local_signer::LocalKeySigner;
     use nmp_router::FixtureDirectory;
-    use nmp_signer::LocalKeySigner;
     use nmp_store::MemoryStore;
     use nostr::{Keys, Kind};
 
@@ -3197,8 +3257,8 @@ mod relay_worker_reconciliation_tests {
 #[cfg(test)]
 mod auth_registry_admission_tests {
     use super::*;
+    use nmp_local_signer::LocalKeySigner;
     use nmp_router::FixtureDirectory;
-    use nmp_signer::LocalKeySigner;
     use nmp_store::MemoryStore;
     use nmp_transport::RelayFrame;
     use nostr::{Keys, RelayMessage};
@@ -3240,7 +3300,7 @@ mod auth_registry_admission_tests {
     struct OneSigner {
         public_key: PublicKey,
         invoked: Sender<()>,
-        operation: Mutex<Option<SignerOp<SignedEvent>>>,
+        operation: Mutex<Option<SignerOp<SignerSignedEvent>>>,
     }
 
     struct TimestampSigner {
@@ -3249,22 +3309,22 @@ mod auth_registry_admission_tests {
     }
 
     impl SigningCapability for TimestampSigner {
-        fn public_key(&self) -> Option<PublicKey> {
-            Some(self.keys.public_key())
+        fn public_key(&self) -> Option<SignerPublicKey> {
+            Some(SignerPublicKey::new(self.keys.public_key().to_bytes()))
         }
 
-        fn sign(&self, unsigned: UnsignedEvent) -> SignerOp<SignedEvent> {
-            let _ = self.observed.send(unsigned.created_at);
+        fn sign(&self, unsigned: SignerUnsignedEvent) -> SignerOp<SignerSignedEvent> {
+            let _ = self.observed.send(Timestamp::from(unsigned.created_at()));
             SignerOp::Ready(Err(nmp_signer::SignerError::Unavailable))
         }
     }
 
     impl SigningCapability for OneSigner {
-        fn public_key(&self) -> Option<PublicKey> {
-            Some(self.public_key)
+        fn public_key(&self) -> Option<SignerPublicKey> {
+            Some(SignerPublicKey::new(self.public_key.to_bytes()))
         }
 
-        fn sign(&self, _unsigned: UnsignedEvent) -> SignerOp<SignedEvent> {
+        fn sign(&self, _unsigned: SignerUnsignedEvent) -> SignerOp<SignerSignedEvent> {
             let _ = self.invoked.send(());
             self.operation
                 .lock()
@@ -4138,6 +4198,7 @@ fn engine_loop<S, D>(
                 let result = signer
                     .public_key()
                     .ok_or(AddSignerError::MissingPublicKey)
+                    .map(|public_key| PublicKey::from_byte_array(*public_key.as_bytes()))
                     .and_then(|pubkey| {
                         let live = registry.len().saturating_add(auth_policies.borrow().len());
                         if !registry.contains(pubkey) && live >= max_auth_capabilities {
@@ -5404,6 +5465,7 @@ fn dispatch_effect(
         Effect::RequestSign(id, generation, unsigned) => match registry.sign(unsigned) {
             Some(operation) => match operation {
                 SignerOp::Ready(result) => {
+                    let result = result.and_then(decode_signed_event);
                     let _ = runtime
                         .self_inbox
                         .send(Cmd::Engine(EngineMsg::SignerCompleted(
@@ -5424,7 +5486,7 @@ fn dispatch_effect(
                         Box::new(move || canceller.cancel()),
                     );
                     runtime.runtime.spawn(async move {
-                        let result = pending.await;
+                        let result = pending.await.and_then(decode_signed_event);
                         let _ = inbox.send(Cmd::Engine(EngineMsg::SignerCompleted(
                             id, generation, result,
                         )));
@@ -5856,8 +5918,8 @@ pub struct SignEventOperation {
 }
 
 enum SignEventSignerResult {
-    Ready(Box<Result<SignedEvent, nmp_signer::SignerError>>),
-    Pending(PendingSignerOp<SignedEvent>),
+    Ready(Box<Result<SignerSignedEvent, nmp_signer::SignerError>>),
+    Pending(PendingSignerOp<SignerSignedEvent>),
 }
 
 impl SignEventOperation {

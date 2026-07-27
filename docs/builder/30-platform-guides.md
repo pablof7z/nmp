@@ -41,9 +41,10 @@ event/outbox store; pass it to `NMPEngine` and call
 `clearPersistedAccount()` before destroying the live signer on sign-out.
 
 For the currently built local remote-signer path, add `primalconnect` to the
-host app's `LSApplicationQueriesSchemes`, call
-`NMPLocalSignerDiscovery.installed()`, start `oneClickConnectNip46`, and wait
-for `.ready`. `UIApplication.open` returning `true` is not readiness.
+host app's `LSApplicationQueriesSchemes`, add/import the separate `NMPNip46`
+product, call `NMPNip46SignerDiscovery.installed()`, start
+`oneClickConnectNip46`, and wait for `.ready`. `UIApplication.open` returning
+`true` is not readiness.
 
 Query and diagnostics bridges buffer newest state. Receipt facts remain
 reattachable rather than relying on an unbounded `AsyncStream` backlog.
@@ -57,6 +58,12 @@ The optional desktop-JVM `:ui` child now proves controlled relay identity
 composables against the public SDK without adding Compose to the core module.
 It owns no engine, HTTP, timer, polling, cache, or image loader and is not an
 Android artifact qualification; see [Controlled relay identity UI](36-relay-ui.md).
+
+NIP-46 is another separate child component, `:nip46`; the root SDK neither
+names nor links it. The component consumes the core engine's opaque signer
+mailbox and contributes an ordinary signer. Build its generated bindings with
+`scripts/build-kotlin-nip46-jvm.sh`, which refreshes the matched core and
+provider native libraries together, then run `./gradlew :nip46:test`.
 
 The Android product must include a standard Keystore-backed provider and prove
 process-death receipt/signer reattachment, not merely JVM binding generation.

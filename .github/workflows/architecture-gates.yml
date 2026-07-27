@@ -89,6 +89,17 @@ jobs:
       - name: Keep NIP-29 context separate from C7 and client policy
         run: bash scripts/check-nip29-ownership.sh
 
+  nip46-provider-boundary:
+    name: NIP-46 optional provider boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Keep NIP-46 out of core signer and native artifacts
+        run: bash scripts/check-nip46-provider-boundary.sh
+
   falsifier-honesty:
     name: Falsifier honesty (gate 6)
     if: github.event_name == 'pull_request'

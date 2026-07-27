@@ -984,13 +984,15 @@ pub(super) fn dispatch(
                         let op = signer
                             .lock()
                             .unwrap_or_else(|poison| poison.into_inner())
-                            .sign(*unsigned);
+                            .sign(super::encode_unsigned_event(&unsigned));
                         let result: Option<Result<nostr::Event, SignerError>> = match op {
-                            SignerOp::Ready(result) => Some(result),
+                            SignerOp::Ready(result) => {
+                                Some(result.and_then(super::decode_signed_event))
+                            }
                             SignerOp::Pending(pending) => {
                                 let canceller = pending.canceller();
                                 terminal.arm(Box::new(move || canceller.cancel()));
-                                Some(pending.await)
+                                Some(pending.await.and_then(super::decode_signed_event))
                             }
                         };
                         if !terminal.is_open() {

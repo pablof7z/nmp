@@ -220,7 +220,7 @@ mod tests {
     use super::*;
     use nmp::{
         Engine, EngineConfig, SignEventError, SignEventRequest, SignerError, SignerOp,
-        SigningCapability,
+        SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability,
     };
 
     /// A fixed, valid secp256k1 secret key -- generated once via `openssl
@@ -235,11 +235,11 @@ mod tests {
     }
 
     impl SigningCapability for ExternalAsyncSigner {
-        fn public_key(&self) -> Option<PublicKey> {
-            Some(self.public_key)
+        fn public_key(&self) -> Option<SignerPublicKey> {
+            Some(SignerPublicKey::new(self.public_key.to_bytes()))
         }
 
-        fn sign(&self, _unsigned: UnsignedEvent) -> SignerOp<nmp::Event> {
+        fn sign(&self, _unsigned: SignerUnsignedEvent) -> SignerOp<SignerSignedEvent> {
             let (completion, operation) = SignerOp::pending_channel();
             std::thread::spawn(move || {
                 let _ = completion.resolve(Err(SignerError::Rejected(

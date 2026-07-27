@@ -565,7 +565,7 @@ pub enum FfiWriteRouting {
 /// P: signing and publishing are ORTHOGONAL stages -- `Unsigned` is a
 /// template the engine signs internally ("the key lives in the engine",
 /// ledger #12); `Signed` (#32, the M5 unlock) is a caller that already
-/// holds a validly-signed event -- an external signer / NIP-46 bunker, or a
+/// holds a validly-signed event -- an external signer provider, or a
 /// verbatim republish -- and hands its fields across as-is. `Signed`'s
 /// fields are field-for-field [`FfiRow`] (the read-side mirror of a signed
 /// `nostr::Event`) plus `sig`, deliberately: the write side stays symmetric

@@ -54,14 +54,15 @@ serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
 # #704: the engine owns ONE multi-thread tokio runtime (2 workers) that hosts
-# every adapter task (NIP-11 fetches, signer/AUTH completion awaits, NIP-46
-# session state machines, follow-action acquisition) — replacing the deleted
+# every adapter task (NIP-11 fetches, signer/AUTH completion awaits, optional
+# provider sessions, follow-action acquisition) — replacing the deleted
 # internal blocking-adapter executor. `rt-multi-thread` is therefore a
 # production feature now, not a dev-only one.
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "net", "sync"] }
 libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
+nmp-local-signer.workspace = true
 nmp-test-support.workspace = true
 # In-process test relay for the runtime (C) integration tests: reconnection
 # replay (test 6) and the end-to-end subscribe/publish/reconnect drive.

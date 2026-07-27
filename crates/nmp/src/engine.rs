@@ -382,11 +382,11 @@ impl Engine {
     }
 
     /// #704: the engine-owned adapter runtime handle. Protocol adapters
-    /// (NIP-02 follow-action, NIP-46 connect handshakes) spawn their async
-    /// tasks here instead of reserving a slot on the deleted blocking-adapter
-    /// executor. Hidden mechanism, not an app scheduling API — the runtime has
-    /// no app-visible capacity, census, or admission, and observations never
-    /// touch it (they are pure-waker async since #680).
+    /// Optional protocol adapters spawn their async tasks here instead of
+    /// reserving a slot on the deleted blocking-adapter executor. Hidden
+    /// mechanism, not an app scheduling API — the runtime has no app-visible
+    /// capacity, census, or admission, and observations never touch it (they
+    /// are pure-waker async since #680).
     #[doc(hidden)]
     pub fn adapter_runtime(&self) -> Result<tokio::runtime::Handle, EngineError> {
         let guard = self
@@ -587,7 +587,7 @@ impl Engine {
     pub fn add_account(&self, secret_key: &str) -> Result<AccountRegistration, EngineError> {
         // #765: parse straight into the signer's canonical zeroizing owner --
         // no intermediate `nostr::Keys`/`SecretKey` lives on this path.
-        let signer = nmp_signer::LocalKeySigner::parse(secret_key)
+        let signer = nmp_local_signer::LocalKeySigner::parse(secret_key)
             .map_err(|_| EngineError::InvalidSecretKey)?;
         let registration = self.with_handle(|handle| {
             handle
@@ -608,8 +608,8 @@ impl Engine {
         self.with_handle(|handle| handle.remove_signer(registration.inner.clone()))
     }
 
-    /// Register an arbitrary signing capability (e.g. a NIP-46/bunker
-    /// remote signer) -- the lower-level verb [`Self::add_account`] sits on
+    /// Register an arbitrary signing capability (for example a remote
+    /// provider) -- the lower-level verb [`Self::add_account`] sits on
     /// top of for the common local-key case. Same "does not activate it"
     /// caveat as `add_account`.
     ///
@@ -883,6 +883,41 @@ mod tests {
     use super::*;
     use nostr::Keys;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn signer_public_key(public_key: PublicKey) -> nmp_signer::SignerPublicKey {
+        nmp_signer::SignerPublicKey::new(public_key.to_bytes())
+    }
+
+    fn signer_unsigned_to_nostr(unsigned: nmp_signer::SignerUnsignedEvent) -> nostr::UnsignedEvent {
+        let (public_key, created_at, kind, tags, content) = unsigned.into_parts();
+        nostr::UnsignedEvent::new(
+            PublicKey::from_slice(public_key.as_bytes()).unwrap(),
+            Timestamp::from(created_at),
+            Kind::from(kind),
+            tags.into_iter()
+                .map(nostr::Tag::parse)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            content,
+        )
+    }
+
+    fn nostr_signed_to_signer(event: nostr::Event) -> nmp_signer::SignerSignedEvent {
+        nmp_signer::SignerSignedEvent::new(
+            event.id.to_bytes(),
+            signer_public_key(event.pubkey),
+            event.created_at.as_secs(),
+            event.kind.as_u16(),
+            event
+                .tags
+                .to_vec()
+                .into_iter()
+                .map(nostr::Tag::to_vec)
+                .collect(),
+            event.content,
+            event.sig.serialize(),
+        )
+    }
 
     struct ThreadWake(std::thread::Thread);
 
@@ -1387,12 +1422,16 @@ mod tests {
     }
 
     impl nmp_signer::SigningCapability for MismatchedSigner {
-        fn public_key(&self) -> Option<PublicKey> {
-            Some(self.reported)
+        fn public_key(&self) -> Option<nmp_signer::SignerPublicKey> {
+            Some(signer_public_key(self.reported))
         }
 
-        fn sign(&self, unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
+        fn sign(
+            &self,
+            unsigned: nmp_signer::SignerUnsignedEvent,
+        ) -> nmp_signer::SignerOp<nmp_signer::SignerSignedEvent> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            let unsigned = signer_unsigned_to_nostr(unsigned);
             let substituted = nostr::UnsignedEvent::new(
                 self.actual.public_key(),
                 unsigned.created_at,
@@ -1400,7 +1439,9 @@ mod tests {
                 unsigned.tags,
                 unsigned.content,
             );
-            nmp_signer::SignerOp::ok(substituted.sign_with_keys(&self.actual).unwrap())
+            nmp_signer::SignerOp::ok(nostr_signed_to_signer(
+                substituted.sign_with_keys(&self.actual).unwrap(),
+            ))
         }
     }
 
@@ -1440,15 +1481,18 @@ mod tests {
 
     struct NoHookPendingSigner {
         public_key: PublicKey,
-        operation: Mutex<Option<nmp_signer::SignerOp<nostr::Event>>>,
+        operation: Mutex<Option<nmp_signer::SignerOp<nmp_signer::SignerSignedEvent>>>,
     }
 
     impl nmp_signer::SigningCapability for NoHookPendingSigner {
-        fn public_key(&self) -> Option<PublicKey> {
-            Some(self.public_key)
+        fn public_key(&self) -> Option<nmp_signer::SignerPublicKey> {
+            Some(signer_public_key(self.public_key))
         }
 
-        fn sign(&self, _unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
+        fn sign(
+            &self,
+            _unsigned: nmp_signer::SignerUnsignedEvent,
+        ) -> nmp_signer::SignerOp<nmp_signer::SignerSignedEvent> {
             self.operation
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
@@ -1463,14 +1507,22 @@ mod tests {
     }
 
     impl nmp_signer::SigningCapability for HookCompletesSigner {
-        fn public_key(&self) -> Option<PublicKey> {
-            Some(self.keys.public_key())
+        fn public_key(&self) -> Option<nmp_signer::SignerPublicKey> {
+            Some(signer_public_key(self.keys.public_key()))
         }
 
-        fn sign(&self, unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
-            let signed = unsigned.sign_with_keys(&self.keys).unwrap();
-            let completion: Arc<Mutex<Option<nmp_signer::PendingSignerSender<nostr::Event>>>> =
-                Arc::new(Mutex::new(None));
+        fn sign(
+            &self,
+            unsigned: nmp_signer::SignerUnsignedEvent,
+        ) -> nmp_signer::SignerOp<nmp_signer::SignerSignedEvent> {
+            let signed = nostr_signed_to_signer(
+                signer_unsigned_to_nostr(unsigned)
+                    .sign_with_keys(&self.keys)
+                    .unwrap(),
+            );
+            let completion: Arc<
+                Mutex<Option<nmp_signer::PendingSignerSender<nmp_signer::SignerSignedEvent>>>,
+            > = Arc::new(Mutex::new(None));
             let completion_for_cancel = Arc::clone(&completion);
             let cancellations = Arc::clone(&self.cancellations);
             let (sender, operation) =
@@ -1497,13 +1549,20 @@ mod tests {
     }
 
     impl nmp_signer::SigningCapability for CountingSigner {
-        fn public_key(&self) -> Option<PublicKey> {
-            Some(self.keys.public_key())
+        fn public_key(&self) -> Option<nmp_signer::SignerPublicKey> {
+            Some(signer_public_key(self.keys.public_key()))
         }
 
-        fn sign(&self, unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
+        fn sign(
+            &self,
+            unsigned: nmp_signer::SignerUnsignedEvent,
+        ) -> nmp_signer::SignerOp<nmp_signer::SignerSignedEvent> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            nmp_signer::SignerOp::ok(unsigned.sign_with_keys(&self.keys).unwrap())
+            nmp_signer::SignerOp::ok(nostr_signed_to_signer(
+                signer_unsigned_to_nostr(unsigned)
+                    .sign_with_keys(&self.keys)
+                    .unwrap(),
+            ))
         }
     }
 
@@ -1536,13 +1595,17 @@ mod tests {
     }
 
     impl nmp_signer::SigningCapability for PendingSigner {
-        fn public_key(&self) -> Option<PublicKey> {
-            Some(self.public_key)
+        fn public_key(&self) -> Option<nmp_signer::SignerPublicKey> {
+            Some(signer_public_key(self.public_key))
         }
 
-        fn sign(&self, _unsigned: nostr::UnsignedEvent) -> nmp_signer::SignerOp<nostr::Event> {
-            let producer: Arc<Mutex<Option<nmp_signer::PendingSignerSender<nostr::Event>>>> =
-                Arc::new(Mutex::new(None));
+        fn sign(
+            &self,
+            _unsigned: nmp_signer::SignerUnsignedEvent,
+        ) -> nmp_signer::SignerOp<nmp_signer::SignerSignedEvent> {
+            let producer: Arc<
+                Mutex<Option<nmp_signer::PendingSignerSender<nmp_signer::SignerSignedEvent>>>,
+            > = Arc::new(Mutex::new(None));
             let producer_for_cancel = Arc::clone(&producer);
             let cancellations = Arc::clone(&self.cancellations);
             let (sender, operation) =

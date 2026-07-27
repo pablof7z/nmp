@@ -7,39 +7,32 @@ import kotlinx.coroutines.runBlocking
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertNull
-import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class RemoteSignerTest {
     @Test
-    fun catalogSeparatesDetectionLaunchPackageAndProviderFacts() {
-        val primal = NMPLocalSignerDiscovery.known.single { it.id == "primal" }
+    fun catalogContainsOnlyNip46DetectionLaunchAndPackageFacts() {
+        val primal = NMPNip46SignerDiscovery.known.single { it.id == "primal" }
         assertEquals("primalconnect://probe", primal.iosDetectionUri)
         assertEquals("primalconnect", primal.nip46LaunchScheme)
         assertEquals("primal://signer", primal.androidDetectionUri)
         assertEquals("net.primal.android", primal.androidPackageId)
-        assertEquals("net.primal.android", primal.androidProviderAuthority)
-        assertEquals(setOf(NMPLocalSignerProtocol.Nip46, NMPLocalSignerProtocol.Nip55), primal.protocols)
-
-        val amber = NMPLocalSignerDiscovery.known.single { it.id == "amber" }
-        assertNull(amber.iosDetectionUri)
-        assertEquals(setOf(NMPLocalSignerProtocol.Nip55), amber.protocols)
+        assertEquals(listOf("primal"), NMPNip46SignerDiscovery.known.map { it.id })
     }
 
     @Test
     fun androidDiscoveryIsPackageFilteredWhenSchemesAreShared() {
         assertEquals(
-            listOf("amber"),
-            NMPLocalSignerDiscovery.installedAndroid(setOf("com.greenart7c3.nostrsigner")).map { it.id },
+            emptyList(),
+            NMPNip46SignerDiscovery.installedAndroid(setOf("com.greenart7c3.nostrsigner")).map { it.id },
         )
         assertEquals(
             listOf("primal"),
-            NMPLocalSignerDiscovery.installedAndroid(setOf("net.primal.android")).map { it.id },
+            NMPNip46SignerDiscovery.installedAndroid(setOf("net.primal.android")).map { it.id },
         )
         assertEquals(
-            listOf("primal", "amber"),
-            NMPLocalSignerDiscovery.installedAndroid(
+            listOf("primal"),
+            NMPNip46SignerDiscovery.installedAndroid(
                 setOf("net.primal.android", "com.greenart7c3.nostrsigner"),
             ).map { it.id },
         )
@@ -50,7 +43,7 @@ class RemoteSignerTest {
         NMPEngine(NMPConfig()).use { engine ->
             val invitation = engine.nip46Invitation(listOf("wss://relay.example"))
             val generic = invitation.uri()
-            val primal = NMPLocalSignerDiscovery.known.single { it.id == "primal" }
+            val primal = NMPNip46SignerDiscovery.known.single { it.id == "primal" }
             val appSpecific = invitation.uri(primal)
             assertTrue(generic.startsWith("nostrconnect://"))
             assertTrue(appSpecific.startsWith("primalconnect://"))
@@ -66,7 +59,6 @@ class RemoteSignerTest {
                 invitation.androidHandoff(primal),
             )
             val forged = primal.copy(
-                protocols = setOf(NMPLocalSignerProtocol.Nip46),
                 androidPackageId = "attacker.example",
             )
             assertEquals(
@@ -74,8 +66,6 @@ class RemoteSignerTest {
                 invitation.androidHandoff(forged).packageName,
                 "handoff must resolve package and protocol from the Rust catalog by id",
             )
-            val amber = NMPLocalSignerDiscovery.known.single { it.id == "amber" }
-            assertFailsWith<NMPError.InvalidSigner> { invitation.androidHandoff(amber) }
         }
     }
 

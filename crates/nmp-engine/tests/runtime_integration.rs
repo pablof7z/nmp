@@ -32,9 +32,9 @@ use nmp_grammar::{
     IdentityField, Selector, SourceAuthority,
 };
 use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
+use nmp_local_signer::LocalKeySigner;
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
-use nmp_signer::LocalKeySigner;
 use nmp_store::{
     sentinel_signature, AcceptWrite, CoverageInterval, EventStore, IntentSigState, MemoryStore,
     RedbStore, RedbStoreResetError, RelayObserved, WriteDurability,

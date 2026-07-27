@@ -25,11 +25,15 @@ use nmp_engine::outbox::WriteStatus;
 use nmp_engine::runtime::{EngineThread, FifoReceiver, FifoRecvTimeoutError, RowsReceiver};
 use nmp_grammar::{Binding, Filter, IdentityField};
 use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
+use nmp_local_signer::LocalKeySigner;
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
-use nmp_signer::{LocalKeySigner, SignerError, SignerOp, SigningCapability};
+use nmp_signer::{
+    SignerError, SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent,
+    SigningCapability,
+};
 use nmp_store::{EventStore, MemoryStore, RelayObserved};
-use nostr::{Event, EventId, Keys, Kind, PublicKey, RelayUrl, Timestamp, UnsignedEvent};
+use nostr::{EventId, Keys, Kind, PublicKey, RelayUrl, Timestamp, UnsignedEvent};
 
 /// #765: `LocalKeySigner` now owns its scalar in one canonical zeroizing
 /// allocation and no longer accepts a `nostr::Keys`. These fixtures still
@@ -45,11 +49,11 @@ struct CountingSigner {
 }
 
 impl SigningCapability for CountingSigner {
-    fn public_key(&self) -> Option<PublicKey> {
-        Some(self.pubkey)
+    fn public_key(&self) -> Option<SignerPublicKey> {
+        Some(SignerPublicKey::new(self.pubkey.to_bytes()))
     }
 
-    fn sign(&self, _unsigned: UnsignedEvent) -> SignerOp<Event> {
+    fn sign(&self, _unsigned: SignerUnsignedEvent) -> SignerOp<SignerSignedEvent> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         SignerOp::err(SignerError::Rejected(
             "counting signer must not be reached".to_string(),
@@ -60,11 +64,11 @@ impl SigningCapability for CountingSigner {
 struct PubkeylessSigner;
 
 impl SigningCapability for PubkeylessSigner {
-    fn public_key(&self) -> Option<nostr::PublicKey> {
+    fn public_key(&self) -> Option<SignerPublicKey> {
         None
     }
 
-    fn sign(&self, _unsigned: UnsignedEvent) -> SignerOp<nostr::Event> {
+    fn sign(&self, _unsigned: SignerUnsignedEvent) -> SignerOp<SignerSignedEvent> {
         SignerOp::err(SignerError::Unavailable)
     }
 }

@@ -1,51 +1,38 @@
 import Foundation
-import NMPFFI
+import NMPNip46FFI
+@_spi(NMPProviderComponents) import NMP
 
 #if canImport(UIKit)
 import UIKit
 #endif
 
-public enum NMPLocalSignerProtocol: Sendable, Hashable {
-    case nip46
-    case nip55
-}
-
-/// Rust-owned discovery facts for one local signer app. Detection URI,
-/// handoff scheme, Android package, provider authority, and protocol support
-/// remain distinct so a shared URL scheme never becomes an identity claim.
-public struct NMPLocalSigner: Sendable, Hashable, Identifiable {
+/// Rust-owned NIP-46 discovery facts for one signer app. Detection URI,
+/// handoff scheme, and Android package remain distinct so a shared URL scheme
+/// never becomes an identity claim.
+public struct NMPNip46Signer: Sendable, Hashable, Identifiable {
     public let id: String
     public let displayName: String
-    public let protocols: Set<NMPLocalSignerProtocol>
     public let iosDetectionURI: String?
     public let nip46LaunchScheme: String?
     public let androidDetectionURI: String?
     public let androidPackageID: String?
-    public let androidProviderAuthority: String?
 
-    init(_ ffi: FfiLocalSignerApp) {
+    init(_ ffi: FfiNip46SignerApp) {
         id = ffi.id
         displayName = ffi.displayName
-        protocols = Set(ffi.protocols.map {
-            switch $0 {
-            case .nip46: .nip46
-            case .nip55: .nip55
-            }
-        })
         iosDetectionURI = ffi.iosDetectionUri
         nip46LaunchScheme = ffi.nip46LaunchScheme
         androidDetectionURI = ffi.androidDetectionUri
         androidPackageID = ffi.androidPackageId
-        androidProviderAuthority = ffi.androidProviderAuthority
     }
 }
 
-public enum NMPLocalSignerDiscovery {
-    public static var known: [NMPLocalSigner] {
-        localSignerCatalog().map(NMPLocalSigner.init)
+public enum NMPNip46SignerDiscovery {
+    public static var known: [NMPNip46Signer] {
+        nip46SignerCatalog().map(NMPNip46Signer.init)
     }
 
-    static func matchingIOSApps(canOpen: (URL) -> Bool) -> [NMPLocalSigner] {
+    static func matchingIOSApps(canOpen: (URL) -> Bool) -> [NMPNip46Signer] {
         known.filter { signer in
             guard
                 let raw = signer.iosDetectionURI,
@@ -55,11 +42,11 @@ public enum NMPLocalSignerDiscovery {
         }
     }
 
-    /// Executes only the OS availability probe. Protocol support, selection,
-    /// and handoff construction remain Rust-owned catalog facts.
+    /// Executes only the OS availability probe. Selection and handoff
+    /// construction remain Rust-owned catalog facts.
     #if canImport(UIKit)
     @MainActor
-    public static func installed() -> [NMPLocalSigner] {
+    public static func installed() -> [NMPNip46Signer] {
         matchingIOSApps(canOpen: UIApplication.shared.canOpenURL)
     }
     #endif
@@ -227,7 +214,7 @@ public final class NMPNip46Connection: @unchecked Sendable {
         guard let ffiConnection else {
             throw NMPError.invalidSigner("no underlying NIP-46 connection to checkpoint")
         }
-        let ffi = try nmpRethrowing { try ffiConnection.checkpoint() }
+        let ffi = try nip46Rethrowing { try ffiConnection.checkpoint() }
         return NMPNip46SessionCheckpoint(ffi)
     }
 
@@ -254,19 +241,23 @@ public struct NMPNip46Invitation: Sendable {
 
     /// Generic chooser URI, or an app-specific URI such as Primal's
     /// `primalconnect://` when a catalog signer is supplied.
-    public func uri(for signer: NMPLocalSigner? = nil) throws -> String {
-        try nmpRethrowing { try ffi.uri(signerId: signer?.id) }
+    public func uri(for signer: NMPNip46Signer? = nil) throws -> String {
+        try nip46Rethrowing { try ffi.uri(signerId: signer?.id) }
     }
 }
 
 extension NMPEngine {
+    private func nip46Provider() -> NmpNip46Provider {
+        NmpNip46Provider(mailbox: signerProviderMailbox())
+    }
+
     public func nip46Invitation(
         relays: [String],
         permissions: String? = nil,
         metadata: NMPNip46ClientMetadata = .init()
     ) throws -> NMPNip46Invitation {
-        let invitation = try nmpRethrowing {
-            try ffi.nip46Invitation(
+        let invitation = try nip46Rethrowing {
+            try nip46Provider().nip46Invitation(
                 relays: relays,
                 permissions: permissions,
                 metadata: metadata.toFfi()
@@ -281,8 +272,8 @@ extension NMPEngine {
         timeout: Duration = .seconds(60)
     ) throws -> NMPNip46Connection {
         let observer = NIP46Observer()
-        let ffiConnection = try nmpRethrowing {
-            try ffi.connectNip46Bunker(
+        let ffiConnection = try nip46Rethrowing {
+            try nip46Provider().connectNip46Bunker(
                 bunkerUri: bunkerURI,
                 timeoutMillis: timeout.milliseconds,
                 observer: observer
@@ -297,8 +288,8 @@ extension NMPEngine {
         timeout: Duration = .seconds(60)
     ) throws -> NMPNip46Connection {
         let observer = NIP46Observer()
-        let ffiConnection = try nmpRethrowing {
-            try ffi.connectNip46Invitation(
+        let ffiConnection = try nip46Rethrowing {
+            try nip46Provider().connectNip46Invitation(
                 invitation: invitation.ffi,
                 timeoutMillis: timeout.milliseconds,
                 observer: observer
@@ -335,8 +326,8 @@ extension NMPEngine {
         timeout: Duration = .seconds(60)
     ) throws -> NMPNip46Connection {
         let observer = NIP46Observer()
-        let ffiConnection = try nmpRethrowing {
-            try ffi.restoreNip46Session(
+        let ffiConnection = try nip46Rethrowing {
+            try nip46Provider().restoreNip46Session(
                 checkpoint: checkpoint.toFfi(),
                 timeoutMillis: timeout.milliseconds,
                 observer: observer
@@ -371,8 +362,8 @@ extension NMPEngine {
             origin: origin
         )
         let observer = NIP46Observer()
-        let ffiConnection = try nmpRethrowing {
-            try ffi.nip46SessionFromParts(
+        let ffiConnection = try nip46Rethrowing {
+            try nip46Provider().nip46SessionFromParts(
                 parts: parts.toFfi(),
                 timeoutMillis: timeout.milliseconds,
                 observer: observer
@@ -387,15 +378,12 @@ extension NMPEngine {
     /// `.ready` before treating the signer as connected.
     @MainActor
     public func oneClickConnectNip46(
-        signer: NMPLocalSigner,
+        signer: NMPNip46Signer,
         relays: [String],
         permissions: String? = nil,
         metadata: NMPNip46ClientMetadata = .init(),
         timeout: Duration = .seconds(60)
     ) async throws -> NMPNip46Connection {
-        guard signer.protocols.contains(.nip46) else {
-            throw NMPError.invalidSigner("\(signer.displayName) does not support NIP-46")
-        }
         let invitation = try nip46Invitation(
             relays: relays,
             permissions: permissions,
@@ -419,6 +407,25 @@ extension NMPEngine {
         return connection
     }
     #endif
+}
+
+private func nip46Rethrowing<T>(_ body: () throws -> T) throws -> T {
+    do {
+        return try body()
+    } catch let error as FfiNip46ProviderError {
+        switch error {
+        case .InvalidSecretKey:
+            throw NMPError.invalidSecretKey
+        case .InvalidPublicKey(let field):
+            throw NMPError.invalidPublicKey(field)
+        case .InvalidRelay(let relay):
+            throw NMPError.invalidRelayUrl(relay)
+        case .InvalidSigner(let reason):
+            throw NMPError.invalidSigner(reason)
+        case .EngineClosed:
+            throw NMPError.engineClosed
+        }
+    }
 }
 
 private extension Duration {

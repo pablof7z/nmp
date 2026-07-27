@@ -19,6 +19,7 @@ nostr.workspace = true
 nmp-grammar.workspace = true
 nmp-engine.workspace = true
 nmp-signer.workspace = true
+nmp-local-signer.workspace = true
 nmp-store.workspace = true
 nmp-router.workspace = true
 nmp-resolver.workspace = true

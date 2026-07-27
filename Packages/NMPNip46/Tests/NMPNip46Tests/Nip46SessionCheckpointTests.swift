@@ -1,7 +1,8 @@
 import Foundation
+import NMP
 import Security
 import XCTest
-@testable import NMP
+@testable import NMPNip46
 
 /// #571: NMP-owned NIP-46 session checkpoint serialization, the Keychain
 /// store, and the restore/import doors' no-checkpoint/refusal paths. The

@@ -3,9 +3,12 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use nmp_nip46::{
+    Nip46ClientMetadata, Nip46ConnectionEvent, Nip46Invitation, Nip46Origin, Nip46Signer,
+};
 use nmp_signer::{
-    CryptoCapability, Nip46ClientMetadata, Nip46ConnectionEvent, Nip46Invitation, Nip46Origin,
-    Nip46Signer, SignerError, SignerOp, SigningCapability,
+    CryptoCapability, SignerError, SignerOp, SignerPublicKey, SignerSignedEvent,
+    SignerSignedEventParts, SignerUnsignedEvent, SigningCapability,
 };
 use nostr::nips::nip44;
 use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
@@ -19,6 +22,46 @@ struct SignBody {
     created_at: u64,
     tags: Vec<Vec<String>>,
     content: String,
+}
+
+fn signer_unsigned(unsigned: &UnsignedEvent) -> SignerUnsignedEvent {
+    SignerUnsignedEvent::new(
+        SignerPublicKey::new(unsigned.pubkey.to_bytes()),
+        unsigned.created_at.as_secs(),
+        unsigned.kind.as_u16(),
+        unsigned
+            .tags
+            .clone()
+            .to_vec()
+            .into_iter()
+            .map(Tag::to_vec)
+            .collect(),
+        unsigned.content.clone(),
+    )
+}
+
+fn nostr_signed(signed: SignerSignedEvent) -> Event {
+    let SignerSignedEventParts {
+        id,
+        public_key,
+        created_at,
+        kind,
+        tags,
+        content,
+        signature,
+    } = signed.into_parts();
+    Event::new(
+        nostr::EventId::from_slice(&id).unwrap(),
+        PublicKey::from_slice(public_key.as_bytes()).unwrap(),
+        Timestamp::from(created_at),
+        Kind::from(kind),
+        tags.into_iter()
+            .map(Tag::parse)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+        content,
+        nostr::secp256k1::schnorr::Signature::from_slice(&signature).unwrap(),
+    )
 }
 
 fn response_event(
@@ -400,9 +443,10 @@ fn checkpoint_then_from_parts_reconnects_without_repairing_and_signs() {
         "resumed after restore",
     );
     let signed = restored
-        .sign(unsigned.clone())
+        .sign(signer_unsigned(&unsigned))
         .wait(Duration::from_secs(5))
         .unwrap();
+    let signed = nostr_signed(signed);
     signed.verify().unwrap();
     assert_eq!(signed.pubkey, user.public_key());
     drop(restored);
@@ -426,7 +470,7 @@ fn from_parts_fails_closed_on_user_public_key_mismatch() {
     let wrong_expected_user = Keys::generate();
     let (relay, _seen) = spawn_multi_session_signer_relay(remote.clone(), actual_user.clone());
 
-    let checkpoint = nmp_signer::Nip46SessionCheckpoint {
+    let checkpoint = nmp_nip46::Nip46SessionCheckpoint {
         client_secret_key: Keys::generate().secret_key().clone(),
         user_public_key: wrong_expected_user.public_key(),
         remote_signer_public_key: remote.public_key(),
@@ -437,7 +481,7 @@ fn from_parts_fails_closed_on_user_public_key_mismatch() {
     let error = Nip46Signer::from_parts(checkpoint, Duration::from_secs(5)).unwrap_err();
     assert_eq!(
         error,
-        nmp_signer::Nip46Error::RestoredIdentityMismatch {
+        nmp_nip46::Nip46Error::RestoredIdentityMismatch {
             expected: wrong_expected_user.public_key(),
             actual: actual_user.public_key(),
         }
@@ -605,9 +649,10 @@ fn client_initiated_checkpoint_then_from_parts_reconnects_without_repairing() {
         "resumed after client-initiated restore",
     );
     let signed = restored
-        .sign(unsigned.clone())
+        .sign(signer_unsigned(&unsigned))
         .wait(Duration::from_secs(5))
         .unwrap();
+    let signed = nostr_signed(signed);
     signed.verify().unwrap();
     assert_eq!(signed.pubkey, user.public_key());
 }
@@ -634,9 +679,10 @@ fn real_bunker_flow_auth_sign_and_crypto_round_trip() {
         "signed remotely",
     );
     let signed = signer
-        .sign(unsigned.clone())
+        .sign(signer_unsigned(&unsigned))
         .wait(Duration::from_secs(5))
         .unwrap();
+    let signed = nostr_signed(signed);
     signed.verify().unwrap();
     assert_eq!(signed.pubkey, user.public_key());
     assert_eq!(signed.content, unsigned.content);
@@ -648,11 +694,17 @@ fn real_bunker_flow_auth_sign_and_crypto_round_trip() {
 
     let peer = Keys::generate();
     let ciphertext = signer
-        .nip44_encrypt(peer.public_key(), "secret payload")
+        .nip44_encrypt(
+            SignerPublicKey::new(peer.public_key().to_bytes()),
+            "secret payload",
+        )
         .wait(Duration::from_secs(5))
         .unwrap();
     let plaintext = signer
-        .nip44_decrypt(peer.public_key(), &ciphertext)
+        .nip44_decrypt(
+            SignerPublicKey::new(peer.public_key().to_bytes()),
+            &ciphertext,
+        )
         .wait(Duration::from_secs(5))
         .unwrap();
     assert_eq!(plaintext, "secret payload");
@@ -687,7 +739,9 @@ fn valid_but_mutated_signer_event_is_terminal_invalid_response() {
         "the frozen body",
     );
     assert!(matches!(
-        signer.sign(unsigned).wait(Duration::from_secs(5)),
+        signer
+            .sign(signer_unsigned(&unsigned))
+            .wait(Duration::from_secs(5)),
         Err(SignerError::InvalidResponse(reason)) if reason.contains("mutated")
     ));
 }
@@ -842,12 +896,14 @@ fn abandoned_remote_operations_release_every_bounded_pending_slot() {
     );
 
     for _ in 0..64 {
-        drop(signer.sign(unsigned.clone()));
+        drop(signer.sign(signer_unsigned(&unsigned)));
     }
     thread::sleep(Duration::from_millis(100));
 
     assert_eq!(
-        signer.sign(unsigned).wait(Duration::from_millis(50)),
+        signer
+            .sign(signer_unsigned(&unsigned))
+            .wait(Duration::from_millis(50)),
         Err(SignerError::Timeout),
         "the next request is admitted; it is not rejected by leaked pending slots",
     );
