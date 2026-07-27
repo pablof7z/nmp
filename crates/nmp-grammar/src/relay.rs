@@ -1,110 +1,38 @@
-//! Pure relay-host classification shared by value planning and transport.
+//! Relay-URL adapter over the one pure destination-admission owner.
 //!
-//! This module performs no admission decision, DNS resolution, or I/O. It
-//! classifies only the parsed host (or a resolved IP) as public versus local.
-//! Provenance-aware allowlists, resolved-address pinning, and dial policy stay
-//! with the engine/transport layers which own those effects.
+//! Relay URL parsing and host extraction belong here. The security-relevant
+//! rules — bare-host normalization and public/local classification — belong
+//! to `nmp-network-policy`, so every dial site compares the same spelling of
+//! the same host. This module performs no admission decision, DNS
+//! resolution, or I/O; provenance-aware allowlists, resolved-address
+//! admission, and dial policy stay with the engine/transport layers which
+//! own those effects.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-
+pub use nmp_network_policy::HostClass;
+use nmp_network_policy::{classify_bare_host, normalize_bare_host};
 use nostr::types::url::Host;
 use nostr::RelayUrl;
 
-/// Host-only relay classification. The value describes what a host is; it
-/// does not decide whether an operator-authorized local host may be used.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RelayHostClass {
-    Public,
-    Local,
-}
-
 /// Classify a relay URL by its host alone. Path, query, and fragment never
-/// influence the verdict. A missing host fails closed as [`RelayHostClass::Local`].
+/// influence the verdict. A missing host fails closed as [`HostClass::Local`].
 #[must_use]
-pub fn classify_relay_host(url: &RelayUrl) -> RelayHostClass {
+pub fn classify_relay_host(url: &RelayUrl) -> HostClass {
     match url.host() {
-        Some(Host::Ipv4(ip)) => classify_ipv4(ip),
-        Some(Host::Ipv6(ip)) => classify_ipv6(ip),
-        Some(Host::Domain(name)) => classify_domain(name),
-        None => RelayHostClass::Local,
+        Some(Host::Ipv4(ip)) => classify_bare_host(&ip.to_string()),
+        Some(Host::Ipv6(ip)) => classify_bare_host(&ip.to_string()),
+        Some(Host::Domain(name)) => classify_bare_host(name),
+        None => HostClass::Local,
     }
 }
 
-/// Canonical host-only key used by provenance-aware local-host allowlists.
+/// Canonical host-only key extracted from a relay URL, in
+/// [`nmp_network_policy::normalize_bare_host`]'s form.
 #[must_use]
 pub fn relay_host_key(url: &RelayUrl) -> Option<String> {
     match url.host()? {
-        Host::Domain(name) => Some(name.trim_end_matches('.').to_ascii_lowercase()),
-        Host::Ipv4(ip) => Some(ip.to_string()),
-        Host::Ipv6(ip) => Some(ip.to_string()),
-    }
-}
-
-/// Classify a resolved address by the same local-range rules as a literal URL
-/// host. Callers still own DNS-pinning and provenance-aware admission.
-#[must_use]
-pub fn classify_ip(ip: IpAddr) -> RelayHostClass {
-    match ip {
-        IpAddr::V4(ip) => classify_ipv4(ip),
-        IpAddr::V6(ip) => classify_ipv6(ip),
-    }
-}
-
-/// Normalize a bare host to the same key [`relay_host_key`] derives.
-#[must_use]
-pub fn normalize_bare_host(host: &str) -> String {
-    let trimmed = host.trim_end_matches('.');
-    match trimmed.parse::<IpAddr>() {
-        Ok(ip) => ip.to_string(),
-        Err(_) => trimmed.to_ascii_lowercase(),
-    }
-}
-
-fn classify_ipv4(ip: Ipv4Addr) -> RelayHostClass {
-    if ip.is_loopback()
-        || ip.is_private()
-        || ip.is_link_local()
-        || ip.is_unspecified()
-        || ip.is_broadcast()
-    {
-        RelayHostClass::Local
-    } else {
-        RelayHostClass::Public
-    }
-}
-
-fn classify_ipv6(ip: Ipv6Addr) -> RelayHostClass {
-    let segments = ip.segments();
-    if let Some(ipv4) = ip.to_ipv4_mapped() {
-        return classify_ipv4(ipv4);
-    }
-    if segments[..6].iter().all(|&segment| segment == 0)
-        && !ip.is_unspecified()
-        && !ip.is_loopback()
-    {
-        let ipv4 = Ipv4Addr::new(
-            (segments[6] >> 8) as u8,
-            (segments[6] & 0xff) as u8,
-            (segments[7] >> 8) as u8,
-            (segments[7] & 0xff) as u8,
-        );
-        return classify_ipv4(ipv4);
-    }
-    let unique_local = (segments[0] & 0xfe00) == 0xfc00;
-    let link_local = (segments[0] & 0xffc0) == 0xfe80;
-    if ip.is_loopback() || ip.is_unspecified() || unique_local || link_local {
-        RelayHostClass::Local
-    } else {
-        RelayHostClass::Public
-    }
-}
-
-fn classify_domain(name: &str) -> RelayHostClass {
-    let host = name.trim_end_matches('.').to_ascii_lowercase();
-    if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".onion") {
-        RelayHostClass::Local
-    } else {
-        RelayHostClass::Public
+        Host::Domain(name) => Some(normalize_bare_host(name)),
+        Host::Ipv4(ip) => Some(normalize_bare_host(&ip.to_string())),
+        Host::Ipv6(ip) => Some(normalize_bare_host(&ip.to_string())),
     }
 }
 
@@ -112,7 +40,7 @@ fn classify_domain(name: &str) -> RelayHostClass {
 mod tests {
     use super::*;
 
-    fn class(url: &str) -> RelayHostClass {
+    fn class(url: &str) -> HostClass {
         classify_relay_host(&RelayUrl::parse(url).expect("valid test relay URL"))
     }
 
@@ -120,7 +48,7 @@ mod tests {
     fn path_never_changes_public_host_classification() {
         assert_eq!(
             class("wss://nostr.wine/npub1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
-            RelayHostClass::Public
+            HostClass::Public
         );
     }
 
@@ -152,7 +80,7 @@ mod tests {
             "ws://localhost:7777",
             "ws://foo.localhost",
         ] {
-            assert_eq!(class(url), RelayHostClass::Local, "{url}");
+            assert_eq!(class(url), HostClass::Local, "{url}");
         }
     }
 
@@ -166,32 +94,7 @@ mod tests {
             "ws://1.1.1.1",
             "ws://[2606:4700:4700::1111]",
         ] {
-            assert_eq!(class(url), RelayHostClass::Public, "{url}");
-        }
-    }
-
-    #[test]
-    fn resolved_ip_uses_the_same_ranges_as_literal_hosts() {
-        for host in [
-            "127.0.0.1",
-            "10.0.0.1",
-            "169.254.169.254",
-            "::1",
-            "fc00::1",
-            "::ffff:10.0.0.1",
-        ] {
-            assert_eq!(
-                classify_ip(host.parse().unwrap()),
-                RelayHostClass::Local,
-                "{host}"
-            );
-        }
-        for host in ["8.8.8.8", "172.32.0.1", "2606:4700:4700::1111"] {
-            assert_eq!(
-                classify_ip(host.parse().unwrap()),
-                RelayHostClass::Public,
-                "{host}"
-            );
+            assert_eq!(class(url), HostClass::Public, "{url}");
         }
     }
 
@@ -203,10 +106,6 @@ mod tests {
         assert_eq!(
             relay_host_key(&RelayUrl::parse("wss://Relay.Example.COM").unwrap()),
             Some("relay.example.com".to_string())
-        );
-        assert_eq!(
-            normalize_bare_host("Relay.Example.COM."),
-            "relay.example.com"
         );
     }
 }

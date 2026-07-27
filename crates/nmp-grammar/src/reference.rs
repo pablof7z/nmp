@@ -10,7 +10,7 @@ use nostr::{EventId, PublicKey, RelayUrl};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    relay::{classify_relay_host, RelayHostClass},
+    relay::{classify_relay_host, HostClass},
     AccessContext, Binding, Demand, Filter, IndexedTagName, NostrEntity, SourceAuthority,
 };
 
@@ -299,7 +299,7 @@ pub struct ReferenceDemandPlan {
 /// Operator-configured relays do not use this predicate because their
 /// provenance is explicit local configuration.
 fn admits_network_relay_hint(relay: &RelayUrl) -> bool {
-    classify_relay_host(relay) == RelayHostClass::Public
+    classify_relay_host(relay) == HostClass::Public
 }
 
 #[cfg(test)]

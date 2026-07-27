@@ -30,6 +30,9 @@ hickory-resolver.workspace = true
 httpdate.workspace = true
 nostr.workspace = true
 nmp-grammar.workspace = true
+# The one pure destination-admission owner (#885): discovery admission and
+# the NIP-11 fetcher decide from it instead of re-deriving host rules.
+nmp-network-policy.workspace = true
 nmp-store.workspace = true
 nmp-resolver.workspace = true
 nmp-router.workspace = true
