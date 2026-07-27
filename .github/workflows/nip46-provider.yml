@@ -1,0 +1,79 @@
+name: Optional NIP-46 provider
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  package-removal:
+    name: NIP-46 package removal
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Delete NIP-46 and prove core plus an unrelated signer
+        run: scripts/test-nip46-provider-removal.sh
+
+  swift-provider:
+    name: Swift NIP-46 component
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Add Apple simulator targets
+        run: rustup target add aarch64-apple-ios-sim x86_64-apple-ios
+
+      - name: Build core and provider XCFrameworks
+        run: |
+          scripts/build-swift-xcframework.sh --sim-only
+          scripts/build-swift-nip46-xcframework.sh --sim-only
+
+      - name: Prove the provider is absent from the core link/resource maps
+        run: |
+          scripts/check-nip46-artifact-inventory.sh \
+            target/aarch64-apple-ios-sim/release/libnmp_ffi.a \
+            target/aarch64-apple-ios-sim/release/libnmp_nip46_ffi.a \
+            Packages/NMP/Sources/NMPFFI \
+            Packages/NMPNip46/Sources/NMPNip46FFI
+
+      - name: Test the selectable provider package
+        run: swift test
+        working-directory: Packages/NMPNip46
+
+  kotlin-provider:
+    name: Kotlin NIP-46 component
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Build core and provider bindings
+        run: |
+          scripts/build-kotlin-jvm.sh
+          scripts/build-kotlin-nip46-jvm.sh
+
+      - name: Prove the provider is absent from the core link/resource maps
+        run: |
+          scripts/check-nip46-artifact-inventory.sh \
+            target/release/libnmp_ffi.so \
+            target/release/libnmp_nip46_ffi.so \
+            Packages/NMPKotlin/src/main/kotlin/uniffi \
+            Packages/NMPKotlin/nip46/src/main/kotlin/uniffi
+
+      - name: Test the selectable provider module
+        run: ./gradlew :nip46:test --console=plain
+        working-directory: Packages/NMPKotlin

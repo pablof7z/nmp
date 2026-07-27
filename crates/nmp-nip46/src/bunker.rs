@@ -1,4 +1,4 @@
-//! Strict, secret-aware parsing for the remote-signer initiated NIP-46 URI.
+//! Strict, secret-aware parsing for the provider-owned NIP-46 bunker URI.
 
 use std::fmt;
 

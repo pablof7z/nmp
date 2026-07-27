@@ -55,11 +55,13 @@ Its relay views accept caller-owned `NmpRelayInformationState`, query-scoped
 `Painter`; they own no engine, HTTP, cache, polling, timer, or image loader.
 See `docs/builder/36-relay-ui.md`.
 
-Remote-signer discovery is already projected as pure JVM values so an Android
-host can execute the OS-specific steps without moving policy out of Rust:
+NIP-46 is deliberately absent from the root/core module. Apps opt into the
+separate `:nip46` component, which consumes the core engine's opaque signer
+mailbox. Its discovery values let an Android host execute OS-specific steps
+without moving protocol policy out of Rust:
 
 ```kotlin
-val primal = NMPLocalSignerDiscovery
+val primal = NMPNip46SignerDiscovery
     .installedAndroid(installedPackageIds)
     .single { it.id == "primal" }
 val invitation = nmp.nip46Invitation(relays)
@@ -73,8 +75,8 @@ The Android app must declare package visibility for the packages/schemes it
 queries. Launch acceptance is not connection readiness; collect
 `connection.states` until `Ready`. This module remains desktop JVM, so the
 `Intent`/`PackageManager` calls above belong to the consuming Android host.
-Amber appears in discovery as NIP-55-only and is rejected by
-`androidHandoff`; NIP-55 execution belongs to the future Android AAR.
+Unrelated signer protocols do not appear in this provider's catalog; NIP-55
+execution belongs to its own future Android component.
 `NMPNip46Connection` is `AutoCloseable`, and closing it detaches only its exact
 session even if another connection has since replaced the same pubkey. Its
 bounded multicast `Flow` replays lifecycle facts; UI and lifecycle collectors
@@ -164,9 +166,22 @@ UniFFI surface (new/changed exported types or methods) -- the generated
 bindings and the compiled cdylib both need to stay in sync with the Rust
 source, same discipline as the Swift xcframework.
 
-CI proves this exact path from a clean checkout on every push/PR (see the
-`kotlin-package` job in `.github/workflows/ci.yml`, mirroring the
-`swift-package` job).
+The optional NIP-46 module is generated and tested independently:
+
+```sh
+scripts/build-kotlin-nip46-jvm.sh
+(cd Packages/NMPKotlin && ./gradlew :nip46:test)
+```
+
+The provider builder refreshes the core bindings/library first and builds both
+native components in one Cargo resolution, preserving the external mailbox's
+exact native type identity. `build-kotlin-jvm.sh` remains the independent
+core-only path.
+
+Generating the provider binding is what makes the optional `:nip46` Gradle
+project selectable; a core-only build does not configure it. CI proves both
+paths from clean checkouts in `.github/workflows/ci.yml` and
+`.github/workflows/nip46-provider.yml`.
 
 ## Findings (#40's actual purpose -- discovering a bad shape is success)
 

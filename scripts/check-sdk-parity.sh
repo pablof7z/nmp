@@ -103,17 +103,27 @@ if [[ -z "$REPO_ROOT" ]]; then
   exit 2
 fi
 
-FFI_DIR="$REPO_ROOT/crates/nmp-ffi/src"
-SWIFT_DIR="$REPO_ROOT/Packages/NMP/Sources"
-KOTLIN_DIR="$REPO_ROOT/Packages/NMPKotlin/src/main/kotlin"
+FFI_DIRS=(
+  "$REPO_ROOT/crates/nmp-ffi/src"
+  "$REPO_ROOT/crates/nmp-nip46-ffi/src"
+)
+SWIFT_DIRS=(
+  "$REPO_ROOT/Packages/NMP/Sources"
+  "$REPO_ROOT/Packages/NMPNip46/Sources"
+)
+KOTLIN_DIRS=(
+  "$REPO_ROOT/Packages/NMPKotlin/src/main/kotlin"
+  "$REPO_ROOT/Packages/NMPKotlin/nip46/src/main/kotlin"
+)
 ALLOWLIST_FILE="$REPO_ROOT/scripts/check-sdk-parity-allowlist.txt"
 
 # Generated UniFFI bindings: gitignored build artifacts that contain every FFI
 # symbol by construction. Never count them as SDK surface (see header).
 SWIFT_GENERATED_EXCLUDE="*/Sources/NMPFFI/*"
+SWIFT_PROVIDER_GENERATED_EXCLUDE="*/Sources/NMPNip46FFI/*"
 KOTLIN_GENERATED_EXCLUDE="*/kotlin/uniffi/*"
 
-for d in "$FFI_DIR" "$SWIFT_DIR" "$KOTLIN_DIR"; do
+for d in "${FFI_DIRS[@]}" "${SWIFT_DIRS[@]}" "${KOTLIN_DIRS[@]}"; do
   if [[ ! -d "$d" ]]; then
     echo "check-sdk-parity: expected directory missing: $d" >&2
     echo "check-sdk-parity: the repo layout has moved; update FFI_DIR/SWIFT_DIR/KOTLIN_DIR at the top of this script." >&2
@@ -146,9 +156,13 @@ tokenize() {
 # Recursive on purpose: if FFI exports move into src/ subdirectories, a
 # top-level-only glob would silently drop them and this check would go
 # vacuously green.
-find "$FFI_DIR" -type f -name '*.rs' | LC_ALL=C sort > "$tmp/ffi_files.txt"
+: > "$tmp/ffi_files.txt"
+for ffi_dir in "${FFI_DIRS[@]}"; do
+  find "$ffi_dir" -type f -name '*.rs' >> "$tmp/ffi_files.txt"
+done
+LC_ALL=C sort -u "$tmp/ffi_files.txt" -o "$tmp/ffi_files.txt"
 if [[ ! -s "$tmp/ffi_files.txt" ]]; then
-  echo "check-sdk-parity: found zero .rs files under $FFI_DIR -- the repo layout has moved; update FFI_DIR at the top of this script." >&2
+  echo "check-sdk-parity: found zero .rs files under the configured FFI directories -- update FFI_DIRS." >&2
   exit 2
 fi
 
@@ -188,7 +202,7 @@ done < "$tmp/ffi_files.txt"
 cat "$tmp/rust_types.txt" "$tmp/rust_fns.txt" | sort -u > "$tmp/rust_symbols.txt"
 
 if [[ ! -s "$tmp/rust_symbols.txt" ]]; then
-  echo "check-sdk-parity: extracted zero Rust FFI export symbols from $FFI_DIR -- the extraction heuristic likely broke against a repo layout/style change. Treating this as a hard failure rather than silently passing." >&2
+  echo "check-sdk-parity: extracted zero Rust FFI export symbols from the configured FFI directories -- the extraction heuristic likely broke against a repo layout/style change. Treating this as a hard failure rather than silently passing." >&2
   exit 2
 fi
 
@@ -207,14 +221,26 @@ cut -f1 "$tmp/rust_word_symbol_sorted.txt" | sort -u > "$tmp/rust_words.txt"
 # --- 3. Swift / Kotlin word sets -------------------------------------------
 extract_words() {
   local dir="$1" ext="$2" exclude="$3"
-  find "$dir" -type f -name "*.$ext" -not -path "$exclude" -print0 2>/dev/null \
+  find "$dir" -type f -name "*.$ext" \
+    -not -path "$exclude" \
+    -not -path "$SWIFT_PROVIDER_GENERATED_EXCLUDE" \
+    -print0 2>/dev/null \
     | xargs -0 grep -hEo '[A-Za-z_][A-Za-z0-9_]*' 2>/dev/null \
     | tokenize \
     | sort -u
 }
 
-extract_words "$SWIFT_DIR" swift "$SWIFT_GENERATED_EXCLUDE" > "$tmp/swift_words.txt"
-extract_words "$KOTLIN_DIR" kt "$KOTLIN_GENERATED_EXCLUDE" > "$tmp/kotlin_words.txt"
+: > "$tmp/swift_words.txt"
+for swift_dir in "${SWIFT_DIRS[@]}"; do
+  extract_words "$swift_dir" swift "$SWIFT_GENERATED_EXCLUDE" >> "$tmp/swift_words.txt"
+done
+sort -u "$tmp/swift_words.txt" -o "$tmp/swift_words.txt"
+
+: > "$tmp/kotlin_words.txt"
+for kotlin_dir in "${KOTLIN_DIRS[@]}"; do
+  extract_words "$kotlin_dir" kt "$KOTLIN_GENERATED_EXCLUDE" >> "$tmp/kotlin_words.txt"
+done
+sort -u "$tmp/kotlin_words.txt" -o "$tmp/kotlin_words.txt"
 
 for side in swift kotlin; do
   if [[ ! -s "$tmp/${side}_words.txt" ]]; then

@@ -8,7 +8,7 @@
 //! per-session executor is GONE: standalone direct-Rust sessions run their
 //! worker/forwarder/switch-relays/result-map work as async tasks on ONE
 //! process-wide shared runtime (`standalone_runtime`, built once, 1 worker
-//! thread, never shut down). See `nmp-signer/src/nip46.rs`'s `SessionRuntime`
+//! thread, never shut down). See `nmp-nip46/src/nip46.rs`'s `SessionRuntime`
 //! /`standalone_runtime` docs.
 //!
 //! What DOES still scale per session is the session's OWNED transport pool
@@ -37,7 +37,7 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
 
-use nmp_signer::{Nip46Signer, MAX_NIP46_RELAYS};
+use nmp_nip46::{Nip46Signer, MAX_NIP46_RELAYS};
 use nostr::nips::nip44;
 use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Tag};
 use serde_json::{json, Value};

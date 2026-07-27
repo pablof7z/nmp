@@ -84,23 +84,32 @@ about current code:
   persisted attempt ordinal and time, ambiguous handoff, and proven socket
   write/flush persisted against an exact lane ordinal; `Sent` is never emitted
   for queue acceptance, ambiguity, or an ephemeral handoff with no outbox fact.
-- **The NIP-46 reconnect and governed sign-only paths are built; standard platform vault providers are not.**
+- **The optional NIP-46 provider and governed sign-only paths are built; standard platform vault providers are not.**
   A current NIP-46 client now owns its independent signer-relay connection,
   NIP-42 AUTH, exact request correlation, `auth_url`, `switch_relays`, distinct
   communication/user keys, NIP-44 crypto, and frozen-event validation. Missing
   capabilities remain durable `AwaitingCapability`; a real redb close/reopen
   proof reconnects a bunker, promotes the exact frozen event, publishes, and
-  receives a relay ACK. Swift projects Primal discovery and one-click launch;
-  Kotlin/JVM projects package-filtered Android discovery and an exact
-  URI/package handoff contract. Connections own scoped registrations, so a
-  stale session cannot detach its replacement, and close/drop deterministically
-  finishes only that session. An explicitly insecure SDK-owned plaintext file
-  checkpoint now provides opt-in personal/development autologin (#197), while
+  receives a relay ACK. The protocol-neutral signer contract now lives in
+  dependency-free `nmp-signer`; the explicit local-key implementation lives in
+  `nmp-local-signer`, while the concrete remote protocol, relay/session, and
+  checkpoint implementation lives in selectable `nmp-nip46`. Core FFI/Swift/
+  Kotlin expose only one opaque signer mailbox. Separate NIP-46 FFI,
+  `Packages/NMPNip46`, and Kotlin `:nip46` components project Primal discovery,
+  one-click launch, package-filtered Android discovery, and an exact
+  URI/package handoff contract. Deleting those provider packages leaves core
+  and an unrelated external signer buildable. Connections own scoped
+  registrations, so a stale session cannot detach its replacement, and
+  close/drop deterministically finishes only that session. An explicitly
+  insecure SDK-owned plaintext file checkpoint now provides opt-in
+  personal/development autologin (#197), while
   remaining distinct from the secure-provider contract. Still open under
   #47/#51: explicit per-write identity override, standard Keychain/Keystore
   providers and automatic secure-vault restore, NIP-55 execution/Android AAR
   integration, and permanent signer connection/correlation counters in engine
-  diagnostics.
+  diagnostics. The existing NIP-46 teardown, foreign-capability mailbox,
+  pull-delivery, and process-global-runtime corrections remain separately
+  tracked by #770/#783/#784/#871; this ownership split does not claim them.
   The sign-only operation now projects across Rust, FFI, Swift, and Kotlin:
   it binds an immutable request to the active registered signer, validates the
   exact returned event, remains bounded/cancellable, and creates no

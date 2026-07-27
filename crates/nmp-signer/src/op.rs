@@ -376,9 +376,9 @@ impl<T: Send + 'static> Drop for PendingSignerOp<T> {
 /// [`SignerOp::wait`]), or await it. The async runtime remains an engine-owned
 /// implementation detail and never crosses this public door (D8).
 ///
-/// `LocalKeySigner` resolves synchronously (`Ready`). `Nip46Signer` uses
-/// `Pending` for an in-flight remote round-trip; the engine's recv loop drives
-/// either kind of signer identically.
+/// `LocalKeySigner` resolves synchronously (`Ready`). Remote providers use
+/// `Pending` for an in-flight round-trip; the engine's recv loop drives either
+/// kind of signer identically.
 pub enum SignerOp<T: Send + 'static> {
     /// Operation completed synchronously.
     Ready(Result<T, SignerError>),

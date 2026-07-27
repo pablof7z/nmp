@@ -36,7 +36,7 @@ a single shared, bounded, async-admission scheduler — designed, not assumed.
 1. **One engine-owned async runtime.** A single `tokio` multi-thread runtime
    (fixed small worker count, default 2 — bounded OS threads) owned by the
    engine, built at construction. It hosts *all* async adapter work: NIP-11
-   fetches, signer/AUTH completion awaits, NIP-46 session state machines,
+   fetches, signer/AUTH completion awaits, optional provider sessions, and
    follow-action acquisition. Thousands of logical operations share these few
    worker threads because each yields at every `.await`. This does **not** impose
    a runtime on applications (they never see it); the single-threaded engine

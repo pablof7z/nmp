@@ -64,10 +64,28 @@ fi
 REPO_ROOT=$(git rev-parse --show-toplevel)
 cd "$REPO_ROOT"
 
-CRATE=nmp-ffi
-LIB_NAME=libnmp_ffi.a
-GEN_DIR="$REPO_ROOT/gen"
-XCFRAMEWORK_OUT="$REPO_ROOT/Packages/NMP/NMP.xcframework"
+CRATE=${NMP_FFI_CRATE:-nmp-ffi}
+LIB_STEM=${NMP_FFI_LIB_STEM:-nmp_ffi}
+BINDGEN_BIN=${NMP_UNIFFI_BINDGEN_BIN:-uniffi-bindgen}
+GEN_DIR=${NMP_SWIFT_GEN_DIR:-"$REPO_ROOT/gen"}
+SWIFT_PACKAGE_DIR=${NMP_SWIFT_PACKAGE_DIR:-"$REPO_ROOT/Packages/NMP"}
+SWIFT_FFI_TARGET=${NMP_SWIFT_FFI_TARGET:-NMPFFI}
+XCFRAMEWORK_NAME=${NMP_SWIFT_XCFRAMEWORK_NAME:-NMP.xcframework}
+EXTERNAL_SWIFT_MODULE=${NMP_SWIFT_EXTERNAL_MODULE:-}
+LIB_NAME="lib$LIB_STEM.a"
+XCFRAMEWORK_OUT="$SWIFT_PACKAGE_DIR/$XCFRAMEWORK_NAME"
+
+# A provider staticlib and the core staticlib must be produced by one Cargo
+# feature-resolution unit. Otherwise each archive can carry a differently
+# hashed copy of the external core UniFFI object, and linking both components
+# either duplicates every core C symbol or crosses incompatible Rust types.
+# Core-only callers keep the one-package default; provider wrappers opt into
+# the exact core + provider package set and refresh both artifacts.
+read -r -a CARGO_PACKAGE_NAMES <<< "${NMP_FFI_CARGO_PACKAGES:-$CRATE}"
+CARGO_PACKAGE_ARGS=()
+for package_name in "${CARGO_PACKAGE_NAMES[@]}"; do
+  CARGO_PACKAGE_ARGS+=(-p "$package_name")
+done
 
 DEVICE_TARGET=aarch64-apple-ios
 SIM_ARM_TARGET=aarch64-apple-ios-sim
@@ -95,17 +113,17 @@ fi
 echo "== 1. cargo build (release) =="
 if [[ "$MODE" != macos ]]; then
   env -u MACOSX_DEPLOYMENT_TARGET \
-    cargo build -p "$CRATE" --release --target "$SIM_ARM_TARGET"
+    cargo build "${CARGO_PACKAGE_ARGS[@]}" --release --target "$SIM_ARM_TARGET"
   env -u MACOSX_DEPLOYMENT_TARGET \
-    cargo build -p "$CRATE" --release --target "$SIM_X86_TARGET"
+    cargo build "${CARGO_PACKAGE_ARGS[@]}" --release --target "$SIM_X86_TARGET"
 fi
 MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET" \
   CFLAGS="$MACOS_CFLAGS" \
   CXXFLAGS="$MACOS_CXXFLAGS" \
-  cargo build -p "$CRATE" --release --target "$MACOS_TARGET"
+  cargo build "${CARGO_PACKAGE_ARGS[@]}" --release --target "$MACOS_TARGET"
 if [[ "$MODE" == all ]]; then
   env -u MACOSX_DEPLOYMENT_TARGET \
-    cargo build -p "$CRATE" --release --target "$DEVICE_TARGET"
+    cargo build "${CARGO_PACKAGE_ARGS[@]}" --release --target "$DEVICE_TARGET"
 fi
 
 SIM_ARM_LIB="$TARGET_DIR/$SIM_ARM_TARGET/release/$LIB_NAME"
@@ -132,7 +150,7 @@ fi
 echo "== 3. uniffi-bindgen (library mode) -> Swift bindings =="
 mkdir -p "$GEN_DIR"
 env -u MACOSX_DEPLOYMENT_TARGET \
-  cargo run -p "$CRATE" --bin uniffi-bindgen -- generate \
+  cargo run -p "$CRATE" --bin "$BINDGEN_BIN" -- generate \
   --library "$BINDGEN_LIB" \
   --language swift \
   --out-dir "$GEN_DIR"
@@ -142,12 +160,23 @@ env -u MACOSX_DEPLOYMENT_TARGET \
 HEADERS_DIR="$TARGET_DIR/ios-ffi-headers"
 rm -rf "$HEADERS_DIR"
 mkdir -p "$HEADERS_DIR"
-cp "$GEN_DIR/nmp_ffiFFI.h" "$HEADERS_DIR/"
-cp "$GEN_DIR/nmp_ffiFFI.modulemap" "$HEADERS_DIR/module.modulemap"
+cp "$GEN_DIR/${LIB_STEM}FFI.h" "$HEADERS_DIR/"
+cp "$GEN_DIR/${LIB_STEM}FFI.modulemap" "$HEADERS_DIR/module.modulemap"
 
-SWIFT_SOURCES_DIR="$REPO_ROOT/Packages/NMP/Sources/NMPFFI"
+SWIFT_SOURCES_DIR="$SWIFT_PACKAGE_DIR/Sources/$SWIFT_FFI_TARGET"
 mkdir -p "$SWIFT_SOURCES_DIR"
-cp "$GEN_DIR/nmp_ffi.swift" "$SWIFT_SOURCES_DIR/"
+SWIFT_SOURCE="$SWIFT_SOURCES_DIR/$LIB_STEM.swift"
+if [[ -n "$EXTERNAL_SWIFT_MODULE" ]]; then
+  GENERATED_SOURCE="$GEN_DIR/$LIB_STEM.swift"
+  TEMP_SOURCE="$SWIFT_SOURCE.tmp"
+  awk -v module="$EXTERNAL_SWIFT_MODULE" '
+    { print }
+    $0 == "import Foundation" { print "import " module }
+  ' "$GENERATED_SOURCE" > "$TEMP_SOURCE"
+  mv "$TEMP_SOURCE" "$SWIFT_SOURCE"
+else
+  cp "$GEN_DIR/$LIB_STEM.swift" "$SWIFT_SOURCE"
+fi
 
 echo "== 4. xcodebuild -create-xcframework =="
 mkdir -p "$(dirname "$XCFRAMEWORK_OUT")"
@@ -178,4 +207,4 @@ echo "== done =="
 echo "Cargo target directory:    $TARGET_DIR"
 echo "Raw bindgen output:        $GEN_DIR/"
 echo "xcframework:               $XCFRAMEWORK_OUT ($SLICES)"
-echo "Swift bindings source:     $SWIFT_SOURCES_DIR/nmp_ffi.swift"
+echo "Swift bindings source:     $SWIFT_SOURCE"
