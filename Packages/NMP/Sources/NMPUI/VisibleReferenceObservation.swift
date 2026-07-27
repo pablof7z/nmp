@@ -27,14 +27,18 @@ public final class NMPReferenceObservationHandle: @unchecked Sendable {
     }
 }
 
-/// Injectable construction seam for an ordinary NMP observation. It owns no
-/// shared state or cache: every call must return a fresh, independent handle.
+/// App-selected construction seam for an ordinary NMP observation.
+///
+/// The app owns locator-to-demand policy inside this seam. NMPUI passes the
+/// exact authored locator and never infers kind:0, source authority, cache,
+/// freshness, relay admission, or hidden helper observations.
 public struct NMPReferenceObservationFactory: @unchecked Sendable {
     public typealias Receive = @MainActor @Sendable (RowBatch) -> Void
     public typealias Open = @MainActor @Sendable (
-        NMPDemand,
+        NostrReferenceTarget,
         @escaping Receive
     ) throws -> NMPReferenceObservationHandle
+    public typealias Resolve = @Sendable (NostrReferenceTarget) throws -> NMPDemand
 
     private let open: Open
 
@@ -47,17 +51,21 @@ public struct NMPReferenceObservationFactory: @unchecked Sendable {
     /// this method on their own.
     @MainActor
     public func observe(
-        _ demand: NMPDemand,
+        _ target: NostrReferenceTarget,
         receive: @escaping Receive
     ) throws -> NMPReferenceObservationHandle {
-        try open(demand, receive)
+        try open(target, receive)
     }
 
-    /// Production factory over the app's existing engine. The iteration task
-    /// retains exactly one `NMPQuery`; cancelling the returned handle releases
-    /// that query without affecting any equal handle another component owns.
-    public static func live(engine: NMPEngine) -> NMPReferenceObservationFactory {
-        NMPReferenceObservationFactory { demand, receive in
+    /// Production factory over the app's existing engine and explicit
+    /// locator-to-demand policy. The resolver runs once for each selected
+    /// component; decoding or parsing alone never invokes it.
+    public static func live(
+        engine: NMPEngine,
+        resolve: @escaping Resolve
+    ) -> NMPReferenceObservationFactory {
+        NMPReferenceObservationFactory { target, receive in
+            let demand = try resolve(target)
             let query = try engine.observe(demand)
             let task = Task { @MainActor in
                 // #680: an observation is a throwing `AsyncSequence` (its
@@ -81,19 +89,17 @@ public struct NMPReferenceObservationFactory: @unchecked Sendable {
 
 /// Per-component observation state used by `observeWhileVisible`.
 ///
-/// The latest canonical/helper batches survive hidden periods. The lifecycle
-/// owns only this component's handles and has no process-global or document-
-/// scoped coordinator.
+/// The last batch survives hidden periods. The lifecycle owns only this
+/// component's one ordinary observation and has no process-global or
+/// document-scoped coordinator.
 @MainActor
 public final class NMPVisibleReferenceObservation: ObservableObject {
-    @Published public private(set) var canonical: RowBatch?
-    @Published public private(set) var helpers: [RowBatch?]
+    @Published public private(set) var latest: RowBatch?
     @Published public private(set) var failure: String?
 
     public let target: NostrReferenceTarget
 
     private let factory: NMPReferenceObservationFactory
-    private let plan: NostrReferenceDemandPlan?
     private var nextGeneration: UInt64 = 0
 
     private enum Lifecycle {
@@ -110,53 +116,31 @@ public final class NMPVisibleReferenceObservation: ObservableObject {
     ) {
         self.target = target
         self.factory = factory
-        do {
-            let plan = try referenceDemandPlan(for: target)
-            self.plan = plan
-            self.helpers = Array(repeating: nil, count: plan.helpers.count)
-            self.failure = nil
-        } catch {
-            self.plan = nil
-            self.helpers = []
-            self.failure = String(describing: error)
-        }
+        self.failure = nil
     }
 
     /// Called by the visibility primitive when this component becomes
     /// render-visible. Repeated calls while already opening/visible are inert.
     public func appear() {
-        guard case .hidden = lifecycle, let plan else { return }
+        guard case .hidden = lifecycle else { return }
 
         nextGeneration &+= 1
         let generation = nextGeneration
         lifecycle = .opening(generation: generation)
         failure = nil
-        var opened: [NMPReferenceObservationHandle] = []
-
         do {
-            opened.append(
-                try factory.observe(plan.canonical) { [weak self] batch in
+            let handle = try factory.observe(target) { [weak self] batch in
                     guard let self, self.accepts(generation) else { return }
-                    self.canonical = batch
+                    self.latest = batch
                 }
-            )
-            for (index, demand) in plan.helpers.enumerated() {
-                opened.append(
-                    try factory.observe(demand) { [weak self] batch in
-                        guard let self, self.accepts(generation) else { return }
-                        self.helpers[index] = batch
-                    }
-                )
-            }
-            lifecycle = .visible(generation: generation, handles: opened)
+            lifecycle = .visible(generation: generation, handles: [handle])
         } catch {
             lifecycle = .hidden
-            opened.forEach { $0.cancel() }
             failure = String(describing: error)
         }
     }
 
-    /// Releases only this component's handles. The last delivered batches are
+    /// Releases only this component's handle. The last delivered batch is
     /// intentionally retained, so scroll-away/return does not flash empty.
     public func disappear() {
         guard case .visible(_, let handles) = lifecycle else {

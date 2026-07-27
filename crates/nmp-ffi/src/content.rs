@@ -6,7 +6,8 @@ use nmp_content::{
 };
 use uniffi::{Enum, Record};
 
-use crate::reference::{target_to_ffi, FfiReferenceTarget};
+use crate::entity::entity_to_ffi;
+use crate::types::FfiNostrEntity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub enum FfiContentSyntax {
@@ -58,7 +59,7 @@ pub enum FfiReferencePlacement {
 pub struct FfiReferenceOccurrence {
     pub id: u64,
     pub original: String,
-    pub target: FfiReferenceTarget,
+    pub target: FfiNostrEntity,
     pub source: FfiSourceRange,
     pub placement: FfiReferencePlacement,
 }
@@ -189,7 +190,7 @@ fn occurrence_to_ffi(value: nmp_content::ReferenceOccurrence) -> FfiReferenceOcc
     FfiReferenceOccurrence {
         id: value.id,
         original: value.original,
-        target: target_to_ffi(value.target),
+        target: entity_to_ffi(value.target),
         source: range_to_ffi(value.source),
         placement: placement_to_ffi(value.placement),
     }

@@ -19,7 +19,10 @@ let engine = try NMPEngine(
 let document = parseNostrContent(
     "hello nostr:npub1... read nostr:naddr1..."
 )
-let observations = NMPReferenceObservationFactory.live(engine: engine)
+let observations = NMPReferenceObservationFactory.live(
+    engine: engine,
+    resolve: appReferenceDemand
+)
 ```
 
 Render with the standard components:
@@ -65,10 +68,10 @@ NostrContent
   document walk
     profile reference -> app-selected profile component
       literal component: no observation
-      NMPStandardProfileMention: owns optional kind:0 observation
+      NMPStandardProfileMention: asks the app resolver for one demand
     event/address reference -> app-selected outer loader
       literal/consent/cache loader: app policy
-      NMPDefaultEventLoader: owns optional canonical/helper observations
+      NMPDefaultEventLoader: asks the app resolver for one demand
         NMPResolvedEventDispatcher
           actual event.kind + purpose -> registered renderer
           otherwise -> generic event fallback
@@ -85,9 +88,9 @@ generic event component instead of blank space.
 
 ## Component-owned visibility
 
-`NMPVisibleReferenceObservation` is per component. It asks
-`referenceDemandPlan(for:)` for the canonical/helper demands and owns a fresh
-independent handle for every observation it opens.
+`NMPVisibleReferenceObservation` is per component. It passes the exact locator
+to the app-supplied factory and owns one fresh independent handle for the
+ordinary observation the factory opens.
 
 ```swift
 struct MyResolvingComponent: View {
@@ -103,7 +106,7 @@ struct MyResolvingComponent: View {
     }
 
     var body: some View {
-        MyResolvedOrFallbackView(batch: observation.canonical)
+        MyResolvedOrFallbackView(batch: observation.latest)
             .observeWhileVisible(observation)
     }
 }
@@ -111,9 +114,9 @@ struct MyResolvingComponent: View {
 
 `observeWhileVisible` is optional reusable behavior, not framework policy:
 
-- appearing opens only this component's handles;
-- leaving the scroll-visible region releases all of those handles;
-- the last canonical/helper batches remain renderable while hidden, so return
+- appearing opens only this component's handle;
+- leaving the scroll-visible region releases that handle;
+- the last delivered batch remains renderable while hidden, so return
   does not flicker empty;
 - scroll thrash cannot accumulate handles or iteration tasks;
 - custom components may instead observe unconditionally or never observe.
@@ -125,20 +128,21 @@ the other component's interest.
 ## Choose acquisition policy in the component
 
 The observation factory is an injectable seam around ordinary `engine.observe`.
-The standard factory opens the supplied `NMPDemand` unchanged. A custom loader
-can wrap or replace it to choose the merged per-handle freshness policy from
+Its required resolver receives the exact authored locator and returns the one
+ordinary `NMPDemand` this app/component wants. A custom loader can wrap or
+replace the app's mapping to choose the merged per-handle freshness policy from
 #565:
 
 ```swift
-let cacheOnly = NMPReferenceObservationFactory { demand, receive in
-    var demand = demand
+let cacheOnly = NMPReferenceObservationFactory.live(engine: engine) { target in
+    var demand = try appReferenceDemand(target)
     demand.freshness = .cacheOnly
-    return try observations.observe(demand, receive: receive)
+    return demand
 }
 ```
 
 A consent loader can render from `cacheOnly`, show "Fetch preview?" when the
-canonical batch is empty, and open a separate `.live` observation only after
+latest batch is empty, and open a separate `.live` observation only after
 the user agrees. A feed mention can choose `.maxAge(seconds: 14_400)` while a
 profile detail component chooses `.live`. Parser output, target identity, and
 the resolved-event renderer table stay unchanged.
@@ -376,10 +380,11 @@ xcodegen generate
 ```
 
 Build and run `NMPUIGallery`. The app imports the exact package components and
-uses `NMPReferenceObservationFactory.live(engine:)`, configures only
-`purplepag.es` and `relay.primal.net`, and hardcodes real profile/article/note
-entities. Its article and note seeds carry no relay URL; the Live proof shows
-ordinary kind:10002 discovery and outbox routing.
+uses `NMPReferenceObservationFactory.live(engine:resolve:)` with an explicit
+Gallery-owned profile/event/address mapping, configures only `purplepag.es` and
+`relay.primal.net`, and hardcodes real profile/article/note entities. Its
+article and note seeds carry no relay URL; the Live proof shows ordinary
+kind:10002 discovery and outbox routing.
 
 The conformance surfaces include literal references with zero acquisition,
 standard profile/event components, misleading-kind dispatch, cycle/depth
@@ -405,5 +410,5 @@ regression.
 - Pass `NostrContentRenderContext` through nested loaders; do not introduce a
   mutable budget/coordinator replacement.
 
-See [Mixed Nostr content and reference plans](34-content.md) for the complete
+See [Mixed Nostr content and exact reference locators](34-content.md) for the complete
 cross-platform ownership and clean-break migration table.

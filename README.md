@@ -99,7 +99,14 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
   through ordinary live observation/ingest. Direct Rust today; native
   projection remains explicit follow-up work.
 - ✅ NIP-29 groups — metadata / membership / moderation, plus kind:9 group-chat **send + read** proven by a live round-trip test (device-scale room-open UX still to be re-measured)
-- ✅ Optional parser-only content module (source-ranged plaintext/Markdown and NIP-19 occurrences), pure safe reference-demand planning shared by Rust/Swift/Kotlin, and a SwiftUI family whose app-selected components—not parsing or visibility—own optional query handles. Exact kind:0/NIP-23 codecs belong to their own protocol owners, not `nmp-content` ([#561](https://github.com/pablof7z/nmp/issues/561))
+- ✅ Optional parser-only content module (source-ranged plaintext/Markdown and
+  NIP-19 occurrences), exact five-variant locator values shared by
+  Rust/Swift/Kotlin, and a SwiftUI family whose app-selected components—not
+  parsing or visibility—ask an explicit app resolver for one ordinary demand.
+  Core decoding owns no kind:0, source-authority, relay-admission, or hidden
+  fan-out policy; exact kind:0/NIP-23 codecs belong to their own optional
+  protocol owners ([#561](https://github.com/pablof7z/nmp/issues/561), corrected
+  by [#879](https://github.com/pablof7z/nmp/issues/879))
 - 🧪 NIP-51 lists — decode/reading only today; list **editing** is deliberately gated on [#50](https://github.com/pablof7z/nmp/issues/50)
 - 🧪 Blossom (BUD-11) media/blob — `nmp-blossom` ships kind:24242-authorized, sha256-verified blob upload plus mirror/delete/list, each with its own bound authorization ([#216](https://github.com/pablof7z/nmp/issues/216) epic, closes [#545](https://github.com/pablof7z/nmp/issues/545)/[#551](https://github.com/pablof7z/nmp/issues/551), [#552](https://github.com/pablof7z/nmp/pull/552)/[#557](https://github.com/pablof7z/nmp/pull/557)) — and **projected through FFI to Swift and Kotlin** ([#555](https://github.com/pablof7z/nmp/issues/555) closes, [#560](https://github.com/pablof7z/nmp/pull/560) merged): a native app can call upload/mirror/delete/list from Rust, Swift, or Kotlin today, each with typed error taxonomies and no collapsed variants. Upload durability is currently **app-owned** (a standalone async call, not yet a persisted/retried engine obligation) — an engine-integrated durable-upload upgrade is tracked as an explicit additive follow-up ([#562](https://github.com/pablof7z/nmp/issues/562)), not a silent gap.
 - ✅ NIP-68 picture events — `nmp-nip68` builds an unsigned kind:20 draft with `imeta` images minted only from a verified, content-addressed Blossom `BlobDescriptor`, plus a tolerant decoder that surfaces a missing sha256 as recorded diagnostics rather than trusting it ([#558](https://github.com/pablof7z/nmp/issues/558) closes, [#566](https://github.com/pablof7z/nmp/pull/566) merged). `build_picture` now takes an explicit `created_at` instead of sampling the clock — a determinism/FFI-parity fix ([#568](https://github.com/pablof7z/nmp/pull/568)). Engine-free, signing-free, first-cut tags only (`title`/`imeta`/`content-warning`/`t`); FFI/Swift/Kotlin projection is a separate later unit.
@@ -140,7 +147,16 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 - **Merged — freshness axis on query demand:** [#577](https://github.com/pablof7z/nmp/pull/577) closes [#565](https://github.com/pablof7z/nmp/issues/565) — `MaxAge`/`CacheOnly` are now served directly from per-handle coverage watermarks.
 - **Headline (merged) — explicit pre-signature write cancellation:** [#585](https://github.com/pablof7z/nmp/pull/585) closes [#533](https://github.com/pablof7z/nmp/issues/533) — an accepted-but-unsigned write used to be able to sit indefinitely with no receipt-keyed way to retract it. Now `cancel(receiptId)` is a durable, typed, idempotent operation across Rust/FFI/Swift/Kotlin: success atomically compensates the optimistic row, restores any displaced predecessor, persists a `Cancelled` receipt fact in the same transaction, and releases in-flight signer ownership; a write that already crossed the signature boundary returns a precise typed refusal, never a silent no-op. Adversarial review caught and drove fixes for signer-task leaks, quarantined recovered writes, and signed-ephemeral replay before merge.
 - **Merged — bounded ordinary row delivery under a slow consumer:** [#586](https://github.com/pablof7z/nmp/pull/586) replaces the per-observer unbounded `mpsc` channel with a one-slot mailbox — skipped reducer batches compose per event-id into one exact transition rebased onto the last delivered state, so a slow query consumer can no longer make the engine's memory grow or replay stale intermediate frames. Windowed rows/diagnostics already used one-slot latest snapshots; this closes the same gap for unwindowed ordinary delivery. Progresses [#46](https://github.com/pablof7z/nmp/issues/46) — receipt observation, graph/derived-set ceilings, relay-advertised limits, and scheduler/resource bounds stay open.
-- **Headline (merged) — content parsing no longer implies acquisition.** [#569](https://github.com/pablof7z/nmp/pull/569) closes [#561](https://github.com/pablof7z/nmp/issues/561): `nmp-content` is parser-only; `nmp_grammar::reference` produces pure safe demand plans; Swift reference components own independent visibility-scoped handles and event loaders dispatch by the acquired event's actual kind; Kotlin mirrors the parser/planner boundary; and one shared NIP-19 corpus proves Rust/FFI/Swift/Kotlin parity. There is no compatibility session, shared mutable coordinator, or hydration count budget.
+- **Content parsing no longer implies acquisition; locator decoding no longer
+  chooses it either.** [#569](https://github.com/pablof7z/nmp/pull/569) made
+  `nmp-content` parser-only. [#879](https://github.com/pablof7z/nmp/issues/879)
+  corrects the remaining lower-layer coupling: core preserves exact `npub`,
+  `nprofile`, `note`, `nevent`, and `naddr` values but exposes no generic
+  demand planner. Swift reference components own independent visibility-scoped
+  handles and ask an explicit app resolver for one ordinary demand; Kotlin
+  mirrors the parser/locator boundary; one shared locator corpus proves
+  Rust/FFI/Swift/Kotlin parity. There is no compatibility planner, shared
+  mutable coordinator, or hydration count budget.
 - **Also open:** a consolidated **v2 architecture decision record** ([#548](https://github.com/pablof7z/nmp/issues/548), 15 rulings against standing doctrine) — now published as a browsable page with a spoken overall briefing plus a per-issue deep-dive: [pablof7z.github.io/nmp/v2-escalation](https://pablof7z.github.io/nmp/v2-escalation/).
 
 ## Performance
@@ -178,7 +194,11 @@ Rust core is the truth · **Swift** qualified on macOS host (iOS-sim runtime pen
 - **Shipped:** freshness axis on query demand — `MaxAge`/`CacheOnly` from coverage watermarks ([#577](https://github.com/pablof7z/nmp/pull/577), closes [#565](https://github.com/pablof7z/nmp/issues/565)).
 - **Shipped:** explicit pre-signature write cancellation — receipt-keyed `cancel(receiptId)` across Rust/FFI/Swift/Kotlin, durable and idempotent ([#585](https://github.com/pablof7z/nmp/pull/585), closes [#533](https://github.com/pablof7z/nmp/issues/533)).
 - **Shipped:** bounded ordinary row delivery under a slow consumer — one-slot rebased mailbox replaces the unbounded per-observer queue ([#586](https://github.com/pablof7z/nmp/pull/586), progresses [#46](https://github.com/pablof7z/nmp/issues/46)).
-- **Shipped:** parser-only content plus component-owned reference acquisition — pure Rust planning, replaceable Swift loaders, Kotlin parser/planner parity, and one shared NIP-19 oracle ([#569](https://github.com/pablof7z/nmp/pull/569), closes [#561](https://github.com/pablof7z/nmp/issues/561)).
+- **Shipped:** parser-only content plus component-owned reference acquisition —
+  exact Rust locator values, app-resolved replaceable Swift loaders, Kotlin
+  parser/locator parity, and one shared NIP-19 oracle
+  ([#569](https://github.com/pablof7z/nmp/pull/569), corrected by
+  [#879](https://github.com/pablof7z/nmp/issues/879)).
 
 ## The ownership boundary
 

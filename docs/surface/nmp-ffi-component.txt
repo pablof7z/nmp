@@ -4047,109 +4047,6 @@ enum Enum {
 }
 
 enum Enum {
-    name: "FfiReferenceTarget",
-    module_path: "nmp_ffi",
-    remote: false,
-    discr_type: None,
-    variants: [
-        Variant {
-            name: "Profile",
-            discr: None,
-            fields: [
-                Field {
-                    name: "pubkey",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "relay_hints",
-                    type_: Sequence {
-                        inner_type: String,
-                    },
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "Event",
-            discr: None,
-            fields: [
-                Field {
-                    name: "id",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "author_hint",
-                    type_: Optional {
-                        inner_type: String,
-                    },
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "kind_hint",
-                    type_: Optional {
-                        inner_type: UInt16,
-                    },
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "relay_hints",
-                    type_: Sequence {
-                        inner_type: String,
-                    },
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "Address",
-            discr: None,
-            fields: [
-                Field {
-                    name: "kind",
-                    type_: UInt16,
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "author",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "identifier",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "relay_hints",
-                    type_: Sequence {
-                        inner_type: String,
-                    },
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-    ],
-    shape: Enum,
-    non_exhaustive: false,
-    docstring: None,
-}
-
-enum Enum {
     name: "FfiRelayInformationCachePolicy",
     module_path: "nmp_ffi",
     remote: false,
@@ -6252,47 +6149,6 @@ record Record {
 }
 
 record Record {
-    name: "FfiReferenceDemandPlan",
-    module_path: "nmp_ffi",
-    remote: false,
-    fields: [
-        Field {
-            name: "target_key",
-            type_: String,
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "canonical",
-            type_: Record {
-                module_path: "nmp_ffi",
-                name: "FfiDemand",
-            },
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "helpers",
-            type_: Sequence {
-                inner_type: Record {
-                    module_path: "nmp_ffi",
-                    name: "FfiDemand",
-                },
-            },
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "discarded_relay_hints",
-            type_: UInt32,
-            default: None,
-            docstring: None,
-        },
-    ],
-    docstring: None,
-}
-
-record Record {
     name: "FfiReferenceOccurrence",
     module_path: "nmp_ffi",
     remote: false,
@@ -6313,7 +6169,7 @@ record Record {
             name: "target",
             type_: Enum {
                 module_path: "nmp_ffi",
-                name: "FfiReferenceTarget",
+                name: "FfiNostrEntity",
             },
             default: None,
             docstring: None,
@@ -8138,70 +7994,6 @@ function Function {
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_parse_simple_groups_list_tolerant",
     checksum: Some(
         57664,
-    ),
-}
-
-function Function {
-    name: "reference_demand_plan",
-    module_path: "nmp_ffi",
-    is_async: false,
-    arguments: [
-        Argument {
-            name: "target",
-            type_: Enum {
-                module_path: "nmp_ffi",
-                name: "FfiReferenceTarget",
-            },
-            by_ref: false,
-            optional: false,
-            default: None,
-        },
-    ],
-    return_type: Some(
-        Record {
-            module_path: "nmp_ffi",
-            name: "FfiReferenceDemandPlan",
-        },
-    ),
-    ffi_func: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_func_reference_demand_plan",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "target",
-                type_: RustBuffer(
-                    Some(
-                        ExternalFfiMetadata {
-                            name: "FfiReferenceTarget",
-                            module_path: "nmp_ffi",
-                        },
-                    ),
-                ),
-            },
-        ],
-        return_type: Some(
-            RustBuffer(
-                Some(
-                    ExternalFfiMetadata {
-                        name: "FfiReferenceDemandPlan",
-                        module_path: "nmp_ffi",
-                    },
-                ),
-            ),
-        ),
-        has_rust_call_status_arg: true,
-        is_object_free_function: false,
-    },
-    docstring: None,
-    throws: Some(
-        Enum {
-            module_path: "nmp_ffi",
-            name: "FfiError",
-        },
-    ),
-    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_reference_demand_plan",
-    checksum: Some(
-        53347,
     ),
 }
 

@@ -30,7 +30,7 @@ final class NMPUITests: XCTestCase {
     func testLiteralVisibleProfileAndEventComponentsOpenZeroHandles() {
         let probe = ObservationProbe()
         let renderers = NostrContentRenderers.literalReferences
-        let profile = occurrence(target: .profile(pubkey: pubkey), original: "npub-literal")
+        let profile = occurrence(target: .pubkey(pubkey: pubkey), original: "npub-literal")
         let event = occurrence(
             target: .event(id: String(repeating: "cd", count: 32), kindHint: 30_023),
             original: "nevent-literal"
@@ -79,7 +79,7 @@ final class NMPUITests: XCTestCase {
 
     func testEqualVisibleComponentsOwnIndependentHandlesAndReleaseOnlyTheirOwn() {
         let probe = ObservationProbe()
-        let target = NostrReferenceTarget.profile(pubkey: pubkey)
+        let target = NostrReferenceTarget.pubkey(pubkey: pubkey)
         let first = NMPVisibleReferenceObservation(target: target, factory: probe.factory)
         let second = NMPVisibleReferenceObservation(target: target, factory: probe.factory)
 
@@ -97,7 +97,7 @@ final class NMPUITests: XCTestCase {
     func testProfileReplacementIsLiveAndLastSnapshotSurvivesScrollAwayAndReturn() {
         let probe = ObservationProbe()
         let observation = NMPVisibleReferenceObservation(
-            target: .profile(pubkey: pubkey),
+            target: .pubkey(pubkey: pubkey),
             factory: probe.factory
         )
         observation.appear()
@@ -105,42 +105,43 @@ final class NMPUITests: XCTestCase {
         let first = row(idByte: "01", kind: 0, pubkey: pubkey)
         let replacement = row(idByte: "02", kind: 0, pubkey: pubkey)
         probe.send(RowBatch(rows: [first]), to: 0)
-        XCTAssertEqual(observation.canonical?.rows.first?.id, first.id)
+        XCTAssertEqual(observation.latest?.rows.first?.id, first.id)
         probe.send(RowBatch(rows: [replacement]), to: 0)
-        XCTAssertEqual(observation.canonical?.rows.first?.id, replacement.id)
+        XCTAssertEqual(observation.latest?.rows.first?.id, replacement.id)
 
         observation.disappear()
-        XCTAssertEqual(observation.canonical?.rows.first?.id, replacement.id)
+        XCTAssertEqual(observation.latest?.rows.first?.id, replacement.id)
 
         observation.appear()
         XCTAssertEqual(probe.activeCount, 1)
         XCTAssertEqual(
-            observation.canonical?.rows.first?.id,
+            observation.latest?.rows.first?.id,
             replacement.id,
             "reacquiring must not clear the last rendered snapshot"
         )
         observation.disappear()
     }
 
-    func testCanonicalAndHelperEvidenceStayOnTheirExactHandles() {
+    func testAuthoredRelayHintsDoNotCreateHiddenObservations() {
         let probe = ObservationProbe()
+        let target = NostrReferenceTarget.event(
+            id: String(repeating: "cd", count: 32),
+            authorHint: String(repeating: "ab", count: 32),
+            kindHint: 30_023,
+            relayHints: ["ws://127.0.0.1", "not a url"]
+        )
         let observation = NMPVisibleReferenceObservation(
-            target: .event(
-                id: String(repeating: "cd", count: 32),
-                relayHints: ["wss://relay.damus.io"]
-            ),
+            target: target,
             factory: probe.factory
         )
         observation.appear()
-        XCTAssertEqual(probe.activeCount, 2)
+        XCTAssertEqual(probe.activeCount, 1)
+        XCTAssertEqual(probe.target(at: 0), target)
 
-        let canonical = row(idByte: "03", kind: 1, pubkey: pubkey)
-        let helper = row(idByte: "04", kind: 1, pubkey: pubkey)
-        probe.send(RowBatch(rows: [canonical]), to: 0)
-        probe.send(RowBatch(rows: [helper]), to: 1)
+        let event = row(idByte: "03", kind: 1, pubkey: pubkey)
+        probe.send(RowBatch(rows: [event]), to: 0)
 
-        XCTAssertEqual(observation.canonical?.rows.first?.id, canonical.id)
-        XCTAssertEqual(observation.helpers[0]?.rows.first?.id, helper.id)
+        XCTAssertEqual(observation.latest?.rows.first?.id, event.id)
         observation.disappear()
         XCTAssertEqual(probe.activeCount, 0)
     }
@@ -163,7 +164,7 @@ final class NMPUITests: XCTestCase {
 
         XCTAssertEqual(probe.activeCount, 0)
         XCTAssertEqual(probe.totalOpenCount, probe.totalCancelCount)
-        XCTAssertEqual(observation.canonical?.rows.first?.id, event.id)
+        XCTAssertEqual(observation.latest?.rows.first?.id, event.id)
     }
 
     func testActualKindAndPurposeDispatchIgnoreMisleadingHintAndReachFallback() {
@@ -231,8 +232,20 @@ final class NMPUITests: XCTestCase {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
         let observation = NMPVisibleReferenceObservation(
-            target: .profile(pubkey: pubkey),
-            factory: .live(engine: engine)
+            target: .pubkey(pubkey: pubkey),
+            factory: .live(engine: engine) { target in
+                guard case .pubkey(let pubkey) = target else {
+                    throw TestReferencePolicyError.unsupported
+                }
+                return NMPDemand(
+                    selection: NMPFilter(
+                        kinds: [0],
+                        authors: .literal([pubkey]),
+                        limit: 1
+                    ),
+                    source: .authorOutboxes
+                )
+            }
         )
 
         observation.appear()
@@ -339,9 +352,14 @@ final class NMPUITests: XCTestCase {
     }
 }
 
+private enum TestReferencePolicyError: Error {
+    case unsupported
+}
+
 private final class ObservationProbe: @unchecked Sendable {
     private struct Entry {
         var active: Bool
+        let target: NostrReferenceTarget
         let receive: NMPReferenceObservationFactory.Receive
     }
 
@@ -350,10 +368,10 @@ private final class ObservationProbe: @unchecked Sendable {
     private var cancellations = 0
 
     var factory: NMPReferenceObservationFactory {
-        NMPReferenceObservationFactory { [self] _, receive in
+        NMPReferenceObservationFactory { [self] target, receive in
             lock.lock()
             let index = entries.count
-            entries.append(Entry(active: true, receive: receive))
+            entries.append(Entry(active: true, target: target, receive: receive))
             lock.unlock()
             return NMPReferenceObservationHandle { [self] in cancel(index) }
         }
@@ -369,6 +387,10 @@ private final class ObservationProbe: @unchecked Sendable {
 
     var activeCount: Int {
         lock.locked { entries.filter(\.active).count }
+    }
+
+    func target(at index: Int) -> NostrReferenceTarget {
+        lock.locked { entries[index].target }
     }
 
     @MainActor

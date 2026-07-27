@@ -9,12 +9,12 @@ class ContentTest {
     private val note = "note1m99r7nwc0wdrkzldrqan96gklg5usqspq7z9696j6unf0ljnpxjspqfw99"
 
     @Test
-    fun parserKeepsOccurrenceAndNormalizesProfile() {
+    fun parserKeepsOccurrenceAndPreservesBarePubkey() {
         val document = parseNostrContent("hello nostr:$npub")
         assertEquals(1, document.references.size)
         val occurrence = document.references.single()
         assertEquals(NostrReferencePlacement.Inline, occurrence.placement)
-        assertIs<NostrReferenceTarget.Profile>(occurrence.target)
+        assertIs<NostrReferenceTarget.Pubkey>(occurrence.target)
     }
 
     @Test
@@ -26,13 +26,10 @@ class ContentTest {
     }
 
     @Test
-    fun parsingAndPlanningAreEngineFree() {
-        // #680 removed the native-task census: parsing content and lowering
-        // its references to demand plans are pure, engine-free value
-        // operations, so there is no longer a census to read before/after.
-        // The surviving invariant is that they succeed without any engine.
+    fun parsingCreatesNoDemandOrEngineWork() {
         val document = parseNostrContent("nostr:$npub nostr:$note")
-        val plans = document.references.map { referenceDemandPlan(it.target) }
-        assertEquals(document.references.size, plans.size)
+        assertEquals(2, document.references.size)
+        assertIs<NostrReferenceTarget.Pubkey>(document.references[0].target)
+        assertIs<NostrReferenceTarget.EventId>(document.references[1].target)
     }
 }

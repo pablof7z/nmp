@@ -183,7 +183,7 @@ private struct NMPObservedProfileMention: View {
     }
 
     private var profileEvent: Row? {
-        observation.canonical?.rows.first {
+        observation.latest?.rows.first {
             $0.kind == 0 && $0.pubkey == input.pubkey
         }
     }
@@ -248,7 +248,7 @@ private struct NMPObservedEventLoader: View {
 
     var body: some View {
         Group {
-            if let event = observation.canonical?.rows.first {
+            if let event = observation.latest?.rows.first {
                 NMPResolvedEventDispatcher(
                     reference: input,
                     event: event,

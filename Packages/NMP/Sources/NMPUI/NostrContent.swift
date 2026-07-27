@@ -196,6 +196,16 @@ public struct NostrContent: View {
 
     private func renderedReference(_ occurrence: NostrReferenceOccurrence) -> NMPRenderedNode {
         switch occurrence.target {
+        case .pubkey(let pubkey):
+            return renderers.renderProfileReference(
+                NMPProfileReferenceInput(
+                    occurrence: occurrence,
+                    pubkey: pubkey,
+                    purpose: purpose,
+                    observationFactory: observationFactory,
+                    actions: actions
+                )
+            )
         case .profile(let pubkey, _):
             return renderers.renderProfileReference(
                 NMPProfileReferenceInput(
@@ -206,7 +216,7 @@ public struct NostrContent: View {
                     actions: actions
                 )
             )
-        case .event, .address:
+        case .eventID, .event, .coordinate:
             return renderers.renderEventReference(
                 NMPEventReferenceInput(
                     occurrence: occurrence,

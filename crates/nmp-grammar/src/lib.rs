@@ -1,7 +1,7 @@
 //! `nmp-grammar` — the reactive filter-binding grammar's value types
 //! (VISION §2 P2): `Filter`, `Binding`, `Selector`, `ConcreteFilter`,
-//! `DemandOp`/`DemandDelta`, canonical descriptor hashing, engine-free NIP-19
-//! reference planning, and pure relay-host classification.
+//! `DemandOp`/`DemandDelta`, canonical descriptor hashing, the pure NIP-19/
+//! NIP-21 locator codec, and pure relay-host classification.
 //!
 //! This crate holds **value types only** — no graph, no engine, no event
 //! matching. `nmp-resolver` owns evaluating a `Filter` (expanding its
@@ -20,7 +20,6 @@ mod demand;
 mod descriptor;
 mod indexed_tag_name;
 mod nip19;
-pub mod reference;
 pub mod relay;
 mod selector;
 mod write;

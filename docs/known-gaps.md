@@ -154,15 +154,19 @@ about current code:
   acquisition slice are built; broad multi-platform UI remains open (#75,
   #561).** `nmp-content` is now a source-ranged plaintext/Markdown parser with
   no engine, query lifecycle, kind:0/NIP-23 codec, or hydration budget.
-  `nmp_grammar::reference` owns pure normalized-target-to-demand planning;
-  direct Rust/FFI/Swift/Kotlin consume one shared NIP-19 corpus proving exact
-  canonical/helper filters, untrusted-hint handling, relay safety/bounds, and
-  malformed/secret refusal. Kotlin stops at the parser/planner boundary until
-  a real Compose content surface exists; it has no replacement content session.
+  Core NIP-19/NIP-21 decoding preserves the exact `npub`, `nprofile`, `note`,
+  `nevent`, or `naddr` variant and its authored hints, but owns no kind:0
+  mapping, source authority, relay admission, or demand planner. Direct
+  Rust/FFI/Swift/Kotlin consume one shared locator corpus proving that exact
+  parity plus malformed/secret refusal. Kotlin stops at the parser/locator
+  boundary until a real Compose content surface exists; it has no replacement
+  content session or acquisition helper.
   `NMPUI` walks immutable documents, offers literal components that open zero
-  handles, and gives the standard profile mention/default event loader their
-  own independently cancellable observations. `observeWhileVisible` releases
-  only the selected component's handles while retaining the last snapshot;
+  handles, and passes the exact locator to an app-supplied
+  locator-to-`NMPDemand` resolver only after a selected profile mention/default
+  event loader asks to observe. Each selected component owns one independently
+  cancellable ordinary observation. `observeWhileVisible` releases only that
+  component's handle while retaining the last snapshot;
   recursion uses immutable cycle/depth context with no active/resolved count
   coordinator. The outer event loader is replaceable independently of
   actual-row-kind/purpose dispatch, and unknown kinds retain a generic fallback.
@@ -180,7 +184,8 @@ about current code:
   only renders and forwards the tap. Pure documents plus literal or injected
   component factories make deterministic conformance states possible without
   a shared fake session. The native iOS Gallery consumes the exact components,
-  configures only two indexers for its live proof, and separately exercises
+  explicitly owns its profile/event/address demand mapping, configures only two
+  indexers for its live proof, and separately exercises
   literal/no-fetch policy, cycle/depth, unknown-kind, Dynamic Type, RTL,
   reduced motion, dark appearance, long Markdown, and 72-row rapid visibility
   churn while reporting engine wire-subscription evidence rather than a UI

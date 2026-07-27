@@ -77,23 +77,33 @@ the next engine construction restores and activates it. Sign-out calls
 `clearPersistedAccount()` before closing the credential-owning engine. This is
 not encrypted, Keystore-backed, or a secure production-vault claim.
 
-The same package also exposes pure content parsing and engine-free reference
-planning:
+The same package also exposes pure content parsing and exact, engine-free
+reference locators:
 
 ```kotlin
 val document = parseNostrContent(rawContent)
 val occurrence = document.references.first()
 
 // Only a purpose-owning component/application scope that needs acquisition
-// asks for the ordinary NMP demands and retains the handles it opens.
-val plan = referenceDemandPlan(occurrence.target)
-val canonical = nmp.observe(plan.canonical)
+// maps the exact variant to a query. This app deliberately treats a bare
+// public key as a profile request; decoding itself does not.
+val target = occurrence.target as NostrReferenceTarget.Pubkey
+val demand = NMPDemand(
+    selection = NMPFilter(
+        kinds = listOf(0u),
+        authors = NMPBinding.Literal(setOf(target.pubkey)),
+        limit = 1u,
+    ),
+    source = NMPSourceAuthority.AuthorOutboxes,
+)
+val profile = nmp.observe(demand)
 ```
 
 Parsing opens no query and requires no engine. A literal renderer can use the
-authored occurrence and never call `referenceDemandPlan`; a component that does
-observe owns each canonical/helper `Flow` collection and its coroutine
-lifecycle. See `docs/builder/34-content.md`.
+authored occurrence and never construct a demand; a component that does
+observe owns the ordinary `Flow` collection and its coroutine lifecycle.
+Authored relay/author/kind hints remain data until a purpose owner explicitly
+validates or promotes them. See `docs/builder/34-content.md`.
 
 ## Building from a clean clone
 

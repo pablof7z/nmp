@@ -12,7 +12,7 @@ use nmp::NostrEntity;
 use crate::convert::FfiError;
 use crate::types::FfiNostrEntity;
 
-fn entity_to_ffi(entity: NostrEntity) -> FfiNostrEntity {
+pub(crate) fn entity_to_ffi(entity: NostrEntity) -> FfiNostrEntity {
     match entity {
         NostrEntity::Pubkey { pubkey } => FfiNostrEntity::Pubkey { pubkey },
         NostrEntity::Profile { pubkey, relays } => FfiNostrEntity::Profile { pubkey, relays },
