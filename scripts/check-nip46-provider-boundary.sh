@@ -16,6 +16,7 @@ required_paths=(
   crates/nmp-ffi/build.rs
   crates/nmp-ffi/src/signer.rs
   crates/nmp-nip46/src/nip46.rs
+  crates/nmp-nip46-ffi/metadata-audit.rs
   crates/nmp-nip46-ffi/src/signer.rs
   Packages/NMP/Sources/NMP/ProviderComponent.swift
   Packages/NMPNip46/Package.swift
@@ -97,10 +98,13 @@ grep -qF 'pub fn verify_nip46_core_component_identity(' crates/nmp-nip46-ffi/src
   fail "NIP-46 provider does not verify plain core identity before object exchange"
 grep -qF 'compatibility: Arc<FfiNip46CoreCompatibility>' crates/nmp-nip46-ffi/src/signer.rs ||
   fail "NIP-46 provider construction does not require a compatibility proof"
-grep -qF 'syn::parse_file(&source)' crates/nmp-nip46-ffi/src/signer.rs ||
-  fail "mailbox-entry falsifier does not parse every provider Rust source structurally"
-grep -qF 'fn visit_use_rename' crates/nmp-nip46-ffi/src/signer.rs ||
-  fail "mailbox-entry falsifier does not forbid aliases that hide the external type"
+grep -qF 'macro_metadata::extract_from_library' crates/nmp-nip46-ffi/metadata-audit.rs ||
+  fail "mailbox-entry falsifier does not inspect UniFFI's compiled export authority"
+grep -qF 'compiled UniFFI metadata must expose exactly one proof-bearing mailbox entry' \
+  crates/nmp-nip46-ffi/metadata-audit.rs ||
+  fail "compiled provider metadata does not enforce the single proof-bearing mailbox entry"
+grep -qF -- '--bin nmp-nip46-metadata-audit' scripts/build-component-release.sh ||
+  fail "managed provider builds do not audit compiled UniFFI metadata before packaging"
 grep -qF 'withVerifiedNip46Core(actual: nmpProviderCoreComponentIdentity())' \
   Packages/NMPNip46/Sources/NMPNip46/RemoteSigner.swift ||
   fail "Swift provider does not verify the loaded core before requesting a mailbox"

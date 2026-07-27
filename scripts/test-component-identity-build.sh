@@ -11,7 +11,13 @@ cd "$ROOT"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/nmp-component-build.XXXXXX")
 CORE_ARTIFACT_DIR=
 PAIR_ARTIFACT_DIR=
+LOCK_HOLDER_PID=
 cleanup() {
+  if [[ -n "$LOCK_HOLDER_PID" ]]; then
+    printf '%s\n' release >"$TMP/lock-release" 2>/dev/null || true
+    kill "$LOCK_HOLDER_PID" 2>/dev/null || true
+    wait "$LOCK_HOLDER_PID" 2>/dev/null || true
+  fi
   rm -r "$TMP"
   for directory in "$CORE_ARTIFACT_DIR" "$PAIR_ARTIFACT_DIR"; do
     if [[ -n "$directory" && -d "$directory" ]]; then
@@ -34,6 +40,10 @@ HOST_TARGET=$(rustc -vV | sed -n 's/^host: //p')
   exit 1
 }
 cargo fetch --locked
+CORE_TARGET_DIR="$BASE_TARGET_DIR/nmp-component-build/core"
+PAIR_TARGET_DIR="$BASE_TARGET_DIR/nmp-component-build/nip46"
+mkdir -p "$CORE_TARGET_DIR"
+printf '%s\n' stale-file-with-no-live-kernel-lock > "$CORE_TARGET_DIR/.builder-lock"
 CORE_ARTIFACT_DIR=$(
   scripts/build-component-release.sh "$BASE_TARGET_DIR" "nmp-ffi" "$HOST_TARGET"
 )
@@ -41,8 +51,6 @@ PAIR_ARTIFACT_DIR=$(
   scripts/build-component-release.sh \
     "$BASE_TARGET_DIR" "nmp-ffi nmp-nip46-ffi" "$HOST_TARGET"
 )
-CORE_TARGET_DIR="$BASE_TARGET_DIR/nmp-component-build/core"
-PAIR_TARGET_DIR="$BASE_TARGET_DIR/nmp-component-build/nip46"
 
 assert_unmanaged_refused() {
   local label=$1
@@ -89,15 +97,32 @@ for artifact_dir in "$CORE_ARTIFACT_DIR" "$PAIR_ARTIFACT_DIR"; do
   }
 done
 
-mkdir "$CORE_TARGET_DIR/.builder-lock"
+mkfifo "$TMP/lock-ready" "$TMP/lock-release"
+perl -MFcntl=:flock -e '
+  my ($lock_file, $ready_pipe, $release_pipe) = @ARGV;
+  open(my $lock, ">>", $lock_file) or die "open $lock_file: $!\n";
+  flock($lock, LOCK_EX) or die "lock $lock_file: $!\n";
+  open(my $ready, ">", $ready_pipe) or die "open $ready_pipe: $!\n";
+  print {$ready} "ready\n";
+  close($ready);
+  open(my $release, "<", $release_pipe) or die "open $release_pipe: $!\n";
+  <$release>;
+' "$CORE_TARGET_DIR/.builder-lock" "$TMP/lock-ready" "$TMP/lock-release" &
+LOCK_HOLDER_PID=$!
+IFS= read -r lock_ready <"$TMP/lock-ready"
+[[ "$lock_ready" == ready ]] || {
+  echo "component-identity-build: lock-holder process did not report readiness" >&2
+  exit 1
+}
 if scripts/build-component-release.sh \
   "$BASE_TARGET_DIR" "nmp-ffi" "$HOST_TARGET" >"$TMP/concurrent-output" 2>&1
 then
   echo "component-identity-build: concurrent managed build unexpectedly succeeded" >&2
-  rmdir "$CORE_TARGET_DIR/.builder-lock"
   exit 1
 fi
-rmdir "$CORE_TARGET_DIR/.builder-lock"
+printf '%s\n' release >"$TMP/lock-release"
+wait "$LOCK_HOLDER_PID" 2>/dev/null || true
+LOCK_HOLDER_PID=
 grep -qF \
   "another supported core build is already using $CORE_TARGET_DIR" \
   "$TMP/concurrent-output" || {

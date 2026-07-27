@@ -2243,15 +2243,17 @@ dependencies = [
 name = "nmp-nip46-ffi"
 version = "0.1.0"
 dependencies = [
+ "camino",
  "nmp",
  "nmp-ffi",
  "nmp-nip46",
  "nostr 0.44.4",
- "syn",
  "tempfile",
  "tokio",
  "tungstenite 0.29.0",
  "uniffi",
+ "uniffi_bindgen",
+ "uniffi_meta",
  "url",
 ]
 

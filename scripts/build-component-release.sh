@@ -39,20 +39,39 @@ COMPONENT_TARGET_DIR="$BASE_TARGET_DIR/nmp-component-build/$PACKAGE_SET"
 MARKER_DIR="$COMPONENT_TARGET_DIR/.nmp-component-build-v1"
 MARKER="$MARKER_DIR/$TARGET"
 AUTHORIZATION="$MARKER_DIR/.authorization"
-LOCK_DIR="$COMPONENT_TARGET_DIR/.builder-lock"
+LOCK_FILE="$COMPONENT_TARGET_DIR/.builder-lock"
 ARTIFACT_PARENT="$BASE_TARGET_DIR/nmp-component-artifacts/$PACKAGE_SET"
 ARTIFACT_SNAPSHOT=
 
 mkdir -p "$MARKER_DIR" "$ARTIFACT_PARENT"
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  echo "component-build: another supported $PACKAGE_SET build is already using $COMPONENT_TARGET_DIR" >&2
-  exit 1
+
+# Hold one kernel-owned advisory lock for the whole managed build. The lock
+# descriptor survives the exec into this script and is inherited by Cargo and
+# rustc, so SIGKILL of the shell cannot permit a second writer while a child is
+# still using the target. A stale lock file is harmless: the kernel lock, not
+# file existence or a recorded PID, is the authority.
+if [[ ${NMP_COMPONENT_BUILD_LOCK_HELD:-} != 1 ]]; then
+  command -v perl >/dev/null 2>&1 || {
+    echo "component-build: perl is required for the portable package-set lock" >&2
+    exit 1
+  }
+  exec perl -MFcntl=:flock,F_SETFD -e '
+    my ($lock_file, $package_set, $target_dir, @command) = @ARGV;
+    open(my $lock, ">>", $lock_file)
+      or die "component-build: open $lock_file: $!\n";
+    flock($lock, LOCK_EX | LOCK_NB)
+      or die "component-build: another supported $package_set build is already using $target_dir\n";
+    fcntl($lock, F_SETFD, 0)
+      or die "component-build: preserve package-set lock across exec: $!\n";
+    $ENV{NMP_COMPONENT_BUILD_LOCK_HELD} = "1";
+    exec @command
+      or die "component-build: restart under package-set lock: $!\n";
+  ' "$LOCK_FILE" "$PACKAGE_SET" "$COMPONENT_TARGET_DIR" "$0" "$@"
 fi
 
 cleanup() {
   local exit_code=$?
   rm -f "$AUTHORIZATION"
-  rmdir "$LOCK_DIR" 2>/dev/null || true
   if [[ $exit_code -ne 0 && -n "$ARTIFACT_SNAPSHOT" && -d "$ARTIFACT_SNAPSHOT" ]]; then
     chmod -R u+w "$ARTIFACT_SNAPSHOT" 2>/dev/null || true
     rm -r "$ARTIFACT_SNAPSHOT"
@@ -82,11 +101,15 @@ NMP_FFI_COMPONENT_AUTH="$AUTH_TOKEN" \
   cargo build --frozen "${PACKAGE_ARGS[@]}" --release --target "$TARGET" 1>&2
 
 RELEASE_DIR="$COMPONENT_TARGET_DIR/$TARGET/release"
+PROVIDER_LIBRARY=
 for stem in "${REQUIRED_LIB_STEMS[@]}"; do
   found=0
   for extension in a so dylib; do
     if [[ -f "$RELEASE_DIR/lib$stem.$extension" ]]; then
       found=1
+      if [[ "$stem" == nmp_nip46_ffi ]]; then
+        PROVIDER_LIBRARY="$RELEASE_DIR/lib$stem.$extension"
+      fi
       break
     fi
   done
@@ -95,6 +118,14 @@ for stem in "${REQUIRED_LIB_STEMS[@]}"; do
     exit 1
   fi
 done
+
+if [[ "$PACKAGE_SET" == nip46 ]]; then
+  echo "component-build: audit compiled provider metadata" >&2
+  cargo run --frozen --quiet \
+    -p nmp-nip46-ffi \
+    --bin nmp-nip46-metadata-audit \
+    -- "$PROVIDER_LIBRARY" 1>&2
+fi
 
 ARTIFACT_SNAPSHOT=$(mktemp -d "$ARTIFACT_PARENT/$TARGET.XXXXXX")
 for artifact in \

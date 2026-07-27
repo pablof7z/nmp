@@ -104,7 +104,12 @@ about current code:
   and hold a per-build authorization only inside the managed Cargo subprocess.
   Before that authorization is revoked, the managed builder copies the exact
   outputs into a fresh artifact snapshot; Swift/Kotlin packaging reads only
-  that snapshot, never the mutable Cargo target. `build.rs` canonicalizes both
+  that snapshot, never the mutable Cargo target. Before exposing the snapshot,
+  the builder extracts UniFFI's compiled metadata from the provider library
+  and requires exactly one provider entry carrying the core mailbox, with the
+  compatibility proof in that constructor's inputs. This audits the same
+  authority bindgen consumes, independent of source location, macro expansion,
+  aliases, records, or other Rust spelling. `build.rs` canonicalizes both
   the component root and its actual `OUT_DIR`, then requires the exact
   `<target>/release/build/nmp-ffi-*/out` layout, so nested targets, `..`
   escapes, and custom profile directories cannot inherit the authorization.
@@ -114,7 +119,10 @@ about current code:
   governed core/fixture input, and compiler/build inputs. An ad-hoc release
   invocation cannot accidentally write or replace a package input; concurrent
   managed builds of one package set refuse with a specific lock error rather
-  than rotating each other's authorization. Debug/IDE builds remain available
+  than rotating each other's authorization. The kernel-held lock remains owned
+  by any surviving Cargo/rustc descendants after a killed shell and releases
+  automatically when the last holder exits; stale lock-file bytes alone never
+  block a later build. Debug/IDE builds remain available
   but are not packaging inputs. External path patches
   that cannot be reproduced from the repository are refused. Swift and Kotlin
   compare the embedded identities before requesting the opaque mailbox, and a

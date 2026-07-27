@@ -13,16 +13,22 @@ name = "nmp_nip46_ffi"
 name = "nmp-nip46-uniffi-bindgen"
 path = "uniffi-bindgen.rs"
 
+[[bin]]
+name = "nmp-nip46-metadata-audit"
+path = "metadata-audit.rs"
+
 [dependencies]
+camino = "1"
 nostr.workspace = true
 nmp.workspace = true
 nmp-ffi = { workspace = true, features = ["nip46-provider-component"] }
 nmp-nip46.workspace = true
 uniffi = { workspace = true, features = ["cli"] }
+uniffi_bindgen = "0.29"
+uniffi_meta = "0.29"
 tokio = { version = "1", features = ["rt", "time", "net"] }
 
 [dev-dependencies]
-syn = { version = "2", features = ["full", "visit"] }
 tempfile = "3"
 tungstenite = "0.29"
 url = "2"
