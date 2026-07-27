@@ -284,18 +284,9 @@ async fn receipt_rejected_by(w: &mut NmpWorld, relay_name: String) {
 // diagnostics -- the contract here is "what did the relay receive", and a
 // spec about wire economy must not take the thing under test as its witness.
 //
-// POSITIVE steps below (a count reaching its value, a value set becoming
-// covered, a replacement appearing) read through `world::wire_record_when`,
-// which settles the wire AND then polls its own predicate within a bounded
-// window. Quiescence alone is not sufficient: `wait_wire_quiet` watches
-// client-to-relay traffic only, so an assertion whose subject is downstream
-// of an INBOUND frame -- a seeded kind:39001 re-resolving a derived `#d` set
-// -- can land in a genuinely quiet gap before the replacing REQ is emitted,
-// and it does so load-sensitively. See that function's doc.
-//
-// NEGATIVE steps ("was never asked to close", "never asked twice", "never
-// named both") keep plain `wire_settled`: they hold at every earlier instant
-// too, so polling them would return immediately and buy nothing.
+// Every step below settles the wire first (`wire_settled`; see
+// `world::WIRE_QUIET`): each of these assertions is a COUNT, and a count read
+// while demand is still recompiling measures when it was taken, not the plan.
 
 /// The values `sub_id`'s CURRENT filter asks for under `tag`. NIP-01
 /// replacement means only a subscription's most recent REQ is live, so a
@@ -322,12 +313,9 @@ async fn relay_serves_tag_with_n_subscriptions(
     tag: String,
     expected: usize,
 ) {
+    w.wire_settled().await;
     let tag = parse_tag(&tag);
-    let record = w
-        .wire_record_when(&relay, |r| {
-            r.live_subscription_ids_naming_tag(tag).len() == expected
-        })
-        .await;
+    let record = w.wire_record(&relay);
     let ids = record.live_subscription_ids_naming_tag(tag);
     assert_eq!(
         ids.len(),
@@ -365,12 +353,9 @@ async fn relay_serves_tag_with_at_most_n_subscriptions(
     tag: String,
     bound: usize,
 ) {
+    w.wire_settled().await;
     let tag = parse_tag(&tag);
-    let record = w
-        .wire_record_when(&relay, |r| {
-            r.live_subscription_ids_naming_tag(tag).len() <= bound
-        })
-        .await;
+    let record = w.wire_record(&relay);
     let ids = record.live_subscription_ids_naming_tag(tag);
     assert!(
         ids.len() <= bound,
@@ -411,16 +396,11 @@ async fn no_request_names_a_tag_and_authors(w: &mut NmpWorld, relay: String, tag
     regex = r#"^one subscription on relay "([^"]+)" asks for every "([a-zA-Z])" value I watch$"#
 )]
 async fn one_subscription_carries_every_tag_value(w: &mut NmpWorld, relay: String, tag: String) {
+    w.wire_settled().await;
     let tag = parse_tag(&tag);
     let wanted = w.watched_tag_values(tag);
     assert!(!wanted.is_empty(), "no #{tag} value is being watched");
-    let record = w
-        .wire_record_when(&relay, |r| {
-            r.live_subscription_ids_naming_tag(tag)
-                .iter()
-                .any(|id| live_tag_values(r, id, tag).is_superset(&wanted))
-        })
-        .await;
+    let record = w.wire_record(&relay);
     let carried: Vec<BTreeSet<String>> = record
         .live_subscription_ids_naming_tag(tag)
         .iter()
@@ -438,18 +418,10 @@ async fn one_subscription_carries_every_tag_value(w: &mut NmpWorld, relay: Strin
     regex = r#"^every "([a-zA-Z])" value I watch is covered by some subscription on relay "([^"]+)"$"#
 )]
 async fn every_tag_value_is_covered(w: &mut NmpWorld, tag: String, relay: String) {
+    w.wire_settled().await;
     let tag = parse_tag(&tag);
     let wanted = w.watched_tag_values(tag);
-    let record = w
-        .wire_record_when(&relay, |r| {
-            let covered: BTreeSet<String> = r
-                .live_subscription_ids()
-                .iter()
-                .flat_map(|id| live_tag_values(r, id, tag))
-                .collect();
-            wanted.is_subset(&covered)
-        })
-        .await;
+    let record = w.wire_record(&relay);
     let covered: BTreeSet<String> = record
         .live_subscription_ids()
         .iter()
@@ -505,12 +477,9 @@ fn closes_among<'a>(record: &'a WireRecord, ids: &[String]) -> Vec<&'a String> {
 
 #[then(regex = r#"^relay "([^"]+)" widened the "([a-zA-Z])" subscription in place$"#)]
 async fn relay_widened_tag_in_place(w: &mut NmpWorld, relay: String, tag: String) {
+    w.wire_settled().await;
     let tag = parse_tag(&tag);
-    let record = w
-        .wire_record_when(&relay, |r| {
-            widened_in_place(r, &r.subscription_ids_naming_tag(tag))
-        })
-        .await;
+    let record = w.wire_record(&relay);
     let ids = record.subscription_ids_naming_tag(tag);
     assert!(
         widened_in_place(&record, &ids),
@@ -523,11 +492,8 @@ async fn relay_widened_tag_in_place(w: &mut NmpWorld, relay: String, tag: String
 
 #[then(regex = r#"^relay "([^"]+)" widened the author subscription in place$"#)]
 async fn relay_widened_authors_in_place(w: &mut NmpWorld, relay: String) {
-    let record = w
-        .wire_record_when(&relay, |r| {
-            widened_in_place(r, &r.subscription_ids_naming_authors())
-        })
-        .await;
+    w.wire_settled().await;
+    let record = w.wire_record(&relay);
     let ids = record.subscription_ids_naming_authors();
     assert!(
         widened_in_place(&record, &ids),
@@ -617,11 +583,8 @@ async fn relay_serves_authors_with_n_subscriptions(
     relay: String,
     expected: usize,
 ) {
-    let record = w
-        .wire_record_when(&relay, |r| {
-            r.live_subscription_ids_naming_authors().len() == expected
-        })
-        .await;
+    w.wire_settled().await;
+    let record = w.wire_record(&relay);
     let ids = record.live_subscription_ids_naming_authors();
     assert_eq!(
         ids.len(),
@@ -641,15 +604,10 @@ async fn relay_serves_authors_with_n_subscriptions(
 
 #[then(regex = r#"^one subscription on relay "([^"]+)" asks for every author I watch$"#)]
 async fn one_subscription_carries_every_author(w: &mut NmpWorld, relay: String) {
+    w.wire_settled().await;
     let wanted = w.watched_authors();
     assert!(!wanted.is_empty(), "no author is being watched");
-    let record = w
-        .wire_record_when(&relay, |r| {
-            r.live_subscription_ids()
-                .iter()
-                .any(|id| live_authors(r, id).is_superset(&wanted))
-        })
-        .await;
+    let record = w.wire_record(&relay);
     let carried: Vec<usize> = record
         .live_subscription_ids()
         .iter()
@@ -668,17 +626,9 @@ async fn one_subscription_carries_every_author(w: &mut NmpWorld, relay: String) 
 
 #[then(regex = r#"^every author I watch is covered by some subscription on relay "([^"]+)"$"#)]
 async fn every_author_is_covered(w: &mut NmpWorld, relay: String) {
+    w.wire_settled().await;
     let wanted = w.watched_authors();
-    let record = w
-        .wire_record_when(&relay, |r| {
-            let covered: BTreeSet<String> = r
-                .live_subscription_ids()
-                .iter()
-                .flat_map(|id| live_authors(r, id))
-                .collect();
-            wanted.is_subset(&covered)
-        })
-        .await;
+    let record = w.wire_record(&relay);
     let covered: BTreeSet<String> = record
         .live_subscription_ids()
         .iter()

@@ -592,6 +592,48 @@ already exhibits (an 8-author filter shrinking one value at a time, never a
 CLOSE). Explicit closure is needed only where the demand is genuinely gone, not
 merely narrower.
 
+### 8.1c OPEN — in-place replacement is not deterministic under a live engine
+
+Found while un-`@wip`ing the BDD scenarios, and reported rather than fixed
+because fixing it is a bigger change than the collapse it was found under.
+
+The wire `Then` steps read the relay's socket ONCE, after the client wire has
+been quiet for a window. That is not sufficient for any assertion whose subject
+is downstream of an INBOUND frame: `wait_wire_quiet` watches client-to-relay
+traffic only, so "seed a kind:39001 → relay pushes it → the client ingests,
+re-resolves the derived set, recompiles, emits a REQ" has a genuinely quiet
+client wire in the middle of it. The read lands in that gap and reports what
+had happened by then.
+
+Making those steps poll (`nmp_bdd::world::wire_record_when`) was tried. It is
+more honest, and what it honestly showed is that the **in-place-replacement
+family of claims does not hold on every interleaving, on EITHER axis**.
+Measured over eight consecutive suite runs against real in-process relays:
+
+- a three-value `#p` watch then dropping one closed **two** subscriptions;
+- the derived five-groups-then-one `#d` sequence closed **one**, and in another
+  run opened a second subscription instead of widening;
+- **the pre-existing author-axis regression guards flaked identically** — they
+  had been green only because the one-shot read landed before the CLOSE.
+
+The end state was correct every time: one subscription carrying every value,
+nothing under-fetching. So this is CHURN, not a correctness defect, and it is
+not something the structural rule introduced — the author axis has behaved this
+way for as long as those scenarios have existed.
+
+The mechanism is interleaving. `tag_fanout_churn.rs` presents every growth step
+as one recompile over the whole demand set and measures ZERO closes,
+deterministically. A live engine does not guarantee one recompile per demand:
+two can land in separate compiles, the coalescer's grouping can differ between
+them, and a token that no longer names any filter is retired rather than
+replaced.
+
+Fixing it properly means either making the recompile boundary deterministic, or
+giving the harness a way to await a specific plan generation rather than a
+quiet socket. Until then the polling helper stays, used only to SEQUENCE a
+stimulus (so "one more group" arrives after the first subscription is genuinely
+live), never to take an assertion.
+
 ### 8.2 OPEN — the Close/reopen straggler race
 
 The coverage ruling assumed a Close leaves pending snapshots to be "harmlessly

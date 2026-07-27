@@ -490,6 +490,58 @@ fn b_warm_cache_resolves_the_whole_set_in_one_recompile() {
     assert_eq!(step.replaced, 0);
 }
 
+/// B2 — THE CASE THE BDD SUITE FAILED ON, reduced to a deterministic ledger:
+/// a WARM set resolved together, and then ONE more value arriving live.
+///
+/// A grows one at a time from cold and B resolves five at once, but nothing
+/// covered the join between them, which is the shape a real app has
+/// constantly: a catalog is already known, and then one more entry appears.
+/// `features/routing/subscription-collapse.feature`'s "Learning about one more
+/// group replaces the subscription in place" exercises exactly this against a
+/// live engine, and it was the one scenario that would not stay green.
+///
+/// What must hold is what A already proves for the cold path: the sixth value
+/// is a ONE-COMPONENT difference from the live five-value filter, so it
+/// replaces that filter on its own token. One REQ, no open, no close.
+#[test]
+fn b2_one_more_value_after_a_warm_set_replaces_in_place() {
+    let r0 = relay(0);
+    let mut study = Study::new(std::slice::from_ref(&r0));
+    for n in 1..=5 {
+        study.preload_admin_of(&r0, 0, &format!("group-{n}"));
+    }
+    study.subscribe(
+        std::slice::from_ref(&r0),
+        "subscribe (5 values already cached)",
+    );
+    assert_eq!(
+        study.ledger.live_outer_count(),
+        1,
+        "precondition: the warm set is ONE live outer sub"
+    );
+    assert_eq!(study.ledger.widest_outer(), 5);
+
+    let step = study.admin_of(&r0, 0, "s", "group-6", "admin of a SIXTH group");
+    study
+        .ledger
+        .report("B2. warm set of 5, then one more arriving live");
+
+    assert_eq!(
+        step,
+        StepCount {
+            opened: 0,
+            replaced: 1,
+            closed: 0
+        },
+        "the sixth value must REPLACE the live outer filter in place -- opening \
+         a second sub (or closing and reopening) is the churn this design \
+         exists to remove"
+    );
+    assert_eq!(study.ledger.live_outer_count(), 1);
+    assert_eq!(study.ledger.widest_outer(), 6);
+    assert_eq!(study.ledger.total.closed, 0);
+}
+
 // ---- C. growth before vs after EOSE ------------------------------------
 
 /// C — does inner-set growth AFTER the inner subscription's EOSE behave

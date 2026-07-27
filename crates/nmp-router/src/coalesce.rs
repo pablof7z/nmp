@@ -107,10 +107,10 @@ impl MergeRule for StructuralUnion {
         // `None` means zero components differ (exact duplicates --
         // `coalesce_with`'s hash dedup owns those, and a rule that "merged"
         // them would spin the fixed point) or that two or more do.
-        let component = &sole_difference(a, b)?;
+        let component = sole_difference(a, b)?;
 
         let mut merged = a.clone();
-        match component {
+        match &component {
             // Scalars must be EQUAL. `since`/`until` are BOUNDS, not value
             // sets: there is no union of two windows that is not either a
             // narrowing or a widening far past both operands, and a filter is

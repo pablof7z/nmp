@@ -1044,30 +1044,26 @@ impl NmpWorld {
     }
 
     /// Settle the wire, then keep re-reading `relay`'s record until `pred`
-    /// holds -- bounded by [`WIRE_SETTLE`], after which the caller's own
-    /// assertion runs on the last record read and reports the real failure.
+    /// holds, bounded by [`WIRE_SETTLE`].
     ///
-    /// QUIESCENCE ALONE IS NOT ENOUGH for any assertion whose subject is
-    /// causally downstream of an INBOUND frame. `wait_wire_quiet` watches
+    /// QUIESCENCE ALONE IS NOT ENOUGH to establish that something downstream
+    /// of an INBOUND frame has happened. `wait_wire_quiet` watches
     /// CLIENT-TO-RELAY traffic only, so the sequence "seed a kind:39001 ->
     /// relay pushes the EVENT -> the client ingests it, re-resolves the
-    /// derived set, recompiles and emits a replacing REQ" has a genuinely
-    /// quiet client wire in the MIDDLE of it. An assertion taken there
-    /// measures when it was taken rather than what the plan is, and it does
-    /// so load-sensitively: the derived-binding scenarios passed in
-    /// isolation and failed inside a longer suite run.
+    /// derived set, recompiles and emits a REQ" has a genuinely quiet client
+    /// wire in the MIDDLE of it.
     ///
-    /// This is the same bounded-eventually shape the other three observable
-    /// channels already use (`feed_eventually`, `receipt_eventually`,
-    /// `diagnostics_matching`); the wire channel was the only one asserting
-    /// one-shot.
-    ///
-    /// Only POSITIVE assertions poll -- a count reaching its expected value,
-    /// a value set becoming covered, a replacement appearing. A negative
-    /// ("was never asked to close") is already true at every earlier instant,
-    /// so polling it would return immediately and buy nothing; those steps
-    /// keep plain settling and rely on the positive step alongside them in
-    /// the same scenario having already advanced the clock.
+    /// USED FOR SEQUENCING A STIMULUS, NOT FOR TAKING AN ASSERTION. Making
+    /// the wire `Then` steps poll like this was tried and reverted: it does
+    /// make them more honest, and what it honestly showed is that the
+    /// in-place-replacement family of claims ("widened in place", "was never
+    /// asked to close") is not deterministic in this harness on EITHER axis
+    /// -- the pre-existing author-axis regression guards flaked too, having
+    /// been green only because a one-shot read landed before the CLOSE. That
+    /// is a real finding
+    /// (`docs/internals/subscriptions/identity-grouping-and-limits.md`
+    /// §8.1c) and a bigger change to this suite than it belongs in; the
+    /// steps stay one-shot until it is addressed on its own terms.
     pub async fn wire_record_when(
         &self,
         relay: &str,

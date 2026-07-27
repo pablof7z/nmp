@@ -60,6 +60,13 @@ pub(crate) enum Component {
 
 /// Every signature component in which `a` and `b` disagree.
 ///
+/// THE EXHAUSTIVE FORM, and deliberately test-only: both production callers
+/// ask only "is there exactly one difference, and which", which
+/// [`sole_difference`] answers without building a list. This one survives
+/// because it is the readable statement of the model and the thing the tests
+/// assert against ("these two filters differ in TWO components"), with
+/// `sole_difference_agrees_with_differing` pinning the fast path to it.
+///
 /// A field that is `None` in one filter and `Some` in the other DOES differ —
 /// including `authors: None` vs `authors: Some(∅)`, which are distinct
 /// selections (absent dimension vs a dimension constrained to nothing), and a
@@ -74,6 +81,7 @@ pub(crate) enum Component {
 /// `b`'s constraint entirely, violating the widen-only contract. Binding
 /// every field by name makes adding an eighth field a compile error here
 /// rather than a silent defect in two places at once.
+#[cfg(test)]
 pub(crate) fn differing(a: &ConcreteFilter, b: &ConcreteFilter) -> Vec<Component> {
     let ConcreteFilter {
         kinds: a_kinds,

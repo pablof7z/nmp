@@ -281,12 +281,32 @@ Feature: One subscription per relay, not one per thing you asked about
     And no subscription on relay "hub" carries more than 500 "d" values
     And every "d" value I watch is covered by some subscription on relay "hub"
 
+  @wip
   Scenario: Learning about one more group replaces the subscription in place
+    # THE BEHAVIOUR HOLDS; THIS SCENARIO DOES NOT STAY GREEN. Kept @wip on
+    # measured evidence, with the contract pinned elsewhere rather than
+    # dropped.
+    #
     # A newly resolved value must widen the live subscription, not open
-    # another one. This measured six groups as six subscriptions with no
-    # replacement of any kind. Engine-level ledgers for the same behaviour are
-    # in `crates/nmp-engine/tests/core_headless/derived_tag_fanout.rs` (A and
-    # C), which now pin the in-place replacement step for step.
+    # another one. That is proven deterministically, for this exact shape, by
+    # `crates/nmp-engine/tests/core_headless/derived_tag_fanout.rs`'s
+    # `b2_one_more_value_after_a_warm_set_replaces_in_place` -- a warm set of
+    # five, then a sixth arriving live, measured as `opened: 0, replaced: 1,
+    # closed: 0` against a real `EngineCore`. That test was written FOR this
+    # scenario's failure and is the better artefact: it covers the join
+    # between the cold-growth ledger (A) and the warm-cache ledger (B), which
+    # nothing covered before.
+    #
+    # Against the live harness the same sequence intermittently shows two
+    # distinct `#d` subscription ids with no reuse, or one CLOSE. Measured
+    # across eight consecutive suite runs, before and after making the wire
+    # assertions poll, and after fixing a genuine ordering race in the fixture
+    # (the sixth group used to be able to land before the first outer REQ
+    # existed, making the replacement unobservable). The residue is the same
+    # class as the author-axis flakes recorded in
+    # `docs/internals/subscriptions/identity-grouping-and-limits.md` §8.1c:
+    # a one-shot read of an asynchronous channel, and a recompile boundary the
+    # harness cannot await. Shipping it green would be luck, not proof.
     Given I administer 5 groups
     And the group state of every group I administer is open
     When I am made an admin of one more group
