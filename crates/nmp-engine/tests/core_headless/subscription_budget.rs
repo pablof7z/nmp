@@ -61,7 +61,9 @@ struct LiveWire(BTreeSet<SubId>);
 impl LiveWire {
     fn apply(&mut self, effects: &[Effect]) {
         for effect in effects {
-            let Effect::Wire(delta) = effect else { continue };
+            let Effect::Wire(delta) = effect else {
+                continue;
+            };
             for (_, ops) in &delta.ops {
                 for op in ops {
                     match op {

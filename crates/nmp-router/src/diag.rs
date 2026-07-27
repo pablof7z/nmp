@@ -92,8 +92,7 @@ pub(crate) fn build(
                     .get(session)
                     .map_or(0, |shortfall| shortfall.refused),
                 subid_length_limit: budget.max_subid_length(&session.relay),
-                subid_length_rejects_our_ids: budget
-                    .rejects_our_subscription_ids(&session.relay),
+                subid_length_rejects_our_ids: budget.rejects_our_subscription_ids(&session.relay),
             },
         );
     }

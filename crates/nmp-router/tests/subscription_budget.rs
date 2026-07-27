@@ -115,7 +115,11 @@ fn an_unadvertised_relay_carries_every_subscription() {
 
     r.compile(&demand, &dir, CompileBudget::with_relay_cap(RELAY_CAP));
 
-    assert_eq!(live_subs(&r), 30, "an unadvertised relay must not be capped");
+    assert_eq!(
+        live_subs(&r),
+        30,
+        "an unadvertised relay must not be capped"
+    );
     assert!(
         r.plan().limited.is_empty(),
         "nothing may be reported as limited when no budget was advertised"
@@ -393,7 +397,10 @@ fn advertised_limits_never_move_an_established_wire_id() {
         .map(|req| req.sub_id.clone())
         .collect();
 
-    assert_eq!(before, after, "a refreshed document must not rename anything");
+    assert_eq!(
+        before, after,
+        "a refreshed document must not rename anything"
+    );
     assert!(delta.ops.is_empty(), "nor cost a single wire op");
 }
 

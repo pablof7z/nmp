@@ -1486,8 +1486,8 @@ impl<S: EventStore> EngineCore<S> {
     /// established id would be identity instability
     /// (`docs/internals/subscriptions/identity-grouping-and-limits.md` §6).
     fn compile_budget(&self) -> CompileBudget {
-        CompileBudget::with_relay_cap(self.cap).advertising_all(
-            self.nip11_information.iter().map(|(relay, information)| {
+        CompileBudget::with_relay_cap(self.cap).advertising_all(self.nip11_information.iter().map(
+            |(relay, information)| {
                 (
                     relay.clone(),
                     AdvertisedRelayLimits {
@@ -1499,8 +1499,8 @@ impl<S: EventStore> EngineCore<S> {
                             .map(|value| usize::try_from(value).unwrap_or(usize::MAX)),
                     },
                 )
-            }),
-        )
+            },
+        ))
     }
 
     /// The engine-global diagnostics projection (M5 plan §1.2 step 2) — "the

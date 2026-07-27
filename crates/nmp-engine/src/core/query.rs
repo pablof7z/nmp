@@ -89,9 +89,11 @@ impl<S: EventStore> EngineCore<S> {
         self.attribution.prune_shapes(demand.iter());
         let admitted_demand = self.admit_projected_routing_evidence(&demand);
         let previous_plan = self.router.plan().clone();
-        let wire_delta: WireDelta =
-            self.router
-                .compile(&admitted_demand, self.directory.as_ref(), self.compile_budget());
+        let wire_delta: WireDelta = self.router.compile(
+            &admitted_demand,
+            self.directory.as_ref(),
+            self.compile_budget(),
+        );
         let planned = &self.router.plan().reqs;
         // NIP-11 evidence is retained for any URL that appears as SOME
         // planned session's relay (#8): the document is per-URL evidence,

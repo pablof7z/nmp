@@ -59,6 +59,24 @@ async fn relay_never_confirms_eose(w: &mut NmpWorld, name: String) {
     w.set_reject_queries(&name);
 }
 
+/// The relay publishes a real NIP-11 document, served over plain HTTP on its
+/// own address, which the engine fetches through its own acquisition path.
+/// Nothing about the number is injected past the engine.
+#[given(regex = r#"^relay "([^"]+)" allows only (\d+) subscriptions? at a time$"#)]
+async fn relay_allows_only_n_subscriptions(w: &mut NmpWorld, name: String, max: u64) {
+    w.advertise_subscription_limit(&name, max);
+}
+
+#[given(regex = r#"^relay "([^"]+)" publishes nothing about itself$"#)]
+async fn relay_publishes_nothing(w: &mut NmpWorld, name: String) {
+    w.publish_no_relay_document(&name);
+}
+
+#[given(regex = r#"^relay "([^"]+)" accepts subscription names of at most (\d+) characters$"#)]
+async fn relay_accepts_subid_length(w: &mut NmpWorld, name: String, max: u64) {
+    w.advertise_subid_length(&name, max);
+}
+
 #[given(regex = r#"^(\S+)'s relay list names "([^"]+)" as (?:her|his|their) write relay$"#)]
 async fn person_write_relay(w: &mut NmpWorld, person: String, relay: String) {
     w.declare_write_relay(&person, &relay);
