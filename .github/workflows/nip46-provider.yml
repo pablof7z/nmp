@@ -76,6 +76,9 @@ jobs:
           cp target/release/libnmp_ffi.so "$RUNNER_TEMP/libnmp_ffi-core-only.so"
           scripts/build-kotlin-nip46-jvm.sh
 
+      - name: Refuse unmanaged release identity
+        run: scripts/test-component-identity-build.sh
+
       - name: Prove matched identity and package-set mismatch
         run: |
           scripts/check-nip46-component-identity.sh \

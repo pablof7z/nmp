@@ -33,6 +33,7 @@ pub fn canonicalize_unit_graph(value: &mut serde_json::Value, workspace: &Path) 
 
 pub fn validate_unit_graph_against_cargo(
     value: &serde_json::Value,
+    workspace: &Path,
     cargo_has_provider_component: bool,
 ) -> Result<(), String> {
     let units = value
@@ -40,8 +41,24 @@ pub fn validate_unit_graph_against_cargo(
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| "Cargo unit graph has no units array".to_owned())?;
     let mut observed = Vec::new();
+    let workspace_package_prefix = format!(
+        "path+file://{}/",
+        workspace
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+    );
 
     for unit in units {
+        let pkg_id = unit
+            .get("pkg_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Cargo unit graph unit has no package id".to_owned())?;
+        if pkg_id.starts_with("path+file://") && !pkg_id.starts_with(&workspace_package_prefix) {
+            return Err(format!(
+                "external path override is not a reproducible component input: {pkg_id}"
+            ));
+        }
         let is_nmp_ffi = unit
             .get("pkg_id")
             .and_then(serde_json::Value::as_str)
@@ -81,7 +98,7 @@ pub fn validate_unit_graph_against_cargo(
         *graph_has_provider_component != cargo_has_provider_component
     }) {
         return Err(format!(
-            "supplied Cargo unit graph disagrees with Cargo-resolved \
+            "derived Cargo unit graph disagrees with Cargo-resolved \
              {PROVIDER_COMPONENT_FEATURE}: graph={observed:?}, cargo={cargo_has_provider_component}"
         ));
     }

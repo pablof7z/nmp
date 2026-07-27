@@ -67,14 +67,8 @@ else
   TARGET_DIR="$REPO_ROOT/$TARGET_DIR_VALUE"
 fi
 
-UNIT_GRAPH_DIR="$TARGET_DIR/nmp-component-unit-graphs"
-mkdir -p "$UNIT_GRAPH_DIR"
-HOST_UNIT_GRAPH="$UNIT_GRAPH_DIR/host-release.json"
-cargo build -Z unstable-options --unit-graph \
-  "${CARGO_PACKAGE_ARGS[@]}" --release > "$HOST_UNIT_GRAPH"
-
 echo "== 1. cargo build (release, host triple) =="
-NMP_FFI_CARGO_UNIT_GRAPH="$HOST_UNIT_GRAPH" \
+NMP_FFI_COMPONENT_BUILD=1 \
   cargo build "${CARGO_PACKAGE_ARGS[@]}" --release
 
 HOST_LIB="$TARGET_DIR/release/$LIB_NAME"

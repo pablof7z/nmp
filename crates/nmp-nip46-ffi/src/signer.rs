@@ -1085,6 +1085,24 @@ mod tests {
     }
 
     #[test]
+    fn every_public_mailbox_entry_requires_compatibility_proof() {
+        let source = include_str!("signer.rs");
+        let signatures = source
+            .split("pub fn ")
+            .skip(1)
+            .map(|suffix| suffix.split_once('{').unwrap().0)
+            .filter(|signature| signature.contains("Arc<FfiSignerMailbox>"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            signatures.len(),
+            1,
+            "every public mailbox entry must remain one proof-bearing constructor"
+        );
+        assert!(signatures[0].contains("Arc<FfiNip46CoreCompatibility>"));
+    }
+
+    #[test]
     fn catalog_keeps_probe_launch_package_and_provider_distinct() {
         let primal = nip46_signer_catalog()
             .into_iter()

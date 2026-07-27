@@ -94,25 +94,70 @@ fn main() {
 }
 
 fn hash_cargo_unit_graph(workspace: &Path, hasher: &mut blake3::Hasher) {
-    println!("cargo:rerun-if-env-changed=NMP_FFI_CARGO_UNIT_GRAPH");
-    let Ok(path) = env::var("NMP_FFI_CARGO_UNIT_GRAPH") else {
-        assert_ne!(
-            env::var("PROFILE").as_deref(),
-            Ok("release"),
-            "release native components require NMP_FFI_CARGO_UNIT_GRAPH; use the supported Swift or Kotlin builder"
+    println!("cargo:rerun-if-env-changed=NMP_FFI_COMPONENT_BUILD");
+    // Cargo exposes a build-script profile class here: `debug` or `release`.
+    // Built-in `bench` is release-class too. Supported component builders use
+    // exact `--release`; every unmanaged release-class invocation fails below.
+    let profile = env::var("PROFILE").expect("Cargo supplies PROFILE");
+    assert!(
+        profile == "debug" || profile == "release",
+        "unknown Cargo build-script profile class: {profile}"
+    );
+    if profile == "release" {
+        assert_eq!(
+            env::var("NMP_FFI_COMPONENT_BUILD").as_deref(),
+            Ok("1"),
+            "release native components must use the supported Swift or Kotlin builder"
         );
-        add_field(hasher, "cargo-unit-graph", b"development-unresolved");
-        return;
-    };
-    let path = PathBuf::from(path);
-    println!("cargo:rerun-if-changed={}", path.display());
-    let bytes = fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    let mut graph: serde_json::Value = serde_json::from_slice(&bytes)
-        .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
+    }
+
     let cargo_has_provider_component =
         env::var_os("CARGO_FEATURE_NIP46_PROVIDER_COMPONENT").is_some();
-    component_identity::validate_unit_graph_against_cargo(&graph, cargo_has_provider_component)
-        .unwrap_or_else(|error| panic!("validate {}: {error}", path.display()));
+    let unexpected_features = env::vars()
+        .filter_map(|(key, _)| key.strip_prefix("CARGO_FEATURE_").map(str::to_owned))
+        .filter(|feature| feature != "DEFAULT" && feature != "NIP46_PROVIDER_COMPONENT")
+        .collect::<Vec<_>>();
+    assert!(
+        unexpected_features.is_empty(),
+        "component identity must explicitly resolve new nmp-ffi features: {unexpected_features:?}"
+    );
+
+    let cargo = env::var_os("CARGO").expect("Cargo supplies CARGO");
+    let target = env::var("TARGET").expect("Cargo supplies TARGET");
+    let mut command = Command::new(cargo);
+    command.current_dir(workspace).args([
+        "build",
+        "-Z",
+        "unstable-options",
+        "--unit-graph",
+        "--locked",
+        "-p",
+        "nmp-ffi",
+        "--target",
+        &target,
+    ]);
+    if cargo_has_provider_component {
+        command.args(["-p", "nmp-nip46-ffi"]);
+    }
+    if profile == "release" {
+        command.arg("--release");
+    }
+    let output = command
+        .output()
+        .expect("Cargo no-build unit graph resolution must run");
+    assert!(
+        output.status.success(),
+        "Cargo no-build unit graph resolution failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut graph: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("parse Cargo no-build unit graph: {error}"));
+    component_identity::validate_unit_graph_against_cargo(
+        &graph,
+        workspace,
+        cargo_has_provider_component,
+    )
+    .unwrap_or_else(|error| panic!("validate Cargo no-build unit graph: {error}"));
     component_identity::canonicalize_unit_graph(&mut graph, workspace);
     let canonical = serde_json::to_vec(&graph)
         .unwrap_or_else(|error| panic!("serialize canonical Cargo unit graph: {error}"));

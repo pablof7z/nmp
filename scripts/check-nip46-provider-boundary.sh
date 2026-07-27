@@ -80,12 +80,14 @@ grep -qF 'pub fn signer_mailbox(&self) -> Arc<FfiSignerMailbox>' crates/nmp-ffi/
   fail "NmpEngine does not vend the opaque signer mailbox"
 grep -qF 'pub fn nmp_core_component_identity() -> String' crates/nmp-ffi/src/signer.rs ||
   fail "core does not export its plain native component identity"
-grep -qF 'NMP_FFI_CARGO_UNIT_GRAPH' crates/nmp-ffi/build.rs ||
-  fail "core identity does not bind Cargo's resolved transitive unit graph"
+grep -qF '"--unit-graph"' crates/nmp-ffi/build.rs ||
+  fail "core identity does not derive Cargo's resolved transitive unit graph"
 grep -qF 'validate_unit_graph_against_cargo' crates/nmp-ffi/build.rs ||
-  fail "core identity trusts a supplied unit graph without checking Cargo's resolved marker"
+  fail "core identity does not validate its derived graph against Cargo's resolved marker"
 grep -qF 'features = ["nip46-provider-component"]' crates/nmp-nip46-ffi/Cargo.toml ||
   fail "NIP-46 provider does not make its presence observable to the nmp-ffi build"
+grep -qF 'scripts/test-component-identity-build.sh' .github/workflows/nip46-provider.yml ||
+  fail "provider CI does not prove unmanaged release identity is refused"
 grep -qF 'pub fn verify_nip46_core_component_identity(' crates/nmp-nip46-ffi/src/signer.rs ||
   fail "NIP-46 provider does not verify plain core identity before object exchange"
 grep -qF 'compatibility: Arc<FfiNip46CoreCompatibility>' crates/nmp-nip46-ffi/src/signer.rs ||
@@ -101,9 +103,15 @@ for builder in scripts/build-swift-nip46-xcframework.sh scripts/build-kotlin-nip
     fail "$builder does not build core and provider under one package-set identity"
 done
 for builder in scripts/build-swift-xcframework.sh scripts/build-kotlin-jvm.sh; do
-  grep -qF 'NMP_FFI_CARGO_UNIT_GRAPH=' "$builder" ||
-    fail "$builder does not bind the exact resolved Cargo unit graph"
+  grep -qF 'NMP_FFI_COMPONENT_BUILD=1' "$builder" ||
+    fail "$builder does not enable the self-derived component identity"
+  if grep -qF 'NMP_FFI_CARGO_UNIT_GRAPH' "$builder"; then
+    fail "$builder still supplies declared graph content"
+  fi
 done
+if grep -qF 'NMP_FFI_CARGO_UNIT_GRAPH' crates/nmp-ffi/build.rs; then
+  fail "build script still accepts caller-declared graph content"
+fi
 if grep -nE 'Arc<NmpEngine>|engine:[[:space:]]*Arc<nmp::Engine>|FfiSigning(Capability)?Callback|SigningCapabilityCallback' \
   crates/nmp-nip46-ffi/src/signer.rs; then
   fail "NIP-46 FFI bypasses the opaque mailbox or recreates a callback bridge"
