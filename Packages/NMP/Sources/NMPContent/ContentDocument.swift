@@ -42,27 +42,42 @@ public enum NostrReferencePlacement: Sendable, Hashable {
     case standalone
 }
 
-/// A normalized public Nostr target. Optional relay/author/kind values remain
-/// acquisition hints where NIP-19 defines them as hints.
+/// An exact decoded public NIP-19/NIP-21 locator.
+///
+/// This value carries only fields authored by the locator. In particular,
+/// `.pubkey` does not imply profile metadata and relay/author/kind hints have
+/// no acquisition authority.
 public enum NostrReferenceTarget: Sendable, Hashable {
-    case profile(pubkey: String, relayHints: [String] = [])
+    case pubkey(pubkey: String)
+    case profile(pubkey: String, relayHints: [String])
+    case eventID(id: String)
     case event(
         id: String,
         authorHint: String? = nil,
         kindHint: UInt16? = nil,
         relayHints: [String] = []
     )
-    case address(kind: UInt16, author: String, identifier: String, relayHints: [String] = [])
+    case coordinate(
+        kind: UInt16,
+        author: String,
+        identifier: String,
+        relayHints: [String]
+    )
 
-    /// Stable semantic identity. Hints deliberately do not change identity.
+    /// Stable presentation identity. Authored hints deliberately do not alter
+    /// the addressed public key, event id, or coordinate.
     public var key: String {
         switch self {
+        case .pubkey(let pubkey):
+            return "pubkey:\(pubkey)"
         case .profile(let pubkey, _):
             return "profile:\(pubkey)"
+        case .eventID(let id):
+            return "event-id:\(id)"
         case .event(let id, _, _, _):
             return "event:\(id)"
-        case .address(let kind, let author, let identifier, _):
-            return "address:\(kind):\(author):\(identifier)"
+        case .coordinate(let kind, let author, let identifier, _):
+            return "coordinate:\(kind):\(author):\(identifier)"
         }
     }
 }
@@ -238,27 +253,30 @@ extension NostrReferencePlacement {
 }
 
 extension NostrReferenceTarget {
-    init(_ ffi: FfiReferenceTarget) {
+    init(_ ffi: FfiNostrEntity) {
         switch ffi {
-        case .profile(let pubkey, let relayHints):
-            self = .profile(pubkey: pubkey, relayHints: relayHints)
-        case .event(let id, let authorHint, let kindHint, let relayHints):
+        case .pubkey(let pubkey):
+            self = .pubkey(pubkey: pubkey)
+        case .profile(let pubkey, let relays):
+            self = .profile(pubkey: pubkey, relayHints: relays)
+        case .eventId(let id):
+            self = .eventID(id: id)
+        case .event(let id, let author, let kind, let relays):
             self = .event(
                 id: id,
-                authorHint: authorHint,
-                kindHint: kindHint,
-                relayHints: relayHints
+                authorHint: author,
+                kindHint: kind,
+                relayHints: relays
             )
-        case .address(let kind, let author, let identifier, let relayHints):
-            self = .address(
+        case .coordinate(let kind, let author, let identifier, let relays):
+            self = .coordinate(
                 kind: kind,
                 author: author,
                 identifier: identifier,
-                relayHints: relayHints
+                relayHints: relays
             )
         }
     }
-
 }
 
 extension NostrReferenceOccurrence {

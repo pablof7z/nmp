@@ -1,10 +1,11 @@
 # Optional Nostr content and UI building blocks
 
 - **Date:** 2026-07-12
-- **Status:** Ratified architecture for issue #75, amended by #561. Shared
-  parsing and reference planning are implemented without engine ownership;
-  Swift components own optional observation, while Kotlin currently projects
-  only the parser/planner contract. The first SwiftUI family and live iOS
+- **Status:** Ratified architecture for issue #75, amended by #561 and corrected
+  by #879. Shared parsing and exact locator decoding are implemented without
+  engine ownership or acquisition planning; Swift components own optional
+  app-resolved observation, while Kotlin currently projects only the
+  parser/locator contract. The first SwiftUI family and live iOS
   Gallery are implemented, as is the open-code registry/CLI. Broad Compose
   content UI, broader protocol families, and deeper cross-platform performance
   proof remain separately tracked work.
@@ -24,16 +25,16 @@ to make correct Nostr content rendering reusable across applications.
 The ecosystem is not part of NMP Core, but it is a real product surface. “The
 app owns presentation” means the app has final authority over its product
 experience. It does **not** mean every app must independently rebuild Nostr URI
-parsing, reference acquisition, recursive embed lifecycle, kind dispatch,
+parsing, exact locator decoding, recursive embed lifecycle, kind dispatch,
 accessibility, media layout, article rendering, product rendering, or all the
 other machinery needed to render an open protocol well.
 
 The selected distribution model is deliberately hybrid:
 
-1. **Linked, versioned substrate** for correctness-sensitive semantics, pure
-   reference planning, component-owned observation primitives, and low-level
-   native primitives. Fixes to parsing, cancellation, accessibility, and safe
-   target lowering propagate normally.
+1. **Linked, versioned substrate** for correctness-sensitive semantics, exact
+   locator values, component-owned observation primitives, and low-level native
+   primitives. Fixes to parsing, cancellation, accessibility, and locator
+   preservation propagate normally.
 2. **Source-installable, styled compositions** for opinionated cards, readers,
    product views, and blocks. An app receives readable native source, may edit
    it without permission, and may selectively install only what it uses.
@@ -61,9 +62,9 @@ Rendering it requires a coordinated system:
 - recognize NIP-21/NIP-27 entities, hashtags, links, custom emoji, invoices,
   media, code spans, and protocol extensions;
 - decode `npub`, `nprofile`, `note`, `nevent`, and `naddr` correctly;
-- let the selected component choose whether to turn a reference into a safe
-  live demand plan, including bounded relay hints, authors, coordinates, and
-  source authority;
+- let the selected component choose whether and how to map an exact locator
+  into ordinary demands, including its own validation/bounds before promoting
+  authored hints;
 - render cached content immediately while acquisition continues;
 - resolve profiles and event references without a second cache or one network
   stack per view;
@@ -87,7 +88,10 @@ An application can start on SwiftUI with:
 
 ```swift
 let document = parseNostrContent(row.content)
-let observations = NMPReferenceObservationFactory.live(engine: engine)
+let observations = NMPReferenceObservationFactory.live(
+    engine: engine,
+    resolve: appReferenceDemand
+)
 NostrContent(
     document: document,
     observationFactory: observations,
@@ -98,8 +102,9 @@ NostrContent(
 and receive a useful, styled, accessible default renderer whose standard
 mention and event-loader components explicitly own live observations. Supplying
 the factory alone does not open anything; `.literalReferences` uses the same
-document with zero handles. Kotlin currently shares the parser and safe demand
-planner but does not claim a broad Compose content renderer.
+document with zero handles. Kotlin currently shares the parser and exact
+locator values but does not claim an acquisition helper or broad Compose
+content renderer.
 
 An app should then be able to move progressively, without a rewrite, through
 these levels of ownership:
@@ -109,8 +114,8 @@ these levels of ownership:
 3. replace one renderer such as the NIP-23 article card;
 4. install and edit the source of a composed renderer;
 5. add a renderer for an app-defined or newly standardized kind;
-6. replace the whole top-level content view while retaining the parser and pure
-   reference planner;
+6. replace the whole top-level content view while retaining the parser and
+   exact locator decoder;
 7. replace every optional layer and consume NMP Core directly.
 
 The adoption path is therefore a gradient, not take-it-or-leave-it.
@@ -128,7 +133,7 @@ Application
       │     content · embed · profile · media · article · product primitives
       │
       └── linked content semantics and reference grammar
-            parser · entity decoder · pure target/demand planning
+            parser · exact entity/locator decoder
                          │
                          ▼ public API only
                     NMP Core
@@ -148,7 +153,7 @@ The dependency arrow points downward only:
 Repository placement does not define the boundary; the dependency graph does.
 The implemented physical split is:
 
-- this repository owns optional shared content semantics, reference-plan
+- this repository owns optional shared content semantics, exact locator
   projection, and native observation primitives because they must track the
   governed grammar/facade and FFI contract closely;
 - this repository also owns first-party native primitive packages, the source
@@ -214,16 +219,17 @@ permanent so unknown kinds never render as blank space.
 
 ### 5.3 What is shared across platforms
 
-The parser, entity decoding, stable node identity, reference target/plan rules,
-and exact protocol decoders should be shared Rust semantics projected to native
-values. SwiftUI and Compose must not independently reinterpret the same NIP
-fields. Cycle/depth is an immutable native render-context value; it is not a
-shared mutable counter.
+The parser, exact entity decoding, stable node identity, and exact protocol
+decoders should be shared Rust semantics projected to native values. SwiftUI
+and Compose must not independently reinterpret the same NIP fields. Locator
+decoding preserves authored hints but does not validate them as network routes.
+Cycle/depth is an immutable native render-context value; it is not a shared
+mutable counter.
 
-## 6. Layer B — pure planning and component-owned observation
+## 6. Layer B — exact locators and component-owned observation
 
 Layer B keeps reusable reference correctness without binding authored syntax to
-network policy. The selected component is the decision point.
+event-schema or network policy. The selected component is the decision point.
 
 ### 6.1 Parsing stops at an authored occurrence
 
@@ -234,38 +240,41 @@ kind:0/NIP-23 codec, cache, renderer, or acquisition callback.
 Merely parsing, walking, or making an occurrence visible creates no demand. A
 literal component renders `occurrence.original` and stops there.
 
-### 6.2 Reference lowering is a pure grammar operation
+### 6.2 Reference decoding stops at exact locator data
 
-When a selected component wants resolution, `nmp_grammar::reference` validates
-the normalized target and returns ordinary closed NMP demands:
+Core decoding preserves five different public values:
 
-- `npub` / `nprofile` -> current kind:0 selection for that author;
-- `note` / `nevent` -> exact event-id selection;
-- `naddr` -> exact address selection: kind + author + `d` identifier.
+- `npub` -> public key;
+- `nprofile` -> profile locator plus authored relay hints;
+- `note` -> event id;
+- `nevent` -> event locator plus optional authored author, kind, and relay
+  hints;
+- `naddr` -> coordinate locator plus authored relay hints.
 
-Optional `nevent` author/kind fields remain hints and never constrain canonical
-matching. Relay hints are canonicalized, deduplicated, safety-filtered, and
-bounded. The plan contains one canonical demand plus optional pinned/outbox
-helpers and the explicit discarded-hint count. Constructing it performs no I/O.
-
-Only the canonical observation supplies rendered winner state. Helpers may feed
-the same NMP store and keep their own evidence, but cannot become a second
-winner or a global absence authority.
+It cannot produce a demand, kind:0 selection, source authority, freshness,
+cache choice, relay route, or observation. Optional `nevent` author/kind fields
+never constrain event-id identity. Relay hints remain exact authored strings;
+the optional acquisition owner that promotes them owns canonicalization,
+safety filtering, bounds, and evidence.
 
 ### 6.3 The selected component owns policy and handles
 
 Reasonable components include:
 
 - literal/link: open nothing;
-- standard profile mention: open the profile demand;
-- default event loader: open canonical/helper event demands;
+- standard profile mention: deliberately map a supported locator to kind:0 and
+  open one ordinary demand;
+- default event loader: deliberately map an exact id/coordinate to one ordinary
+  demand under app-selected authority;
 - consent loader: inspect cache, then ask before live acquisition;
-- explicit-relay fallback: add a pinned helper after scoped failure evidence.
+- explicit-relay fallback: validate hints and add a pinned observation after
+  scoped failure evidence.
 
-Every call to the observation factory returns an independent handle owned by
-that component. NMP Core may coalesce equal demands, but releasing one component
-cannot release another component's interest. The last handle withdraws live
-demand without deleting canonical store truth.
+The app/component owns whether to open zero, one, or multiple observations.
+Every call to the shipped Swift observation factory returns one independent
+handle owned by that component. NMP Core may coalesce equal demands, but
+releasing one component cannot release another component's interest. The last
+handle withdraws live demand without deleting canonical store truth.
 
 Freshness (#565) is an orthogonal per-handle choice: `Live`,
 `MaxAge(seconds)`, or `CacheOnly`. It is not parser or session configuration.
@@ -301,11 +310,10 @@ not copy the renderer switch.
 
 ### 6.6 Lifetime and cross-platform split
 
-- Rust owns parsing, normalized targets, safe closed demand plans, and shared
-  parity fixtures.
+- Rust owns parsing, exact locator values, and shared parity fixtures.
 - Swift owns its component-local `NMPQuery` tasks, visibility lifecycle, and
   native observable state.
-- Kotlin currently projects the same parser/plan values; component/Compose
+- Kotlin currently projects the same parser/locator values; component/Compose
   lifecycle waits for a real Compose content surface rather than shipping a
   session-shaped placeholder.
 - NMP Core owns query sharing, cache/store truth, routing, relay I/O, and
@@ -521,7 +529,7 @@ The hybrid boundary puts code on the side matching its change character:
 | Linked and versioned | Source-installed and app-owned |
 |---|---|
 | parsing and entity decoding | styled cards and blocks |
-| reference planning and component observation primitives | visual composition |
+| exact locator projection and component observation primitives | visual composition |
 | protocol semantic adapters | app-specific renderer catalog assembly |
 | accessibility/behavior primitives | local theme presets and product chrome |
 | stable fallback behavior | opinionated resource-policy choices |
@@ -775,16 +783,17 @@ Implementation should be split into issue-backed vertical proofs:
 1. **Contract and parser boundary — built (#147, corrected by #567):** define
    `ContentDocument`, stable occurrence identity, malformed fallback, and a
    parser with no engine or protocol-schema ownership.
-2. **Pure reference-plan proof — built (#567/#583):** lower
-   `npub`/`nevent`/`naddr` into safe canonical/helper demand values and prove
-   exact Rust/FFI/Swift/Kotlin parity from one shared corpus.
+2. **Pure locator proof — built (#567/#583, corrected by #879):** preserve
+   `npub`/`nprofile`/`note`/`nevent`/`naddr` as exact distinct values with
+   authored hints, create no demand or route policy, and prove exact
+   Rust/FFI/Swift/Kotlin parity from one shared corpus.
 3. **One platform component proof — built (#573):** SwiftUI document walking,
    literal zero-fetch components, component-owned visibility observations,
    outer event loading, actual-kind/purpose dispatch, and generic fallback with
    no app-root provider or shared session.
-4. **Second platform parity proof — parser/planner built (#580/#583), narrow
+4. **Second platform parity proof — parser/locator built (#580/#583/#879), narrow
    relay family built (#198), broad Compose UI open:** Kotlin consumes the same
-   semantic/plan corpus, while controlled Compose relay primitives establish
+   semantic/locator corpus, while controlled Compose relay primitives establish
    native construction without claiming a content-loader surface exists.
 5. **Hybrid distribution proof — built (#165 / PR #475):** install one styled
    component whose linked primitives can update independently; prove local

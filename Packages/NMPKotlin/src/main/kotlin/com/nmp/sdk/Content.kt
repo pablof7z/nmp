@@ -6,9 +6,9 @@ import uniffi.nmp_ffi.FfiContentDocument
 import uniffi.nmp_ffi.FfiContentSyntax
 import uniffi.nmp_ffi.FfiInlineNode
 import uniffi.nmp_ffi.FfiInlineStyle
+import uniffi.nmp_ffi.FfiNostrEntity
 import uniffi.nmp_ffi.FfiReferenceOccurrence
 import uniffi.nmp_ffi.FfiReferencePlacement
-import uniffi.nmp_ffi.FfiReferenceTarget
 import uniffi.nmp_ffi.FfiSourceRange
 import uniffi.nmp_ffi.parseNostrContent as ffiParseNostrContent
 
@@ -101,11 +101,20 @@ enum class NostrReferencePlacement {
     }
 }
 
+/** Exact decoded public NIP-19/NIP-21 locator data.
+ *
+ * No variant implies an event schema, source authority, relay admission
+ * decision, or observation. In particular, [Pubkey] is not a profile query.
+ */
 sealed class NostrReferenceTarget {
+    data class Pubkey(val pubkey: String) : NostrReferenceTarget()
+
     data class Profile(
         val pubkey: String,
-        val relayHints: List<String> = emptyList(),
+        val relayHints: List<String>,
     ) : NostrReferenceTarget()
+
+    data class EventId(val id: String) : NostrReferenceTarget()
 
     data class Event(
         val id: String,
@@ -114,29 +123,32 @@ sealed class NostrReferenceTarget {
         val relayHints: List<String> = emptyList(),
     ) : NostrReferenceTarget()
 
-    data class Address(
+    data class Coordinate(
         val kind: UShort,
         val author: String,
         val identifier: String,
-        val relayHints: List<String> = emptyList(),
+        val relayHints: List<String>,
     ) : NostrReferenceTarget()
 
     val key: String
         get() =
             when (this) {
+                is Pubkey -> "pubkey:$pubkey"
                 is Profile -> "profile:$pubkey"
+                is EventId -> "event-id:$id"
                 is Event -> "event:$id"
-                is Address -> "address:$kind:$author:$identifier"
+                is Coordinate -> "coordinate:$kind:$author:$identifier"
             }
 
     companion object {
-        internal fun from(ffi: FfiReferenceTarget): NostrReferenceTarget =
+        internal fun from(ffi: FfiNostrEntity): NostrReferenceTarget =
             when (ffi) {
-                is FfiReferenceTarget.Profile -> Profile(ffi.pubkey, ffi.relayHints)
-                is FfiReferenceTarget.Event ->
-                    Event(ffi.id, ffi.authorHint, ffi.kindHint, ffi.relayHints)
-                is FfiReferenceTarget.Address ->
-                    Address(ffi.kind, ffi.author, ffi.identifier, ffi.relayHints)
+                is FfiNostrEntity.Pubkey -> Pubkey(ffi.pubkey)
+                is FfiNostrEntity.Profile -> Profile(ffi.pubkey, ffi.relays)
+                is FfiNostrEntity.EventId -> EventId(ffi.id)
+                is FfiNostrEntity.Event -> Event(ffi.id, ffi.author, ffi.kind, ffi.relays)
+                is FfiNostrEntity.Coordinate ->
+                    Coordinate(ffi.kind, ffi.author, ffi.identifier, ffi.relays)
             }
     }
 }

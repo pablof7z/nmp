@@ -1,35 +1,35 @@
 import Foundation
 import NMP
 import NMPContent
-import NMPUI
 import XCTest
 
 final class ReferenceFixtureParityTests: XCTestCase {
-    func testSharedNIP19FixturesMatchSwiftTargetsAndDemandPlans() throws {
+    func testSharedNIP19FixturesPreserveExactSwiftLocators() throws {
         for fixture in try loadReferenceFixtures().cases {
             switch fixture.outcome {
             case "public":
-                let expectedTarget = try XCTUnwrap(fixture.target, fixture.name)
-                let expectedPlan = try XCTUnwrap(fixture.plan, fixture.name)
+                let expected = try XCTUnwrap(fixture.locator, fixture.name)
                 XCTAssertEqual(
                     normalize(try decodeNostrEntity(fixture.input)),
-                    expectedTarget,
+                    expected,
                     "\(fixture.name) decoded entity"
                 )
                 if fixture.input.hasPrefix("nostr:") {
                     XCTAssertEqual(
                         normalize(try decodeNostrEntity(String(fixture.input.dropFirst(6)))),
-                        expectedTarget,
+                        expected,
                         "\(fixture.name) nostr URI and bare forms"
                     )
                 }
-                let document = parseNostrContent(fixture.input)
-                let occurrence = try XCTUnwrap(document.references.single, fixture.name)
-                let target = normalize(occurrence.target)
-                let plan = try normalize(referenceDemandPlan(for: occurrence.target))
-
-                XCTAssertEqual(target, expectedTarget, "\(fixture.name) target")
-                XCTAssertEqual(plan, expectedPlan, "\(fixture.name) demand plan")
+                let occurrence = try XCTUnwrap(
+                    parseNostrContent(fixture.input).references.single,
+                    fixture.name
+                )
+                XCTAssertEqual(
+                    normalize(occurrence.target),
+                    expected,
+                    "\(fixture.name) content locator"
+                )
             case "secret_key", "malformed":
                 try assertNonActionable(fixture)
             default:
@@ -69,55 +69,17 @@ private struct ReferenceFixture: Decodable {
     let name: String
     let input: String
     let outcome: String
-    let target: NormalizedReferenceTarget?
-    let plan: NormalizedReferencePlan?
+    let locator: NormalizedNostrEntity?
 }
 
-private struct NormalizedReferenceTarget: Decodable, Equatable {
-    let kind: String
-    let key: String
+private struct NormalizedNostrEntity: Decodable, Equatable {
+    let variant: String
     let pubkey: String?
     let id: String?
-    let authorHint: String?
-    let kindHint: UInt16?
-    let addressKind: UInt16?
     let author: String?
+    let eventKind: UInt16?
     let identifier: String?
-    let relayHints: [String]
-}
-
-private struct NormalizedReferencePlan: Decodable, Equatable {
-    let targetKey: String
-    let canonical: NormalizedDemand
-    let helpers: [NormalizedDemand]
-    let discardedRelayHints: UInt32
-}
-
-private struct NormalizedDemand: Decodable, Equatable {
-    let selection: NormalizedFilter
-    let source: NormalizedSource
-    let access: String
-    let cache: String
-    let freshness: String
-}
-
-private struct NormalizedFilter: Decodable, Equatable {
-    let kinds: [UInt16]
-    let authors: [String]
-    let ids: [String]
-    let tags: [String: [String]]
-    let since: UInt64?
-    let until: UInt64?
-    let limit: UInt32?
-}
-
-private struct NormalizedSource: Decodable, Equatable {
-    let kind: String
     let relays: [String]
-}
-
-private enum ReferenceNormalizationError: Error {
-    case nonLiteralBinding
 }
 
 private func loadReferenceFixtures() throws -> ReferenceFixtureCorpus {
@@ -126,161 +88,75 @@ private func loadReferenceFixtures() throws -> ReferenceFixtureCorpus {
         repository = repository.deletingLastPathComponent()
     }
     let data = try Data(
-        contentsOf: repository.appendingPathComponent("fixtures/reference-plans.json")
+        contentsOf: repository.appendingPathComponent("fixtures/reference-locators.json")
     )
     let decoder = JSONDecoder()
     decoder.keyDecodingStrategy = .convertFromSnakeCase
     let corpus = try decoder.decode(ReferenceFixtureCorpus.self, from: data)
-    XCTAssertEqual(corpus.schema, 1)
+    XCTAssertEqual(corpus.schema, 2)
     return corpus
 }
 
-private func normalize(_ target: NostrReferenceTarget) -> NormalizedReferenceTarget {
+private func normalize(_ target: NostrReferenceTarget) -> NormalizedNostrEntity {
     switch target {
-    case .profile(let pubkey, let relayHints):
-        return NormalizedReferenceTarget(
-            kind: "profile",
-            key: target.key,
-            pubkey: pubkey,
-            id: nil,
-            authorHint: nil,
-            kindHint: nil,
-            addressKind: nil,
-            author: nil,
-            identifier: nil,
-            relayHints: relayHints
-        )
-    case .event(let id, let authorHint, let kindHint, let relayHints):
-        return NormalizedReferenceTarget(
-            kind: "event",
-            key: target.key,
-            pubkey: nil,
-            id: id,
-            authorHint: authorHint,
-            kindHint: kindHint,
-            addressKind: nil,
-            author: nil,
-            identifier: nil,
-            relayHints: relayHints
-        )
-    case .address(let kind, let author, let identifier, let relayHints):
-        return NormalizedReferenceTarget(
-            kind: "address",
-            key: target.key,
-            pubkey: nil,
-            id: nil,
-            authorHint: nil,
-            kindHint: nil,
-            addressKind: kind,
+    case .pubkey(let pubkey):
+        return normalized("pubkey", pubkey: pubkey)
+    case .profile(let pubkey, let relays):
+        return normalized("profile", pubkey: pubkey, relays: relays)
+    case .eventID(let id):
+        return normalized("event_id", id: id)
+    case .event(let id, let author, let kind, let relays):
+        return normalized("event", id: id, author: author, eventKind: kind, relays: relays)
+    case .coordinate(let kind, let author, let identifier, let relays):
+        return normalized(
+            "coordinate",
             author: author,
+            eventKind: kind,
             identifier: identifier,
-            relayHints: relayHints
+            relays: relays
         )
     }
 }
 
-private func normalize(_ entity: NostrEntity) -> NormalizedReferenceTarget {
+private func normalize(_ entity: NostrEntity) -> NormalizedNostrEntity {
     switch entity {
     case .pubkey(let pubkey):
-        return normalize(NostrReferenceTarget.profile(pubkey: pubkey))
+        return normalized("pubkey", pubkey: pubkey)
     case .profile(let pubkey, let relays):
-        return normalize(NostrReferenceTarget.profile(pubkey: pubkey, relayHints: relays))
+        return normalized("profile", pubkey: pubkey, relays: relays)
     case .eventId(let id):
-        return normalize(NostrReferenceTarget.event(id: id))
+        return normalized("event_id", id: id)
     case .event(let id, let author, let kind, let relays):
-        return normalize(
-            NostrReferenceTarget.event(
-                id: id,
-                authorHint: author,
-                kindHint: kind,
-                relayHints: relays
-            )
-        )
+        return normalized("event", id: id, author: author, eventKind: kind, relays: relays)
     case .coordinate(let kind, let author, let identifier, let relays):
-        return normalize(
-            NostrReferenceTarget.address(
-                kind: kind,
-                author: author,
-                identifier: identifier,
-                relayHints: relays
-            )
+        return normalized(
+            "coordinate",
+            author: author,
+            eventKind: kind,
+            identifier: identifier,
+            relays: relays
         )
     }
 }
 
-private func normalize(_ plan: NostrReferenceDemandPlan) throws -> NormalizedReferencePlan {
-    NormalizedReferencePlan(
-        targetKey: plan.targetKey,
-        canonical: try normalize(plan.canonical),
-        helpers: try plan.helpers.map(normalize),
-        discardedRelayHints: plan.discardedRelayHints
+private func normalized(
+    _ variant: String,
+    pubkey: String? = nil,
+    id: String? = nil,
+    author: String? = nil,
+    eventKind: UInt16? = nil,
+    identifier: String? = nil,
+    relays: [String] = []
+) -> NormalizedNostrEntity {
+    NormalizedNostrEntity(
+        variant: variant,
+        pubkey: pubkey,
+        id: id,
+        author: author,
+        eventKind: eventKind,
+        identifier: identifier,
+        relays: relays
     )
-}
-
-private func normalize(_ demand: NMPDemand) throws -> NormalizedDemand {
-    let source: NormalizedSource
-    switch demand.source {
-    case .authorOutboxes:
-        source = NormalizedSource(kind: "author_outboxes", relays: [])
-    case .public:
-        source = NormalizedSource(kind: "public", relays: [])
-    case .pinned(let relays):
-        source = NormalizedSource(kind: "pinned", relays: relays.sorted())
-    }
-
-    let access: String
-    switch demand.access {
-    case .public:
-        access = "public"
-    case .nip42(let publicKey):
-        access = "nip42:\(publicKey)"
-    }
-
-    let cache: String
-    switch demand.cache {
-    case .agnostic:
-        cache = "agnostic"
-    case .strict:
-        cache = "strict"
-    }
-
-    let freshness: String
-    switch demand.freshness {
-    case .live:
-        freshness = "live"
-    case .maxAge(let seconds):
-        freshness = "max_age:\(seconds)"
-    case .cacheOnly:
-        freshness = "cache_only"
-    }
-
-    return NormalizedDemand(
-        selection: NormalizedFilter(
-            kinds: (demand.selection.kinds ?? []).sorted(),
-            authors: try literals(demand.selection.authors),
-            ids: try literals(demand.selection.ids),
-            tags: try Dictionary(
-                uniqueKeysWithValues: demand.selection.tags.map { name, binding in
-                    (String(name), try literals(binding))
-                }
-            ),
-            since: demand.selection.since,
-            until: demand.selection.until,
-            limit: demand.selection.limit
-        ),
-        source: source,
-        access: access,
-        cache: cache,
-        freshness: freshness
-    )
-}
-
-private func literals(_ binding: NMPBinding?) throws -> [String] {
-    guard let binding else { return [] }
-    guard case .literal(let values) = binding else {
-        throw ReferenceNormalizationError.nonLiteralBinding
-    }
-    return values.sorted()
 }
 
 private extension Array {

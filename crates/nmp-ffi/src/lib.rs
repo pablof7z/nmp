@@ -27,8 +27,6 @@
 //! - [`entity`] -- the bech32 nostr-entity DECODE codec (#116), the one
 //!   exported free function that needs no `NmpEngine` instance at all: no
 //!   engine, no network, no signing.
-//! - [`reference`] -- engine-free normalized targets and safe canonical/helper
-//!   demand plans. Planning returns values and never opens an observation.
 //! - [`nip51`] -- tolerant, observational NIP-51 Simple-groups parsing
 //!   (#863). A free function over a caller-constructible `FfiRow` returning
 //!   plain data; no observation-qualified wrapper, projection error, or
@@ -64,7 +62,6 @@ pub mod nip02;
 pub mod nip22;
 pub mod nip29;
 pub mod nip51;
-pub mod reference;
 pub mod signer;
 pub mod types;
 

@@ -1,15 +1,12 @@
-//! One acceptance corpus for engine-free NIP-19 reference semantics.
+//! One acceptance corpus for the pure public NIP-19/NIP-21 locator codec.
 //!
 //! The direct Rust/FFI parity harness and both native SDK suites consume the
 //! exact same JSON bytes. Platform tests normalize their public values into
-//! this schema; no platform keeps an alternate table of expected targets or
-//! demands.
-
-use std::collections::BTreeMap;
+//! this schema; no platform keeps an alternate table of expected locators.
 
 use serde::Deserialize;
 
-const REFERENCE_FIXTURE_JSON: &str = include_str!("../../../fixtures/reference-plans.json");
+const REFERENCE_FIXTURE_JSON: &str = include_str!("../../../fixtures/reference-locators.json");
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct ReferenceFixtureCorpus {
@@ -22,8 +19,7 @@ pub struct ReferenceFixture {
     pub name: String,
     pub input: String,
     pub outcome: ReferenceFixtureOutcome,
-    pub target: Option<NormalizedReferenceTarget>,
-    pub plan: Option<NormalizedReferencePlan>,
+    pub locator: Option<NormalizedNostrEntity>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -35,50 +31,13 @@ pub enum ReferenceFixtureOutcome {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub struct NormalizedReferenceTarget {
-    pub kind: String,
-    pub key: String,
+pub struct NormalizedNostrEntity {
+    pub variant: String,
     pub pubkey: Option<String>,
     pub id: Option<String>,
-    pub author_hint: Option<String>,
-    pub kind_hint: Option<u16>,
-    pub address_kind: Option<u16>,
     pub author: Option<String>,
+    pub event_kind: Option<u16>,
     pub identifier: Option<String>,
-    pub relay_hints: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub struct NormalizedReferencePlan {
-    pub target_key: String,
-    pub canonical: NormalizedDemand,
-    pub helpers: Vec<NormalizedDemand>,
-    pub discarded_relay_hints: u32,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub struct NormalizedDemand {
-    pub selection: NormalizedFilter,
-    pub source: NormalizedSource,
-    pub access: String,
-    pub cache: String,
-    pub freshness: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub struct NormalizedFilter {
-    pub kinds: Vec<u16>,
-    pub authors: Vec<String>,
-    pub ids: Vec<String>,
-    pub tags: BTreeMap<String, Vec<String>>,
-    pub since: Option<u64>,
-    pub until: Option<u64>,
-    pub limit: Option<u32>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub struct NormalizedSource {
-    pub kind: String,
     pub relays: Vec<String>,
 }
 
@@ -101,7 +60,7 @@ mod tests {
     #[test]
     fn shared_corpus_is_versioned_unique_and_covers_every_required_outcome() {
         let corpus = reference_fixtures();
-        assert_eq!(corpus.schema, 1);
+        assert_eq!(corpus.schema, 2);
 
         let names = corpus
             .cases
@@ -114,14 +73,18 @@ mod tests {
             "fixture names must be unique"
         );
 
-        let public_kinds = corpus
+        let public_variants = corpus
             .cases
             .iter()
-            .filter_map(|case| case.target.as_ref().map(|target| target.kind.as_str()))
+            .filter_map(|case| {
+                case.locator
+                    .as_ref()
+                    .map(|locator| locator.variant.as_str())
+            })
             .collect::<BTreeSet<_>>();
         assert_eq!(
-            public_kinds,
-            BTreeSet::from(["address", "event", "profile"])
+            public_variants,
+            BTreeSet::from(["coordinate", "event", "event_id", "profile", "pubkey"])
         );
         assert!(corpus
             .cases
@@ -134,21 +97,19 @@ mod tests {
     }
 
     #[test]
-    fn only_public_entities_carry_actionable_expectations() {
+    fn only_public_entities_carry_locator_expectations() {
         for case in reference_fixtures().cases {
             match case.outcome {
                 ReferenceFixtureOutcome::Public => {
-                    let target = case.target.expect("public fixture must carry a target");
-                    let plan = case.plan.expect("public fixture must carry a demand plan");
-                    assert_eq!(target.key, plan.target_key);
+                    case.locator
+                        .expect("public fixture must carry an exact locator");
                 }
                 ReferenceFixtureOutcome::SecretKey | ReferenceFixtureOutcome::Malformed => {
                     assert!(
-                        case.target.is_none(),
-                        "{} unexpectedly has a target",
+                        case.locator.is_none(),
+                        "{} unexpectedly has a locator",
                         case.name
                     );
-                    assert!(case.plan.is_none(), "{} unexpectedly has a plan", case.name);
                 }
             }
         }

@@ -1,4 +1,4 @@
-use nmp_grammar::reference::ReferenceTarget;
+use nmp_grammar::NostrEntity;
 
 /// Input syntax selected by the caller or an owning protocol module.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -66,12 +66,15 @@ pub enum ReferencePlacement {
     Standalone,
 }
 
-/// One occurrence of a normalized Nostr reference.
+/// One occurrence of an exact decoded public NIP-19/NIP-21 locator.
+///
+/// The five locator variants remain distinct. In particular, a bare `npub`
+/// stays a public key and does not become an implicit profile query.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReferenceOccurrence {
     pub id: u64,
     pub original: String,
-    pub target: ReferenceTarget,
+    pub target: NostrEntity,
     pub source: SourceRange,
     pub placement: ReferencePlacement,
 }
