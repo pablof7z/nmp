@@ -1,5 +1,11 @@
 use std::path::Path;
 
+const PROVIDER_COMPONENT_FEATURE: &str = "nip46-provider-component";
+
+pub fn normalize_build_text(text: &str, workspace: &Path) -> String {
+    text.replace(workspace.to_string_lossy().as_ref(), "<workspace>")
+}
+
 pub fn canonicalize_unit_graph(value: &mut serde_json::Value, workspace: &Path) {
     match value {
         serde_json::Value::Object(fields) => {
@@ -19,11 +25,65 @@ pub fn canonicalize_unit_graph(value: &mut serde_json::Value, workspace: &Path) 
             }
         }
         serde_json::Value::String(text) => {
-            let workspace = workspace.to_string_lossy();
-            if text.contains(workspace.as_ref()) {
-                *text = text.replace(workspace.as_ref(), "<workspace>");
-            }
+            *text = normalize_build_text(text, workspace);
         }
         _ => {}
     }
+}
+
+pub fn validate_unit_graph_against_cargo(
+    value: &serde_json::Value,
+    cargo_has_provider_component: bool,
+) -> Result<(), String> {
+    let units = value
+        .get("units")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "Cargo unit graph has no units array".to_owned())?;
+    let mut observed = Vec::new();
+
+    for unit in units {
+        let is_nmp_ffi = unit
+            .get("pkg_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|pkg_id| pkg_id.contains("/crates/nmp-ffi#"));
+        let is_library = unit
+            .pointer("/target/name")
+            .and_then(serde_json::Value::as_str)
+            == Some("nmp_ffi")
+            && unit
+                .pointer("/target/kind")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|kinds| {
+                    kinds
+                        .iter()
+                        .any(|kind| kind.as_str().is_some_and(|kind| kind == "lib"))
+                });
+        if !is_nmp_ffi
+            || !is_library
+            || unit.get("mode").and_then(serde_json::Value::as_str) != Some("build")
+        {
+            continue;
+        }
+
+        let graph_has_provider_component = unit
+            .get("features")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "nmp-ffi library unit has no features array".to_owned())?
+            .iter()
+            .any(|feature| feature.as_str() == Some(PROVIDER_COMPONENT_FEATURE));
+        observed.push(graph_has_provider_component);
+    }
+
+    if observed.is_empty() {
+        return Err("Cargo unit graph has no nmp-ffi library build unit".to_owned());
+    }
+    if observed.iter().any(|graph_has_provider_component| {
+        *graph_has_provider_component != cargo_has_provider_component
+    }) {
+        return Err(format!(
+            "supplied Cargo unit graph disagrees with Cargo-resolved \
+             {PROVIDER_COMPONENT_FEATURE}: graph={observed:?}, cargo={cargo_has_provider_component}"
+        ));
+    }
+    Ok(())
 }

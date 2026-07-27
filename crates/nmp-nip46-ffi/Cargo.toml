@@ -16,7 +16,7 @@ path = "uniffi-bindgen.rs"
 [dependencies]
 nostr.workspace = true
 nmp.workspace = true
-nmp-ffi.workspace = true
+nmp-ffi = { workspace = true, features = ["nip46-provider-component"] }
 nmp-nip46.workspace = true
 uniffi = { workspace = true, features = ["cli"] }
 tokio = { version = "1", features = ["rt", "time", "net"] }

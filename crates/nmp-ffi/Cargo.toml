@@ -23,6 +23,13 @@ name = "nmp_ffi"
 name = "uniffi-bindgen"
 path = "uniffi-bindgen.rs"
 
+[features]
+default = []
+# Cargo-controlled witness that the resolved graph contains the separately
+# selectable NIP-46 component. The provider dependency enables it; callers do
+# not set it directly.
+nip46-provider-component = []
+
 [dependencies]
 nostr.workspace = true
 # #851: every engine, query, receipt, signer and typed write value this crate

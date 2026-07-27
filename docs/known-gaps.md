@@ -119,6 +119,11 @@ about current code:
   diagnostics. The existing NIP-46 teardown, foreign-capability mailbox,
   pull-delivery, and process-global-runtime corrections remain separately
   tracked by #770/#783/#784/#871; this ownership split does not claim them.
+  The governed UniFFI component snapshot still covers only core `nmp-ffi`;
+  the separately selectable `nmp-nip46-ffi` provider namespace has no
+  committed surface snapshot yet. #954 owns adding it through the protected
+  governance bootstrap before the provider is published independently by
+  #831.
   The sign-only operation now projects across Rust, FFI, Swift, and Kotlin:
   it binds an immutable request to the active registered signer, validates the
   exact returned event, remains bounded/cancellable, and creates no

@@ -80,10 +80,12 @@ grep -qF 'pub fn signer_mailbox(&self) -> Arc<FfiSignerMailbox>' crates/nmp-ffi/
   fail "NmpEngine does not vend the opaque signer mailbox"
 grep -qF 'pub fn nmp_core_component_identity() -> String' crates/nmp-ffi/src/signer.rs ||
   fail "core does not export its plain native component identity"
-grep -qF 'NMP_FFI_CARGO_PACKAGES' crates/nmp-ffi/build.rs ||
-  fail "core identity does not bind the selected Cargo package set"
 grep -qF 'NMP_FFI_CARGO_UNIT_GRAPH' crates/nmp-ffi/build.rs ||
   fail "core identity does not bind Cargo's resolved transitive unit graph"
+grep -qF 'validate_unit_graph_against_cargo' crates/nmp-ffi/build.rs ||
+  fail "core identity trusts a supplied unit graph without checking Cargo's resolved marker"
+grep -qF 'features = ["nip46-provider-component"]' crates/nmp-nip46-ffi/Cargo.toml ||
+  fail "NIP-46 provider does not make its presence observable to the nmp-ffi build"
 grep -qF 'pub fn verify_nip46_core_component_identity(' crates/nmp-nip46-ffi/src/signer.rs ||
   fail "NIP-46 provider does not verify plain core identity before object exchange"
 grep -qF 'compatibility: Arc<FfiNip46CoreCompatibility>' crates/nmp-nip46-ffi/src/signer.rs ||

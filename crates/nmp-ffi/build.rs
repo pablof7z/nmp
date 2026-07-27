@@ -34,16 +34,15 @@ fn main() {
             .expect("Cargo supplies PROFILE")
             .as_bytes(),
     );
-    add_field(
-        &mut hasher,
-        "cargo-packages",
-        normalized_component_packages().as_bytes(),
-    );
     hash_cargo_unit_graph(workspace, &mut hasher);
     for variable in ["CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS"] {
         println!("cargo:rerun-if-env-changed={variable}");
         if let Ok(value) = env::var(variable) {
-            add_field(&mut hasher, variable, value.as_bytes());
+            add_field(
+                &mut hasher,
+                variable,
+                component_identity::normalize_build_text(&value, workspace).as_bytes(),
+            );
         }
     }
 
@@ -85,6 +84,7 @@ fn main() {
     for crate_dir in crate_dirs {
         hash_source_tree(workspace, &crate_dir, &mut hasher);
     }
+    hash_source_tree(workspace, &workspace.join("fixtures"), &mut hasher);
 
     println!("cargo:rerun-if-env-changed=RUSTC");
     println!(
@@ -93,25 +93,14 @@ fn main() {
     );
 }
 
-fn normalized_component_packages() -> String {
-    println!("cargo:rerun-if-env-changed=NMP_FFI_CARGO_PACKAGES");
-    let mut packages = env::var("NMP_FFI_CARGO_PACKAGES")
-        .unwrap_or_else(|_| "nmp-ffi".to_owned())
-        .split_whitespace()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    packages.sort();
-    packages.dedup();
-    assert!(
-        packages.iter().any(|package| package == "nmp-ffi"),
-        "NMP_FFI_CARGO_PACKAGES must include nmp-ffi"
-    );
-    packages.join(" ")
-}
-
 fn hash_cargo_unit_graph(workspace: &Path, hasher: &mut blake3::Hasher) {
     println!("cargo:rerun-if-env-changed=NMP_FFI_CARGO_UNIT_GRAPH");
     let Ok(path) = env::var("NMP_FFI_CARGO_UNIT_GRAPH") else {
+        assert_ne!(
+            env::var("PROFILE").as_deref(),
+            Ok("release"),
+            "release native components require NMP_FFI_CARGO_UNIT_GRAPH; use the supported Swift or Kotlin builder"
+        );
         add_field(hasher, "cargo-unit-graph", b"development-unresolved");
         return;
     };
@@ -120,6 +109,10 @@ fn hash_cargo_unit_graph(workspace: &Path, hasher: &mut blake3::Hasher) {
     let bytes = fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     let mut graph: serde_json::Value = serde_json::from_slice(&bytes)
         .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
+    let cargo_has_provider_component =
+        env::var_os("CARGO_FEATURE_NIP46_PROVIDER_COMPONENT").is_some();
+    component_identity::validate_unit_graph_against_cargo(&graph, cargo_has_provider_component)
+        .unwrap_or_else(|error| panic!("validate {}: {error}", path.display()));
     component_identity::canonicalize_unit_graph(&mut graph, workspace);
     let canonical = serde_json::to_vec(&graph)
         .unwrap_or_else(|error| panic!("serialize canonical Cargo unit graph: {error}"));
@@ -143,17 +136,7 @@ fn hash_source_tree(workspace: &Path, directory: &Path, hasher: &mut blake3::Has
             hash_source_tree(workspace, &path, hasher);
             continue;
         }
-        let include = path
-            .file_name()
-            .and_then(OsStr::to_str)
-            .is_some_and(|name| name == "Cargo.toml" || name == "build.rs")
-            || path
-                .extension()
-                .and_then(OsStr::to_str)
-                .is_some_and(|extension| extension == "rs");
-        if include {
-            hash_file(workspace, &path, hasher);
-        }
+        hash_file(workspace, &path, hasher);
     }
 }
 
