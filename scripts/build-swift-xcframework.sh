@@ -82,10 +82,6 @@ XCFRAMEWORK_OUT="$SWIFT_PACKAGE_DIR/$XCFRAMEWORK_NAME"
 # Core-only callers keep the one-package default; provider wrappers opt into
 # the exact core + provider package set and refresh both artifacts.
 read -r -a CARGO_PACKAGE_NAMES <<< "${NMP_FFI_CARGO_PACKAGES:-$CRATE}"
-CARGO_PACKAGE_ARGS=()
-for package_name in "${CARGO_PACKAGE_NAMES[@]}"; do
-  CARGO_PACKAGE_ARGS+=(-p "$package_name")
-done
 
 DEVICE_TARGET=aarch64-apple-ios
 SIM_ARM_TARGET=aarch64-apple-ios-sim
@@ -101,8 +97,9 @@ MACOS_CFLAGS="${CFLAGS:+$CFLAGS }-mmacosx-version-min=$MACOS_DEPLOYMENT_TARGET"
 MACOS_CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }-mmacosx-version-min=$MACOS_DEPLOYMENT_TARGET"
 
 # Cargo resolves a relative CARGO_TARGET_DIR from its working directory. The
-# script runs Cargo at the repository root, so resolve the same path here when
-# locating the resulting archives and storing packaging intermediates.
+# script runs Cargo at the repository root. Treat it as a BASE only: the
+# managed builder reuses a package-set cache but returns a fresh sealed
+# artifact snapshot for each target. Packaging never reads that cache.
 TARGET_DIR_VALUE=${CARGO_TARGET_DIR:-target}
 if [[ "$TARGET_DIR_VALUE" == /* ]]; then
   TARGET_DIR="$TARGET_DIR_VALUE"
@@ -110,26 +107,53 @@ else
   TARGET_DIR="$REPO_ROOT/$TARGET_DIR_VALUE"
 fi
 
-echo "== 1. cargo build (release) =="
+build_target() {
+  "$REPO_ROOT/scripts/build-component-release.sh" \
+    "$TARGET_DIR" "${CARGO_PACKAGE_NAMES[*]}" "$1"
+}
+
+build_target_without_macos() {
+  env -u MACOSX_DEPLOYMENT_TARGET \
+    "$REPO_ROOT/scripts/build-component-release.sh" \
+    "$TARGET_DIR" "${CARGO_PACKAGE_NAMES[*]}" "$1"
+}
+
+echo "== 1. cargo build (isolated release) =="
+cargo fetch --locked
 if [[ "$MODE" != macos ]]; then
-  env -u MACOSX_DEPLOYMENT_TARGET \
-    cargo build "${CARGO_PACKAGE_ARGS[@]}" --release --target "$SIM_ARM_TARGET"
-  env -u MACOSX_DEPLOYMENT_TARGET \
-    cargo build "${CARGO_PACKAGE_ARGS[@]}" --release --target "$SIM_X86_TARGET"
+  SIM_ARM_COMPONENT_ARTIFACT_DIR=$(build_target_without_macos "$SIM_ARM_TARGET")
+  SIM_X86_COMPONENT_ARTIFACT_DIR=$(build_target_without_macos "$SIM_X86_TARGET")
 fi
-MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET" \
+MACOS_COMPONENT_ARTIFACT_DIR=$(
+  MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET" \
   CFLAGS="$MACOS_CFLAGS" \
   CXXFLAGS="$MACOS_CXXFLAGS" \
-  cargo build "${CARGO_PACKAGE_ARGS[@]}" --release --target "$MACOS_TARGET"
+    build_target "$MACOS_TARGET"
+)
 if [[ "$MODE" == all ]]; then
-  env -u MACOSX_DEPLOYMENT_TARGET \
-    cargo build "${CARGO_PACKAGE_ARGS[@]}" --release --target "$DEVICE_TARGET"
+  DEVICE_COMPONENT_ARTIFACT_DIR=$(build_target_without_macos "$DEVICE_TARGET")
 fi
 
-SIM_ARM_LIB="$TARGET_DIR/$SIM_ARM_TARGET/release/$LIB_NAME"
-SIM_X86_LIB="$TARGET_DIR/$SIM_X86_TARGET/release/$LIB_NAME"
-MACOS_LIB="$TARGET_DIR/$MACOS_TARGET/release/$LIB_NAME"
-DEVICE_LIB="$TARGET_DIR/$DEVICE_TARGET/release/$LIB_NAME"
+cleanup_component_artifacts() {
+  local directory
+  for directory in \
+    "${SIM_ARM_COMPONENT_ARTIFACT_DIR:-}" \
+    "${SIM_X86_COMPONENT_ARTIFACT_DIR:-}" \
+    "${MACOS_COMPONENT_ARTIFACT_DIR:-}" \
+    "${DEVICE_COMPONENT_ARTIFACT_DIR:-}"
+  do
+    if [[ -n "$directory" && -d "$directory" ]]; then
+      chmod -R u+w "$directory" 2>/dev/null || true
+      rm -r "$directory"
+    fi
+  done
+}
+trap cleanup_component_artifacts EXIT
+
+SIM_ARM_LIB="${SIM_ARM_COMPONENT_ARTIFACT_DIR:-}/$LIB_NAME"
+SIM_X86_LIB="${SIM_X86_COMPONENT_ARTIFACT_DIR:-}/$LIB_NAME"
+MACOS_LIB="$MACOS_COMPONENT_ARTIFACT_DIR/$LIB_NAME"
+DEVICE_LIB="${DEVICE_COMPONENT_ARTIFACT_DIR:-}/$LIB_NAME"
 
 echo "== 1b. verify macOS deployment target ($MACOS_DEPLOYMENT_TARGET) =="
 "$DEPLOYMENT_CHECKER" "$MACOS_LIB"
@@ -150,7 +174,7 @@ fi
 echo "== 3. uniffi-bindgen (library mode) -> Swift bindings =="
 mkdir -p "$GEN_DIR"
 env -u MACOSX_DEPLOYMENT_TARGET \
-  cargo run -p "$CRATE" --bin "$BINDGEN_BIN" -- generate \
+  cargo run --locked -p "$CRATE" --bin "$BINDGEN_BIN" -- generate \
   --library "$BINDGEN_LIB" \
   --language swift \
   --out-dir "$GEN_DIR"

@@ -37,6 +37,26 @@ final class RemoteSignerTests: XCTestCase {
         )
     }
 
+    func testMismatchedCoreIsTypedBeforeTheMailboxBodyRuns() {
+        var mailboxBodyRan = false
+
+        XCTAssertThrowsError(
+            try withVerifiedNip46Core(actual: "deliberately-mismatched-core") { _ in
+                mailboxBodyRan = true
+            }
+        ) { error in
+            guard case .nativeComponentMismatch(
+                component: "nmp-nip46",
+                expectedCoreIdentity: let expected,
+                actualCoreIdentity: "deliberately-mismatched-core"
+            ) = error as? NMPError else {
+                return XCTFail("unexpected error: \(error)")
+            }
+            XCTAssertTrue(expected.hasPrefix("nmp-core-component-v1-"))
+        }
+        XCTAssertFalse(mailboxBodyRan)
+    }
+
     func testObserverProjectsReadyThenFinishesOnClose() async {
         let observer = NIP46Observer()
         var states = observer.stream.makeAsyncIterator()

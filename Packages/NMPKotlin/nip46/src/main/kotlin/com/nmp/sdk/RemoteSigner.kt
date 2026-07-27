@@ -10,6 +10,7 @@ import kotlin.time.Duration.Companion.seconds
 import uniffi.nmp_nip46_ffi.FfiBunkerParseError
 import uniffi.nmp_nip46_ffi.FfiNip46ClientMetadata
 import uniffi.nmp_nip46_ffi.FfiNip46ConnectionEvent
+import uniffi.nmp_nip46_ffi.FfiNip46CoreCompatibility
 import uniffi.nmp_nip46_ffi.FfiNip46Failure
 import uniffi.nmp_nip46_ffi.FfiNip46Invitation
 import uniffi.nmp_nip46_ffi.FfiNip46ProviderException
@@ -18,6 +19,7 @@ import uniffi.nmp_nip46_ffi.Nip46Connection
 import uniffi.nmp_nip46_ffi.Nip46ConnectionObserver
 import uniffi.nmp_nip46_ffi.NmpNip46Provider
 import uniffi.nmp_nip46_ffi.nip46SignerCatalog
+import uniffi.nmp_nip46_ffi.verifyNip46CoreComponentIdentity
 
 /** Rust-owned NIP-46 signer facts. Android code should query the exact
  * [androidDetectionUri], filter handlers by [androidPackageId], then launch
@@ -255,7 +257,9 @@ data class NMPAndroidSignerHandoff(val uri: String, val packageName: String)
 
 @OptIn(NMPProviderComponentApi::class)
 private fun NMPEngine.nip46Provider(): NmpNip46Provider =
-    NmpNip46Provider(signerProviderMailbox())
+    withVerifiedNip46Core(nmpProviderCoreComponentIdentity()) { compatibility ->
+        NmpNip46Provider(compatibility, signerProviderMailbox())
+    }
 
 fun NMPEngine.nip46Invitation(
     relays: List<String>,
@@ -378,6 +382,24 @@ private inline fun <T> nip46Rethrowing(body: () -> T): T =
                 NMPError.InvalidRelayUrl(error.relay)
             is FfiNip46ProviderException.InvalidSigner ->
                 NMPError.InvalidSigner(error.reason)
+            is FfiNip46ProviderException.CoreComponentMismatch ->
+                NMPError.NativeComponentMismatch(
+                    component = "nmp-nip46",
+                    expectedCoreIdentity = error.expected,
+                    actualCoreIdentity = error.actual,
+                )
             is FfiNip46ProviderException.EngineClosed -> NMPError.EngineClosed
         }
     }
+
+/** Validate plain component identity before evaluating [body]. Production's
+ * body is the first place that requests/lowers the external core mailbox. */
+internal inline fun <T> withVerifiedNip46Core(
+    actual: String,
+    body: (FfiNip46CoreCompatibility) -> T,
+): T {
+    val compatibility = nip46Rethrowing {
+        verifyNip46CoreComponentIdentity(actual)
+    }
+    return body(compatibility)
+}

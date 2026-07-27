@@ -2131,6 +2131,7 @@ version = "0.1.0"
 name = "nmp-ffi"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "nmp",
  "nmp-asset",
  "nmp-blossom",
@@ -2242,6 +2243,7 @@ dependencies = [
 name = "nmp-nip46-ffi"
 version = "0.1.0"
 dependencies = [
+ "camino",
  "nmp",
  "nmp-ffi",
  "nmp-nip46",
@@ -2250,6 +2252,8 @@ dependencies = [
  "tokio",
  "tungstenite 0.29.0",
  "uniffi",
+ "uniffi_bindgen",
+ "uniffi_meta",
  "url",
 ]
 

@@ -23,6 +23,13 @@ name = "nmp_ffi"
 name = "uniffi-bindgen"
 path = "uniffi-bindgen.rs"
 
+[features]
+default = []
+# Cargo-controlled witness that the resolved graph contains the separately
+# selectable NIP-46 component. The provider dependency enables it; callers do
+# not set it directly.
+nip46-provider-component = []
+
 [dependencies]
 nostr.workspace = true
 # #851: every engine, query, receipt, signer and typed write value this crate
@@ -88,3 +95,7 @@ url = "2"
 # #680 async observation falsifiers drive the pull-based `next()` futures with a
 # real executor. `#[tokio::test]` only, dev-only — production stays runtime-free.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[build-dependencies]
+blake3.workspace = true
+serde_json.workspace = true

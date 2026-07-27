@@ -247,8 +247,13 @@ public struct NMPNip46Invitation: Sendable {
 }
 
 extension NMPEngine {
-    private func nip46Provider() -> NmpNip46Provider {
-        NmpNip46Provider(mailbox: signerProviderMailbox())
+    private func nip46Provider() throws -> NmpNip46Provider {
+        try withVerifiedNip46Core(actual: nmpProviderCoreComponentIdentity()) { compatibility in
+            NmpNip46Provider(
+                compatibility: compatibility,
+                mailbox: signerProviderMailbox()
+            )
+        }
     }
 
     public func nip46Invitation(
@@ -409,6 +414,19 @@ extension NMPEngine {
     #endif
 }
 
+/// Validate plain component identity before evaluating `body`. Production's
+/// body is the first place that requests/lowers the external core mailbox;
+/// tests inject a trap body to prove mismatch cannot reach that point.
+func withVerifiedNip46Core<T>(
+    actual: String,
+    body: (FfiNip46CoreCompatibility) throws -> T
+) throws -> T {
+    let compatibility = try nip46Rethrowing {
+        try verifyNip46CoreComponentIdentity(actual: actual)
+    }
+    return try body(compatibility)
+}
+
 private func nip46Rethrowing<T>(_ body: () throws -> T) throws -> T {
     do {
         return try body()
@@ -422,6 +440,12 @@ private func nip46Rethrowing<T>(_ body: () throws -> T) throws -> T {
             throw NMPError.invalidRelayUrl(relay)
         case .InvalidSigner(let reason):
             throw NMPError.invalidSigner(reason)
+        case .CoreComponentMismatch(let expected, let actual):
+            throw NMPError.nativeComponentMismatch(
+                component: "nmp-nip46",
+                expectedCoreIdentity: expected,
+                actualCoreIdentity: actual
+            )
         case .EngineClosed:
             throw NMPError.engineClosed
         }

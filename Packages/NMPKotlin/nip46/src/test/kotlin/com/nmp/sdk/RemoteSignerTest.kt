@@ -7,6 +7,8 @@ import kotlinx.coroutines.runBlocking
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class RemoteSignerTest {
@@ -67,6 +69,21 @@ class RemoteSignerTest {
                 "handoff must resolve package and protocol from the Rust catalog by id",
             )
         }
+    }
+
+    @Test
+    fun mismatchedCoreIsTypedBeforeTheMailboxBodyRuns() {
+        var mailboxBodyRan = false
+
+        val error = assertFailsWith<NMPError.NativeComponentMismatch> {
+            withVerifiedNip46Core("deliberately-mismatched-core") {
+                mailboxBodyRan = true
+            }
+        }
+        assertEquals("nmp-nip46", error.component)
+        assertTrue(error.expectedCoreIdentity.startsWith("nmp-core-component-v1-"))
+        assertEquals("deliberately-mismatched-core", error.actualCoreIdentity)
+        assertFalse(mailboxBodyRan)
     }
 
     @Test
