@@ -761,6 +761,24 @@ fn wire_sub_string(sub_id: &SubId) -> String {
     format!("{}", sub_id.1)
 }
 
+/// Every subscription `effects` withdraws from `relay`.
+fn wire_closes(effects: &[Effect], relay: &RelayUrl) -> BTreeSet<SubId> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Wire(delta) => Some(delta),
+            _ => None,
+        })
+        .flat_map(|delta| delta.ops.iter())
+        .filter(|(session, _)| &session.relay == relay)
+        .flat_map(|(_, ops)| ops.iter())
+        .filter_map(|op| match op {
+            WireOp::Close(sub_id) => Some(sub_id.clone()),
+            WireOp::Req(..) => None,
+        })
+        .collect()
+}
+
 fn public_session(relay: &RelayUrl) -> RelaySessionKey {
     RelaySessionKey::public(relay.clone())
 }

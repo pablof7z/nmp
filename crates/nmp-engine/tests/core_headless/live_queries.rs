@@ -1045,6 +1045,88 @@ fn limited_fetch_never_records_coverage() {
     );
 }
 
+// ---- #932: the plan-identity path, already closed by #899/PR #912 -------
+
+/// REGRESSION GUARD, not a repair: this passes because wire ids for PLANNED
+/// subscriptions are allocated tokens (`nmp_router::SubId::allocate`) that
+/// the router's monotonic mint counter never recycles within a session.
+///
+/// Withdraw a subscription and immediately re-demand exactly the same
+/// skeleton. The reopened request goes on the wire under a token nobody has
+/// ever been handed, so the closed request's late EOSE resolves to nothing at
+/// all -- it cannot pop the reopened request's attribution snapshot, and no
+/// coverage watermark is claimed before the reopened request has been served.
+/// The reopened request's own EOSE then earns its coverage normally.
+///
+/// The relay here is connected but never behaviorally proven for NIP-77, so
+/// the demand takes the ordinary planned-REQ path rather than the role-derived
+/// repair path the same defect survived on until #932.
+#[test]
+fn a_reopened_plan_subscription_never_inherits_a_closed_tokens_eose() {
+    let a = Keys::generate();
+    let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let mut core = new_core(dir);
+    connect(&mut core, 0, &relay0);
+
+    let subscribed = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let handle = subscribed_handle(&subscribed);
+    let closed_sub_id = req_for(&subscribed, &relay0).0.clone();
+
+    let withdrawn = core.handle(EngineMsg::Unsubscribe(handle));
+    assert!(
+        wire_closes(&withdrawn, &relay0).contains(&closed_sub_id),
+        "withdrawing the only demand owner must close its request: {withdrawn:?}"
+    );
+
+    let redemanded = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let _ = subscribed_handle(&redemanded);
+    let reopened_sub_id = req_for(&redemanded, &relay0).0.clone();
+    assert_ne!(
+        reopened_sub_id, closed_sub_id,
+        "re-demanding the same skeleton must mint a fresh wire token (#912)"
+    );
+
+    let atom = ctx_atom(cf(&[1], &[&a.public_key().to_hex()]));
+    let stale = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay0),
+        eose_frame(&wire_sub_string(&closed_sub_id)),
+    ));
+    assert!(
+        !stale
+            .iter()
+            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+        "the closed request's late EOSE must credit nothing: {stale:?}"
+    );
+    assert_eq!(core.get_coverage(&atom, &relay0), None);
+
+    let served = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay0),
+        eose_frame(&wire_sub_string(&reopened_sub_id)),
+    ));
+    assert!(
+        served
+            .iter()
+            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+        "the reopened request's own EOSE must still earn its coverage: {served:?}"
+    );
+    assert!(core.get_coverage(&atom, &relay0).is_some());
+}
+
 // ---- per-source acquisition evidence (docs/design/
 // scoped-evidence-49-12-plan.md §2/§3, folding #12 into #49) -------------
 

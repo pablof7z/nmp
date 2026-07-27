@@ -1052,3 +1052,233 @@ fn live_eose_timeout_fallback_then_supersession_closes_orphaned_candidate() {
 
     let _ = core.handle(EngineMsg::Unsubscribe(a_handle));
 }
+
+// ---- #932: a reopened repair REQ never inherits a closed one's EOSE ------
+
+/// THE #932 FALSIFIER, at the role-id path the allocated-wire-id work
+/// (#899/PR #912) deliberately did not cover.
+///
+/// A NIP-77 role subscription's wire id used to be purely content-derived --
+/// the router's plan id, a role byte, and the full filter hash -- while a
+/// PLANNED subscription's id became an allocated token the router never
+/// recycles. Content-derived means reproducible: close a repair REQ (its
+/// inflight snapshots and its wire mapping are discarded), then re-derive the
+/// same role for the same plan id and the same filter, and the identical
+/// 64-hex string went back on the wire with a FRESH attribution FIFO. A
+/// straggler EOSE for the PRE-CLOSE request then popped the reopened
+/// request's snapshot and minted a durable coverage watermark for a REQ the
+/// relay had not finished serving -- and coverage is exactly what
+/// `plan_is_fresh_for` trusts, so the engine believed it held data that never
+/// arrived.
+///
+/// The backlog fallback role is the sharpest instance because it is
+/// deliberately UNLIMITED (so nothing poisons it) and carries the demand's
+/// real absorbed keys (so its EOSE genuinely earns coverage).
+///
+/// Both legs matter. The stale EOSE must credit NOTHING, and the reopened
+/// request's OWN EOSE must still credit normally -- an "exact attribution"
+/// fix and a "dead attribution" regression are indistinguishable without the
+/// second assertion.
+#[test]
+fn a_reopened_backlog_req_never_inherits_a_closed_incarnations_eose() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new()
+        .with_write(a.public_key().to_hex(), [relay.clone()])
+        .with_write(b.public_key().to_hex(), [relay.clone()]);
+    let mut core = new_core(dir);
+
+    let initial = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let _ = subscribed_handle(&initial);
+    connect_and_prove_nip77(&mut core, &relay);
+
+    // Widening to a+b starts a live-first handoff; letting its liveness
+    // deadline expire parks an unlimited backlog REQ carrying both authors'
+    // coverage keys.
+    let widened = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &b.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let b_handle = subscribed_handle(&widened);
+    let timed_out = core.handle(EngineMsg::Tick(Timestamp::from(30u64)));
+    let (first_backlog, backlog_filter) = req_for(&timed_out, &relay);
+    let first_backlog = first_backlog.clone();
+    assert_eq!(
+        backlog_filter.limit, None,
+        "the backlog fallback is unlimited, so its EOSE really does earn coverage"
+    );
+
+    // Narrowing back to a-only supersedes that whole repair phase: the
+    // backlog REQ is closed and its attribution discarded, its EOSE still
+    // potentially in flight. Re-widening and expiring again re-derives the
+    // SAME role for the SAME plan id and the SAME filter.
+    let narrowed = core.handle(EngineMsg::Unsubscribe(b_handle));
+    assert!(
+        wire_closes(&narrowed, &relay).contains(&first_backlog),
+        "narrowing must close the superseded backlog REQ: {narrowed:?}"
+    );
+    let rewidened = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &b.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let _ = subscribed_handle(&rewidened);
+    let timed_out_again = core.handle(EngineMsg::Tick(Timestamp::from(90u64)));
+    let (reopened_backlog, _) = req_for(&timed_out_again, &relay);
+    let reopened_backlog = reopened_backlog.clone();
+
+    assert_ne!(
+        reopened_backlog, first_backlog,
+        "a reopened repair REQ must never go back on the wire under a \
+         subscription id a closed one already used"
+    );
+    assert_eq!(
+        wire_sub_string(&reopened_backlog).len(),
+        64,
+        "reincarnation must fit INSIDE the digest -- 64 hex characters is \
+         exactly NIP-01's subscription_id cap and may never be exceeded"
+    );
+
+    // The straggler: the EOSE the relay finally sends for the request that
+    // was closed at the narrowing step.
+    let stale = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire_sub_string(&first_backlog)),
+    ));
+    assert!(
+        !stale
+            .iter()
+            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+        "a straggler EOSE for a closed request must credit no coverage at \
+         all -- the reopened request has not been served yet: {stale:?}"
+    );
+    let atom_a = ctx_atom(cf(&[1], &[&a.public_key().to_hex()]));
+    let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
+    assert_eq!(core.get_coverage(&atom_a, &relay), None);
+    assert_eq!(core.get_coverage(&atom_b, &relay), None);
+
+    // The positive leg: the reopened request's OWN EOSE still earns exactly
+    // the coverage it proved.
+    let served = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire_sub_string(&reopened_backlog)),
+    ));
+    assert!(
+        served
+            .iter()
+            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+        "the reopened request's own EOSE must still record coverage -- \
+         exact attribution, not dead attribution: {served:?}"
+    );
+    assert!(core.get_coverage(&atom_a, &relay).is_some());
+    assert!(core.get_coverage(&atom_b, &relay).is_some());
+}
+
+/// The same reincarnation defect at the live-candidate role (#932). A
+/// `limit:0` candidate poisons coverage by construction, so its observable is
+/// the reconciliation barrier itself: its EOSE is what promotes it to the
+/// live owner and opens Negentropy. Under a recycled wire id a straggler for
+/// a closed candidate tripped that barrier for a candidate the relay had
+/// never acknowledged.
+#[test]
+fn a_reopened_live_candidate_never_inherits_a_closed_incarnations_eose() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureDirectory::new()
+        .with_write(a.public_key().to_hex(), [relay.clone()])
+        .with_write(b.public_key().to_hex(), [relay.clone()]);
+    let mut core = new_core(dir);
+
+    let initial = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &a.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let a_handle = subscribed_handle(&initial);
+    connect_and_prove_nip77(&mut core, &relay);
+
+    let widened = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &b.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let b_handle = subscribed_handle(&widened);
+    let candidate_ab = req_for(&widened, &relay).0.clone();
+    let opened = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire_sub_string(&candidate_ab)),
+    ));
+    assert!(
+        opened
+            .iter()
+            .any(|effect| matches!(effect, Effect::NegOpen(..))),
+        "the candidate's own EOSE is the barrier that opens reconciliation"
+    );
+
+    // Narrow to a-only: a replacement candidate goes out and is never
+    // acknowledged. Re-widening closes and discards it; narrowing again
+    // re-derives the identical role/plan/filter triple.
+    let narrowed = core.handle(EngineMsg::Unsubscribe(b_handle));
+    let candidate_a = req_for(&narrowed, &relay).0.clone();
+    let rewidened = core.handle(EngineMsg::Subscribe(
+        literal_query(&[1], &b.public_key().to_hex()),
+        Box::new(CapturingSink::default()),
+    ));
+    let b_handle_again = subscribed_handle(&rewidened);
+    let narrowed_again = core.handle(EngineMsg::Unsubscribe(b_handle_again));
+    let reopened_candidate = req_for(&narrowed_again, &relay).0.clone();
+
+    assert_ne!(
+        reopened_candidate, candidate_a,
+        "a reopened live candidate must never reuse a closed candidate's \
+         subscription id"
+    );
+
+    let stale = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire_sub_string(&candidate_a)),
+    ));
+    assert!(
+        !stale
+            .iter()
+            .any(|effect| matches!(effect, Effect::NegOpen(..))),
+        "a straggler EOSE for a closed candidate must never trip the \
+         reconciliation barrier for the reopened one: {stale:?}"
+    );
+
+    // The reopened candidate's own EOSE still works exactly as before.
+    let served = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire_sub_string(&reopened_candidate)),
+    ));
+    assert!(
+        served
+            .iter()
+            .any(|effect| matches!(effect, Effect::NegOpen(..))),
+        "the reopened candidate's own EOSE must still open reconciliation: \
+         {served:?}"
+    );
+    let _ = core.handle(EngineMsg::Unsubscribe(a_handle));
+}

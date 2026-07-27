@@ -219,6 +219,15 @@ impl AttributionState {
     /// coverage. These ids are role-derived and never shared with the live
     /// REQ, so removing the whole FIFO is exact rather than a best-effort
     /// "pop the newest" convention.
+    ///
+    /// Dropping the wire mapping outright is only SAFE because no later
+    /// incarnation can re-register the same string (#932): NIP-77 role ids
+    /// carry an engine-minted reincarnation (`core::nip77_role_sub_id`) and
+    /// planned ids are allocated tokens the router never recycles within a
+    /// session (`nmp_router::SubId::allocate`). Were a discarded string ever
+    /// re-registered, the FRESH FIFO underneath it would be popped by a
+    /// straggler EOSE belonging to the request that was closed -- crediting
+    /// durable coverage for a request the relay has not finished serving.
     pub(crate) fn discard_sub(&mut self, sub_id: &SubId) {
         self.inflight.remove(sub_id);
         self.sub_id_by_wire

@@ -108,10 +108,49 @@ const NIP77_NEG_ROLE: u8 = 0x72;
 const NIP77_MISSING_ROLE: u8 = 0x73;
 const NIP77_FALLBACK_ROLE: u8 = 0x74;
 
-fn nip77_role_sub_id(plan_sub_id: &SubId, role: u8, filter: &ConcreteFilter) -> SubId {
+/// Derive the wire id for one NIP-77 role subscription, in the ENGINE's own
+/// per-connection wire-string namespace.
+///
+/// `incarnation` is what makes each derivation a FRESH string (#932), and it
+/// is the whole point of this signature. Role + plan id + filter hash alone
+/// are content-derived, so closing a role subscription and later re-deriving
+/// it for the same plan id and the same filter reproduced the SAME 64-hex
+/// wire string. `AttributionState::discard_sub` drops the closed
+/// incarnation's inflight FIFO and its wire mapping, so the re-derived string
+/// re-registered with a FRESH FIFO -- and a straggler EOSE for the
+/// pre-Close REQ then popped the NEW snapshot and minted durable coverage for
+/// a request the relay had not finished serving. Coverage is what
+/// `plan_is_fresh_for` trusts, so that over-claimed acquisition outright.
+///
+/// This is the derived-namespace counterpart of what #899/#912 did for
+/// PLANNED subscriptions, whose ids are allocated tokens the router never
+/// recycles within a session (`nmp_router::SubId::allocate`). It deliberately
+/// lives here rather than in `AttributionState::record_send`: the plan path
+/// must NOT be incarnated, because `Effect::Replay` ships `WireReq`s straight
+/// out of the router's plan and `on_wire_request_handoff` keys on
+/// `(session, sub_id)` -- a blanket mint at send time would break that
+/// router-to-engine correspondence. Only ids the engine both mints and
+/// stores itself can carry an incarnation, and these four roles are exactly
+/// those ids.
+///
+/// The incarnation is FOLDED INTO the digest, never appended to it: a
+/// `SubId`'s wire string is the hex `Display` of this hash, fixed at 64
+/// characters, which is exactly NIP-01's `subscription_id` cap. Real relays
+/// that declare `max_subid_length` sit at 71 and most declare nothing, so 64
+/// is the ceiling to respect and an incarnation marker has to fit inside the
+/// existing hash rather than extend it.
+fn nip77_role_sub_id(
+    plan_sub_id: &SubId,
+    role: u8,
+    filter: &ConcreteFilter,
+    incarnation: u64,
+) -> SubId {
     let mut hash = fold_byte(plan_sub_id.1, role);
     for byte in filter.hash().as_bytes() {
         hash = fold_byte(hash, *byte);
+    }
+    for byte in incarnation.to_be_bytes() {
+        hash = fold_byte(hash, byte);
     }
     SubId(plan_sub_id.0.clone(), hash, plan_sub_id.2)
 }
@@ -1152,9 +1191,17 @@ pub struct EngineCore<S: EventStore> {
     /// kept separate from `prober`: advertisement is evidence, never proof.
     nip11_information: HashMap<RelayUrl, RelayInformationCapabilityEvidence>,
     /// Router plan id -> exact NIP-01 subscription currently owning the live
-    /// tail. NIP-77 candidates use full-filter-derived ids, so an old live
-    /// selection can overlap a replacement until the replacement's EOSE.
+    /// tail. NIP-77 candidates use role-derived ids, so an old live selection
+    /// can overlap a replacement until the replacement's EOSE.
     active_nip77_live: HashMap<SubId, SubId>,
+    /// Monotonic reincarnation counter for every NIP-77 role wire id
+    /// ([`nip77_role_sub_id`], #932). ONLY ever increments: it survives
+    /// recompiles, `AttributionState::clear_session`, and reconnects
+    /// untouched, because a counter that reset would re-mint a string a
+    /// straggler EOSE could still be addressed to -- exactly the defect it
+    /// exists to close. `u64` at one mint per repair phase is not a
+    /// wrap-around this process can reach.
+    next_nip77_incarnation: u64,
     /// Candidate live REQs waiting for their exact EOSE barrier.
     pending_neg_handoffs: HashMap<SubId, PendingNegHandoff>,
     /// Live reconciliation sessions keyed by their role-derived NIP-77 id.
@@ -1320,6 +1367,7 @@ impl<S: EventStore> EngineCore<S> {
             prober: Prober::new(),
             nip11_information: HashMap::new(),
             active_nip77_live: HashMap::new(),
+            next_nip77_incarnation: 0,
             pending_neg_handoffs: HashMap::new(),
             neg_sessions: HashMap::new(),
             pending_backfills: HashMap::new(),
