@@ -22,8 +22,18 @@ cd "$ROOT"
 
 fail() { echo "nip51-no-derived-authority: $*" >&2; exit 1; }
 
+# Portability note: plain POSIX `grep` only. GitHub's ubuntu-latest runner has
+# no `ripgrep`, and this gate must run with no toolchain and no setup step.
+#
+# The searched corpus is `git ls-files` over crates/ and Packages/ -- tracked
+# sources only, so build output and uniffi-generated bindings can neither hide
+# a violation nor manufacture one.
+# `xargs`'s "some invocation exited 1" status differs between GNU and BSD, so
+# a match is detected by captured OUTPUT, never by exit status.
+census() { git ls-files -- crates Packages | xargs grep -nE "$1" || true; }
+
 # Every layer that projects Simple-groups parsing must actually exist. A
-# missing file would otherwise turn each `rg` below into a vacuous pass.
+# missing file would otherwise turn each search below into a vacuous pass.
 NIP51_SOURCES=(
   crates/nmp-nip51/src/simple_groups.rs
   crates/nmp-ffi/src/nip51.rs
@@ -44,7 +54,9 @@ done
 #    `decode*` spelling hid that caller-constructible input was accepted.
 # (`docs/surface-change-log.md` is append-only history and is deliberately
 # not scanned: it records the withdrawn spelling as a fact of the past.)
-if rg -n 'decode_simple_groups_list|decodeSimpleGroupsList' crates Packages; then
+found=$(census 'decode_simple_groups_list|decodeSimpleGroupsList')
+if [[ -n $found ]]; then
+  printf '%s\n' "$found"
   fail "obsolete authoritative-sounding decoder door reappeared"
 fi
 
@@ -56,39 +68,39 @@ for requirement in \
 do
   file=${requirement%%:*}
   symbol=${requirement#*:}
-  rg -q -- "$symbol" "$file" || fail "$file is missing $symbol"
+  grep -qF -- "$symbol" "$file" || fail "$file is missing $symbol"
 done
 
 # 2. Parsing has no consumer operation that needs authority today, so it may
 #    not mint a reusable protocol-specific proof, canonical wrapper,
 #    lifecycle, or authority token -- anywhere in the workspace or the SDKs.
-if rg -n \
-  'ObservedSimpleGroups|QualifiedSimpleGroups|SimpleGroupsProjection|CanonicalSimpleGroups|AuthoritativeSimpleGroups|project_observed_simple_groups|projectObservedSimpleGroups|SimpleGroupsWitness|SimpleGroupsProof' \
-  crates Packages; then
+found=$(census 'ObservedSimpleGroups|QualifiedSimpleGroups|SimpleGroupsProjection|CanonicalSimpleGroups|AuthoritativeSimpleGroups|project_observed_simple_groups|projectObservedSimpleGroups|SimpleGroupsWitness|SimpleGroupsProof')
+if [[ -n $found ]]; then
+  printf '%s\n' "$found"
   fail "derived NIP-51 authority/lifecycle surface appeared"
 fi
 
 # 3. No frame proof or second observation handle may be reachable from the
 #    NIP-51 parsing files themselves -- the kind:10009 read is the ordinary
 #    `LiveQuery`, and parsing adds no handle beside it.
-if rg -n \
-  'FrameProof|ObservationHandle|AuthorityToken|FfiObservation|FfiFrame\b' \
+if grep -nE \
+  'FrameProof|ObservationHandle|AuthorityToken|FfiObservation|FfiFrame([^A-Za-z0-9_]|$)' \
   "${NIP51_SOURCES[@]}"; then
   fail "NIP-51 parsing acquired an observation lifecycle/proof surface"
 fi
 
 # 4. The tolerant-parser falsifiers must keep proving that fabricated,
 #    wrong-kind input preserves evidence instead of becoming authority.
-rg -q 'tolerant_parse_of_fabricated_input_yields_plain_evidence_not_authority' \
+grep -qF 'tolerant_parse_of_fabricated_input_yields_plain_evidence_not_authority' \
   crates/nmp-nip51/src/simple_groups.rs ||
   fail "direct-Rust fabricated-input falsifier is missing"
-rg -q 'tolerant_parser_preserves_evidence_even_for_fabricated_wrong_kind_row' \
+grep -qF 'tolerant_parser_preserves_evidence_even_for_fabricated_wrong_kind_row' \
   crates/nmp-ffi/src/nip51.rs ||
   fail "FFI fabricated-wrong-kind falsifier is missing"
-rg -q 'testTolerantParserPreservesEvidenceForFabricatedWrongKindRow' \
+grep -qF 'testTolerantParserPreservesEvidenceForFabricatedWrongKindRow' \
   Packages/NMP/Tests/NMPTests/NIP51Tests.swift ||
   fail "Swift fabricated-wrong-kind falsifier is missing"
-rg -q 'tolerantParserPreservesEvidenceForFabricatedWrongKindRow' \
+grep -qF 'tolerantParserPreservesEvidenceForFabricatedWrongKindRow' \
   Packages/NMPKotlin/src/test/kotlin/com/nmp/sdk/NIP51Test.kt ||
   fail "Kotlin fabricated-wrong-kind falsifier is missing"
 
@@ -96,18 +108,18 @@ rg -q 'tolerantParserPreservesEvidenceForFabricatedWrongKindRow' \
 #    these signatures stops taking its host as a parameter, host selection has
 #    started deriving from somewhere -- and a tolerant parser result is the
 #    only nearby candidate.
-rg -q 'pub fn group_discovery_demand\(host: RelayUrl\)' crates/nmp-nip29/src/demand.rs ||
+grep -qF 'pub fn group_discovery_demand(host: RelayUrl)' crates/nmp-nip29/src/demand.rs ||
   fail "direct-Rust NIP-29 explicit-host selection seam is missing"
-rg -q 'pub fn group_discovery_demand\(host: String\)' crates/nmp-ffi/src/nip29.rs ||
+grep -qF 'pub fn group_discovery_demand(host: String)' crates/nmp-ffi/src/nip29.rs ||
   fail "FFI NIP-29 explicit-host selection seam is missing"
-rg -q 'func groupDiscoveryDemand\(host: String\)' Packages/NMP/Sources/NMP/NIP29.swift ||
+grep -qF 'func groupDiscoveryDemand(host: String)' Packages/NMP/Sources/NMP/NIP29.swift ||
   fail "Swift NIP-29 explicit-host selection seam is missing"
-rg -q 'fun groupDiscoveryDemand\(' Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29.kt ||
+grep -qF 'fun groupDiscoveryDemand(' Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29.kt ||
   fail "Kotlin NIP-29 explicit-host selection seam is missing"
 
 # 6. The workload nouns stay exactly two. A NIP-51 file must not export a
 #    third query/intent-shaped noun of its own.
-if rg -n 'pub struct .*Query|pub struct .*Intent|struct .*Observation' "${NIP51_SOURCES[@]}"; then
+if grep -nE 'pub struct .*Query|pub struct .*Intent|struct .*Observation' "${NIP51_SOURCES[@]}"; then
   fail "NIP-51 parsing introduced a third workload noun"
 fi
 
