@@ -35,7 +35,8 @@ down. Read §5 first if you only want the failure modes.
 behaviour; sections marked OPEN are unresolved. §7's design is now built —
 §7.1 as `nmp_router::StructuralUnion`, §7.2 as `nmp_router::wire_id` — and
 §6's per-relay subscription budget is built as `nmp_router::CompileBudget`.
-What remains unbuilt is §8.1b/§8.2.
+What remains unbuilt is §8.1b/§8.2. §11 is a design pass whose verdict is
+NOT to build (#933), with the measurement that supports it.
 
 ---
 
@@ -827,6 +828,7 @@ Everything asserted above is measured, not reasoned. Reproduce with:
 | §8.2 the Close/reopen straggler, role path: durable coverage minted by a straggler, plus the positive leg | `crates/nmp-engine/tests/core_headless/negentropy.rs` (`a_reopened_backlog_req_never_inherits_a_closed_incarnations_eose`, `a_reopened_live_candidate_never_inherits_a_closed_incarnations_eose`) |
 | §8.2 the same race on the plan path, green by §7.2 alone | `crates/nmp-engine/tests/core_headless/live_queries.rs` (`a_reopened_plan_subscription_never_inherits_a_closed_tokens_eose`) |
 | §8.2 observed at the relay, in the product's own voice | `features/coverage/reopened-requests.feature` |
+| §11 what a widening subscription costs a relay, versus asking only for the new values | `crates/nmp/examples/reserve_cost_live.rs` |
 
 The live probe is the strongest evidence and the cheapest to re-run:
 
@@ -874,11 +876,16 @@ the whole query and re-serves every event it already served. #933 proposed
 paying it back — keep the incumbent, and open a small second subscription
 carrying only the newly discovered values.
 
-This section is the design pass #933 asked for. The verdict is **do not
-build it as specified**, and the reason is not that the saving is small.
-The saving is large. The reason is that two of the four recorded problems
-have no answer, a fifth problem exists that the issue does not list, and a
-cheaper change collects most of the same saving.
+This section is the design pass #933 asked for. The verdict is **do not build
+it**, and the reason is not that the saving is small — the saving is large,
+up to 90% of served bytes. The reason is that the time floor the issue treats
+as its easy problem has no standalone answer, and every variant that survives
+scrutiny reaches safety the same way: by making the split into coverage-driven
+planned demand, which reverses §4.3 and pays out four more invariants behind
+it. A cheaper change collects part of the same saving.
+
+Read §11.6 first if you only want the ruling. §11.1 is the number; §11.4 is
+why the number is not enough.
 
 ### 11.1 The saving, measured
 
@@ -911,7 +918,8 @@ nak serve --port 10547
 cargo run -p nmp --example reserve_cost_live -- ws://localhost:10547 5,1,3
 ```
 
-Three things to read out of that table.
+Four things to read out of that table, and one of them is a caveat about the
+table itself.
 
 **The waste is real and it is quadratic in the number of GROWTH STEPS.**
 `overwrite` serves `E·(v₁ + v₁₊₂ + …)`; `delta` serves `E·n`. Nothing about
@@ -919,18 +927,41 @@ the number of values drives it — a set that resolves in one step wastes
 nothing at all, and the same set arriving one value at a time wastes 90%.
 
 **The step count is a recompile-granularity artifact, not a property of the
-demand.** §1: the router recompiles on every demand mutation, with no
-debounce. `derived_tag_fanout.rs` case D records that derived resolution is
-driven by INGESTED ROWS, not by EOSE — so a derived set whose members arrive
-as separate events grows one value per recompile, which is the `1`×20 row.
-The issue's own name for the feature ("per-EOSE") understates its own case.
+demand — and where a real workload sits in that bracket is NOT measured
+here.** §1: the router recompiles on every demand mutation, with no debounce.
+`derived_tag_fanout.rs` case D records that derived resolution is driven by
+INGESTED ROWS, not by EOSE, which is what produces the `1`×20 row. But that
+case feeds events one at a time into a headless core. The live runtime does
+not: `on_relay_frames` accumulates event candidates across a whole inbound
+batch and ingests them in ONE `ingest_relay_observations` call, so one
+committed mutation and one recompile, over batches of up to
+`max_engine_batch: 4_096` frames within `max_engine_batch_wait: 200µs`
+(`crates/nmp-transport/src/pool.rs`). A burst of twenty revealing events from
+one relay therefore tends toward ONE growth step, not twenty. What defeats
+the batch is spacing, not volume: multi-relay staggered discovery, or a
+live-tail set that gains a member every few minutes. **`0.6%` and `90%` are
+both real; which one a given workload gets is the first thing any revisit of
+#933 must measure, and this study does not answer it.**
 
-**The saving is bought with exactly the resource §6 declared scarce.** 90% of
-the bytes costs 20 concurrent subscriptions against an advertised ceiling
-measured at ~20. #930 spent re-serve bandwidth to buy subscriptions, 300 → 1.
-#933 spends subscriptions to buy the bandwidth back. They are the same trade
-in opposite directions, and only one of the two resources has a hard relay
-ceiling attached to it.
+**The rightmost column is the NEVER-CLOSE variant's bill, and it must not be
+charged to the other one.** `reserve_cost_live` opens `delta{step}` per step
+and never CLOSEs — deliberately, as the pessimal bound. #933's own wording is
+"short-lived". A close-at-EOSE variant whose uncovered values coalesce into
+one backfill filter (same shape, unfloored, one-component different — so
+`StructuralUnion` merges them) peaks at two or three concurrent
+subscriptions, not twenty. The two variants have DIFFERENT bills: the
+never-close variant pays in subscriptions, the close-at-EOSE variant pays in
+coverage machinery (§11.4). Neither pays both, and an argument that charges
+one design for both is attackable.
+
+**Both variants trade against exactly the resource §6 declared scarce.**
+#930 spent re-serve bandwidth to buy subscriptions, 300 → 1. #933 spends
+subscriptions to buy the bandwidth back. Same trade, opposite directions, and
+only one of the two resources has a hard relay ceiling attached to it. Note
+the existence proof already running in production, though: `neither_limited`
+means every LIMITED query is in per-value-subscription posture today (§11.2),
+without incident. The subscription cost is a real cost; it is not, on its
+own, prohibitive.
 
 ### 11.2 The benefit window is narrower than the table
 
@@ -969,8 +1000,9 @@ floor is sound only AFTER a split has separated covered values from uncovered
 ones. **Problem 1 has no standalone answer: the floor and the split are one
 mechanism, and the floor is the dependent half.**
 
-**#2 — one interval per row. Confirmed, and it binds the two tiers against
-each other, not just time-chunked backfill.** `merge_interval`
+**#2 — one interval per row. Confirmed, and it binds the two TIERS against
+each other, not just time-chunked backfill — but it is a satisfiable
+constraint, not an unanswered problem.** `merge_interval`
 (`crates/nmp-store/src/coverage.rs:122`) treats `incoming.from <=
 cur.through + 1` as touching and unions; anything else keeps whichever
 interval has the greater `through` and **discards the other outright**. The
@@ -978,11 +1010,22 @@ issue's conclusion (chunk descending only) is right. What it misses is that
 the live tier and the backfill tier land on the SAME key one step later —
 once a delta value joins the incumbent filter, a live tier floored at `now`
 proves `[now, eose]` against a row holding `[0, delta_eose]`. Disjoint.
-Recency wins. The backfill's proof is destroyed and the backfill re-fires
-forever, which is problem 3's symptom arriving through problem 2's door. The
-live tier's floor is therefore capped at `min(through) + 1` over its absorbed
-keys — it can never simply be "now", and it is only ever as high as the
-laggiest value in the merged filter.
+Recency wins. The backfill's proof is destroyed.
+
+Two precisions, both of which cut AGAINST treating this as a blocker:
+
+- The destroyed proof re-fires **forever** only if the re-fired backfill is
+  `until`-bounded, which pins its `through` below the live row's `from` on
+  every retry. An UNBOUNDED re-fire EOSEs at ~now, mints `[0, ~now]`, touches
+  the live row and unions — so the loop terminates after one wasted
+  full-history refetch. The natural design carries `until` (to avoid
+  double-serving the live range), so the scary version is the likely one; but
+  "forever" is a property of that choice, not of the storage model.
+- The fix falls out of the same paragraph: cap the live tier's floor at
+  `min(through) + 1` over its absorbed keys. Then `from <= delta_eose + 1`
+  always, so the intervals always touch and always union. The floor can never
+  simply be "now", and is only ever as high as the laggiest value in the
+  merged filter — a real constraint on the design, cheaply satisfied.
 
 **#3 — backfill squeezed from both sides. Confirmed exactly as written.**
 `AttributionState::record_send` snapshots `limited: filter.limit.is_some()`,
@@ -1007,30 +1050,72 @@ that NIP-77 relays are out of scope and negentropy is the delta mechanism
 there.** Suppressing the tiers on probed relays is the only variant that does
 not ship two unreconciled loops.
 
-### 11.4 Two blockers, and a fifth problem the issue does not list
+### 11.4 The real cost: every survivable variant converges on the same bill
 
-**Blocker A — it converts a bandwidth cost into silent demand loss.** Today
-every widening re-sends the wide UNFLOORED filter, so any history previously
-missed is re-served. That accidental self-repair is precisely what the delta
-design removes. If a one-shot backfill is lost — disconnect mid-flight, CLOSE
-before EOSE, a relay that never EOSEs — the next compile is zero-diff, no REQ
-is emitted, and §4.3 records that coverage is consulted **only** by the
-`MaxAge` freshness gate and by diagnostics, never during filter construction.
-So nothing re-requests, ever. The hole is permanent, and invisible to any app
-not using `MaxAge`. Silent demand loss is the failure class §5.1 calls the
-worst in this system; a bandwidth optimisation must not reintroduce it.
+**A — as specified, a lost backfill is never retried; the only retry path
+that exists costs the whole design.** Today every widening re-sends the wide
+UNFLOORED filter, so any history previously missed is re-served. That
+accidental self-repair is precisely what the delta design removes. If a
+one-shot backfill is lost — disconnect mid-flight, CLOSE before EOSE, a relay
+that never EOSEs — the next compile is zero-diff and no REQ is emitted.
+Nothing else picks it up: `decide_handle_acquisition` is explicitly one-shot
+("an unsatisfied `MaxAge` becomes `Live` once and stays there"), history's
+re-request evidence is its own `acquired_tie_seconds` set rather than
+coverage rows, and every `get_coverage` reader in the engine is a gate or a
+diagnostic — §4.3's "never during filter construction" is exact.
 
-**Blocker B — #931 makes the backfill tier the preferred victim.**
-`refuse_over_budget` runs per session AFTER coalescing and token assignment,
-and §6.1's ranking is that **incumbents outrank newcomers**. A backfill
-subscription is a newcomer by construction: it is minted at the exact compile
-where demand grew. On any relay near its advertised cap, the backfill is
-refused first while the floored incumbent survives — Blocker A's permanent
-hole, triggered by the guard rail that landed the same day. This is the fifth
-problem, it is independent of the four, and it is the one with the freshest
-code behind it.
+The engine DOES have a repair pattern, and it is worth naming because it is
+the only one available: **anchor retryable work in the plan, and re-derive
+ephemeral work from the plan on reconnect.** That is how the NIP-77 role subs
+survive a disconnect — not by being replayed themselves, but because
+`on_relay_connected` re-derives the whole flow from `router.plan().reqs`.
+Borrowing it means making the split a COMPILE INPUT: `compile(demand,
+directory, budget, coverage)`, partitioning a merged shape's absorbed keys
+into covered and uncovered, planning a floored incumbent over the former and
+one coalesced unfloored backfill over the latter. Every leg of the failure
+closes — replay resends it, a missing coverage row means the next compile
+still plans it, attribution works through the front door unpoisoned, and
+`diag.rs` can see it because it is in `RelayPlan`.
 
-### 11.5 The cheaper change that collects most of the same saving
+That variant is sound. It is also the whole bill:
+
+- it reverses §4.3 — coverage becomes an input to filter construction;
+- identical-demand recompiles stop being zero-diff whenever coverage moved,
+  which breaks §5.1's `ops on identical recompile: 0` unless floors are
+  frozen between value-set changes, which is more state;
+- folding a backfilled value back into the incumbent needs a recompile
+  trigger on coverage minting — nothing recompiles on EOSE today — or the
+  backfill lingers, holding budget, until the next demand mutation;
+- `shadow_plan_for` must be fed the same coverage snapshot, or `MaxAge`
+  evaluates against a plan shape the live router no longer produces.
+
+**B — and the fold is a 2-diff, so every growth step churns.** This is the
+cost neither the issue nor the first pass of this section listed, and it is
+the sharpest one. Under §7.2 `Since` and a tag's values are SEPARATE
+components (`crates/nmp-router/src/component.rs`). A floored-incumbent design
+moves both in the same compile at every growth step: the value set gains the
+backfilled value AND the floor advances. That is a two-component move, so
+`wire_id::assign` mints a fresh token and `diff_plans` emits Close + Req
+rather than one overwriting REQ. It is exactly the **compound churn** §8.1
+dismissed as "not a real workload" and forbade designing around — reintroduced
+as the steady state of the feature. The replacement REQ is floored, so the
+churn is bandwidth-cheap; but it re-enters §8.2's straggler surface once per
+growth step, and it contradicts the one-overwriting-REQ wire story the whole
+of §7 exists to preserve.
+
+**C — a lesser cost: #931 ranks the backfill last.** `refuse_over_budget`
+runs per session after coalescing and token assignment, and §6.1's ranking is
+that **incumbents outrank newcomers**; a backfill is a newcomer by
+construction. Recorded for completeness rather than as a blocker, because it
+is narrow and loud: it can only fire on a relay that advertises
+`max_subscriptions` AND is already over cap — the state §3.4's collapse made
+rare — and when it does fire, the refused keys join `limited`, so
+`plan_is_fresh_for` returns false and `ShortfallFact::LocalLimit` reaches the
+app. It also has a clean in-router answer, since the split and the budget
+would live in the same compile step: when `planned + 1 > allowed`, emit
+today's unfloored merged filter for that session and degrade to overwrite.
+
+### 11.5 The cheaper change — which collects the BURST regime and nothing else
 
 The `1`×20 row is 90% waste, and §11.1 established that the driver is the
 number of RECOMPILES, not the demand. §8.3 rejected debounce — but read the
@@ -1040,16 +1125,27 @@ canonical dedup absorbs it."* Every clause of that is a CLIENT-correctness
 argument. It was decided before any relay-bandwidth number existed, and the
 number is 2.90 MB versus 285 KB.
 
-Collapsing 20 growth recompiles into 2 moves the `1`×20 row onto the `5,3,…`
-row — most of the saving, at **zero** extra subscriptions, zero coverage
-rework, and no new identity namespace. It touches one thing (when a recompile
-fires) instead of five (floors, coverage intervals, an out-of-plan emission
-path, diagnostics, and the negentropy loop). §8.1c is already asking for a
-deterministic recompile boundary for an unrelated reason, so the two want the
-same seam.
+Widening the recompile boundary moves the `1`×20 row onto the `5,3,…` row at
+**zero** extra subscriptions, zero coverage rework, and no new identity
+namespace. It touches one thing (when a recompile fires) instead of five
+(floors, coverage intervals, an out-of-plan emission path, diagnostics, and
+the negentropy loop). §8.1c is already asking for a deterministic recompile
+boundary for an unrelated reason, so the two want the same seam.
 
-That is not a decision, and nothing here proposes taking it. It is the
-alternative any future revisit of #933 has to beat.
+**But it only reaches growth that arrives inside the window.** The engine
+already collapses same-batch bursts (§11.1), so the reachable ground is
+growth spaced by less than a widened `max_engine_batch_wait` — and the
+schedules that hurt most in practice are spaced by RTTs or by minutes:
+multi-relay staggered discovery, or a live-tail set gaining a member at a
+time. Those are untouched by any window an interactive client can tolerate.
+An EOSE-anchored boundary reaches further (defer growth recompiles until the
+REVEALING subscription EOSEs — #933's own "per-EOSE" granularity applied to
+the other side of the pipe), at the cost of a new failure mode: a relay that
+never EOSEs would delay growth indefinitely without a timeout, and §8's case
+D exists because misbehaving relays do exactly that.
+
+So this is the right FIRST move against the measured number, not a universal
+substitute for #933. Nothing here proposes taking it either.
 
 ### 11.6 Verdict
 
@@ -1057,16 +1153,40 @@ alternative any future revisit of #933 has to beat.
 mechanism as specified is not available. What would have to change first, in
 order:
 
-- a coverage row that can hold more than one interval, or a floor discipline
-  proven never to produce a disjoint merge (§11.3 #2);
-- a retry path for a lost one-shot backfill that does not depend on the demand
-  changing (Blocker A);
-- a budget ranking that does not refuse the newcomer that carries the history
-  (Blocker B);
-- suppression on probed NIP-77 Public sessions (§11.3 #4);
-- an observation story for out-of-plan traffic, which `diag.rs` cannot see.
+- **coverage becomes an input to filter construction**, reversing §4.3 —
+  because it is the only way to know which values are already covered, and
+  the only way a lost backfill is ever retried (§11.4 A);
+- **identical-demand recompiles stop being zero-diff** whenever coverage
+  moved, unless floors are frozen between value-set changes — §5.1's `ops on
+  identical recompile: 0` is a shipped assertion;
+- **something must recompile when coverage is minted**, which nothing does
+  today, or a backfill lingers past its own EOSE holding a subscription;
+- **compound churn becomes the steady state**, because value-set growth plus
+  a floor advance is a 2-diff under §7.2 — the exact workload §8.1 forbade
+  designing around (§11.4 B);
+- **suppression on probed NIP-77 Public sessions** (§11.3 #4), which is a
+  scope decision rather than a mechanism, and is already the accepted answer;
+- **a floor discipline proven never to produce a disjoint coverage merge**
+  (§11.3 #2) — satisfiable, but it must be proven rather than assumed.
 
-Two of those five are changes to load-bearing invariants that landed this
-week. That is the complexity-to-benefit ratio, and it is why the measurement
-exists: so a future revisit argues against 90%-of-2.9 MB and a 20x
-subscription bill, rather than against an intuition.
+Four of those six are changes to invariants that landed this week, and the
+first one is load-bearing for all the rest: every variant that survives
+scrutiny gets there by making the split coverage-driven planned demand, and
+then pays that whole list. That convergence — not the subscription count, not
+the budget ranking — is the verdict's foundation.
+
+Two smaller arguments are recorded here but are NOT load-bearing, and a
+future revisit should not have to refute them: the 20x subscription bill
+(which belongs to the never-close variant only, §11.1), and the budget
+ranking (narrow, loud, and answerable in-router, §11.4 C).
+
+The measurement exists so that a revisit argues against numbers. What it does
+not yet establish is where a real workload sits between `0.6%` and `90%` —
+that bracket is the honest state of knowledge, and closing it is the cheapest
+next thing anyone could do here.
+
+*Reviewed adversarially by Fable, 2026-07-27, against an earlier draft that
+called §11.4 A permanent and unanswerable. It is not: the plan-replay variant
+above is Fable's, and demoting the subscription count and the budget ranking
+from blockers to costs is its correction. The verdict survived the review;
+three of its supporting arguments did not.*
