@@ -67,7 +67,7 @@ class WriteIntentTest {
                             content = "unsigned",
                         ),
                     durability = FfiDurability.AT_MOST_ONCE,
-                    routing = FfiWriteRouting.AuthorOutbox,
+                    routing = FfiWriteRouting.AUTHOR_OUTBOX,
                     identityOverride = "a".repeat(64),
                     correlation = "correlation-42",
                 ),
