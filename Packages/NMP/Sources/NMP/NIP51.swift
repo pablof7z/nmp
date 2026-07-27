@@ -8,8 +8,13 @@
 // one is reintroduced.
 //
 // Reading kind:10009 stays the ordinary demand/observation noun
-// (`activeAccountDemand()` in NIP29.swift). Browsing a NIP-29 group still
-// takes a host the app explicitly chose -- see `groupDiscoveryDemand(host:)`.
+// (`activeAccountDemand()`, below). Browsing a NIP-29 group still takes a
+// host the app explicitly chose -- see `groupDiscoveryDemand(host:)`.
+//
+// `SimpleGroupsList` is also the ONE native shape a decoded kind:10009 list
+// takes (#858). The NIP-29-facing wrapper family that used to sit beside it
+// merely renamed these fields and dropped `malformedItemCount`; there is no
+// second projection of this value anywhere in the SDK.
 
 import NMPFFI
 
@@ -51,6 +56,17 @@ public struct SimpleGroupsList: Sendable, Hashable {
         malformedItemCount = ffi.malformedItemCount
         hasPrivateContent = ffi.hasPrivateContent
     }
+}
+
+/// The signed-in account's Simple-groups-list demand (#108): `kinds:
+/// [10009]`, `AuthorOutboxes + Public`. Signed-out (no active account)
+/// resolves to zero rows through the ordinary reactive-binding empty-
+/// resolution path -- no special case needed on the caller's side.
+///
+/// #858 moved this out of NIP29.swift: kind:10009 is NIP-51's kind, so its
+/// demand constructor lives with the rest of NIP-51.
+public func activeAccountDemand() -> NMPDemand {
+    NMPDemand(NMPFFI.activeAccountDemand())
 }
 
 /// Tolerantly parse Simple-groups-shaped public items from an untrusted

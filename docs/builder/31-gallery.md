@@ -60,15 +60,19 @@ and presentation. Core owns neither a home feed nor kind:1 preference.
 ## 5. NIP-29 group management
 
 ```swift
-let groups = nip29.observeRememberedGroups(using: engine)
+let list = parseSimpleGroupsListTolerant(row)          // NIP-51 kind:10009
+let selected = list.items[0]                           // app-owned selection
+let demand = try groupDiscoveryDemand(host: selected.hostRelay)  // NIP-29
 let receipt = try group.makeAdmin(pubkey, using: engine)
 ```
 
-The remembered group/host list is NIP-51 kind `10009`: NIP-51 owns that schema
-and codec, while NIP-29 composes its typed entries into group references. NIP-29
-owns only its exact group metadata, membership, role, and moderation schemas,
-reconstruction, host authority, and semantic operations. It claims neither
-kind `10009` nor generic NIP-51 relay sets such as kind `30002`.
+The remembered group/host list is NIP-51 kind `10009`: NIP-51 owns that schema,
+codec, and decode result outright. NIP-29 owns only its exact group metadata,
+membership, role, and moderation schemas, reconstruction, host authority, and
+semantic operations. It claims neither kind `10009` nor generic NIP-51 relay
+sets such as kind `30002` — and it does not re-project NIP-51's decoded value
+under NIP-29 names either (#858). The app selects one entry and hands the exact
+fields a NIP-29 operation needs.
 
 ## 6. NIP-68 photo in a NIP-29 group
 

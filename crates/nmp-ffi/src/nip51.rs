@@ -11,14 +11,23 @@
 //! `scripts/check-nip51-no-derived-authority.sh`: any observation-qualified
 //! `Observed*` wrapper, projection-error family, frame-proof projector, or
 //! other protocol-specific witness. NIP-51 reading stays the ordinary
-//! `LiveQuery`/`FfiDemand` noun (`crate::nip29::active_account_demand`), and
-//! a future destructive NIP-51 mutation must bind its exact observed base
-//! privately inside that semantic operation while building the ordinary
-//! opaque write intent -- never by exporting a reusable authority noun here.
+//! `LiveQuery`/`FfiDemand` noun ([`active_account_demand`]), and a future
+//! destructive NIP-51 mutation must bind its exact observed base privately
+//! inside that semantic operation while building the ordinary opaque write
+//! intent -- never by exporting a reusable authority noun here.
+//!
+//! Also deliberately absent since #858: any second projection of this value.
+//! [`FfiSimpleGroupsList`] is the ONE native shape a decoded kind:10009 list
+//! takes. The NIP-29-facing wrapper family that used to sit beside it merely
+//! renamed these fields and dropped `malformed_item_count` -- exactly the
+//! second-owner shape #63's boundary exists to forbid. A caller that wants to
+//! browse a group picks one [`FfiSimpleGroupEntry`] and passes its
+//! `host_relay`/`group_id` to `crate::nip29`'s constructors itself.
 
 use nostr::RelayUrl;
 
-use crate::types::{FfiRow, FfiSimpleGroupEntry, FfiSimpleGroupsList};
+use crate::convert::demand_to_ffi;
+use crate::types::{FfiDemand, FfiRow, FfiSimpleGroupEntry, FfiSimpleGroupsList};
 
 fn simple_group_entry_to_ffi(entry: &nmp_nip51::SimpleGroupEntry) -> FfiSimpleGroupEntry {
     FfiSimpleGroupEntry {
@@ -36,6 +45,19 @@ fn simple_groups_list_to_ffi(list: &nmp_nip51::SimpleGroupsList) -> FfiSimpleGro
             .expect("usize always fits u64 on supported FFI targets"),
         has_private_content: list.has_private_content,
     }
+}
+
+/// The signed-in account's Simple-groups-list demand (#108,
+/// `nmp_nip51::active_account_demand` mirror): `kinds:[10009]`,
+/// `AuthorOutboxes + Public`. Signed-out (no active account) resolves to
+/// zero atoms through the ordinary reactive-binding empty-resolution path
+/// -- no special case needed on either side of this boundary.
+///
+/// #858 moved this out of `crate::nip29`: kind:10009 is NIP-51's kind, so
+/// its demand constructor lives with the rest of NIP-51.
+#[uniffi::export]
+pub fn active_account_demand() -> FfiDemand {
+    demand_to_ffi(nmp_nip51::active_account_demand())
 }
 
 /// Tolerantly parse Simple-groups-shaped public items out of a raw native
@@ -104,14 +126,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn active_account_demand_projects_the_reactive_authors_binding() {
+        let demand = active_account_demand();
+        assert_eq!(demand.selection.kinds, Some(vec![10009]));
+    }
+
     /// The host an app browses with is its own explicit typed input, never
     /// harvested from parser output by the boundary itself.
+    ///
+    /// #858's FFI falsifier too: the SELECTED entry feeds NIP-29's
+    /// host-pinned constructors directly, field for field, with no
+    /// intermediate NIP-29-owned copy of the NIP-51 value in between.
     #[test]
     fn nip29_browsing_still_demands_an_explicitly_supplied_host() {
         let list = parse_simple_groups_list_tolerant(fabricated_row(10_009));
-        let chosen = list.items[0].host_relay.clone();
-        let demand =
-            crate::nip29::group_discovery_demand(chosen).expect("app-supplied host parses");
+        let selected = list.items[0].clone();
+        let demand = crate::nip29::group_discovery_demand(selected.host_relay.clone())
+            .expect("app-supplied host parses");
         assert_eq!(demand.selection.kinds, Some(vec![39000]));
+
+        let content = crate::nip29::group_content_demand(selected.host_relay, selected.group_id)
+            .expect("app-supplied host parses");
+        assert_eq!(content.selection.kinds, Some(vec![9, 30315]));
+        assert_eq!(content.source, demand.source);
     }
 }
