@@ -237,9 +237,17 @@ fn main() {
     }
     println!();
 
+    // `budget`/`refused` are the two most load-bearing columns for #937 and
+    // this probe used to omit them, which is how I came to call the resulting
+    // under-service "silent". It is not silent: the engine records a
+    // `BudgetShortfall` per session, `RelayPlan::limited` keeps the affected
+    // atoms from being called fresh by `plan_is_fresh_for`, and
+    // `acquisition_evidence` reports `ShortfallFact::LocalLimit` to the app.
+    // The snapshot this probe already reads carries both numbers; only the
+    // printout was missing them.
     println!(
-        "{:<28} {:>5} {:>7} {:>9} {:>8}",
-        "relay", "subs", "widest", "authors", "events"
+        "{:<28} {:>5} {:>7} {:>8} {:>9} {:>8}",
+        "relay", "subs", "budget", "refused", "authors", "events"
     );
     let mut worst_subs = 0usize;
     let mut served = 0u64;
@@ -252,10 +260,13 @@ fn main() {
         served += events;
         per_relay.insert(row.relay.to_string(), (row.wire_sub_count, widest, events));
         println!(
-            "{:<28} {:>5} {:>7} {:>9} {:>8}",
+            "{:<28} {:>5} {:>7} {:>8} {:>9} {:>8}",
             row.relay.to_string(),
             row.wire_sub_count,
-            widest,
+            row.subscription_budget
+                .map(|b| b.to_string())
+                .unwrap_or_else(|| "-".into()),
+            row.subscriptions_refused,
             row.authors_served,
             events
         );
