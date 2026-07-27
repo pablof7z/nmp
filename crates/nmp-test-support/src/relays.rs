@@ -621,7 +621,7 @@ impl ClientFrames {
                 .log
                 .fault(format!("unexpected client frame opcode {opcode:#x}")),
             // Close/ping/pong carry no NIP-01 message.
-            0x8 | 0x9 | 0xa => {}
+            0x8..=0xa => {}
             other => self
                 .log
                 .fault(format!("unknown client frame opcode {other:#x}")),

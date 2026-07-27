@@ -171,7 +171,7 @@ impl WireLedger {
         self.live
             .values()
             .filter(|f| self.is_outer(f))
-            .map(|f| d_values(f))
+            .map(d_values)
             .collect()
     }
 
@@ -354,9 +354,9 @@ fn relay(n: usize) -> RelayUrl {
 #[test]
 fn probe_single_inner_value_reaches_the_wire_as_one_req() {
     let r0 = relay(0);
-    let mut study = Study::new(&[r0.clone()]);
+    let mut study = Study::new(std::slice::from_ref(&r0));
 
-    study.subscribe(&[r0.clone()], "subscribe (empty derived set)");
+    study.subscribe(std::slice::from_ref(&r0), "subscribe (empty derived set)");
     assert_eq!(
         study.ledger.live_outer_count(),
         0,
@@ -375,8 +375,8 @@ fn probe_single_inner_value_reaches_the_wire_as_one_req() {
 #[test]
 fn a_incremental_growth_opens_one_req_per_value_with_zero_churn() {
     let r0 = relay(0);
-    let mut study = Study::new(&[r0.clone()]);
-    study.subscribe(&[r0.clone()], "subscribe");
+    let mut study = Study::new(std::slice::from_ref(&r0));
+    study.subscribe(std::slice::from_ref(&r0), "subscribe");
 
     for n in 1..=5 {
         let group = format!("group-{n}");
@@ -419,12 +419,15 @@ fn a_incremental_growth_opens_one_req_per_value_with_zero_churn() {
 #[test]
 fn b_warm_cache_resolves_the_whole_set_in_one_recompile() {
     let r0 = relay(0);
-    let mut study = Study::new(&[r0.clone()]);
+    let mut study = Study::new(std::slice::from_ref(&r0));
     for n in 1..=5 {
         study.preload_admin_of(&r0, 0, &format!("group-{n}"));
     }
 
-    let step = study.subscribe(&[r0.clone()], "subscribe (5 values already cached)");
+    let step = study.subscribe(
+        std::slice::from_ref(&r0),
+        "subscribe (5 values already cached)",
+    );
     study
         .ledger
         .report("B. warm cache, 5 values resolved at subscribe time");
@@ -451,8 +454,8 @@ fn b_warm_cache_resolves_the_whole_set_in_one_recompile() {
 #[test]
 fn c_growth_after_inner_eose_behaves_identically_to_growth_before() {
     let r0 = relay(0);
-    let mut study = Study::new(&[r0.clone()]);
-    study.subscribe(&[r0.clone()], "subscribe");
+    let mut study = Study::new(std::slice::from_ref(&r0));
+    study.subscribe(std::slice::from_ref(&r0), "subscribe");
 
     let before = study.admin_of(&r0, 0, "s", "group-1", "PRE-EOSE  admin of group-1");
     let inner = study.inner_sub_id();
@@ -479,8 +482,8 @@ fn c_growth_after_inner_eose_behaves_identically_to_growth_before() {
 #[test]
 fn d_never_eosing_relay_still_opens_every_outer_sub() {
     let r0 = relay(0);
-    let mut study = Study::new(&[r0.clone()]);
-    study.subscribe(&[r0.clone()], "subscribe");
+    let mut study = Study::new(std::slice::from_ref(&r0));
+    study.subscribe(std::slice::from_ref(&r0), "subscribe");
 
     for n in 1..=4 {
         let group = format!("group-{n}");
@@ -545,8 +548,8 @@ fn e_values_arriving_across_two_relays_fan_out_per_value_not_per_relay() {
 #[test]
 fn f_fifty_values_open_fifty_outer_subs() {
     let r0 = relay(0);
-    let mut study = Study::new(&[r0.clone()]);
-    study.subscribe(&[r0.clone()], "subscribe");
+    let mut study = Study::new(std::slice::from_ref(&r0));
+    study.subscribe(std::slice::from_ref(&r0), "subscribe");
 
     for n in 1..=50 {
         study.admin_of(&r0, 0, "s", &format!("group-{n:02}"), "growth");
@@ -628,7 +631,7 @@ fn g_authors_slot_collapses_to_one_sub_where_a_tag_slot_opens_one_per_value() {
     core.handle(EngineMsg::SetActivePubkey(Some(me.public_key())));
     let mut authors_ledger = WireLedger::for_kinds(&[1]);
     let effects = core.handle(EngineMsg::Subscribe(
-        posts_by_my_follows(&[r0.clone()]),
+        posts_by_my_follows(std::slice::from_ref(&r0)),
         Box::new(CapturingSink::default()),
     ));
     authors_ledger.record("subscribe", &effects);
@@ -654,8 +657,8 @@ fn g_authors_slot_collapses_to_one_sub_where_a_tag_slot_opens_one_per_value() {
     let authors_widest = authors_ledger.widest_outer();
 
     // --- tag slot ---
-    let mut study = Study::new(&[r0.clone()]);
-    study.subscribe(&[r0.clone()], "subscribe");
+    let mut study = Study::new(std::slice::from_ref(&r0));
+    study.subscribe(std::slice::from_ref(&r0), "subscribe");
     for n in 1..=5 {
         study.admin_of(
             &r0,
@@ -727,7 +730,7 @@ fn i_re_served_events_after_a_replacement_cost_bandwidth_but_never_rows() {
 
     let sink = CapturingSink::default();
     core.handle(EngineMsg::Subscribe(
-        posts_by_my_follows(&[r0.clone()]),
+        posts_by_my_follows(std::slice::from_ref(&r0)),
         Box::new(sink.clone()),
     ));
 
