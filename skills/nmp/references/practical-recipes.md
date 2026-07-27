@@ -63,7 +63,7 @@ engine.observe(demand)
 
 The live write shape (`engine.groupMessageIntent` →
 `GroupSendIntent` → `publishComposed`) is an unsound extra noun and lifecycle,
-not a recipe to copy; #823 owns its hard cut. The target write shape, which is
+not a recipe to copy; #838 supersedes #823 and owns its removal. The target write shape, which is
 not yet available at this revision, is a protocol-owned immutable composer
 returning the ordinary `WriteIntent`, followed by generic `engine.publish`.
 
@@ -76,7 +76,7 @@ Rules:
 - The protocol composer derives active author and time, protocol tags,
   reply/recipient rows, previous-state provenance, and pinned routing. Do not
   hand-build those fields in Swift/Kotlin.
-- Do not build around the current take-once wrapper; it is part of the #823
+- Do not build around the current take-once wrapper; it is part of the #838
   defect, not a lifecycle contract.
 - Keep the receipt id and observe all relay outcomes. One ACK is not universal delivery.
 

@@ -321,13 +321,29 @@ pub fn comment_intent(
         .as_deref()
         .map(parse_correlation_token)
         .transpose()?;
-    let unsigned = nmp_nip22::compose_comment(
+    let intent = nmp_nip22::comment_intent(
         &root,
         parent,
         author,
         nostr::Timestamp::from(created_at),
         content,
+        correlation,
     );
+
+    // NIP-22 owns this complete shape. The FFI layer projects the returned
+    // ordinary intent instead of independently re-stating its payload,
+    // durability, routing, identity, or correlation policy.
+    let nmp_grammar::WriteIntent {
+        payload: nmp_grammar::WritePayload::Unsigned(unsigned),
+        durability: nmp_grammar::Durability::Durable,
+        routing: nmp_grammar::WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation,
+    } = intent
+    else {
+        unreachable!("nmp-nip22::comment_intent violated its closed write contract")
+    };
+
     Ok(FfiWriteIntent {
         payload: FfiWritePayload::Unsigned {
             pubkey: unsigned.pubkey.to_hex(),

@@ -22,7 +22,7 @@ mod intent;
 mod root;
 mod target;
 
-pub use build::{compose_comment, compose_comment_reply, compose_top_level_comment};
+pub use build::{compose_comment_reply, compose_top_level_comment};
 pub use decode::{decode_comment, CommentDecodeError, DecodedComment};
 pub use demand::comment_thread_demand;
 pub use intent::comment_intent;

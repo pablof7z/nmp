@@ -100,11 +100,29 @@ fn parent_comment_tags(event_id: &nostr::EventId, author: Option<PublicKey>) -> 
     tags
 }
 
-/// Build an unsigned NIP-22 comment on `root`. `parent` closes whether the
-/// lowercase tags mirror the root (top-level) or identify a direct comment
-/// parent (reply). This is the one pure event composer shared by the direct
-/// intent and foreign-language projections.
-pub fn compose_comment(
+/// Build an unsigned top-level NIP-22 comment on `root`: the parent tags
+/// mirror the root tags exactly (lowercased). Tag order: root tags first
+/// (`E`/`A`/`I`, `K`, `P`?), then the mirrored parent tags (`e`/`a`/`i`,
+/// `k`, `p`?).
+pub fn compose_top_level_comment(
+    root: &CommentRoot,
+    author: PublicKey,
+    created_at: Timestamp,
+    content: String,
+) -> UnsignedEvent {
+    let mut tags = root_tags(root);
+    tags.extend(parent_mirrors_root_tags(root));
+    EventBuilder::new(Kind::from(COMMENT_KIND), content)
+        .tags(tags)
+        .custom_created_at(created_at)
+        .build(author)
+}
+
+/// Build an unsigned NIP-22 reply: the root tags stay pinned to the
+/// thread's root, but the parent becomes the comment event being replied
+/// to. Tag order: root tags first, then `["e", parent], ["k", "1111"],
+/// ["p", parent_author]?`.
+pub fn compose_comment_reply(
     root: &CommentRoot,
     parent: CommentParent,
     author: PublicKey,
@@ -122,30 +140,6 @@ pub fn compose_comment(
         .tags(tags)
         .custom_created_at(created_at)
         .build(author)
-}
-
-/// Build an unsigned top-level NIP-22 comment on `root`.
-pub fn compose_top_level_comment(
-    root: &CommentRoot,
-    author: PublicKey,
-    created_at: Timestamp,
-    content: String,
-) -> UnsignedEvent {
-    compose_comment(root, CommentParent::Root, author, created_at, content)
-}
-
-/// Build an unsigned NIP-22 reply: the root tags stay pinned to the
-/// thread's root, but the parent becomes the comment event being replied
-/// to. Tag order: root tags first, then `["e", parent], ["k", "1111"],
-/// ["p", parent_author]?`.
-pub fn compose_comment_reply(
-    root: &CommentRoot,
-    parent: CommentParent,
-    author: PublicKey,
-    created_at: Timestamp,
-    content: String,
-) -> UnsignedEvent {
-    compose_comment(root, parent, author, created_at, content)
 }
 
 #[cfg(test)]

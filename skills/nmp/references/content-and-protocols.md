@@ -32,14 +32,14 @@ NIP-22 `publishComposed`, or take-once lifecycle.
 NIP-29 helpers provide group discovery/content demand and remembered-group
 decoding. The live group-message path uses a pinned-host
 `FfiComposedWriteIntent` / `GroupSendIntent` and `publishComposed`; that
-parallel noun and lifecycle are architecturally unsound and pending the #823
-hard cut. Do not use them as a model for new protocol work. The target is a
+parallel noun and lifecycle are architecturally unsound and pending #838's
+protocol-ownership correction. Do not use them as a model for new protocol work. The target is a
 protocol-owned immutable composer returning the ordinary `WriteIntent`, with
 non-forgeable payload-bound host authority and generic publication.
 
 Kotlin's current call map is `groupContentDemand(host, groupId)` -> `NMPDemand`, `engine.observe(demand)` -> cold timeline flow, `NMPContentClient(engine).session(...)` -> `NostrContentSession`, and `session.claim(...)` -> closeable `NostrContentClaim` for a parsed reference. Close claims before their session. For signer handoff use `engine.nip46Invitation(...)`, derive and cache `invitation.androidHandoff(signer)` while the invitation is still live, then call `engine.connectNip46(...)`, start state collection, and launch the cached explicit handoff. Wait for `Ready`, activate that user pubkey before unsigned writes, and close the exact connection.
 
-While #823 remains open, the live composed group intent is take-once. That is
+While #838 remains open, the live composed group intent is take-once. That is
 current behavior to account for, not an accepted design contract.
 
 ## NIP-46 and local signers

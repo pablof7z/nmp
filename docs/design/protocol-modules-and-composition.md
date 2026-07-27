@@ -121,7 +121,8 @@ protocol-specific publication overload would create a second owner of the
 same write.
 
 NIP-29's current `FfiComposedWriteIntent` / `GroupSendIntent` and
-`publishComposed` path violates that same rule; #823 owns its hard cut. Its
+`publishComposed` path violates that same rule. #838 supersedes #823 and owns
+the protocol-boundary correction and removal. Its
 pinned-host authority requirement is real, but it must become a
 non-forgeable, payload-bound part of the ordinary immutable `WriteIntent`, not
 a reason for a parallel noun or publication lifecycle.

@@ -9,7 +9,7 @@ use nostr::{PublicKey, Timestamp};
 
 use nmp_grammar::{CorrelationToken, Durability, WriteIntent, WritePayload, WriteRouting};
 
-use crate::build::compose_comment;
+use crate::build::{compose_comment_reply, compose_top_level_comment};
 use crate::root::{CommentParent, CommentRoot};
 
 /// Compose a durable, author-outbox-routed `WriteIntent` for a NIP-22
@@ -28,7 +28,12 @@ pub fn comment_intent(
     content: String,
     correlation: Option<CorrelationToken>,
 ) -> WriteIntent {
-    let unsigned = compose_comment(root, parent, author, created_at, content);
+    let unsigned = match parent {
+        CommentParent::Root => compose_top_level_comment(root, author, created_at, content),
+        CommentParent::Comment { .. } => {
+            compose_comment_reply(root, parent, author, created_at, content)
+        }
+    };
     WriteIntent {
         payload: WritePayload::Unsigned(unsigned),
         durability: Durability::Durable,

@@ -77,8 +77,8 @@ NIP-29 composer can therefore accept `(groupId, hostRelay)`, but the resulting
 host authority must be non-forgeable and payload-bound inside the ordinary
 immutable `WriteIntent`. It is not a generic relay list and cannot be extracted
 or reused to route unrelated traffic. The current parallel NIP-29 intent and
-publication lifecycle does not satisfy this architecture; #823 owns its hard
-cut.
+publication lifecycle does not satisfy this architecture; #838 supersedes
+#823 and owns the protocol-boundary correction and removal.
 
 Private-inbox or recipient authority is stricter: it cannot be a public
 constructor over arbitrary relay URLs. The owning module or engine mints it only

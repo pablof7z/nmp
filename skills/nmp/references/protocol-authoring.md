@@ -62,7 +62,8 @@ its top-level composer returns `WriteIntent`, then the app uses generic
 
 NIP-29's current opaque carrier, take-once lifecycle, Engine method, and
 `publishComposed` door are an identified architectural defect, not a precedent
-or permitted exception; #823 owns their removal. The target is still immutable
+or permitted exception; #838 supersedes #823 and owns their removal as part of
+restoring exact protocol ownership. The target is still immutable
 staged composition returning the ordinary `WriteIntent`. Its pinned-host
 authority must become non-forgeable and payload-bound within that noun, with a
 generic acceptance check that learns no NIP-29 semantics.
