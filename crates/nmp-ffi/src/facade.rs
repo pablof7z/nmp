@@ -901,11 +901,11 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    fn signer_public_key(public_key: nostr::PublicKey) -> nmp_signer::SignerPublicKey {
-        nmp_signer::SignerPublicKey::new(public_key.to_bytes())
+    fn signer_public_key(public_key: nostr::PublicKey) -> nmp::SignerPublicKey {
+        nmp::SignerPublicKey::new(public_key.to_bytes())
     }
 
-    fn signer_unsigned_to_nostr(unsigned: nmp_signer::SignerUnsignedEvent) -> nostr::UnsignedEvent {
+    fn signer_unsigned_to_nostr(unsigned: nmp::SignerUnsignedEvent) -> nostr::UnsignedEvent {
         let (public_key, created_at, kind, tags, content) = unsigned.into_parts();
         nostr::UnsignedEvent::new(
             nostr::PublicKey::from_slice(public_key.as_bytes()).unwrap(),
@@ -919,8 +919,8 @@ mod tests {
         )
     }
 
-    fn nostr_signed_to_signer(event: nostr::Event) -> nmp_signer::SignerSignedEvent {
-        nmp_signer::SignerSignedEvent::new(
+    fn nostr_signed_to_signer(event: nostr::Event) -> nmp::SignerSignedEvent {
+        nmp::SignerSignedEvent::new(
             event.id.to_bytes(),
             signer_public_key(event.pubkey),
             event.created_at.as_secs(),
@@ -1320,15 +1320,15 @@ mod tests {
         actual: nostr::Keys,
     }
 
-    impl nmp_signer::SigningCapability for MismatchedFfiSigner {
-        fn public_key(&self) -> Option<nmp_signer::SignerPublicKey> {
+    impl nmp::SigningCapability for MismatchedFfiSigner {
+        fn public_key(&self) -> Option<nmp::SignerPublicKey> {
             Some(signer_public_key(self.reported))
         }
 
         fn sign(
             &self,
-            unsigned: nmp_signer::SignerUnsignedEvent,
-        ) -> nmp_signer::SignerOp<nmp_signer::SignerSignedEvent> {
+            unsigned: nmp::SignerUnsignedEvent,
+        ) -> nmp::SignerOp<nmp::SignerSignedEvent> {
             let unsigned = signer_unsigned_to_nostr(unsigned);
             let substituted = nostr::UnsignedEvent::new(
                 self.actual.public_key(),
@@ -1337,7 +1337,7 @@ mod tests {
                 unsigned.tags,
                 unsigned.content,
             );
-            nmp_signer::SignerOp::ok(nostr_signed_to_signer(
+            nmp::SignerOp::ok(nostr_signed_to_signer(
                 substituted.sign_with_keys(&self.actual).unwrap(),
             ))
         }
@@ -1346,23 +1346,22 @@ mod tests {
     struct PendingFfiSigner {
         public_key: nostr::PublicKey,
         cancellations: Arc<AtomicUsize>,
-        completion: Mutex<Option<nmp_signer::PendingSignerSender<nmp_signer::SignerSignedEvent>>>,
+        completion: Mutex<Option<nmp::PendingSignerSender<nmp::SignerSignedEvent>>>,
     }
 
-    impl nmp_signer::SigningCapability for PendingFfiSigner {
-        fn public_key(&self) -> Option<nmp_signer::SignerPublicKey> {
+    impl nmp::SigningCapability for PendingFfiSigner {
+        fn public_key(&self) -> Option<nmp::SignerPublicKey> {
             Some(signer_public_key(self.public_key))
         }
 
         fn sign(
             &self,
-            _unsigned: nmp_signer::SignerUnsignedEvent,
-        ) -> nmp_signer::SignerOp<nmp_signer::SignerSignedEvent> {
+            _unsigned: nmp::SignerUnsignedEvent,
+        ) -> nmp::SignerOp<nmp::SignerSignedEvent> {
             let cancellations = Arc::clone(&self.cancellations);
-            let (sender, operation) =
-                nmp_signer::SignerOp::pending_channel_with_cancel(move || {
-                    cancellations.fetch_add(1, Ordering::SeqCst);
-                });
+            let (sender, operation) = nmp::SignerOp::pending_channel_with_cancel(move || {
+                cancellations.fetch_add(1, Ordering::SeqCst);
+            });
             *self
                 .completion
                 .lock()

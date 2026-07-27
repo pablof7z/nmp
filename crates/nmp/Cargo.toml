@@ -14,9 +14,18 @@ publish.workspace = true
 # `nmp-engine::core` covers every path regardless, Unit A0/#56).
 unstable-mechanism = []
 
+# #851: NIP-22 comment composition/decode, projected through the canonical
+# facade so direct Rust and `nmp-ffi` share ONE owner for those values. The
+# mechanism crate stays optional -- an app that never composes a comment does
+# not link it -- but an app that does gets it through `nmp`, never as a
+# second direct dependency alongside the facade. Non-default, so the governed
+# default-feature surface snapshot is unchanged.
+nip22 = ["dep:nmp-nip22"]
+
 [dependencies]
 nostr.workspace = true
 nmp-grammar.workspace = true
+nmp-nip22 = { workspace = true, optional = true }
 nmp-engine.workspace = true
 nmp-signer.workspace = true
 nmp-local-signer.workspace = true

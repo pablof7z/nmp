@@ -1,7 +1,8 @@
 //! Typed NIP-22 comments over NIP-73 external targets (#572/#822) -- top-level
 //! free functions for root-thread demand, decode, and ordinary write-intent
-//! composition. None needs an `NmpEngine`: `nmp-nip22` owns the schema and
-//! pure composition, while the generic engine owns the one
+//! composition. None needs an `NmpEngine`: the facade's own [`nmp::nip22`]
+//! module owns the schema and pure composition (#851 -- one owner for direct
+//! Rust and for this boundary alike), while the generic engine owns the one
 //! `FfiWriteIntent -> publish -> receipt` lifecycle.
 
 use nostr::{EventId, PublicKey};
@@ -11,7 +12,7 @@ use crate::types::{
     FfiDemand, FfiDurability, FfiRow, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
 };
 
-/// A validated NIP-73 external-content target (`nmp_nip22::Nip73Target`
+/// A validated NIP-73 external-content target (`nmp::nip22::Nip73Target`
 /// mirror).
 #[derive(uniffi::Enum, Debug, Clone, PartialEq, Eq)]
 pub enum FfiNip73Target {
@@ -19,7 +20,7 @@ pub enum FfiNip73Target {
     General { value: String, kind: String },
 }
 
-/// The root of a NIP-22 comment thread (`nmp_nip22::CommentRoot` mirror).
+/// The root of a NIP-22 comment thread (`nmp::nip22::CommentRoot` mirror).
 #[derive(uniffi::Enum, Debug, Clone, PartialEq, Eq)]
 pub enum FfiCommentRoot {
     Event {
@@ -42,7 +43,7 @@ pub enum FfiCommentRoot {
     },
 }
 
-/// A comment's direct parent (`nmp_nip22::CommentParent` mirror).
+/// A comment's direct parent (`nmp::nip22::CommentParent` mirror).
 #[derive(uniffi::Enum, Debug, Clone, PartialEq, Eq)]
 pub enum FfiCommentParent {
     Root,
@@ -52,7 +53,7 @@ pub enum FfiCommentParent {
     },
 }
 
-/// A successfully decoded, typed NIP-22 comment (`nmp_nip22::DecodedComment`
+/// A successfully decoded, typed NIP-22 comment (`nmp::nip22::DecodedComment`
 /// mirror).
 #[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
 pub struct FfiDecodedComment {
@@ -64,7 +65,7 @@ pub struct FfiDecodedComment {
     pub parent: FfiCommentParent,
 }
 
-/// [`decode_comment`]'s typed rejection (`nmp_nip22::CommentDecodeError`
+/// [`decode_comment`]'s typed rejection (`nmp::nip22::CommentDecodeError`
 /// mirror). Exhaustive; every variant is constructed by a test
 /// (Reachability Gate).
 #[derive(uniffi::Error, Debug, Clone, PartialEq, Eq)]
@@ -108,74 +109,76 @@ impl std::fmt::Display for FfiCommentDecodeError {
     }
 }
 
-impl From<nmp_nip22::CommentDecodeError> for FfiCommentDecodeError {
-    fn from(value: nmp_nip22::CommentDecodeError) -> Self {
+impl From<nmp::nip22::CommentDecodeError> for FfiCommentDecodeError {
+    fn from(value: nmp::nip22::CommentDecodeError) -> Self {
         match value {
-            nmp_nip22::CommentDecodeError::WrongKind { got } => Self::WrongKind { got },
-            nmp_nip22::CommentDecodeError::MissingRoot => Self::MissingRoot,
-            nmp_nip22::CommentDecodeError::DuplicateContradictoryRoot => {
+            nmp::nip22::CommentDecodeError::WrongKind { got } => Self::WrongKind { got },
+            nmp::nip22::CommentDecodeError::MissingRoot => Self::MissingRoot,
+            nmp::nip22::CommentDecodeError::DuplicateContradictoryRoot => {
                 Self::DuplicateContradictoryRoot
             }
-            nmp_nip22::CommentDecodeError::MissingRootKind => Self::MissingRootKind,
-            nmp_nip22::CommentDecodeError::InvalidRootKind { got } => Self::InvalidRootKind { got },
-            nmp_nip22::CommentDecodeError::MalformedRootReference => Self::MalformedRootReference,
-            nmp_nip22::CommentDecodeError::EmptyExternalValue => Self::EmptyExternalValue,
-            nmp_nip22::CommentDecodeError::MalformedExternalValue { got } => {
+            nmp::nip22::CommentDecodeError::MissingRootKind => Self::MissingRootKind,
+            nmp::nip22::CommentDecodeError::InvalidRootKind { got } => {
+                Self::InvalidRootKind { got }
+            }
+            nmp::nip22::CommentDecodeError::MalformedRootReference => Self::MalformedRootReference,
+            nmp::nip22::CommentDecodeError::EmptyExternalValue => Self::EmptyExternalValue,
+            nmp::nip22::CommentDecodeError::MalformedExternalValue { got } => {
                 Self::MalformedExternalValue { got }
             }
-            nmp_nip22::CommentDecodeError::MissingParent => Self::MissingParent,
-            nmp_nip22::CommentDecodeError::DuplicateContradictoryParent => {
+            nmp::nip22::CommentDecodeError::MissingParent => Self::MissingParent,
+            nmp::nip22::CommentDecodeError::DuplicateContradictoryParent => {
                 Self::DuplicateContradictoryParent
             }
-            nmp_nip22::CommentDecodeError::MissingParentKind => Self::MissingParentKind,
-            nmp_nip22::CommentDecodeError::InvalidParentKind { got } => {
+            nmp::nip22::CommentDecodeError::MissingParentKind => Self::MissingParentKind,
+            nmp::nip22::CommentDecodeError::InvalidParentKind { got } => {
                 Self::InvalidParentKind { got }
             }
-            nmp_nip22::CommentDecodeError::MalformedParentReference => {
+            nmp::nip22::CommentDecodeError::MalformedParentReference => {
                 Self::MalformedParentReference
             }
-            nmp_nip22::CommentDecodeError::ParentDoesNotMatchRootOrComment => {
+            nmp::nip22::CommentDecodeError::ParentDoesNotMatchRootOrComment => {
                 Self::ParentDoesNotMatchRootOrComment
             }
         }
     }
 }
 
-fn target_from_ffi(target: FfiNip73Target) -> Result<nmp_nip22::Nip73Target, FfiError> {
+fn target_from_ffi(target: FfiNip73Target) -> Result<nmp::nip22::Nip73Target, FfiError> {
     match target {
         FfiNip73Target::PodcastEpisodeGuid { guid } => {
-            nmp_nip22::Nip73Target::podcast_episode_guid(&guid).map_err(|err| {
+            nmp::nip22::Nip73Target::podcast_episode_guid(&guid).map_err(|err| {
                 FfiError::InvalidNip73Target {
                     reason: err.to_string(),
                 }
             })
         }
-        FfiNip73Target::General { value, kind } => nmp_nip22::Nip73Target::general(&value, &kind)
+        FfiNip73Target::General { value, kind } => nmp::nip22::Nip73Target::general(&value, &kind)
             .map_err(|err| FfiError::InvalidNip73Target {
                 reason: err.to_string(),
             }),
     }
 }
 
-fn target_to_ffi(target: &nmp_nip22::Nip73Target) -> FfiNip73Target {
+fn target_to_ffi(target: &nmp::nip22::Nip73Target) -> FfiNip73Target {
     match target {
-        nmp_nip22::Nip73Target::PodcastEpisodeGuid(guid) => {
+        nmp::nip22::Nip73Target::PodcastEpisodeGuid(guid) => {
             FfiNip73Target::PodcastEpisodeGuid { guid: guid.clone() }
         }
-        nmp_nip22::Nip73Target::General { value, kind } => FfiNip73Target::General {
+        nmp::nip22::Nip73Target::General { value, kind } => FfiNip73Target::General {
             value: value.clone(),
             kind: kind.clone(),
         },
     }
 }
 
-fn root_from_ffi(root: FfiCommentRoot) -> Result<nmp_nip22::CommentRoot, FfiError> {
+fn root_from_ffi(root: FfiCommentRoot) -> Result<nmp::nip22::CommentRoot, FfiError> {
     Ok(match root {
         FfiCommentRoot::Event {
             event_id,
             kind,
             author_pubkey,
-        } => nmp_nip22::CommentRoot::Event {
+        } => nmp::nip22::CommentRoot::Event {
             event_id: EventId::from_hex(&event_id)
                 .map_err(|_| FfiError::InvalidEventId { got: event_id })?,
             kind,
@@ -186,7 +189,7 @@ fn root_from_ffi(root: FfiCommentRoot) -> Result<nmp_nip22::CommentRoot, FfiErro
             kind,
             identifier,
             event_id,
-        } => nmp_nip22::CommentRoot::Address {
+        } => nmp::nip22::CommentRoot::Address {
             author: parse_pubkey(&author_pubkey)?,
             kind,
             identifier,
@@ -197,14 +200,14 @@ fn root_from_ffi(root: FfiCommentRoot) -> Result<nmp_nip22::CommentRoot, FfiErro
                 .transpose()?,
         },
         FfiCommentRoot::External { target } => {
-            nmp_nip22::CommentRoot::External(target_from_ffi(target)?)
+            nmp::nip22::CommentRoot::External(target_from_ffi(target)?)
         }
     })
 }
 
-fn root_to_ffi(root: &nmp_nip22::CommentRoot) -> FfiCommentRoot {
+fn root_to_ffi(root: &nmp::nip22::CommentRoot) -> FfiCommentRoot {
     match root {
-        nmp_nip22::CommentRoot::Event {
+        nmp::nip22::CommentRoot::Event {
             event_id,
             kind,
             author,
@@ -213,7 +216,7 @@ fn root_to_ffi(root: &nmp_nip22::CommentRoot) -> FfiCommentRoot {
             kind: *kind,
             author_pubkey: author.map(|pk| pk.to_hex()),
         },
-        nmp_nip22::CommentRoot::Address {
+        nmp::nip22::CommentRoot::Address {
             author,
             kind,
             identifier,
@@ -224,19 +227,19 @@ fn root_to_ffi(root: &nmp_nip22::CommentRoot) -> FfiCommentRoot {
             identifier: identifier.clone(),
             event_id: event_id.map(|id| id.to_hex()),
         },
-        nmp_nip22::CommentRoot::External(target) => FfiCommentRoot::External {
+        nmp::nip22::CommentRoot::External(target) => FfiCommentRoot::External {
             target: target_to_ffi(target),
         },
     }
 }
 
-fn parent_from_ffi(parent: FfiCommentParent) -> Result<nmp_nip22::CommentParent, FfiError> {
+fn parent_from_ffi(parent: FfiCommentParent) -> Result<nmp::nip22::CommentParent, FfiError> {
     Ok(match parent {
-        FfiCommentParent::Root => nmp_nip22::CommentParent::Root,
+        FfiCommentParent::Root => nmp::nip22::CommentParent::Root,
         FfiCommentParent::Comment {
             event_id,
             author_pubkey,
-        } => nmp_nip22::CommentParent::Comment {
+        } => nmp::nip22::CommentParent::Comment {
             event_id: EventId::from_hex(&event_id)
                 .map_err(|_| FfiError::InvalidEventId { got: event_id })?,
             author: author_pubkey.as_deref().map(parse_pubkey).transpose()?,
@@ -244,10 +247,10 @@ fn parent_from_ffi(parent: FfiCommentParent) -> Result<nmp_nip22::CommentParent,
     })
 }
 
-fn parent_to_ffi(parent: &nmp_nip22::CommentParent) -> FfiCommentParent {
+fn parent_to_ffi(parent: &nmp::nip22::CommentParent) -> FfiCommentParent {
     match parent {
-        nmp_nip22::CommentParent::Root => FfiCommentParent::Root,
-        nmp_nip22::CommentParent::Comment { event_id, author } => FfiCommentParent::Comment {
+        nmp::nip22::CommentParent::Root => FfiCommentParent::Root,
+        nmp::nip22::CommentParent::Comment { event_id, author } => FfiCommentParent::Comment {
             event_id: event_id.to_hex(),
             author_pubkey: author.map(|pk| pk.to_hex()),
         },
@@ -256,15 +259,15 @@ fn parent_to_ffi(parent: &nmp_nip22::CommentParent) -> FfiCommentParent {
 
 /// The demand for an entire NIP-22 comment thread rooted at `root`:
 /// `kinds:[1111]`, scoped by the uppercase root reference on `#I`
-/// (`nmp_nip22::comment_thread_demand` mirror).
+/// (`nmp::nip22::comment_thread_demand` mirror).
 #[uniffi::export]
 pub fn comment_thread_demand(root: FfiCommentRoot) -> Result<FfiDemand, FfiError> {
     let root = root_from_ffi(root)?;
-    Ok(demand_to_ffi(nmp_nip22::comment_thread_demand(&root)))
+    Ok(demand_to_ffi(nmp::nip22::comment_thread_demand(&root)))
 }
 
 /// Decode a delivered kind:1111 [`FfiRow`] into a typed
-/// [`FfiDecodedComment`] (`nmp_nip22::decode_comment` mirror). Fallible:
+/// [`FfiDecodedComment`] (`nmp::nip22::decode_comment` mirror). Fallible:
 /// malformed or mismatched tag sets stay raw rows, they never become a
 /// typed comment.
 #[uniffi::export]
@@ -278,7 +281,7 @@ pub fn decode_comment(row: FfiRow) -> Result<FfiDecodedComment, FfiCommentDecode
             reason: format!("row.pubkey is not valid public-key hex: {}", row.pubkey),
         }
     })?;
-    let decoded = nmp_nip22::decode_comment(
+    let decoded = nmp::nip22::decode_comment(
         event_id,
         author,
         row.created_at,
@@ -297,7 +300,7 @@ pub fn decode_comment(row: FfiRow) -> Result<FfiDecodedComment, FfiCommentDecode
 }
 
 /// Compose an ordinary durable, author-outbox-routed [`FfiWriteIntent`] for a
-/// NIP-22 comment (`nmp_nip22::comment_intent` mirror). This function is
+/// NIP-22 comment (`nmp::nip22::comment_intent` mirror). This function is
 /// engine-free: author and event time are explicit deterministic composition
 /// inputs. Publish the returned value through
 /// [`crate::facade::NmpEngine::publish`], the same generic write lifecycle as
@@ -321,7 +324,7 @@ pub fn comment_intent(
         .as_deref()
         .map(parse_correlation_token)
         .transpose()?;
-    let intent = nmp_nip22::comment_intent(
+    let intent = nmp::nip22::comment_intent(
         &root,
         parent,
         author,
@@ -333,15 +336,15 @@ pub fn comment_intent(
     // NIP-22 owns this complete shape. The FFI layer projects the returned
     // ordinary intent instead of independently re-stating its payload,
     // durability, routing, identity, or correlation policy.
-    let nmp_grammar::WriteIntent {
-        payload: nmp_grammar::WritePayload::Unsigned(unsigned),
-        durability: nmp_grammar::Durability::Durable,
-        routing: nmp_grammar::WriteRouting::AuthorOutbox,
+    let nmp::WriteIntent {
+        payload: nmp::WritePayload::Unsigned(unsigned),
+        durability: nmp::Durability::Durable,
+        routing: nmp::WriteRouting::AuthorOutbox,
         identity_override: None,
         correlation,
     } = intent
     else {
-        unreachable!("nmp-nip22::comment_intent violated its closed write contract")
+        unreachable!("nmp::nip22::comment_intent violated its closed write contract")
     };
 
     Ok(FfiWriteIntent {
@@ -386,7 +389,7 @@ mod tests {
     #[test]
     fn decode_comment_round_trips_a_valid_top_level_comment() {
         let author = nostr::Keys::generate().public_key();
-        let unsigned = nmp_nip22::compose_top_level_comment(
+        let unsigned = nmp::nip22::compose_top_level_comment(
             &root_from_ffi(podcast_root()).unwrap(),
             author,
             nostr::Timestamp::from(1000u64),
