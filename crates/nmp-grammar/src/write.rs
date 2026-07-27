@@ -1,13 +1,11 @@
 //! The write-intent vocabulary (#115 Fable ruling, Fork 3's dependency
 //! ruling): `Durability`, `WritePayload`, `WriteIntent`, `WriteRouting`,
-//! `NarrowOnly`, `PrivateRoute`, [`RelayListBootstrapAuthority`], and
-//! `HostAuthority` relocate here from
-//! `nmp-engine::outbox` -- a protocol module (e.g. `nmp-nip29`) composing a
-//! `WriteIntent` must not gain an engine dependency to do so, and this
-//! crate is already the read noun's home (`Demand`/`SourceAuthority`), so
-//! it is the write noun's correct home too: the write vocab living in the
-//! reducer crate was a layering accident #115 is first to trip over, not a
-//! deliberate boundary. `WriteStatus`/`Receipt`/`ReceiptSink` stay in
+//! `NarrowOnly`, `PrivateRoute`, and [`RelayListBootstrapAuthority`] live
+//! here rather than `nmp-engine::outbox`: protocol modules composing a
+//! `WriteIntent` must not gain an engine dependency to do so, and this crate
+//! is already the read noun's home (`Demand`/`SourceAuthority`). The former
+//! NIP-29-only single-host route was deleted by #838 once its unsupported
+//! composer disappeared. `WriteStatus`/`Receipt`/`ReceiptSink` stay in
 //! `nmp-engine` (they reference `core::ReceiptId` and are runtime evidence,
 //! not intent vocab -- an app never constructs one).
 //!
@@ -211,26 +209,13 @@ pub enum WriteRouting {
     AuthorOutbox,
     /// Ledger #6: narrow-only, fail-closed.
     PrivateNarrow(PrivateRoute),
-    /// #115: an explicit, single pinned host authority -- the write-side
-    /// analog of [`crate::SourceAuthority::Pinned`]. NOT `PrivateNarrow`:
-    /// that variant is ledger #6's private/fail-closed narrow route, and
-    /// reusing it here would make host-authority evidence lie (a
-    /// `PrivateNarrow` receipt means "the caller pre-narrowed this exact
-    /// set," not "this is the group's host"). Kind-blind, protocol-blind:
-    /// the engine's `resolve_routes` treats this as "route to exactly this
-    /// one relay," nothing more -- it never knows or cares this is a
-    /// NIP-29 group host. See [`HostAuthority`]'s own doc for the
-    /// misuse-resistance story (the FFI tier withholds this variant
-    /// entirely -- an app can only reach it transitively through a
-    /// protocol module's composed intent).
-    PinnedHost(HostAuthority),
     /// NIP-65 account bootstrap: publish the author's first kind:10002 to
     /// exactly the finite relay set validated by the NIP-65 protocol module.
     ///
     /// This route is deliberately distinct from [`Self::PrivateNarrow`]:
     /// bootstrap relays are public delivery targets, not privacy authority.
-    /// It is also distinct from [`Self::PinnedHost`]: NIP-65 permits an
-    /// explicit relay SET rather than one protocol host. The engine executes
+    /// NIP-65 permits an explicit relay SET rather than one protocol host.
+    /// The engine executes
     /// this closed value without interpreting NIP-65, mutating its directory,
     /// or inserting synthetic relay provenance. Only an ordinary network
     /// ingest of the resulting kind:10002 can establish later
@@ -282,13 +267,12 @@ pub struct PrivateRoute {
 
 /// Exact relay-set authority for the first NIP-65 kind:10002 publication.
 ///
-/// Like [`HostAuthority`], this is public at the trusted direct-Rust grammar
-/// tier because a separate protocol crate must be able to mint it without
-/// depending on the engine. It is intentionally withheld from the `nmp`
-/// facade. [`Self::from_validated_relays`] is therefore a protocol-module
-/// assertion: `nmp-nip65` validates non-emptiness, uniqueness, and its public
-/// bound before constructing this value. No mutation/widening API exists
-/// afterward.
+/// This is public at the trusted direct-Rust grammar tier because a separate
+/// protocol crate must be able to mint it without depending on the engine.
+/// It is intentionally withheld from the `nmp` facade.
+/// [`Self::from_validated_relays`] is therefore a protocol-module assertion:
+/// `nmp-nip65` validates non-emptiness, uniqueness, and its public bound before
+/// constructing this value. No mutation/widening API exists afterward.
 #[derive(Debug, Clone)]
 pub struct RelayListBootstrapAuthority {
     relays: BTreeSet<RelayUrl>,
@@ -311,62 +295,9 @@ impl RelayListBootstrapAuthority {
     }
 }
 
-/// An explicit, single pinned write-host authority (#115) — the write-side
-/// analog of [`crate::SourceAuthority::Pinned`] (#107): read-side parity is
-/// the standard this type follows exactly. `host` is PRIVATE: `new()` (via
-/// [`Self::from_selected_host`]) is the only mint, mirroring
-/// `SourceAuthority::Pinned`'s own newtype discipline. Singleton, not a
-/// set — a NIP-29 group lives on exactly one host, so there is nothing to
-/// widen/union the way a read-side pinned scope might legitimately name
-/// several relays at once.
-///
-/// **Misuse-resistance story (Fable ruling, Fork 1):** `from_selected_host`
-/// is `pub` and infallible at the direct-Rust tier, exactly as
-/// `SourceAuthority::Pinned`'s constructor is — a trusted protocol module
-/// (like `nmp-nip29`) or a direct-Rust caller who has ALREADY established
-/// which relay is the correct host may mint one. This is NOT a
-/// cryptographically-sealed capability token (that would be theater at a
-/// Rust API boundary: Rust cannot express "only `nmp-nip29` may call this"
-/// without inverting the dependency graph). The REAL enforcement is at the
-/// FFI tier: `nmp-ffi` withholds both a `HostAuthority` constructor AND any
-/// matching `FfiWriteRouting` variant entirely (see that crate's
-/// `convert.rs`/`nip29.rs`) — an app can only ever obtain a pinned write
-/// transitively, through a protocol module's already-composed
-/// `WriteIntent` (`nmp_nip29::compose_group_send`), never by naming a host
-/// itself. Direct-Rust callers are the trusted tier where this constructor
-/// being public is exactly the same posture as every other `Pinned`
-/// authority in this crate.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct HostAuthority {
-    host: RelayUrl,
-}
-
-impl HostAuthority {
-    /// Mint a `HostAuthority` for `host` — the caller (a protocol module,
-    /// or a direct-Rust app that already knows its selected host) asserts
-    /// this IS the correct host. Infallible: unlike
-    /// `SourceAuthority::Pinned`'s relay SET (which can be empty),
-    /// `RelayUrl` itself already guarantees a well-formed single URL by
-    /// construction — there is no analogous "empty" state to reject.
-    pub fn from_selected_host(host: RelayUrl) -> Self {
-        Self { host }
-    }
-
-    pub fn host(&self) -> RelayUrl {
-        self.host.clone()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn host_authority_round_trips_the_selected_host() {
-        let host = RelayUrl::parse("wss://host.example.com").unwrap();
-        let auth = HostAuthority::from_selected_host(host.clone());
-        assert_eq!(auth.host(), host);
-    }
 
     #[test]
     fn relay_list_bootstrap_authority_is_an_immutable_exact_set() {

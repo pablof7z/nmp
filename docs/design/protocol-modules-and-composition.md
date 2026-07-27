@@ -64,6 +64,11 @@ Responsibilities remain separate:
 - Core validates the final draft, resolves the chosen signer, signs exactly
   once, persists it, and publishes it.
 
+Current implementation status (#838): `nmp-nip29` ships the pure
+draft-to-`GroupPublication` contextualization seam and `nmp-nipc7` separately
+ships kind:9/`q` construction. The engine/native publication step in the
+illustration above is still a required composition proof, not a shipped API.
+
 Upload failure and Nostr publication failure are distinct results. NIP-29's
 contextual publication does not transfer schema ownership of the photo to
 NIP-29.
@@ -120,12 +125,13 @@ one generic `publish` → receipt lifecycle. A separate wrapper noun or
 protocol-specific publication overload would create a second owner of the
 same write.
 
-NIP-29's current `FfiComposedWriteIntent` / `GroupSendIntent` and
-`publishComposed` path violates that same rule. #838 supersedes #823 and owns
-the protocol-boundary correction and removal. Its
-pinned-host authority requirement is real, but it must become a
-non-forgeable, payload-bound part of the ordinary immutable `WriteIntent`, not
-a reason for a parallel noun or publication lifecycle.
+#838 removed NIP-29's former `FfiComposedWriteIntent` / `GroupSendIntent` and
+`publishComposed` path. `nmp-nip29` now returns the pure
+`GroupPublication` value described above, while the engine and native SDKs
+have no single-host publication route for it. Completing that composition
+remains #824 work: it must preserve the contextualized event and selected host
+without reintroducing a forgeable raw relay override, parallel write noun, or
+second publication lifecycle.
 
 ## 7. Falsification
 
@@ -133,8 +139,9 @@ Required proofs include:
 
 - enabling no protocol module retains a useful raw two-noun engine;
 - a module cannot claim a kind it does not define without an ownership failure;
-- NIP-29 can publish a foreign-owned draft with `h` and host routing while the
-  foreign schema owner remains unchanged;
+- NIP-29 preserves a foreign-owned draft while adding only `h` and retaining
+  its selected host; the later engine publication proof must preserve that
+  same ownership boundary;
 - composition is deterministic and the core signs once;
 - a reusable fragment prints the same graph as its raw construction;
 - disabling a module removes its code and semantic API without changing core;

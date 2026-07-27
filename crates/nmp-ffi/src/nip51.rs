@@ -66,9 +66,9 @@ pub fn active_account_demand() -> FfiDemand {
 ///
 /// The result preserves malformed-item and private-content evidence, and
 /// grants NO signature, canonical-store, provenance, routing, or mutation
-/// authority. To browse a NIP-29 group the app still passes an explicit host
-/// of its own choosing to `group_discovery_demand`/`group_content_demand`;
-/// nothing here authorizes a host on the app's behalf.
+/// authority. To discover NIP-29 groups the app still passes an explicit host
+/// of its own choosing to `group_discovery_demand`; nothing here authorizes a
+/// host or invents a fixed group-content catalog on the app's behalf.
 #[uniffi::export]
 pub fn parse_simple_groups_list_tolerant(row: FfiRow) -> FfiSimpleGroupsList {
     simple_groups_list_to_ffi(&nmp_nip51::parse_simple_groups_list_from_raw_tags_tolerant(
@@ -136,7 +136,7 @@ mod tests {
     /// harvested from parser output by the boundary itself.
     ///
     /// #858's FFI falsifier too: the SELECTED entry feeds NIP-29's
-    /// host-pinned constructors directly, field for field, with no
+    /// host-pinned discovery constructor directly, field for field, with no
     /// intermediate NIP-29-owned copy of the NIP-51 value in between.
     #[test]
     fn nip29_browsing_still_demands_an_explicitly_supplied_host() {
@@ -146,9 +146,10 @@ mod tests {
             .expect("app-supplied host parses");
         assert_eq!(demand.selection.kinds, Some(vec![39000]));
 
-        let content = crate::nip29::group_content_demand(selected.host_relay, selected.group_id)
-            .expect("app-supplied host parses");
-        assert_eq!(content.selection.kinds, Some(vec![9, 30315]));
-        assert_eq!(content.source, demand.source);
+        assert_eq!(
+            selected.group_id, "group-a",
+            "the NIP-51-owned group id remains caller data; NIP-29 does not \
+             turn it into a fixed content catalog"
+        );
     }
 }

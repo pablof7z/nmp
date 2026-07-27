@@ -2433,9 +2433,6 @@ impl<S: EventStore> EngineCore<S> {
                     .collect::<Vec<_>>()
                     .join(",")
             ),
-            WriteRouting::PinnedHost(auth) => {
-                format!("pinned-host-hex:{}", hex::encode(auth.host().to_string()))
-            }
             WriteRouting::RelayListBootstrap(auth) => format!(
                 "nip65-bootstrap-hex:{}",
                 auth.iter()
@@ -2466,14 +2463,6 @@ impl<S: EventStore> EngineCore<S> {
             return Some(WriteRouting::PrivateNarrow(PrivateRoute {
                 relays: NarrowOnly::new(relays),
             }));
-        }
-        if let Some(encoded) = snapshot.strip_prefix("pinned-host-hex:") {
-            let bytes = hex::decode(encoded).ok()?;
-            let url = String::from_utf8(bytes).ok()?;
-            let host = RelayUrl::parse(&url).ok()?;
-            return Some(WriteRouting::PinnedHost(HostAuthority::from_selected_host(
-                host,
-            )));
         }
         if let Some(encoded) = snapshot.strip_prefix("nip65-bootstrap-hex:") {
             let relays = if encoded.is_empty() {
@@ -2588,14 +2577,8 @@ impl<S: EventStore> EngineCore<S> {
     /// relay set is exactly whatever the caller pre-narrowed into the
     /// `NarrowOnly` set, empty or not (ledger #6's fail-closed mechanism).
     ///
-    /// `PinnedHost` (#115) also never consults the directory — like
-    /// `PrivateNarrow`, its one relay is exactly whatever the caller
-    /// asserted via `HostAuthority::from_selected_host`. Unlike
-    /// `PrivateNarrow`, an empty/unroutable state is structurally
-    /// unreachable (`HostAuthority` always carries exactly one well-formed
-    /// `RelayUrl`), so this arm is infallible where `PrivateNarrow`'s is
-    /// not. `RelayListBootstrap` follows the same directory-blind execution
-    /// rule for a finite set minted by the NIP-65 module. Crucially, resolving
+    /// `RelayListBootstrap` follows the same directory-blind execution rule
+    /// for a finite set minted by the NIP-65 module. Crucially, resolving
     /// this route does NOT install those relays as author-outbox facts; only
     /// the ordinary network-ingest path for the resulting kind:10002 can do
     /// that.
@@ -2629,7 +2612,6 @@ impl<S: EventStore> EngineCore<S> {
                     Ok(route.relays.iter().cloned().collect())
                 }
             }
-            WriteRouting::PinnedHost(auth) => Ok(BTreeSet::from([auth.host()])),
             WriteRouting::RelayListBootstrap(auth) => {
                 let relays = auth.iter().cloned().collect::<BTreeSet<_>>();
                 if relays.is_empty() {

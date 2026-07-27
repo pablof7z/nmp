@@ -60,13 +60,11 @@ publication overload for symmetry. NIP-22 is the concrete native precedent:
 its top-level composer returns `WriteIntent`, then the app uses generic
 `publish`.
 
-NIP-29's current opaque carrier, take-once lifecycle, Engine method, and
-`publishComposed` door are an identified architectural defect, not a precedent
-or permitted exception; #838 supersedes #823 and owns their removal as part of
-restoring exact protocol ownership. The target is still immutable
-staged composition returning the ordinary `WriteIntent`. Its pinned-host
-authority must become non-forgeable and payload-bound within that noun, with a
-generic acceptance check that learns no NIP-29 semantics.
+NIP-29 is the practical ownership model: a schema module first builds a
+complete immutable draft, then NIP-29 adds only its `h` context and retains the
+selected host beside that foreign draft. C7 independently owns kind:9 and `q`
+replies; mention/notification policy remains app-owned. The engine-routable
+NIP-29 publication step is not shipped yet.
 
 ## Rust, FFI, and native projection
 

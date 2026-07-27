@@ -5,13 +5,6 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[features]
-default = []
-# Keep the pure/default crate engine-free (#115's dependency ruling). Native
-# SDKs and direct Rust apps that want the semantic group-message operation opt
-# into this thin integration layer.
-engine = ["dep:nmp"]
-
 # #858: nmp-nip29 does not depend on nmp-nip51 AT ALL. #63's ownership
 # boundary once read as "nip29 consumes nip51's typed output"; the only thing
 # it actually did with that output was rename its fields, so the wrapper is
@@ -22,4 +15,3 @@ engine = ["dep:nmp"]
 [dependencies]
 nostr.workspace = true
 nmp-grammar.workspace = true
-nmp = { workspace = true, optional = true }
