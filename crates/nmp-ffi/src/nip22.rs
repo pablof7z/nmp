@@ -472,13 +472,14 @@ mod tests {
     #[test]
     fn composed_comment_uses_the_generic_publish_door() {
         let author = nostr::Keys::generate().public_key();
+        let correlation = "comment-generic-publish".to_string();
         let intent = comment_intent(
             podcast_root(),
             FfiCommentParent::Root,
             author.to_hex(),
             1000,
             "hi".to_string(),
-            None,
+            Some(correlation.clone()),
         )
         .unwrap();
         let engine = crate::facade::NmpEngine::new(crate::facade::NmpEngineConfig::default())
@@ -490,7 +491,22 @@ mod tests {
         let receipt = engine
             .publish(intent)
             .expect("the ordinary generic publish door must accept the comment");
-        assert!(receipt.id() > 0);
+        let receipt_id = receipt.id();
+        let reattached = engine
+            .reattach_by_correlation(correlation)
+            .expect("the generic door must preserve the comment correlation token");
+        assert_eq!(reattached.receipt_id, Some(receipt_id));
+        match reattached.outcome {
+            crate::types::FfiReceiptReattachment::Attached { stream } => {
+                assert_eq!(stream.id(), receipt_id);
+            }
+            crate::types::FfiReceiptReattachment::NotFound => {
+                panic!("the accepted comment correlation must be retained")
+            }
+            crate::types::FfiReceiptReattachment::RetainedButUnreadable => {
+                panic!("the accepted comment receipt must remain readable")
+            }
+        }
         engine.shutdown();
     }
 }
