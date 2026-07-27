@@ -97,7 +97,36 @@ pub(crate) enum StoreOwnershipError {
 /// death — none of which an in-process registry could have covered.
 pub(crate) struct StoreOwnership {
     target: PathBuf,
-    _sidecar: File,
+    sidecar: File,
+}
+
+/// Releasing by closing the descriptor is NOT enough (#936).
+///
+/// The lock lives on the *open file description*, not on the descriptor. Any
+/// child forked while this owner is alive — including the transient child
+/// every `Command::spawn` creates between `fork` and `exec` — inherits a
+/// descriptor onto that same description, so the lock survives until the last
+/// of them is closed. `FD_CLOEXEC` (which Rust already sets) cannot close that
+/// window, because it acts at `exec`, not at `fork`. The consequence is the
+/// #936 regression: a sequential drop-then-reopen of one path, in one process,
+/// with no concurrency of its own, could be refused with `StoreAlreadyOpen`
+/// because an unrelated concurrent spawn was holding a duplicate descriptor.
+///
+/// An explicit unlock releases the lock on the shared description itself, so
+/// it takes effect no matter how many inherited duplicates exist. `redb` does
+/// exactly this for the database file it locks alongside this sidecar; without
+/// it, only half of the pair was fork-safe.
+///
+/// Nothing wants a forked child to inherit ownership: a child that means to
+/// own the target opens the sidecar itself and takes its own lock.
+impl Drop for StoreOwnership {
+    fn drop(&mut self) {
+        // Best effort by necessity — drop cannot report. Closing the
+        // descriptor immediately afterwards remains the backstop for the
+        // single-descriptor case, and process death remains the backstop for
+        // everything else.
+        let _ = self.sidecar.unlock();
+    }
 }
 
 impl StoreOwnership {
@@ -168,14 +197,12 @@ fn acquire_ownership_with_hooks(
             });
         }
     }
+    // The handle is bound to `target` the instant the lock is held, and
+    // before anything that can fail or unwind, so every later exit — a
+    // failing revalidation, a panicking hook — drops it and releases the
+    // lock exactly once instead of leaking an orphan owner.
+    let ownership = StoreOwnership { target, sidecar };
     after_lock();
-    // The handle is bound to `target` before revalidation so that a failing
-    // revalidation drops it — releasing the lock exactly once — instead of
-    // leaking an orphan owner.
-    let ownership = StoreOwnership {
-        target,
-        _sidecar: sidecar,
-    };
     ownership.revalidate(path)?;
     Ok(ownership)
 }
@@ -489,6 +516,127 @@ mod tests {
         drop(replacement);
         reset_store(&path).unwrap();
         assert!(!path.exists());
+    }
+
+    /// Fork a child that outlives the caller and holds every descriptor it
+    /// inherited. Returns the pid; the child runs no destructor and touches
+    /// no store byte.
+    ///
+    /// SAFETY: the child executes nothing but `nanosleep` and `_exit`, both
+    /// async-signal-safe, so forking this multi-threaded binary is sound.
+    #[cfg(unix)]
+    fn fork_descriptor_holder() -> libc::pid_t {
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0, "fork: {}", io::Error::last_os_error());
+        if child == 0 {
+            let hold = libc::timespec {
+                tv_sec: 120,
+                tv_nsec: 0,
+            };
+            unsafe {
+                libc::nanosleep(&hold, std::ptr::null_mut());
+                libc::_exit(0);
+            }
+        }
+        child
+    }
+
+    #[cfg(unix)]
+    fn reap_descriptor_holder(child: libc::pid_t) {
+        unsafe {
+            libc::kill(child, libc::SIGKILL);
+            libc::waitpid(child, std::ptr::null_mut(), 0);
+        }
+    }
+
+    /// #936, the open/reset half. The lock lives on the open file
+    /// description, so every child forked while a store is open inherits a
+    /// descriptor onto it — including the transient child inside every
+    /// `Command::spawn`, between `fork` and `exec`, which `FD_CLOEXEC` cannot
+    /// cover. Releasing by closing the owner's own descriptor therefore left
+    /// the lock alive in those children, and the next open of the same path
+    /// was refused with `StoreAlreadyOpen` — sequentially, in one process,
+    /// with no concurrency of the caller's own.
+    ///
+    /// A live forked child is the deterministic form of that window: it holds
+    /// the inherited descriptor for far longer than the reopen below takes.
+    #[cfg(unix)]
+    #[test]
+    fn a_forked_child_cannot_hold_the_sidecar_lock_past_the_owner_drop() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("forked-child.redb");
+        let owner = crate::RedbStore::open(&path).unwrap();
+        let child = fork_descriptor_holder();
+
+        drop(owner);
+        // Both ownership doors, taken sequentially by this one process while
+        // the child is still alive and still holding its inherited
+        // descriptor.
+        let reopened = crate::RedbStore::open(&path);
+        let reopened_is_owned = reopened.is_ok();
+        drop(reopened);
+        let reset = reset_store(&path);
+        reap_descriptor_holder(child);
+
+        assert!(
+            reopened_is_owned,
+            "a sequential reopen must never be refused because a forked child \
+             inherited the sidecar descriptor"
+        );
+        assert!(
+            reset.is_ok(),
+            "the reset door must be released by the same drop: {reset:?}"
+        );
+        assert!(!path.exists());
+
+        // Cross-process exclusion is unchanged: the release is the owner's
+        // drop, not the child's exit, and a live owner still refuses.
+        let owner = crate::RedbStore::open(&path).unwrap();
+        assert!(matches!(
+            crate::RedbStore::open(&path),
+            Err(RedbStoreOpenError::StoreAlreadyOpen { .. })
+        ));
+        drop(owner);
+    }
+
+    /// #936, the fail-closed half — the shape #936's original report caught
+    /// in `target_retargeted_during_lock_acquisition_fails_closed`, made
+    /// deterministic. The child is forked while the doomed acquisition holds
+    /// the lock, so it inherits that descriptor; the acquisition then fails
+    /// closed and drops its partial ownership. Releasing by close alone left
+    /// the abandoned lock alive in the child, and the immediately following
+    /// acquisition of the same target was refused with `AlreadyOpen`.
+    #[cfg(unix)]
+    #[test]
+    fn a_fail_closed_acquisition_releases_its_lock_past_a_forked_child() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let first = fixture.path().join("fail-closed-first.redb");
+        let second = fixture.path().join("fail-closed-second.redb");
+        let alias = fixture.path().join("fail-closed-alias.redb");
+        symlink(&first, &alias).unwrap();
+
+        let mut child = 0;
+        let result = acquire_ownership_with_hooks(&alias, || {
+            child = fork_descriptor_holder();
+            std::fs::remove_file(&alias).unwrap();
+            symlink(&second, &alias).unwrap();
+        });
+        assert!(matches!(
+            result,
+            Err(StoreOwnershipError::TargetChanged { .. })
+        ));
+
+        let owner = acquire_ownership(&first);
+        reap_descriptor_holder(child);
+        assert!(
+            owner.is_ok(),
+            "a fail-closed acquisition must release its lock even though a \
+             child forked mid-acquisition inherited the sidecar descriptor: \
+             {:?}",
+            owner.err()
+        );
     }
 
     #[test]
