@@ -1088,8 +1088,128 @@ mod tests {
 
     #[test]
     fn every_public_mailbox_entry_requires_compatibility_proof() {
+        use syn::visit::Visit;
+
+        #[derive(Default)]
+        struct TypeNames {
+            mailbox: bool,
+            compatibility: bool,
+        }
+
+        impl<'ast> Visit<'ast> for TypeNames {
+            fn visit_type_path(&mut self, path: &'ast syn::TypePath) {
+                for segment in &path.path.segments {
+                    match segment.ident.to_string().as_str() {
+                        "FfiSignerMailbox" => self.mailbox = true,
+                        "FfiNip46CoreCompatibility" => self.compatibility = true,
+                        _ => {}
+                    }
+                }
+                syn::visit::visit_type_path(self, path);
+            }
+        }
+
+        fn signature_type_names(signature: &syn::Signature) -> TypeNames {
+            let mut names = TypeNames::default();
+            for argument in &signature.inputs {
+                if let syn::FnArg::Typed(argument) = argument {
+                    names.visit_type(&argument.ty);
+                }
+            }
+            names
+        }
+
+        struct PublicEntryVisitor {
+            path: PathBuf,
+            mailbox_entries: Vec<(PathBuf, String, bool)>,
+            mailbox_aliases: Vec<(PathBuf, String)>,
+            inside_uniffi_export_impl: bool,
+        }
+
+        impl PublicEntryVisitor {
+            fn has_uniffi_export(attributes: &[syn::Attribute]) -> bool {
+                attributes.iter().any(|attribute| {
+                    let mut segments = attribute.path().segments.iter();
+                    matches!(
+                        (segments.next(), segments.next(), segments.next()),
+                        (Some(first), Some(second), None)
+                            if first.ident == "uniffi" && second.ident == "export"
+                    )
+                })
+            }
+
+            fn inspect_signature(
+                &mut self,
+                visibility: &syn::Visibility,
+                signature: &syn::Signature,
+                explicitly_exported: bool,
+            ) {
+                if !matches!(visibility, syn::Visibility::Public(_))
+                    && !explicitly_exported
+                    && !self.inside_uniffi_export_impl
+                {
+                    return;
+                }
+                let names = signature_type_names(signature);
+                if names.mailbox {
+                    self.mailbox_entries.push((
+                        self.path.clone(),
+                        signature.ident.to_string(),
+                        names.compatibility,
+                    ));
+                }
+            }
+        }
+
+        impl<'ast> Visit<'ast> for PublicEntryVisitor {
+            fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
+                self.inspect_signature(
+                    &function.vis,
+                    &function.sig,
+                    Self::has_uniffi_export(&function.attrs),
+                );
+                syn::visit::visit_item_fn(self, function);
+            }
+
+            fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
+                self.inspect_signature(
+                    &function.vis,
+                    &function.sig,
+                    Self::has_uniffi_export(&function.attrs),
+                );
+                syn::visit::visit_impl_item_fn(self, function);
+            }
+
+            fn visit_item_impl(&mut self, implementation: &'ast syn::ItemImpl) {
+                let prior = self.inside_uniffi_export_impl;
+                self.inside_uniffi_export_impl =
+                    prior || Self::has_uniffi_export(&implementation.attrs);
+                syn::visit::visit_item_impl(self, implementation);
+                self.inside_uniffi_export_impl = prior;
+            }
+
+            fn visit_item_type(&mut self, alias: &'ast syn::ItemType) {
+                let mut names = TypeNames::default();
+                names.visit_type(&alias.ty);
+                if names.mailbox {
+                    self.mailbox_aliases
+                        .push((self.path.clone(), alias.ident.to_string()));
+                }
+                syn::visit::visit_item_type(self, alias);
+            }
+
+            fn visit_use_rename(&mut self, rename: &'ast syn::UseRename) {
+                if rename.ident == "FfiSignerMailbox" {
+                    self.mailbox_aliases
+                        .push((self.path.clone(), rename.rename.to_string()));
+                }
+                syn::visit::visit_use_rename(self, rename);
+            }
+        }
+
         let mut pending = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")];
-        let mut signatures = Vec::new();
+        let mut mailbox_entries = Vec::new();
+        let mut mailbox_aliases = Vec::new();
         while let Some(path) = pending.pop() {
             if path.is_dir() {
                 pending.extend(
@@ -1104,22 +1224,33 @@ mod tests {
             }
 
             let source = fs::read_to_string(&path).unwrap();
-            signatures.extend(
-                source
-                    .split("pub fn ")
-                    .skip(1)
-                    .map(|suffix| suffix.split_once('{').unwrap().0)
-                    .filter(|signature| signature.contains("Arc<FfiSignerMailbox>"))
-                    .map(|signature| (path.clone(), signature.to_owned())),
-            );
+            let syntax = syn::parse_file(&source).unwrap_or_else(|error| {
+                panic!("parse provider source {}: {error}", path.display())
+            });
+            let mut visitor = PublicEntryVisitor {
+                path,
+                mailbox_entries: Vec::new(),
+                mailbox_aliases: Vec::new(),
+                inside_uniffi_export_impl: false,
+            };
+            visitor.visit_file(&syntax);
+            mailbox_entries.append(&mut visitor.mailbox_entries);
+            mailbox_aliases.append(&mut visitor.mailbox_aliases);
         }
 
-        assert_eq!(
-            signatures.len(),
-            1,
-            "every public mailbox entry across the provider crate must remain one proof-bearing constructor: {signatures:?}"
+        assert!(
+            mailbox_aliases.is_empty(),
+            "the external core mailbox type may not be hidden behind an alias: {mailbox_aliases:?}"
         );
-        assert!(signatures[0].1.contains("Arc<FfiNip46CoreCompatibility>"));
+        assert_eq!(
+            mailbox_entries.len(),
+            1,
+            "every public mailbox entry across the provider crate must remain one proof-bearing constructor: {mailbox_entries:?}"
+        );
+        assert!(
+            mailbox_entries[0].2,
+            "the one public mailbox entry must also require FfiNip46CoreCompatibility: {mailbox_entries:?}"
+        );
     }
 
     #[test]

@@ -64,6 +64,36 @@ fn build_flags_ignore_absolute_workspace_paths() {
 }
 
 #[test]
+fn release_out_dir_must_be_the_exact_managed_target_and_profile() {
+    let root = Path::new("/cache/nmp-component-build/nip46");
+    assert!(component_identity::validate_release_out_dir(
+        root,
+        Path::new(
+            "/cache/nmp-component-build/nip46/aarch64-linux-android/release/build/nmp-ffi-abcd/out"
+        ),
+        "aarch64-linux-android",
+    )
+    .is_ok());
+
+    for escaped in [
+        "/cache/elsewhere/aarch64-linux-android/release/build/nmp-ffi-abcd/out",
+        "/cache/nmp-component-build/nip46/nested/aarch64-linux-android/release/build/nmp-ffi-abcd/out",
+        "/cache/nmp-component-build/nip46/aarch64-linux-android/release-lto/build/nmp-ffi-abcd/out",
+        "/cache/nmp-component-build/nip46/aarch64-linux-android/release/build/other-crate-abcd/out",
+    ] {
+        assert!(
+            component_identity::validate_release_out_dir(
+                root,
+                Path::new(escaped),
+                "aarch64-linux-android",
+            )
+            .is_err(),
+            "{escaped} must not inherit a managed release authorization"
+        );
+    }
+}
+
+#[test]
 fn unit_graph_identity_preserves_resolved_feature_changes() {
     let mut first = graph("/checkout/one/nmp", "feature-a");
     let mut second = graph("/checkout/one/nmp", "feature-b");

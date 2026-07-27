@@ -166,7 +166,16 @@ fn hash_cargo_unit_graph(workspace: &Path, hasher: &mut blake3::Hasher) {
 
 fn validated_release_marker(cargo_has_provider_component: bool) -> PathBuf {
     println!("cargo:rerun-if-env-changed=NMP_FFI_COMPONENT_AUTH");
-    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"));
+    println!("cargo:rerun-if-env-changed=NMP_FFI_COMPONENT_ROOT");
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"))
+        .canonicalize()
+        .expect("Cargo OUT_DIR must exist");
+    let component_root = PathBuf::from(
+        env::var_os("NMP_FFI_COMPONENT_ROOT")
+            .expect("release native components require the supported component builder"),
+    )
+    .canonicalize()
+    .expect("supported component root must exist");
     let target = env::var("TARGET").expect("Cargo supplies TARGET");
     let package_set = if cargo_has_provider_component {
         "nip46"
@@ -177,43 +186,35 @@ fn validated_release_marker(cargo_has_provider_component: bool) -> PathBuf {
         "nmp-component-build-v1\npackage-set={package_set}\ntarget={target}\nprofile=release\n"
     );
 
-    for component_root in out_dir.ancestors() {
-        if component_root.file_name().and_then(OsStr::to_str) != Some(package_set)
-            || component_root
+    assert!(
+        component_root.file_name().and_then(OsStr::to_str) == Some(package_set)
+            && component_root
                 .parent()
                 .and_then(Path::file_name)
                 .and_then(OsStr::to_str)
-                != Some("nmp-component-build")
-        {
-            continue;
-        }
-        let marker = component_root.join(".nmp-component-build-v1").join(&target);
-        let Ok(actual) = fs::read_to_string(&marker) else {
-            continue;
-        };
-        assert_eq!(
-            actual, expected,
-            "release component marker disagrees with Cargo-observed package set or target"
-        );
-        let authorization = component_root
-            .join(".nmp-component-build-v1")
-            .join(".authorization");
-        println!("cargo:rerun-if-changed={}", authorization.display());
-        let expected_authorization = fs::read_to_string(&authorization).unwrap_or_else(|_| {
-            panic!(
-                "isolated component target has no live builder authorization: {}",
-                authorization.display()
-            )
-        });
-        assert_eq!(
-            env::var("NMP_FFI_COMPONENT_AUTH").as_deref(),
-            Ok(expected_authorization.trim()),
-            "release component authorization does not match its isolated target"
-        );
-        return marker;
-    }
+                == Some("nmp-component-build"),
+        "release component root is not a supported package-set target"
+    );
+    component_identity::validate_release_out_dir(&component_root, &out_dir, &target)
+        .unwrap_or_else(|error| panic!("{error}"));
 
-    panic!("release native components must use the isolated supported Swift or Kotlin builder");
+    let marker = component_root.join(".nmp-component-build-v1").join(&target);
+    let actual = fs::read_to_string(&marker)
+        .unwrap_or_else(|_| panic!("release component target has no supported builder marker"));
+    assert_eq!(
+        actual, expected,
+        "release component marker disagrees with Cargo-observed package set or target"
+    );
+    let authorization = component_root
+        .join(".nmp-component-build-v1")
+        .join(".authorization");
+    println!("cargo:rerun-if-changed={}", authorization.display());
+    let expected_authorization = fs::read_to_string(&authorization)
+        .unwrap_or_else(|_| panic!("release component target has no live builder authorization"));
+    if env::var("NMP_FFI_COMPONENT_AUTH").as_deref() != Ok(expected_authorization.trim()) {
+        panic!("release component authorization does not match its isolated target");
+    }
+    marker
 }
 
 fn hash_source_tree(workspace: &Path, directory: &Path, hasher: &mut blake3::Hasher) {

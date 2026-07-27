@@ -22,6 +22,7 @@ uniffi = { workspace = true, features = ["cli"] }
 tokio = { version = "1", features = ["rt", "time", "net"] }
 
 [dev-dependencies]
+syn = { version = "2", features = ["full", "visit"] }
 tempfile = "3"
 tungstenite = "0.29"
 url = "2"

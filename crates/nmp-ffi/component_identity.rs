@@ -1,9 +1,45 @@
-use std::path::Path;
+use std::path::{Component, Path};
 
 const PROVIDER_COMPONENT_FEATURE: &str = "nip46-provider-component";
 
 pub fn normalize_build_text(text: &str, workspace: &Path) -> String {
     text.replace(workspace.to_string_lossy().as_ref(), "<workspace>")
+}
+
+pub fn validate_release_out_dir(
+    component_root: &Path,
+    out_dir: &Path,
+    target: &str,
+) -> Result<(), String> {
+    let relative = out_dir.strip_prefix(component_root).map_err(|_| {
+        format!(
+            "Cargo OUT_DIR {} is outside component root {}",
+            out_dir.display(),
+            component_root.display()
+        )
+    })?;
+    let components = relative
+        .components()
+        .map(|component| match component {
+            Component::Normal(value) => value.to_string_lossy().into_owned(),
+            _ => String::new(),
+        })
+        .collect::<Vec<_>>();
+    let valid = components.len() == 5
+        && components[0] == target
+        && components[1] == "release"
+        && components[2] == "build"
+        && components[3].starts_with("nmp-ffi-")
+        && components[4] == "out"
+        && components.iter().all(|component| !component.is_empty());
+    if !valid {
+        return Err(format!(
+            "Cargo OUT_DIR {} is not the exact {target}/release nmp-ffi build under {}",
+            out_dir.display(),
+            component_root.display()
+        ));
+    }
+    Ok(())
 }
 
 pub fn canonicalize_unit_graph(value: &mut serde_json::Value, workspace: &Path) {

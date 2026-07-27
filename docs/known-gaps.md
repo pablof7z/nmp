@@ -99,22 +99,31 @@ about current code:
   one-click launch, package-filtered Android discovery, and an exact
   URI/package handoff contract. Deleting those provider packages leaves core
   and an unrelated external signer buildable. Supported native release builders
-  fix the core-only or matched core/provider Cargo roots, use isolated target
-  directories per package set, freeze the resolution after a locked fetch, and
-  mint a per-build authorization checked from the build script's actual
-  output-directory ancestry. Only within that fixed shape does the deterministic
+  fix the core-only or matched core/provider Cargo roots, use an isolated
+  reusable target per package set, freeze the resolution after a locked fetch,
+  and hold a per-build authorization only inside the managed Cargo subprocess.
+  Before that authorization is revoked, the managed builder copies the exact
+  outputs into a fresh artifact snapshot; Swift/Kotlin packaging reads only
+  that snapshot, never the mutable Cargo target. `build.rs` canonicalizes both
+  the component root and its actual `OUT_DIR`, then requires the exact
+  `<target>/release/build/nmp-ffi-*/out` layout, so nested targets, `..`
+  escapes, and custom profile directories cannot inherit the authorization.
+  Only within that fixed shape does the deterministic
   component identity self-derive and hash Cargo's exact resolved unit graph
   (package roots/edges, transitive features, profiles, and targets), every
   governed core/fixture input, and compiler/build inputs. An ad-hoc release
-  invocation cannot accidentally write a packageable component; debug/IDE
-  builds remain available but are not packaging inputs. External path patches
+  invocation cannot accidentally write or replace a package input; concurrent
+  managed builds of one package set refuse with a specific lock error rather
+  than rotating each other's authorization. Debug/IDE builds remain available
+  but are not packaging inputs. External path patches
   that cannot be reproduced from the repository are refused. Swift and Kotlin
   compare the embedded identities before requesting the opaque mailbox, and a
   mismatch is a typed construction failure before any external Rust object
   crosses the component seam (#952). The build authorization is a working-
   discipline guard against accidental artifact substitution, not a secret
-  against a caller deliberately replaying it; the native identity comparison is
-  the runtime authority. Supported builders always use the exact release
+  against a caller deliberately forging the marker or reading/replaying the
+  in-flight token; the native identity comparison is the runtime authority.
+  The managed builder never returns or prints that token. Supported builders always use the exact release
   profile; custom/bench release-class builds are intentionally not a supported
   packaging path and fail without that builder authorization. The Android AAR
   work in #831 still owns

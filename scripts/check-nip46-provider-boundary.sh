@@ -23,6 +23,7 @@ required_paths=(
   Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/ProviderComponent.kt
   Packages/NMPKotlin/nip46/build.gradle.kts
   Packages/NMPKotlin/nip46/src/main/kotlin/com/nmp/sdk/RemoteSigner.kt
+  scripts/build-component-release.sh
   scripts/check-nip46-component-identity.sh
 )
 for path in "${required_paths[@]}"; do
@@ -96,6 +97,10 @@ grep -qF 'pub fn verify_nip46_core_component_identity(' crates/nmp-nip46-ffi/src
   fail "NIP-46 provider does not verify plain core identity before object exchange"
 grep -qF 'compatibility: Arc<FfiNip46CoreCompatibility>' crates/nmp-nip46-ffi/src/signer.rs ||
   fail "NIP-46 provider construction does not require a compatibility proof"
+grep -qF 'syn::parse_file(&source)' crates/nmp-nip46-ffi/src/signer.rs ||
+  fail "mailbox-entry falsifier does not parse every provider Rust source structurally"
+grep -qF 'fn visit_use_rename' crates/nmp-nip46-ffi/src/signer.rs ||
+  fail "mailbox-entry falsifier does not forbid aliases that hide the external type"
 grep -qF 'withVerifiedNip46Core(actual: nmpProviderCoreComponentIdentity())' \
   Packages/NMPNip46/Sources/NMPNip46/RemoteSigner.swift ||
   fail "Swift provider does not verify the loaded core before requesting a mailbox"
@@ -107,19 +112,32 @@ for builder in scripts/build-swift-nip46-xcframework.sh scripts/build-kotlin-nip
     fail "$builder does not build core and provider under one package-set identity"
 done
 for builder in scripts/build-swift-xcframework.sh scripts/build-kotlin-jvm.sh; do
-  grep -qF 'scripts/prepare-component-build.sh' "$builder" ||
-    fail "$builder does not isolate its exact package-set target"
-  grep -qF 'NMP_FFI_COMPONENT_AUTH=' "$builder" ||
-    fail "$builder does not authorize only its own isolated invocation"
-  grep -qF 'cargo build --frozen' "$builder" ||
-    fail "$builder does not freeze its isolated release resolution"
+  grep -qF 'scripts/build-component-release.sh' "$builder" ||
+    fail "$builder does not consume a sealed exact-package-set snapshot"
+  if grep -qF 'NMP_FFI_COMPONENT_AUTH=' "$builder"; then
+    fail "$builder can still carry component authorization outside the managed Cargo invocation"
+  fi
   if grep -qF 'NMP_FFI_CARGO_UNIT_GRAPH' "$builder"; then
     fail "$builder still supplies declared graph content"
   fi
 done
-grep -qF 'cargo build --frozen "${CARGO_PACKAGE_ARGS[@]}" --release --target "$HOST_TARGET"' \
-  scripts/build-kotlin-jvm.sh ||
-  fail "Kotlin component build does not make its hashed host target explicit to Cargo"
+grep -qF 'cargo build --frozen "${PACKAGE_ARGS[@]}" --release --target "$TARGET"' \
+  scripts/build-component-release.sh ||
+  fail "managed component build does not freeze exact package roots, target, and release profile"
+grep -qF 'rm -f "$AUTHORIZATION"' scripts/build-component-release.sh ||
+  fail "managed component build does not revoke its authorization before returning"
+grep -qF 'nmp-component-artifacts' scripts/build-component-release.sh ||
+  fail "managed component build does not seal package inputs outside the reusable Cargo target"
+if grep -qE 'target/nmp-component-build/.*/release/libnmp' \
+  .github/workflows/nip46-provider.yml
+then
+  fail "provider workflow still audits mutable Cargo-cache libraries instead of packaged outputs"
+fi
+grep -qF 'Packages/NMPKotlin/src/main/resources/linux-x86-64/libnmp_ffi.so' \
+  .github/workflows/nip46-provider.yml ||
+  fail "Kotlin provider workflow does not audit the packaged core resource"
+grep -qF 'find Packages/NMP/NMP.xcframework' .github/workflows/nip46-provider.yml ||
+  fail "Swift provider workflow does not audit the packaged XCFramework slice"
 if grep -qF 'NMP_FFI_CARGO_UNIT_GRAPH' crates/nmp-ffi/build.rs; then
   fail "build script still accepts caller-declared graph content"
 fi

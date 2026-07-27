@@ -2247,6 +2247,7 @@ dependencies = [
  "nmp-ffi",
  "nmp-nip46",
  "nostr 0.44.4",
+ "syn",
  "tempfile",
  "tokio",
  "tungstenite 0.29.0",
