@@ -45,6 +45,10 @@ fi
 if cargo tree -p nmp --edges normal | grep -qE 'nmp-nip46($|[[:space:]])'; then
   fail "the canonical Rust facade dependency graph contains NIP-46"
 fi
+if cargo tree -p nmp-nip46 --edges features |
+  grep -q 'nostr feature "nip46"'; then
+  fail "the provider enabled rust-nostr's NIP-46 umbrella instead of its exact dependencies"
+fi
 
 # Core source and hand-written native SDKs cannot name the provider. Generated
 # files and append-only history are outside this corpus by construction.

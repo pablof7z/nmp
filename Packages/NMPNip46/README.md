@@ -9,10 +9,14 @@ capability door.
 From the repository root:
 
 ```sh
-scripts/build-swift-xcframework.sh --macos-only
 scripts/build-swift-nip46-xcframework.sh --macos-only
 swift test --package-path Packages/NMPNip46
 ```
+
+The provider builder regenerates both core and provider artifacts in one Cargo
+resolution. That is required for the external `FfiSignerMailbox` type; two
+independently compiled static archives are not link-compatible merely because
+their source versions match.
 
 Use `--sim-only` or no mode flag when an iOS Simulator or device slice is
 needed. Apps that do not add this package neither name nor link NIP-46.

@@ -36,6 +36,16 @@ BINDGEN_NAME=${NMP_UNIFFI_BINDGEN_BIN:-uniffi-bindgen}
 GEN_DIR=${NMP_KOTLIN_GEN_DIR:-gen-kotlin}
 KOTLIN_PKG_DIR=${NMP_KOTLIN_MODULE_DIR:-Packages/NMPKotlin}
 
+# See the Swift builder's matching rule: provider and core native libraries
+# that exchange an external UniFFI object must come from one Cargo
+# feature-resolution unit. Provider wrappers pass both package names; a
+# core-only build retains the one-package default.
+read -r -a CARGO_PACKAGE_NAMES <<< "${NMP_FFI_CARGO_PACKAGES:-$CRATE}"
+CARGO_PACKAGE_ARGS=()
+for package_name in "${CARGO_PACKAGE_NAMES[@]}"; do
+  CARGO_PACKAGE_ARGS+=(-p "$package_name")
+done
+
 case "$(uname -s)" in
   Darwin) LIB_EXT=dylib ;;
   Linux) LIB_EXT=so ;;
@@ -58,7 +68,7 @@ else
 fi
 
 echo "== 1. cargo build (release, host triple) =="
-cargo build -p "$CRATE" --release
+cargo build "${CARGO_PACKAGE_ARGS[@]}" --release
 
 HOST_LIB="$TARGET_DIR/release/$LIB_NAME"
 if [[ ! -f "$HOST_LIB" ]]; then

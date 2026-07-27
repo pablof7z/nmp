@@ -137,10 +137,13 @@ with the Rust source.
 The optional signer component has its own corresponding build:
 
 ```sh
-scripts/build-swift-xcframework.sh --sim-only
 scripts/build-swift-nip46-xcframework.sh --sim-only
 swift test --package-path Packages/NMPNip46
 ```
+
+The provider builder refreshes both XCFrameworks from one Cargo resolution so
+the external mailbox has one exact native type identity. Run the core builder
+alone only for a core-only artifact.
 
 CI proves the core-only and selected-provider paths from clean checkouts in
 `.github/workflows/ci.yml` and `.github/workflows/nip46-provider.yml`; missing

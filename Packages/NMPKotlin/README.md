@@ -169,10 +169,14 @@ source, same discipline as the Swift xcframework.
 The optional NIP-46 module is generated and tested independently:
 
 ```sh
-scripts/build-kotlin-jvm.sh
 scripts/build-kotlin-nip46-jvm.sh
 (cd Packages/NMPKotlin && ./gradlew :nip46:test)
 ```
+
+The provider builder refreshes the core bindings/library first and builds both
+native components in one Cargo resolution, preserving the external mailbox's
+exact native type identity. `build-kotlin-jvm.sh` remains the independent
+core-only path.
 
 Generating the provider binding is what makes the optional `:nip46` Gradle
 project selectable; a core-only build does not configure it. CI proves both

@@ -6,10 +6,11 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-# NIP-46 supplies the typed message/event helpers; the adapter still parses
-# the current URI/handshake additions itself because rust-nostr 0.44 models
-# the older connect shape.
-nostr = { workspace = true, features = ["nip46"] }
+# The provider implements its exact NIP-46 RPC/message shape in `nip46.rs`.
+# It uses rust-nostr only for ordinary events/keys and NIP-44 crypto; enabling
+# rust-nostr's `nip46` umbrella here would unify that optional feature into the
+# separately packaged core native artifact.
+nostr = { workspace = true, features = ["nip44"] }
 nmp-signer.workspace = true
 nmp-transport.workspace = true
 # #885: the bunker-relay pool dials under the shared destination policy.

@@ -75,6 +75,18 @@ EXTERNAL_SWIFT_MODULE=${NMP_SWIFT_EXTERNAL_MODULE:-}
 LIB_NAME="lib$LIB_STEM.a"
 XCFRAMEWORK_OUT="$SWIFT_PACKAGE_DIR/$XCFRAMEWORK_NAME"
 
+# A provider staticlib and the core staticlib must be produced by one Cargo
+# feature-resolution unit. Otherwise each archive can carry a differently
+# hashed copy of the external core UniFFI object, and linking both components
+# either duplicates every core C symbol or crosses incompatible Rust types.
+# Core-only callers keep the one-package default; provider wrappers opt into
+# the exact core + provider package set and refresh both artifacts.
+read -r -a CARGO_PACKAGE_NAMES <<< "${NMP_FFI_CARGO_PACKAGES:-$CRATE}"
+CARGO_PACKAGE_ARGS=()
+for package_name in "${CARGO_PACKAGE_NAMES[@]}"; do
+  CARGO_PACKAGE_ARGS+=(-p "$package_name")
+done
+
 DEVICE_TARGET=aarch64-apple-ios
 SIM_ARM_TARGET=aarch64-apple-ios-sim
 SIM_X86_TARGET=x86_64-apple-ios
@@ -101,17 +113,17 @@ fi
 echo "== 1. cargo build (release) =="
 if [[ "$MODE" != macos ]]; then
   env -u MACOSX_DEPLOYMENT_TARGET \
-    cargo build -p "$CRATE" --release --target "$SIM_ARM_TARGET"
+    cargo build "${CARGO_PACKAGE_ARGS[@]}" --release --target "$SIM_ARM_TARGET"
   env -u MACOSX_DEPLOYMENT_TARGET \
-    cargo build -p "$CRATE" --release --target "$SIM_X86_TARGET"
+    cargo build "${CARGO_PACKAGE_ARGS[@]}" --release --target "$SIM_X86_TARGET"
 fi
 MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET" \
   CFLAGS="$MACOS_CFLAGS" \
   CXXFLAGS="$MACOS_CXXFLAGS" \
-  cargo build -p "$CRATE" --release --target "$MACOS_TARGET"
+  cargo build "${CARGO_PACKAGE_ARGS[@]}" --release --target "$MACOS_TARGET"
 if [[ "$MODE" == all ]]; then
   env -u MACOSX_DEPLOYMENT_TARGET \
-    cargo build -p "$CRATE" --release --target "$DEVICE_TARGET"
+    cargo build "${CARGO_PACKAGE_ARGS[@]}" --release --target "$DEVICE_TARGET"
 fi
 
 SIM_ARM_LIB="$TARGET_DIR/$SIM_ARM_TARGET/release/$LIB_NAME"

@@ -62,7 +62,8 @@ Android artifact qualification; see [Controlled relay identity UI](36-relay-ui.m
 NIP-46 is another separate child component, `:nip46`; the root SDK neither
 names nor links it. The component consumes the core engine's opaque signer
 mailbox and contributes an ordinary signer. Build its generated bindings with
-`scripts/build-kotlin-nip46-jvm.sh`, then run `./gradlew :nip46:test`.
+`scripts/build-kotlin-nip46-jvm.sh`, which refreshes the matched core and
+provider native libraries together, then run `./gradlew :nip46:test`.
 
 The Android product must include a standard Keystore-backed provider and prove
 process-death receipt/signer reattachment, not merely JVM binding generation.
