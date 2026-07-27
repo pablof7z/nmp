@@ -703,7 +703,12 @@ fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
         .is_attached());
 }
 
-fn assert_persisted_routing_fails_closed_without_dropping(database_name: &str, routing: String) {
+fn assert_persisted_routing_fails_closed_without_dropping(
+    database_name: &str,
+    routing: String,
+    route_probe: RelayUrl,
+    inbox_recipient: Option<PublicKey>,
+) {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join(database_name);
     let keys = Keys::generate();
@@ -738,7 +743,11 @@ fn assert_persisted_routing_fails_closed_without_dropping(database_name: &str, r
     };
 
     let store = RedbStore::open(&path).unwrap();
-    let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+    let mut route_directory = directory(keys.public_key(), route_probe.clone());
+    if let Some(recipient) = inbox_recipient {
+        route_directory = route_directory.with_read(recipient.to_hex(), [route_probe.clone()]);
+    }
+    let mut core = EngineCore::new(store, Box::new(route_directory), 10);
     let effects = core.recover_on_boot();
     assert!(!effects
         .iter()
@@ -752,6 +761,22 @@ fn assert_persisted_routing_fails_closed_without_dropping(database_name: &str, r
         unreadable.0.lock().unwrap().is_empty(),
         "unreadable routing must replay no receipt prefix"
     );
+
+    // Keep the exact relay that every formerly valid route would select both
+    // connected and authenticated. Substituting `author-outbox`, restoring
+    // the legacy inbox decoder, or restoring the legacy pinned-host decoder
+    // therefore makes signer completion emit `PublishEvent` and fails the
+    // no-wire assertion below.
+    let route_session = signer_session(&route_probe, keys.public_key());
+    let route_handle = RelayHandle {
+        slot: 7,
+        generation: 1,
+    };
+    core.handle(EngineMsg::RelayConnected(
+        route_handle,
+        route_session.clone(),
+    ));
+    authenticate(&mut core, route_handle, &route_session, &keys);
 
     let sign_request = core.handle(EngineMsg::SignerAttached(keys.public_key()));
     let generation = sign_request
@@ -797,15 +822,20 @@ fn malformed_persisted_routing_fails_closed_without_dropping_the_obligation() {
     assert_persisted_routing_fails_closed_without_dropping(
         "malformed-route.redb",
         "future-routing-version-with-no-decoder".into(),
+        RelayUrl::parse("wss://malformed-route-probe.example").unwrap(),
+        None,
     );
 }
 
 #[test]
 fn removed_to_inboxes_snapshot_is_retained_unreadable_and_never_reinterpreted() {
-    let recipient = Keys::generate().public_key().to_hex();
+    let recipient = Keys::generate().public_key();
+    let route_probe = RelayUrl::parse("wss://removed-to-inboxes.example").unwrap();
     assert_persisted_routing_fails_closed_without_dropping(
         "removed-to-inboxes-route.redb",
-        format!("to-inboxes:{recipient}"),
+        format!("to-inboxes:{}", recipient.to_hex()),
+        route_probe,
+        Some(recipient),
     );
 }
 
@@ -816,6 +846,8 @@ fn removed_pinned_host_snapshot_is_retained_unreadable_and_never_reinterpreted()
     assert_persisted_routing_fails_closed_without_dropping(
         "removed-pinned-host-route.redb",
         format!("{legacy_route_prefix}:{}", hex::encode(host.to_string())),
+        host,
+        None,
     );
 }
 

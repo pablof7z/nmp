@@ -125,12 +125,13 @@ one generic `publish` → receipt lifecycle. A separate wrapper noun or
 protocol-specific publication overload would create a second owner of the
 same write.
 
-NIP-29's current `FfiComposedWriteIntent` / `GroupSendIntent` and
-`publishComposed` path violates that same rule. #838 supersedes #823 and owns
-the protocol-boundary correction and removal. Its
-pinned-host authority requirement is real, but it must become a
-non-forgeable, payload-bound part of the ordinary immutable `WriteIntent`, not
-a reason for a parallel noun or publication lifecycle.
+#838 removed NIP-29's former `FfiComposedWriteIntent` / `GroupSendIntent` and
+`publishComposed` path. `nmp-nip29` now returns the pure
+`GroupPublication` value described above, while the engine and native SDKs
+have no single-host publication route for it. Completing that composition
+remains #824 work: it must preserve the contextualized event and selected host
+without reintroducing a forgeable raw relay override, parallel write noun, or
+second publication lifecycle.
 
 ## 7. Falsification
 
