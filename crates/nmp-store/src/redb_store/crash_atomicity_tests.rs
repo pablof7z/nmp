@@ -145,7 +145,7 @@ fn assert_path_canonical_integrity(path: &Path) {
     );
 }
 
-fn crash_worker(path: &Path, point: &str, audit_v8: bool) {
+fn crash_worker(path: &Path, point: &str) {
     let stdout = tempfile::NamedTempFile::new().expect("worker stdout file");
     let stderr = tempfile::NamedTempFile::new().expect("worker stderr file");
     let mut child = Command::new(std::env::current_exe().expect("current test executable"))
@@ -176,48 +176,11 @@ fn crash_worker(path: &Path, point: &str, audit_v8: bool) {
         Some(libc::SIGABRT),
         "worker must abort at {point}; status={status:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    if audit_v8 {
-        assert_path_canonical_integrity(path);
-    }
+    assert_path_canonical_integrity(path);
 }
 
 fn crash(path: &Path, point: &str) {
-    crash_worker(path, point, true);
-}
-
-fn crash_before_v8(path: &Path, point: &str) {
-    crash_worker(path, point, false);
-}
-
-fn downgrade_to_v7_without_postings(path: &Path) {
-    let db = Database::create(path).expect("open database for v7 downgrade");
-    let write_txn = db.begin_write().expect("begin v7 downgrade");
-    write_txn
-        .delete_table(POSTINGS_SEGMENTS)
-        .expect("remove packed segments");
-    write_txn
-        .delete_table(POSTINGS_DICTIONARIES)
-        .expect("remove packed dictionaries");
-    write_txn
-        .delete_table(POSTINGS_RUN_META)
-        .expect("remove packed run metadata");
-    write_txn
-        .delete_table(POSTINGS_RUN_BY_MIN)
-        .expect("remove packed run ranges");
-    write_txn
-        .delete_table(POSTINGS_DEAD_KEYS)
-        .expect("remove packed death blocks");
-    write_txn
-        .delete_table(POSTINGS_META)
-        .expect("remove packed readiness");
-    let mut schema = write_txn
-        .open_table(SCHEMA_META)
-        .expect("open schema marker");
-    schema
-        .insert(SCHEMA_VERSION_KEY, PREVIOUS_SCHEMA_VERSION)
-        .expect("restore v7 schema marker");
-    drop(schema);
-    write_txn.commit().expect("commit v7 downgrade");
+    crash_worker(path, point);
 }
 
 #[test]
@@ -318,13 +281,6 @@ fn redb_crash_worker() {
                 packed_event(7),
                 RelayObserved::new(relay, Timestamp::from(3_007u64)),
             );
-        }
-        "postings-before-migration-ready"
-        | "postings-after-migration-ready"
-        | "postings-after-migration-commit"
-        | "coverage-repair-before-commit"
-        | "coverage-repair-after-commit" => {
-            let _ = RedbStore::open(path);
         }
         "route-revision-before-commit" => {
             let mut store =
@@ -568,91 +524,6 @@ fn packed_compaction_output_is_never_partially_published() {
 }
 
 #[test]
-fn packed_schema_migration_is_atomic_across_process_death() {
-    for point in [
-        "postings-before-migration-ready",
-        "postings-after-migration-ready",
-    ] {
-        let (_dir, path) = fixture();
-        let event = packed_event(0);
-        {
-            let mut store = RedbStore::open(&path).expect("initialize migration fixture");
-            store
-                .insert(
-                    event.clone(),
-                    RelayObserved::new(
-                        RelayUrl::parse(RELAY).expect("relay"),
-                        Timestamp::from(3_000u64),
-                    ),
-                )
-                .expect("seed migration event");
-        }
-        downgrade_to_v7_without_postings(&path);
-
-        crash_before_v8(&path, point);
-        let db = Database::open(&path).expect("open rolled-back v7 database");
-        let read_txn = db.begin_read().expect("read rolled-back v7 database");
-        let schema = read_txn
-            .open_table(SCHEMA_META)
-            .expect("read schema marker");
-        assert_eq!(
-            schema
-                .get(SCHEMA_VERSION_KEY)
-                .expect("read schema version")
-                .expect("schema version exists")
-                .value(),
-            PREVIOUS_SCHEMA_VERSION,
-            "migration marker must roll back at {point}"
-        );
-        drop(schema);
-        drop(read_txn);
-        drop(db);
-
-        let store = RedbStore::open(&path).expect("retry migration after process death");
-        assert_eq!(
-            store
-                .query(&Filter::new().id(event.id))
-                .expect("query migrated event")
-                .len(),
-            1
-        );
-        drop(store);
-        assert_path_canonical_integrity(&path);
-    }
-
-    let (_dir, path) = fixture();
-    let event = packed_event(0);
-    {
-        let mut store = RedbStore::open(&path).expect("initialize committed migration fixture");
-        store
-            .insert(
-                event.clone(),
-                RelayObserved::new(
-                    RelayUrl::parse(RELAY).expect("relay"),
-                    Timestamp::from(3_000u64),
-                ),
-            )
-            .expect("seed committed migration event");
-    }
-    downgrade_to_v7_without_postings(&path);
-    crash(&path, "postings-after-migration-commit");
-    let store = RedbStore::open(&path).expect("reopen committed migration");
-    assert_eq!(store.open_write_transactions(), 0);
-    assert_eq!(
-        store
-            .query(&Filter::new().id(event.id))
-            .expect("query after committed migration crash")
-            .len(),
-        1
-    );
-}
-
-/// #591: `OUTBOX_CORRELATIONS`' row is written in the SAME transaction as
-/// the receipt it names -- a real SIGABRT immediately before commit leaves
-/// NEITHER row behind (never an orphan correlation mapping pointing at a
-/// receipt that was never actually retained), and a subsequent successful
-/// accept commits BOTH atomically, resolvable via `lookup_correlation`.
-#[test]
 fn correlation_row_is_all_or_nothing_with_its_receipt() {
     let (_dir, path) = fixture();
     RedbStore::open(&path).expect("initialize store");
@@ -752,74 +623,6 @@ fn explicit_retention_eviction_and_coverage_lowering_are_atomic_across_process_d
             Timestamp::from(1_100u64),
         )),
         "successful explicit policy must lower evidence with row deletion"
-    );
-}
-
-fn prepare_pre_repair_max_coverage(path: &Path) {
-    let relay = RelayUrl::parse(RELAY).expect("relay");
-    {
-        let mut store = RedbStore::open(path).expect("initialize pre-repair fixture");
-        store
-            .record_coverage(
-                &retention_atom(),
-                &relay,
-                CoverageInterval::new(Timestamp::from(u64::MAX), Timestamp::from(u64::MAX)),
-            )
-            .expect("record old MAX-only coverage");
-    }
-    let db = Database::open(path).expect("open raw pre-repair fixture");
-    let write = db.begin_write().expect("begin marker removal");
-    {
-        let mut schema = write.open_table(SCHEMA_META).expect("open schema meta");
-        schema
-            .remove(COVERAGE_MAX_EVICTION_REPAIR_KEY)
-            .expect("remove repair marker")
-            .expect("fresh fixture carries repair marker");
-    }
-    write.commit().expect("commit marker removal");
-}
-
-fn coverage_repair_state(path: &Path) -> (Option<u64>, u64) {
-    let db = Database::open(path).expect("open raw repair state");
-    let read = db.begin_read().expect("begin repair state read");
-    let schema = read.open_table(SCHEMA_META).expect("open schema meta");
-    let marker = schema
-        .get(COVERAGE_MAX_EVICTION_REPAIR_KEY)
-        .expect("read repair marker")
-        .map(|guard| guard.value());
-    let coverage = read.open_table(COVERAGE).expect("open coverage");
-    let rows = coverage.len().expect("count coverage rows");
-    (marker, rows)
-}
-
-#[test]
-fn max_coverage_repair_retries_before_commit_and_survives_after_commit() {
-    let (_before_dir, before_path) = fixture();
-    prepare_pre_repair_max_coverage(&before_path);
-    crash_before_v8(&before_path, "coverage-repair-before-commit");
-    assert_eq!(
-        coverage_repair_state(&before_path),
-        (None, 1),
-        "a pre-commit death must leave the old marker so repair retries"
-    );
-    drop(RedbStore::open(&before_path).expect("retry repair after pre-commit death"));
-    assert_eq!(
-        coverage_repair_state(&before_path),
-        (Some(COVERAGE_MAX_EVICTION_REPAIR_VERSION), 0)
-    );
-
-    let (_after_dir, after_path) = fixture();
-    prepare_pre_repair_max_coverage(&after_path);
-    crash_before_v8(&after_path, "coverage-repair-after-commit");
-    assert_eq!(
-        coverage_repair_state(&after_path),
-        (Some(COVERAGE_MAX_EVICTION_REPAIR_VERSION), 0),
-        "a post-commit death must retain both invalidation and marker"
-    );
-    drop(RedbStore::open(&after_path).expect("reopen committed repair"));
-    assert_eq!(
-        coverage_repair_state(&after_path),
-        (Some(COVERAGE_MAX_EVICTION_REPAIR_VERSION), 0)
     );
 }
 

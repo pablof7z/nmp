@@ -195,7 +195,29 @@ pub enum RedbStoreOpenError {
     /// The caller path resolved to a different target while the operation was
     /// in flight. Nothing was exposed and the partial ownership was released.
     TargetChanged { expected: PathBuf, actual: PathBuf },
-    /// The database itself refused the open (schema epoch, corruption, I/O).
+    /// The target's durable bytes are not the exact current schema epoch
+    /// (#867). NMP carries no persistent-schema compatibility obligation in
+    /// this architecture cut: there is no pre-current decoder to fall back on,
+    /// so this is the ONE outcome for any nonempty non-current store, raised
+    /// before a `RedbStore` is exposed and before a single byte is mutated.
+    /// Nothing was migrated, adopted, aliased, or reset — the caller decides
+    /// whether to recreate the store.
+    ///
+    /// It is deliberately NOT a `Database` error: corruption of the CURRENT
+    /// epoch stays `Database(redb::Error::Corrupted(..))`, so an operator can
+    /// never read "unsupported schema" and conclude their current-epoch data
+    /// was merely old, nor read "corrupted" and conclude a recreate is enough.
+    ///
+    /// `found` is the marker actually present: `None` when the store predates
+    /// the schema marker entirely.
+    UnsupportedSchema {
+        path: PathBuf,
+        expected: u64,
+        found: Option<u64>,
+    },
+    /// The database itself refused the open (corruption, I/O, redb-level
+    /// misuse). Schema-epoch refusal is [`Self::UnsupportedSchema`], never
+    /// this.
     Database(redb::Error),
 }
 
@@ -285,6 +307,24 @@ impl std::fmt::Display for RedbStoreOpenError {
                 expected.display(),
                 actual.display()
             ),
+            Self::UnsupportedSchema {
+                path,
+                expected,
+                found,
+            } => match found {
+                Some(found) => write!(
+                    f,
+                    "persistent store {} is schema epoch {found}, not the one supported epoch {expected}; \
+                     it was not migrated, adopted, or reset",
+                    path.display()
+                ),
+                None => write!(
+                    f,
+                    "persistent store {} predates the schema marker and is not the one supported \
+                     epoch {expected}; it was not migrated, adopted, or reset",
+                    path.display()
+                ),
+            },
             Self::Database(error) => error.fmt(f),
         }
     }
@@ -297,7 +337,9 @@ impl std::error::Error for RedbStoreOpenError {
             | Self::LockFileOpenFailed { source, .. }
             | Self::LockFailed { source, .. } => Some(source),
             Self::Database(error) => Some(error),
-            Self::StoreAlreadyOpen { .. } | Self::TargetChanged { .. } => None,
+            Self::StoreAlreadyOpen { .. }
+            | Self::TargetChanged { .. }
+            | Self::UnsupportedSchema { .. } => None,
         }
     }
 }
@@ -644,9 +686,7 @@ mod tests {
 
         assert!(matches!(
             crate::RedbStore::open(&path),
-            Err(RedbStoreOpenError::Database(redb::Error::UpgradeRequired(
-                _
-            )))
+            Err(RedbStoreOpenError::UnsupportedSchema { .. })
         ));
         reset_store(&path).expect("schema refusal must release database then sidecar ownership");
         assert!(!path.exists());

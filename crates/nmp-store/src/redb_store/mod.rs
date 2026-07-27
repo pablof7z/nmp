@@ -111,8 +111,6 @@ mod store;
 use store::RedbCrashPoint;
 pub use store::RedbStore;
 mod event_ops;
-#[cfg(test)]
-use event_ops::CoverageRowRecord;
 mod ingest;
 mod outbox_ops;
 mod write_ops;

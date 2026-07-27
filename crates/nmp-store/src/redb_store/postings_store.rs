@@ -21,16 +21,16 @@ use super::postings::{
     RunEvent, RunMeta, SegmentView, MAX_DEATH_BLOCKS,
 };
 use super::query::tag_index_prefix;
+#[cfg(test)]
+use super::schema::POSTINGS_READY;
 use super::schema::{
-    persist_err, EventKey, EVENTS, POSTINGS_DEAD_KEYS, POSTINGS_DICTIONARIES, POSTINGS_META,
-    POSTINGS_NEXT_RUN_ID, POSTINGS_READY, POSTINGS_RUN_BY_MIN, POSTINGS_RUN_META,
-    POSTINGS_SEGMENTS,
+    persist_err, EventKey, POSTINGS_DEAD_KEYS, POSTINGS_DICTIONARIES, POSTINGS_META,
+    POSTINGS_NEXT_RUN_ID, POSTINGS_RUN_BY_MIN, POSTINGS_RUN_META, POSTINGS_SEGMENTS,
 };
-use super::{Event, EventCursor, EventId, PersistenceError, StoredEventView};
+use super::{Event, EventCursor, EventId, PersistenceError};
 
 const BASE_RUN_FAN_IN: usize = 8;
 const LARGE_RUN_FAN_IN: usize = 6;
-const MIGRATION_RUN_EVENTS: usize = 8_192;
 
 /// Process-death seams for the packed publication protocol. The environment
 /// variable is set only in the dedicated child-process crash harness, so
@@ -240,90 +240,6 @@ impl PostingsBatch {
     }
 }
 
-pub(super) fn rebuild_from_canonical(
-    write_txn: &redb::WriteTransaction,
-) -> Result<(), PersistenceError> {
-    write_txn
-        .delete_table(POSTINGS_SEGMENTS)
-        .map_err(persist_err)?;
-    write_txn
-        .delete_table(POSTINGS_DICTIONARIES)
-        .map_err(persist_err)?;
-    write_txn
-        .delete_table(POSTINGS_RUN_META)
-        .map_err(persist_err)?;
-    write_txn
-        .delete_table(POSTINGS_RUN_BY_MIN)
-        .map_err(persist_err)?;
-    write_txn
-        .delete_table(POSTINGS_DEAD_KEYS)
-        .map_err(persist_err)?;
-    write_txn.delete_table(POSTINGS_META).map_err(persist_err)?;
-
-    write_txn
-        .open_table(POSTINGS_SEGMENTS)
-        .map_err(persist_err)?;
-    write_txn
-        .open_table(POSTINGS_DICTIONARIES)
-        .map_err(persist_err)?;
-    write_txn
-        .open_table(POSTINGS_RUN_META)
-        .map_err(persist_err)?;
-    write_txn
-        .open_table(POSTINGS_RUN_BY_MIN)
-        .map_err(persist_err)?;
-    write_txn
-        .open_table(POSTINGS_DEAD_KEYS)
-        .map_err(persist_err)?;
-    write_txn.open_table(POSTINGS_META).map_err(persist_err)?;
-
-    let events = write_txn.open_table(EVENTS).map_err(persist_err)?;
-    let mut batch = BTreeMap::new();
-    for row in events.iter().map_err(persist_err)? {
-        let (event_key, value) = row.map_err(persist_err)?;
-        let event = StoredEventView::from_trusted(value.value())
-            .map_err(|error| packed_err(format!("decode migration event: {error:?}")))?
-            .materialize_event()
-            .map_err(|error| packed_err(format!("materialize migration event: {error:?}")))?;
-        batch.insert(event_key.value(), event);
-        if batch.len() == MIGRATION_RUN_EVENTS {
-            publish_events(write_txn, &batch)?;
-            batch.clear();
-        }
-    }
-    drop(events);
-    if !batch.is_empty() {
-        publish_events(write_txn, &batch)?;
-    }
-    #[cfg(test)]
-    crash_if_postings("postings-before-migration-ready");
-    let mut meta = write_txn.open_table(POSTINGS_META).map_err(persist_err)?;
-    meta.insert(POSTINGS_READY, 1).map_err(persist_err)?;
-    #[cfg(test)]
-    crash_if_postings("postings-after-migration-ready");
-    Ok(())
-}
-
-fn publish_events(
-    write_txn: &redb::WriteTransaction,
-    events: &BTreeMap<EventKey, Event>,
-) -> Result<(), PersistenceError> {
-    let run_id = allocate_run_id(write_txn)?;
-    let memberships = memberships_for_events(events);
-    let encoded = encode_run(memberships).map_err(packed_err)?;
-    let min_event_key = *events.first_key_value().expect("nonempty additions").0;
-    let max_event_key = *events.last_key_value().expect("nonempty additions").0;
-    let meta = RunMeta {
-        run_id,
-        level: 0,
-        min_event_key,
-        max_event_key,
-        live_events: encoded.dictionary_entries,
-    };
-    insert_run(write_txn, meta, encoded)?;
-    compact_overfull_levels(write_txn)
-}
-
 fn publish_pending(
     write_txn: &redb::WriteTransaction,
     events: &BTreeMap<EventKey, PendingEvent>,
@@ -523,6 +439,7 @@ fn allocate_run_id(write_txn: &redb::WriteTransaction) -> Result<u64, Persistenc
     Ok(run_id)
 }
 
+#[cfg(test)]
 fn memberships_for_events(events: &BTreeMap<EventKey, Event>) -> Vec<Membership> {
     let mut memberships = Vec::new();
     let global = Prefix::global();

@@ -502,8 +502,8 @@ fn bootstrap_cannot_hide_two_contradictory_live_ordinals() {
         let (intent, _, signed, _, _) = seed(&mut store, "existing-lane", 721, relay.clone());
         (intent, signed)
     };
-    insert_legacy_attempt(&path, intent, &relay, 1, &signed, AttemptOutcome::Started);
-    insert_legacy_attempt(&path, intent, &relay, 2, &signed, AttemptOutcome::Started);
+    insert_raw_attempt(&path, intent, &relay, 1, &signed, true);
+    insert_raw_attempt(&path, intent, &relay, 2, &signed, true);
     let mut store = reopen(&path);
     assert!(store
         .bootstrap_outbox_lanes(intent)
@@ -532,33 +532,58 @@ fn raw_lane_key(intent: IntentId, relay: &RelayUrl) -> String {
     format!("{:020}:{:020}:{canonical}", intent.0, canonical.len())
 }
 
-fn insert_legacy_attempt(
+/// Write one raw `(intent, relay, ordinal)` attempt row directly, bypassing
+/// the lane doors. `with_detail` chooses between the ONE current shape (base
+/// row plus its required detail row) and a detail-less base row, which the
+/// current schema can no longer produce (#867).
+fn insert_raw_attempt(
     path: &Path,
     intent: IntentId,
     relay: &RelayUrl,
     ordinal: u64,
     event: &Event,
-    outcome: AttemptOutcome,
+    with_detail: bool,
 ) {
     let db = Database::open(path).unwrap();
     let write = db.begin_write().unwrap();
+    let key = format!(
+        "{:020}:{:020}:{}:{:020}",
+        intent.0,
+        relay.as_str().len(),
+        relay.as_str(),
+        ordinal
+    );
     {
         let attempts: TableDefinition<&str, &str> = TableDefinition::new("outbox_attempts");
         let mut table = write.open_table(attempts).unwrap();
-        let key = format!(
-            "{:020}:{:020}:{}:{:020}",
-            intent.0,
-            relay.as_str().len(),
-            relay.as_str(),
-            ordinal
-        );
         let value = serde_json::json!({
             "version": 1,
             "intent_id": intent,
             "relay": relay,
             "ordinal": ordinal,
             "event_json": event.as_json(),
-            "outcome": outcome,
+            "outcome": AttemptOutcome::Started,
+        });
+        table
+            .insert(
+                key.as_str(),
+                serde_json::to_string(&value).unwrap().as_str(),
+            )
+            .unwrap();
+    }
+    if with_detail {
+        let details: TableDefinition<&str, &str> = TableDefinition::new("outbox_attempt_details");
+        let mut table = write.open_table(details).unwrap();
+        let value = serde_json::json!({
+            "version": 1,
+            "intent_id": intent,
+            "relay": relay,
+            "ordinal": ordinal,
+            "started_at": serde_json::Value::Null,
+            "handoff": serde_json::Value::Null,
+            "transient": serde_json::Value::Null,
+            "finished_at": serde_json::Value::Null,
+            "terminal": serde_json::Value::Null,
         });
         table
             .insert(
@@ -877,15 +902,19 @@ fn lane_detail_and_deadline_corruption_fail_closed() {
     }
 }
 
+/// #867: the store models ONE current attempt shape. A detail-less attempt
+/// row could only have been written by a pre-current writer, so bootstrap
+/// refuses it as corruption. There is no compatibility lane state left for it
+/// to be adopted into, and no shell detail row is written on its behalf.
 #[test]
-fn legacy_v1_bootstrap_is_deterministic_and_rejects_contradictory_live_history() {
+fn detail_less_attempt_row_is_refused_rather_than_adopted() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("legacy-bootstrap.redb");
-    let relay = RelayUrl::parse("wss://legacy-bootstrap.example").unwrap();
+    let path = dir.path().join("detail-less-attempt.redb");
+    let relay = RelayUrl::parse("wss://detail-less.example").unwrap();
     let (intent, signed) = {
         let mut store = reopen(&path);
         let keys = Keys::generate();
-        let (signed, frozen) = signed_and_frozen(&keys, "legacy", 250);
+        let (signed, frozen) = signed_and_frozen(&keys, "detail-less", 250);
         let intent = store
             .accept_write(accept(frozen, &keys, 250))
             .unwrap()
@@ -897,106 +926,28 @@ fn legacy_v1_bootstrap_is_deterministic_and_rejects_contradictory_live_history()
             .unwrap();
         (intent, signed)
     };
-    insert_legacy_attempt(&path, intent, &relay, 1, &signed, AttemptOutcome::Started);
-    let mut store = reopen(&path);
-    let lane = store.bootstrap_outbox_lanes(intent).unwrap().remove(0);
-    assert_eq!(lane.last_ordinal, 1);
-    assert_eq!(lane.state, LaneState::LegacyInFlight { ordinal: 1 });
-    assert_eq!(store.bootstrap_outbox_lanes(intent).unwrap(), vec![lane]);
+    insert_raw_attempt(&path, intent, &relay, 1, &signed, false);
 
-    let second_path = dir.path().join("contradictory-bootstrap.redb");
-    let (second_intent, second_signed) = {
-        let mut store = reopen(&second_path);
-        let keys = Keys::generate();
-        let (signed, frozen) = signed_and_frozen(&keys, "contradictory", 251);
-        let intent = store
-            .accept_write(accept(frozen, &keys, 251))
-            .unwrap()
-            .journaled_intent_id()
-            .unwrap();
-        store.promote_signed(intent, signed.sig).unwrap();
-        store
-            .record_route_revision(intent, BTreeSet::from([relay.clone()]))
-            .unwrap();
-        (intent, signed)
-    };
-    for ordinal in [1, 2] {
-        insert_legacy_attempt(
-            &second_path,
-            second_intent,
-            &relay,
-            ordinal,
-            &second_signed,
-            AttemptOutcome::Started,
-        );
-    }
-    let mut store = reopen(&second_path);
+    let mut store = reopen(&path);
     assert!(store
-        .bootstrap_outbox_lanes(second_intent)
+        .bootstrap_outbox_lanes(intent)
         .unwrap_err()
         .to_string()
-        .contains("live v1 Started"));
-    assert!(store
-        .recover_outbox_lanes(second_intent)
-        .unwrap()
-        .is_empty());
+        .contains("missing its detail row"));
+    assert!(store.recover_outbox_lanes(intent).unwrap().is_empty());
 }
 
+/// The mirror refusal: attempt history that exists without the lane row the
+/// current schema always commits first.
 #[test]
-fn genuine_detail_less_legacy_row_adopts_as_legacy_in_flight_for_bootstrap() {
-    let name = "durable-planned";
+fn attempt_history_without_its_lane_is_refused_rather_than_reconstructed() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(format!("{name}.redb"));
-    let relay = RelayUrl::parse(&format!("wss://{name}.legacy.example")).unwrap();
+    let path = dir.path().join("laneless-attempt.redb");
+    let relay = RelayUrl::parse("wss://laneless.example").unwrap();
     let (intent, signed) = {
         let mut store = reopen(&path);
         let keys = Keys::generate();
-        let (signed, frozen) = signed_and_frozen(&keys, name, 260);
-        let intent = store
-            .accept_write(accept(frozen, &keys, 260))
-            .unwrap()
-            .journaled_intent_id()
-            .unwrap();
-        store.promote_signed(intent, signed.sig).unwrap();
-        store
-            .record_route_revision(intent, BTreeSet::from([relay.clone()]))
-            .unwrap();
-        (intent, signed)
-    };
-    insert_legacy_attempt(&path, intent, &relay, 1, &signed, AttemptOutcome::Started);
-
-    let mut store = reopen(&path);
-    let lane = store.bootstrap_outbox_lanes(intent).unwrap().remove(0);
-    assert_eq!(lane.state, LaneState::LegacyInFlight { ordinal: 1 });
-    assert_eq!(store.recover_attempt_details(intent).unwrap().len(), 1);
-    store
-        .set_lane_transient(
-            &lane.key,
-            lane.revision,
-            1,
-            Timestamp::from(280),
-            TransientCause::Interrupted,
-            None,
-        )
-        .unwrap();
-}
-
-/// A legacy v1 attempt row whose OWN outcome is already terminal (written
-/// before the additive detail table existed, so no DETAILS row overlays it)
-/// must bootstrap straight to `LaneState::Terminal`. This is the live
-/// upgrade-read branch (`redb_store.rs` / `memory_store.rs` bootstrap
-/// `Some(attempt) => LaneState::Terminal`) that the lane doors never produce
-/// themselves: they keep the attempt row's outcome `Started` and record the
-/// terminal outcome in DETAILS instead.
-#[test]
-fn genuine_terminal_legacy_row_adopts_as_terminal_lane_for_bootstrap() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("legacy-terminal.redb");
-    let relay = RelayUrl::parse("wss://legacy-terminal.example").unwrap();
-    let (intent, signed) = {
-        let mut store = reopen(&path);
-        let keys = Keys::generate();
-        let (signed, frozen) = signed_and_frozen(&keys, "legacy-terminal", 262);
+        let (signed, frozen) = signed_and_frozen(&keys, "laneless", 262);
         let intent = store
             .accept_write(accept(frozen, &keys, 262))
             .unwrap()
@@ -1008,17 +959,15 @@ fn genuine_terminal_legacy_row_adopts_as_terminal_lane_for_bootstrap() {
             .unwrap();
         (intent, signed)
     };
-    insert_legacy_attempt(&path, intent, &relay, 1, &signed, AttemptOutcome::Acked);
+    insert_raw_attempt(&path, intent, &relay, 1, &signed, true);
 
     let mut store = reopen(&path);
-    let lane = store.bootstrap_outbox_lanes(intent).unwrap().remove(0);
-    assert_eq!(
-        lane.state,
-        LaneState::Terminal {
-            ordinal: 1,
-            outcome: AttemptOutcome::Acked,
-        }
-    );
+    assert!(store
+        .bootstrap_outbox_lanes(intent)
+        .unwrap_err()
+        .to_string()
+        .contains("without its lane row"));
+    assert!(store.recover_outbox_lanes(intent).unwrap().is_empty());
 }
 
 #[test]
@@ -1147,8 +1096,8 @@ fn redb_lane_attempt_detail_deadline_and_close_survive_real_reopens() {
         assert!(store.reattach_receipt(receipt).unwrap().is_some());
         assert_eq!(store.next_outbox_deadline().unwrap(), None);
     }
-    // New attempts remain immutable Started facts; terminal state overlays
-    // from additive details while legacy terminal v1 rows remain readable.
+    // Attempt base rows remain immutable Started facts; terminal state
+    // overlays from the required detail row.
     let db = Database::open(&path).unwrap();
     let read = db.begin_read().unwrap();
     let attempts: TableDefinition<&str, &str> = TableDefinition::new("outbox_attempts");

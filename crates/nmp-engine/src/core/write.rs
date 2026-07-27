@@ -357,7 +357,7 @@ impl<S: EventStore> EngineCore<S> {
         let mut eligible = Vec::new();
         for (id, lane) in lanes {
             match lane.state {
-                LaneState::InFlight { .. } | LaneState::LegacyInFlight { .. } => {
+                LaneState::InFlight { .. } => {
                     in_flight = in_flight.saturating_add(1);
                     in_flight_relays.insert(lane.key.relay.clone());
                 }
@@ -913,8 +913,7 @@ impl<S: EventStore> EngineCore<S> {
                     }
                 }
                 match lane.state {
-                    LaneState::LegacyInFlight { ordinal }
-                    | LaneState::InFlight {
+                    LaneState::InFlight {
                         ordinal,
                         phase: InFlightPhase::AwaitingHandoff,
                     } => match durability {
@@ -2973,7 +2972,6 @@ impl<S: EventStore> EngineCore<S> {
                     phase: InFlightPhase::AwaitingHandoff,
                     ..
                 }
-                | LaneState::LegacyInFlight { .. }
                 | LaneState::Terminal { .. } => {}
             }
         }
