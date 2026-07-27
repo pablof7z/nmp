@@ -780,17 +780,36 @@ fn set_next_run_id(fixture: &Fixture, value: Option<u64>) {
     write_txn.commit().expect("raw commit");
 }
 
+/// How the packed run allocator can lie without any byte being malformed.
+enum Rewind {
+    /// The row is gone while a run is still live. Legal only against an
+    /// empty catalog, where the canonical initial next id is `1`.
+    Missing,
+    /// Zero is never a valid run id.
+    Zero,
+    /// Exactly the id a live run already owns: the next publication would
+    /// overwrite that run's dictionary, segments, and catalog row.
+    OntoLiveRun,
+}
+
 /// Every byte of the allocator is a well-typed `u64`, so no decoder can see
 /// this class. A rewound allocator hands back an id a live run already owns
 /// and the publication that follows overwrites it inside an otherwise valid
-/// transaction. Proven for the three ways the allocator can lie.
+/// transaction. Proven for each way the allocator can lie.
 #[test]
 fn packed_publication_rejects_an_allocator_that_would_reuse_a_live_run() {
-    for rewind in [None, Some(0)] {
+    for rewind in [Rewind::Missing, Rewind::Zero, Rewind::OntoLiveRun] {
         let fixture = Fixture::new();
         let seeded = seeded_packed_store(&fixture);
         let live = *packed_run_ids(&fixture).first().expect("one packed run");
-        set_next_run_id(&fixture, rewind.or(Some(live)));
+        set_next_run_id(
+            &fixture,
+            match rewind {
+                Rewind::Missing => None,
+                Rewind::Zero => Some(0),
+                Rewind::OntoLiveRun => Some(live),
+            },
+        );
 
         let healthy_before = {
             let store = fixture.open();
