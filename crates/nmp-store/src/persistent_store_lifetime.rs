@@ -684,6 +684,9 @@ mod tests {
         write.commit().unwrap();
         drop(db);
 
+        // The exact current epoch is pinned by `redb_store::tests`; this test
+        // owns only the lifetime consequence of the unsupported-schema
+        // refusal, so it deliberately does not restate the version number.
         assert!(matches!(
             crate::RedbStore::open(&path),
             Err(RedbStoreOpenError::UnsupportedSchema { .. })

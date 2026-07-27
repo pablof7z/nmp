@@ -50,6 +50,38 @@ fn assert_refuses_without_mutation(path: &std::path::Path, what: &str) {
     );
 }
 
+/// #867 x #489: ownership is acquired BEFORE the epoch is inspected, so a
+/// store that would be refused for its schema is never read by a process that
+/// does not own it. If the order were reversed, this would surface the schema
+/// verdict instead of the ownership one — leaking one process's durable state
+/// to a non-owner.
+#[test]
+fn a_non_owner_is_refused_for_ownership_before_the_schema_epoch_is_inspected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owned-unsupported-epoch.redb");
+    let db = Database::create(&path).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    write_txn
+        .open_table(TableDefinition::<u64, &[u8]>::new("events_v5"))
+        .unwrap();
+    write_txn.commit().unwrap();
+    drop(db);
+
+    let owner = crate::persistent_store_lifetime::acquire_for_open(&path).unwrap();
+    assert!(
+        matches!(
+            RedbStore::open(&path),
+            Err(RedbStoreOpenError::StoreAlreadyOpen { .. })
+        ),
+        "a non-owner must be refused for ownership, never told about the schema"
+    );
+    drop(owner);
+
+    // Once unowned, the same target reaches the epoch check and produces the
+    // one schema refusal.
+    assert_refuses_without_mutation(&path, "owned then released v5 epoch");
+}
+
 #[test]
 fn pre_marker_table_epochs_refuse_at_open_without_mutating_durable_facts() {
     for legacy in [
