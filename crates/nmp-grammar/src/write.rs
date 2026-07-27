@@ -209,8 +209,6 @@ pub struct WriteIntent {
 pub enum WriteRouting {
     /// The author's write relays (reuses the M2 router's lanes).
     AuthorOutbox,
-    /// Recipients' inboxes (kind:10050 / NIP-65 read).
-    ToInboxes(Vec<PublicKey>),
     /// Ledger #6: narrow-only, fail-closed.
     PrivateNarrow(PrivateRoute),
     /// #115: an explicit, single pinned host authority -- the write-side

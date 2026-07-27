@@ -545,8 +545,8 @@ pub enum FfiDurability {
 /// `nmp` facade itself withholds re-exporting `NarrowOnly`/`PrivateRoute`
 /// for the identical reason (see `crates/nmp/src/lib.rs`'s doc). A
 /// validated, opaque private-route mint belongs in a protocol module built
-/// on direct Rust, not this FFI surface -- `AuthorOutbox`/`ToInboxes`
-/// remain the only FFI-constructible routing choices for now.
+/// on direct Rust, not this FFI surface. `AuthorOutbox` is the only
+/// FFI-constructible routing choice.
 ///
 /// #115: `PinnedHost(HostAuthority)` gets the IDENTICAL treatment, for the
 /// IDENTICAL reason -- this enum deliberately gains NO variant for it, and
@@ -554,13 +554,15 @@ pub enum FfiDurability {
 /// app can only ever obtain a pinned-host write transitively, through a
 /// protocol module's already-composed intent (`NmpEngine::group_message_intent`
 /// -> the opaque `FfiComposedWriteIntent`) -- never by naming a host
-/// itself. This exhaustive two-variant match IS the enforcement: a new
-/// `WriteRouting` variant landing in `nmp-grammar` without a corresponding
-/// FfiWriteRouting decision is a compile error here, not a silent gap.
+/// itself. #839 removes raw recipient routing for the same reason: a
+/// generic recipient array cannot prove that the event schema owns those
+/// recipients or that its body agrees with them. This exhaustive
+/// single-variant match IS the enforcement: a new `WriteRouting` variant
+/// landing in `nmp-grammar` without a corresponding `FfiWriteRouting`
+/// decision is a compile error here, not a silent gap.
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiWriteRouting {
     AuthorOutbox,
-    ToInboxes { recipients: Vec<String> },
 }
 
 /// The event payload of a write intent (`nmp::WritePayload` mirror). VISION

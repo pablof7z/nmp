@@ -36,17 +36,16 @@ enum class Durability {
  * (#22/#52): a private/narrow route must come from a trusted protocol
  * module's own resolved logic, never a raw relay-URL string an app hands
  * across this boundary with no way to prove it is actually private --
- * exactly the "route escape hatch" #22's canonical design rules out. See
- * `FfiWriteRouting`'s doc. */
+ * exactly the "route escape hatch" #22's canonical design rules out. There
+ * is also deliberately no raw-recipient route (#839): recipient meaning
+ * must be fixed by the protocol operation that owns the complete event
+ * body. See `FfiWriteRouting`'s doc. */
 sealed class WriteRouting {
     object AuthorOutbox : WriteRouting()
-
-    data class ToInboxes(val recipients: List<String>) : WriteRouting()
 
     fun toFfi(): FfiWriteRouting =
         when (this) {
             is AuthorOutbox -> FfiWriteRouting.AuthorOutbox
-            is ToInboxes -> FfiWriteRouting.ToInboxes(recipients)
         }
 
     companion object {
