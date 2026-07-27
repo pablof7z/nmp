@@ -67,7 +67,7 @@ class WriteIntentTest {
                             content = "unsigned",
                         ),
                     durability = FfiDurability.AT_MOST_ONCE,
-                    routing = FfiWriteRouting.AuthorOutbox,
+                    routing = FfiWriteRouting.AUTHOR_OUTBOX,
                     identityOverride = "a".repeat(64),
                     correlation = "correlation-42",
                 ),
@@ -101,7 +101,7 @@ class WriteIntentTest {
                             sig = "e".repeat(128),
                         ),
                     durability = FfiDurability.EPHEMERAL,
-                    routing = FfiWriteRouting.ToInboxes(listOf("f".repeat(64))),
+                    routing = FfiWriteRouting.AUTHOR_OUTBOX,
                     identityOverride = null,
                     correlation = null,
                 ),
@@ -119,7 +119,7 @@ class WriteIntentTest {
             signed.payload,
         )
         assertEquals(Durability.Ephemeral, signed.durability)
-        assertEquals(WriteRouting.ToInboxes(listOf("f".repeat(64))), signed.routing)
+        assertEquals(WriteRouting.AuthorOutbox, signed.routing)
         assertNull(signed.identityOverride)
         assertNull(signed.correlation)
 

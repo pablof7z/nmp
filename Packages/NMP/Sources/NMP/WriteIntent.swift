@@ -30,22 +30,21 @@ public enum Durability: Sendable, Hashable {
 /// module's own resolved logic, never a raw relay-URL string an app hands
 /// across this boundary with no way to prove it is actually private --
 /// exactly the "route escape hatch" #22's canonical design rules out. See
-/// `FfiWriteRouting`'s doc.
+/// `FfiWriteRouting`'s doc. There is also deliberately no raw-recipient
+/// route (#839): recipient meaning must be fixed by the protocol operation
+/// that owns the complete event body.
 public enum WriteRouting: Sendable, Hashable {
     case authorOutbox
-    case toInboxes([String])
 
     func toFfi() -> FfiWriteRouting {
         switch self {
         case .authorOutbox: return .authorOutbox
-        case .toInboxes(let recipients): return .toInboxes(recipients: recipients)
         }
     }
 
     init(_ ffi: FfiWriteRouting) {
         switch ffi {
         case .authorOutbox: self = .authorOutbox
-        case .toInboxes(let recipients): self = .toInboxes(recipients)
         }
     }
 }

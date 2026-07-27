@@ -703,12 +703,11 @@ fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
         .is_attached());
 }
 
-#[test]
-fn malformed_persisted_routing_fails_closed_without_dropping_the_obligation() {
+fn assert_persisted_routing_fails_closed_without_dropping(database_name: &str, routing: String) {
     let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("malformed-route.redb");
+    let path = tmp.path().join(database_name);
     let keys = Keys::generate();
-    let event = signed(&keys, "malformed", 104);
+    let event = signed(&keys, "unreadable routing", 104);
     let frozen = nostr::Event::new(
         event.id,
         event.pubkey,
@@ -727,7 +726,7 @@ fn malformed_persisted_routing_fails_closed_without_dropping_the_obligation() {
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: keys.public_key().to_hex(),
                 durability: WriteDurability::Durable,
-                routing: "future-routing-version-with-no-decoder".into(),
+                routing,
                 sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(104u64),
                 correlation: None,
@@ -791,6 +790,23 @@ fn malformed_persisted_routing_fails_closed_without_dropping_the_obligation() {
         .iter()
         .any(|intent| intent.intent_id == intent_id));
     assert!(store.recover_attempts(intent_id).unwrap().is_empty());
+}
+
+#[test]
+fn malformed_persisted_routing_fails_closed_without_dropping_the_obligation() {
+    assert_persisted_routing_fails_closed_without_dropping(
+        "malformed-route.redb",
+        "future-routing-version-with-no-decoder".into(),
+    );
+}
+
+#[test]
+fn removed_to_inboxes_snapshot_is_retained_unreadable_and_never_reinterpreted() {
+    let recipient = Keys::generate().public_key().to_hex();
+    assert_persisted_routing_fails_closed_without_dropping(
+        "removed-to-inboxes-route.redb",
+        format!("to-inboxes:{recipient}"),
+    );
 }
 
 #[test]
