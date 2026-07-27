@@ -367,11 +367,13 @@ The codebase already knows this and stopped enforcing it:
 
 `diag.rs` reports `wire_sub_count` per session and nothing consumes it.
 
-**OPEN:** whether a per-relay subscription budget should become an enforced
-planning input, using the existing `limited` / `refused_sessions` reporting seam
-rather than reviving `RelayLimits`. Sequencing matters: pre-collapse, a budget
-over 300-vs-20 only forces triage that drops 280 atoms' coverage — fail-closed
-but useless. Land the collapse first, then the budget is a guard rail.
+**DECIDED (owner, 2026-07-27): enforced, not advisory.** A per-relay
+subscription budget becomes a real planning input, using the existing `limited` /
+`refused_sessions` reporting seam rather than reviving `RelayLimits`.
+
+Sequencing is load-bearing: pre-collapse, a budget over 300-vs-20 only forces
+triage that drops 280 atoms' coverage — fail-closed but useless. **Land the
+collapse first**, then the budget is a guard rail rather than a guillotine.
 
 Note also `max_subid_length`: parsed, unread. A relay advertising `< 64` would
 reject our fixed-length ids and nothing would notice. Worth a diagnostic. It must
@@ -500,16 +502,34 @@ subscriptions whatever their ids; without identity, growth churns.
 
 - **Compound churn.** Two components moving in one recompile — an author
   resolves *and* the window advances — is a 2-diff, so it closes and reopens.
-  Recompiles batch every change since the last one, so this is realistic. It is
-  an efficiency cost, never correctness. **Do not relax to "≤2 components with
-  overlap evidence"** — every relaxation re-imports lineage matching's ambiguity.
-  If measurement shows it common on real traces, that is the one finding that
-  would reopen the choice between signature and lineage matching.
+  Reviewed and **dismissed by the owner as not a real workload** (2026-07-27);
+  not to be measured or designed around. **Do not relax to "≤2 components with
+  overlap evidence"** regardless — every relaxation re-imports lineage matching's
+  ambiguity for no gain.
 - **Window siblings.** Two filters identical except `until`, both moving in one
   compile, are each one-diff from each prior, and a scalar has no overlap metric.
   Needs an arbitrary-but-deterministic tiebreak; the residual swap is accepted.
   Heavy multi-window pagination is the single workload that would argue for the
   collision-check design instead.
+
+### 8.1b Retraction — DECIDED (owner, 2026-07-27)
+
+When a newer answer invalidates what we previously held, **close whatever is now
+known to be incorrect and open it again with the right values.** Correctness
+first; do not try to preserve a subscription whose demand has been contradicted.
+
+Stated preference on *how*: this should be expressed **declaratively or via
+signals**, not as imperative teardown bookkeeping scattered through the
+recompile path. The recompile is already a full recomputation from demand
+(§1), so the natural shape is that retraction falls out of the recomputed
+demand rather than being a separate imperative step.
+
+Note the interaction with §7.2: under signature matching, a filter whose values
+shrink is still a one-component difference, so the common case is an in-place
+overwrite carrying the survivor set — the same wire behaviour the author axis
+already exhibits (an 8-author filter shrinking one value at a time, never a
+CLOSE). Explicit closure is needed only where the demand is genuinely gone, not
+merely narrower.
 
 ### 8.2 OPEN — the Close/reopen straggler race
 

@@ -11,9 +11,9 @@ use cucumber::then;
 
 use nmp_engine::outbox::WriteStatus;
 
-use crate::relays::{WireRecord, WireReq};
 use crate::steps::{parse_people, parse_tag};
 use crate::world::NmpWorld;
+use nmp_test_support::relays::{WireRecord, WireReq};
 
 /// Parse the kind numbers a diagnostics filter's exact wire JSON asks for
 /// (`RelayDiagnosticsSnapshot::filters`/`FilterCoverageEntry::filter` are
