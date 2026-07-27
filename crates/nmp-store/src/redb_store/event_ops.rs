@@ -585,27 +585,8 @@ pub(super) fn gc(store: &mut RedbStore, claims: &ClaimSet) -> Result<GcReport, P
         // unifying).
         let victim_index = GcVictimIndex::new(&victims);
         let mut row_updates: Vec<(String, Option<CoverageRowRecord>)> = Vec::new();
-        let mut legacy_row_keys: Vec<String> = Vec::new();
         for entry in coverage.iter().map_err(persist_err)? {
             let (row_key, value) = entry.map_err(persist_err)?;
-
-            // Legacy-row purge (#106, Fable's C refinement): a row
-            // whose key predates the current schema version (no
-            // `COVERAGE_ROW_KEY_PREFIX`) is permanently orphaned --
-            // nothing will ever compute a matching key for it again
-            // (v2 keys fold context + a version tag into the hash
-            // itself, so no v1 key can ever collide forward into v2).
-            // Delete it outright rather than let it linger forever,
-            // tracked separately from `report.coverage_rows_deleted`
-            // (which is specifically shrink-emptied current-schema
-            // rows).
-            if !row_key
-                .value()
-                .starts_with(RedbStore::COVERAGE_ROW_KEY_PREFIX)
-            {
-                legacy_row_keys.push(row_key.value().to_string());
-                continue;
-            }
 
             let mut record: CoverageRowRecord =
                 serde_json::from_str(value.value()).expect("redb: decode coverage row");
@@ -646,10 +627,6 @@ pub(super) fn gc(store: &mut RedbStore, claims: &ClaimSet) -> Result<GcReport, P
             }
         }
 
-        for row_key in legacy_row_keys {
-            coverage.remove(row_key.as_str()).map_err(persist_err)?;
-            report.legacy_coverage_rows_purged += 1;
-        }
         Ok(())
     })?;
     #[cfg(test)]

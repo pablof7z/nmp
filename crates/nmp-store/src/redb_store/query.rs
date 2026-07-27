@@ -1,7 +1,9 @@
 use super::canonical::CanonicalWriteTables;
 #[cfg(test)]
 use super::canonical::{observation_event_key, observation_relay_key};
-use super::schema::{persist_err, EventKey, INDEX_CARDINALITY};
+#[cfg(feature = "bench-instrumentation")]
+use super::schema::EventKey;
+use super::schema::{persist_err, INDEX_CARDINALITY};
 #[cfg(test)]
 use super::schema::{
     RelayKey, ADDR_INDEX, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS, EVENT_STORE_META,
@@ -12,12 +14,13 @@ use super::schema::{
 #[cfg(test)]
 use super::{address_key_for, binary_event, Database, RelayUrl};
 use super::{
-    decode_hex_32, BTreeMap, BTreeSet, Deserialize, Event, EventId, Filter, IndexedMatch, Kind,
-    PersistenceError, PublicKey, Serialize, SingleLetterTag, StoredEventView, Timestamp,
+    decode_hex_32, BTreeSet, Deserialize, Event, EventId, Filter, IndexedMatch, Kind,
+    PersistenceError, PublicKey, Serialize, SingleLetterTag, Timestamp,
 };
-use redb::ReadableTable;
 #[cfg(test)]
-use redb::{ReadableDatabase, ReadableTableMetadata};
+use super::{BTreeMap, StoredEventView};
+#[cfg(test)]
+use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
 
 /// The `addr_tombstones` table's JSON value.
 #[derive(Debug, Serialize, Deserialize)]
@@ -178,6 +181,7 @@ pub(super) fn tag_index_key(
     ordered_vec_key(&tag_index_prefix(tag, value), created_at, id)
 }
 
+#[cfg(test)]
 pub(super) fn add_event_cardinalities(
     counts: &mut BTreeMap<Vec<u8>, u64>,
     sample_key: &[u8; 32],
@@ -203,33 +207,6 @@ pub(super) fn add_event_cardinalities(
     for key in tags {
         increment(key);
     }
-}
-
-pub(super) fn rebuild_index_cardinality_from_events(
-    events: &redb::Table<'_, EventKey, &[u8]>,
-    cardinality: &mut redb::Table<'_, &[u8], u64>,
-    sample_key: &[u8; 32],
-) -> Result<(), redb::StorageError> {
-    let mut counts = BTreeMap::new();
-    for row in events.iter()? {
-        let (_event_key, value) = row?;
-        let event = StoredEventView::from_trusted(value.value())
-            .expect("redb: canonical event remains valid")
-            .materialize_event()
-            .expect("redb: canonical event materializes");
-        add_event_cardinalities(&mut counts, sample_key, &event);
-    }
-    let existing: Vec<Vec<u8>> = cardinality
-        .iter()?
-        .map(|entry| entry.map(|(key, _)| key.value().to_vec()))
-        .collect::<Result<_, _>>()?;
-    for key in existing {
-        cardinality.remove(key.as_slice())?;
-    }
-    for (key, count) in counts {
-        cardinality.insert(key.as_slice(), count)?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

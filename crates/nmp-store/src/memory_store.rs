@@ -2454,10 +2454,39 @@ impl EventStore for MemoryStore {
                 relays.extend(revision.relays.iter().cloned());
             }
         }
-        for (candidate, relay, _) in self.outbox_attempts.keys() {
-            if *candidate == intent_id {
-                relays.insert(relay.clone());
+        // #867: mirror `RedbStore`'s bootstrap exactly — verify the one
+        // current shape (base row + detail row + covering route revision)
+        // rather than adopting a pre-detail attempt layout.
+        let attempt_keys: BTreeSet<_> = self
+            .outbox_attempts
+            .keys()
+            .filter(|(candidate, _, _)| *candidate == intent_id)
+            .map(|(_, relay, ordinal)| (relay.clone(), *ordinal))
+            .collect();
+        for (relay, ordinal) in &attempt_keys {
+            if !self
+                .outbox_attempt_details
+                .contains_key(&(intent_id, relay.clone(), *ordinal))
+            {
+                return Err(PersistenceError::invariant(
+                    "attempt row is missing its detail row",
+                ));
             }
+            if !relays.contains(relay) {
+                return Err(PersistenceError::invariant(
+                    "attempt relay is absent from every route revision",
+                ));
+            }
+        }
+        if self
+            .outbox_attempt_details
+            .keys()
+            .filter(|(candidate, _, _)| *candidate == intent_id)
+            .any(|(_, relay, ordinal)| !attempt_keys.contains(&(relay.clone(), *ordinal)))
+        {
+            return Err(PersistenceError::invariant(
+                "attempt detail row has no base attempt row",
+            ));
         }
         let all_attempts = self.recover_attempts(intent_id)?;
         for relay in relays {
@@ -2494,7 +2523,7 @@ impl EventStore for MemoryStore {
                     }))
             {
                 return Err(PersistenceError::invariant(
-                    "contradictory live v1 Started attempt history",
+                    "contradictory live attempt history",
                 ));
             }
             if let Some(existing) = self.get_lane(&key) {
@@ -2526,25 +2555,17 @@ impl EventStore for MemoryStore {
                 }
                 continue;
             }
-            let last_ordinal = attempts.last().map_or(0, |attempt| attempt.ordinal);
-            let state = match attempts.last() {
-                None => LaneState::WaitingConnection,
-                Some(attempt) if attempt.outcome == AttemptOutcome::Started => {
-                    LaneState::LegacyInFlight {
-                        ordinal: attempt.ordinal,
-                    }
-                }
-                Some(attempt) => LaneState::Terminal {
-                    ordinal: attempt.ordinal,
-                    outcome: attempt.outcome.clone(),
-                },
-            };
+            if !attempts.is_empty() {
+                return Err(PersistenceError::invariant(
+                    "attempt history exists without its lane row",
+                ));
+            }
             self.insert_lane(RecoveredLane {
                 version: 1,
                 key,
                 revision: 1,
-                last_ordinal,
-                state,
+                last_ordinal: 0,
+                state: LaneState::WaitingConnection,
             });
         }
         self.recover_outbox_lanes(intent_id)
@@ -3165,20 +3186,13 @@ mod lane_atomicity_tests {
             .contains("terminal lane lacks"));
     }
 
-    /// A legacy v1 attempt row whose OWN outcome is already terminal (no
-    /// overlaid DETAILS row) must bootstrap straight to `LaneState::Terminal`
-    /// — the live upgrade-read branch that the lane doors never produce
-    /// themselves (they keep the attempt row `Started` and record the
-    /// terminal outcome in DETAILS). Mirrors the `RedbStore` case in
-    /// `lane_contract.rs`; seeded directly because `MemoryStore`'s maps are
-    /// private and it has no durable file to raw-insert into.
+    /// #867: `MemoryStore` models only current states, so it must refuse the
+    /// same pre-current attempt shapes `RedbStore` refuses (the mirror of
+    /// `lane_contract.rs`'s fixtures; seeded directly because `MemoryStore`'s
+    /// maps are private and it has no durable file to raw-insert into).
     #[test]
-    fn genuine_terminal_legacy_row_adopts_as_terminal_lane_for_bootstrap_in_memory() {
-        let (mut store, intent, relay, signed, _) = setup("legacy-terminal");
-        // Drop the empty lane `setup` bootstrapped so this intent presents as
-        // a pre-lane upgrade: a bare terminal attempt row with no lane and no
-        // additive detail row.
-        store.outbox_lanes.remove(&intent);
+    fn pre_current_attempt_shapes_are_refused_rather_than_adopted_in_memory() {
+        let (mut store, intent, relay, signed, _) = setup("detail-less");
         store.outbox_attempts.insert(
             (intent, relay.clone(), 1),
             RecoveredAttempt {
@@ -3186,19 +3200,32 @@ mod lane_atomicity_tests {
                 intent_id: intent,
                 relay: relay.clone(),
                 ordinal: 1,
-                event: signed,
-                outcome: AttemptOutcome::Acked,
+                event: signed.clone(),
+                outcome: AttemptOutcome::Started,
             },
         );
+        assert!(store
+            .bootstrap_outbox_lanes(intent)
+            .unwrap_err()
+            .to_string()
+            .contains("missing its detail row"));
 
-        let lane = store.bootstrap_outbox_lanes(intent).unwrap().remove(0);
-        assert_eq!(
-            lane.state,
-            LaneState::Terminal {
-                ordinal: 1,
-                outcome: AttemptOutcome::Acked,
-            }
-        );
+        let (mut store, intent, relay, signed, lane) = setup("laneless");
+        let lane = store
+            .set_lane_eligible(&lane.key, lane.revision, Timestamp::from(950u64))
+            .unwrap();
+        store
+            .start_lane_attempt(&lane.key, lane.revision, signed, Timestamp::from(951u64))
+            .unwrap();
+        // Drop the lane the current schema always commits first, leaving the
+        // attempt history a pre-lane layout would have left behind.
+        store.outbox_lanes.remove(&intent);
+        let _ = relay;
+        assert!(store
+            .bootstrap_outbox_lanes(intent)
+            .unwrap_err()
+            .to_string()
+            .contains("without its lane row"));
     }
 }
 

@@ -108,7 +108,6 @@ pub(super) fn decode_lane(key: &str, json: &str) -> Result<RecoveredLane, Persis
     let state_ordinal = match &lane.state {
         LaneState::InFlight { ordinal, .. }
         | LaneState::Transient { ordinal, .. }
-        | LaneState::LegacyInFlight { ordinal }
         | LaneState::Terminal { ordinal, .. } => Some(*ordinal),
         _ => None,
     };

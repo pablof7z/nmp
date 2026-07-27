@@ -1,77 +1,189 @@
 use super::*;
 
-#[test]
-fn v5_event_epoch_is_rejected_before_any_v6_table_is_created() {
-    const LEGACY_EVENTS_V5: TableDefinition<u64, &[u8]> = TableDefinition::new("events_v5");
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("legacy-epoch.redb");
-    let db = Database::create(&path).unwrap();
-    let write_txn = db.begin_write().unwrap();
-    write_txn.open_table(LEGACY_EVENTS_V5).unwrap();
-    write_txn.commit().unwrap();
-    drop(db);
-
-    let error = match RedbStore::open(&path) {
-        Ok(_) => panic!("v5 event epoch must not open as an empty v6 store"),
-        Err(error) => error,
-    };
-    assert!(matches!(
-        error,
-        RedbStoreOpenError::Database(redb::Error::UpgradeRequired(version))
-            if version == SCHEMA_VERSION as u8
-    ));
-
-    let db = Database::create(&path).unwrap();
-    let read_txn = db.begin_read().unwrap();
-    let table_names: BTreeSet<_> = read_txn
-        .list_tables()
-        .unwrap()
-        .map(|table| table.name().to_owned())
-        .collect();
-    assert_eq!(table_names, BTreeSet::from(["events_v5".to_owned()]));
-    assert!(!table_names.contains(EVENTS.name()));
+/// #867: NMP defines ONE current Redb schema epoch and carries no
+/// persistent-schema compatibility obligation. Every previously-shipped epoch
+/// -- the unversioned/v5 table layouts that predate the schema marker, and the
+/// v6/v7/v8 markers -- must refuse at open, before a store exists and without
+/// changing a single durable fact.
+///
+/// "Durable fact" is the exact table inventory, every table's row count, and
+/// the schema marker itself. It is deliberately NOT raw file bytes: redb
+/// performs its own allocator bookkeeping whenever a `Database` handle is
+/// created, which happens before any NMP code can read the marker. What this
+/// proves is the load-bearing claim -- the refusal creates no table, writes no
+/// row, and never rewrites the marker it rejected.
+fn durable_facts(path: &std::path::Path) -> BTreeMap<String, u64> {
+    let db = Database::create(path).expect("reopen fixture for durable-fact snapshot");
+    let read_txn = db.begin_read().expect("read fixture");
+    let mut facts = BTreeMap::new();
+    for handle in read_txn.list_tables().expect("list fixture tables") {
+        let name = handle.name().to_owned();
+        let len = read_txn
+            .open_untyped_table(handle)
+            .expect("open fixture table")
+            .len()
+            .expect("count fixture rows");
+        facts.insert(name, len);
+    }
+    if let Ok(schema_meta) = read_txn.open_table(SCHEMA_META) {
+        if let Some(version) = schema_meta.get(SCHEMA_VERSION_KEY).expect("read marker") {
+            facts.insert("::schema-marker".to_owned(), version.value());
+        }
+    }
+    facts
 }
 
-#[test]
-fn v5_displaced_epoch_is_rejected_before_any_v6_table_is_created() {
-    const LEGACY_DISPLACED_V5: TableDefinition<&str, &[u8]> =
-        TableDefinition::new("outbox_displaced_v5");
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("legacy-displaced-epoch.redb");
-    let db = Database::create(&path).unwrap();
-    let write_txn = db.begin_write().unwrap();
-    write_txn.open_table(LEGACY_DISPLACED_V5).unwrap();
-    write_txn.commit().unwrap();
-    drop(db);
-
-    let error = match RedbStore::open(&path) {
-        Ok(_) => panic!("v5 displaced epoch must not open as an empty v6 store"),
+fn assert_refuses_without_mutation(path: &std::path::Path, what: &str) {
+    let before = durable_facts(path);
+    let error = match RedbStore::open(path) {
+        Ok(_) => panic!("{what} must not open as a current-epoch store"),
         Err(error) => error,
     };
-    assert!(matches!(
-        error,
-        RedbStoreOpenError::Database(redb::Error::UpgradeRequired(version))
-            if version == SCHEMA_VERSION as u8
-    ));
-
-    let db = Database::create(&path).unwrap();
-    let read_txn = db.begin_read().unwrap();
-    let table_names: BTreeSet<_> = read_txn
-        .list_tables()
-        .unwrap()
-        .map(|table| table.name().to_owned())
-        .collect();
-    assert_eq!(
-        table_names,
-        BTreeSet::from(["outbox_displaced_v5".to_owned()])
+    assert!(
+        matches!(error, RedbStoreOpenError::UnsupportedSchema { expected, .. } if expected == SCHEMA_VERSION),
+        "{what} must produce the one unsupported-schema refusal, got {error:?}"
     );
-    assert!(!table_names.contains(OUTBOX_DISPLACED.name()));
+    assert_eq!(
+        durable_facts(path),
+        before,
+        "{what} refusal must not create, write, or rewrite any durable fact"
+    );
+}
+
+/// #867 x #489: ownership is acquired BEFORE the epoch is inspected, so a
+/// store that would be refused for its schema is never read by a process that
+/// does not own it. If the order were reversed, this would surface the schema
+/// verdict instead of the ownership one — leaking one process's durable state
+/// to a non-owner.
+#[test]
+fn a_non_owner_is_refused_for_ownership_before_the_schema_epoch_is_inspected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owned-unsupported-epoch.redb");
+    let db = Database::create(&path).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    write_txn
+        .open_table(TableDefinition::<u64, &[u8]>::new("events_v5"))
+        .unwrap();
+    write_txn.commit().unwrap();
+    drop(db);
+
+    let owner = crate::persistent_store_lifetime::acquire_for_open(&path).unwrap();
+    assert!(
+        matches!(
+            RedbStore::open(&path),
+            Err(RedbStoreOpenError::StoreAlreadyOpen { .. })
+        ),
+        "a non-owner must be refused for ownership, never told about the schema"
+    );
+    drop(owner);
+
+    // Once unowned, the same target reaches the epoch check and produces the
+    // one schema refusal.
+    assert_refuses_without_mutation(&path, "owned then released v5 epoch");
 }
 
 #[test]
-fn healthy_v8_reopen_starts_no_application_write_transaction() {
+fn pre_marker_table_epochs_refuse_at_open_without_mutating_durable_facts() {
+    for legacy in [
+        "events",
+        "events_v2",
+        "events_v3",
+        "events_v4",
+        "events_v5",
+        "outbox_displaced_v2",
+        "outbox_displaced_v5",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pre-marker-epoch.redb");
+        let db = Database::create(&path).unwrap();
+        let write_txn = db.begin_write().unwrap();
+        write_txn
+            .open_table(TableDefinition::<u64, &[u8]>::new(legacy))
+            .unwrap();
+        write_txn.commit().unwrap();
+        drop(db);
+
+        assert_refuses_without_mutation(&path, legacy);
+    }
+}
+
+#[test]
+fn superseded_schema_markers_refuse_at_open_without_mutating_durable_facts() {
+    // 6, 7, and 8 are the exact markers earlier NMP builds wrote. 10 stands in
+    // for a store written by a FUTURE epoch: the refusal is "not exactly the
+    // current epoch", not "older than the current epoch".
+    for superseded in [6u64, 7, 8, 10] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("superseded-marker.redb");
+        drop(RedbStore::open(&path).unwrap());
+
+        let db = Database::create(&path).unwrap();
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut schema_meta = write_txn.open_table(SCHEMA_META).unwrap();
+            schema_meta.insert(SCHEMA_VERSION_KEY, superseded).unwrap();
+        }
+        write_txn.commit().unwrap();
+        drop(db);
+
+        assert_refuses_without_mutation(&path, &format!("schema marker {superseded}"));
+    }
+}
+
+/// The refusal must never be reachable by damaging the CURRENT epoch: a
+/// corrupt current row stays typed corruption, so an operator can never read
+/// "unsupported schema" and conclude their data was merely old.
+#[test]
+fn corrupt_current_schema_rows_fail_as_corruption_not_as_an_old_epoch() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("corrupt-current.redb");
+    drop(RedbStore::open(&path).unwrap());
+
+    let db = Database::create(&path).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut sample_meta = write_txn.open_table(INDEX_CARDINALITY_SAMPLE_META).unwrap();
+        sample_meta
+            .insert(INDEX_CARDINALITY_SAMPLE_KEY, [0u8; 8].as_slice())
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+    drop(db);
+
+    assert!(
+        matches!(
+            RedbStore::open(&path),
+            Err(RedbStoreOpenError::Database(redb::Error::Corrupted(_)))
+        ),
+        "a truncated cardinality sample key is current-epoch corruption"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("corrupt-current-cardinality.redb");
+    drop(RedbStore::open(&path).unwrap());
+
+    let db = Database::create(&path).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut cardinality_meta = write_txn.open_table(INDEX_CARDINALITY_META).unwrap();
+        cardinality_meta
+            .remove(INDEX_CARDINALITY_VERSION_KEY)
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+    drop(db);
+
+    assert!(
+        matches!(
+            RedbStore::open(&path),
+            Err(RedbStoreOpenError::Database(redb::Error::Corrupted(_)))
+        ),
+        "a missing cardinality epoch is current-epoch corruption, never an old epoch"
+    );
+}
+
+#[test]
+fn healthy_current_schema_reopen_starts_no_application_write_transaction() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("healthy-reopen.redb");
 
@@ -99,147 +211,6 @@ fn healthy_v8_reopen_starts_no_application_write_transaction() {
             .value(),
         SCHEMA_VERSION
     );
-}
-
-#[test]
-fn v7_rows_migrate_atomically_to_query_ready_packed_postings() {
-    use nostr::EventBuilder;
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("v7-packed-migration.redb");
-    let keys = nostr::Keys::generate();
-    let event = EventBuilder::new(Kind::TextNote, "migrate packed")
-        .custom_created_at(Timestamp::from(42u64))
-        .sign_with_keys(&keys)
-        .unwrap();
-    let mut store = RedbStore::open(&path).unwrap();
-    store
-        .insert(
-            event.clone(),
-            RelayObserved::new(
-                RelayUrl::parse("wss://migration.example").unwrap(),
-                Timestamp::from(42u64),
-            ),
-        )
-        .unwrap();
-    drop(store);
-
-    let db = Database::create(&path).unwrap();
-    let write_txn = db.begin_write().unwrap();
-    write_txn.delete_table(POSTINGS_SEGMENTS).unwrap();
-    write_txn.delete_table(POSTINGS_DICTIONARIES).unwrap();
-    write_txn.delete_table(POSTINGS_RUN_META).unwrap();
-    write_txn.delete_table(POSTINGS_RUN_BY_MIN).unwrap();
-    write_txn.delete_table(POSTINGS_DEAD_KEYS).unwrap();
-    write_txn.delete_table(POSTINGS_META).unwrap();
-    let mut schema = write_txn.open_table(SCHEMA_META).unwrap();
-    schema
-        .insert(SCHEMA_VERSION_KEY, PREVIOUS_SCHEMA_VERSION)
-        .unwrap();
-    drop(schema);
-    write_txn.commit().unwrap();
-    drop(db);
-
-    let migrated = RedbStore::open(&path).unwrap();
-    assert_eq!(migrated.open_write_transactions(), 1);
-    assert_eq!(
-        migrated
-            .query_newest(&Filter::new().kind(Kind::TextNote), 10)
-            .unwrap()
-            .into_iter()
-            .map(|row| row.event.id)
-            .collect::<Vec<_>>(),
-        vec![event.id]
-    );
-    let read_txn = migrated.db.begin_read().unwrap();
-    let schema = read_txn.open_table(SCHEMA_META).unwrap();
-    assert_eq!(
-        schema.get(SCHEMA_VERSION_KEY).unwrap().unwrap().value(),
-        SCHEMA_VERSION
-    );
-    let packed = read_txn.open_table(POSTINGS_META).unwrap();
-    assert_eq!(packed.get(POSTINGS_READY).unwrap().unwrap().value(), 1);
-    drop(packed);
-    drop(schema);
-    drop(read_txn);
-    drop(migrated);
-
-    let reopened = RedbStore::open(&path).unwrap();
-    assert_eq!(reopened.open_write_transactions(), 0);
-}
-
-#[test]
-fn v6_author_kind_index_is_removed_and_cardinality_rebuilt_atomically() {
-    use nostr::EventBuilder;
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("v6-author-kind-migration.redb");
-    let keys = nostr::Keys::generate();
-    let event = EventBuilder::new(Kind::TextNote, "migrate")
-        .custom_created_at(Timestamp::from(10u64))
-        .sign_with_keys(&keys)
-        .unwrap();
-    let mut store = RedbStore::open(&path).unwrap();
-    store
-        .insert(
-            event,
-            RelayObserved::new(
-                RelayUrl::parse("wss://migration.example").unwrap(),
-                Timestamp::from(10u64),
-            ),
-        )
-        .unwrap();
-    drop(store);
-
-    let db = Database::create(&path).unwrap();
-    let write_txn = db.begin_write().unwrap();
-    {
-        let mut schema_meta = write_txn.open_table(SCHEMA_META).unwrap();
-        schema_meta
-            .insert(SCHEMA_VERSION_KEY, LEGACY_SCHEMA_VERSION)
-            .unwrap();
-        let mut cardinality_meta = write_txn.open_table(INDEX_CARDINALITY_META).unwrap();
-        cardinality_meta
-            .insert(INDEX_CARDINALITY_VERSION_KEY, 2)
-            .unwrap();
-        let mut retired = write_txn.open_table(LEGACY_BY_AUTHOR_KIND).unwrap();
-        retired.insert(&[0; 74], 1).unwrap();
-        let mut cardinality = write_txn.open_table(INDEX_CARDINALITY).unwrap();
-        cardinality.insert([3, 0].as_slice(), 1).unwrap();
-    }
-    write_txn.commit().unwrap();
-    drop(db);
-
-    let migrated = RedbStore::open(&path).unwrap();
-    assert_eq!(migrated.open_write_transactions(), 1);
-    assert_eq!(migrated.query(&Filter::new()).unwrap().len(), 1);
-    let read_txn = migrated.db.begin_read().unwrap();
-    let table_names: BTreeSet<_> = read_txn
-        .list_tables()
-        .unwrap()
-        .map(|table| table.name().to_owned())
-        .collect();
-    assert!(!table_names.contains(LEGACY_BY_AUTHOR_KIND.name()));
-    let schema_meta = read_txn.open_table(SCHEMA_META).unwrap();
-    assert_eq!(
-        schema_meta
-            .get(SCHEMA_VERSION_KEY)
-            .unwrap()
-            .unwrap()
-            .value(),
-        SCHEMA_VERSION
-    );
-    let cardinality = read_txn.open_table(INDEX_CARDINALITY).unwrap();
-    assert!(cardinality.iter().unwrap().all(|entry| {
-        entry
-            .unwrap()
-            .0
-            .value()
-            .first()
-            .is_some_and(|namespace| *namespace != 3)
-    }));
-    drop(read_txn);
-    assert_canonical_integrity(&migrated.db);
 }
 
 #[test]
@@ -491,159 +462,6 @@ fn coverage_row_key_carries_the_full_256_bit_digest() {
         64,
         "expected 64 hex chars (32 bytes) in the durable key, got {} in {row_key:?}",
         hex_part.len()
-    );
-}
-
-#[test]
-fn reopen_conservatively_invalidates_pre_fix_max_only_coverage_once() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("test.redb");
-    let relay = RelayUrl::parse("wss://relay.example").unwrap();
-    let max_atom = ContextualAtom {
-        filter: ConcreteFilter {
-            kinds: Some(BTreeSet::from([1u16])),
-            ..ConcreteFilter::default()
-        },
-        source: nmp_grammar::SourceAuthority::Public,
-        access: nmp_grammar::AccessContext::Public,
-        routing_evidence: BTreeSet::new(),
-    };
-    let retained_atom = ContextualAtom {
-        filter: ConcreteFilter {
-            kinds: Some(BTreeSet::from([2u16])),
-            ..ConcreteFilter::default()
-        },
-        ..max_atom.clone()
-    };
-    let max_key = compute_coverage_key(&max_atom);
-    let retained_key = compute_coverage_key(&retained_atom);
-
-    {
-        let mut store = RedbStore::open(&db_path).unwrap();
-        store
-            .record_coverage(
-                &max_atom,
-                &relay,
-                CoverageInterval::new(Timestamp::from(u64::MAX), Timestamp::from(u64::MAX)),
-            )
-            .unwrap();
-        store
-            .record_coverage(
-                &retained_atom,
-                &relay,
-                CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
-            )
-            .unwrap();
-    }
-
-    // Model a database last opened by a build predating the repair marker.
-    {
-        let db = Database::open(&db_path).unwrap();
-        let write = db.begin_write().unwrap();
-        {
-            let mut schema = write.open_table(SCHEMA_META).unwrap();
-            schema
-                .remove(COVERAGE_MAX_EVICTION_REPAIR_KEY)
-                .unwrap()
-                .expect("fresh stores carry the repair marker");
-        }
-        write.commit().unwrap();
-    }
-
-    let store = RedbStore::open(&db_path).unwrap();
-    assert_eq!(
-        store.get_coverage(max_key, &relay),
-        None,
-        "an old exact MAX-only row is indistinguishable from the false GC result and must be cleared"
-    );
-    assert_eq!(
-        store.get_coverage(retained_key, &relay),
-        Some(CoverageInterval::new(
-            Timestamp::from(0u64),
-            Timestamp::from(100u64)
-        )),
-        "conservative invalidation must not erase unrelated coverage"
-    );
-    drop(store);
-
-    let db = Database::open(&db_path).unwrap();
-    let read = db.begin_read().unwrap();
-    let schema = read.open_table(SCHEMA_META).unwrap();
-    assert_eq!(
-        schema
-            .get(COVERAGE_MAX_EVICTION_REPAIR_KEY)
-            .unwrap()
-            .unwrap()
-            .value(),
-        COVERAGE_MAX_EVICTION_REPAIR_VERSION
-    );
-}
-
-/// #106's legacy-purge falsifier: a coverage row written under the OLD
-/// (pre-#106, unversioned) key format is silently unreachable via
-/// `get_coverage` (its key never matches anything `record_coverage`
-/// computes anymore) and `gc` deletes it outright, tracked via
-/// `GcReport::legacy_coverage_rows_purged` (disjoint from the ordinary
-/// shrink/delete counters).
-#[test]
-fn gc_purges_legacy_unversioned_coverage_rows() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("test.redb");
-    let mut store = RedbStore::open(&db_path).unwrap();
-    let relay = RelayUrl::parse("wss://relay.example").unwrap();
-
-    // Write a legacy-shaped row directly (bypassing `record_coverage`,
-    // which always writes under the CURRENT version prefix) -- the
-    // exact shape a pre-#106 row would have on disk.
-    let legacy_shape = ConcreteFilter {
-        kinds: Some(std::collections::BTreeSet::from([1u16])),
-        authors: Some(std::collections::BTreeSet::from(["aa".to_string()])),
-        ..ConcreteFilter::default()
-    };
-    let legacy_key = compute_coverage_key(&ContextualAtom {
-        filter: legacy_shape.clone(),
-        source: nmp_grammar::SourceAuthority::AuthorOutboxes,
-        access: nmp_grammar::AccessContext::Public,
-        routing_evidence: BTreeSet::new(),
-    });
-    let mut legacy_hex = String::new();
-    {
-        use std::fmt::Write as _;
-        for byte in legacy_key.as_bytes() {
-            let _ = write!(legacy_hex, "{byte:02x}");
-        }
-    }
-    let legacy_row_key = format!("{legacy_hex}:{}", relay.as_str());
-    let legacy_record = CoverageRowRecord {
-        shape: ShapeRecord::from(&legacy_shape),
-        from: 0,
-        through: 100,
-    };
-    {
-        let write_txn = store.db.begin_write().unwrap();
-        {
-            let mut coverage = write_txn.open_table(COVERAGE).unwrap();
-            coverage
-                .insert(
-                    legacy_row_key.as_str(),
-                    serde_json::to_string(&legacy_record).unwrap().as_str(),
-                )
-                .unwrap();
-        }
-        write_txn.commit().unwrap();
-    }
-
-    let report = store.gc(&ClaimSet::new(Vec::new())).unwrap();
-    assert_eq!(
-        report.legacy_coverage_rows_purged, 1,
-        "the unversioned legacy row must be purged"
-    );
-
-    let read_txn = store.db.begin_read().unwrap();
-    let coverage = read_txn.open_table(COVERAGE).unwrap();
-    assert!(
-        coverage.get(legacy_row_key.as_str()).unwrap().is_none(),
-        "the legacy row must be gone after gc"
     );
 }
 
@@ -2076,14 +1894,19 @@ fn empty_filter_sets_and_reversed_windows_match_nostr_semantics() {
     assert!(store.query_newest(&reversed, 10).unwrap().is_empty());
 }
 
+/// #867: the cardinality sidecar is written in the SAME transaction as the
+/// schema marker, so a current-epoch store cannot legitimately be missing it.
+/// A damaged sidecar is corruption of the current epoch — it is neither
+/// rebuilt in place (that would be an adoption path) nor relabelled as an old
+/// schema.
 #[test]
-fn missing_cardinality_epoch_rebuilds_atomically_from_canonical_events() {
+fn damaged_cardinality_sidecar_is_current_epoch_corruption_not_a_rebuild() {
     use nostr::EventBuilder;
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("cardinality-rebuild.redb");
+    let path = dir.path().join("damaged-cardinality-sidecar.redb");
     let keys = nostr::Keys::generate();
-    let relay = RelayUrl::parse("wss://cardinality-rebuild.example").unwrap();
+    let relay = RelayUrl::parse("wss://cardinality.example").unwrap();
     let mut store = RedbStore::open(&path).unwrap();
     for i in 0..7u64 {
         let event = EventBuilder::new(Kind::TextNote, format!("row-{i}"))
@@ -2104,35 +1927,17 @@ fn missing_cardinality_epoch_rebuilds_atomically_from_canonical_events() {
     {
         let mut meta = write_txn.open_table(INDEX_CARDINALITY_META).unwrap();
         meta.remove(INDEX_CARDINALITY_VERSION_KEY).unwrap();
-        let mut sample_meta = write_txn.open_table(INDEX_CARDINALITY_SAMPLE_META).unwrap();
-        sample_meta.remove(INDEX_CARDINALITY_SAMPLE_KEY).unwrap();
-        let mut cardinality = write_txn.open_table(INDEX_CARDINALITY).unwrap();
-        cardinality
-            .insert(global_cardinality_key().as_slice(), 999)
-            .unwrap();
     }
     write_txn.commit().unwrap();
     drop(db);
 
-    let reopened = RedbStore::open(&path).unwrap();
-    assert_eq!(
-        reopened.open_write_transactions(),
-        1,
-        "the unhealthy sidecar is rebuilt in one write transaction"
+    assert!(
+        matches!(
+            RedbStore::open(&path),
+            Err(RedbStoreOpenError::Database(redb::Error::Corrupted(_)))
+        ),
+        "a missing cardinality epoch is corruption, never a rebuild or an old epoch"
     );
-    assert_eq!(reopened.query(&Filter::new()).unwrap().len(), 7);
-    let read_txn = reopened.db.begin_read().unwrap();
-    let sample_meta = read_txn.open_table(INDEX_CARDINALITY_SAMPLE_META).unwrap();
-    assert_eq!(
-        sample_meta
-            .get(INDEX_CARDINALITY_SAMPLE_KEY)
-            .unwrap()
-            .unwrap()
-            .value()
-            .len(),
-        32
-    );
-    assert_canonical_integrity(&reopened.db);
 }
 
 #[test]
@@ -2155,7 +1960,7 @@ fn malformed_cardinality_sample_key_fails_open() {
     assert!(matches!(
         RedbStore::open(&path),
         Err(RedbStoreOpenError::Database(redb::Error::Corrupted(message)))
-            if message == "invalid cardinality sample key length"
+            if message == "current schema is missing its cardinality sample key"
     ));
 }
 
