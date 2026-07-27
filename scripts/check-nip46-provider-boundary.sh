@@ -100,8 +100,11 @@ grep -qF 'compatibility: Arc<FfiNip46CoreCompatibility>' crates/nmp-nip46-ffi/sr
   fail "NIP-46 provider construction does not require a compatibility proof"
 grep -qF 'macro_metadata::extract_from_library' crates/nmp-nip46-ffi/metadata-audit.rs ||
   fail "mailbox-entry falsifier does not inspect UniFFI's compiled export authority"
-grep -qF 'if module_path == CORE_MODULE' crates/nmp-nip46-ffi/metadata-audit.rs ||
-  fail "compiled metadata audit does not cover linked non-core namespaces"
+grep -qF 'const CORE_MAILBOX_SOURCE: &str = "nmp_ffi::NmpEngine::signer_mailbox";' \
+  crates/nmp-nip46-ffi/metadata-audit.rs ||
+  fail "compiled metadata audit does not pin the one outward-only core mailbox source"
+grep -qF 'core_mailbox_sources != 1' crates/nmp-nip46-ffi/metadata-audit.rs ||
+  fail "compiled metadata audit does not require exactly one core mailbox source"
 grep -qF 'compiled UniFFI metadata must expose exactly one proof-bearing mailbox entry' \
   crates/nmp-nip46-ffi/metadata-audit.rs ||
   fail "compiled provider metadata does not enforce the single proof-bearing mailbox entry"
@@ -111,7 +114,10 @@ for falsifier in \
   exact_compiled_constructor_name_is_required \
   missing_mailbox_metadata_positive_control_is_rejected \
   missing_compatibility_metadata_positive_control_is_rejected \
-  foreign_namespace_mailbox_entry_is_not_hidden_from_audit; do
+  missing_core_mailbox_source_positive_control_is_rejected \
+  foreign_namespace_mailbox_entry_is_not_hidden_from_audit \
+  forged_core_namespace_mailbox_input_is_not_exempted \
+  exact_core_mailbox_source_cannot_accept_a_mailbox_input; do
   grep -qF "fn $falsifier" crates/nmp-nip46-ffi/metadata-audit.rs ||
     fail "compiled metadata audit is missing falsifier $falsifier"
 done

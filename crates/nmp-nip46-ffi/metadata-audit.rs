@@ -18,6 +18,7 @@ const PROVIDER_MODULE: &str = "nmp_nip46_ffi";
 const CORE_MODULE: &str = "nmp_ffi";
 const MAILBOX_TYPE: &str = "FfiSignerMailbox";
 const COMPATIBILITY_TYPE: &str = "FfiNip46CoreCompatibility";
+const CORE_MAILBOX_SOURCE: &str = "nmp_ffi::NmpEngine::signer_mailbox";
 const REQUIRED_ENTRY: &str = "nmp_nip46_ffi::NmpNip46Provider::new";
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -132,15 +133,15 @@ impl TypeGraph {
 struct Callable<'a> {
     label: String,
     inputs: Vec<&'a Type>,
-    signature: Vec<&'a Type>,
+    return_type: Option<&'a Type>,
+    throws: Option<&'a Type>,
 }
 
-fn provider_library_callables(items: &[Metadata]) -> Vec<Callable<'_>> {
+fn library_callables(items: &[Metadata]) -> Vec<Callable<'_>> {
     let mut callables = Vec::new();
     for item in items {
-        let (module_path, label, inputs, return_type, throws) = match item {
+        let (label, inputs, return_type, throws) = match item {
             Metadata::Func(function) => (
-                function.module_path.as_str(),
                 format!("{}::{}", function.module_path, function.name),
                 function
                     .inputs
@@ -151,7 +152,6 @@ fn provider_library_callables(items: &[Metadata]) -> Vec<Callable<'_>> {
                 function.throws.as_ref(),
             ),
             Metadata::Constructor(constructor) => (
-                constructor.module_path.as_str(),
                 format!(
                     "{}::{}::{}",
                     constructor.module_path, constructor.self_name, constructor.name
@@ -165,7 +165,6 @@ fn provider_library_callables(items: &[Metadata]) -> Vec<Callable<'_>> {
                 constructor.throws.as_ref(),
             ),
             Metadata::Method(method) => (
-                method.module_path.as_str(),
                 format!(
                     "{}::{}::{}",
                     method.module_path, method.self_name, method.name
@@ -179,7 +178,6 @@ fn provider_library_callables(items: &[Metadata]) -> Vec<Callable<'_>> {
                 method.throws.as_ref(),
             ),
             Metadata::TraitMethod(method) => (
-                method.module_path.as_str(),
                 format!(
                     "{}::{}::{}",
                     method.module_path, method.trait_name, method.name
@@ -195,21 +193,11 @@ fn provider_library_callables(items: &[Metadata]) -> Vec<Callable<'_>> {
             _ => continue,
         };
 
-        // The provider library statically links the canonical core namespace,
-        // whose mailbox-producing entries are the source of the opaque handle.
-        // Audit every other namespace in the artifact so a linked sidecar
-        // component cannot export a second, unproven mailbox entry.
-        if module_path == CORE_MODULE {
-            continue;
-        }
-
-        let mut signature = inputs.clone();
-        signature.extend(return_type);
-        signature.extend(throws);
         callables.push(Callable {
             label,
             inputs,
-            signature,
+            return_type,
+            throws,
         });
     }
     callables
@@ -243,15 +231,39 @@ fn audit(items: &[Metadata]) -> Result<String, String> {
         ));
     }
 
+    let mut core_mailbox_sources = 0;
     let mut mailbox_entries = Vec::new();
-    for callable in provider_library_callables(items) {
-        let carries_mailbox = callable
-            .signature
+    for callable in library_callables(items) {
+        let input_carries_mailbox = callable
+            .inputs
             .iter()
             .any(|ty| graph.contains_named(ty, CORE_MODULE, MAILBOX_TYPE));
+        let return_carries_mailbox = callable
+            .return_type
+            .is_some_and(|ty| graph.contains_named(ty, CORE_MODULE, MAILBOX_TYPE));
+        let throws_carries_mailbox = callable
+            .throws
+            .is_some_and(|ty| graph.contains_named(ty, CORE_MODULE, MAILBOX_TYPE));
+        let carries_mailbox =
+            input_carries_mailbox || return_carries_mailbox || throws_carries_mailbox;
         if !carries_mailbox {
             continue;
         }
+
+        // The core vends the opaque mailbox through one exact outward-only
+        // callable. Do not exempt its namespace: a linked crate may choose
+        // the same `[lib] name` and therefore claim the same UniFFI module.
+        // An input, throws position, duplicate, or any other callable remains
+        // subject to the provider-proof rule below.
+        if callable.label == CORE_MAILBOX_SOURCE
+            && return_carries_mailbox
+            && !input_carries_mailbox
+            && !throws_carries_mailbox
+        {
+            core_mailbox_sources += 1;
+            continue;
+        }
+
         let requires_compatibility = callable
             .inputs
             .iter()
@@ -263,6 +275,12 @@ fn audit(items: &[Metadata]) -> Result<String, String> {
             ));
         }
         mailbox_entries.push(callable.label);
+    }
+
+    if core_mailbox_sources != 1 {
+        return Err(format!(
+            "compiled UniFFI metadata must expose exactly one outward-only core mailbox source ({CORE_MAILBOX_SOURCE}); found {core_mailbox_sources}"
+        ));
     }
 
     if mailbox_entries != [REQUIRED_ENTRY] {
@@ -310,8 +328,8 @@ fn main() {
 mod tests {
     use super::*;
     use uniffi_meta::{
-        ConstructorMetadata, FieldMetadata, FnMetadata, FnParamMetadata, ObjectImpl,
-        ObjectMetadata, RecordMetadata,
+        ConstructorMetadata, FieldMetadata, FnMetadata, FnParamMetadata, MethodMetadata,
+        ObjectImpl, ObjectMetadata, RecordMetadata,
     };
 
     fn object(module_path: &str, name: &str) -> Metadata {
@@ -349,6 +367,18 @@ mod tests {
                     FnParamMetadata::simple("mailbox", object_type(CORE_MODULE, MAILBOX_TYPE)),
                 ],
                 throws: None,
+                checksum: None,
+                docstring: None,
+            }),
+            Metadata::Method(MethodMetadata {
+                module_path: CORE_MODULE.to_string(),
+                self_name: "NmpEngine".to_string(),
+                name: "signer_mailbox".to_string(),
+                is_async: false,
+                inputs: Vec::new(),
+                return_type: Some(object_type(CORE_MODULE, MAILBOX_TYPE)),
+                throws: None,
+                takes_self_by_arc: true,
                 checksum: None,
                 docstring: None,
             }),
@@ -519,6 +549,52 @@ mod tests {
         let error = audit(&items).expect_err("linked non-core namespaces must be audited");
         assert!(error.contains("nmp_nip46_sideload::sideload_take_mailbox"));
         assert!(error.contains("without an input containing"));
+    }
+
+    #[test]
+    fn forged_core_namespace_mailbox_input_is_not_exempted() {
+        let mut items = valid_metadata();
+        items.push(function_in_module(
+            CORE_MODULE,
+            "impostor_take_mailbox",
+            vec![object_type(CORE_MODULE, MAILBOX_TYPE)],
+            None,
+        ));
+
+        let error =
+            audit(&items).expect_err("claiming the core namespace must not exempt mailbox inputs");
+        assert!(error.contains("nmp_ffi::impostor_take_mailbox"));
+        assert!(error.contains("without an input containing"));
+    }
+
+    #[test]
+    fn exact_core_mailbox_source_cannot_accept_a_mailbox_input() {
+        let mut items = valid_metadata();
+        let Some(Metadata::Method(method)) = items
+            .iter_mut()
+            .find(|item| matches!(item, Metadata::Method(_)))
+        else {
+            panic!("valid metadata must contain the core mailbox source");
+        };
+        method.inputs.push(FnParamMetadata::simple(
+            "mailbox",
+            object_type(CORE_MODULE, MAILBOX_TYPE),
+        ));
+
+        let error =
+            audit(&items).expect_err("the exact core source is exempt only in return position");
+        assert!(error.contains(CORE_MAILBOX_SOURCE));
+        assert!(error.contains("without an input containing"));
+    }
+
+    #[test]
+    fn missing_core_mailbox_source_positive_control_is_rejected() {
+        let mut items = valid_metadata();
+        items.retain(|item| !matches!(item, Metadata::Method(_)));
+
+        let error = audit(&items).expect_err("the outward core mailbox source must be present");
+        assert!(error.contains("exactly one outward-only core mailbox source"));
+        assert!(error.contains(CORE_MAILBOX_SOURCE));
     }
 
     #[test]
