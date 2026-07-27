@@ -1,4 +1,5 @@
 use super::{EventId, PersistenceError, PublicKey, TableDefinition};
+use crate::PersistenceFault;
 
 /// Wrap any `redb` operation error as a [`PersistenceError`] (architecture
 /// review correction — see its doc). `accept_write`/`accept_ephemeral`/
@@ -8,8 +9,45 @@ use super::{EventId, PersistenceError, PublicKey, TableDefinition};
 /// `.expect()` these same `Result`s at their own call sites into the
 /// shared helpers below — unchanged behavior for them, just funneled
 /// through one typed error type instead of a bespoke panic message each.
-pub(super) fn persist_err(e: impl std::fmt::Display) -> PersistenceError {
-    PersistenceError(e.to_string())
+///
+/// This is also the one place redb's typed failure survives (#895). redb
+/// already distinguishes the latch (`PreviousIo`/`DatabaseClosed`) from the
+/// originating I/O failure (`Io`); flattening every error to `to_string()`
+/// here was what forced embedders to grep the message. The message is still
+/// preserved verbatim — the classification is added alongside it, so the
+/// ~450 `map_err(persist_err)` call sites need no change at all.
+///
+/// The bound is `Into<redb::Error>` rather than `Display` on purpose: it
+/// admits exactly redb's own error family (`StorageError`, `TableError`,
+/// `TransactionError`, `CommitError`, `DatabaseError`, `SavepointError`,
+/// `CompactionError`, `io::Error`, and `redb::Error` itself), so a non-redb
+/// failure cannot silently arrive here and be mislabeled as a backend
+/// fault. Those go through [`PersistenceError::invariant`] instead.
+pub(super) fn persist_err(e: impl Into<redb::Error>) -> PersistenceError {
+    let error = e.into();
+    PersistenceError::new(classify(&error), error.to_string())
+}
+
+/// Map redb's typed error onto the durability classification.
+///
+/// The load-bearing split is `PreviousIo`/`DatabaseClosed` (raised by
+/// `CheckedBackend::check_failure()` *before* the backend op is attempted —
+/// so the write was never tried) versus `Io` (the first failure, the one
+/// that sets the latch, whose durability is genuinely unknown). See
+/// [`PersistenceFault`] for why `Io` cannot honestly be narrowed further.
+///
+/// Everything redb models above the storage layer — a table type mismatch,
+/// a missing table, an upgrade requirement, a savepoint refusal — is this
+/// crate misusing its own database, not an I/O event: `Invariant`.
+fn classify(error: &redb::Error) -> PersistenceFault {
+    match error {
+        redb::Error::PreviousIo | redb::Error::DatabaseClosed => PersistenceFault::Latched,
+        redb::Error::Io(_) => PersistenceFault::Io,
+        redb::Error::Corrupted(_) => PersistenceFault::Corrupted,
+        redb::Error::ValueTooLarge(_) => PersistenceFault::ValueTooLarge,
+        redb::Error::LockPoisoned(_) => PersistenceFault::LockPoisoned,
+        _ => PersistenceFault::Invariant,
+    }
 }
 
 pub(super) type EventKey = u64;

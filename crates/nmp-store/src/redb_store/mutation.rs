@@ -197,13 +197,15 @@ fn update_outbox_receipt<T: GovernedIngestTxn>(
     let key = receipt_key(receipt_id);
     let json = txn
         .string_get(GovernedStringMap::OutboxReceipts, &key)?
-        .ok_or_else(|| PersistenceError(format!("missing outbox receipt {receipt_id}")))?;
+        .ok_or_else(|| {
+            PersistenceError::invariant(format!("missing outbox receipt {receipt_id}"))
+        })?;
     let mut record: OutboxReceiptRecord = serde_json::from_str(&json).map_err(|error| {
-        PersistenceError(format!("decode outbox receipt {receipt_id}: {error}"))
+        PersistenceError::invariant(format!("decode outbox receipt {receipt_id}: {error}"))
     })?;
     record.state = state;
     let encoded = serde_json::to_string(&record).map_err(|error| {
-        PersistenceError(format!("encode outbox receipt {receipt_id}: {error}"))
+        PersistenceError::invariant(format!("encode outbox receipt {receipt_id}: {error}"))
     })?;
     txn.string_put(GovernedStringMap::OutboxReceipts, &key, &encoded)
 }
@@ -218,7 +220,7 @@ fn remove_claimant<T: GovernedIngestTxn>(
         return Ok(());
     };
     let mut claimants: Vec<u64> = serde_json::from_str(&json)
-        .map_err(|error| PersistenceError(format!("decode claimant set: {error}")))?;
+        .map_err(|error| PersistenceError::invariant(format!("decode claimant set: {error}")))?;
     claimants.retain(|id| *id != intent_id.0);
     if claimants.is_empty() {
         txn.string_remove(map, key)?;
@@ -238,8 +240,9 @@ fn remove_addr_claimant<T: GovernedIngestTxn>(
     let Some(json) = txn.string_get(map, key)? else {
         return Ok(());
     };
-    let mut claimants: Vec<AddrClaimant> = serde_json::from_str(&json)
-        .map_err(|error| PersistenceError(format!("decode address claimant set: {error}")))?;
+    let mut claimants: Vec<AddrClaimant> = serde_json::from_str(&json).map_err(|error| {
+        PersistenceError::invariant(format!("decode address claimant set: {error}"))
+    })?;
     claimants.retain(|claimant| claimant.intent_id != intent_id.0);
     if claimants.is_empty() {
         txn.string_remove(map, key)?;

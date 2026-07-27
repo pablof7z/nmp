@@ -204,7 +204,9 @@ impl<'borrow, 'txn> FjallIngestTxn<'borrow, 'txn> {
             } else {
                 current.checked_sub(delta.unsigned_abs())
             }
-            .ok_or_else(|| PersistenceError("Fjall cardinality overflow/underflow".to_owned()))?;
+            .ok_or_else(|| {
+                PersistenceError::invariant("Fjall cardinality overflow/underflow".to_owned())
+            })?;
             if next == 0 {
                 self.transaction.remove(&self.keyspaces.cardinality, key);
             } else {
@@ -218,9 +220,12 @@ impl<'borrow, 'txn> FjallIngestTxn<'borrow, 'txn> {
     fn load_provenance(&self, key: EventKey) -> Result<Provenance, PersistenceError> {
         let encoded = self
             .get(&self.keyspaces.provenance, event_key(key))?
-            .ok_or_else(|| PersistenceError(format!("missing Fjall provenance for {key}")))?;
-        binary_event::decode_provenance(&encoded)
-            .map_err(|error| PersistenceError(format!("decode Fjall provenance: {error:?}")))
+            .ok_or_else(|| {
+                PersistenceError::invariant(format!("missing Fjall provenance for {key}"))
+            })?;
+        binary_event::decode_provenance(&encoded).map_err(|error| {
+            PersistenceError::invariant(format!("decode Fjall provenance: {error:?}"))
+        })
     }
 
     fn store_provenance(
@@ -228,8 +233,9 @@ impl<'borrow, 'txn> FjallIngestTxn<'borrow, 'txn> {
         key: EventKey,
         provenance: &Provenance,
     ) -> Result<(), PersistenceError> {
-        let encoded = binary_event::encode_provenance(provenance)
-            .map_err(|error| PersistenceError(format!("encode Fjall provenance: {error:?}")))?;
+        let encoded = binary_event::encode_provenance(provenance).map_err(|error| {
+            PersistenceError::invariant(format!("encode Fjall provenance: {error:?}"))
+        })?;
         self.transaction
             .insert(&self.keyspaces.provenance, event_key(key), encoded);
         Ok(())
@@ -237,9 +243,9 @@ impl<'borrow, 'txn> FjallIngestTxn<'borrow, 'txn> {
 
     fn adjust_cardinality(&mut self, key: Vec<u8>, delta: i64) -> Result<(), PersistenceError> {
         let current = self.cardinality_deltas.entry(key).or_default();
-        *current = current
-            .checked_add(delta)
-            .ok_or_else(|| PersistenceError("Fjall cardinality delta overflow".to_owned()))?;
+        *current = current.checked_add(delta).ok_or_else(|| {
+            PersistenceError::invariant("Fjall cardinality delta overflow".to_owned())
+        })?;
         Ok(())
     }
 
@@ -304,9 +310,11 @@ impl GovernedIngestTxn for FjallIngestTxn<'_, '_> {
             return Ok(None);
         };
         let event = StoredEventView::from_trusted(&encoded)
-            .map_err(|error| PersistenceError(format!("decode Fjall event: {error:?}")))?
+            .map_err(|error| PersistenceError::invariant(format!("decode Fjall event: {error:?}")))?
             .materialize_event()
-            .map_err(|error| PersistenceError(format!("materialize Fjall event: {error:?}")))?;
+            .map_err(|error| {
+                PersistenceError::invariant(format!("materialize Fjall event: {error:?}"))
+            })?;
         Ok(Some(StoredEvent {
             event,
             provenance: self.load_provenance(key)?,
@@ -344,8 +352,9 @@ impl GovernedIngestTxn for FjallIngestTxn<'_, '_> {
 
     fn replace_event(&mut self, key: EventKey, event: &Event) -> Result<(), PersistenceError> {
         let started = Instant::now();
-        let encoded = binary_event::encode_event(event)
-            .map_err(|error| PersistenceError(format!("encode Fjall event: {error:?}")))?;
+        let encoded = binary_event::encode_event(event).map_err(|error| {
+            PersistenceError::invariant(format!("encode Fjall event: {error:?}"))
+        })?;
         self.encode_ns = self.encode_ns.saturating_add(duration_ns(started));
         self.transaction
             .insert(&self.keyspaces.events, event_key(key), encoded);
@@ -368,13 +377,14 @@ impl GovernedIngestTxn for FjallIngestTxn<'_, '_> {
         provenance: &Provenance,
     ) -> Result<EventKey, PersistenceError> {
         let key = self.next_event_key;
-        self.next_event_key = key
-            .checked_add(1)
-            .ok_or_else(|| PersistenceError("Fjall event key space exhausted".to_owned()))?;
+        self.next_event_key = key.checked_add(1).ok_or_else(|| {
+            PersistenceError::invariant("Fjall event key space exhausted".to_owned())
+        })?;
         self.event_allocator_dirty = true;
         let encode_started = Instant::now();
-        let encoded = binary_event::encode_event(event)
-            .map_err(|error| PersistenceError(format!("encode Fjall event: {error:?}")))?;
+        let encoded = binary_event::encode_event(event).map_err(|error| {
+            PersistenceError::invariant(format!("encode Fjall event: {error:?}"))
+        })?;
         self.encode_ns = self.encode_ns.saturating_add(duration_ns(encode_started));
         self.transaction
             .insert(&self.keyspaces.events, event_key(key), encoded);
@@ -440,8 +450,9 @@ impl GovernedIngestTxn for FjallIngestTxn<'_, '_> {
     ) -> Result<Option<String>, PersistenceError> {
         self.get(self.keyspaces.string_map(map), key)?
             .map(|value| {
-                String::from_utf8(value.to_vec())
-                    .map_err(|error| PersistenceError(format!("decode Fjall string: {error}")))
+                String::from_utf8(value.to_vec()).map_err(|error| {
+                    PersistenceError::invariant(format!("decode Fjall string: {error}"))
+                })
             })
             .transpose()
     }
@@ -466,8 +477,9 @@ impl GovernedIngestTxn for FjallIngestTxn<'_, '_> {
         let previous = self
             .get(keyspace, key)?
             .map(|value| {
-                String::from_utf8(value.to_vec())
-                    .map_err(|error| PersistenceError(format!("decode Fjall string: {error}")))
+                String::from_utf8(value.to_vec()).map_err(|error| {
+                    PersistenceError::invariant(format!("decode Fjall string: {error}"))
+                })
             })
             .transpose()?;
         self.transaction.remove(keyspace, key);
@@ -614,12 +626,16 @@ fn event_key(key: EventKey) -> [u8; 8] {
 fn decode_u64(value: &[u8]) -> Result<u64, PersistenceError> {
     let bytes: [u8; 8] = value
         .try_into()
-        .map_err(|_| PersistenceError("Fjall u64 value has wrong width".to_owned()))?;
+        .map_err(|_| PersistenceError::invariant("Fjall u64 value has wrong width".to_owned()))?;
     Ok(u64::from_be_bytes(bytes))
 }
 
+/// Benchmark-local funnel for Fjall's errors. Deliberately NOT classified:
+/// Fjall's durability contract is #821's, not #895's, and this adapter exists
+/// only to measure a ceiling — nothing embeds it, so a bench failure carries
+/// no durability claim to get wrong.
 fn persist_err(error: impl std::fmt::Display) -> PersistenceError {
-    PersistenceError(error.to_string())
+    PersistenceError::invariant(error.to_string())
 }
 
 fn duration_ns(started: Instant) -> u64 {

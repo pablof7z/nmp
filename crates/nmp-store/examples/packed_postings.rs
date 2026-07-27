@@ -328,14 +328,16 @@ fn run_governed_redb(
                 )
             })
             .collect();
-        store.insert_batch(rows).map_err(|error| error.0)?;
+        store
+            .insert_batch(rows)
+            .map_err(|error| error.message().to_owned())?;
     }
     let wall_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
     let process = process_delta(sample_process(), process_before);
     let attribution = nmp_store::ingest_attribution::snapshot();
     let expected_ids = store
         .query(&Filter::new())
-        .map_err(|error| error.0)?
+        .map_err(|error| error.message().to_owned())?
         .into_iter()
         .map(|row| row.event.id)
         .collect::<std::collections::HashSet<_>>();
@@ -348,7 +350,7 @@ fn run_governed_redb(
     let reopened = RedbStore::open(path).map_err(|error| error.to_string())?;
     let reopened_ids = reopened
         .query(&Filter::new())
-        .map_err(|error| error.0)?
+        .map_err(|error| error.message().to_owned())?
         .into_iter()
         .map(|row| row.event.id)
         .collect::<std::collections::HashSet<_>>();

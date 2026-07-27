@@ -38,7 +38,7 @@ impl ReadFailureControl {
             let Some(FailRead::Query(message)) = failure.take() else {
                 unreachable!()
             };
-            Some(PersistenceError(message))
+            Some(PersistenceError::invariant(message))
         } else {
             None
         }
@@ -50,7 +50,7 @@ impl ReadFailureControl {
             let Some(FailRead::NewestBefore(message)) = failure.take() else {
                 unreachable!()
             };
-            Some(PersistenceError(message))
+            Some(PersistenceError::invariant(message))
         } else {
             None
         }

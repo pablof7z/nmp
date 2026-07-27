@@ -163,7 +163,42 @@ impl RedbStore {
     /// schema marker proves every table exists, and one exact metadata count
     /// tells us whether crash-abandoned ephemeral receipts need recovery.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, redb::Error> {
-        Self::open_inner(path, BenchmarkDurability::Immediate)
+        Self::open_inner(path, BenchmarkDurability::Immediate, |path| {
+            Database::builder()
+                .set_cache_size(REDB_CACHE_BYTES)
+                .create(path)
+        })
+    }
+
+    /// Open over a caller-supplied `redb` storage backend (#895 falsifiers).
+    ///
+    /// Unit-test build only. The durability classification is only worth
+    /// having if it is proven against redb's real failure machinery — its
+    /// `CheckedBackend` latch, its commit ordering, its post-flush resize —
+    /// rather than against hand-constructed `StorageError` values. The only
+    /// way to make that machinery fail on demand is to give redb a backend
+    /// that fails on demand, so this seam exists purely to let the
+    /// durability tests drive a genuine `RedbStore` through a genuine
+    /// disk-full sequence.
+    ///
+    /// The database handle itself is unchanged: still a bare `Database`,
+    /// still opened exactly once. In-place close/reopen is #895's second
+    /// half and is deliberately not here.
+    #[cfg(test)]
+    pub(super) fn open_with_backend(
+        path: impl AsRef<Path>,
+        backend: impl redb::StorageBackend,
+    ) -> Result<Self, redb::Error> {
+        let mut backend = Some(backend);
+        Self::open_inner(path, BenchmarkDurability::Immediate, move |_| {
+            Database::builder()
+                .set_cache_size(REDB_CACHE_BYTES)
+                .create_with_backend(
+                    backend
+                        .take()
+                        .expect("open_and_register calls the database factory exactly once"),
+                )
+        })
     }
 
     /// Open a benchmark-only diagnostic store whose governed write
@@ -176,18 +211,23 @@ impl RedbStore {
     /// work. Schema creation and reopen repair remain immediately durable.
     #[cfg(feature = "bench-instrumentation")]
     pub fn open_benchmark_nondurable(path: impl AsRef<Path>) -> Result<Self, redb::Error> {
-        Self::open_inner(path, BenchmarkDurability::NoneThenImmediateCheckpoint)
+        Self::open_inner(
+            path,
+            BenchmarkDurability::NoneThenImmediateCheckpoint,
+            |path| {
+                Database::builder()
+                    .set_cache_size(REDB_CACHE_BYTES)
+                    .create(path)
+            },
+        )
     }
 
     fn open_inner(
         path: impl AsRef<Path>,
         _benchmark_durability: BenchmarkDurability,
+        create: impl FnOnce(&Path) -> Result<Database, redb::DatabaseError>,
     ) -> Result<Self, redb::Error> {
-        let registered = open_and_register(path.as_ref(), |path| {
-            Database::builder()
-                .set_cache_size(REDB_CACHE_BYTES)
-                .create(path)
-        })?;
+        let registered = open_and_register(path.as_ref(), create)?;
         let db = &registered.value;
         // Schema v6 deliberately carried no event-row migration. Refuse any
         // older NMP event epoch before creating a single v7 table: otherwise
@@ -284,7 +324,7 @@ impl RedbStore {
                             write_txn.delete_table(LEGACY_BY_AUTHOR_KIND)?;
                         }
                         rebuild_from_canonical(&write_txn)
-                            .map_err(|error| redb::Error::Corrupted(error.0))?;
+                            .map_err(|error| redb::Error::Corrupted(error.message().to_owned()))?;
                         let mut schema_meta = write_txn.open_table(SCHEMA_META)?;
                         schema_meta.insert(SCHEMA_VERSION_KEY, SCHEMA_VERSION)?;
                     }
@@ -595,7 +635,9 @@ impl RedbStore {
             } else {
                 let encoded_relay =
                     relays.get(relay_key).map_err(persist_err)?.ok_or_else(|| {
-                        PersistenceError(format!("observation points at missing relay {relay_key}"))
+                        PersistenceError::invariant(format!(
+                            "observation points at missing relay {relay_key}"
+                        ))
                     })?;
                 let relay = RelayUrl::parse(encoded_relay.value())
                     .expect("redb: interned relay URL remains parseable");
@@ -665,7 +707,7 @@ impl RedbStore {
                 .map_err(persist_err)?
                 .map(|guard| guard.value());
             if canonical_key != Some(event_key) {
-                return Err(PersistenceError(format!(
+                return Err(PersistenceError::invariant(format!(
                     "ordered index disagrees with canonical id map for {event_id}"
                 )));
             }
@@ -675,7 +717,7 @@ impl RedbStore {
             #[cfg(any(test, feature = "bench-instrumentation"))]
             self.query_event_values.fetch_add(1, Ordering::Relaxed);
             let Some(value) = events.get(event_key).map_err(persist_err)? else {
-                return Err(PersistenceError(format!(
+                return Err(PersistenceError::invariant(format!(
                     "ordered index points at missing canonical event {event_key}"
                 )));
             };
@@ -771,7 +813,7 @@ impl RedbStore {
             #[cfg(any(test, feature = "bench-instrumentation"))]
             self.query_event_values.fetch_add(1, Ordering::Relaxed);
             let Some(value) = events.get(event_key).map_err(persist_err)? else {
-                return Err(PersistenceError(format!(
+                return Err(PersistenceError::invariant(format!(
                     "ordered index points at missing canonical event {event_key}"
                 )));
             };

@@ -446,4 +446,7 @@ impl EventStore for RedbStore {
 mod crash_atomicity_tests;
 
 #[cfg(test)]
+mod durability_tests;
+
+#[cfg(test)]
 mod tests;
