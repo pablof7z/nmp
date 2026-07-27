@@ -226,11 +226,35 @@ fn main() {
     for (at, peak, authors) in &trajectory {
         println!("  t+{at:>3}s  peak_subs={peak:<5} authors_served={authors}");
     }
-    let still_climbing = matches!(trajectory.last(), Some(&(_, peak, _))
-        if trajectory.iter().rev().take(2).any(|&(_, p, _)| p < peak) || trajectory.len() < 2);
+    // Settled means "nothing changed for a while", measured against the CLOCK.
+    //
+    // The first version of this compared the last two trajectory entries and
+    // warned if the count had risen. But `trajectory` only pushes ON CHANGE,
+    // so its last entry is the last CHANGE, not the last observation, and
+    // consecutive changes are almost always increases. It therefore fired on
+    // every run including the most definitively settled one -- nos.lol pinned
+    // at exactly 20 and relay.damus.io at exactly 200, their advertised caps,
+    // where the count could not climb because it was clamped.
+    //
+    // That is the same defect this example exists to fix: an aggregate that
+    // cannot represent the distinction it is being asked about.
+    const QUIET_SECS: u64 = 20;
+    let elapsed = started.elapsed().as_secs();
+    let last_change_at = trajectory.last().map(|&(at, _, _)| at);
+    let still_climbing = match last_change_at {
+        None => true,
+        Some(at) => elapsed.saturating_sub(at) < QUIET_SECS,
+    };
+    match last_change_at {
+        Some(at) if !still_climbing => println!(
+            "  settled: no change for {}s (last change t+{at}s, ran {elapsed}s)",
+            elapsed.saturating_sub(at)
+        ),
+        _ => {}
+    }
     if still_climbing {
         println!(
-            "  WARNING: the count was still moving at the deadline. This run is a\n\
+            "  WARNING: the count changed within the last {QUIET_SECS}s. This run is a\n\
              \x20 LOWER BOUND on the steady state, not a measurement of it. Raise\n\
              \x20 NMP_LIVE_SETTLE until the trajectory flattens before quoting a number."
         );
