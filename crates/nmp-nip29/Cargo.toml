@@ -19,6 +19,5 @@ engine = ["dep:nmp"]
 [dependencies]
 nostr.workspace = true
 nmp-grammar.workspace = true
-nmp-ownership.workspace = true
 nmp-nip51.workspace = true
 nmp = { workspace = true, optional = true }

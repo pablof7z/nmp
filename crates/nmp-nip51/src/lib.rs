@@ -8,11 +8,9 @@
 //! replacement-write encoding stays gated on #50's source-scoped
 //! base-version contract and is out of scope here.
 
-mod claims;
 mod demand;
 mod simple_groups;
 
-pub use claims::claims;
 pub use demand::active_account_demand;
 pub use simple_groups::{
     decode_simple_groups_list, decode_simple_groups_list_from_raw_tags, SimpleGroupEntry,

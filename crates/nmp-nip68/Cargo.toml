@@ -15,10 +15,8 @@ default = []
 # nmp-blossom is the artifact seam: a NIP-68 image is minted only from a
 # content-addressed BlobDescriptor / VerifiedUpload (the #421 "protected kind
 # without artifact provenance fails" contract). nmp-asset owns the exact-byte
-# `Sha256Hash` that seam carries (#884). nmp-ownership carries the KindClaim
-# vocabulary this crate exports through claims().
+# `Sha256Hash` that seam carries (#884).
 [dependencies]
 nostr.workspace = true
 nmp-asset.workspace = true
-nmp-ownership.workspace = true
 nmp-blossom.workspace = true

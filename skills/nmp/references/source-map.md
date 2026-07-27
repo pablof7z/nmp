@@ -42,7 +42,6 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `crates/nmp-signer/src/op.rs`
 - Source: `crates/nmp-signer/src/nip46.rs`
 - Source: `crates/nmp-signer/tests/nip46_mock_relay.rs`
-- Source: `crates/nmp-ownership/src/lib.rs`
 - Source: `crates/nmp-content/src/document.rs`
 - Source: `crates/nmp-content/src/parse.rs`
 

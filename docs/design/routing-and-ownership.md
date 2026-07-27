@@ -1,12 +1,12 @@
 # Relay routing + kind ownership — the canonical spec
 
 - **Date:** 2026-07-11
-- **Status:** Owner-confirmed default policy (Part A); designed override primitive + provenance decision (Part B); designed ownership boundary (Part C) — Part C's fold mechanism (`ClaimSet`) and workspace audit (`nmp-audit`) shipped 2026-07-15 (#521; see the §4.2 status ledger for what is built vs. Unit E-pending). Parts B/C carry one explicit owner-decision list (§8). Provisional-until-v2 like everything else, but Part A is the owner's settled routing model — do not re-litigate its rules, only their mechanics.
+- **Status:** Owner-confirmed default routing policy (Part A) — settled; do not re-litigate its rules, only their mechanics. **Parts B and C were rewritten 2026-07-27 by #859:** the route-override primitive and the global kind-ownership registry they specified are DELETED, not deferred. `crates/nmp-ownership` and `crates/nmp-audit`, and every protocol crate's `claims()` export, no longer exist; #757 and #758 (which would have wired the registry into routing) are closed NOT_PLANNED. Parts B/C now record what actually holds and name the one enforcement gap that remains open (§4.3). §8's remaining owner-decision list is scoped to Part A. Provisional-until-v2 like everything else.
 - **2026-07-11 promotion correction:** ownership below is **schema ownership**, not
   ownership of every event that participates in a protocol context. A NIP module
   claims only the exact event schemas that NIP defines. Per-publication context
   contributed to a foreign-owned unsigned draft is a separate, typed operation
-  (§3.2.1); it never expands the module's `KindClaim`.
+  (§3.2.1); it never expands what schemas that module defines.
   Likewise, historical "no `relays:` parameter" wording means no untyped route
   override on the default path; a live query may carry explicit typed source
   authority as specified in `query-demand-and-evidence.md`.
@@ -87,7 +87,7 @@ The distinction now matters on both sides: reads consume authors' **write**-mark
 
 ### 2.5 Who picks `WriteRouting`
 
-Today the caller supplies `WriteRouting` on the intent. Under this spec the default is **`WriteRouting::Default`** (new variant): the engine derives §2.3's union from the signed event itself at route-resolution time (kind, author, p-tags are all on the event). `AuthorOutbox`/`ToInboxes` remain as internals the default resolves *into*; `PrivateNarrow` remains the fail-closed narrow type, now minted only by route policies (Part B) — the app-facing publish surface takes an event + durability, nothing more. This is what makes "no `relays:` param" true on the write side too.
+Today the caller supplies `WriteRouting` on the intent. Under this spec the default is **`WriteRouting::Default`** (new variant): the engine derives §2.3's union from the signed event itself at route-resolution time (kind, author, p-tags are all on the event). `AuthorOutbox`/`ToInboxes` remain as internals the default resolves *into*; `PrivateNarrow` remains the fail-closed narrow type, minted by the layer that owns the operation's destination (Part B §3.1) — the app-facing publish surface takes an event + durability, nothing more. This is what makes "no `relays:` param" true on the write side too.
 
 ### 2.6 Acceptance scenarios (these are the tests)
 
@@ -99,79 +99,58 @@ Today the caller supplies `WriteRouting` on the intent. Under this spec the defa
 
 ---
 
-## 3. Part B — The `RoutePolicy` override primitive
+## 3. Part B — Route authority is derived, not overridden (DELETED design)
 
-A protocol module that **owns** certain event schemas (Part C) may replace the
-default policy for exactly those schemas. The router stays NIP-agnostic the same
-way it already is for `GroupHost`/`DmInbox` pins: **the module feeds classified
-facts and declares a policy value; the router only ever executes
-closed-vocabulary values** (VISION §10: values in, code after — a policy is data,
-never a closure).
+**2026-07-27 correction (#859).** This section previously specified a
+`RoutePolicy` override primitive — `RelaySource`, `AppLanes`, `FailMode`, and a
+typed `RouteClass` provenance enum — attached to a module's `KindClaim` and
+dispatched from a global `kind -> RoutePolicy` table. That primitive existed as
+types in `crates/nmp-ownership` and was **never consumed by any runtime path**.
+It has been deleted, along with the crate. The direction that would have wired
+it into generic routing (#758) is closed NOT_PLANNED, as is its predecessor
+#757: ordinary callers no longer select routing at all, so there is no caller
+whose selection a global policy table would have to override.
 
-### 3.1 Shape
+### 3.1 What replaces it: nothing app-facing
 
-```rust
-/// Supplied by a module for the kinds it OWNS (audited, §4). One policy
-/// covers reads AND writes for those kinds.
-pub struct RoutePolicy {
-    /// Where relays come from when reading these kinds.
-    pub read_source: RelaySource,
-    /// Where relays come from when writing these kinds.
-    pub write_source: RelaySource,
-    /// Whether the app lanes (appRelay/fallbackRelay) still apply.
-    /// Default policy = Apply; an override defaults to Skip for BOTH
-    /// read and write (owner-confirmed).
-    pub app_lanes: AppLanes,        // Apply | Skip
-    /// What happens when the source resolves to ZERO relays.
-    pub on_empty: FailMode,         // Closed | OpenToAppLanes
-    /// The typed provenance every wire route/publish under this policy
-    /// carries (§3.3). No default.
-    pub route_class: RouteClass,
-}
+There is no route-override primitive, and no plan for one. Route resolution
+derives the route **inside the owning layer** from the complete facts of the
+operation or query:
 
-/// CLOSED vocabulary — extend the enum, never admit module code.
-pub enum RelaySource {
-    /// The default: author's write-marked 10002 (reads/author-writes)
-    /// + p-tag recipients' read-marked 10002 (writes), §2.
-    Nip65Default,
-    /// A per-pubkey replaceable relay-list kind other than 10002
-    /// (NIP-17 → kind:10050; drafts → the user's draft-relay list kind).
-    /// Discovery rides sync_discovery unchanged: every 1xxxx kind is
-    /// already a DiscoveryKind, so the engine can bootstrap these lists
-    /// from indexers with zero new machinery.
-    RelayListKind { kind: u16 },
-    /// Pinned facts the owning module ingested into the directory under
-    /// a named lane (NIP-29 → group-anchor relays derived from group
-    /// state, lane GroupHost). The router reads pinned_relays(); it
-    /// never knows what a "group" is.
-    PinnedLane(Lane),
-}
-```
+- **Reads.** A live query carries its own typed source/access authority as part
+  of its closed descriptor (`query-demand-and-evidence.md`). Where an operation
+  needs an exact host or a private source, that authority is part of *that
+  query*, and it cannot change the routing of an unrelated query that happens
+  to mention the same numeric kind.
+- **Writes.** The publishing layer derives the destination from the complete
+  write facts (Part A §2.3). Where an operation needs a destination that author
+  outbox facts cannot produce, the destination is bound by the operation that
+  mints the write, and that authority is operation-local — it does not install a
+  policy for every event of that kind.
 
-- **How a module supplies it:** as part of its `KindClaim` (§4.1) — ownership and routing authority are one declaration, registered at engine construction. The router holds a `BTreeMap<u16, RoutePolicy>` **derived from the claim table** (table-driven; there is no hand-maintained per-kind `match` anywhere — the legacy per-kind match is explicitly left behind).
-- **How the router applies it:** atom/event classification happens once, up front: an atom whose `kinds` are all owned by one policy routes under that policy; the default policy otherwise. A filter mixing policy-owned and default kinds is **split** into per-policy atoms before routing (same machinery as skeleton grouping — kinds are already a set field; widen-only coalescing may re-merge per relay afterwards where the policies agree). An event's kind picks the write policy the same way.
-- **App-lane skip:** `AppLanes::Skip` removes appRelay/fallbackRelay from both directions for those kinds. A NIP-17 gift-wrap never touches the app relay even though the app relay takes "everything" — *everything* means everything default-routed.
-- **Fail modes — the trust rule:** *someone else's private inbox → fail closed; your own recoverable content → fail open.*
-  - **NIP-17 fails CLOSED:** recipient has no kind:10050 ⇒ the write terminates `WriteStatus::Failed` before any `PublishEvent` effect exists (structurally: the policy mints a `PrivateNarrow`/`NarrowOnly` set; empty ⇒ the existing ledger-#6 mechanism fires). It never falls to appRelay, even when one is configured. Reads simply have no route; their scoped acquisition evidence carries an explicit `NoPlannedSource` shortfall for the unresolved atom (ledger #7), never a global verdict.
-  - **Drafts fail OPEN:** no draft-relay list ⇒ `OpenToAppLanes` re-admits appRelay/fallbackRelay *for this event only*. Your own recoverable content on your own app relay is fine.
-- **`Skip` + `OpenToAppLanes` compose:** skip means "app lanes are not additive routes"; open-on-empty means "app lanes are the last-resort route when the source is empty." These are different questions and both fields are required — no defaulting.
+Neither direction consults a global kind table. Generic router/engine code does
+not branch on protocol module identity.
 
-### 3.2 What this is NOT
+### 3.2 What this rules out
 
-- Not a raw `relays:` parameter — policies attach to *kinds via ownership*, never
-  to a query or an intent. Typed query source authority and typed per-intent
-  context are separate closed values; neither is an unclassified override.
-- Not a closure/callback — `RelaySource` is closed; a module needing a new source shape extends the enum through review (exactly the Selector-vocabulary rule).
-- Not a second routing engine — policies swap the *fact source* and *lane applicability*; coverage solving, coalescing, sub-id stability, diffing, delivery re-filter all run unchanged on the policy's relays.
+- No raw `relays:` parameter on observe or publish (unchanged — this was always
+  the rule, and deleting `RoutePolicy` does not weaken it).
+- No standalone "register a route policy" API, because there is no route policy
+  noun at all.
+- No global `kind -> policy` dispatch, and therefore no per-kind `match` in core
+  either. Core knows NIP-01/NIP-65 defaults and nothing else.
 
-### 3.2.1 Contextual publication is not kind ownership
+### 3.2.1 Contextual publication is not schema ownership
+
+This doctrine survives the deletion and is still load-bearing (bug-class ledger
+row 14; cited from `nmp-nip29` and `nmp-media`).
 
 Some protocols constrain an event without defining its schema. NIP-29 is the
-forcing example: a group-bound publication may carry an event whose kind is
-owned by another module (or is unowned), while NIP-29 contributes the required
-`h` tag and the group's host relay.
+forcing example: a group-bound publication may carry an event whose schema is
+defined by another crate, while NIP-29 contributes the required `h` tag and the
+group's host relay.
 
-That operation is **per unsigned draft**, not a `RoutePolicy` for the draft's
+That operation is **per unsigned draft**, not a route override for the draft's
 kind:
 
 1. The schema owner builds and validates an immutable unsigned draft.
@@ -181,118 +160,102 @@ kind:
    explicit signer override, signs exactly once, and publishes through the
    ordinary outbox and receipt machinery.
 
-The contextual module cannot rewrite schema-owned fields, claim the foreign
-kind, or install a kind-wide route override. A pre-signed event is immutable and
-therefore cannot acquire missing group context; it can only be published
-verbatim. NIP-29's own management/state event schemas still use ordinary
-`KindClaim` + `RoutePolicy` routing.
+The contextual module cannot rewrite schema-owned fields, define the foreign
+kind's schema, or install a kind-wide route override. A pre-signed event is
+immutable and therefore cannot acquire missing group context; it can only be
+published verbatim.
 
-### 3.3 Typed route provenance — DECISION: adopt (`RouteClass`, no default)
+The important consequence, and the reason ledger row 14 was a TARGET: a route
+contribution is **not** gated on owning the kind. The deleted design gated every
+contribution on ownership, which is precisely the confusion the row names.
 
-The owner deferred this; the call here is **adopt**, and the reasoning is short because half of it is already in the tree:
+### 3.3 Typed route provenance — the `RouteClass` decision, reversed
 
-1. **The read side already has it.** `RouteProvenance{lane, route_kind}` means every wire REQ traces to a typed reason today. Declining typed classes on the write side would make writes the *less* accountable direction — backwards, given writes are where leaks happen (ledger #6).
-2. **Ledger #6's mechanism needs it to generalize.** `NarrowOnly` proves fail-closed for one variant; `RouteClass` makes "which trust regime routed this publish" a required, inspectable fact on every publish, and lets the ownership gate (§4.3) be one table lookup instead of per-kind knowledge.
-3. **Fail-closed-by-construction is free.** `enum RouteClass` with **no `Default` impl and no anonymous constructor**: every publish carries exactly one, minted by the policy engine — an unclassifiable publish cannot be represented, so it cannot reach the wire. This is a type mechanism, admissible under the ledger's own standard (lints are not; types are).
+The 2026-07-11 spec adopted a write-side `RouteClass` enum (`Automatic`,
+`HostPinned`, `VerifiedPrivateInbox`, `Manual`, `Imported`, `Diagnostic`) minted
+by a policy engine and threaded through `WriteStatus::Routed`. It was never
+threaded through anything: the enum lived in `nmp-ownership` with no producer
+and no consumer. It is deleted with the crate.
 
-```rust
-/// Why this publish is going where it's going. NO Default. Minted by the
-/// routing layer only; apps never construct one.
-pub enum RouteClass {
-    /// Default policy (§2): author outbox + p-tag inboxes + app lanes.
-    Automatic,
-    /// A module-pinned host (NIP-29 group anchor).
-    HostPinned,
-    /// A verified private inbox route (NIP-17 kind:10050 resolution) —
-    /// carries the NarrowOnly set; only narrowing exists.
-    VerifiedPrivateInbox,
-    /// Explicit tooling route (nmp-demo / diagnostics CLI). Feature-gated
-    /// out of the app-facing SDK build — see §8 (owner decision 4).
-    Manual,
-    /// Re-broadcast of an event authored elsewhere (import/mirror tools).
-    Imported,
-    /// Diagnostic probes (capability probing, NIP-66-style checks).
-    Diagnostic,
-}
-```
-
-**Pre-signed events fail closed.** `WritePayload::Signed` (already-signed verbatim publish, the M4 gap in known-gaps) is exactly where a leak sneaks in — no signing step, no template inspection. Rule: a pre-signed publish is routed **only** by the claim table: owned kind ⇒ the owner's policy (and its class); unowned kind ⇒ default policy ⇒ `Automatic`. `Manual`/`Imported` are the only classes an operator surface can request explicitly, and they are not in the app SDK build. A pre-signed kind:1059 with no nip17 module linked therefore has an owner-less sensitive kind and routes `Automatic` — which is why nip17's claim exists and why linking it is what makes DMs *safe*, not just possible (see §5 modularity and §8 decision 2).
-
-`WriteStatus::Routed` grows the class (`Routed(RouteClass, BTreeSet<RelayUrl>)`) so receipts and diagnostics show the trust regime, not just the URLs.
+The accountability argument behind it stands, and is met structurally rather
+than by a provenance tag: an unroutable write fails closed and its receipt
+carries the shortfall as durable evidence (ledger rows 6 and 16), and the read
+side keeps its existing `RouteProvenance{lane, route_kind}`. If a future
+operation genuinely needs a write-side trust-regime label, it is minted by the
+layer that owns that operation's destination — not by a global table keyed on a
+number.
 
 ---
 
-## 4. Part C — The kind-ownership boundary
+## 4. Part C — Schema ownership is structural, not registered
 
-The legacy repo proved the *essence*: positive typed claims, a static workspace audit as the load-bearing enforcement, a runtime publish gate, ownership gating route authority. It also proved what to drop: the linker-symbol collision gimmick, the per-kind `match`, per-kind claim repetition, regex source scans, and doctrine-lints (inadmissible here by the ledger's own falsification standard — every mechanism below is a type or a data-driven CI test over declared values, not a source-text scan).
+**2026-07-27 correction (#859).** This section previously specified a global
+ownership registry: `KindClaim`/`KindScope`/`ModuleId`, a `ClaimSet` fold, a
+`ModuleRegistration` list taken at engine construction, and a workspace audit
+crate (`nmp-audit`) that folded every enrolled module's `claims()`. Layers 1 and
+3 were never built; layer 2 was built and was **self-enrolled** — it discovered
+only crates that voluntarily declared a normal dependency on `nmp-ownership`, so
+a new protocol crate evaded the alleged workspace guarantee simply by omitting
+that dependency, and non-claiming crates were kept in the registry by prose-only
+`DeclaresNoClaims` entries. A proof a new author can opt out of is
+governance-by-policing, which this repo's ledger does not accept as a mechanism.
+All of it is deleted: both crates, every `claims()` export, and every
+audit-only dependency edge.
 
-### 4.1 The claim — one typed fact per module
+### 4.1 What ownership means now
 
-```rust
-/// Declared by a protocol module, const/static data. Registered at engine
-/// construction; collected by the workspace audit.
-pub struct KindClaim {
-    pub owner: ModuleId,                  // e.g. "nip17", "nip29", "drafts"
-    pub scope: KindScope,
-    /// Exclusive: no other module may claim an overlapping scope, and the
-    /// publish gate (§4.3) applies. Non-exclusive claims exist for shared
-    /// mechanisms (none known yet; the variant exists so the audit can
-    /// distinguish deliberate sharing from drift).
-    pub exclusive: bool,
-    /// Routing authority: present iff this module overrides routing for
-    /// this scope. A RoutePolicy is ONLY accepted attached to a claim —
-    /// this is the gate: no ownership, no route override.
-    pub route_policy: Option<RoutePolicy>,
-    /// Conscious acknowledgment that the scope intersects DiscoveryKinds
-    /// ({0, 3} ∪ 10000..=19999) — audit check (c) enforces consistency in
-    /// BOTH directions (missing ack red, stale ack red). Added by #521.
-    pub discovery_ack: bool,
-}
+**Schema ownership is a dependency fact, not a declaration.** A protocol crate
+owns a schema because it is the crate that defines, builds, and parses it, and
+because every other crate that touches that schema does so by depending on it
+and consuming its typed output. `nmp-nip51` owns kind:10009 because
+`nmp-nip29` reads `SimpleGroupEntry` from it rather than re-parsing tags;
+`nmp-blossom` owns kind:24242 and `nmp-nip68` kind:20 because `nmp-media`
+composes their outputs rather than reconstructing them. Nothing has to be
+registered for that to be true, and nothing can be forgotten to make it false.
 
-pub enum KindScope {
-    Kind(u16),
-    Range(RangeInclusive<u16>),           // only when a NIP truly owns the range
-    Set(&'static [u16]),                  // NIP-17's {1059, 13, 14, 15, 10050}
-}
-```
+**Publication authority stays with the layer that mints the write.** A supported
+write is constructible only through a typed semantic operation; the numeric kind
+is not the authority boundary, the complete operation is.
 
-Range/Set kill the legacy per-kind repetition. A module exports `pub fn claims() -> &'static [KindClaim]` — plain data, no macro magic required (`declare_crate_ownership!` may return as sugar later; it is not the mechanism).
+**Two crates parsing the same numeric kind is not, by itself, a conflict.** The
+dangerous duplicate is two public operations claiming the same semantic
+responsibility, or generic core code branching on protocol meaning — neither of
+which a table of numbers detects.
 
-### 4.2 Enforcement — three layers, none of them a lint
+### 4.2 What generic core must never do
 
-1. **Engine-construction check (types + fail-fast).** The engine builder takes `Vec<ModuleRegistration>`; construction folds all claims into the routing table and **errors** (typed, not panic) on any exclusive-scope overlap among *linked* modules. Cheap, runs in every test that builds an engine, catches the common case at the first `cargo test`.
-2. **The static workspace audit (the load-bearing layer).** A CI test (`nmp-audit` dev-crate or a workspace-level integration test) that dev-depends on **every** module crate — enumerated from `cargo metadata`, so a new module crate that forgets to enroll is itself a red build — collects all `claims()`, and asserts: (a) no exclusive-scope overlap **across the whole workspace, including modules no app currently links** (the legacy audit's key property: drift is caught before any consumer collides); (b) every `RoutePolicy` is attached to a claim whose scope covers it (route authority ⊆ ownership, by construction of the struct, re-asserted across crates); (c) claimed scopes don't intersect `DiscoveryKinds` unless flagged (a module claiming 1xxxx must consciously interact with indexer semantics). Output on failure names both owners and the overlapping scope — the legacy `NMP-OWNERSHIP-COLLISION` map, minus the linker.
-3. **The runtime publish gate (table-driven).** At route resolution, one lookup: event kind → claim table. Owned-exclusive kind ⇒ routed by the owner's policy, carrying the owner's `RouteClass`; the default policy **refuses** to route it (structurally: the routing table returns the policy, and `Automatic` is simply not the entry for that kind — there is no bypass parameter to pass). Unowned kind ⇒ default policy, `Automatic`. This replaces the legacy `validate_publish_ownership` per-kind provenance checks with the class system: "kind 1059 requires nip17 provenance" becomes "kind 1059's table entry routes `VerifiedPrivateInbox` or fails closed" — same guarantee, zero per-kind code in core.
+1. Take a module registration list, in any form.
+2. Dispatch on protocol module identity.
+3. Look up a global kind -> policy/owner table at route resolution.
+4. Contain per-kind protocol knowledge beyond the NIP-01/NIP-65 defaults Part A
+   specifies.
 
-**Dropped from legacy, deliberately:** the compile-time linker-symbol collision (fragile across feature unification/platforms, redundant once layer 2 exists and layer 1 fails fast); the source-surface regex scan (a lint by another name); the hand-maintained per-kind `match` (the table *is* the claims).
+These are the properties reviews and falsifiers check; they are stated as
+absences because the mechanism is the absence of the noun.
 
-**Status of the three layers (2026-07-15, #521 — this is the honest ledger, not a claim of completion):**
+### 4.3 The one remaining enforcement gap — TARGET
 
-1. **Layer 1 — MECHANISM SHIPPED, engine wiring deferred to Unit E.** The fold is `nmp_ownership::ClaimSet::build`: claims in, typed `ClaimOverlap` out (both owners, both scopes, one witness kind; Display prefixed `NMP-OWNERSHIP-COLLISION`). The `EngineCore::new` signature change is deliberately NOT done yet: no module is registered with the engine today (nip02/nip51/nip29 are composition libraries used *beside* the engine), so every construction site would pass an empty registration vec — plumbing that enforces nothing while appearing to. It lands with Unit E (claim-table routing), its first real consumer, which folds through this same function.
-2. **Layer 2 — SHIPPED (`crates/nmp-audit`).** cargo-metadata enrollment keyed on "declares a normal dependency on `nmp-ownership`" (the real module crates are `nmp-nip*`, not the plan's anticipated `nmp-mod-*`, so the name pattern was dropped for the dependency fact): an unenrolled claim-bearing crate is a red build, a stale registry entry too. Checks (a) exclusive-overlap fold via `ClaimSet::build`, (b) route authority ⊆ ownership (policy ⇒ exclusive), (c) `discovery_ack` consistency in both directions, plus fixture falsifiers per the build plan §4.3/§4.4. `nmp-nip29` is enrolled as an explicit `DeclaresNoClaims` entry (contextual publication, §3.2.1 — its no-`claims()` export stays deliberate).
-3. **Layer 3 — NOT BUILT; lands with Unit E.** The lookup it needs (`ClaimSet::route_policy(kind)`) exists and is tested; the route-resolution dispatch does not. Until Unit E, an owned kind routes like any other — today's claims all declare `route_policy: None`, so the table contains no policy the default path could violate.
+Where a **dependency direction** is the invariant (e.g. "no pure protocol crate
+depends on the engine/router/store/transport merely to describe protocol data"),
+CI must inspect the **actual workspace graph** — `cargo metadata`, resolved
+edges — or compile an external-consumer falsifier. It must not require a crate
+to self-enrol for the check to see it, which is exactly the failure mode
+`nmp-audit` shipped with.
 
-**Layer-3 semantics, clarified (previously ambiguous):** the refusal binds when the owning claim **carries a `RoutePolicy`**. An exclusive claim with `route_policy: None` (nip02's kind:3, nip51's kind:10009) is schema ownership for audit/collision purposes only — those kinds route under the **default** policy by the owner's own declaration (both crates document exactly that), and refusing them would break the owning modules themselves. "The default policy refuses to route it" applies to policy-bearing claims (nip17's future 1059/10050), where `Automatic` is simply not the table entry.
-
-### 4.3 Ownership gates routing authority
-
-The rule, stated once: **a module's schema-wide `RoutePolicy` is honored for
-exactly the kinds it owns.** The `Option<RoutePolicy>` living *inside*
-`KindClaim` makes this true by construction — there is no standalone "register a
-route policy" API to misuse. A typed contextual publication (§3.2.1) is the only
-separate case: it contributes route context to one composed intent and cannot
-be registered as policy for the foreign kind. The two legacy facts ("owns
-kind" + "overrides route") remain independently *checkable* but cannot drift
-into a module claiming unrelated content schemas.
+That check is **not built**. It is tracked separately from this deletion; do not
+read §4.1 as claiming a mechanical guarantee. What §4.1 claims today is that the
+*bad* mechanism is gone and that ownership is described by the real dependency
+shape, which is auditable by reading the graph even before CI does it
+automatically.
 
 ### 4.4 Scope-drift prevention
 
-- A module reading/writing a kind outside its claim doesn't get a schema-wide
-  policy for it — it gets the default policy like any app code. A contextual
-  operation may add only its typed, per-intent contribution (§3.2.1). Drift
-  therefore cannot silently turn into ownership of the foreign schema.
-- The audit's cross-workspace overlap check means a second module claiming an owned kind is a red build even if no app links both.
-- New ledger entry (proposed here as "#14", **landed 2026-07-15 as bug-class-ledger row 22** — the ledger's own #14 was meanwhile taken by the schema-vs-contextual class): "a routing override is only representable inside a `KindClaim`; overlapping exclusive claims are a red build workspace-wide; an owned kind cannot be routed by the default policy (*policy-bearing* ownership — an exclusive claim with `route_policy: None` routes default by the owner's own declaration; see §4.2's layer-3 clarification)." Falsification: attempt to publish an owned kind through `Automatic`, attempt to register a bare policy, attempt two claims on one kind — each must fail to compile or fail closed. Status is PARTIAL: the first two falsifiers are live (`nmp-audit` fixtures + no bare-policy API); the `Automatic`-refusal falsifier awaits Unit E's gate.
+- A crate reading or writing a kind whose schema it does not define does not
+  thereby gain any routing authority over it — there is no authority to gain.
+  It may add only its typed, per-intent contextual contribution (§3.2.1).
+- Drift into ownership of a foreign schema requires copying that schema's
+  parser/builder into a second crate. That is a visible, reviewable diff, not a
+  silent table entry.
 
 ---
 
@@ -300,13 +263,13 @@ into a module claiming unrelated content schemas.
 
 | Piece | Crate |
 |---|---|
-| Default policy (§2), lanes, solver, coalescing, `RoutePolicy`/`RelaySource`/`RouteClass`/`KindClaim` **types**, claim-table routing, publish gate | `nmp-router` (types + compile) / `nmp-engine` (write-path execution) — **core knows zero NIPs beyond NIP-01/65 defaults** |
-| Ownership audit harness | workspace-level dev-crate (`nmp-audit`), cargo-metadata-driven |
-| NIP-17: claim `{1059,13,14,15,10050}`, policy `{read/write: RelayListKind{10050}, Skip, Closed, VerifiedPrivateInbox}`, kind:10050 ingestion, gift-wrap machinery | `nmp-mod-nip17` (future) |
-| NIP-29: claim the explicit set of NIP-29-defined management/state schemas only (no broad ranges and no foreign content kinds); those owned schemas may use `{PinnedLane(GroupHost), Skip, Closed, HostPinned}`. Group-bound foreign drafts use §3.2.1 to add `h` + host context without changing ownership. | `nmp-mod-nip29` (future) |
-| Drafts: claim (draft kind), policy `{RelayListKind{draft-list-kind}, Skip, OpenToAppLanes, Automatic}` | `nmp-mod-drafts` (future) |
+| Default policy (§2), lanes, solver, coalescing, route compilation | `nmp-router` (types + compile) / `nmp-engine` (write-path execution) — **core knows zero NIPs beyond NIP-01/65 defaults** |
+| Each NIP's schema: build, parse, validate, typed values, demand constructors | that NIP's own `nmp-nip*` / `nmp-blossom` crate, engine-free |
+| The destination and body of a supported write | the layer that mints that write, operation-locally (§3.1) |
+| NIP-17 (future): gift-wrap machinery, kind:10050 ingestion, and its own fail-closed private-inbox resolution | `nmp-mod-nip17` (future) — its routing is owned by the operation that publishes a gift-wrap, not by a registry entry for kind 1059 |
+| NIP-29: the NIP-29-defined management/state schemas. Group-bound foreign drafts use §3.2.1 to add `h` + host context without defining the foreign schema. | `nmp-nip29` |
 
-An app that enables nip17 links DM routing; an app that doesn't links **zero** DM code — the claim table simply has no 1059 entry, and core contains no string "gift wrap" anywhere. The seam already half-exists: `Lane::GroupHost`/`Lane::DmInbox` and `pinned_relays()` were built as exactly this kind of module-fed fact; Part B/C give them their supplier.
+An app that enables nip17 links DM routing; an app that doesn't links **zero** DM code — because the code is in a crate it did not depend on, and core contains no string "gift wrap" anywhere. The seam already half-exists: `Lane::GroupHost`/`Lane::DmInbox` and `pinned_relays()` were built as module-fed facts; what feeds them is a typed operation, not a global policy table.
 
 ---
 
@@ -318,33 +281,56 @@ An app that enables nip17 links DM routing; an app that doesn't links **zero** D
 1. `Lane::{AppRelay, Fallback, Nip65Read}`; `RelayDirectory::{app_relays, fallback_relays, read_relays, ingest_read_relays}`; config surface for the three lanes.
 2. Solver-input narrowing (own relays only toward k) + additive lane application outside the solve + shortfall-triggered fallback with appRelay suppression.
 3. Default write policy derived from the event (`WriteRouting::Default`): p-tag inbox fan-out (read-marked, 2-each), the >10-p-tag / kind:3 / kind:1xxxx exclusions, app-lane union; delete the flagged `ToInboxes` write-relay fallback.
-4. `RoutePolicy` + `RelaySource` + claim-table routing (read-atom splitting by policy, write-kind dispatch), `AppLanes`/`FailMode` composition.
-5. `RouteClass` (no default) threaded through `WriteStatus::Routed` + diagnostics; pre-signed publish routed only via the table.
-6. `KindClaim`/`KindScope`/`ModuleRegistration`, construction-time overlap error, the `nmp-audit` workspace test, ledger #14 + falsification tests. *(Status: types + `discovery_ack` + `ClaimSet` fold + `nmp-audit` + ledger row 22 landed with #521; `ModuleRegistration`/engine wiring rides Unit E — see §4.2 status ledger.)*
-7. The §2.6 scenarios as router/engine tests; a **decision-table test** covering every (lane config × policy × fail-mode × p-tag/kind exclusion) cell.
+4. ~~Route-policy override primitive and claim-table routing.~~ **CANCELLED
+   (#859; #757/#758 closed NOT_PLANNED.)** Nothing replaces it — see §3.1.
+5. ~~`RouteClass` threaded through `WriteStatus::Routed`.~~ **CANCELLED (#859)** —
+   see §3.3.
+6. ~~`KindClaim`/`KindScope`/`ModuleRegistration` + the `nmp-audit` workspace
+   test.~~ **DELETED (#859).** `crates/nmp-ownership` and `crates/nmp-audit` are
+   gone, along with every `claims()` export. The replacement obligation is the
+   workspace-graph dependency check in §4.3, which is TARGET.
+7. The §2.6 scenarios as router/engine tests; a **decision-table test** covering
+   every (lane config × fail-mode × p-tag/kind exclusion) cell.
 
-Rough order: 1–3 are M-next (they close a known-gap and finish Part A); 4–5 land with the first real module need (nip17 is the forcing function); 6 lands the moment a second claim-bearing module exists — the audit is cheap and should not wait for a collision.
+Rough order: 1–3 are M-next (they close a known-gap and finish Part A); 7 rides
+with them. Items 4–6 are not scheduled because they are cancelled.
 
 ---
 
 ## 7. Biggest risk
 
-**The policy-composition matrix.** Lanes × overrides × fail modes × pre-signed × p-tag exclusions is a genuine decision *table*, and every cell is a routing decision where one wrong precedence is either a privacy leak (a gift-wrap reaching appRelay because `Skip` and `OpenToAppLanes` were composed wrong, or a pre-signed 1059 sliding through `Automatic` in an app that forgot to link nip17) or silent under-delivery (fallback suppressed when it shouldn't be, an under-min author quietly unrouted). The individual mechanisms are each simple; the *interactions* are where this design can rot. Mitigation is stated in §6 item 7 and is non-negotiable: the full decision table enumerated as tests, plus ledger entries whose falsification attempts target exactly the leak cells. Secondary risk: §6 item 2 changes the meaning of an already-proven solver's input — re-run every solver/coverage-attribution property test against the narrowed candidate semantics before trusting any plan diff.
+**The lane-composition matrix.** Lanes × fail modes × pre-signed × p-tag
+exclusions is a genuine decision *table*, and every cell is a routing decision
+where one wrong precedence is either a privacy leak or silent under-delivery
+(fallback suppressed when it shouldn't be, an under-min author quietly
+unrouted). Deleting the override primitive (§3) removes the *policy* dimension
+from that matrix — a real reduction in the space that can rot — but the
+remaining cells still need the full decision table enumerated as tests (§6 item
+7), plus ledger entries whose falsification attempts target exactly the leak
+cells. Secondary risk: §6 item 2 changes the meaning of an already-proven
+solver's input — re-run every solver/coverage-attribution property test against
+the narrowed candidate semantics before trusting any plan diff.
+
+**The risk this document created.** For a year Parts B/C described a mechanism
+that did not exist and, in the case of `nmp-audit`, one that existed and proved
+nothing. That is the more expensive failure mode: a design doc asserting a
+guarantee is read as the guarantee. Status lines in this file are load-bearing;
+keep them honest or delete the section.
 
 ## 8. Decisions that still need the owner
 
 1. **Discovery-kind self-writes to indexers** (§2.1): does the author's own kind:10002/kind:0 publish also go to the configured indexers by default? Spec assumes **yes** (bootstrap symmetry); confirm.
-2. **Pre-signed sensitive kinds without their module linked** (§3.3): an app publishing a pre-signed kind:1059 with no nip17 module gets `Automatic` public routing. Alternatives: (a) accept (current spec — modularity-pure: core cannot know 1059 is sensitive), (b) a tiny core-shipped "known-sensitive, refuse-unowned" kind set (violates zero-NIP-knowledge), (c) refuse ALL pre-signed publishes of any 1xxx-gift-wrap-range kind. Spec recommends (a) + loud documentation; owner may prefer (b).
-3. **Do `Hint`/`Provenance` extras count toward the 2-relay-min**, or only `Nip65Write`? Owner said "author's own relays (from kind:10002)"; spec reads that literally (extras are additive candidates but don't satisfy the min ⇒ under-min authors still trigger fallback). Confirm — the other reading (hints count) reduces fallback traffic.
-4. **`Manual`/`Imported` surface** (§3.3): confirmed as feature-gated tooling-only (absent from the app SDK), or removed entirely until a tool needs them?
-5. **Draft-relay list kind** for the drafts module's `RelayListKind` source (kind:10013 per NIP-37?) — pick when the module is built.
+2. **Pre-signed sensitive kinds without their module linked:** an app publishing a pre-signed kind:1059 with no nip17 module gets ordinary default routing. Alternatives: (a) accept (current spec — modularity-pure: core cannot know 1059 is sensitive), (b) a tiny core-shipped "known-sensitive, refuse-unowned" kind set (violates zero-NIP-knowledge), (c) refuse ALL pre-signed publishes of any 1xxx-gift-wrap-range kind. Spec recommends (a) + loud documentation; owner may prefer (b). Resolved as (a) in §9.2 — the resolution stands, but note that its phrasing predates #859 and the mechanism is "the composing crate owns the write", not a registry entry.
+3. **Do `Hint`/`Provenance` extras count toward the 2-relay-min**, or only `Nip65Write`? Owner said "author's own relays (from kind:10002)"; spec reads that literally (extras are additive candidates but don't satisfy the min ⇒ under-min authors still trigger fallback). Confirm — the other reading (hints count) reduces fallback traffic. (Resolved in §9.3.)
+4. ~~**`Manual`/`Imported` route-class surface.**~~ **MOOT (#859)** — `RouteClass` is deleted; there are no route classes to gate.
+5. **Draft-relay list kind** for a future drafts module (kind:10013 per NIP-37?) — pick when the module is built. It will be that module's own routing fact, not a registered relay source.
 
 ## 9. Owner decisions RESOLVED (2026-07-11)
 
 1. **Discovery self-writes to indexers: YES** — and add **indexer backfill**: when NMP receives a *newer* event (e.g. a fresher kind:0/10002) that the indexer it's using did not have, it contributes that event *back* to that indexer (republish), keeping the indexer fresh. New write-back behavior for the router milestone.
-2. **Pre-signed sensitive kinds without their module linked: accept (a)** — core stays NIP-blind. Raw **kind:1059 (gift-wrap) has no mandated routing in core**; routing is owned by whatever crate *composes over* gift-wraps. `nip17` (and any other gift-wrap-composing module) does its **own** routing (recipient's kind:10050, fail-closed) via the `RoutePolicy`/ownership seam. If no such module is linked, a bare pre-signed 1059 routes `Automatic` — which is *why* linking the composing module is what makes it safe.
+2. **Pre-signed sensitive kinds without their module linked: accept (a)** — core stays NIP-blind. Raw **kind:1059 (gift-wrap) has no mandated routing in core**; routing is owned by whatever crate *composes over* gift-wraps. `nip17` (and any other gift-wrap-composing module) does its **own** routing (recipient's kind:10050, fail-closed) inside the operation that mints the write. If no such module is linked, a bare pre-signed 1059 routes by the default policy — which is *why* linking the composing module is what makes it safe. *(2026-07-27: the decision stands; the "`RoutePolicy`/ownership seam" it originally named is deleted per #859, and the seam is now the write-minting operation itself — §3.1.)*
 3. **Relay hints count toward the 2-min (BOTH read+write), and NMP EMITS hints on publish.** Two additions: (a) on READ, a relay hint (from an `e`/`p` tag's 3rd position, or from provenance of where an event was seen) is a first-class routing candidate that *counts* toward the 2-relay-min — favor following hints. (b) on WRITE, when publishing an event that references another event/user, NMP writes a **relay hint = the relay where it found the referenced event** into that tag. This supersedes §8-decision-3's literal "only write relays count" reading.
-4. **`Manual`/`Imported` route classes: feature-gated, tooling-only** (absent from the app SDK build) — orchestrator's call, per the spec recommendation.
+4. ~~**`Manual`/`Imported` route classes: feature-gated, tooling-only.**~~ **MOOT (#859)** — the `RouteClass` enum this decided is deleted.
 5. **Drafts: kind:10013 (NIP-37), but do NOT build the module yet** — capture the known requirements in a follow-up GitHub issue; spec it high-level only.
 6. **Schema ownership and contextual contribution are distinct.** NIP-29 owns
    only its exact NIP-defined event schemas. A group-bound publication of a
