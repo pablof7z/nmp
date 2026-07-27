@@ -152,16 +152,27 @@ fn batching_a_growing_tag_set_trades_sub_count_for_wire_churn() {
         fan_total.closes, 0,
         "fan-out never closes a sub as the set grows"
     );
-    assert!(
-        batch_total.closes > 0,
-        "a widened filter's SubId moves on every growth step, forcing Close+Req"
+
+    // INVERTED when allocated ids landed (#899). Under derived ids a widened
+    // filter's SubId moved on every growth step, so batching bought one live
+    // sub at the price of a Close plus a Req per value -- measured then as 15
+    // wire messages against fan-out's 8. Allocation decides continuity by
+    // structural signature instead, so a grown value set is a one-component
+    // difference that overwrites the SAME token in place.
+    assert_eq!(
+        batch_total.closes, 0,
+        "a widened filter must now grow in place: allocated ids do not move \
+         when a value set grows"
     );
-    assert!(
-        batch_total.total() > fan_total.total(),
-        "batching costs MORE cumulative wire messages than fan-out: \
-         batched {} vs fan-out {}",
+    assert_eq!(
         batch_total.total(),
-        fan_total.total()
+        fan_total.total(),
+        "batching now costs the SAME wire messages as fan-out ({} vs {}) while \
+         holding {} live sub instead of {} -- that is the whole point of the fix",
+        batch_total.total(),
+        fan_total.total(),
+        batch_live,
+        fan_live
     );
 }
 
@@ -227,12 +238,18 @@ fn the_authors_slot_already_achieves_one_stable_sub_with_no_churn() {
 /// `WireReq`s sharing one id cannot both reach the wire — one is silently
 /// dropped, and the next compile is a no-op, so it never repairs.
 ///
-/// `Skeleton::of` erases `authors`, which is only safe while `AuthorUnion` is
-/// TOTAL over the partition. `neither_limited` makes it partial: two atoms
-/// identical except `authors`, both carrying a `limit`, refuse to merge and
-/// then collide on the erased skeleton.
+/// INVERTED when allocated ids landed (#899). This test previously asserted
+/// the DEFECT: `Skeleton::of` erased `authors`, which was only safe while
+/// `AuthorUnion` was TOTAL over the partition, and `neither_limited` makes it
+/// partial — so two atoms identical except `authors`, both carrying a `limit`,
+/// refused to merge and then collided on the erased skeleton, with one REQ
+/// silently never reaching the relay.
+///
+/// Allocation removes the bet entirely: injectivity comes from the assignment
+/// (each prior token used at most once, fresh tokens unique by minting), so
+/// two unmergeable filters simply get two tokens.
 #[test]
-fn limited_identical_except_authors_atoms_collide_on_sub_id() {
+fn limited_identical_except_authors_atoms_each_reach_the_wire() {
     let dir = FixtureDirectory::new();
     let mut router = Router::new(
         DiscoveryKinds::default(),
@@ -294,16 +311,19 @@ fn limited_identical_except_authors_atoms_collide_on_sub_id() {
     assert_eq!(planned.len(), 2, "both atoms are planned separately");
     assert_eq!(
         planned_ids.len(),
-        1,
-        "FABLE'S CLAIM: the two planned WireReqs share ONE SubId"
+        2,
+        "each unmergeable filter must carry its OWN token — this asserted 1 \
+         before #899, which is exactly how demand went missing"
     );
     assert_eq!(
-        emitted, 1,
-        "FABLE'S CLAIM: only one REQ reaches the wire — the other author's demand is silently lost"
+        emitted, 2,
+        "BOTH REQs must reach the wire; before #899 only one did and the other \
+         author's demand was silently lost"
     );
     assert_eq!(
         repaired, 0,
-        "FABLE'S CLAIM: an identical recompile is a no-op, so the loss never repairs"
+        "an identical recompile stays a no-op — nothing to repair, because \
+         nothing was dropped"
     );
 }
 
