@@ -30,6 +30,25 @@ NMPEngine(NMPConfig(indexerRelays = listOf("wss://purplepag.es"))).use { nmp ->
 
 See `src/main/kotlin/com/nmp/sdk/Engine.kt` for the full public surface.
 
+NIP-22 comment composition is a protocol-owned top-level function returning
+the ordinary write noun:
+
+```kotlin
+val intent =
+    commentIntent(
+        root = root,
+        parent = parent,
+        authorPubkey = author,
+        createdAt = timestamp,
+        content = text,
+        correlation = correlation,
+    )
+val receipt = nmp.publish(intent)
+```
+
+It does not become an `NMPEngine` method, a `CommentIntent` wrapper, or a
+second publication lifecycle.
+
 Apps that opt into the separate `:ui` artifact may also import `com.nmp.ui`.
 Its relay views accept caller-owned `NmpRelayInformationState`, query-scoped
 `NmpRelayRuntimePresentation`, and an optional already-resolved Compose

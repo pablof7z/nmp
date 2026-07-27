@@ -7,7 +7,7 @@
 - Current public support:
 - Target-only mechanism or missing prerequisite:
 - Native packaging today versus target:
-- Why an ordinary app `Filter`, `Demand`, or `WriteIntent` is insufficient:
+- Required generic `Filter`, `Demand`, or `WriteIntent` authority hardening, if any:
 
 ## Exact ownership
 
@@ -20,7 +20,8 @@
 
 - Public semantic inputs:
 - Returned demand/resource/draft/operation:
-- One-step publish or staged take-once token:
+- Protocol-owned immutable composition returning the ordinary core noun:
+- Generic `publish` path:
 - Source/access/routing context:
 - Why authority cannot be widened or forged:
 

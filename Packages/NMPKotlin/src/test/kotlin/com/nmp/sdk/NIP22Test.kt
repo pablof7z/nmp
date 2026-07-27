@@ -179,7 +179,7 @@ class NIP22Test {
 
                 val token = "kotlin-nip22-offline-signer-token"
                 val intent =
-                    engine.commentIntent(
+                    commentIntent(
                         root = CommentRoot.External(Nip73Target.PodcastEpisodeGuid("guid-offline")),
                         parent = CommentParent.Root,
                         authorPubkey = author,
@@ -187,7 +187,7 @@ class NIP22Test {
                         content = "great show",
                         correlation = token,
                     )
-                val receipt = engine.publishComposed(intent)
+                val receipt = engine.publish(intent)
                 val statuses = withTimeout(5_000) { receipt.status.take(2).toList() }
                 assertEquals(
                     listOf(WriteStatus.Accepted, WriteStatus.AwaitingCapability(author)),
@@ -229,14 +229,33 @@ class NIP22Test {
                 engine.setActiveAccount(authorPubkey)
 
                 val intent =
-                    engine.commentIntent(
+                    commentIntent(
                         root = CommentRoot.External(Nip73Target.PodcastEpisodeGuid("golden-guid-572")),
                         parent = CommentParent.Root,
                         authorPubkey = authorPubkey,
                         createdAt = 1_700_000_000uL,
                         content = "golden fixture content",
                     )
-                val receipt = engine.publishComposed(intent)
+                val payload = intent.payload as WritePayload.Unsigned
+                assertEquals(authorPubkey, payload.pubkey)
+                assertEquals(1_700_000_000uL, payload.createdAt)
+                assertEquals(1111u.toUShort(), payload.kind)
+                assertEquals(
+                    listOf(
+                        listOf("I", "podcast:item:guid:golden-guid-572"),
+                        listOf("K", "podcast:item:guid"),
+                        listOf("i", "podcast:item:guid:golden-guid-572"),
+                        listOf("k", "podcast:item:guid"),
+                    ),
+                    payload.tags,
+                )
+                assertEquals("golden fixture content", payload.content)
+                assertEquals(Durability.Durable, intent.durability)
+                assertEquals(WriteRouting.AuthorOutbox, intent.routing)
+                assertEquals(null, intent.identityOverride)
+                assertEquals(null, intent.correlation)
+
+                val receipt = engine.publish(intent)
                 val statuses = withTimeout(5_000) { receipt.status.take(2).toList() }
                 assertEquals(WriteStatus.Accepted, statuses.first())
 
@@ -271,14 +290,14 @@ class NIP22Test {
                 val rowFlow = engine.observe(demand)
 
                 val intent =
-                    engine.commentIntent(
+                    commentIntent(
                         root = root,
                         parent = CommentParent.Root,
                         authorPubkey = author,
                         createdAt = 1_723_459_000uL,
                         content = "visible through the ordinary query path",
                     )
-                val receipt = engine.publishComposed(intent)
+                val receipt = engine.publish(intent)
                 withTimeout(5_000) { receipt.status.take(2).toList() }
 
                 val row = withTimeout(5_000) { rowFlow.first { it.rows.isNotEmpty() } }.rows.first()

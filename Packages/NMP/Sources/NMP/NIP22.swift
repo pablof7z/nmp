@@ -1,10 +1,7 @@
-// Typed NIP-22 comments over NIP-73 external targets (#572) -- pure
-// functions, same shape as `NIP29.swift`'s precedent (#108): no `NMPEngine`
-// instance is needed for root-thread demand or decode. `NMPEngine.
-// commentIntent` (this file's write-side counterpart) needs no engine
-// state either -- `nmp_nip22::comment_intent` takes author/time as
-// explicit caller parameters -- but lives on `NMPEngine` for the same
-// "engine door" naming symmetry as `groupMessageIntent`.
+// Typed NIP-22 comments over NIP-73 external targets (#572/#822). Demand,
+// decode, and composition are pure protocol-owned functions. Composition
+// returns NMP's ordinary `WriteIntent`; publication remains exclusively on
+// `NMPEngine.publish`.
 
 import NMPFFI
 
@@ -182,40 +179,28 @@ public func decodeComment(_ row: Row) throws -> DecodedComment {
     }
 }
 
-/// A composed NIP-22 comment (#572), returned by `NMPEngine.commentIntent`.
-/// Opaque and take-once -- pass it to `NMPEngine.publishComposed(_:)`
-/// exactly once; a second attempt throws `NMPError.intentAlreadyConsumed`.
-/// Never exposes the materialized tags, routing, author, or timestamp.
-public struct CommentIntent: Sendable {
-    let ffi: FfiComposedWriteIntent
-}
-
-extension NMPEngine {
-    /// Compose a durable, author-outbox-routed NIP-22 comment `WriteIntent`
-    /// (#572). Unlike `groupMessageIntent`, this needs no engine state at
-    /// all -- author/time are explicit caller parameters -- but lives here
-    /// for the same "engine door" naming symmetry. `correlation` (#591)
-    /// passes straight through to `WriteIntent.correlation`. Publish the
-    /// returned take-once value through `publishComposed(_:)`.
-    public func commentIntent(
-        root: CommentRoot,
-        parent: CommentParent,
-        authorPubkey: String,
-        createdAt: UInt64,
-        content: String,
-        correlation: String? = nil
-    ) throws -> CommentIntent {
-        try CommentIntent(
-            ffi: nmpRethrowing {
-                try ffi.commentIntent(
-                    root: root.toFfi(),
-                    parent: parent.toFfi(),
-                    authorPubkey: authorPubkey,
-                    createdAt: createdAt,
-                    content: content,
-                    correlation: correlation
-                )
-            }
-        )
-    }
+/// Compose a durable, author-outbox-routed NIP-22 comment as NMP's ordinary
+/// `WriteIntent` (#822). Author and time are explicit inputs, so composition
+/// owns no engine state or lifecycle. `correlation` passes through unchanged;
+/// publish the result through `NMPEngine.publish(_:)`.
+public func commentIntent(
+    root: CommentRoot,
+    parent: CommentParent,
+    authorPubkey: String,
+    createdAt: UInt64,
+    content: String,
+    correlation: String? = nil
+) throws -> WriteIntent {
+    try WriteIntent(
+        nmpRethrowing {
+            try NMPFFI.commentIntent(
+                root: root.toFfi(),
+                parent: parent.toFfi(),
+                authorPubkey: authorPubkey,
+                createdAt: createdAt,
+                content: content,
+                correlation: correlation
+            )
+        }
+    )
 }

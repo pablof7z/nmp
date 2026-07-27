@@ -1,19 +1,15 @@
-//! Typed NIP-22 comments over NIP-73 external targets (#572) -- top-level
-//! free functions for root-thread demand and decode, same shape as
-//! [`crate::nip29`]'s precedent (#108/#156): no `NmpEngine` instance is
-//! needed for either, since `nmp_nip22`'s default feature set has zero
-//! engine dependency (its `comment_intent` takes author/time as EXPLICIT
-//! caller parameters, unlike NIP-29's semantic kind:9 message). The
-//! take-once composed-intent wrapper is [`crate::nip29::FfiComposedWriteIntent`]
-//! itself -- reused verbatim, nothing here is NIP-22-specific about it.
-
-use std::sync::Arc;
+//! Typed NIP-22 comments over NIP-73 external targets (#572/#822) -- top-level
+//! free functions for root-thread demand, decode, and ordinary write-intent
+//! composition. None needs an `NmpEngine`: `nmp-nip22` owns the schema and
+//! pure composition, while the generic engine owns the one
+//! `FfiWriteIntent -> publish -> receipt` lifecycle.
 
 use nostr::{EventId, PublicKey};
 
 use crate::convert::{demand_to_ffi, parse_correlation_token, parse_pubkey, FfiError};
-use crate::nip29::FfiComposedWriteIntent;
-use crate::types::{FfiDemand, FfiRow};
+use crate::types::{
+    FfiDemand, FfiDurability, FfiRow, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
+};
 
 /// A validated NIP-73 external-content target (`nmp_nip22::Nip73Target`
 /// mirror).
@@ -300,20 +296,24 @@ pub fn decode_comment(row: FfiRow) -> Result<FfiDecodedComment, FfiCommentDecode
     })
 }
 
-/// Compose a durable, author-outbox-routed `WriteIntent` for a NIP-22
-/// comment (`nmp_nip22::comment_intent` mirror). Take-once: publish the
-/// returned handle through [`crate::facade::NmpEngine::publish_composed`]
-/// exactly once. `correlation` (#591) is passed straight through to
-/// `WriteIntent.correlation` -- no comment-specific correlation machinery.
+/// Compose an ordinary durable, author-outbox-routed [`FfiWriteIntent`] for a
+/// NIP-22 comment (`nmp_nip22::comment_intent` mirror). This function is
+/// engine-free: author and event time are explicit deterministic composition
+/// inputs. Publish the returned value through
+/// [`crate::facade::NmpEngine::publish`], the same generic write lifecycle as
+/// every other ordinary intent. `correlation` (#591) passes straight through
+/// to `WriteIntent.correlation`; NIP-22 owns no separate correlation,
+/// take-once, signing, routing, receipt, or retry machinery.
+#[uniffi::export]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn comment_intent(
+pub fn comment_intent(
     root: FfiCommentRoot,
     parent: FfiCommentParent,
     author_pubkey: String,
     created_at: u64,
     content: String,
     correlation: Option<String>,
-) -> Result<Arc<FfiComposedWriteIntent>, FfiError> {
+) -> Result<FfiWriteIntent, FfiError> {
     let root = root_from_ffi(root)?;
     let parent = parent_from_ffi(parent)?;
     let author = parse_pubkey(&author_pubkey)?;
@@ -329,7 +329,38 @@ pub(crate) fn comment_intent(
         content,
         correlation,
     );
-    Ok(FfiComposedWriteIntent::new(intent))
+
+    // NIP-22 owns this complete shape. The FFI layer projects the returned
+    // ordinary intent instead of independently re-stating its payload,
+    // durability, routing, identity, or correlation policy.
+    let nmp_grammar::WriteIntent {
+        payload: nmp_grammar::WritePayload::Unsigned(unsigned),
+        durability: nmp_grammar::Durability::Durable,
+        routing: nmp_grammar::WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation,
+    } = intent
+    else {
+        unreachable!("nmp-nip22::comment_intent violated its closed write contract")
+    };
+
+    Ok(FfiWriteIntent {
+        payload: FfiWritePayload::Unsigned {
+            pubkey: unsigned.pubkey.to_hex(),
+            created_at: unsigned.created_at.as_secs(),
+            kind: unsigned.kind.as_u16(),
+            tags: unsigned
+                .tags
+                .iter()
+                .map(|tag| tag.as_slice().to_vec())
+                .collect(),
+            content: unsigned.content,
+        },
+        durability: FfiDurability::Durable,
+        routing: FfiWriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: correlation.map(|token| token.to_string()),
+    })
 }
 
 #[cfg(test)]
@@ -397,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn comment_intent_composes_a_takeonce_write_intent() {
+    fn comment_intent_composes_the_ordinary_exact_write_intent() {
         let author = nostr::Keys::generate().public_key();
         let intent = comment_intent(
             podcast_root(),
@@ -405,17 +436,77 @@ mod tests {
             author.to_hex(),
             1000,
             "hi".to_string(),
-            None,
+            Some("comment-correlation".to_string()),
         )
         .unwrap();
-        let taken = intent.take().unwrap();
-        assert!(matches!(
-            taken.payload,
-            nmp_grammar::WritePayload::Unsigned(_)
-        ));
-        assert!(
-            intent.take().is_err(),
-            "take-once must refuse a second take"
+
+        let FfiWritePayload::Unsigned {
+            pubkey,
+            created_at,
+            kind,
+            tags,
+            content,
+        } = &intent.payload
+        else {
+            panic!("NIP-22 comments must be ordinary unsigned write intents")
+        };
+        assert_eq!(pubkey, &author.to_hex());
+        assert_eq!(*created_at, 1000);
+        assert_eq!(*kind, 1111);
+        assert_eq!(content, "hi");
+        assert_eq!(
+            tags,
+            &vec![
+                vec!["I".to_string(), "podcast:item:guid:guid-1".to_string()],
+                vec!["K".to_string(), "podcast:item:guid".to_string()],
+                vec!["i".to_string(), "podcast:item:guid:guid-1".to_string()],
+                vec!["k".to_string(), "podcast:item:guid".to_string()],
+            ]
         );
+        assert_eq!(intent.durability, FfiDurability::Durable);
+        assert_eq!(intent.routing, FfiWriteRouting::AuthorOutbox);
+        assert_eq!(intent.identity_override, None);
+        assert_eq!(intent.correlation.as_deref(), Some("comment-correlation"));
+    }
+
+    #[test]
+    fn composed_comment_uses_the_generic_publish_door() {
+        let author = nostr::Keys::generate().public_key();
+        let correlation = "comment-generic-publish".to_string();
+        let intent = comment_intent(
+            podcast_root(),
+            FfiCommentParent::Root,
+            author.to_hex(),
+            1000,
+            "hi".to_string(),
+            Some(correlation.clone()),
+        )
+        .unwrap();
+        let engine = crate::facade::NmpEngine::new(crate::facade::NmpEngineConfig::default())
+            .expect("engine must build");
+        engine
+            .set_active_account(Some(author.to_hex()))
+            .expect("the composed author must be active");
+
+        let receipt = engine
+            .publish(intent)
+            .expect("the ordinary generic publish door must accept the comment");
+        let receipt_id = receipt.id();
+        let reattached = engine
+            .reattach_by_correlation(correlation)
+            .expect("the generic door must preserve the comment correlation token");
+        assert_eq!(reattached.receipt_id, Some(receipt_id));
+        match reattached.outcome {
+            crate::types::FfiReceiptReattachment::Attached { stream } => {
+                assert_eq!(stream.id(), receipt_id);
+            }
+            crate::types::FfiReceiptReattachment::NotFound => {
+                panic!("the accepted comment correlation must be retained")
+            }
+            crate::types::FfiReceiptReattachment::RetainedButUnreadable => {
+                panic!("the accepted comment receipt must remain readable")
+            }
+        }
+        engine.shutdown();
     }
 }

@@ -98,6 +98,11 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
   author-outbox writes become routable only after the relay list returns
   through ordinary live observation/ingest. Direct Rust today; native
   projection remains explicit follow-up work.
+- ✅ NIP-22 comments over NIP-73 targets — typed root/parent validation,
+  thread demand, decode, and deterministic composition across Rust, FFI,
+  Swift, and Kotlin. Composition is an engine-free protocol function returning
+  the ordinary `WriteIntent`; apps publish it through the one generic
+  `publish` → `Receipt` lifecycle.
 - ✅ NIP-29 groups — metadata / membership / moderation, plus kind:9 group-chat **send + read** proven by a live round-trip test (device-scale room-open UX still to be re-measured)
 - ✅ Optional parser-only content module (source-ranged plaintext/Markdown and
   NIP-19 occurrences), exact five-variant locator values shared by

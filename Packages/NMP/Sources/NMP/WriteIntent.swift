@@ -15,6 +15,14 @@ public enum Durability: Sendable, Hashable {
         case .atMostOnce: return .atMostOnce
         }
     }
+
+    init(_ ffi: FfiDurability) {
+        switch ffi {
+        case .durable: self = .durable
+        case .ephemeral: self = .ephemeral
+        case .atMostOnce: self = .atMostOnce
+        }
+    }
 }
 
 /// Where a write is routed. There is deliberately no `.privateNarrow` case
@@ -31,6 +39,13 @@ public enum WriteRouting: Sendable, Hashable {
         switch self {
         case .authorOutbox: return .authorOutbox
         case .toInboxes(let recipients): return .toInboxes(recipients: recipients)
+        }
+    }
+
+    init(_ ffi: FfiWriteRouting) {
+        switch ffi {
+        case .authorOutbox: self = .authorOutbox
+        case .toInboxes(let recipients): self = .toInboxes(recipients)
         }
     }
 }
@@ -58,6 +73,29 @@ public enum WritePayload: Sendable, Hashable {
             return .signed(
                 id: id, pubkey: pubkey, createdAt: createdAt, kind: kind, tags: tags, content: content,
                 sig: sig)
+        }
+    }
+
+    init(_ ffi: FfiWritePayload) {
+        switch ffi {
+        case .unsigned(let pubkey, let createdAt, let kind, let tags, let content):
+            self = .unsigned(
+                pubkey: pubkey,
+                createdAt: createdAt,
+                kind: kind,
+                tags: tags,
+                content: content
+            )
+        case .signed(let id, let pubkey, let createdAt, let kind, let tags, let content, let sig):
+            self = .signed(
+                id: id,
+                pubkey: pubkey,
+                createdAt: createdAt,
+                kind: kind,
+                tags: tags,
+                content: content,
+                sig: sig
+            )
         }
     }
 }
@@ -109,6 +147,17 @@ public struct WriteIntent: Sendable, Hashable {
         self.routing = routing
         self.identityOverride = identityOverride
         self.correlation = correlation
+    }
+
+    /// Reverse projection for protocol-owned FFI composers that return the
+    /// ordinary write noun. Kept internal: apps construct `WriteIntent`
+    /// directly or receive one from a typed protocol function.
+    init(_ ffi: FfiWriteIntent) {
+        payload = WritePayload(ffi.payload)
+        durability = Durability(ffi.durability)
+        routing = WriteRouting(ffi.routing)
+        identityOverride = ffi.identityOverride
+        correlation = ffi.correlation
     }
 
     func toFfi() -> FfiWriteIntent {

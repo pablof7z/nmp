@@ -54,7 +54,19 @@ Do not add a callback registry that chooses routing, admission, signer, ordering
 5. Preserve core receipt facts. Map only module-owned composition failures.
 6. Never mutate a signed event, access signer secrets, write store indexes, open transport, or create an optimistic row lane.
 
-NIP-29 is the practical model: app code supplies group identity and message semantics; the module derives protocol tags/context and returns a composed intent whose pinned-host routing cannot be forged as a generic relay list.
+When these steps resolve entirely to an ordinary public `WriteIntent`, return
+that noun directly. Do not add an Engine receiver, take-once wrapper, or second
+publication overload for symmetry. NIP-22 is the concrete native precedent:
+its top-level composer returns `WriteIntent`, then the app uses generic
+`publish`.
+
+NIP-29's current opaque carrier, take-once lifecycle, Engine method, and
+`publishComposed` door are an identified architectural defect, not a precedent
+or permitted exception; #838 supersedes #823 and owns their removal as part of
+restoring exact protocol ownership. The target is still immutable
+staged composition returning the ordinary `WriteIntent`. Its pinned-host
+authority must become non-forgeable and payload-bound within that noun, with a
+generic acceptance check that learns no NIP-29 semantics.
 
 ## Rust, FFI, and native projection
 
@@ -62,13 +74,17 @@ A consumer-facing semantic change is not complete at the Rust implementation alo
 
 1. Add the narrow direct-Rust API in the facade or opt-in protocol crate.
 2. Decide whether it changes supported surface under repository governance.
-3. Project closed records/enums and semantic operations through FFI. Prefer one-step compose-and-publish when no intermediate value is useful. When staged composition is required, the current supported precedent is an opaque, take-once semantic token such as `GroupSendIntent` followed by `publishComposed`; do not expose raw authority, routing, callbacks, or mutable mechanism internals.
+3. Project closed records/enums and semantic operations through FFI. Protocol-owned composition returns the ordinary public `WriteIntent`, and publication uses generic `publish` (NIP-22). Preserve immutable staged composition rather than hiding composition inside a protocol-specific publish door. If contextual authority is not safely representable, fix the one write noun so the authority is non-forgeable and payload-bound; do not create an opaque parallel intent, take-once lifecycle, raw routing escape hatch, callback, or mutable mechanism object.
 4. Wrap generated types in idiomatic Swift and Kotlin ownership shapes.
 5. Preserve semantic parity while allowing native lifecycle syntax to differ.
 6. Update supported-surface docs, known gaps, and the surface change log when required.
 7. Rebuild generated bindings and compile consumers from a clean-clone shape.
 
-Choose and document one native shape. Do not leave callers guessing between one-step semantic publish and a staged take-once token. If the operation derives current time, add an internal fixed-clock/test seam so Rust/FFI/Swift/Kotlin can prove byte parity without exposing app-selected timestamps.
+Choose and document one native shape: protocol-owned immutable composition into
+the ordinary `WriteIntent`, followed by generic publication. If the operation
+derives current time, add an internal fixed-clock/test seam so
+Rust/FFI/Swift/Kotlin can prove byte parity without exposing app-selected
+timestamps.
 
 If one native platform is deliberately deferred, document the gap precisely. Never imply parity from generated bindings compiling.
 
