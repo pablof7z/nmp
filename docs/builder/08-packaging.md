@@ -95,19 +95,21 @@ foreign NIP-68 photo schema merely because a group can publish one.
 
 Dependencies do not transfer ownership. For example, an NIP-29 package may
 depend on NIP-51 to compose typed kind `10009` Simple groups into remembered
-NIP-29 group/host references. NIP-51 still exclusively owns the `10009` codec;
-NIP-29 claims neither `10009` nor generic kind `30002` relay sets.
+NIP-29 group/host references. NIP-51 still exclusively owns the `10009` codec,
+because it is the crate that defines and parses it and NIP-29 consumes its typed
+output rather than re-parsing the wire. That dependency direction *is* the
+ownership fact; nothing is declared or registered to establish it.
 
-The composition root links the facade and each enabled module, then passes the
-modules' immutable static claims into engine construction. In Rust this may be
-an explicit list of `ModuleRegistration` values from the linked crates. A Swift
-or Kotlin product may project the same choice as a closed configuration or
-precomposed package.
+The composition root links the facade and each enabled module. That is the whole
+mechanism. There is no registration list, no claim vocabulary, and no engine
+construction parameter carrying module identity — #859 deleted the
+`ModuleRegistration`/`KindClaim` design and #757/#758 (which would have wired it
+into routing) are closed NOT_PLANNED. A Swift or Kotlin product projects the same
+build choice as a closed configuration or precomposed package.
 
-This is construction data, not a registration framework: modules install no
-callbacks, perform no startup side effects, and own no lifecycle or second
-engine. An app enabling zero modules supplies an empty claim set and retains the
-raw two-noun engine.
+Modules install no callbacks, perform no startup side effects, and own no
+lifecycle or second engine. An app enabling zero modules links no module code and
+retains the raw two-noun engine unchanged.
 
 ## Binary and binding versions move together
 

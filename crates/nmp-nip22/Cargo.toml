@@ -16,4 +16,3 @@ default = []
 [dependencies]
 nostr.workspace = true
 nmp-grammar.workspace = true
-nmp-ownership.workspace = true

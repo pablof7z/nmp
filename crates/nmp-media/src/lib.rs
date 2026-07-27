@@ -41,10 +41,11 @@
 //! # Ownership (composition is not schema ownership)
 //! "Composition does not transfer ownership: a context owner may wrap an
 //! artifact, but only the artifact owner may define the artifact"
-//! (`docs/design/routing-and-ownership.md` §3.2.1). This crate OWNS NO event
-//! kinds and exports NO `claims()` -- kind:24242 stays owned by `nmp-blossom`
-//! and kind:20 by `nmp-nip68`, exactly as `nmp-nip29` composes kind:10009
-//! without claiming it. See the `ownership_audit` module below.
+//! (`docs/design/routing-and-ownership.md` §3.2.1). This crate defines NO
+//! event schema of its own: kind:24242 is defined and parsed only by
+//! `nmp-blossom` and kind:20 only by `nmp-nip68`. The structural proof is the
+//! dependency direction -- nmp-media depends on those crates and neither
+//! re-implements nor re-exports their builders/codecs.
 //!
 //! The FFI/Swift/Kotlin projection of this seam is a SEPARATE later unit
 //! (batched with the nip68 projection, compile-gated) -- see
@@ -57,39 +58,3 @@ mod upload;
 pub use compose::{compose_picture, ComposedImage, MediaComposeError, PicturePost};
 pub use prepare::{prepare, PrepareError, PreparedUpload};
 pub use upload::{MediaUploadError, UploadedAsset};
-
-#[cfg(test)]
-mod ownership_audit {
-    //! #559 ownership audit: this crate is a COMPOSITION crate, so it
-    //! deliberately exports no `claims()` of its own -- "composition does not
-    //! transfer ownership" (`docs/design/routing-and-ownership.md` §3.2.1),
-    //! exactly the `nmp-nip29` stance. The two kinds the seam composes stay
-    //! owned EXCLUSIVELY upstream (24242 by `nmp-blossom`, 20 by
-    //! `nmp-nip68`); nmp-media wraps their artifacts without defining any.
-    //! The ABSENCE of a `claims()` export from this crate IS the proof it
-    //! registers nothing -- a future claim would be a new, reviewable,
-    //! additive export, and `nmp-audit` enrolls this crate as
-    //! `DeclaresNoClaims`.
-
-    #[test]
-    fn nmp_media_claims_nothing_and_upstream_owners_keep_their_kinds() {
-        // kind:24242 (the Blossom authorization) is owned exclusively by
-        // nmp-blossom; the upload stage authorizes and uploads WITHOUT
-        // claiming that schema.
-        let blossom = nmp_blossom::claims();
-        assert!(blossom
-            .iter()
-            .any(|claim| claim.scope.contains(24242) && claim.exclusive));
-
-        // kind:20 (the NIP-68 picture-first event) is owned exclusively by
-        // nmp-nip68; the compose stage assembles that draft WITHOUT claiming
-        // the schema -- only the artifact owner may define the artifact.
-        let nip68 = nmp_nip68::claims();
-        assert!(nip68
-            .iter()
-            .any(|claim| claim.scope.contains(20) && claim.exclusive));
-
-        // nmp-media exports no `claims()` function at all -- there is nothing
-        // to assert about it here, and that absence is the whole point.
-    }
-}

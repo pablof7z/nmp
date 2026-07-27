@@ -13,20 +13,16 @@ publish.workspace = true
 # that would consume a router/resolver/store, so no `engine` feature exists.
 default = []
 
-# The composition seam wires exactly three upstream crates together:
-# nmp-blossom (standalone async upload -> VerifiedUpload) and nmp-nip68
-# (VerifiedUpload -> kind:20 draft). nmp-ownership is a NORMAL dependency
-# purely so this crate enrolls in nmp-audit's workspace ownership registry
-# (as DeclaresNoClaims) -- the SAME pattern nmp-nip29 uses; it is used only
-# for that enrollment coupling, never to export a claims() of our own
-# (composition is not kind ownership, routing-and-ownership.md §3.2.1).
+# The composition seam wires the upstream crates together: nmp-blossom
+# (standalone async upload -> VerifiedUpload) and nmp-nip68 (VerifiedUpload
+# -> kind:20 draft). Composition is not schema ownership: this crate defines
+# no Nostr schema of its own, it only sequences the two upstream owners.
 [dependencies]
 nostr.workspace = true
 # #884: exact-byte asset identity (`Sha256Hash`, `VerifiedAsset`) comes from
 # the one protocol-neutral owner, never from a storage protocol's private
 # vocabulary.
 nmp-asset.workspace = true
-nmp-ownership.workspace = true
 nmp-blossom.workspace = true
 nmp-nip68.workspace = true
 

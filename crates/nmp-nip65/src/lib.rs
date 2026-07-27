@@ -14,8 +14,6 @@
 //! canonical replaceable winner. Every later write uses ordinary
 //! `AuthorOutbox`.
 
-mod claims;
-
 use std::collections::BTreeSet;
 
 use nmp::{
@@ -24,8 +22,6 @@ use nmp::{
 };
 use nmp_grammar::RelayListBootstrapAuthority;
 use nostr::nips::nip65::RelayMetadata;
-
-pub use claims::claims;
 
 /// Maximum number of exact relays the bootstrap publication may contact.
 ///

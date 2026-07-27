@@ -7,6 +7,13 @@
   code; this is the artifact that gets fanned out to builders.
 - **Promotion status:** historical execution record. For unbuilt units, the promoted
   contracts supersede kind-ownership and untyped-override assumptions here.
+- **Units E, F and G are CANCELLED (2026-07-27, #859)** — `RoutePolicy` +
+  `RelaySource` + claim-table routing (E), `RouteClass` typed provenance (F),
+  and the kind-ownership boundary + `nmp-audit` (G). `crates/nmp-ownership` and
+  `crates/nmp-audit` are deleted and #757/#758 are closed NOT_PLANNED; nothing
+  replaces them. Read those three sections as history. Units A–D and the §2.6
+  scenario tests are unaffected. See `docs/design/routing-and-ownership.md`
+  Parts B/C and bug-class-ledger rows 14 and 22.
 - **Source of truth:** `docs/design/routing-and-ownership.md` §9 (owner-resolved
   decisions) overrides §8 (open list) wherever they conflict. Where §9 is silent
   and §8 is open, the sub-decision is surfaced in §7 below as an owner question —
