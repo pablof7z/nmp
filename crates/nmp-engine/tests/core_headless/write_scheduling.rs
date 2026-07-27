@@ -507,8 +507,7 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
             })
             .unwrap();
         core.handle(EngineMsg::AuthSendCompleted(
-            send_token,
-            AuthSendOutcome::Accepted,
+            AuthSendCompletion::for_operation(&send_token, AuthSendOutcome::Accepted),
         ));
         let second = core.handle(EngineMsg::RelayFrame(
             handle,

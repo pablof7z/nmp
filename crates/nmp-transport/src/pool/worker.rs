@@ -27,7 +27,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
@@ -47,7 +47,10 @@ use crate::keepalive::{
 use super::connect::{open_relay_socket, RelaySocket};
 use super::frame::classify_message;
 use super::spawn::ThreadSpawner;
-use super::{AttemptCorrelation, EphemeralSendOutcome, HandoffResult, RelayFrame};
+use super::{
+    AttemptCorrelation, EphemeralOperation, EphemeralSendOutcome, HandoffResult, RelayFrame,
+    RelaySessionKey,
+};
 use super::{ThreadRole, ThreadSpawnError};
 
 const SOCKET: Token = Token(0);
@@ -88,56 +91,38 @@ pub(super) enum WorkerCommand {
         frame: String,
     },
     /// A one-shot connection-scoped handoff. This never enters `pending`,
-    /// `preamble`, or the durable EVENT queues. The completion is resolved
+    /// `preamble`, or the durable EVENT queues. The operation is resolved
     /// only by this exact generation's write+flush boundary, or unavailable
     /// when the command is stale / the generation ends first.
     SendEphemeral {
-        generation: u64,
+        target: EphemeralTarget,
         frame: String,
-        completion: EphemeralCompletion,
     },
 }
 
-pub(super) struct EphemeralCompletion {
-    callback: Option<Box<dyn FnOnce(EphemeralSendOutcome) + Send + 'static>>,
-}
-
-impl EphemeralCompletion {
-    pub(super) fn new(callback: impl FnOnce(EphemeralSendOutcome) + Send + 'static) -> Self {
-        Self {
-            callback: Some(Box::new(callback)),
-        }
-    }
-
-    fn resolve(mut self, outcome: EphemeralSendOutcome) {
-        if let Some(callback) = self.callback.take() {
-            // A consumer callback is an off-transport notification edge. A
-            // panic there must not kill the relay worker and strand unrelated
-            // traffic or future exact completions.
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                callback(outcome);
-            }));
-        }
-    }
-
-    pub(super) fn disarm(mut self) {
-        self.callback.take();
-    }
-}
-
-impl Drop for EphemeralCompletion {
-    fn drop(&mut self) {
-        if let Some(callback) = self.callback.take() {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                callback(EphemeralSendOutcome::Unavailable);
-            }));
-        }
-    }
+/// The exact, closed identity of one ephemeral handoff (issue #883).
+///
+/// This is a plain value: no callback, no trait object, no drop-time code
+/// execution. The worker moves it from the command channel to its queue to
+/// the terminal [`WorkerEventKind::EphemeralHandoff`], and dropping it does
+/// nothing at all — every terminal is an explicit `send`, so a lost terminal
+/// is a code path this module must fix rather than a silent `Drop` backstop
+/// that quietly runs consumer code on the relay thread.
+///
+/// `session` and `generation` are the exact target the caller submitted
+/// against, carried verbatim rather than re-read from pool slot state, so a
+/// completion delivered after a reconnect cannot be attributed to the new
+/// generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct EphemeralTarget {
+    pub(super) session: RelaySessionKey,
+    pub(super) generation: u64,
+    pub(super) operation: EphemeralOperation,
 }
 
 struct EphemeralFrame {
+    target: EphemeralTarget,
     frame: String,
-    completion: EphemeralCompletion,
 }
 
 /// What happened, tagged with the worker's packed `(worker_id, attempt)`
@@ -171,6 +156,16 @@ pub(super) enum WorkerEventKind {
     EventHandoff {
         correlation: AttemptCorrelation,
         result: HandoffResult,
+    },
+    /// The one, ever, resolution of a `SendEphemeral` command's
+    /// [`EphemeralOperation`] (issue #883). See
+    /// [`super::PoolEvent::EphemeralHandoff`] for the delivery contract; like
+    /// `EventHandoff` it is never gated on generation/slot staleness at the
+    /// pool-translator level, because the terminal already names its own
+    /// exact target.
+    EphemeralHandoff {
+        target: EphemeralTarget,
+        outcome: EphemeralSendOutcome,
     },
 }
 
@@ -236,24 +231,18 @@ impl WorkerHandle {
     /// of growing this queue without bound. `Pool::send`/`send_durable`
     /// already have a typed "not handed off" outcome for exactly this case;
     /// this is the seam that makes it reachable.
+    ///
+    /// A refused enqueue is terminal for the command: both refusal shapes (a
+    /// full bounded queue and a gone worker thread) simply drop it, and every
+    /// caller reports its own typed synchronous refusal. Nothing is retained,
+    /// so a refusal can never leave a half-owned correlation or operation
+    /// behind. The mio waker fires only on a successful enqueue.
     pub(super) fn push(&self, command: WorkerCommand) -> bool {
-        self.try_push(command).is_ok()
-    }
-
-    /// Enqueue while preserving command ownership on a refused enqueue.
-    /// BOTH refusal shapes — a full bounded queue (the #506 backpressure
-    /// signal) and a gone worker thread (channel disconnected) — return the
-    /// command so exact ephemeral callers can disarm their callback before
-    /// reporting a synchronous refusal. The mio waker fires only on a
-    /// successful enqueue.
-    pub(super) fn try_push(&self, command: WorkerCommand) -> Result<(), WorkerCommand> {
-        self.command_tx
-            .try_send(command)
-            .map_err(|error| match error {
-                TrySendError::Full(command) | TrySendError::Disconnected(command) => command,
-            })?;
+        if self.command_tx.try_send(command).is_err() {
+            return false;
+        }
         self.wake();
-        Ok(())
+        true
     }
 
     /// Wake the worker if it is parked in `mio::Poll::poll` for a live
@@ -421,7 +410,7 @@ fn run_worker(
     // reconnect discipline as the durable pair above, resolved
     // `Unavailable` instead of `NotHandedOff`/`Ambiguous`.
     let mut ephemeral: VecDeque<EphemeralFrame> = VecDeque::new();
-    let mut ephemeral_write_accepted: Vec<EphemeralCompletion> = Vec::new();
+    let mut ephemeral_write_accepted: Vec<EphemeralTarget> = Vec::new();
     let mut attempt: u32 = 0;
     let mut backoff_delay = reconnect_delay_initial;
 
@@ -638,8 +627,8 @@ fn drain_permanently_disconnected(
                 correlation,
                 HandoffResult::NotHandedOff,
             ),
-            Ok(WorkerCommand::SendEphemeral { completion, .. }) => {
-                completion.resolve(EphemeralSendOutcome::Unavailable);
+            Ok(WorkerCommand::SendEphemeral { target, .. }) => {
+                resolve_ephemeral(event_tx, slot, target, EphemeralSendOutcome::Unavailable);
             }
             Ok(
                 WorkerCommand::Send(_)
@@ -671,6 +660,31 @@ fn resolve_correlation(
             correlation,
             result,
         },
+    });
+}
+
+/// Fire the one, ever, [`WorkerEventKind::EphemeralHandoff`] for `target`
+/// (issue #883).
+///
+/// This is the ONLY thing that terminates an exact ephemeral operation, and
+/// it is a value send: the worker never calls consumer code, so a blocked or
+/// panicking downstream reducer cannot stall this socket's readiness loop or
+/// any other operation this worker owns. Taking `target` by value is what
+/// makes double resolution unrepresentable — the caller no longer holds it.
+/// The event's tag generation is the target's OWN generation, so a terminal
+/// produced while the worker has already moved on still names the exact
+/// connection the caller submitted against.
+fn resolve_ephemeral(
+    event_tx: &SyncSender<WorkerEvent>,
+    slot: u32,
+    target: EphemeralTarget,
+    outcome: EphemeralSendOutcome,
+) {
+    let generation = target.generation;
+    let _ = event_tx.send(WorkerEvent {
+        slot,
+        generation,
+        kind: WorkerEventKind::EphemeralHandoff { target, outcome },
     });
 }
 
@@ -716,8 +730,8 @@ fn resolve_queued_durables_on_shutdown(
             // A channel-resident ephemeral handoff is settled with the same
             // explicit discipline as a durable one — its `Drop` backstop
             // would fire anyway, but retirement must never rely on it.
-            Ok(WorkerCommand::SendEphemeral { completion, .. }) => {
-                completion.resolve(EphemeralSendOutcome::Unavailable);
+            Ok(WorkerCommand::SendEphemeral { target, .. }) => {
+                resolve_ephemeral(event_tx, slot, target, EphemeralSendOutcome::Unavailable);
             }
             // Non-durable traffic (`Send`/`SetReconnectPreamble`) and the
             // `Shutdown` nudge itself carry no correlation to resolve; simply
@@ -751,7 +765,7 @@ fn resolve_generation_end(
     durable: &mut VecDeque<(AttemptCorrelation, String)>,
     write_accepted: &mut Vec<AttemptCorrelation>,
     ephemeral: &mut VecDeque<EphemeralFrame>,
-    ephemeral_write_accepted: &mut Vec<EphemeralCompletion>,
+    ephemeral_write_accepted: &mut Vec<EphemeralTarget>,
 ) {
     for (correlation, _frame) in durable.drain(..) {
         resolve_correlation(
@@ -772,12 +786,15 @@ fn resolve_generation_end(
         );
     }
     for pending in ephemeral.drain(..) {
-        pending
-            .completion
-            .resolve(EphemeralSendOutcome::Unavailable);
+        resolve_ephemeral(
+            event_tx,
+            slot,
+            pending.target,
+            EphemeralSendOutcome::Unavailable,
+        );
     }
-    for completion in ephemeral_write_accepted.drain(..) {
-        completion.resolve(EphemeralSendOutcome::Unavailable);
+    for target in ephemeral_write_accepted.drain(..) {
+        resolve_ephemeral(event_tx, slot, target, EphemeralSendOutcome::Unavailable);
     }
 }
 
@@ -829,8 +846,8 @@ fn wait_before_reconnect(
                     HandoffResult::NotHandedOff,
                 );
             }
-            Ok(WorkerCommand::SendEphemeral { completion, .. }) => {
-                completion.resolve(EphemeralSendOutcome::Unavailable);
+            Ok(WorkerCommand::SendEphemeral { target, .. }) => {
+                resolve_ephemeral(event_tx, slot, target, EphemeralSendOutcome::Unavailable);
             }
             Ok(WorkerCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => return false,
             Err(RecvTimeoutError::Timeout) => {}
@@ -861,7 +878,7 @@ fn run_connected(
     durable: &mut VecDeque<(AttemptCorrelation, String)>,
     write_accepted: &mut Vec<AttemptCorrelation>,
     ephemeral: &mut VecDeque<EphemeralFrame>,
-    ephemeral_write_accepted: &mut Vec<EphemeralCompletion>,
+    ephemeral_write_accepted: &mut Vec<EphemeralTarget>,
     initial_gate_required: bool,
     relay: super::committed_observations::RelayScope,
     committed_observations: &super::committed_observations::CommittedObservationCache,
@@ -916,7 +933,7 @@ fn run_connected_inner(
     durable: &mut VecDeque<(AttemptCorrelation, String)>,
     write_accepted: &mut Vec<AttemptCorrelation>,
     ephemeral: &mut VecDeque<EphemeralFrame>,
-    ephemeral_write_accepted: &mut Vec<EphemeralCompletion>,
+    ephemeral_write_accepted: &mut Vec<EphemeralTarget>,
     outbound_released: &mut bool,
     initial_gate_required: bool,
     relay: super::committed_observations::RelayScope,
@@ -1256,15 +1273,11 @@ fn drain_commands(
                     );
                 }
             }
-            Ok(WorkerCommand::SendEphemeral {
-                generation: cmd_generation,
-                frame,
-                completion,
-            }) => {
-                if cmd_generation == generation {
-                    ephemeral.push_back(EphemeralFrame { frame, completion });
+            Ok(WorkerCommand::SendEphemeral { target, frame }) => {
+                if target.generation == generation {
+                    ephemeral.push_back(EphemeralFrame { target, frame });
                 } else {
-                    completion.resolve(EphemeralSendOutcome::Unavailable);
+                    resolve_ephemeral(event_tx, slot, target, EphemeralSendOutcome::Unavailable);
                 }
             }
             Err(TryRecvError::Empty) => return Drain::Continue,
@@ -1286,7 +1299,7 @@ fn flush_generation_writes(
     durable: &mut VecDeque<(AttemptCorrelation, String)>,
     write_accepted: &mut Vec<AttemptCorrelation>,
     ephemeral: &mut VecDeque<EphemeralFrame>,
-    ephemeral_write_accepted: &mut Vec<EphemeralCompletion>,
+    ephemeral_write_accepted: &mut Vec<EphemeralTarget>,
     socket: &mut RelaySocket,
     event_tx: &SyncSender<WorkerEvent>,
     slot: u32,
@@ -1332,7 +1345,7 @@ fn flush_writes(
     durable: &mut VecDeque<(AttemptCorrelation, String)>,
     write_accepted: &mut Vec<AttemptCorrelation>,
     ephemeral: &mut VecDeque<EphemeralFrame>,
-    ephemeral_write_accepted: &mut Vec<EphemeralCompletion>,
+    ephemeral_write_accepted: &mut Vec<EphemeralTarget>,
     socket: &mut RelaySocket,
     event_tx: &SyncSender<WorkerEvent>,
     slot: u32,
@@ -1382,7 +1395,7 @@ fn flush_writes(
 fn flush_ephemeral_writes(
     ephemeral: &mut VecDeque<EphemeralFrame>,
     write_accepted: &mut Vec<AttemptCorrelation>,
-    ephemeral_write_accepted: &mut Vec<EphemeralCompletion>,
+    ephemeral_write_accepted: &mut Vec<EphemeralTarget>,
     socket: &mut RelaySocket,
     event_tx: &SyncSender<WorkerEvent>,
     slot: u32,
@@ -1390,7 +1403,7 @@ fn flush_ephemeral_writes(
 ) -> FlushResult {
     while let Some(pending) = ephemeral.pop_front() {
         match socket.write(Message::Text(pending.frame.clone().into())) {
-            Ok(()) => ephemeral_write_accepted.push(pending.completion),
+            Ok(()) => ephemeral_write_accepted.push(pending.target),
             Err(error) if is_nonblocking_io(&error) => {
                 ephemeral.push_front(pending);
                 return FlushResult::Blocked;
@@ -1416,7 +1429,7 @@ fn flush_message(
     socket: &mut RelaySocket,
     message: Message,
     write_accepted: &mut Vec<AttemptCorrelation>,
-    ephemeral_write_accepted: &mut Vec<EphemeralCompletion>,
+    ephemeral_write_accepted: &mut Vec<EphemeralTarget>,
     event_tx: &SyncSender<WorkerEvent>,
     slot: u32,
     generation: u64,
@@ -1443,7 +1456,7 @@ fn flush_message(
 fn flush_socket_and_settle(
     socket: &mut RelaySocket,
     write_accepted: &mut Vec<AttemptCorrelation>,
-    ephemeral_write_accepted: &mut Vec<EphemeralCompletion>,
+    ephemeral_write_accepted: &mut Vec<EphemeralTarget>,
     event_tx: &SyncSender<WorkerEvent>,
     slot: u32,
     generation: u64,
@@ -1459,8 +1472,8 @@ fn flush_socket_and_settle(
                 HandoffResult::Written,
             );
         }
-        for completion in ephemeral_write_accepted.drain(..) {
-            completion.resolve(EphemeralSendOutcome::Accepted);
+        for target in ephemeral_write_accepted.drain(..) {
+            resolve_ephemeral(event_tx, slot, target, EphemeralSendOutcome::Accepted);
         }
     }
     result
@@ -1755,14 +1768,43 @@ mod tests {
             .collect()
     }
 
-    fn ephemeral_completion() -> (EphemeralCompletion, Receiver<EphemeralSendOutcome>) {
-        let (tx, rx) = mpsc::channel();
-        (
-            EphemeralCompletion::new(move |outcome| {
-                let _ = tx.send(outcome);
-            }),
-            rx,
-        )
+    fn ephemeral_target(generation: u64, operation: u64) -> EphemeralTarget {
+        EphemeralTarget {
+            session: RelaySessionKey::public(
+                RelayUrl::parse("wss://relay.example").expect("test relay url"),
+            ),
+            generation,
+            operation: EphemeralOperation(operation),
+        }
+    }
+
+    /// Every terminal this module produced, split by lane, drained in ONE
+    /// pass so the two assertions can never hide each other. Ephemeral
+    /// terminals carry their exact `(session, generation)` alongside the
+    /// outcome, so a terminal that lost its target — or was re-tagged with
+    /// the worker's current generation instead of the caller's — fails here.
+    #[allow(clippy::type_complexity)]
+    fn drained_results(
+        rx: &Receiver<WorkerEvent>,
+    ) -> (
+        Vec<(AttemptCorrelation, HandoffResult)>,
+        Vec<(EphemeralTarget, EphemeralSendOutcome)>,
+    ) {
+        let mut durable = Vec::new();
+        let mut ephemeral = Vec::new();
+        for event in rx.try_iter() {
+            match event.kind {
+                WorkerEventKind::EventHandoff {
+                    correlation,
+                    result,
+                } => durable.push((correlation, result)),
+                WorkerEventKind::EphemeralHandoff { target, outcome } => {
+                    ephemeral.push((target, outcome));
+                }
+                _ => {}
+            }
+        }
+        (durable, ephemeral)
     }
 
     #[test]
@@ -2573,12 +2615,11 @@ mod tests {
     fn stale_ephemeral_command_is_rejected_before_any_send_queue() {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::sync_channel(TEST_EVENT_QUEUE_CAPACITY);
-        let (completion, completion_rx) = ephemeral_completion();
+        let target = ephemeral_target(7, 70);
         command_tx
             .send(WorkerCommand::SendEphemeral {
-                generation: 7,
+                target: target.clone(),
                 frame: "auth".to_string(),
-                completion,
             })
             .unwrap();
 
@@ -2602,27 +2643,27 @@ mod tests {
             Drain::Continue
         ));
 
-        assert_eq!(
-            completion_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            EphemeralSendOutcome::Unavailable
-        );
         assert!(pending.is_empty());
         assert!(preamble.is_empty());
         assert!(durable.is_empty());
         assert!(ephemeral.is_empty());
-        assert!(event_rx.try_recv().is_err(), "no write correlation emitted");
+        let (durable_results, ephemeral_results) = drained_results(&event_rx);
+        assert!(durable_results.is_empty(), "no write correlation emitted");
+        assert_eq!(
+            ephemeral_results,
+            vec![(target, EphemeralSendOutcome::Unavailable)]
+        );
     }
 
     #[test]
     fn exact_ephemeral_command_stays_separate_and_dies_with_generation() {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::sync_channel(TEST_EVENT_QUEUE_CAPACITY);
-        let (completion, completion_rx) = ephemeral_completion();
+        let target = ephemeral_target(9, 90);
         command_tx
             .send(WorkerCommand::SendEphemeral {
-                generation: 9,
+                target: target.clone(),
                 frame: "auth".to_string(),
-                completion,
             })
             .unwrap();
 
@@ -2649,7 +2690,7 @@ mod tests {
         assert_eq!(preamble, ["req-preamble"]);
         assert!(durable.is_empty(), "AUTH never enters durable EVENT state");
         assert_eq!(ephemeral.len(), 1);
-        assert!(completion_rx.try_recv().is_err());
+        assert_eq!(drained_results(&event_rx), (Vec::new(), Vec::new()));
 
         let mut write_accepted = Vec::new();
         let mut ephemeral_write_accepted = Vec::new();
@@ -2662,23 +2703,23 @@ mod tests {
             &mut ephemeral,
             &mut ephemeral_write_accepted,
         );
+        let (durable_results, ephemeral_results) = drained_results(&event_rx);
+        assert!(durable_results.is_empty(), "no write correlation emitted");
         assert_eq!(
-            completion_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            EphemeralSendOutcome::Unavailable
+            ephemeral_results,
+            vec![(target, EphemeralSendOutcome::Unavailable)]
         );
-        assert!(event_rx.try_recv().is_err(), "no write correlation emitted");
     }
 
     #[test]
     fn reconnect_wait_rejects_ephemeral_instead_of_carrying_it() {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::sync_channel(TEST_EVENT_QUEUE_CAPACITY);
-        let (completion, completion_rx) = ephemeral_completion();
+        let target = ephemeral_target(10, 100);
         command_tx
             .send(WorkerCommand::SendEphemeral {
-                generation: 10,
+                target: target.clone(),
                 frame: "auth".to_string(),
-                completion,
             })
             .unwrap();
         command_tx.send(WorkerCommand::Shutdown).unwrap();
@@ -2696,26 +2737,27 @@ mod tests {
             6,
             11,
         ));
-        assert_eq!(
-            completion_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            EphemeralSendOutcome::Unavailable
-        );
         assert!(pending.is_empty());
         assert_eq!(preamble, ["req-preamble"]);
-        assert!(event_rx.try_recv().is_err());
+        let (durable_results, ephemeral_results) = drained_results(&event_rx);
+        assert!(durable_results.is_empty());
+        assert_eq!(
+            ephemeral_results,
+            vec![(target, EphemeralSendOutcome::Unavailable)]
+        );
     }
 
     #[test]
     fn successful_ephemeral_flush_accepts_once_without_write_correlation() {
         let (mut socket, _peer) = real_buffered_socket();
         let (event_tx, event_rx) = mpsc::sync_channel(TEST_EVENT_QUEUE_CAPACITY);
-        let (completion, completion_rx) = ephemeral_completion();
+        let target = ephemeral_target(22, 220);
         let mut pending = VecDeque::new();
         let mut durable = VecDeque::new();
         let mut write_accepted = Vec::new();
         let mut ephemeral = VecDeque::from([EphemeralFrame {
+            target: target.clone(),
             frame: "auth".to_string(),
-            completion,
         }]);
         let mut ephemeral_write_accepted = Vec::new();
 
@@ -2733,29 +2775,35 @@ mod tests {
             ),
             FlushResult::Flushed
         ));
+        let (durable_results, ephemeral_results) = drained_results(&event_rx);
+        assert!(durable_results.is_empty(), "no write correlation emitted");
         assert_eq!(
-            completion_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            EphemeralSendOutcome::Accepted
+            ephemeral_results,
+            vec![(target, EphemeralSendOutcome::Accepted)],
+            "an accepted operation resolves exactly once"
         );
-        assert!(completion_rx.try_recv().is_err(), "completion is one-shot");
-        assert!(event_rx.try_recv().is_err(), "no write correlation emitted");
         assert!(pending.is_empty());
         assert!(durable.is_empty());
         assert!(ephemeral.is_empty());
         assert!(ephemeral_write_accepted.is_empty());
     }
 
+    /// Issue #883: dropping an ephemeral command executes NOTHING. The
+    /// terminal is always an explicit `resolve_ephemeral` send, so a dropped
+    /// command is silent rather than a `Drop` impl running consumer code on
+    /// whatever thread happened to own the value.
     #[test]
-    fn dropped_worker_command_resolves_ephemeral_shutdown_baseline() {
-        let (completion, completion_rx) = ephemeral_completion();
+    fn dropping_an_ephemeral_command_executes_no_consumer_code() {
+        let (event_tx, event_rx) = mpsc::sync_channel(TEST_EVENT_QUEUE_CAPACITY);
         drop(WorkerCommand::SendEphemeral {
-            generation: 1,
+            target: ephemeral_target(1, 10),
             frame: "auth".to_string(),
-            completion,
         });
+        drop(event_tx);
         assert_eq!(
-            completion_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            EphemeralSendOutcome::Unavailable
+            drained_results(&event_rx),
+            (Vec::new(), Vec::new()),
+            "a dropped command must not synthesize a terminal from Drop"
         );
     }
 
@@ -2770,7 +2818,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::sync_channel(TEST_EVENT_QUEUE_CAPACITY);
 
         let queued = AttemptCorrelation(51);
-        let (completion, completion_rx) = ephemeral_completion();
+        let target = ephemeral_target(5, 50);
         command_tx
             .send(WorkerCommand::SendDurable {
                 generation: 5,
@@ -2780,9 +2828,8 @@ mod tests {
             .unwrap();
         command_tx
             .send(WorkerCommand::SendEphemeral {
-                generation: 5,
+                target: target.clone(),
                 frame: "auth".to_string(),
-                completion,
             })
             .unwrap();
 
@@ -2791,12 +2838,11 @@ mod tests {
         drain_permanently_disconnected(&command_rx, &event_tx, &shutdown, 1, 5);
 
         assert_eq!(
-            handoff_results(&event_rx),
-            vec![(queued, HandoffResult::NotHandedOff)]
-        );
-        assert_eq!(
-            completion_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            EphemeralSendOutcome::Unavailable
+            drained_results(&event_rx),
+            (
+                vec![(queued, HandoffResult::NotHandedOff)],
+                vec![(target, EphemeralSendOutcome::Unavailable)],
+            )
         );
     }
 }

@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 use nmp_engine::core::{
     AcquisitionEvidence, AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome,
-    AuthSendOutcome, AuthSignerOutcome, Effect, EngineCore, EngineMsg, ReceiptId, RowDelta,
-    RowSink, ShortfallFact, SourceEvidence, SourceStatus,
+    AuthSendCompletion, AuthSendOutcome, AuthSignerOutcome, Effect, EngineCore, EngineMsg,
+    ReceiptId, RowDelta, RowSink, ShortfallFact, SourceEvidence, SourceStatus,
 };
 use nmp_engine::outbox::{ReceiptSink, WriteStatus};
 use nmp_grammar::{
@@ -968,8 +968,7 @@ fn finish_authentication<S: EventStore>(
         })
         .expect("signed AUTH requests an exact-generation send");
     core.handle(EngineMsg::AuthSendCompleted(
-        send_token,
-        AuthSendOutcome::Accepted,
+        AuthSendCompletion::for_operation(&send_token, AuthSendOutcome::Accepted),
     ));
     core.handle(EngineMsg::RelayFrame(
         handle,

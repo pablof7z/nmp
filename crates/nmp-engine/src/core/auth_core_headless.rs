@@ -135,8 +135,7 @@ impl Fixture {
 
     fn send_accepted(&mut self, token: AuthOpToken) {
         self.core.handle(EngineMsg::AuthSendCompleted(
-            token,
-            AuthSendOutcome::Accepted,
+            AuthSendCompletion::for_operation(&token, AuthSendOutcome::Accepted),
         ));
     }
 
@@ -240,8 +239,7 @@ fn exact_early_ok_waits_for_successful_handoff_and_failed_handoff_never_readies(
         .auth_ready_sessions
         .contains_key(&fixture.session));
     let ready = fixture.core.handle(EngineMsg::AuthSendCompleted(
-        send_token,
-        AuthSendOutcome::Accepted,
+        AuthSendCompletion::for_operation(&send_token, AuthSendOutcome::Accepted),
     ));
     assert_eq!(
         ready
@@ -256,8 +254,7 @@ fn exact_early_ok_waits_for_successful_handoff_and_failed_handoff_never_readies(
     let (send_token, event) = fixture.sign(sign_token, unsigned);
     assert!(fixture.ok(event.id, true).is_empty());
     fixture.core.handle(EngineMsg::AuthSendCompleted(
-        send_token,
-        AuthSendOutcome::Unavailable,
+        AuthSendCompletion::for_operation(&send_token, AuthSendOutcome::Unavailable),
     ));
     assert!(!fixture
         .core
@@ -286,8 +283,7 @@ fn every_challenge_supersedes_and_identical_challenges_mint_distinct_events() {
     assert!(fixture
         .core
         .handle(EngineMsg::AuthSendCompleted(
-            first_send,
-            AuthSendOutcome::Accepted,
+            AuthSendCompletion::for_operation(&first_send, AuthSendOutcome::Accepted),
         ))
         .is_empty());
     assert!(fixture
@@ -756,8 +752,7 @@ fn disconnect_releases_every_pending_and_ready_phase_and_stale_callbacks_are_ine
         assert!(fixture
             .core
             .handle(EngineMsg::AuthSendCompleted(
-                stale,
-                AuthSendOutcome::Accepted,
+                AuthSendCompletion::for_operation(&stale, AuthSendOutcome::Accepted),
             ))
             .is_empty());
     }

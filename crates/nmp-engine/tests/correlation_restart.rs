@@ -14,8 +14,8 @@ use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
 use nmp_engine::core::{
-    AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome, AuthSendOutcome,
-    AuthSignerOutcome, Effect, EngineCore, EngineMsg, ReattachOutcome, ReceiptId,
+    AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome, AuthSendCompletion,
+    AuthSendOutcome, AuthSignerOutcome, Effect, EngineCore, EngineMsg, ReattachOutcome, ReceiptId,
 };
 use nmp_engine::outbox::{ReceiptSink, WriteStatus};
 use nmp_grammar::{
@@ -408,8 +408,7 @@ fn authenticate(
         })
         .expect("signed AUTH requests exact-generation send");
     core.handle(EngineMsg::AuthSendCompleted(
-        send_token,
-        AuthSendOutcome::Accepted,
+        AuthSendCompletion::for_operation(&send_token, AuthSendOutcome::Accepted),
     ));
     core.handle(EngineMsg::RelayFrame(
         handle,
