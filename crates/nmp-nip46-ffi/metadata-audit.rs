@@ -253,8 +253,11 @@ fn audit(items: &[Metadata]) -> Result<String, String> {
         // The core vends the opaque mailbox through one exact outward-only
         // callable. Do not exempt its namespace: a linked crate may choose
         // the same `[lib] name` and therefore claim the same UniFFI module.
-        // An input, throws position, duplicate, or any other callable remains
-        // subject to the provider-proof rule below.
+        // UniFFI derives both this label and its no-mangle symbols from the
+        // same module/type/function tuple, so forging the exact allowance
+        // collides at link time; the exact-one check below remains the second
+        // line of defence. An input, throws position, duplicate, or any other
+        // callable remains subject to the provider-proof rule below.
         if callable.label == CORE_MAILBOX_SOURCE
             && return_carries_mailbox
             && !input_carries_mailbox
@@ -585,6 +588,40 @@ mod tests {
             audit(&items).expect_err("the exact core source is exempt only in return position");
         assert!(error.contains(CORE_MAILBOX_SOURCE));
         assert!(error.contains("without an input containing"));
+    }
+
+    #[test]
+    fn exact_core_mailbox_source_cannot_throw_a_mailbox() {
+        let mut items = valid_metadata();
+        let Some(Metadata::Method(method)) = items
+            .iter_mut()
+            .find(|item| matches!(item, Metadata::Method(_)))
+        else {
+            panic!("valid metadata must contain the core mailbox source");
+        };
+        method.throws = Some(object_type(CORE_MODULE, MAILBOX_TYPE));
+
+        let error =
+            audit(&items).expect_err("the exact core source is exempt only in return position");
+        assert!(error.contains(CORE_MAILBOX_SOURCE));
+        assert!(error.contains("without an input containing"));
+    }
+
+    #[test]
+    fn duplicate_core_mailbox_source_is_rejected() {
+        let mut items = valid_metadata();
+        let duplicate = items
+            .iter()
+            .find_map(|item| match item {
+                Metadata::Method(method) => Some(method.clone()),
+                _ => None,
+            })
+            .expect("valid metadata must contain the core mailbox source");
+        items.push(Metadata::Method(duplicate));
+
+        let error = audit(&items).expect_err("two core mailbox sources must fail");
+        assert!(error.contains("exactly one outward-only core mailbox source"));
+        assert!(error.contains("found 2"));
     }
 
     #[test]

@@ -115,7 +115,10 @@ about current code:
   `nmp_ffi` is audited by callable shape like every other crate. The mailbox
   has private fields and its Rust constructor is crate-private, so even a
   linked namespace impostor cannot mint a mailbox for its allowlisted return;
-  only the real core `NmpEngine` can vend one. This audits
+  only the real core `NmpEngine` can vend one. UniFFI derives the audit label
+  and no-mangle scaffolding symbol from the same module/type/function tuple,
+  so a linked crate forging that exact return label collides with core at link
+  time; the audit independently requires exactly one such source. This audits
   the same compiled authority bindgen consumes, independent of source
   location, claimed crate/module namespace, macro expansion, aliases, records,
   or other Rust spelling. It cannot prove the meaning of a raw integer that

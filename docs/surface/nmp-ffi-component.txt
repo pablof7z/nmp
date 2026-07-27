@@ -9171,7 +9171,7 @@ object Object {
     },
     ffi_init_callback: None,
     docstring: Some(
-        "Opaque provider mailbox bound to one exact core engine.\n\nNative provider components consume this external UniFFI object rather than\nimporting or mirroring `NmpEngine`. Its Rust-only operations are the\nordinary generic signer door and the engine-owned adapter runtime already\nused by supported provider sessions.",
+        "Opaque provider mailbox bound to one exact core engine.\n\nNative provider components consume this external UniFFI object rather than\nimporting or mirroring `NmpEngine`. Its Rust-only operations are the\nordinary generic signer door and the engine-owned adapter runtime already\nused by supported provider sessions. Construction is sealed inside core:\nlinked crates can receive this object only from\n[`NmpEngine::signer_mailbox`](crate::facade::NmpEngine::signer_mailbox).\n\n```compile_fail\nlet _ = nmp_ffi::signer::FfiSignerMailbox::from_engine(panic!());\n```",
     ),
 }
 

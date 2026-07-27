@@ -120,7 +120,9 @@ for falsifier in \
   missing_core_mailbox_source_positive_control_is_rejected \
   foreign_namespace_mailbox_entry_is_not_hidden_from_audit \
   forged_core_namespace_mailbox_input_is_not_exempted \
-  exact_core_mailbox_source_cannot_accept_a_mailbox_input; do
+  exact_core_mailbox_source_cannot_accept_a_mailbox_input \
+  exact_core_mailbox_source_cannot_throw_a_mailbox \
+  duplicate_core_mailbox_source_is_rejected; do
   grep -qF "fn $falsifier" crates/nmp-nip46-ffi/metadata-audit.rs ||
     fail "compiled metadata audit is missing falsifier $falsifier"
 done
