@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use nostr::{EventId, Keys, PublicKey, Tag, Timestamp, UnsignedEvent};
 
-use nmp_engine::core::{AcquisitionEvidence, DiagnosticsSnapshot, RowDelta};
+use nmp_engine::core::{AcquisitionEvidence, DiagnosticsSnapshot, RowDelta, ShortfallFact};
 use nmp_engine::outbox::WriteStatus;
 use nmp_engine::runtime::{DiagnosticsHandle, EngineThread, Handle, QueryHandle, RowsReceiver};
 use nmp_grammar::{AccessContext, IndexedTagName, SourceAuthority};
@@ -530,6 +530,35 @@ impl NmpWorld {
 
     pub fn set_reject_queries(&mut self, relay: &str) {
         self.relay_config_mut(relay).reject_queries = true;
+    }
+
+    /// `Given relay <name> allows at most <n> subscriptions at a time` --
+    /// the relay publishes a NIP-11 document saying so, served over plain
+    /// HTTP on its own address exactly as a real relay does. The engine
+    /// fetches and parses it through its own acquisition path; nothing is
+    /// injected behind its back.
+    pub fn advertise_subscription_limit(&mut self, relay: &str, max: u64) {
+        self.relay_config_mut(relay)
+            .advertised_limits
+            .get_or_insert_with(Default::default)
+            .max_subscriptions = Some(max);
+    }
+
+    /// `Given relay <name> accepts subscription names of at most <n>
+    /// characters`.
+    pub fn advertise_subid_length(&mut self, relay: &str, max: u64) {
+        self.relay_config_mut(relay)
+            .advertised_limits
+            .get_or_insert_with(Default::default)
+            .max_subid_length = Some(max);
+    }
+
+    /// `Given relay <name> publishes nothing about itself` -- no NIP-11
+    /// document at all, answered `404`. This is the DEFAULT for every relay
+    /// in this suite, stated explicitly where a scenario is about it: two of
+    /// the eight major public relays measured for issue #931 behave this way.
+    pub fn publish_no_relay_document(&mut self, relay: &str) {
+        self.relay_config_mut(relay).advertised_limits = None;
     }
 
     /// `Given <person>'s relay list names <relay> as their write relay` /
@@ -1183,6 +1212,37 @@ impl NmpWorld {
             let rows: Vec<nostr::Event> = f.rows.values().cloned().collect();
             pred(&rows, &f.evidence)
         })
+    }
+
+    /// How many OPEN WATCHES have been told, in their own acquisition
+    /// evidence, that some of what they asked for could not be requested
+    /// locally (`ShortfallFact::LocalLimit`).
+    ///
+    /// This is the app-facing half of a bound subscription budget, and the
+    /// half that matters most: a diagnostics count tells an operator, this
+    /// tells the subscriber. Bounded-polls until `expected` watches report
+    /// it, then returns whatever the count actually is, so a failure message
+    /// can say how far off it was.
+    pub fn watches_reporting_a_local_limit(&mut self, expected: usize) -> usize {
+        let deadline = Instant::now() + EVENTUALLY;
+        loop {
+            let mut reporting = 0;
+            for watch in self.watches.values_mut() {
+                watch.drain_available();
+                if watch
+                    .evidence
+                    .shortfall
+                    .iter()
+                    .any(|fact| matches!(fact, ShortfallFact::LocalLimit { .. }))
+                {
+                    reporting += 1;
+                }
+            }
+            if reporting >= expected || Instant::now() >= deadline {
+                return reporting;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     pub fn feed_never(&mut self, pred: impl Fn(&[nostr::Event]) -> bool) -> bool {

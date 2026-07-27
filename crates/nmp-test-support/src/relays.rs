@@ -76,6 +76,40 @@ pub struct RelayConfig {
     /// gated. Defaults to `false` so every existing scenario keeps its
     /// ungated relay semantics.
     pub auth_required_writes: bool,
+    /// What this relay publishes in its NIP-11 document. `None` -- the
+    /// default, and every pre-existing scenario's behaviour -- means it
+    /// publishes NO document at all: an HTTP fetch is answered `404`, which
+    /// is exactly what relay.nostr.band and relay.snort.social do today.
+    pub advertised_limits: Option<AdvertisedLimits>,
+}
+
+/// The `limitation` fields a scripted relay advertises. Each is optional
+/// because NIP-11 omission means "said nothing", never an implicit zero --
+/// and a document that carries a `limitation` object WITHOUT
+/// `max_subscriptions` is a real shape worth being able to script.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AdvertisedLimits {
+    pub max_subscriptions: Option<u64>,
+    pub max_subid_length: Option<u64>,
+}
+
+impl AdvertisedLimits {
+    /// The exact JSON document this relay serves. Hand-built rather than
+    /// serialized from a type, so the test corpus states the wire shape it
+    /// means -- the same reason the wire assertions read raw client bytes.
+    fn document(&self) -> String {
+        let mut limitation = Vec::new();
+        if let Some(value) = self.max_subscriptions {
+            limitation.push(format!("\"max_subscriptions\":{value}"));
+        }
+        if let Some(value) = self.max_subid_length {
+            limitation.push(format!("\"max_subid_length\":{value}"));
+        }
+        format!(
+            "{{\"name\":\"scripted\",\"supported_nips\":[1,11],\"limitation\":{{{}}}}}",
+            limitation.join(",")
+        )
+    }
 }
 
 /// Contact count + a `Notify` so a caller can WAIT (bounded, no spin-poll --
@@ -689,10 +723,14 @@ impl ScriptedRelay {
             let mut frames = ClientFrames::new(Arc::clone(&tap_log));
             Box::new(move |bytes: &[u8]| frames.push(bytes)) as ClientTap
         });
-        let connection_owner = ConnectionOwner::bind_with_tap(
+        let connection_owner = ConnectionOwner::bind_with_tap_and_document(
             public_addr,
             SocketAddr::from((Ipv4Addr::LOCALHOST, backend_port)),
             Some(tap),
+            config
+                .advertised_limits
+                .as_ref()
+                .map(AdvertisedLimits::document),
         )
         .await
         .expect("nmp-bdd: client-facing relay owner must bind");
@@ -953,6 +991,7 @@ impl QueryPolicy for LoggingQueryPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// Build the client-to-server websocket frame `payload` would be sent
     /// as: FIN + text opcode, masked (RFC 6455 requires client masking, and
@@ -968,6 +1007,64 @@ mod tests {
         frame.extend_from_slice(&mask);
         frame.extend(bytes.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
         frame
+    }
+
+    /// One plain HTTP GET on the relay's own address returns its NIP-11
+    /// document, and the SAME address still accepts websocket clients -- the
+    /// two-protocols-one-port shape every real relay has, and the reason an
+    /// acceptance test can drive the engine's real document acquisition.
+    ///
+    /// The falsifier for the other half is right below it: a relay with no
+    /// advertisement answers 404, exactly as the two public relays measured
+    /// for issue #931 do.
+    #[tokio::test]
+    async fn a_scripted_relay_serves_its_nip11_document_over_plain_http() {
+        async fn fetch(relay: &ScriptedRelay) -> String {
+            let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", relay.port()))
+                .await
+                .expect("relay address accepts a plain TCP client");
+            socket
+                .write_all(
+                    b"GET / HTTP/1.1\r\nHost: localhost\r\n\
+                      Accept: application/nostr+json\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("the request is writable");
+            let mut response = Vec::new();
+            socket
+                .read_to_end(&mut response)
+                .await
+                .expect("the relay answers and closes");
+            String::from_utf8(response).expect("the response is text")
+        }
+
+        let advertised = ScriptedRelay::start(&RelayConfig {
+            advertised_limits: Some(AdvertisedLimits {
+                max_subscriptions: Some(20),
+                max_subid_length: Some(71),
+            }),
+            ..RelayConfig::default()
+        })
+        .await;
+        let response = fetch(&advertised).await;
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        assert!(
+            response.contains("application/nostr+json"),
+            "the fetcher asks for this exact content type: {response}"
+        );
+        assert!(response.contains("\"max_subscriptions\":20"), "{response}");
+        assert!(response.contains("\"max_subid_length\":71"), "{response}");
+        // The websocket half of the same address is untouched.
+        assert!(advertised.wire_record().subscription_ids().is_empty());
+        advertised.shutdown();
+
+        let silent = ScriptedRelay::start(&RelayConfig::default()).await;
+        let response = fetch(&silent).await;
+        assert!(
+            response.starts_with("HTTP/1.1 404"),
+            "a relay that publishes nothing must SAY nothing: {response}"
+        );
+        silent.shutdown();
     }
 
     /// The recorder's own falsifier: a REQ and a CLOSE, fed in through the
