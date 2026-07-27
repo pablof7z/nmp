@@ -826,6 +826,7 @@ fn one_sided_deadline_index_corruption_fails_closed_before_close() {
             .contains("cardinalities"));
         assert!(store
             .recover_outbox()
+            .expect("recover outbox")
             .iter()
             .any(|open| open.intent_id == intent));
     }
@@ -1088,6 +1089,7 @@ fn redb_lane_attempt_detail_deadline_and_close_survive_real_reopens() {
         let store = reopen(&path);
         assert!(!store
             .recover_outbox()
+            .expect("recover outbox")
             .iter()
             .any(|row| row.intent_id == intent));
         assert_eq!(store.recover_outbox_lanes(intent).unwrap().len(), 1);

@@ -101,7 +101,12 @@ mod receipt_allocator_tests {
             .iter()
             .any(|effect| matches!(effect, Effect::EmitReceipt(_, status) if *status == expected)));
         assert!(core.pending.is_empty());
-        assert!(core.resolver.store().recover_outbox().is_empty());
+        assert!(core
+            .resolver
+            .store()
+            .recover_outbox()
+            .expect("recover outbox")
+            .is_empty());
     }
 
     #[test]
@@ -148,7 +153,12 @@ mod receipt_allocator_tests {
 
         assert_eq!(FIRST_UNACCEPTED_ID - 1, u64::MAX >> 1);
         assert!(core.pending.is_empty());
-        assert!(core.resolver.store().recover_outbox().is_empty());
+        assert!(core
+            .resolver
+            .store()
+            .recover_outbox()
+            .expect("recover outbox")
+            .is_empty());
     }
 
     #[test]

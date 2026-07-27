@@ -239,12 +239,14 @@ pub fn sentinel_signature() -> Signature {
 /// pending row becomes visible" — architecture review correction).
 /// Realistic runtime failures (disk full, I/O error) at `accept_write`/
 /// `accept_ephemeral`/`promote_signed`/`compensate_write` must never panic
-/// the embedding app — unlike the rest of this crate's `redb` usage, which
-/// stays `.expect()`-on-invariant-violation per this crate's own module
-/// doc (a healthy embedded DB file failing to open a table it created
-/// itself is a bug; a write failing because the disk is full is not).
+/// the embedding app. Neither may a *persisted row that does not decode*
+/// (#790): a malformed, truncated, or schema-incompatible value is a fact
+/// about the file, not a reason to abort the host, so every production
+/// decoder of store-owned bytes/JSON reports it through its owning door as
+/// [`PersistenceFault::Invariant`] instead of `.expect()`ing.
 /// `MemoryStore` implements the same fallible signature for backend
-/// uniformity but never actually returns `Err` (it does no I/O).
+/// uniformity but never actually returns `Err` (it does no I/O and owns no
+/// encoded rows).
 ///
 /// "Do not panic" was only half the contract (#895). The other half is
 /// telling the embedder *what kind* of failure this was, so recovery is a
@@ -407,6 +409,20 @@ pub enum PersistenceFault {
     /// its own decoded rows — a decode/encode failure, a schema invariant,
     /// an index disagreement, an exhausted counter. See
     /// [`PersistenceError::invariant`].
+    ///
+    /// **This, not [`Self::Corrupted`], is where a persisted row that fails
+    /// to decode lands (#790.)** The two are not synonyms. `Corrupted` is
+    /// redb's own report that the *file structure* is damaged — redb cannot
+    /// vouch for what it did or did not write, so it is
+    /// [`DurabilityOutcome::Unknown`]. A row that redb returned intact but
+    /// whose bytes violate *this crate's* schema is the opposite situation:
+    /// the backend is healthy, the failure is raised while decoding, and
+    /// decoding always happens before the enclosing write transaction is
+    /// committed. So the requested mutation provably did not land, and
+    /// [`DurabilityOutcome::Absent`] is the true claim, not a convenient one.
+    /// Reporting such a row as `Corrupted` would additionally assert
+    /// [`Self::requires_reopen`], which is false: reopening the handle cannot
+    /// change what the row says.
     Invariant,
 }
 
@@ -1785,7 +1801,17 @@ pub trait EventStore {
     /// in-memory write-outbox bookkeeping. `MemoryStore` always returns
     /// empty (Fable checkpoint Q4: crash-safety is a `RedbStore`-only
     /// backend property, not a contract `EventStore` itself promises).
-    fn recover_outbox(&self) -> Vec<RecoveredIntent>;
+    ///
+    /// Fallible (#790). This used to return a bare `Vec`, which left the
+    /// backend nothing to do with a journal row that will not decode except
+    /// panic the embedding host at boot — the one moment the host is least
+    /// able to survive it. `Ok(vec![])` and `Err(..)` are different facts and
+    /// must stay distinguishable: the first says "no durable obligation is
+    /// open", the second says "the durable obligation set is unreadable".
+    /// A caller must never collapse the second into the first, and this door
+    /// never returns a partial prefix — an undecodable row fails the whole
+    /// call rather than silently shortening the obligation set.
+    fn recover_outbox(&self) -> Result<Vec<RecoveredIntent>, PersistenceError>;
 
     /// Look up `receipt_id`'s durably-RETAINED record — independent of
     /// whether its intent's `OUTBOX_INTENTS` open-work row still exists

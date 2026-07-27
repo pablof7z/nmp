@@ -165,7 +165,7 @@ impl EventStore for FailingReadStore {
         self.inner.compensate_write(intent_id)
     }
 
-    fn recover_outbox(&self) -> Vec<RecoveredIntent> {
+    fn recover_outbox(&self) -> Result<Vec<RecoveredIntent>, PersistenceError> {
         self.inner.recover_outbox()
     }
 
