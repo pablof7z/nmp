@@ -67,6 +67,14 @@ public enum NMPError: Error, Sendable, Equatable {
     case signEventAlreadyConsumed
     case invalidSignature(String)
     case engineClosed
+    /// A separately packaged native component was built against a different
+    /// core Rust object contract. Refused before an external object pointer
+    /// crosses the component boundary (#952).
+    case nativeComponentMismatch(
+        component: String,
+        expectedCoreIdentity: String,
+        actualCoreIdentity: String
+    )
     /// `decodeNostrEntity`'s input was not valid bech32, had an
     /// unrecognized HRP prefix, or had a malformed inner TLV payload
     /// (#116).
@@ -211,6 +219,12 @@ extension NMPError: LocalizedError {
             "Invalid signature hex: \(got.debugDescription)"
         case .engineClosed:
             "Engine already shut down"
+        case .nativeComponentMismatch(
+            let component,
+            let expectedCoreIdentity,
+            let actualCoreIdentity
+        ):
+            "Native component \(component) requires core \(expectedCoreIdentity), loaded \(actualCoreIdentity)"
         case .invalidNostrEntity(let reason):
             "Invalid Nostr entity: \(reason)"
         case .nostrEntitySecretKeyRejected:

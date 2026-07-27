@@ -50,6 +50,7 @@ pub enum FfiNip46ProviderError {
     InvalidPublicKey { field: String },
     InvalidRelay { relay: String },
     InvalidSigner { reason: String },
+    CoreComponentMismatch { expected: String, actual: String },
     EngineClosed,
 }
 
@@ -62,6 +63,10 @@ impl std::fmt::Display for FfiNip46ProviderError {
             }
             Self::InvalidRelay { relay } => write!(f, "invalid NIP-46 relay: {relay:?}"),
             Self::InvalidSigner { reason } => write!(f, "invalid NIP-46 signer: {reason}"),
+            Self::CoreComponentMismatch { expected, actual } => write!(
+                f,
+                "NIP-46 provider requires core component {expected}, loaded {actual}"
+            ),
             Self::EngineClosed => f.write_str("core engine already shut down"),
         }
     }
@@ -686,14 +691,46 @@ pub fn nip46_signer_catalog() -> Vec<FfiNip46SignerApp> {
 /// through the core engine's ordinary registration door.
 #[derive(uniffi::Object)]
 pub struct NmpNip46Provider {
+    _compatibility: Arc<FfiNip46CoreCompatibility>,
     mailbox: Arc<FfiSignerMailbox>,
+}
+
+/// Opaque proof that the loaded core identity matched this provider build.
+///
+/// The proof is minted from plain identity text before the caller requests a
+/// core mailbox. Requiring it in [`NmpNip46Provider::new`] makes the ordering
+/// visible in generated bindings instead of relying on README discipline.
+#[derive(Debug, uniffi::Object)]
+pub struct FfiNip46CoreCompatibility {
+    _private: (),
+}
+
+/// Verify the loaded core component before any external object is exchanged.
+#[uniffi::export]
+pub fn verify_nip46_core_component_identity(
+    actual: String,
+) -> Result<Arc<FfiNip46CoreCompatibility>, FfiNip46ProviderError> {
+    let expected = nmp_ffi::signer::CORE_COMPONENT_IDENTITY;
+    if actual != expected {
+        return Err(FfiNip46ProviderError::CoreComponentMismatch {
+            expected: expected.to_string(),
+            actual,
+        });
+    }
+    Ok(Arc::new(FfiNip46CoreCompatibility { _private: () }))
 }
 
 #[uniffi::export]
 impl NmpNip46Provider {
     #[uniffi::constructor]
-    pub fn new(mailbox: Arc<FfiSignerMailbox>) -> Arc<Self> {
-        Arc::new(Self { mailbox })
+    pub fn new(
+        compatibility: Arc<FfiNip46CoreCompatibility>,
+        mailbox: Arc<FfiSignerMailbox>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            _compatibility: compatibility,
+            mailbox,
+        })
     }
 
     pub fn nip46_invitation(
@@ -969,6 +1006,23 @@ mod tests {
 
     struct CloseCountingObserver {
         closed: Arc<AtomicUsize>,
+    }
+
+    #[test]
+    fn exact_core_identity_mints_compatibility_and_mismatch_is_typed() {
+        assert!(verify_nip46_core_component_identity(
+            nmp_ffi::signer::nmp_core_component_identity()
+        )
+        .is_ok());
+
+        assert_eq!(
+            verify_nip46_core_component_identity("mismatched-core".to_string())
+                .expect_err("a different core identity must be refused"),
+            FfiNip46ProviderError::CoreComponentMismatch {
+                expected: nmp_ffi::signer::CORE_COMPONENT_IDENTITY.to_string(),
+                actual: "mismatched-core".to_string(),
+            }
+        );
     }
 
     impl Nip46ConnectionObserver for CloseCountingObserver {

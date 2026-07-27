@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# #877: NIP-46 is a selectable signer provider, never part of the universal
-# signer/core/native vocabulary. This is the source-and-package half of the
-# boundary falsifier; build jobs additionally run the core/provider tests and
-# inspect their produced libraries.
+# #877/#952: NIP-46 is a selectable signer provider, never part of the
+# universal signer/core/native vocabulary. A provider must also prove exact
+# native-core compatibility before it may receive the external mailbox.
 
 set -euo pipefail
 
@@ -14,6 +13,7 @@ fail() { echo "nip46-provider-boundary: $*" >&2; exit 1; }
 required_paths=(
   crates/nmp-signer/src/capability.rs
   crates/nmp-local-signer/src/local.rs
+  crates/nmp-ffi/build.rs
   crates/nmp-ffi/src/signer.rs
   crates/nmp-nip46/src/nip46.rs
   crates/nmp-nip46-ffi/src/signer.rs
@@ -23,6 +23,7 @@ required_paths=(
   Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/ProviderComponent.kt
   Packages/NMPKotlin/nip46/build.gradle.kts
   Packages/NMPKotlin/nip46/src/main/kotlin/com/nmp/sdk/RemoteSigner.kt
+  scripts/check-nip46-component-identity.sh
 )
 for path in "${required_paths[@]}"; do
   [[ -f "$path" ]] || fail "required ownership path is missing: $path"
@@ -77,8 +78,24 @@ grep -qF 'pub struct FfiSignerMailbox' crates/nmp-ffi/src/signer.rs ||
   fail "core opaque signer mailbox is missing"
 grep -qF 'pub fn signer_mailbox(&self) -> Arc<FfiSignerMailbox>' crates/nmp-ffi/src/facade.rs ||
   fail "NmpEngine does not vend the opaque signer mailbox"
-grep -qF 'pub fn new(mailbox: Arc<FfiSignerMailbox>)' crates/nmp-nip46-ffi/src/signer.rs ||
-  fail "NIP-46 native provider does not consume the external core mailbox"
+grep -qF 'pub fn nmp_core_component_identity() -> String' crates/nmp-ffi/src/signer.rs ||
+  fail "core does not export its plain native component identity"
+grep -qF 'NMP_FFI_CARGO_PACKAGES' crates/nmp-ffi/build.rs ||
+  fail "core identity does not bind the selected Cargo package set"
+grep -qF 'pub fn verify_nip46_core_component_identity(' crates/nmp-nip46-ffi/src/signer.rs ||
+  fail "NIP-46 provider does not verify plain core identity before object exchange"
+grep -qF 'compatibility: Arc<FfiNip46CoreCompatibility>' crates/nmp-nip46-ffi/src/signer.rs ||
+  fail "NIP-46 provider construction does not require a compatibility proof"
+grep -qF 'withVerifiedNip46Core(actual: nmpProviderCoreComponentIdentity())' \
+  Packages/NMPNip46/Sources/NMPNip46/RemoteSigner.swift ||
+  fail "Swift provider does not verify the loaded core before requesting a mailbox"
+grep -qF 'withVerifiedNip46Core(nmpProviderCoreComponentIdentity())' \
+  Packages/NMPKotlin/nip46/src/main/kotlin/com/nmp/sdk/RemoteSigner.kt ||
+  fail "Kotlin provider does not verify the loaded core before requesting a mailbox"
+for builder in scripts/build-swift-nip46-xcframework.sh scripts/build-kotlin-nip46-jvm.sh; do
+  grep -qF 'NMP_FFI_CARGO_PACKAGES="$COMPONENT_PACKAGES"' "$builder" ||
+    fail "$builder does not build core and provider under one package-set identity"
+done
 if grep -nE 'Arc<NmpEngine>|engine:[[:space:]]*Arc<nmp::Engine>|FfiSigning(Capability)?Callback|SigningCapabilityCallback' \
   crates/nmp-nip46-ffi/src/signer.rs; then
   fail "NIP-46 FFI bypasses the opaque mailbox or recreates a callback bridge"

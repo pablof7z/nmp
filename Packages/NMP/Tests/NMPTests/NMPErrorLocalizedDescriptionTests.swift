@@ -53,6 +53,14 @@ final class NMPErrorLocalizedDescriptionTests: XCTestCase {
             (.signEventAlreadyConsumed, "This sign-event result was already consumed"),
             (.invalidSignature("sentinel-signature"), #"Invalid signature hex: "sentinel-signature""#),
             (.engineClosed, "Engine already shut down"),
+            (
+                .nativeComponentMismatch(
+                    component: "sentinel-provider",
+                    expectedCoreIdentity: "sentinel-expected",
+                    actualCoreIdentity: "sentinel-actual"
+                ),
+                "Native component sentinel-provider requires core sentinel-expected, loaded sentinel-actual"
+            ),
             (.invalidNostrEntity("sentinel-entity"), "Invalid Nostr entity: sentinel-entity"),
             (.nostrEntitySecretKeyRejected, "Refusing to decode a secret-key entity"),
             (

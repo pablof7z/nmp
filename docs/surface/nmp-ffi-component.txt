@@ -7338,6 +7338,36 @@ function Function {
 }
 
 function Function {
+    name: "nmp_core_component_identity",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [],
+    return_type: Some(
+        String,
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_nmp_core_component_identity",
+        is_async: false,
+        arguments: [],
+        return_type: Some(
+            RustBuffer(
+                None,
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Return the loaded core library's exact native component identity.\n\nThis value is plain data by design: a provider can compare it before\nrequesting or lowering [`FfiSignerMailbox`].",
+    ),
+    throws: None,
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_nmp_core_component_identity",
+    checksum: Some(
+        14080,
+    ),
+}
+
+function Function {
     name: "parse_nostr_content",
     module_path: "nmp_ffi",
     is_async: false,

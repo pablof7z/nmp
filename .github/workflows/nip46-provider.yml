@@ -33,7 +33,16 @@ jobs:
       - name: Build core and provider XCFrameworks
         run: |
           scripts/build-swift-xcframework.sh --sim-only
+          cp target/aarch64-apple-ios-sim/release/libnmp_ffi.a \
+            "$RUNNER_TEMP/libnmp_ffi-core-only.a"
           scripts/build-swift-nip46-xcframework.sh --sim-only
+
+      - name: Prove matched identity and package-set mismatch
+        run: |
+          scripts/check-nip46-component-identity.sh \
+            "$RUNNER_TEMP/libnmp_ffi-core-only.a" \
+            target/aarch64-apple-ios-sim/release/libnmp_ffi.a \
+            target/aarch64-apple-ios-sim/release/libnmp_nip46_ffi.a
 
       - name: Prove the provider is absent from the core link/resource maps
         run: |
@@ -64,7 +73,15 @@ jobs:
       - name: Build core and provider bindings
         run: |
           scripts/build-kotlin-jvm.sh
+          cp target/release/libnmp_ffi.so "$RUNNER_TEMP/libnmp_ffi-core-only.so"
           scripts/build-kotlin-nip46-jvm.sh
+
+      - name: Prove matched identity and package-set mismatch
+        run: |
+          scripts/check-nip46-component-identity.sh \
+            "$RUNNER_TEMP/libnmp_ffi-core-only.so" \
+            target/release/libnmp_ffi.so \
+            target/release/libnmp_nip46_ffi.so
 
       - name: Prove the provider is absent from the core link/resource maps
         run: |
