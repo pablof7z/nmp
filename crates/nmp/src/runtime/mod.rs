@@ -177,7 +177,7 @@ pub type HistoryMsg = HistoryBatch;
 /// `Send` but deliberately not `Sync`.
 ///
 /// ```compile_fail
-/// use nmp::runtime::HistoryReceiver;
+/// use nmp::mechanism::runtime::HistoryReceiver;
 /// fn require_sync<T: Sync>() {}
 /// require_sync::<HistoryReceiver>();
 /// ```

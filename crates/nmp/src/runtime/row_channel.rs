@@ -199,7 +199,7 @@ pub(crate) struct RowsSender {
 /// `Sync`.
 ///
 /// ```compile_fail
-/// use nmp::runtime::RowsReceiver;
+/// use nmp::mechanism::runtime::RowsReceiver;
 /// fn require_sync<T: Sync>() {}
 /// require_sync::<RowsReceiver>();
 /// ```
