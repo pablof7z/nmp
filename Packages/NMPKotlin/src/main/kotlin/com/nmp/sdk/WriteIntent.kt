@@ -45,7 +45,7 @@ sealed class WriteRouting {
 
     fun toFfi(): FfiWriteRouting =
         when (this) {
-            is AuthorOutbox -> FfiWriteRouting.AuthorOutbox
+            is AuthorOutbox -> FfiWriteRouting.AUTHOR_OUTBOX
         }
 
     companion object {
