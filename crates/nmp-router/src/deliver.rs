@@ -52,7 +52,7 @@ mod tests {
             .unwrap();
 
         // A wire filter widened to cover both A and B (what a coalesced
-        // AuthorUnion REQ would look like).
+        // author-union REQ would look like).
         let wire_events = vec![a_event.clone(), b_event.clone()];
 
         let atom_a = atom_for(&[1], &a_keys.public_key().to_hex());

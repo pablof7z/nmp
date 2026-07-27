@@ -3,7 +3,7 @@
 //! THE DEFECT. `SubId::for_wire` derived a wire id from the filter's
 //! `Skeleton` (`route.rs`), which DELETES `authors`. Two filters differing
 //! only in `authors` therefore minted the SAME id. Normally they would have
-//! been merged by `AuthorUnion` first — but `coalesce::neither_limited`
+//! been merged by the author union first — but `coalesce::neither_limited`
 //! refuses to merge any pair where either side carries a `limit`, so both
 //! survive coalescing under one id. `diff_plans` keys the emitted delta by
 //! `SubId` in a `BTreeMap` (`plan.rs`), so one of them is silently dropped,
@@ -111,7 +111,7 @@ fn count_closes(delta: &WireDelta) -> usize {
 }
 
 /// THE falsifier. Two atoms identical except `authors`, both carrying a
-/// `limit`. `AuthorUnion` refuses them (`neither_limited`), so they survive
+/// `limit`. The union refuses them (`neither_limited`), so they survive
 /// coalescing as two separate `WireReq`s — and under the old derived identity
 /// they minted the SAME `SubId`, because `Skeleton::of` erased the only field
 /// that distinguishes them. One REQ then never reached the wire, and an
@@ -215,7 +215,7 @@ fn churning_a_limited_atoms_author_set_overwrites_in_place() {
 }
 
 /// `limit` is the TRIGGER, not the defect. `RuleRegistry::dedup_only()` holds
-/// no `AuthorUnion` at all, so under it two ordinary UNLIMITED atoms identical
+/// no union at all, so under it two ordinary UNLIMITED atoms identical
 /// except `authors` also fail to merge — and must also stay distinct on the
 /// wire. Mergeability depends on the registry actually in play, not on the
 /// filter alone; an identity ALLOCATED per surviving filter is indifferent to
@@ -335,7 +335,7 @@ fn withdrawing_a_sibling_does_not_move_the_survivors_sub_id() {
     );
 }
 
-/// The control that must NOT regress: `AuthorUnion`'s in-place widening.
+/// The control that must NOT regress: the author axis's in-place widening.
 /// Growing an unlimited author set one value at a time keeps ONE accumulating
 /// filter on ONE stable token — N REQs, zero CLOSEs.
 #[test]
@@ -739,7 +739,7 @@ prop_compose! {
         tag_value in prop::sample::select(vec!["v0", "v1"]),
         since in prop::option::of(prop::sample::select(vec![100u64, 200])),
         until in prop::option::of(prop::sample::select(vec![1_000u64, 2_000])),
-        // Biased toward Some: `limit` is what makes `AuthorUnion` refuse
+        // Biased toward Some: `limit` is what makes the union refuse
         // (`coalesce::neither_limited`), which is the trigger for the whole
         // defect class.
         limit in prop_oneof![

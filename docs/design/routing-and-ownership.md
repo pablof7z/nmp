@@ -26,7 +26,7 @@ Everything below is shipped and tested; this spec extends it, it does not replac
 | `DiscoveryKinds` = `{0, 3} ∪ 10000..=19999` (owner-affirmed); indexer relays eligible ONLY for discovery-kind atoms, never a content fallback | `facts.rs::DiscoveryKinds`, `route.rs::build_candidates` |
 | **Additive relay roles**: a relay that is both an author's write relay and an indexer gets both roles' atoms (unioned candidates, never one-role-per-relay) | `router.rs::additive_relay_roles_union_not_exclusive` |
 | 2-relay-min + cap greedy deterministic coverage solver with typed `Shortfall` (`NoCandidates` / `FewerCandidatesThanK` / `CapExhausted`) | `solver.rs` |
-| Widen-only coalescing (`AuthorUnion`, `KindUnion`; unproven rules dropped, ship separate) + local re-filter on delivery | `coalesce.rs`, `deliver.rs` |
+| Widen-only coalescing (`StructuralUnion` — one rule over every array axis; unproven rules dropped, ship separate) + local re-filter on delivery | `coalesce.rs`, `deliver.rs` |
 | Per-relay REQ partitioning, skeleton-stable `SubId` (author churn = one overwriting REQ), full-recompile-then-surgical-diff | `plan.rs`, `router.rs` |
 | Read-side typed provenance: every `WireReq` carries `Vec<RouteProvenance>` (relay, lane, covered authors, `OutboxSolved`\|`Pinned`) — no wire REQ without a traceable route | `route.rs::RouteProvenance` |
 | Self-bootstrapping outbox: `sync_discovery` opens a widen-only internal kind:10002 sub against indexers for authors with unknown write relays (wave 2 supersession) | `core/mod.rs::sync_discovery` |
@@ -91,7 +91,7 @@ Today the caller supplies `WriteRouting` on the intent. Under this spec the defa
 
 ### 2.6 Acceptance scenarios (these are the tests)
 
-**A1 — kind:30023 feed.** appRelay = `my-app-relay`. u1 writes to {relay1, relay2}, u2 to {relay2, relay4}, u3 to {relay1, relay4}. Query `kinds:[30023], authors:[u1,u2,u3]` compiles to exactly: `my-app-relay` ← all three authors (app lane, additive); `relay1` ← [u1,u3]; `relay2` ← [u1,u2]; `relay4` ← [u2,u3] (coverage-solved, AuthorUnion-coalesced, one REQ per relay). No fallback fires (appRelay suppresses; all authors at 2). Diagnostics show `by_lane` counting `AppRelay` separately from `Nip65Write`.
+**A1 — kind:30023 feed.** appRelay = `my-app-relay`. u1 writes to {relay1, relay2}, u2 to {relay2, relay4}, u3 to {relay1, relay4}. Query `kinds:[30023], authors:[u1,u2,u3]` compiles to exactly: `my-app-relay` ← all three authors (app lane, additive); `relay1` ← [u1,u3]; `relay2` ← [u1,u2]; `relay4` ← [u2,u3] (coverage-solved, author-union-coalesced, one REQ per relay). No fallback fires (appRelay suppresses; all authors at 2). Diagnostics show `by_lane` counting `AppRelay` separately from `Nip65Write`.
 
 **A2 — kind:0 two-wave reactive flow.** Query `kinds:[0], authors:[uX]`, uX unknown. Wave 1: kind:0 is a discovery kind ⇒ routes immediately to indexers (+appRelay); a possibly-stale kind:0 renders. In parallel `sync_discovery` widens its kind:10002 sub with uX. Wave 2: uX's 10002 lands ⇒ same recompile routes the kind:0 atom additionally to uX's own write relays (skeleton-stable sub-id ⇒ overwriting REQ, no churn); the store's replaceable supersession makes the fresher kind:0 the winner. Nothing is torn down; the app saw one live query throughout.
 

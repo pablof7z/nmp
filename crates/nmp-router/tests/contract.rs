@@ -323,7 +323,7 @@ fn diagnostics_reverse_coverage_and_lanes() {
     let diag = router.diagnostics();
     let relay0 = &diag.per_session[&public_session(test_relay(0))];
     assert_eq!(relay0.authors_served, 2);
-    // Both A and B reached relay0 via Nip65Write; AuthorUnion folds their
+    // Both A and B reached relay0 via Nip65Write; the union folds their
     // filters into one WireReq, but `by_lane` counts each contributing
     // author-route (2 here), not the number of merged WireReqs (1).
     assert_eq!(relay0.by_lane.get(&Lane::Nip65Write), Some(&2));

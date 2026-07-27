@@ -14,6 +14,15 @@
 //! groups". Every measurement here is a real `EngineCore` run: zero I/O, but
 //! the same `EngineMsg::RelayFrame` ingest path a live relay drives.
 //!
+//! THE LEDGERS BELOW WERE INVERTED when `nmp_router::StructuralUnion` landed.
+//! They originally measured the fan-out as a defect: N resolved `#d` values
+//! opened N wire subscriptions carrying one value each, while the SAME
+//! derived binding in the `authors` slot collapsed onto one. Both halves of
+//! that asymmetry are gone -- the merge rule folds the per-value atoms
+//! (#900/§7.1) and allocated wire tokens carry the widened filter forward in
+//! place (#899/§7.2) -- so what each ledger now pins is the collapsed shape,
+//! and the tag/author contrast in G has become an equality.
+//!
 //! Run the narrated ledgers with:
 //! `cargo test -p nmp-engine --test core_headless derived_tag_fanout -- --nocapture`
 
@@ -372,8 +381,15 @@ fn probe_single_inner_value_reaches_the_wire_as_one_req() {
 /// A — the headline measurement. Five admin groups arrive one at a time on a
 /// live relay. How many outer REQs exist, and how much wire churn did
 /// getting there cost?
+///
+/// INVERTED. This asserted `opened: 1` per value and five live outer subs
+/// each carrying a singleton `#d` -- the fan-out. Each newly resolved value
+/// is now a ONE-COMPONENT difference from the filter already live, so it is
+/// coalesced into it and the wire sees a single REPLACING REQ on the same
+/// token: `replaced: 1`, nothing opened, nothing closed, one live sub whose
+/// `#d` array grows to five.
 #[test]
-fn a_incremental_growth_opens_one_req_per_value_with_zero_churn() {
+fn a_incremental_growth_widens_one_sub_in_place_with_zero_churn() {
     let r0 = relay(0);
     let mut study = Study::new(std::slice::from_ref(&r0));
     study.subscribe(std::slice::from_ref(&r0), "subscribe");
@@ -381,41 +397,63 @@ fn a_incremental_growth_opens_one_req_per_value_with_zero_churn() {
     for n in 1..=5 {
         let group = format!("group-{n}");
         let step = study.admin_of(&r0, 0, "s", &group, &format!("admin of {group}"));
-        assert_eq!(
-            step,
+        let expected = if n == 1 {
+            // The first value has nothing to widen: it opens the sub.
             StepCount {
                 opened: 1,
                 replaced: 0,
-                closed: 0
-            },
-            "each new derived value must open exactly one new sub and disturb none of the existing ones"
+                closed: 0,
+            }
+        } else {
+            StepCount {
+                opened: 0,
+                replaced: 1,
+                closed: 0,
+            }
+        };
+        assert_eq!(
+            step, expected,
+            "after the first value, each new derived value must REPLACE the live \
+             outer sub in place -- never open another, never close one"
         );
-        assert_eq!(study.ledger.live_outer_count(), n);
+        assert_eq!(
+            study.ledger.live_outer_count(),
+            1,
+            "the outer subscription count must not grow with the value set"
+        );
+        assert_eq!(study.ledger.widest_outer(), n, "the value set itself grows");
     }
 
     study
         .ledger
         .report("A. cold cache, 5 values arriving one at a time");
 
-    assert_eq!(study.ledger.live_outer_count(), 5);
+    assert_eq!(study.ledger.live_outer_count(), 1);
     assert_eq!(
         study.ledger.total.closed, 0,
         "growth must never close an existing sub"
     );
     assert_eq!(
-        study.ledger.total.replaced, 0,
-        "growth must never re-issue an existing sub's filter"
+        study.ledger.total.opened, 2,
+        "one inner sub plus ONE outer sub -- that is the whole steady state"
     );
-    // Every outer sub carries exactly ONE #d value — the fan-out, measured.
-    for values in study.ledger.live_outer() {
-        assert_eq!(values.len(), 1, "each outer REQ carries a singleton #d");
-    }
+    // ONE outer sub carrying all five #d values -- the collapse, measured.
+    assert_eq!(
+        study.ledger.live_outer(),
+        vec![(1..=5).map(|n| format!("group-{n}")).collect::<Vec<_>>()],
+        "one outer REQ carries every resolved #d value"
+    );
 }
 
 // ---- B. warm cache ------------------------------------------------------
 
 /// B — the user's "are cache reads served atomically?" question. Five admin
 /// lists are already in the store when the subscription opens.
+///
+/// The single-recompile property always held; what changed is what that one
+/// recompile emits. It opened five outer subs plus the inner one; it now
+/// opens ONE outer sub carrying all five values, because the five atoms
+/// coalesce before any of them reaches a token.
 #[test]
 fn b_warm_cache_resolves_the_whole_set_in_one_recompile() {
     let r0 = relay(0);
@@ -434,16 +472,74 @@ fn b_warm_cache_resolves_the_whole_set_in_one_recompile() {
 
     assert_eq!(
         study.ledger.live_outer_count(),
-        5,
-        "a warm cache must resolve the full derived set at subscribe time"
+        1,
+        "a warm cache must resolve the full derived set into ONE outer sub"
     );
     assert_eq!(
-        step.opened,
-        study.ledger.live_outer_count() + 1,
-        "all five outer subs plus the inner sub open in ONE recompile — the cache read is atomic"
+        study.ledger.widest_outer(),
+        5,
+        "a warm cache must resolve the FULL derived set at subscribe time -- all \
+         five values, in the one filter"
+    );
+    assert_eq!(
+        step.opened, 2,
+        "the one outer sub plus the inner sub open in ONE recompile — the cache \
+         read is atomic"
     );
     assert_eq!(step.closed, 0);
     assert_eq!(step.replaced, 0);
+}
+
+/// B2 — THE CASE THE BDD SUITE FAILED ON, reduced to a deterministic ledger:
+/// a WARM set resolved together, and then ONE more value arriving live.
+///
+/// A grows one at a time from cold and B resolves five at once, but nothing
+/// covered the join between them, which is the shape a real app has
+/// constantly: a catalog is already known, and then one more entry appears.
+/// `features/routing/subscription-collapse.feature`'s "Learning about one more
+/// group replaces the subscription in place" exercises exactly this against a
+/// live engine, and it was the one scenario that would not stay green.
+///
+/// What must hold is what A already proves for the cold path: the sixth value
+/// is a ONE-COMPONENT difference from the live five-value filter, so it
+/// replaces that filter on its own token. One REQ, no open, no close.
+#[test]
+fn b2_one_more_value_after_a_warm_set_replaces_in_place() {
+    let r0 = relay(0);
+    let mut study = Study::new(std::slice::from_ref(&r0));
+    for n in 1..=5 {
+        study.preload_admin_of(&r0, 0, &format!("group-{n}"));
+    }
+    study.subscribe(
+        std::slice::from_ref(&r0),
+        "subscribe (5 values already cached)",
+    );
+    assert_eq!(
+        study.ledger.live_outer_count(),
+        1,
+        "precondition: the warm set is ONE live outer sub"
+    );
+    assert_eq!(study.ledger.widest_outer(), 5);
+
+    let step = study.admin_of(&r0, 0, "s", "group-6", "admin of a SIXTH group");
+    study
+        .ledger
+        .report("B2. warm set of 5, then one more arriving live");
+
+    assert_eq!(
+        step,
+        StepCount {
+            opened: 0,
+            replaced: 1,
+            closed: 0
+        },
+        "the sixth value must REPLACE the live outer filter in place -- opening \
+         a second sub (or closing and reopening) is the churn this design \
+         exists to remove"
+    );
+    assert_eq!(study.ledger.live_outer_count(), 1);
+    assert_eq!(study.ledger.widest_outer(), 6);
+    assert_eq!(study.ledger.total.closed, 0);
 }
 
 // ---- C. growth before vs after EOSE ------------------------------------
@@ -466,21 +562,50 @@ fn c_growth_after_inner_eose_behaves_identically_to_growth_before() {
         .ledger
         .report("C. one value before the inner EOSE, one after");
 
+    // The two steps are no longer identical, and the difference is the
+    // collapse rather than EOSE: the FIRST value opens the outer sub, the
+    // second widens it in place. What must not differ is the WIRE COST, and
+    // it does not -- one message either way.
     assert_eq!(
-        before, after,
-        "EOSE on the inner sub must not change how a newly resolved derived value reaches the wire"
+        before,
+        StepCount {
+            opened: 1,
+            replaced: 0,
+            closed: 0
+        },
+        "the first resolved value opens the outer sub"
     );
-    assert_eq!(study.ledger.live_outer_count(), 2);
+    assert_eq!(
+        after,
+        StepCount {
+            opened: 0,
+            replaced: 1,
+            closed: 0
+        },
+        "EOSE on the inner sub must not change how a newly resolved derived \
+         value reaches the wire: the second value widens in place, exactly as \
+         it would have pre-EOSE (see test A, where no EOSE happens at all)"
+    );
+    assert_eq!(
+        study.ledger.live_outer_count(),
+        1,
+        "both values are served by ONE outer sub"
+    );
+    assert_eq!(study.ledger.widest_outer(), 2);
     assert_eq!(study.ledger.total.closed, 0);
 }
 
 // ---- D. a relay that streams but never EOSEs ---------------------------
 
-/// D — a misbehaving relay that serves data and never EOSEs. The outer subs
-/// must still open: derived resolution is driven by ingested rows, not by
-/// end-of-stored-events.
+/// D — a misbehaving relay that serves data and never EOSEs. Every resolved
+/// value must still reach the wire: derived resolution is driven by ingested
+/// rows, not by end-of-stored-events.
+///
+/// The load-bearing point survives the collapse and is now sharper: a fix
+/// that bought the collapse by BATCHING ON EOSE would show up here as a
+/// filter that never grows past nothing.
 #[test]
-fn d_never_eosing_relay_still_opens_every_outer_sub() {
+fn d_never_eosing_relay_still_serves_every_value() {
     let r0 = relay(0);
     let mut study = Study::new(std::slice::from_ref(&r0));
     study.subscribe(std::slice::from_ref(&r0), "subscribe");
@@ -502,8 +627,14 @@ fn d_never_eosing_relay_still_opens_every_outer_sub() {
 
     assert_eq!(
         study.ledger.live_outer_count(),
+        1,
+        "four values, one outer sub"
+    );
+    assert_eq!(
+        study.ledger.widest_outer(),
         4,
-        "a never-EOSEing relay must not stall derived resolution"
+        "a never-EOSEing relay must not stall derived resolution -- every value \
+         must be in the live filter without any end-of-stored-events signal"
     );
     assert_eq!(study.ledger.total.closed, 0);
 }
@@ -513,8 +644,15 @@ fn d_never_eosing_relay_still_opens_every_outer_sub() {
 /// E — the "slow second relay" case, expressed as the only thing a zero-I/O
 /// engine can actually distinguish: values arriving interleaved across two
 /// distinct relay sessions.
+///
+/// INVERTED, and the number to expect is PER RELAY rather than 1: coalescing
+/// is partitioned by `(RelaySessionKey, SourceAuthority)`
+/// (`Router::compile`), so two pinned relays are two partitions and the
+/// collapsed answer is ONE sub EACH -- two in total, each carrying all four
+/// values. It previously asserted at least four (one per value), which is the
+/// per-(value, relay) fan-out this file was written to measure.
 #[test]
-fn e_values_arriving_across_two_relays_fan_out_per_value_not_per_relay() {
+fn e_values_arriving_across_two_relays_collapse_per_relay_not_per_value() {
     let (r0, r1) = (relay(0), relay(1));
     let mut study = Study::new(&[r0.clone(), r1.clone()]);
     study.subscribe(&[r0.clone(), r1.clone()], "subscribe (2 pinned relays)");
@@ -531,22 +669,35 @@ fn e_values_arriving_across_two_relays_fan_out_per_value_not_per_relay() {
         .ledger
         .report("E. two pinned relays, interleaved arrival, staggered EOSE");
 
-    // Four distinct groups, two pinned relays: the fan-out is per (value,
-    // relay), so this is where the multiplicative cost shows up.
+    // Four distinct groups, two pinned relays. The fan-out WAS per (value,
+    // relay) -- the multiplicative cost. It is now one sub per relay.
     assert_eq!(study.ledger.total.closed, 0);
-    assert!(
-        study.ledger.live_outer_count() >= 4,
-        "each resolved value must be live on the wire; got {}",
-        study.ledger.live_outer_count()
+    assert_eq!(
+        study.ledger.live_outer_count(),
+        2,
+        "one outer sub per pinned relay -- coalescing is partitioned per relay \
+         session, so two relays is two subs, not one and not one per value; got {:?}",
+        study.ledger.live_outer()
     );
+    for values in study.ledger.live_outer() {
+        assert_eq!(
+            values.len(),
+            4,
+            "each relay's single sub must ask for every resolved value: {values:?}"
+        );
+    }
 }
 
 // ---- F. scale ----------------------------------------------------------
 
-/// F — linearity, stated as a number rather than an adjective. 50 admin
-/// groups is a realistic mid-size mosaico catalog.
+/// F — scale, stated as a number rather than an adjective. 50 admin groups is
+/// a realistic mid-size mosaico catalog.
+///
+/// INVERTED: this asserted 50 live outer subs against a real-world relay
+/// ceiling of roughly 20. The catalog is now ONE subscription carrying 50
+/// values, against a 500-value budget.
 #[test]
-fn f_fifty_values_open_fifty_outer_subs() {
+fn f_fifty_values_are_one_outer_sub() {
     let r0 = relay(0);
     let mut study = Study::new(std::slice::from_ref(&r0));
     study.subscribe(std::slice::from_ref(&r0), "subscribe");
@@ -571,8 +722,22 @@ fn f_fifty_values_open_fifty_outer_subs() {
         study.ledger.widest_outer()
     );
 
-    assert_eq!(study.ledger.live_outer_count(), 50);
+    assert_eq!(
+        study.ledger.live_outer_count(),
+        1,
+        "50 catalog entries must be ONE subscription, not 50 against a relay \
+         ceiling of ~20"
+    );
+    assert_eq!(
+        study.ledger.widest_outer(),
+        50,
+        "that one subscription carries every value"
+    );
     assert_eq!(study.ledger.total.closed, 0);
+    assert_eq!(
+        study.ledger.total.opened, 2,
+        "one inner sub, one outer sub -- growth costs replacements, not opens"
+    );
 }
 
 // ---- G. the decisive contrast: same shape, different slot ---------------
@@ -612,16 +777,23 @@ fn posts_by_my_follows(relays: &[RelayUrl]) -> LiveQuery {
     )
 }
 
-/// G — THE contrast. Grow a derived set one element at a time, twice: once
-/// with the binding in `authors`, once in a tag slot. Same engine, same
-/// growth, same relay, same pinned source.
+/// G — THE contrast, now an EQUALITY. Grow a derived set one element at a
+/// time, twice: once with the binding in `authors`, once in a tag slot. Same
+/// engine, same growth, same relay, same pinned source.
 ///
-/// `authors` collapses to ONE sub replaced in place (`AuthorUnion` merges the
-/// atoms, and `Skeleton::of` erases `authors` so the sub-id never moves).
-/// A tag slot has neither a union rule nor the skeleton erasure, so it opens
-/// one sub per value. The asymmetry is mechanical, not semantic.
+/// This was the decisive asymmetry: `authors` collapsed to one sub replaced
+/// in place while a tag slot opened one sub per value, because the registry
+/// held an author rule and no tag rule, and because `Skeleton::of` erased
+/// `authors` and nothing else. The asymmetry was always mechanical rather
+/// than semantic -- a value list is a CHOICE in either slot -- and both
+/// mechanisms are now slot-agnostic: one structural rule spanning every array
+/// axis, and allocated tokens matched by structural signature.
+///
+/// So the test is no longer a contrast to be explained but a REGRESSION GUARD
+/// on the equality. If the two slots ever diverge again, one of them has
+/// grown a special case.
 #[test]
-fn g_authors_slot_collapses_to_one_sub_where_a_tag_slot_opens_one_per_value() {
+fn g_a_derived_set_collapses_the_same_way_in_the_authors_slot_and_a_tag_slot() {
     let r0 = relay(0);
 
     // --- authors slot ---
@@ -697,12 +869,22 @@ fn g_authors_slot_collapses_to_one_sub_where_a_tag_slot_opens_one_per_value() {
     );
     assert_eq!(
         authors_widest, 5,
-        "that one sub must carry all five authors — AuthorUnion widened it"
+        "that one sub must carry all five authors — the union widened it"
     );
     assert_eq!(
         study.ledger.live_outer_count(),
-        5,
-        "five derived TAG values must open five separate wire subs"
+        authors_live_outer,
+        "five derived TAG values must collapse EXACTLY as five derived authors \
+         do -- same sub count"
+    );
+    assert_eq!(
+        study.ledger.widest_outer(),
+        authors_widest,
+        "...and the same value count in the one filter"
+    );
+    assert_eq!(
+        study.ledger.total.closed, authors_ledger.total.closed,
+        "...and neither slot closes anything as it grows"
     );
 }
 

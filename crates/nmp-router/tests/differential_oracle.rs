@@ -6,7 +6,7 @@
 //!
 //! - Path A (dedup-only floor): `RuleRegistry::dedup_only()` -- one WireReq
 //!   per (author, relay) pair, no merging.
-//! - Path B (coalesced): `RuleRegistry::default_widen_only()` -- AuthorUnion
+//! - Path B (coalesced): `RuleRegistry::default_widen_only()` -- StructuralUnion
 //!   folds shards sharing a relay into one widened WireReq.
 //!
 //! Both paths route through the IDENTICAL coverage solve (registry choice

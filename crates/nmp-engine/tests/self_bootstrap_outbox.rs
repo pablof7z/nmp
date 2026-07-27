@@ -266,7 +266,7 @@ fn content_atom_adds_write_relay_without_erasing_projected_source_provenance() {
     // its author set even after resolving -- and write_r is now ALSO a
     // legitimate discovery-lane candidate for A (additive relay roles, Bug
     // 3: an author's own write relay is a fine place to also ask for their
-    // kind:10002). `nmp_router::coalesce`'s `KindUnion` rule correctly folds
+    // kind:10002). `nmp_router::coalesce`'s union rule correctly folds
     // both onto ONE Req rather than opening two redundant subs to the same
     // relay -- this is the widen-safe merge working exactly as designed,
     // not a partial route.
@@ -331,7 +331,7 @@ fn relay_list_parse_excludes_explicit_read_only_relays() {
     // `contains(&1)` rather than `== Some({1})`: the widen-only discovery
     // sub (see the churn fix's doc on `sync_discovery`) leaves A in its
     // author set after resolving, and write_r is now ALSO a legitimate
-    // discovery-lane candidate for A (additive relay roles) -- `KindUnion`
+    // discovery-lane candidate for A (additive relay roles) -- the kinds union
     // may correctly fold that onto the same Req as A's kind:1 content atom.
     assert!(
         plan.reqs_for(&write_r)

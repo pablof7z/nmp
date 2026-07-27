@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use nmp_grammar::{ConcreteFilter, DescriptorHash};
 use nmp_store::CoverageKey;
 
+use crate::component::{sole_difference, Component};
 use crate::route::RouteProvenance;
 
 /// One coalesce-in-progress entry: the filter plus the provenance/coverage
@@ -28,31 +29,154 @@ pub trait MergeRule {
     fn try_merge(&self, a: &ConcreteFilter, b: &ConcreteFilter) -> Option<ConcreteFilter>;
 }
 
-/// `AuthorUnion` — the load-bearing rule. Applies when `a` and `b` are
-/// identical in every field except `authors`; merges into the union of both
-/// author sets. Trivially widening: adding authors only matches MORE
-/// events, never fewer.
-pub struct AuthorUnion;
+/// Maximum event ids carried by one coalesced wire filter. Resolver fan-out
+/// produces singleton projected-id atoms; the union packs those atoms up to
+/// this bound and then leaves additional chunks as separate REQs.
+pub const MAX_IDS_PER_FILTER: usize = 256;
 
-impl MergeRule for AuthorUnion {
+/// Maximum values carried under ONE tag name by one coalesced wire filter.
+///
+/// Deliberately NOT [`MAX_IDS_PER_FILTER`]: that cap bounds 64-char hex event
+/// ids, where 256 values is already ~16KB of filter. Indexed tag values —
+/// NIP-29 `d` identifiers, hashtags, coordinates — are short, so 500 values
+/// is a comparable frame size, and 500 is the number field experience reports
+/// as unremarkable for a relay to accept. Measured against the operational
+/// reality this whole module exists to respect: relays cap CONCURRENT
+/// SUBSCRIPTIONS at roughly 20 while accepting arrays of ~500 values without
+/// complaint (`crates/nmp-router/tests/tag_kill_measurement.rs`).
+///
+/// Like the id bound, this is operational rather than part of the widening
+/// proof: an over-cap union is REFUSED, so the surplus ships as further REQs
+/// and no demanded value is ever dropped.
+pub const MAX_TAG_VALUES_PER_FILTER: usize = 500;
+
+/// `StructuralUnion` — THE merge rule, derived from the filter's shape
+/// rather than named after one field.
+///
+/// ```text
+/// arrays  (kinds, authors, ids, and EACH tag name)  → union, when exactly ONE differs
+/// scalars (since, until)                            → must be equal
+/// limit                                             → refuse
+/// caps                                              → refuse if the result exceeds
+/// ```
+///
+/// It replaces the `AuthorUnion` / `KindUnion` / `IdUnion` trio, which was
+/// three copies of one idea plus a missing fourth: nothing merged on tags, so
+/// two filters differing only in a `#p` or `#d` value never combined at any
+/// scale, and a 300-group catalog compiled to 300 subscriptions per host
+/// against a real-world ceiling of ~20
+/// (`docs/internals/subscriptions/identity-grouping-and-limits.md` §3.4).
+/// Tags stop being a missing fourth rule and become instances of the general
+/// case.
+///
+/// WIDENING. Every component but one is equal between the operands; the one
+/// that differs has its constraint replaced by the UNION of both value sets,
+/// which is a superset of each. So the merged predicate is weaker on that
+/// axis and identical everywhere else:
+/// `matches(merged) ⊇ matches(a) ∪ matches(b)`.
+///
+/// EXACTLY ONE COMPONENT, and this is a hard rule rather than a conservative
+/// starting point. Unioning two at once over-widens into cartesian corners:
+/// `{k:[1],a:[A]} + {k:[2],a:[B]} → {k:[1,2],a:[A,B]}` also fetches kind 2
+/// from A and kind 1 from B, events neither side asked for, and the waste is
+/// unbounded on sparse inputs. Ruled out by the owner, not merely deferred.
+///
+/// TAGS ARE ONE COMPONENT PER NAME. Tags are CONJUNCTIVE across names, so
+/// `{#e:X}` and `{#p:Y}` differ in TWO components and are refused. Had they
+/// been treated as one "tags" axis, the union would have demanded `#e:X` AND
+/// `#p:Y` together — a filter matching NEITHER operand. That is a narrowing,
+/// not a widening, and it is the single most dangerous mistake available on
+/// this axis.
+pub struct StructuralUnion;
+
+impl MergeRule for StructuralUnion {
     fn name(&self) -> &'static str {
-        "AuthorUnion"
+        "StructuralUnion"
     }
 
     fn try_merge(&self, a: &ConcreteFilter, b: &ConcreteFilter) -> Option<ConcreteFilter> {
-        let (a_authors, b_authors) = both_constrain(&a.authors, &b.authors)?;
-        if !same_except_authors(a, b) {
+        // FIRST, and not expressible as a component comparison: a `limit` on
+        // EITHER side refuses, even when both carry the SAME limit. Equal
+        // limits produce no `Component::Limit` difference, so the match below
+        // would never see them -- see `neither_limited`'s doc for why merging
+        // them under-fetches.
+        if !neither_limited(a, b) {
             return None;
         }
-        let mut authors = a_authors.clone();
-        authors.extend(b_authors.iter().cloned());
+
+        // `None` means zero components differ (exact duplicates --
+        // `coalesce_with`'s hash dedup owns those, and a rule that "merged"
+        // them would spin the fixed point) or that two or more do.
+        let component = sole_difference(a, b)?;
+
         let mut merged = a.clone();
-        merged.authors = Some(authors);
+        match &component {
+            // Scalars must be EQUAL. `since`/`until` are BOUNDS, not value
+            // sets: there is no union of two windows that is not either a
+            // narrowing or a widening far past both operands, and a filter is
+            // co-pinned across its fields (`nmp_grammar::ConcreteFilter`), so
+            // widening the window silently changes what the co-pinned value
+            // set means.
+            Component::Since | Component::Until => return None,
+            // UNREACHABLE, and kept as defence in depth: `neither_limited`
+            // above already refused any filter carrying a limit, so no pair
+            // reaching here can differ in `limit`. Do not delete the check
+            // above on the strength of this arm -- two EQUAL `Some(200)`
+            // limits are not a differing component and would sail past it.
+            Component::Limit => return None,
+            Component::Kinds => {
+                let (a_kinds, b_kinds) = both_constrain(&a.kinds, &b.kinds)?;
+                let mut kinds = a_kinds.clone();
+                kinds.extend(b_kinds.iter().copied());
+                merged.kinds = Some(kinds);
+            }
+            Component::Authors => {
+                let (a_authors, b_authors) = both_constrain(&a.authors, &b.authors)?;
+                let mut authors = a_authors.clone();
+                authors.extend(b_authors.iter().cloned());
+                merged.authors = Some(authors);
+            }
+            Component::Ids => {
+                let (a_ids, b_ids) = both_constrain(&a.ids, &b.ids)?;
+                let mut ids = a_ids.clone();
+                ids.extend(b_ids.iter().cloned());
+                if ids.len() > MAX_IDS_PER_FILTER {
+                    return None;
+                }
+                merged.ids = Some(ids);
+            }
+            Component::Tag(name) => {
+                // THE POLARITY INVERTS HERE, and getting it backwards
+                // reintroduces #900 on a new axis. On `authors`/`kinds`/`ids`
+                // the unconstrained shapes are `None` and `Some(∅)`. On tags
+                // the unconstrained shape is an ABSENT NAME (a filter that
+                // does not mention `#d` matches every event, tagged or not),
+                // while a PRESENT name with an empty value set matches
+                // NOTHING -- `nostr`'s `match_event` evaluates `any()` over an
+                // empty set, which is false for tagged and untagged events
+                // alike.
+                //
+                // So `?` on the lookups is the whole admission test, and it
+                // refuses the dangerous end: folding an absent name into a
+                // present one would take a filter matching EVERYTHING on that
+                // axis and constrain it to a value list. `{#t:∅}` is the
+                // harmless end and is deliberately allowed -- it matches
+                // nothing, so `matches(a ∪ b) ⊇ ∅ ∪ matches(b)` trivially.
+                let a_values = a.tags.get(name)?;
+                let b_values = b.tags.get(name)?;
+                let mut values = a_values.clone();
+                values.extend(b_values.iter().cloned());
+                if values.len() > MAX_TAG_VALUES_PER_FILTER {
+                    return None;
+                }
+                merged.tags.insert(*name, values);
+            }
+        }
         Some(merged)
     }
 }
 
-/// The union rules' shared admission test (#900): a set-valued component may
+/// The union rule's admission test (#900): a set-valued component may
 /// only be UNIONED when BOTH operands actually constrain it — `Some` and
 /// non-empty.
 ///
@@ -84,16 +208,6 @@ fn both_constrain<'a, T: Ord>(
     }
 }
 
-fn same_except_authors(a: &ConcreteFilter, b: &ConcreteFilter) -> bool {
-    a.kinds == b.kinds
-        && a.ids == b.ids
-        && a.tags == b.tags
-        && a.since == b.since
-        && a.until == b.until
-        && neither_limited(a, b)
-        && a.authors != b.authors
-}
-
 /// Both `a` and `b` carry NO `limit` at all -- NOT merely `a.limit ==
 /// b.limit`. A relay-side `limit` caps the RESULT COUNT, not a predicate:
 /// two `limit:200` REQs for disjoint author sets each promise up to 200
@@ -106,82 +220,6 @@ fn same_except_authors(a: &ConcreteFilter, b: &ConcreteFilter) -> bool {
 /// guard but did not actually save the widening property.
 fn neither_limited(a: &ConcreteFilter, b: &ConcreteFilter) -> bool {
     a.limit.is_none() && b.limit.is_none()
-}
-
-/// `KindUnion` — an optional, droppable rule. Applies when `a` and `b` are
-/// identical in every field except `kinds` (and share the same `authors`
-/// identity, so it never accidentally straddles two distinct outbox
-/// routes). Trivially widening for the same reason as `AuthorUnion`: a
-/// wider `kinds` set only matches more events.
-pub struct KindUnion;
-
-impl MergeRule for KindUnion {
-    fn name(&self) -> &'static str {
-        "KindUnion"
-    }
-
-    fn try_merge(&self, a: &ConcreteFilter, b: &ConcreteFilter) -> Option<ConcreteFilter> {
-        // Same #900 admission test as `AuthorUnion`: `kinds: None` means
-        // EVERY kind, and is reachable — the FFI filter boundary carries
-        // `kinds` as an option and propagates it verbatim.
-        let (a_kinds, b_kinds) = both_constrain(&a.kinds, &b.kinds)?;
-        let same_rest = a.authors == b.authors
-            && a.ids == b.ids
-            && a.tags == b.tags
-            && a.since == b.since
-            && a.until == b.until
-            && neither_limited(a, b)
-            && a.kinds != b.kinds;
-        if !same_rest {
-            return None;
-        }
-        let mut kinds = a_kinds.clone();
-        kinds.extend(b_kinds.iter().copied());
-        let mut merged = a.clone();
-        merged.kinds = Some(kinds);
-        Some(merged)
-    }
-}
-
-/// Maximum event ids carried by one coalesced wire filter. Resolver fan-out
-/// produces singleton projected-id atoms; `IdUnion` packs those atoms up to
-/// this bound and then leaves additional chunks as separate REQs.
-pub const MAX_IDS_PER_FILTER: usize = 256;
-
-/// `IdUnion` — identical-except-ids widening with an explicit output cap.
-/// The cap is operational, not part of the widening proof: every successful
-/// merge still contains the full union of both inputs.
-pub struct IdUnion;
-
-impl MergeRule for IdUnion {
-    fn name(&self) -> &'static str {
-        "IdUnion"
-    }
-
-    fn try_merge(&self, a: &ConcreteFilter, b: &ConcreteFilter) -> Option<ConcreteFilter> {
-        // Already refused `None` on either side before #900; `both_constrain`
-        // additionally refuses `Some(∅)`, which `nostr`'s matcher treats as
-        // unconstrained exactly like `None`.
-        let (a_ids, b_ids) = both_constrain(&a.ids, &b.ids)?;
-        let same_rest = a.authors == b.authors
-            && a.kinds == b.kinds
-            && a.tags == b.tags
-            && a.since == b.since
-            && a.until == b.until
-            && neither_limited(a, b)
-            && a.ids != b.ids;
-        if !same_rest {
-            return None;
-        }
-        let mut ids = a_ids.clone();
-        ids.extend(b_ids.iter().cloned());
-        if ids.len() > MAX_IDS_PER_FILTER {
-            return None;
-        }
-        let mut merged = a.clone();
-        merged.ids = Some(ids);
-        Some(merged)
-    }
 }
 
 /// A rule that is DELIBERATELY non-widening — construction-only, used by
@@ -212,7 +250,7 @@ impl MergeRule for DiscardSecondOperand {
 
 /// The merge-rule registry. `default_widen_only()` contains only rules
 /// whose widening claim has been independently property-tested green
-/// (`AuthorUnion`, `KindUnion`, `IdUnion`); `dropped_rules()` reports any rule that was
+/// ([`StructuralUnion`]); `dropped_rules()` reports any rule that was
 /// constructed but excluded (graceful-degradation visibility, M2 plan §6).
 pub struct RuleRegistry {
     rules: Vec<Box<dyn MergeRule>>,
@@ -220,14 +258,12 @@ pub struct RuleRegistry {
 }
 
 impl RuleRegistry {
-    /// The default, PROVEN-widening registry.
+    /// The default, PROVEN-widening registry. ONE rule, spanning all four
+    /// array axes — see [`StructuralUnion`] for why it is not three rules
+    /// plus a missing fourth.
     pub fn default_widen_only() -> Self {
         Self {
-            rules: vec![
-                Box::new(AuthorUnion),
-                Box::new(KindUnion),
-                Box::new(IdUnion),
-            ],
+            rules: vec![Box::new(StructuralUnion)],
             dropped: Vec::new(),
         }
     }
@@ -318,11 +354,12 @@ impl RuleRegistry {
 
         // 3. Exact-canonical dedup AGAIN, over the SURVIVORS. Step 1 alone is
         //    not enough: a merge can RE-CREATE a filter the pool already
-        //    holds, and no rule can then remove the duplicate, because every
-        //    rule requires its OWN axis to DIFFER (`same_except_authors`
-        //    needs `a.authors != b.authors`, `KindUnion` needs `a.kinds !=
-        //    b.kinds`, `IdUnion` needs `a.ids != b.ids`) -- byte-identical
-        //    entries match no rule and both survive the fixed point.
+        //    holds, and no rule can then remove the duplicate, because
+        //    `StructuralUnion` requires EXACTLY ONE component to differ and
+        //    byte-identical entries differ in NONE -- they match no rule and
+        //    both survive the fixed point. (That refusal is deliberate, not
+        //    an oversight: a rule that "merged" a filter with its own twin
+        //    would never reach a fixed point.)
         //    Reachable today: the per-author outbox entries `{authors:{a}}`
         //    and `{authors:{b}}` alongside the additive app lane's full-set
         //    entry `{authors:{a,b}}` on one relay; merging the first pair
@@ -367,8 +404,8 @@ impl RuleRegistry {
         *entries = out;
     }
 
-    /// Advance `current` to the AuthorUnion/KindUnion/IdUnion fixed point,
-    /// merging pairs in EXACTLY the order the original "nested loop, restart
+    /// Advance `current` to the [`StructuralUnion`] fixed point, merging
+    /// pairs in EXACTLY the order the original "nested loop, restart
     /// the whole O(n^2) scan from i=0 after every merge" implementation
     /// picked (#505): that loop always merges the FIRST pair `(i, j)`, in
     /// row-major order over the CURRENT array, that any registered rule
@@ -376,15 +413,21 @@ impl RuleRegistry {
     /// from `i=0` is what made it O(n^3) (n-1 merges, each paying a fresh
     /// O(n^2) scan) -- but it is NOT simply replaceable by "only compare
     /// the freshly-merged entry against the rest and otherwise carry on",
-    /// because a rule can unlock a match between an UNTOUCHED earlier
+    /// because a merge can UNLOCK a match between an UNTOUCHED earlier
     /// entry and the freshly-merged one that neither original operand
-    /// qualified for. Concretely: `AuthorUnion` merging `{authors:{a}}` and
-    /// `{authors:{b}}` produces `{authors:{a,b}}`; a third entry
-    /// `{kinds:{2}, authors:{a,b}}` cannot `KindUnion` with either input
-    /// alone (their `authors` are `{a}`/`{b}`, not `{a,b}`) but CAN
-    /// `KindUnion` with the merged entry. The original algorithm would
+    /// qualified for. Concretely: merging `{authors:{a}}` and
+    /// `{authors:{b}}` on the authors component produces `{authors:{a,b}}`;
+    /// a third entry `{kinds:{2}, authors:{a,b}}` is a TWO-component move
+    /// from either input alone (their `authors` are `{a}`/`{b}`, not
+    /// `{a,b}`, so both `kinds` AND `authors` differ) but a ONE-component
+    /// move from the merged entry. The original algorithm would
     /// find this via its next full restart; skipping straight to "only
     /// test the new entry against later entries" would miss it entirely.
+    ///
+    /// TERMINATION is unchanged by the collapse to one rule: every merge
+    /// removes two entries and appends one, so `current.len()` strictly
+    /// decreases, and no rule accepts a zero-diff pair (which is what a
+    /// self-merge would be).
     ///
     /// So every entry before the current merge point genuinely has to be
     /// re-offered against each newly merged entry -- this function does
@@ -438,13 +481,11 @@ impl RuleRegistry {
     }
 
     /// Try every registered rule, in registration order (matching the
-    /// original's `for rule in &self.rules`), on `(a, b)`. The three
-    /// default rules' domains are mutually exclusive on any given pair
-    /// (each requires a DIFFERENT single field to be the one that
-    /// differs, with every other field -- including whether the pair
-    /// differs on that rule's field at all -- required equal), so at most
-    /// one can ever match; the order is kept anyway for exact parity with
-    /// the original loop.
+    /// original's `for rule in &self.rules`), on `(a, b)`, and take the
+    /// FIRST that accepts. `default_widen_only()` now holds exactly one
+    /// rule, so the iteration is a formality there -- but the registry is
+    /// open (`register`), and first-match-wins is the behaviour a caller
+    /// adding a candidate rule alongside the default gets.
     fn try_merge_pair(&self, a: &Entry, b: &Entry) -> Option<Entry> {
         for rule in &self.rules {
             if let Some(merged) = rule.try_merge(&a.0, &b.0) {
@@ -499,6 +540,8 @@ impl RuleRegistry {
 mod tests {
     use super::*;
     use std::collections::BTreeSet as Set;
+
+    use nmp_grammar::IndexedTagName;
 
     /// Reference oracle for the O(n^2) `merge_fixed_point` above: an exact
     /// copy of the ORIGINAL (pre-#505) `coalesce_with` fixed-point loop,
@@ -557,95 +600,6 @@ mod tests {
             .collect()
     }
 
-    /// The falsifier the #505 fix has to survive: a rule can unlock a match
-    /// between an UNTOUCHED earlier entry and a freshly merged one that
-    /// neither original operand qualified for. `AuthorUnion(a, b)` produces
-    /// `authors: {a, b}` -- a set that exists nowhere in the input until
-    /// that merge happens. `c` carries exactly that author set already (but
-    /// a different `kinds`), so it cannot `KindUnion` with `a` or `b` alone
-    /// (their `authors` are `{a}`/`{b}`, not `{a,b}`), only with their
-    /// merge. An "only compare the new entry against later entries"
-    /// shortcut would miss this; `merge_fixed_point`'s prefix revalidation
-    /// must not.
-    #[test]
-    fn incremental_merge_matches_naive_restart_on_cross_rule_unlock() {
-        let a = cf(&[1], &["a"]);
-        let b = cf(&[1], &["b"]);
-        let c = ConcreteFilter {
-            kinds: Some(Set::from([2u16])),
-            authors: Some(Set::from(["a".to_string(), "b".to_string()])),
-            ..ConcreteFilter::default()
-        };
-        let entries = entries_of(vec![a, b, c]);
-
-        let registry = RuleRegistry::default_widen_only();
-        let naive = naive_coalesce_with(&registry, entries.clone());
-        let fast = registry.coalesce_with(entries);
-
-        assert_eq!(fast, naive);
-        // Sanity: the cross-rule unlock actually fires -- everything
-        // collapses into ONE filter (kinds {1,2}, authors {a,b}).
-        assert_eq!(fast.len(), 1);
-        assert_eq!(
-            fast[0].0.authors,
-            Some(Set::from(["a".to_string(), "b".to_string()]))
-        );
-        assert_eq!(fast[0].0.kinds, Some(Set::from([1u16, 2u16])));
-    }
-
-    /// A bigger fixture exercising all three rules together, including an
-    /// `IdUnion` shard large enough that the `MAX_IDS_PER_FILTER` cap forces
-    /// it to split into multiple wire filters -- the one place merge ORDER
-    /// can change which ids land in which final filter (bin-packing). The
-    /// O(n^2) incremental merge must reproduce the O(n^3) naive restart's
-    /// bucketing byte-for-byte, not just its aggregate shape.
-    #[test]
-    fn incremental_merge_matches_naive_restart_on_large_fixture() {
-        let mut filters: Vec<ConcreteFilter> = Vec::new();
-
-        // 4 disjoint AuthorUnion shards (10 authors each, distinct `kinds`).
-        for shard in 0..4u16 {
-            for author in 0..10 {
-                filters.push(ConcreteFilter {
-                    kinds: Some(Set::from([100 + shard])),
-                    authors: Some(Set::from([format!("author-{shard}-{author}")])),
-                    ..ConcreteFilter::default()
-                });
-            }
-        }
-
-        // A KindUnion shard: one author, 6 distinct singleton kinds.
-        for kind in 0..6u16 {
-            filters.push(ConcreteFilter {
-                kinds: Some(Set::from([200 + kind])),
-                authors: Some(Set::from(["kind-shard-author".to_string()])),
-                ..ConcreteFilter::default()
-            });
-        }
-
-        // An IdUnion shard big enough to force the cap to split it.
-        for i in 0..(MAX_IDS_PER_FILTER * 2 + 17) {
-            filters.push(ConcreteFilter {
-                kinds: Some(Set::from([1u16])),
-                ids: Some(Set::from([format!("{i:064x}")])),
-                ..ConcreteFilter::default()
-            });
-        }
-
-        let entries = entries_of(filters);
-
-        let registry = RuleRegistry::default_widen_only();
-        let naive = naive_coalesce_with(&registry, entries.clone());
-        let fast = registry.coalesce_with(entries);
-
-        assert_eq!(
-            fast, naive,
-            "the O(n^2) incremental merge must produce a byte-identical \
-             coalesced set (including IdUnion's cap-driven bucketing) to \
-             the original O(n^3) restart-from-scratch algorithm"
-        );
-    }
-
     fn cf(kinds: &[u16], authors: &[&str]) -> ConcreteFilter {
         ConcreteFilter {
             kinds: Some(kinds.iter().copied().collect()),
@@ -666,19 +620,266 @@ mod tests {
         }
     }
 
+    fn name(c: char) -> IndexedTagName {
+        IndexedTagName::new(c).expect("test tag names are ASCII letters")
+    }
+
+    /// `{kinds:[1], #<tag>: values}` — the shape the resolver's cartesian
+    /// fan-out produces for a bound tag field (one value per atom).
+    fn cf_tag(tag: char, values: &[&str]) -> ConcreteFilter {
+        ConcreteFilter {
+            kinds: Some(Set::from([1u16])),
+            tags: BTreeMap::from([(
+                name(tag),
+                values
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Set<String>>(),
+            )]),
+            ..ConcreteFilter::default()
+        }
+    }
+
+    fn tag_values(f: &ConcreteFilter, tag: char) -> Set<String> {
+        f.tags.get(&name(tag)).cloned().unwrap_or_default()
+    }
+
+    // ---- the fixed point, against its naive oracle ----------------------
+
+    /// The falsifier the #505 fix has to survive: a merge can unlock a match
+    /// between an UNTOUCHED earlier entry and a freshly merged one that
+    /// neither original operand qualified for. Merging `a` and `b` on the
+    /// authors component produces `authors: {a, b}` -- a set that exists
+    /// nowhere in the input until that merge happens. `c` carries exactly
+    /// that author set already but a different `kinds`, so it is a
+    /// TWO-component move from `a` or `b` alone (both `kinds` and `authors`
+    /// differ) and a ONE-component move from their merge. An "only compare
+    /// the new entry against later entries" shortcut would miss this;
+    /// `merge_fixed_point`'s prefix revalidation must not.
     #[test]
-    fn author_union_merges_identical_except_authors() {
+    fn incremental_merge_matches_naive_restart_on_cross_axis_unlock() {
+        let a = cf(&[1], &["a"]);
+        let b = cf(&[1], &["b"]);
+        let c = ConcreteFilter {
+            kinds: Some(Set::from([2u16])),
+            authors: Some(Set::from(["a".to_string(), "b".to_string()])),
+            ..ConcreteFilter::default()
+        };
+        let entries = entries_of(vec![a, b, c]);
+
+        let registry = RuleRegistry::default_widen_only();
+        let naive = naive_coalesce_with(&registry, entries.clone());
+        let fast = registry.coalesce_with(entries);
+
+        assert_eq!(fast, naive);
+        // Sanity: the cross-axis unlock actually fires -- everything
+        // collapses into ONE filter (kinds {1,2}, authors {a,b}).
+        assert_eq!(fast.len(), 1);
+        assert_eq!(
+            fast[0].0.authors,
+            Some(Set::from(["a".to_string(), "b".to_string()]))
+        );
+        assert_eq!(fast[0].0.kinds, Some(Set::from([1u16, 2u16])));
+    }
+
+    /// A bigger fixture exercising ALL FOUR array axes together, including
+    /// two shards large enough that a cap forces them to split into multiple
+    /// wire filters -- the one place merge ORDER can change which values land
+    /// in which final filter (bin-packing). The O(n^2) incremental merge must
+    /// reproduce the O(n^3) naive restart's bucketing byte-for-byte, not just
+    /// its aggregate shape.
+    #[test]
+    fn incremental_merge_matches_naive_restart_on_large_fixture() {
+        let mut filters: Vec<ConcreteFilter> = Vec::new();
+
+        // 4 disjoint author shards (10 authors each, distinct `kinds`).
+        for shard in 0..4u16 {
+            for author in 0..10 {
+                filters.push(ConcreteFilter {
+                    kinds: Some(Set::from([100 + shard])),
+                    authors: Some(Set::from([format!("author-{shard}-{author}")])),
+                    ..ConcreteFilter::default()
+                });
+            }
+        }
+
+        // A kinds shard: one author, 6 distinct singleton kinds.
+        for kind in 0..6u16 {
+            filters.push(ConcreteFilter {
+                kinds: Some(Set::from([200 + kind])),
+                authors: Some(Set::from(["kind-shard-author".to_string()])),
+                ..ConcreteFilter::default()
+            });
+        }
+
+        // An ids shard big enough to force `MAX_IDS_PER_FILTER` to split it.
+        for i in 0..(MAX_IDS_PER_FILTER * 2 + 17) {
+            filters.push(ConcreteFilter {
+                kinds: Some(Set::from([1u16])),
+                ids: Some(Set::from([format!("{i:064x}")])),
+                ..ConcreteFilter::default()
+            });
+        }
+
+        // A tag shard big enough to force `MAX_TAG_VALUES_PER_FILTER` to
+        // split it, plus a SECOND tag name that must never fold into the
+        // first.
+        for i in 0..(MAX_TAG_VALUES_PER_FILTER * 2 + 11) {
+            filters.push(cf_tag('d', &[&format!("group-{i:05}")]));
+        }
+        for i in 0..7 {
+            filters.push(cf_tag('e', &[&format!("thread-{i:05}")]));
+        }
+
+        let entries = entries_of(filters);
+
+        let registry = RuleRegistry::default_widen_only();
+        let naive = naive_coalesce_with(&registry, entries.clone());
+        let fast = registry.coalesce_with(entries);
+
+        assert_eq!(
+            fast, naive,
+            "the O(n^2) incremental merge must produce a byte-identical \
+             coalesced set (including cap-driven bucketing on ids AND tags) \
+             to the original O(n^3) restart-from-scratch algorithm"
+        );
+    }
+
+    // ---- the rule: what it merges ----------------------------------------
+
+    #[test]
+    fn merges_identical_except_authors() {
         let a = cf(&[1], &["aa"]);
         let b = cf(&[1], &["bb"]);
-        let merged = AuthorUnion.try_merge(&a, &b).expect("should merge");
+        let merged = StructuralUnion.try_merge(&a, &b).expect("should merge");
         assert_eq!(
             merged.authors,
             Some(Set::from(["aa".to_string(), "bb".to_string()]))
         );
     }
 
+    #[test]
+    fn merges_identical_except_kinds() {
+        let a = cf(&[1], &["aa"]);
+        let b = cf(&[2], &["aa"]);
+        let merged = StructuralUnion.try_merge(&a, &b).expect("should merge");
+        assert_eq!(merged.kinds, Some(Set::from([1u16, 2u16])));
+    }
+
+    #[test]
+    fn merges_identical_except_ids() {
+        let a = ConcreteFilter {
+            ids: Some(Set::from([format!("{:064x}", 1)])),
+            ..ConcreteFilter::default()
+        };
+        let b = ConcreteFilter {
+            ids: Some(Set::from([format!("{:064x}", 2)])),
+            ..ConcreteFilter::default()
+        };
+        let merged = StructuralUnion.try_merge(&a, &b).expect("should merge");
+        assert_eq!(merged.ids.map(|ids| ids.len()), Some(2));
+    }
+
+    /// THE NEW AXIS. Two filters differing only in the value set under one
+    /// tag NAME merge into the union of those values -- the case no rule
+    /// covered before, and the whole reason a 300-group catalog compiled to
+    /// 300 subscriptions.
+    #[test]
+    fn merges_identical_except_one_tag_names_values() {
+        let a = cf_tag('d', &["group-1"]);
+        let b = cf_tag('d', &["group-2"]);
+        let merged = StructuralUnion.try_merge(&a, &b).expect("should merge");
+        assert_eq!(
+            tag_values(&merged, 'd'),
+            Set::from(["group-1".to_string(), "group-2".to_string()])
+        );
+        assert_eq!(
+            merged.kinds,
+            Some(Set::from([1u16])),
+            "the untouched components come through unchanged"
+        );
+    }
+
+    /// A filter carrying TWO tag names merges on the one that differs, and
+    /// leaves the shared name exactly as it was.
+    #[test]
+    fn merges_one_tag_name_while_another_stays_pinned() {
+        let mut a = cf_tag('d', &["group-1"]);
+        a.tags.insert(name('e'), Set::from(["thread".to_string()]));
+        let mut b = cf_tag('d', &["group-2"]);
+        b.tags.insert(name('e'), Set::from(["thread".to_string()]));
+
+        let merged = StructuralUnion.try_merge(&a, &b).expect("should merge");
+        assert_eq!(
+            tag_values(&merged, 'd'),
+            Set::from(["group-1".to_string(), "group-2".to_string()])
+        );
+        assert_eq!(
+            tag_values(&merged, 'e'),
+            Set::from(["thread".to_string()]),
+            "the co-pinned tag name is untouched -- merging it too would be a \
+             two-component move"
+        );
+    }
+
+    // ---- the rule: what it REFUSES ---------------------------------------
+
+    /// The single most dangerous mistake available on this axis. Tags are
+    /// CONJUNCTIVE across names, so `{#e:X}` unioned with `{#p:Y}` would
+    /// demand BOTH -- a filter matching NEITHER operand. `differing` reports
+    /// two components (a name present on one side only is itself a
+    /// difference), so the rule refuses.
+    #[test]
+    fn refuses_two_different_tag_names() {
+        let a = cf_tag('e', &["x"]);
+        let b = cf_tag('p', &["y"]);
+        assert!(StructuralUnion.try_merge(&a, &b).is_none());
+        assert!(StructuralUnion.try_merge(&b, &a).is_none());
+    }
+
+    /// THE TAG POLARITY, and the inverse of the `authors` case below: an
+    /// ABSENT tag name is UNCONSTRAINED (the filter matches every event on
+    /// that axis), so folding it into a present name NARROWS.
+    #[test]
+    fn refuses_an_absent_tag_name_against_a_present_one() {
+        let unconstrained = cf(&[1], &[]);
+        let bearing = cf_tag('d', &["group-1"]);
+        assert!(
+            unconstrained.tags.is_empty(),
+            "fixture sanity: no tag constraint at all"
+        );
+        assert!(
+            StructuralUnion
+                .try_merge(&unconstrained, &bearing)
+                .is_none(),
+            "a filter with no #d constraint matches EVERY #d -- folding it \
+             into {{group-1}} narrows"
+        );
+        assert!(
+            StructuralUnion
+                .try_merge(&bearing, &unconstrained)
+                .is_none(),
+            "refusal must not depend on operand order"
+        );
+    }
+
+    /// The harmless end of the same axis, and the reason "refuse `None` vs
+    /// `Some`" cannot be transplanted onto tags unexamined: a PRESENT tag
+    /// name with an EMPTY value set matches NOTHING (`match_event` evaluates
+    /// `any()` over an empty set), so unioning it in is a widening and is
+    /// allowed.
+    #[test]
+    fn merges_an_empty_tag_value_set_because_it_matches_nothing() {
+        let empty = cf_tag('d', &[]);
+        let bearing = cf_tag('d', &["group-1"]);
+        let merged = StructuralUnion
+            .try_merge(&empty, &bearing)
+            .expect("{{#d:∅}} matches nothing, so unioning it in only widens");
+        assert_eq!(tag_values(&merged, 'd'), Set::from(["group-1".to_string()]));
+    }
+
     /// #900's exact reported case: an authorless (`authors: None`) atom and
-    /// an author-bearing sibling with the same skeleton. Before the fix,
+    /// an author-bearing sibling with the same skeleton. Before that fix,
     /// `unwrap_or_default()` read `None` as `∅` and produced
     /// `authors: {aa}` — a filter matching strictly FEWER events than its
     /// own first operand, which matched every author alive. Reachable on
@@ -686,111 +887,163 @@ mod tests {
     /// explicitly permits an author-bearing atom to declare `Public` too, so
     /// both land in one relay's `SourceAuthority::Public` partition.
     #[test]
-    fn author_union_refuses_an_unconstrained_authors_operand() {
+    fn refuses_an_unconstrained_authors_operand() {
         let unconstrained = cf(&[1], &[]);
         let bearing = cf(&[1], &["aa"]);
         assert_eq!(unconstrained.authors, None, "fixture sanity");
-        assert!(
-            AuthorUnion.try_merge(&unconstrained, &bearing).is_none(),
-            "authors:None means EVERY author -- merging it into {{aa}} narrows"
-        );
-        assert!(
-            AuthorUnion.try_merge(&bearing, &unconstrained).is_none(),
-            "refusal must not depend on operand order"
-        );
+        assert!(StructuralUnion
+            .try_merge(&unconstrained, &bearing)
+            .is_none());
+        assert!(StructuralUnion
+            .try_merge(&bearing, &unconstrained)
+            .is_none());
     }
 
     /// `Some(∅)` is refused for the same reason: `nostr`'s matcher treats an
-    /// empty author set as unconstrained, not as "matches nothing".
+    /// empty author set as unconstrained, not as "matches nothing". This is
+    /// the polarity that INVERTS on tags.
     #[test]
-    fn author_union_refuses_an_empty_authors_operand() {
+    fn refuses_an_empty_authors_operand() {
         let mut empty = cf(&[1], &["aa"]);
         empty.authors = Some(Set::new());
         let bearing = cf(&[1], &["aa"]);
-        assert!(AuthorUnion.try_merge(&empty, &bearing).is_none());
-        assert!(AuthorUnion.try_merge(&bearing, &empty).is_none());
+        assert!(StructuralUnion.try_merge(&empty, &bearing).is_none());
+        assert!(StructuralUnion.try_merge(&bearing, &empty).is_none());
     }
 
-    /// Same defect, `KindUnion`'s axis. `kinds: None` means EVERY kind and
-    /// is reachable through the FFI filter boundary, which carries `kinds`
-    /// as an option and propagates it verbatim into `ConcreteFilter`.
+    /// Same defect, the `kinds` axis. `kinds: None` means EVERY kind and is
+    /// reachable through the FFI filter boundary, which carries `kinds` as an
+    /// option and propagates it verbatim.
     #[test]
-    fn kind_union_refuses_an_unconstrained_or_empty_kinds_operand() {
+    fn refuses_an_unconstrained_or_empty_kinds_operand() {
         let bearing = cf(&[1], &["aa"]);
         let mut unconstrained = bearing.clone();
         unconstrained.kinds = None;
-        assert!(KindUnion.try_merge(&unconstrained, &bearing).is_none());
-        assert!(KindUnion.try_merge(&bearing, &unconstrained).is_none());
+        assert!(StructuralUnion
+            .try_merge(&unconstrained, &bearing)
+            .is_none());
+        assert!(StructuralUnion
+            .try_merge(&bearing, &unconstrained)
+            .is_none());
 
         let mut empty = bearing.clone();
         empty.kinds = Some(Set::new());
-        assert!(KindUnion.try_merge(&empty, &bearing).is_none());
-        assert!(KindUnion.try_merge(&bearing, &empty).is_none());
+        assert!(StructuralUnion.try_merge(&empty, &bearing).is_none());
+        assert!(StructuralUnion.try_merge(&bearing, &empty).is_none());
     }
 
-    /// `IdUnion` already refused `None`; it must also refuse `Some(∅)`.
+    /// And the `ids` axis.
     #[test]
-    fn id_union_refuses_an_empty_ids_operand() {
+    fn refuses_an_unconstrained_or_empty_ids_operand() {
         let bearing = ConcreteFilter {
             ids: Some(Set::from([format!("{:064x}", 1)])),
             ..ConcreteFilter::default()
         };
         let mut empty = bearing.clone();
         empty.ids = Some(Set::new());
-        assert!(IdUnion.try_merge(&empty, &bearing).is_none());
-        assert!(IdUnion.try_merge(&bearing, &empty).is_none());
+        assert!(StructuralUnion.try_merge(&empty, &bearing).is_none());
+        assert!(StructuralUnion.try_merge(&bearing, &empty).is_none());
+
+        let mut unconstrained = bearing.clone();
+        unconstrained.ids = None;
+        assert!(StructuralUnion
+            .try_merge(&unconstrained, &bearing)
+            .is_none());
     }
 
-    /// End to end through the registry: the #900 pair ships as TWO REQs,
-    /// and the authorless one keeps its unconstrained `authors`.
+    /// TWO components at once is the cartesian-corner refusal, and it is a
+    /// hard rule rather than a conservative default: the union
+    /// `{k:[1,2], a:[A,B]}` also fetches kind 2 from A and kind 1 from B --
+    /// events neither operand asked for, with unbounded waste on sparse
+    /// inputs.
+    #[test]
+    fn refuses_when_two_components_differ() {
+        let a = cf(&[1], &["aa"]);
+        let b = cf(&[2], &["bb"]);
+        assert!(StructuralUnion.try_merge(&a, &b).is_none());
+    }
+
+    /// A differing SCALAR is a refusal, not a union: `since`/`until` are
+    /// bounds, and no combination of two windows both widens and stays near
+    /// either operand.
+    #[test]
+    fn refuses_when_a_scalar_differs() {
+        let a = cf_since(&[1], 100);
+        let b = cf_since(&[1], 200);
+        assert!(StructuralUnion.try_merge(&a, &b).is_none());
+
+        let mut a = cf(&[1], &["aa"]);
+        a.until = Some(100);
+        let mut b = cf(&[1], &["aa"]);
+        b.until = Some(200);
+        assert!(StructuralUnion.try_merge(&a, &b).is_none());
+
+        // ... and a differing scalar does not become mergeable just because
+        // an array axis differs too: that is a two-component move.
+        let mut a = cf(&[1], &["aa"]);
+        a.since = Some(100);
+        let mut b = cf(&[1], &["bb"]);
+        b.since = Some(200);
+        assert!(StructuralUnion.try_merge(&a, &b).is_none());
+    }
+
+    /// Byte-identical filters differ in NOTHING, and the rule refuses them.
+    /// `coalesce_with`'s hash dedup owns that case; a rule that accepted it
+    /// would never reach a fixed point.
+    #[test]
+    fn refuses_a_zero_diff_pair() {
+        let a = cf(&[1], &["aa"]);
+        assert!(StructuralUnion.try_merge(&a, &a.clone()).is_none());
+    }
+
+    /// The load-bearing regression test for the limit rule: two SAME-limit
+    /// filters for disjoint author sets must NOT be merged. An equal limit
+    /// produces no `Component::Limit` difference, so the upfront
+    /// `neither_limited` check is the ONLY thing standing between this pair
+    /// and a merged `{authors:{aa,bb}, limit:200}` -- which a relay truncates
+    /// at 200 total rows, silently under-fetching relative to the two
+    /// original `limit:200` REQs (up to 400 rows between them).
+    #[test]
+    fn refuses_to_merge_same_limit_filters() {
+        let mut a = cf(&[1], &["aa"]);
+        a.limit = Some(200);
+        let mut b = cf(&[1], &["bb"]);
+        b.limit = Some(200);
+        assert!(
+            StructuralUnion.try_merge(&a, &b).is_none(),
+            "a limited filter must never be merged, even with an identical limit"
+        );
+
+        // The same on the tag axis -- the limit guard is axis-independent.
+        let mut a = cf_tag('d', &["group-1"]);
+        a.limit = Some(10);
+        let mut b = cf_tag('d', &["group-2"]);
+        b.limit = Some(10);
+        assert!(StructuralUnion.try_merge(&a, &b).is_none());
+    }
+
+    /// One side limited, the other not: the pair differs in `limit` AND in
+    /// its array axis, so it is a two-component move even before
+    /// `neither_limited` refuses it. Both guards agree.
+    #[test]
+    fn refuses_to_merge_when_only_one_side_is_limited() {
+        let mut a = cf(&[1], &["aa"]);
+        a.limit = Some(200);
+        let b = cf(&[1], &["bb"]);
+        assert!(StructuralUnion.try_merge(&a, &b).is_none());
+        assert!(StructuralUnion.try_merge(&b, &a).is_none());
+    }
+
+    // ---- through the registry --------------------------------------------
+
+    /// End to end: the #900 pair ships as TWO REQs, and the authorless one
+    /// keeps its unconstrained `authors`.
     #[test]
     fn coalesce_ships_an_unconstrained_authors_filter_separately() {
         let filters = Set::from([cf(&[1], &[]), cf(&[1], &["aa"])]);
         let out = RuleRegistry::default_widen_only().coalesce(filters);
         assert_eq!(out.len(), 2, "an unconstrained filter must not be absorbed");
         assert!(out.iter().any(|f| f.authors.is_none()));
-    }
-
-    #[test]
-    fn author_union_refuses_when_other_fields_differ() {
-        let a = cf(&[1], &["aa"]);
-        let b = cf(&[2], &["bb"]);
-        assert!(AuthorUnion.try_merge(&a, &b).is_none());
-    }
-
-    /// The load-bearing regression test for this fix: two SAME-limit
-    /// filters for disjoint author sets must NOT be merged. Before this
-    /// fix, `same_except_authors` accepted `a.limit == b.limit` as a
-    /// "safety guard" and merged them anyway into one filter that still
-    /// carries the same limit -- a relay serving `{authors:{aa,bb},
-    /// limit:200}` truncates at 200 total rows, silently under-fetching
-    /// relative to the two original `limit:200` REQs (up to 400 rows
-    /// between them). Excluding ANY limited filter from the union rules
-    /// entirely is what actually preserves
-    /// `matches(try_merge(a,b)) ⊇ matches(a) ∪ matches(b)`.
-    #[test]
-    fn author_union_refuses_to_merge_same_limit_filters() {
-        let mut a = cf(&[1], &["aa"]);
-        a.limit = Some(200);
-        let mut b = cf(&[1], &["bb"]);
-        b.limit = Some(200);
-        assert!(
-            AuthorUnion.try_merge(&a, &b).is_none(),
-            "a limited filter must never be merged, even with an identical limit"
-        );
-    }
-
-    /// Same falsifier, `KindUnion`'s domain.
-    #[test]
-    fn kind_union_refuses_to_merge_same_limit_filters() {
-        let mut a = cf(&[1], &["aa"]);
-        a.limit = Some(50);
-        let mut b = cf(&[2], &["aa"]);
-        b.limit = Some(50);
-        assert!(
-            KindUnion.try_merge(&a, &b).is_none(),
-            "a limited filter must never be merged, even with an identical limit"
-        );
     }
 
     /// End-to-end through the registry: two limited, otherwise-mergeable
@@ -813,15 +1066,7 @@ mod tests {
     }
 
     #[test]
-    fn kind_union_merges_identical_except_kinds() {
-        let a = cf(&[1], &["aa"]);
-        let b = cf(&[2], &["aa"]);
-        let merged = KindUnion.try_merge(&a, &b).expect("should merge");
-        assert_eq!(merged.kinds, Some(Set::from([1u16, 2u16])));
-    }
-
-    #[test]
-    fn coalesce_dedups_then_author_unions_shards() {
+    fn coalesce_dedups_then_unions_author_shards() {
         let filters = Set::from([cf(&[1], &["aa"]), cf(&[1], &["bb"]), cf(&[1], &["dd"])]);
         let out = RuleRegistry::default_widen_only().coalesce(filters);
         assert_eq!(out.len(), 1);
@@ -832,6 +1077,46 @@ mod tests {
                 "bb".to_string(),
                 "dd".to_string()
             ]))
+        );
+    }
+
+    /// The catalog shape, through the registry: 300 singleton `#d` atoms --
+    /// exactly what the resolver's cartesian fan-out produces for a derived
+    /// tag binding -- become ONE filter carrying all 300 values.
+    #[test]
+    fn coalesce_folds_a_catalog_of_tag_values_into_one_filter() {
+        let filters: Set<ConcreteFilter> = (0..300)
+            .map(|i| cf_tag('d', &[&format!("group-{i:04}")]))
+            .collect();
+        let out = RuleRegistry::default_widen_only().coalesce(filters);
+        assert_eq!(out.len(), 1, "300 groups are ONE subscription, not 300");
+        assert_eq!(tag_values(&out[0], 'd').len(), 300);
+    }
+
+    /// Two tag NAMES stay two filters however many values each carries --
+    /// the conjunctive refusal, end to end.
+    #[test]
+    fn coalesce_keeps_two_tag_names_apart() {
+        let mut filters: Set<ConcreteFilter> = (0..10)
+            .map(|i| cf_tag('d', &[&format!("group-{i}")]))
+            .collect();
+        filters.extend((0..10).map(|i| cf_tag('e', &[&format!("thread-{i}")])));
+
+        let out = RuleRegistry::default_widen_only().coalesce(filters);
+        assert_eq!(out.len(), 2, "one filter per tag NAME");
+        for filter in &out {
+            assert_eq!(
+                filter.tags.len(),
+                1,
+                "no filter may demand two tag names at once: {filter:?}"
+            );
+        }
+        assert_eq!(
+            out.iter()
+                .map(|f| tag_values(f, 'd').len() + tag_values(f, 'e').len())
+                .sum::<usize>(),
+            20,
+            "every value survives somewhere"
         );
     }
 
@@ -859,17 +1144,21 @@ mod tests {
         assert_eq!(registry.dropped_rules(), &["DiscardSecondOperand"]);
 
         // Two filters sharing `kinds` but differing in `since` -- outside
-        // AuthorUnion/KindUnion's domain (both require every other field
-        // equal), but squarely inside DiscardSecondOperand's (unsound)
-        // applicability predicate. With the rule dropped, both ship as
-        // separate REQs -- neither is silently discarded.
+        // StructuralUnion's domain (a differing scalar is a refusal), but
+        // squarely inside DiscardSecondOperand's (unsound) applicability
+        // predicate. With the rule dropped, both ship as separate REQs --
+        // neither is silently discarded.
         let filters = Set::from([cf_since(&[1], 100), cf_since(&[1], 200)]);
         let out = registry.coalesce(filters);
         assert_eq!(out.len(), 2, "dropped rule must not fire");
     }
 
+    // ---- the caps: chunk, never truncate ---------------------------------
+
+    /// The cap SHARDS rather than drops: every input id reaches some output
+    /// filter, and no output filter exceeds the bound.
     #[test]
-    fn id_union_chunks_projected_singletons_at_the_wire_bound() {
+    fn ids_chunk_at_the_wire_bound_without_losing_a_value() {
         let filters: Set<ConcreteFilter> = (0..(MAX_IDS_PER_FILTER * 2 + 17))
             .map(|i| ConcreteFilter {
                 kinds: Some(Set::from([1])),
@@ -884,7 +1173,6 @@ mod tests {
 
         let out = RuleRegistry::default_widen_only().coalesce(filters);
 
-        assert_eq!(out.len(), 3);
         assert!(out.iter().all(|filter| {
             filter
                 .ids
@@ -895,7 +1183,79 @@ mod tests {
             out.iter()
                 .flat_map(|filter| filter.ids.clone().unwrap_or_default())
                 .collect::<Set<_>>(),
-            expected
+            expected,
+            "the cap must chunk, never truncate"
         );
+        assert!(chunk_count_is_provable(
+            out.len(),
+            expected.len(),
+            MAX_IDS_PER_FILTER
+        ));
+    }
+
+    /// The same on the tag axis, at `MAX_TAG_VALUES_PER_FILTER`.
+    #[test]
+    fn tag_values_chunk_at_the_wire_bound_without_losing_a_value() {
+        let total = MAX_TAG_VALUES_PER_FILTER * 2 + 200;
+        let filters: Set<ConcreteFilter> = (0..total)
+            .map(|i| cf_tag('d', &[&format!("group-{i:05}")]))
+            .collect();
+
+        let out = RuleRegistry::default_widen_only().coalesce(filters);
+
+        let covered: Set<String> = out.iter().flat_map(|f| tag_values(f, 'd')).collect();
+        assert_eq!(covered.len(), total, "the cap must chunk, never truncate");
+        for filter in &out {
+            assert!(
+                tag_values(filter, 'd').len() <= MAX_TAG_VALUES_PER_FILTER,
+                "a coalesced filter carries {} #d values, over the bound",
+                tag_values(filter, 'd').len()
+            );
+        }
+        println!(
+            "{total} #d values at a {MAX_TAG_VALUES_PER_FILTER} cap → {} filter(s), sizes {:?}",
+            out.len(),
+            out.iter()
+                .map(|f| tag_values(f, 'd').len())
+                .collect::<Vec<_>>()
+        );
+        assert!(chunk_count_is_provable(
+            out.len(),
+            total,
+            MAX_TAG_VALUES_PER_FILTER
+        ));
+    }
+
+    /// The provable window on how many chunks a cap-split leaves, and the
+    /// reason no test here asserts `⌈n/cap⌉` exactly.
+    ///
+    /// FLOOR: `⌈n/cap⌉` chunks are needed to carry `n` values at `cap` each.
+    ///
+    /// CEILING: a TERMINAL state of `merge_fixed_point` has no mergeable
+    /// pair left, and the only thing that can refuse two same-axis chunks is
+    /// the cap -- so for every pair `|c_i| + |c_j| > cap`, which means at
+    /// most ONE chunk holds `cap/2` or fewer values. With `k` chunks over `n`
+    /// values that gives `(k-1) * (cap/2 + 1) <= n`.
+    ///
+    /// The actual number lands inside that window and is an artifact of the
+    /// greedy merge ORDER, not of the arithmetic: mutually-mergeable
+    /// singletons pair up in a doubling cascade (1→2→4→...), so chunks stall
+    /// at the largest power of two that still fits under the cap. At
+    /// `MAX_IDS_PER_FILTER = 256` that lands exactly on the cap; at
+    /// `MAX_TAG_VALUES_PER_FILTER = 500` it stalls at 256 and leaves real
+    /// headroom unused. That is a bin-packing inefficiency, never a
+    /// correctness problem -- every value still ships, and the resulting
+    /// count is orders of magnitude inside the ~20-subscription relay
+    /// ceiling this module exists to respect. Asserting the window rather
+    /// than the number keeps these tests honest about which part is proven.
+    fn chunk_count_is_provable(chunks: usize, values: usize, cap: usize) -> bool {
+        let floor = values.div_ceil(cap);
+        let ceiling = values / (cap / 2 + 1) + 1;
+        assert!(
+            chunks >= floor && chunks <= ceiling,
+            "{chunks} chunks for {values} values at cap {cap} is outside the \
+             provable window {floor}..={ceiling}"
+        );
+        true
     }
 }

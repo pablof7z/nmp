@@ -333,6 +333,65 @@ async fn relay_serves_tag_with_n_subscriptions(
     );
 }
 
+/// The BOUNDED form of the count assertion, for the case where an exact
+/// number is not a fact about the contract.
+///
+/// Past the per-filter value bound the coalescer chunks, and how many chunks
+/// it produces is an artifact of its greedy merge ORDER, not `⌈n/bound⌉`:
+/// mutually-mergeable filters pair up in a doubling cascade, so chunks stall
+/// at the largest power of two under the bound. What IS provable is a window
+/// -- a terminal state has no mergeable pair left, so every pair of chunks
+/// sums over the bound, which means at most one chunk is half-full or less.
+/// The contract worth asserting is therefore "comfortably inside the relay's
+/// concurrent-subscription ceiling", which is what this step says.
+#[then(
+    regex = r#"^relay "([^"]+)" serves every "([a-zA-Z])" watch with at most (\d+) subscriptions?$"#
+)]
+async fn relay_serves_tag_with_at_most_n_subscriptions(
+    w: &mut NmpWorld,
+    relay: String,
+    tag: String,
+    bound: usize,
+) {
+    w.wire_settled().await;
+    let tag = parse_tag(&tag);
+    let record = w.wire_record(&relay);
+    let ids = record.live_subscription_ids_naming_tag(tag);
+    assert!(
+        ids.len() <= bound,
+        "relay {relay:?} is serving the #{tag} watches with {} live subscriptions, \
+         over the bound of {bound}: each carries {:?} value(s)",
+        ids.len(),
+        ids.iter()
+            .map(|id| live_tag_values(&record, id, tag).len())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Across tag names a filter is a CONJUNCTION, and so is a tag alongside an
+/// author list: a REQ naming both `#p` and `authors` demands both at once and
+/// matches neither original watch. The tag-name twin of this
+/// (`never received a request naming both "p" and "t"`) guards the same
+/// property within the tag axis; this one guards it ACROSS axes, which is
+/// where a rule that unioned two components at a time would break it.
+#[then(
+    regex = r#"^relay "([^"]+)" never received a request naming both "([a-zA-Z])" and authors$"#
+)]
+async fn no_request_names_a_tag_and_authors(w: &mut NmpWorld, relay: String, tag: String) {
+    w.wire_settled().await;
+    let tag = parse_tag(&tag);
+    let record = w.wire_record(&relay);
+    for req in &record.reqs {
+        assert!(
+            !(req.names_tag(tag) && !req.authors().is_empty()),
+            "a REQ on {relay:?} demands #{tag} AND an author list at once ({:?}); \
+             those are two independent selections, and a filter carrying both \
+             matches neither original watch",
+            req.filters
+        );
+    }
+}
+
 #[then(
     regex = r#"^one subscription on relay "([^"]+)" asks for every "([a-zA-Z])" value I watch$"#
 )]

@@ -944,7 +944,7 @@ fn eose_overwrite_race_credits_only_the_intersection() {
     let sub_id = sub_id.clone();
     let wire = wire_sub_string(&sub_id);
 
-    // Second subscribe (same skeleton, same relay): AuthorUnion widens the
+    // Second subscribe (same skeleton, same relay): the union widens the
     // SAME sub_id's filter to {a, e} -- an OVERWRITING REQ, snapshot2
     // absorbs {h_a, h_e}, pushed onto the SAME FIFO alongside snapshot1.
     let effects2 = core.handle(EngineMsg::Subscribe(

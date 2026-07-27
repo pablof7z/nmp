@@ -103,18 +103,34 @@ pub fn my_follows_query() -> LiveQuery {
     })
 }
 
+/// What makes one tag watch different from another beyond its value -- the
+/// two shapes that must BLOCK a merge the value alone would allow.
+///
+/// A `limit` caps the relay-side RESULT COUNT rather than the predicate, so
+/// two limited watches for different values cannot be unioned without
+/// under-fetching. A `since` is a co-pinned time bound, and no union of two
+/// windows both widens and stays near either operand. Either one present and
+/// differing means the two watches must reach the relay as two subscriptions.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WatchShape {
+    pub limit: Option<usize>,
+    pub since: Option<u64>,
+}
+
 /// `kinds:[1]` narrowed to ONE value of ONE single-letter tag and PINNED to
 /// `relay` -- the smallest demand that exercises the tag axis of wire
 /// subscription aggregation. Pinned rather than outbox-routed on purpose: the
 /// contract under specification is about what reaches a NAMED relay, so the
 /// scenario must not also depend on relay discovery choosing that relay.
-pub fn tagged_note_query(relay: &RelayUrl, tag: char, value: &str) -> LiveQuery {
+pub fn tagged_note_query(relay: &RelayUrl, tag: char, value: &str, shape: WatchShape) -> LiveQuery {
     let tag = IndexedTagName::new(tag).expect("nmp-bdd: an indexed tag name is one ASCII letter");
     pinned_note_query(
         relay,
         Filter {
             kinds: Some(BTreeSet::from([1u16])),
             tags: BTreeMap::from([(tag, Binding::Literal(BTreeSet::from([value.to_string()])))]),
+            limit: shape.limit,
+            since: shape.since,
             ..Filter::default()
         },
     )
@@ -123,7 +139,7 @@ pub fn tagged_note_query(relay: &RelayUrl, tag: char, value: &str) -> LiveQuery 
 /// The same shape on the AUTHOR axis -- the one axis that already
 /// aggregates, so every tag-axis scenario has a control to be measured
 /// against. `limit` is what makes a pair of these UNMERGEABLE: a relay-side
-/// `limit` caps the result COUNT, so `AuthorUnion` refuses to widen across
+/// `limit` caps the result COUNT, so the union refuses to widen across
 /// one (see `nmp_router::coalesce::neither_limited`).
 pub fn authored_note_query(relay: &RelayUrl, author_hex: &str, limit: Option<usize>) -> LiveQuery {
     pinned_note_query(
@@ -927,19 +943,33 @@ impl NmpWorld {
         );
     }
 
-    /// `When I watch for notes tagged <tag> as <value>`.
-    pub async fn watch_tag_value(&mut self, tag: char, value: &str) {
+    /// `When I watch for notes tagged <tag> as <value>`, plus the shaped
+    /// variants (`the latest N notes tagged ...`, `... from the last N days`)
+    /// whose whole point is that they must NOT merge with an unshaped
+    /// sibling.
+    ///
+    /// The watch key carries the shape, so two watches for the same value
+    /// under different shapes are two distinct open watches rather than one
+    /// silently overwriting the other.
+    pub async fn watch_tag_value_shaped(&mut self, tag: char, value: &str, shape: WatchShape) {
         self.ensure_started().await;
         let url = self.watch_relay_url();
         self.watched_tag_values
             .entry(tag)
             .or_default()
             .insert(value.to_string());
-        self.open_watch(
-            format!("{tag}={value}"),
-            tagged_note_query(&url, tag, value),
-        )
-        .await;
+        let key = match (shape.limit, shape.since) {
+            (None, None) => format!("{tag}={value}"),
+            (limit, since) => format!("{tag}={value}/limit={limit:?}/since={since:?}"),
+        };
+        self.open_watch(key, tagged_note_query(&url, tag, value, shape))
+            .await;
+    }
+
+    /// `When I watch for notes tagged <tag> as <value>`.
+    pub async fn watch_tag_value(&mut self, tag: char, value: &str) {
+        self.watch_tag_value_shaped(tag, value, WatchShape::default())
+            .await;
     }
 
     /// `When I watch for notes tagged <tag> as <n> different values` -- the
@@ -1013,6 +1043,43 @@ impl NmpWorld {
         }
     }
 
+    /// Settle the wire, then keep re-reading `relay`'s record until `pred`
+    /// holds, bounded by [`WIRE_SETTLE`].
+    ///
+    /// QUIESCENCE ALONE IS NOT ENOUGH to establish that something downstream
+    /// of an INBOUND frame has happened. `wait_wire_quiet` watches
+    /// CLIENT-TO-RELAY traffic only, so the sequence "seed a kind:39001 ->
+    /// relay pushes the EVENT -> the client ingests it, re-resolves the
+    /// derived set, recompiles and emits a REQ" has a genuinely quiet client
+    /// wire in the MIDDLE of it.
+    ///
+    /// USED FOR SEQUENCING A STIMULUS, NOT FOR TAKING AN ASSERTION. Making
+    /// the wire `Then` steps poll like this was tried and reverted: it does
+    /// make them more honest, and what it honestly showed is that the
+    /// in-place-replacement family of claims ("widened in place", "was never
+    /// asked to close") is not deterministic in this harness on EITHER axis
+    /// -- the pre-existing author-axis regression guards flaked too, having
+    /// been green only because a one-shot read landed before the CLOSE. That
+    /// is a real finding
+    /// (`docs/internals/subscriptions/identity-grouping-and-limits.md`
+    /// §8.1c) and a bigger change to this suite than it belongs in; the
+    /// steps stay one-shot until it is addressed on its own terms.
+    pub async fn wire_record_when(
+        &self,
+        relay: &str,
+        pred: impl Fn(&WireRecord) -> bool,
+    ) -> WireRecord {
+        let deadline = Instant::now() + WIRE_SETTLE;
+        loop {
+            self.wire_settled().await;
+            let record = self.wire_record(relay);
+            if pred(&record) || Instant::now() >= deadline {
+                return record;
+            }
+            tokio::time::sleep(WIRE_QUIET).await;
+        }
+    }
+
     /// `Given I administer <n> groups` -- one kind:39001 (NIP-29 group
     /// admins) fixture per group, each naming me, staged at the watched
     /// relay. These are what the group-state query's inner demand resolves
@@ -1062,8 +1129,32 @@ impl NmpWorld {
     /// `When I am made an admin of one more group` -- a LIVE kind:39001,
     /// landing at the relay after the watch is already open, so the value set
     /// grows through the same ingest path a real admin grant would take.
+    ///
+    /// "AFTER THE WATCH IS ALREADY OPEN" IS ENFORCED HERE, not assumed. The
+    /// preceding step opens the watch and returns as soon as the subscription
+    /// is registered -- but the outer `#d` REQ is causally downstream of the
+    /// INNER subscription's results (the relay must push the already-seeded
+    /// kind:39001 rows, the client must ingest them and re-resolve the derived
+    /// set, and only then does an outer REQ exist). Seeding the new group
+    /// inside that gap makes it resolve alongside the original ones, so the
+    /// FIRST outer REQ already carries every value and there is nothing live
+    /// left to replace.
+    ///
+    /// That is not a wrong outcome -- one subscription carrying every value is
+    /// exactly the contract -- but it makes the REPLACEMENT this scenario
+    /// exists to observe unobservable, and it happens under load: measured at
+    /// roughly one run in eight. Waiting for an outer `#d` subscription to
+    /// actually be live first is what makes "one more" mean one more.
     pub async fn made_admin_of_one_more_group(&mut self) {
         self.ensure_started().await;
+        let relay = self
+            .watch_relay
+            .clone()
+            .expect("nmp-bdd: no relay has been named as the one I watch directly");
+        self.wire_record_when(&relay, |record| {
+            !record.live_subscription_ids_naming_tag('d').is_empty()
+        })
+        .await;
         self.group_counter += 1;
         let group = format!("group-{:04}", self.group_counter);
         self.watched_tag_values
