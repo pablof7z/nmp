@@ -93,6 +93,14 @@ Feature: Respecting what a relay says it can hold
     And I watch for the latest 10 notes tagged "p" as "bob"
     And I watch for the latest 10 notes tagged "p" as "carol"
     And I watch for the latest 10 notes tagged "p" as "dave"
+    # The behavioural assertion is the load-bearing one: all four watches
+    # reach the relay. "Nothing is known" is the weaker half deliberately --
+    # a relay that answered 404 and a relay whose document has not been asked
+    # for yet look identical from here, so it can only witness that no number
+    # was invented, not that one was asked for. That the relay really does
+    # answer 404 is pinned in the harness's own falsifier
+    # (`nmp-test-support`'s `a_scripted_relay_serves_its_nip11_document_over_
+    # plain_http`).
     Then nothing is known about how many subscriptions relay "hub" allows
     And relay "hub" is holding 4 subscriptions
     And nothing I asked for was refused for want of a subscription
@@ -141,19 +149,32 @@ Feature: Respecting what a relay says it can hold
     Then 1 of my watches is told it could not be requested in full
     And relay "hub" refused 1 subscription it could not hold
 
-  Scenario: A limit that binds does not disturb what is already being served
+  Scenario: Demand arriving at a full relay is refused, not swapped in
     # A limit must not thrash. Once a relay is full, whatever it is already
     # serving keeps being served: newly arrived demand is what gets refused,
     # not whichever subscription a re-sort happened to demote. Otherwise the
     # limit itself becomes a source of churn -- closing and reopening
     # subscriptions forever while the demand set stays exactly the same.
+    #
+    # What this scenario can state honestly is the COUNTS, over demand that
+    # genuinely arrives at different times. That no established subscription
+    # is ever renamed or reopened is a claim about identity across recompiles,
+    # which depends on how a document's arrival interleaves with the fourth
+    # watch; it is pinned deterministically instead by `nmp-router`'s
+    # `a_bound_budget_does_not_churn_what_it_already_serves`, which measures
+    # ZERO wire ops when more demand meets a saturated relay.
+    #
+    # The refusal count is asserted FIRST on purpose. It is the assertion that
+    # polls, and the compile that refuses is downstream of the relay's own
+    # HTTP fetch -- which the client-to-relay wire cannot see going quiet. A
+    # one-shot read of the socket taken before it would be green by luck.
     Given relay "hub" allows only 2 subscriptions at a time
     When I watch for the latest 10 notes tagged "p" as "alice"
     And I watch for the latest 10 notes tagged "p" as "bob"
     And 250ms later I watch for the latest 10 notes tagged "p" as "carol"
     And 250ms later I watch for the latest 10 notes tagged "p" as "dave"
-    Then relay "hub" is holding 2 subscriptions
-    And relay "hub" refused 2 subscriptions it could not hold
+    Then relay "hub" refused 2 subscriptions it could not hold
+    And relay "hub" is holding 2 subscriptions
 
   # ---- the name a subscription is given ---------------------------------
 
