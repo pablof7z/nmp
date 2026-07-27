@@ -93,7 +93,7 @@ pub(crate) fn differing(a: &ConcreteFilter, b: &ConcreteFilter) -> Vec<Component
     let names: BTreeSet<&IndexedTagName> = a.tags.keys().chain(b.tags.keys()).collect();
     for name in names {
         if a.tags.get(name) != b.tags.get(name) {
-            out.push(Component::Tag(name.clone()));
+            out.push(Component::Tag(*name));
         }
     }
     out
@@ -301,12 +301,10 @@ mod tests {
     fn tag_values_are_one_component_per_tag_name() {
         let mut a = cf();
         a.tags = tag('e', &["x"]);
-        a.tags
-            .extend(tag('p', &["y"]).into_iter().map(|(k, v)| (k, v)));
+        a.tags.extend(tag('p', &["y"]).into_iter());
         let mut b = cf();
         b.tags = tag('e', &["x2"]);
-        b.tags
-            .extend(tag('p', &["y2"]).into_iter().map(|(k, v)| (k, v)));
+        b.tags.extend(tag('p', &["y2"]).into_iter());
 
         assert_eq!(
             differing(&a, &b).len(),
