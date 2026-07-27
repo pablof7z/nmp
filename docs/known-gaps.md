@@ -99,13 +99,15 @@ about current code:
   one-click launch, package-filtered Android discovery, and an exact
   URI/package handoff contract. Deleting those provider packages leaves core
   and an unrelated external signer buildable. A deterministic native component
-  identity now binds governed core source plus Cargo/build inputs; Swift and
-  Kotlin compare it before requesting the opaque mailbox, and a mismatch is a
-  typed construction failure before any external Rust object crosses the
-  component seam (#952). The Android AAR work in #831 still owns publishing
-  that same identity in provenance/Gradle metadata and emulator-qualifying a
-  deliberately mismatched pair; the native check remains the final authority
-  when packaging metadata is stale or tampered. Connections own scoped
+  identity now binds governed core source plus Cargo's exact resolved unit
+  graph (package roots/edges, transitive features, profiles, and targets) and
+  compiler/build inputs; Swift and Kotlin compare it before requesting the
+  opaque mailbox, and a mismatch is a typed construction failure before any
+  external Rust object crosses the component seam (#952). The Android AAR work
+  in #831 still owns publishing that same identity in provenance/Gradle metadata
+  and emulator-qualifying a deliberately mismatched pair; the native check
+  remains the final authority when packaging metadata is stale or tampered.
+  Connections own scoped
   registrations, so a stale session cannot detach its replacement, and
   close/drop deterministically finishes only that session. An explicitly
   insecure SDK-owned plaintext file checkpoint now provides opt-in

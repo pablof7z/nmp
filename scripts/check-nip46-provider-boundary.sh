@@ -82,6 +82,8 @@ grep -qF 'pub fn nmp_core_component_identity() -> String' crates/nmp-ffi/src/sig
   fail "core does not export its plain native component identity"
 grep -qF 'NMP_FFI_CARGO_PACKAGES' crates/nmp-ffi/build.rs ||
   fail "core identity does not bind the selected Cargo package set"
+grep -qF 'NMP_FFI_CARGO_UNIT_GRAPH' crates/nmp-ffi/build.rs ||
+  fail "core identity does not bind Cargo's resolved transitive unit graph"
 grep -qF 'pub fn verify_nip46_core_component_identity(' crates/nmp-nip46-ffi/src/signer.rs ||
   fail "NIP-46 provider does not verify plain core identity before object exchange"
 grep -qF 'compatibility: Arc<FfiNip46CoreCompatibility>' crates/nmp-nip46-ffi/src/signer.rs ||
@@ -95,6 +97,10 @@ grep -qF 'withVerifiedNip46Core(nmpProviderCoreComponentIdentity())' \
 for builder in scripts/build-swift-nip46-xcframework.sh scripts/build-kotlin-nip46-jvm.sh; do
   grep -qF 'NMP_FFI_CARGO_PACKAGES="$COMPONENT_PACKAGES"' "$builder" ||
     fail "$builder does not build core and provider under one package-set identity"
+done
+for builder in scripts/build-swift-xcframework.sh scripts/build-kotlin-jvm.sh; do
+  grep -qF 'NMP_FFI_CARGO_UNIT_GRAPH=' "$builder" ||
+    fail "$builder does not bind the exact resolved Cargo unit graph"
 done
 if grep -nE 'Arc<NmpEngine>|engine:[[:space:]]*Arc<nmp::Engine>|FfiSigning(Capability)?Callback|SigningCapabilityCallback' \
   crates/nmp-nip46-ffi/src/signer.rs; then

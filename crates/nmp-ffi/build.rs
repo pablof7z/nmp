@@ -1,3 +1,5 @@
+mod component_identity;
+
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
@@ -37,6 +39,7 @@ fn main() {
         "cargo-packages",
         normalized_component_packages().as_bytes(),
     );
+    hash_cargo_unit_graph(workspace, &mut hasher);
     for variable in ["CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS"] {
         println!("cargo:rerun-if-env-changed={variable}");
         if let Ok(value) = env::var(variable) {
@@ -104,6 +107,23 @@ fn normalized_component_packages() -> String {
         "NMP_FFI_CARGO_PACKAGES must include nmp-ffi"
     );
     packages.join(" ")
+}
+
+fn hash_cargo_unit_graph(workspace: &Path, hasher: &mut blake3::Hasher) {
+    println!("cargo:rerun-if-env-changed=NMP_FFI_CARGO_UNIT_GRAPH");
+    let Ok(path) = env::var("NMP_FFI_CARGO_UNIT_GRAPH") else {
+        add_field(hasher, "cargo-unit-graph", b"development-unresolved");
+        return;
+    };
+    let path = PathBuf::from(path);
+    println!("cargo:rerun-if-changed={}", path.display());
+    let bytes = fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let mut graph: serde_json::Value = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
+    component_identity::canonicalize_unit_graph(&mut graph, workspace);
+    let canonical = serde_json::to_vec(&graph)
+        .unwrap_or_else(|error| panic!("serialize canonical Cargo unit graph: {error}"));
+    add_field(hasher, "cargo-unit-graph", &canonical);
 }
 
 fn hash_source_tree(workspace: &Path, directory: &Path, hasher: &mut blake3::Hasher) {

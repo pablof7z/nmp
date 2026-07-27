@@ -110,19 +110,37 @@ else
   TARGET_DIR="$REPO_ROOT/$TARGET_DIR_VALUE"
 fi
 
+UNIT_GRAPH_DIR="$TARGET_DIR/nmp-component-unit-graphs"
+mkdir -p "$UNIT_GRAPH_DIR"
+write_unit_graph() {
+  local target=$1
+  local output="$UNIT_GRAPH_DIR/${target}-release.json"
+  cargo build -Z unstable-options --unit-graph \
+    "${CARGO_PACKAGE_ARGS[@]}" --release --target "$target" > "$output"
+  printf '%s\n' "$output"
+}
+
 echo "== 1. cargo build (release) =="
 if [[ "$MODE" != macos ]]; then
+  SIM_ARM_UNIT_GRAPH=$(write_unit_graph "$SIM_ARM_TARGET")
   env -u MACOSX_DEPLOYMENT_TARGET \
+    NMP_FFI_CARGO_UNIT_GRAPH="$SIM_ARM_UNIT_GRAPH" \
     cargo build "${CARGO_PACKAGE_ARGS[@]}" --release --target "$SIM_ARM_TARGET"
+  SIM_X86_UNIT_GRAPH=$(write_unit_graph "$SIM_X86_TARGET")
   env -u MACOSX_DEPLOYMENT_TARGET \
+    NMP_FFI_CARGO_UNIT_GRAPH="$SIM_X86_UNIT_GRAPH" \
     cargo build "${CARGO_PACKAGE_ARGS[@]}" --release --target "$SIM_X86_TARGET"
 fi
+MACOS_UNIT_GRAPH=$(write_unit_graph "$MACOS_TARGET")
 MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET" \
   CFLAGS="$MACOS_CFLAGS" \
   CXXFLAGS="$MACOS_CXXFLAGS" \
+  NMP_FFI_CARGO_UNIT_GRAPH="$MACOS_UNIT_GRAPH" \
   cargo build "${CARGO_PACKAGE_ARGS[@]}" --release --target "$MACOS_TARGET"
 if [[ "$MODE" == all ]]; then
+  DEVICE_UNIT_GRAPH=$(write_unit_graph "$DEVICE_TARGET")
   env -u MACOSX_DEPLOYMENT_TARGET \
+    NMP_FFI_CARGO_UNIT_GRAPH="$DEVICE_UNIT_GRAPH" \
     cargo build "${CARGO_PACKAGE_ARGS[@]}" --release --target "$DEVICE_TARGET"
 fi
 
