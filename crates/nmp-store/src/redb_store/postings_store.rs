@@ -505,7 +505,7 @@ pub(super) fn scan_packed<T>(
 }
 
 fn packed_err(error: impl std::fmt::Display) -> PersistenceError {
-    PersistenceError(format!("packed postings: {error}"))
+    PersistenceError::invariant(format!("packed postings: {error}"))
 }
 
 fn allocate_run_id(write_txn: &redb::WriteTransaction) -> Result<u64, PersistenceError> {

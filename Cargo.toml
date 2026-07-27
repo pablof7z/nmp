@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
+    # Pure network-destination admission (#885): host normalization,
+    # public/local classification, whole-answer-set DNS admission. No I/O.
+    "crates/nmp-network-policy",
     "crates/nmp-grammar",
     "crates/nmp-ownership",
     # workspace-wide kind-ownership audit (routing-and-ownership.md §4.2
@@ -67,6 +70,7 @@ blake3 = "1"
 futures-channel = "0.3"
 hickory-resolver = "0.26.1"
 httpdate = "1"
+nmp-network-policy = { path = "crates/nmp-network-policy" }
 nmp-grammar = { path = "crates/nmp-grammar" }
 nmp-ownership = { path = "crates/nmp-ownership" }
 nmp-store = { path = "crates/nmp-store" }

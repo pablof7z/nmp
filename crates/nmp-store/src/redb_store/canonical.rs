@@ -53,8 +53,9 @@ pub(super) fn decode_stored_event(bytes: &[u8]) -> StoredEvent {
 }
 
 pub(super) fn try_decode_stored_event(bytes: &[u8]) -> Result<StoredEvent, PersistenceError> {
-    binary_event::decode(bytes)
-        .map_err(|error| PersistenceError(format!("decode portable stored event: {error:?}")))
+    binary_event::decode(bytes).map_err(|error| {
+        PersistenceError::invariant(format!("decode portable stored event: {error:?}"))
+    })
 }
 
 pub(super) fn decode_stored_event_record(bytes: &[u8]) -> StoredEventRecord {
@@ -167,10 +168,14 @@ impl<'txn> CanonicalWriteTables<'txn> {
         let cardinality_sample_key = cardinality_sample_meta
             .get(INDEX_CARDINALITY_SAMPLE_KEY)
             .map_err(persist_err)?
-            .ok_or_else(|| PersistenceError("missing cardinality sample key".to_owned()))?
+            .ok_or_else(|| {
+                PersistenceError::invariant("missing cardinality sample key".to_owned())
+            })?
             .value()
             .try_into()
-            .map_err(|_| PersistenceError("invalid cardinality sample key length".to_owned()))?;
+            .map_err(|_| {
+                PersistenceError::invariant("invalid cardinality sample key length".to_owned())
+            })?;
         drop(cardinality_sample_meta);
         Ok(Self {
             events: write_txn.open_table(EVENTS).map_err(persist_err)?,
@@ -214,13 +219,17 @@ impl<'txn> CanonicalWriteTables<'txn> {
         };
         let local_bytes = self.local.get(key).map_err(persist_err)?;
         let event = StoredEventView::from_trusted(event_bytes.value())
-            .map_err(|error| PersistenceError(format!("decode canonical event view: {error:?}")))?
+            .map_err(|error| {
+                PersistenceError::invariant(format!("decode canonical event view: {error:?}"))
+            })?
             .materialize_event()
-            .map_err(|error| PersistenceError(format!("materialize canonical event: {error:?}")))?;
+            .map_err(|error| {
+                PersistenceError::invariant(format!("materialize canonical event: {error:?}"))
+            })?;
         let local = local_bytes
             .map(|bytes| {
                 binary_event::decode_local(bytes.value()).map_err(|error| {
-                    PersistenceError(format!("decode canonical local state: {error:?}"))
+                    PersistenceError::invariant(format!("decode canonical local state: {error:?}"))
                 })
             })
             .transpose()?;
@@ -240,7 +249,7 @@ impl<'txn> CanonicalWriteTables<'txn> {
             .map_err(persist_err)?
             .map(|bytes| {
                 binary_event::decode_local(bytes.value()).map_err(|error| {
-                    PersistenceError(format!("decode canonical local state: {error:?}"))
+                    PersistenceError::invariant(format!("decode canonical local state: {error:?}"))
                 })
             })
             .transpose()
@@ -283,9 +292,9 @@ impl<'txn> CanonicalWriteTables<'txn> {
 
     pub(super) fn allocate_key(&mut self) -> Result<EventKey, PersistenceError> {
         let next = self.next_event_key;
-        self.next_event_key = next
-            .checked_add(1)
-            .ok_or_else(|| PersistenceError("canonical event key space exhausted".to_owned()))?;
+        self.next_event_key = next.checked_add(1).ok_or_else(|| {
+            PersistenceError::invariant("canonical event key space exhausted".to_owned())
+        })?;
         self.event_allocator_dirty = true;
         Ok(next)
     }
@@ -294,7 +303,7 @@ impl<'txn> CanonicalWriteTables<'txn> {
         let next = self.next_relay_key;
         self.next_relay_key = next
             .checked_add(1)
-            .ok_or_else(|| PersistenceError("relay key space exhausted".to_owned()))?;
+            .ok_or_else(|| PersistenceError::invariant("relay key space exhausted".to_owned()))?;
         self.relay_allocator_dirty = true;
         Ok(next)
     }
@@ -336,9 +345,9 @@ impl<'txn> CanonicalWriteTables<'txn> {
         relay_key: RelayKey,
     ) -> Result<(), PersistenceError> {
         let current = self.effective_relay_ref(relay_key)?;
-        let next = current
-            .checked_add(1)
-            .ok_or_else(|| PersistenceError("relay reference count exhausted".to_owned()))?;
+        let next = current.checked_add(1).ok_or_else(|| {
+            PersistenceError::invariant("relay reference count exhausted".to_owned())
+        })?;
         self.relay_ref_counts.insert(relay_key, next);
         Ok(())
     }
@@ -348,9 +357,9 @@ impl<'txn> CanonicalWriteTables<'txn> {
         relay_key: RelayKey,
     ) -> Result<(), PersistenceError> {
         let current = self.effective_relay_ref(relay_key)?;
-        let next = current
-            .checked_sub(1)
-            .ok_or_else(|| PersistenceError("relay reference count underflow".to_owned()))?;
+        let next = current.checked_sub(1).ok_or_else(|| {
+            PersistenceError::invariant("relay reference count underflow".to_owned())
+        })?;
         self.relay_ref_counts.insert(relay_key, next);
         Ok(())
     }
@@ -361,9 +370,9 @@ impl<'txn> CanonicalWriteTables<'txn> {
         delta: i64,
     ) -> Result<(), PersistenceError> {
         let current = self.cardinality_deltas.entry(key).or_default();
-        *current = current
-            .checked_add(delta)
-            .ok_or_else(|| PersistenceError("index cardinality delta overflow".to_owned()))?;
+        *current = current.checked_add(delta).ok_or_else(|| {
+            PersistenceError::invariant("index cardinality delta overflow".to_owned())
+        })?;
         Ok(())
     }
 
@@ -428,7 +437,7 @@ impl<'txn> CanonicalWriteTables<'txn> {
                 persisted.checked_sub(delta.unsigned_abs())
             }
             .ok_or_else(|| {
-                PersistenceError(format!(
+                PersistenceError::invariant(format!(
                     "index cardinality underflow/overflow for prefix {key:?}"
                 ))
             })?;

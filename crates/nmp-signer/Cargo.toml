@@ -11,6 +11,8 @@ publish.workspace = true
 # the older connect shape.
 nostr = { workspace = true, features = ["nip46"] }
 nmp-transport.workspace = true
+# #885: the bunker-relay pool dials under the shared destination policy.
+nmp-network-policy.workspace = true
 # #704: reduced to the process-wide OS-thread-spawn counter only; the
 # standalone NIP-46 runtime's worker threads bump it via `on_thread_start`.
 nmp-executor.workspace = true

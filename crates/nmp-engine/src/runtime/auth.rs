@@ -1759,9 +1759,9 @@ mod tests {
         // postdates the mega base this reducer was ported from.
         let pool = Pool::new(
             PoolConfig {
-                allowed_local_hosts: std::sync::Arc::new(std::collections::BTreeSet::from([
-                    "127.0.0.1".to_string(),
-                ])),
+                destination_policy: std::sync::Arc::new(
+                    nmp_network_policy::DestinationPolicy::new(["127.0.0.1".to_string()]),
+                ),
                 ..PoolConfig::default()
             },
             pool_tx,

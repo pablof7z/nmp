@@ -15,7 +15,8 @@ nostr.workspace = true
 # the protocol-neutral `nmp-asset` crate, not privately re-implemented here.
 nmp-asset.workspace = true
 nmp-ownership.workspace = true
-nmp-transport.workspace = true
+# #885: the one pure destination-admission owner every Blossom dial uses.
+nmp-network-policy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true

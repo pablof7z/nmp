@@ -1961,9 +1961,6 @@ dependencies = [
  "nmp-test-support",
  "nmp-transport",
  "nostr 0.44.4",
- "nostr-relay-builder",
- "serde",
- "serde_json",
  "tokio",
 ]
 
@@ -1974,8 +1971,8 @@ dependencies = [
  "base64",
  "hickory-resolver",
  "nmp-asset",
+ "nmp-network-policy",
  "nmp-ownership",
- "nmp-transport",
  "nostr 0.44.4",
  "reqwest",
  "serde",
@@ -2022,6 +2019,7 @@ dependencies = [
  "negentropy",
  "nmp-executor",
  "nmp-grammar",
+ "nmp-network-policy",
  "nmp-nip29",
  "nmp-nip51",
  "nmp-resolver",
@@ -2077,6 +2075,7 @@ name = "nmp-grammar"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "nmp-network-policy",
  "nostr 0.44.4",
  "serde_json",
 ]
@@ -2092,6 +2091,10 @@ dependencies = [
  "nostr 0.44.4",
  "tokio",
 ]
+
+[[package]]
+name = "nmp-network-policy"
+version = "0.1.0"
 
 [[package]]
 name = "nmp-nip02"
@@ -2174,11 +2177,11 @@ name = "nmp-parity"
 version = "0.1.0"
 dependencies = [
  "nmp",
- "nmp-bdd",
  "nmp-content",
  "nmp-ffi",
  "nmp-grammar",
  "nmp-nip02",
+ "nmp-test-support",
  "nostr 0.44.4",
  "tempfile",
  "tokio",
@@ -2191,6 +2194,7 @@ dependencies = [
  "libc",
  "nmp-grammar",
  "nmp-store",
+ "nmp-test-support",
  "nostr 0.44.4",
 ]
 
@@ -2201,6 +2205,7 @@ dependencies = [
  "nmp-grammar",
  "nmp-resolver",
  "nmp-store",
+ "nmp-test-support",
  "nostr 0.44.4",
  "proptest",
 ]
@@ -2211,6 +2216,7 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "nmp-executor",
+ "nmp-network-policy",
  "nmp-transport",
  "nostr 0.44.4",
  "serde",
@@ -2242,6 +2248,10 @@ dependencies = [
 name = "nmp-test-support"
 version = "0.1.0"
 dependencies = [
+ "nostr 0.44.4",
+ "nostr-relay-builder",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 
@@ -2253,6 +2263,7 @@ dependencies = [
  "mio",
  "nmp-executor",
  "nmp-grammar",
+ "nmp-network-policy",
  "nmp-test-support",
  "nostr 0.44.4",
  "nostr-relay-builder",

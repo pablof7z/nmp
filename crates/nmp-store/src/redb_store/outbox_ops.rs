@@ -86,7 +86,7 @@ pub(super) fn reattach_receipt(
         return Ok(None);
     };
     let record: OutboxReceiptRecord = serde_json::from_str(&json)
-        .map_err(|err| PersistenceError(format!("decode retained receipt: {err}")))?;
+        .map_err(|err| PersistenceError::invariant(format!("decode retained receipt: {err}")))?;
     Ok(Some(RecoveredReceipt {
         receipt_id,
         intent_id: record.intent_id,
@@ -119,9 +119,9 @@ pub(super) fn lookup_correlation(
     else {
         return Ok(None);
     };
-    let receipt_id: u64 = encoded
-        .parse()
-        .map_err(|err| PersistenceError(format!("decode correlation receipt id: {err}")))?;
+    let receipt_id: u64 = encoded.parse().map_err(|err| {
+        PersistenceError::invariant(format!("decode correlation receipt id: {err}"))
+    })?;
     Ok(Some(receipt_id))
 }
 
@@ -139,7 +139,9 @@ pub(super) fn record_route_revision(
             .map_err(persist_err)?
             .is_none()
         {
-            return Err(PersistenceError("route revision intent is not open".into()));
+            return Err(PersistenceError::invariant(
+                "route revision intent is not open",
+            ));
         }
         let mut revisions = write_txn
             .open_table(OUTBOX_ROUTE_REVISIONS)
@@ -157,15 +159,15 @@ pub(super) fn record_route_revision(
             let (key, value) = entry.map_err(persist_err)?;
             let recovered = decode_route_revision(key.value(), value.value())?;
             if recovered.intent_id != intent_id {
-                return Err(PersistenceError(
-                    "route revision range does not match its value intent".into(),
+                return Err(PersistenceError::invariant(
+                    "route revision range does not match its value intent",
                 ));
             }
             last = last.max(recovered.ordinal);
         }
         let ordinal = last
             .checked_add(1)
-            .ok_or_else(|| PersistenceError("route revision ordinal exhausted".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("route revision ordinal exhausted"))?;
         let record = OutboxRouteRevisionRecord {
             version: 1,
             intent_id,
@@ -173,7 +175,7 @@ pub(super) fn record_route_revision(
             relays: relays.clone(),
         };
         let encoded = serde_json::to_string(&record)
-            .map_err(|err| PersistenceError(format!("encode route revision: {err}")))?;
+            .map_err(|err| PersistenceError::invariant(format!("encode route revision: {err}")))?;
         revisions
             .insert(
                 route_revision_key(intent_id, ordinal).as_str(),
@@ -214,8 +216,8 @@ pub(super) fn recover_route_revisions(
         let (key, value) = entry.map_err(persist_err)?;
         let revision = decode_route_revision(key.value(), value.value())?;
         if revision.intent_id != intent_id {
-            return Err(PersistenceError(
-                "route revision range does not match its value intent".into(),
+            return Err(PersistenceError::invariant(
+                "route revision range does not match its value intent",
             ));
         }
         recovered.push(revision);
@@ -244,8 +246,8 @@ pub(super) fn recover_attempts(
         let (key, value) = entry.map_err(persist_err)?;
         let mut attempt = decode_attempt(key.value(), value.value())?;
         if attempt.intent_id != intent_id {
-            return Err(PersistenceError(
-                "outbox attempt range does not match its value intent".into(),
+            return Err(PersistenceError::invariant(
+                "outbox attempt range does not match its value intent",
             ));
         }
         if let Some(detail) = details.get(key.value()).map_err(persist_err)? {
@@ -279,7 +281,9 @@ pub(super) fn bootstrap_outbox_lanes(
             .map_err(persist_err)?
             .is_none()
         {
-            return Err(PersistenceError("lane bootstrap intent is not open".into()));
+            return Err(PersistenceError::invariant(
+                "lane bootstrap intent is not open",
+            ));
         }
         let route_revisions = write_txn
             .open_table(OUTBOX_ROUTE_REVISIONS)
@@ -383,16 +387,16 @@ pub(super) fn bootstrap_outbox_lanes(
                         )
                     }))
             {
-                return Err(PersistenceError(
-                    "contradictory live v1 Started attempt history".into(),
+                return Err(PersistenceError::invariant(
+                    "contradictory live v1 Started attempt history",
                 ));
             }
             if let Some(existing) = lanes.get(storage_key.as_str()).map_err(persist_err)? {
                 let lane = decode_lane(&storage_key, existing.value())?;
                 let max = lane_attempts.last().map_or(0, |attempt| attempt.ordinal);
                 if lane.last_ordinal != max {
-                    return Err(PersistenceError(
-                        "outbox lane cursor disagrees with retained attempt history".into(),
+                    return Err(PersistenceError::invariant(
+                        "outbox lane cursor disagrees with retained attempt history",
                     ));
                 }
                 match lane_attempts.last() {
@@ -403,14 +407,14 @@ pub(super) fn bootstrap_outbox_lanes(
                                 outcome: attempt.outcome.clone(),
                             })
                         {
-                            return Err(PersistenceError(
-                                "terminal attempt and lane state disagree".into(),
+                            return Err(PersistenceError::invariant(
+                                "terminal attempt and lane state disagree",
                             ));
                         }
                     }
                     _ if matches!(lane.state, LaneState::Terminal { .. }) => {
-                        return Err(PersistenceError(
-                            "terminal lane lacks matching terminal attempt".into(),
+                        return Err(PersistenceError::invariant(
+                            "terminal lane lacks matching terminal attempt",
                         ));
                     }
                     _ => {}
@@ -464,7 +468,9 @@ pub(super) fn recover_outbox_lanes(
         let (key, value) = row.map_err(persist_err)?;
         let lane = decode_lane(key.value(), value.value())?;
         if lane.key.intent_id != intent_id {
-            return Err(PersistenceError("lane range escaped intent prefix".into()));
+            return Err(PersistenceError::invariant(
+                "lane range escaped intent prefix",
+            ));
         }
         recovered.push(lane);
     }
@@ -478,7 +484,9 @@ pub(super) fn due_outbox_deadlines(
     limit: usize,
 ) -> Result<Vec<LaneDeadline>, PersistenceError> {
     if limit > 1_024 {
-        return Err(PersistenceError("deadline read limit exceeds 1024".into()));
+        return Err(PersistenceError::invariant(
+            "deadline read limit exceeds 1024",
+        ));
     }
     let read_txn = store.db.begin_read().map_err(persist_err)?;
     let deadlines = read_txn.open_table(OUTBOX_DEADLINES).map_err(persist_err)?;
@@ -486,8 +494,8 @@ pub(super) fn due_outbox_deadlines(
         .open_table(OUTBOX_DEADLINES_BY_INTENT)
         .map_err(persist_err)?;
     if deadlines.len().map_err(persist_err)? != deadlines_by_intent.len().map_err(persist_err)? {
-        return Err(PersistenceError(
-            "deadline index cardinalities disagree".into(),
+        return Err(PersistenceError::invariant(
+            "deadline index cardinalities disagree",
         ));
     }
     let lanes = read_txn.open_table(OUTBOX_LANES).map_err(persist_err)?;
@@ -507,19 +515,19 @@ pub(super) fn due_outbox_deadlines(
             .get(secondary_key.as_str())
             .map_err(persist_err)?
             .map(|guard| guard.value().to_string())
-            .ok_or_else(|| PersistenceError("deadline is missing by-intent index".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("deadline is missing by-intent index"))?;
         if decode_deadline_by_intent(&secondary_key, &secondary)? != deadline {
-            return Err(PersistenceError("deadline indexes disagree".into()));
+            return Err(PersistenceError::invariant("deadline indexes disagree"));
         }
         let lane_storage_key = lane_key(&deadline.key);
         let lane_json = lanes
             .get(lane_storage_key.as_str())
             .map_err(persist_err)?
             .map(|guard| guard.value().to_string())
-            .ok_or_else(|| PersistenceError("deadline references missing lane".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("deadline references missing lane"))?;
         let lane = decode_lane(&lane_storage_key, &lane_json)?;
         if lane_deadline(&lane).as_ref() != Some(&deadline) {
-            return Err(PersistenceError("deadline and lane disagree".into()));
+            return Err(PersistenceError::invariant("deadline and lane disagree"));
         }
         recovered.push(deadline);
     }
@@ -535,8 +543,8 @@ pub(super) fn next_outbox_deadline(
         .open_table(OUTBOX_DEADLINES_BY_INTENT)
         .map_err(persist_err)?;
     if deadlines.len().map_err(persist_err)? != deadlines_by_intent.len().map_err(persist_err)? {
-        return Err(PersistenceError(
-            "deadline index cardinalities disagree".into(),
+        return Err(PersistenceError::invariant(
+            "deadline index cardinalities disagree",
         ));
     }
     let lanes = read_txn.open_table(OUTBOX_LANES).map_err(persist_err)?;
@@ -551,18 +559,18 @@ pub(super) fn next_outbox_deadline(
         .get(secondary_key.as_str())
         .map_err(persist_err)?
         .map(|guard| guard.value().to_string())
-        .ok_or_else(|| PersistenceError("deadline is missing by-intent index".into()))?;
+        .ok_or_else(|| PersistenceError::invariant("deadline is missing by-intent index"))?;
     if decode_deadline_by_intent(&secondary_key, &secondary)? != deadline {
-        return Err(PersistenceError("deadline indexes disagree".into()));
+        return Err(PersistenceError::invariant("deadline indexes disagree"));
     }
     let lane_storage_key = lane_key(&deadline.key);
     let lane = lanes
         .get(lane_storage_key.as_str())
         .map_err(persist_err)?
         .map(|guard| guard.value().to_string())
-        .ok_or_else(|| PersistenceError("deadline references missing lane".into()))?;
+        .ok_or_else(|| PersistenceError::invariant("deadline references missing lane"))?;
     if lane_deadline(&decode_lane(&lane_storage_key, &lane)?).as_ref() != Some(&deadline) {
-        return Err(PersistenceError("deadline and lane disagree".into()));
+        return Err(PersistenceError::invariant("deadline and lane disagree"));
     }
     Ok(Some(deadline.at))
 }
@@ -606,8 +614,8 @@ pub(super) fn set_lane_transient(
         .as_ref()
         .is_some_and(|reason| reason.len() > 4_096)
     {
-        return Err(PersistenceError(
-            "transient raw reason exceeds 4096 bytes".into(),
+        return Err(PersistenceError::invariant(
+            "transient raw reason exceeds 4096 bytes",
         ));
     }
     let write_txn = store.db.begin_write().map_err(persist_err)?;
@@ -627,10 +635,10 @@ pub(super) fn set_lane_transient(
             .get(storage_key.as_str())
             .map_err(persist_err)?
             .map(|g| g.value().to_string())
-            .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("outbox lane not found"))?;
         let current = decode_lane(&storage_key, &json)?;
         if current.last_ordinal != ordinal {
-            return Err(PersistenceError("stale attempt ordinal".into()));
+            return Err(PersistenceError::invariant("stale attempt ordinal"));
         }
         if ordinal > 0 {
             let detail_key = attempt_key(key.intent_id, &key.relay, ordinal);
@@ -638,7 +646,7 @@ pub(super) fn set_lane_transient(
                 .get(detail_key.as_str())
                 .map_err(persist_err)?
                 .map(|g| g.value().to_string())
-                .ok_or_else(|| PersistenceError("attempt detail row not found".into()))?;
+                .ok_or_else(|| PersistenceError::invariant("attempt detail row not found"))?;
             let mut detail = decode_attempt_details(&detail_key, &detail_json)?;
             detail.transient = Some(AttemptTransientDetail {
                 eligible_at,
@@ -687,8 +695,8 @@ pub(super) fn suspend_lane_attempt(
         .as_ref()
         .is_some_and(|reason| reason.len() > 4_096)
     {
-        return Err(PersistenceError(
-            "transient raw reason exceeds 4096 bytes".into(),
+        return Err(PersistenceError::invariant(
+            "transient raw reason exceeds 4096 bytes",
         ));
     }
     let write_txn = store.db.begin_write().map_err(persist_err)?;
@@ -708,18 +716,18 @@ pub(super) fn suspend_lane_attempt(
             .get(storage_key.as_str())
             .map_err(persist_err)?
             .map(|g| g.value().to_string())
-            .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("outbox lane not found"))?;
         let current = decode_lane(&storage_key, &json)?;
         if current.revision != expected_revision || current.last_ordinal != ordinal || ordinal == 0
         {
-            return Err(PersistenceError("stale suspended attempt".into()));
+            return Err(PersistenceError::invariant("stale suspended attempt"));
         }
         let detail_key = attempt_key(key.intent_id, &key.relay, ordinal);
         let detail_json = details
             .get(detail_key.as_str())
             .map_err(persist_err)?
             .map(|g| g.value().to_string())
-            .ok_or_else(|| PersistenceError("attempt detail row not found".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("attempt detail row not found"))?;
         let mut detail = decode_attempt_details(&detail_key, &detail_json)?;
         detail.transient = Some(AttemptTransientDetail {
             eligible_at: at,
@@ -764,19 +772,19 @@ pub(super) fn start_lane_attempt(
         .get(intent_key(key.intent_id).as_str())
         .map_err(persist_err)?
         .map(|g| g.value().to_string())
-        .ok_or_else(|| PersistenceError("attempt intent is not open".into()))?;
+        .ok_or_else(|| PersistenceError::invariant("attempt intent is not open"))?;
     let intent: OutboxIntentRecord = serde_json::from_str(&intent_json)
-        .map_err(|e| PersistenceError(format!("decode attempt intent: {e}")))?;
+        .map_err(|e| PersistenceError::invariant(format!("decode attempt intent: {e}")))?;
     let frozen = Event::from_json(&intent.frozen_json)
-        .map_err(|e| PersistenceError(format!("decode attempt intent event: {e}")))?;
+        .map_err(|e| PersistenceError::invariant(format!("decode attempt intent event: {e}")))?;
     if intent.sig_state != IntentSigState::Signed || frozen != event {
-        return Err(PersistenceError(
-            "attempt bytes are not the intent's promoted signed bytes".into(),
+        return Err(PersistenceError::invariant(
+            "attempt bytes are not the intent's promoted signed bytes",
         ));
     }
     event
         .verify()
-        .map_err(|e| PersistenceError(format!("attempt event is invalid: {e}")))?;
+        .map_err(|e| PersistenceError::invariant(format!("attempt event is invalid: {e}")))?;
     drop(intents);
     drop(read_txn);
     let write_txn = store.db.begin_write().map_err(persist_err)?;
@@ -797,19 +805,19 @@ pub(super) fn start_lane_attempt(
             .get(storage_key.as_str())
             .map_err(persist_err)?
             .map(|g| g.value().to_string())
-            .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("outbox lane not found"))?;
         let current = decode_lane(&storage_key, &lane_json)?;
         if current.revision != expected_revision
             || !matches!(current.state, LaneState::Eligible { .. })
         {
-            return Err(PersistenceError(
-                "lane is not expected eligible cursor".into(),
+            return Err(PersistenceError::invariant(
+                "lane is not expected eligible cursor",
             ));
         }
         let ordinal = current
             .last_ordinal
             .checked_add(1)
-            .ok_or_else(|| PersistenceError("attempt ordinal exhausted".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("attempt ordinal exhausted"))?;
         let attempt = RecoveredAttempt {
             version: 1,
             intent_id: key.intent_id,
@@ -890,8 +898,8 @@ pub(super) fn record_lane_handoff(
             ..
         } if reason.len() > 4_096
     ) {
-        return Err(PersistenceError(
-            "transient raw reason exceeds 4096 bytes".into(),
+        return Err(PersistenceError::invariant(
+            "transient raw reason exceeds 4096 bytes",
         ));
     }
     let write_txn = store.db.begin_write().map_err(persist_err)?;
@@ -911,10 +919,10 @@ pub(super) fn record_lane_handoff(
             .get(lane_storage_key.as_str())
             .map_err(persist_err)?
             .map(|g| g.value().to_string())
-            .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("outbox lane not found"))?;
         let current_lane = decode_lane(&lane_storage_key, &lane_json)?;
         if current_lane.revision != expected_revision || current_lane.last_ordinal != ordinal {
-            return Err(PersistenceError("stale lane handoff".into()));
+            return Err(PersistenceError::invariant("stale lane handoff"));
         }
         if !matches!(
             current_lane.state,
@@ -923,18 +931,18 @@ pub(super) fn record_lane_handoff(
                 phase: InFlightPhase::AwaitingHandoff,
             } if current == ordinal
         ) {
-            return Err(PersistenceError("lane is not awaiting handoff".into()));
+            return Err(PersistenceError::invariant("lane is not awaiting handoff"));
         }
         let attempt_key_value = attempt_key(key.intent_id, &key.relay, ordinal);
         let detail_json = details
             .get(attempt_key_value.as_str())
             .map_err(persist_err)?
             .map(|g| g.value().to_string())
-            .ok_or_else(|| PersistenceError("attempt detail row not found".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("attempt detail row not found"))?;
         let mut recovered_detail = decode_attempt_details(&attempt_key_value, &detail_json)?;
         if let Some(existing) = &recovered_detail.handoff {
             if existing != &detail {
-                return Err(PersistenceError("conflicting handoff evidence".into()));
+                return Err(PersistenceError::invariant("conflicting handoff evidence"));
             }
         } else {
             recovered_detail.handoff = Some(detail);
@@ -962,7 +970,7 @@ pub(super) fn record_lane_handoff(
                 finished_at,
             } => {
                 if outcome == AttemptOutcome::Started {
-                    return Err(PersistenceError("Started is not terminal".into()));
+                    return Err(PersistenceError::invariant("Started is not terminal"));
                 }
                 recovered_detail.finished_at = Some(finished_at);
                 recovered_detail.terminal = Some(outcome.clone());
@@ -978,7 +986,7 @@ pub(super) fn record_lane_handoff(
             state,
         )?;
         if lane.last_ordinal != ordinal {
-            return Err(PersistenceError("stale lane handoff ordinal".into()));
+            return Err(PersistenceError::invariant("stale lane handoff ordinal"));
         }
         details
             .insert(
@@ -1003,7 +1011,7 @@ pub(super) fn finish_lane_attempt(
     finished_at: Timestamp,
 ) -> Result<RecoveredLane, PersistenceError> {
     if outcome == AttemptOutcome::Started {
-        return Err(PersistenceError("Started is not terminal".into()));
+        return Err(PersistenceError::invariant("Started is not terminal"));
     }
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let lane = {
@@ -1022,17 +1030,17 @@ pub(super) fn finish_lane_attempt(
             .get(storage_key.as_str())
             .map_err(persist_err)?
             .map(|g| g.value().to_string())
-            .ok_or_else(|| PersistenceError("outbox lane not found".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("outbox lane not found"))?;
         let current = decode_lane(&storage_key, &lane_json)?;
         if current.revision != expected_revision || current.last_ordinal != ordinal {
-            return Err(PersistenceError("stale terminal attempt".into()));
+            return Err(PersistenceError::invariant("stale terminal attempt"));
         }
         let detail_key = attempt_key(key.intent_id, &key.relay, ordinal);
         let detail_json = details
             .get(detail_key.as_str())
             .map_err(persist_err)?
             .map(|g| g.value().to_string())
-            .ok_or_else(|| PersistenceError("attempt detail row not found".into()))?;
+            .ok_or_else(|| PersistenceError::invariant("attempt detail row not found"))?;
         let mut detail = decode_attempt_details(&detail_key, &detail_json)?;
         if let Some(existing) = &detail.terminal {
             if existing == &outcome
@@ -1047,8 +1055,8 @@ pub(super) fn finish_lane_attempt(
             {
                 current
             } else {
-                return Err(PersistenceError(
-                    "attempt already has conflicting terminal evidence".into(),
+                return Err(PersistenceError::invariant(
+                    "attempt already has conflicting terminal evidence",
                 ));
             }
         } else {
@@ -1121,8 +1129,8 @@ pub(super) fn close_terminal_intent(
                 let (key, value) = row.map_err(persist_err)?;
                 let lane = decode_lane(key.value(), value.value())?;
                 if lane.key.intent_id != intent_id {
-                    return Err(PersistenceError(
-                        "lane close range escaped intent prefix".into(),
+                    return Err(PersistenceError::invariant(
+                        "lane close range escaped intent prefix",
                     ));
                 }
                 lanes_snapshot.push(lane);
@@ -1132,8 +1140,8 @@ pub(super) fn close_terminal_intent(
                     .iter()
                     .any(|lane| !matches!(lane.state, LaneState::Terminal { .. }))
             {
-                return Err(PersistenceError(
-                    "intent lanes are not non-empty and terminal".into(),
+                return Err(PersistenceError::invariant(
+                    "intent lanes are not non-empty and terminal",
                 ));
             }
             let mut deadlines = write_txn
@@ -1145,8 +1153,8 @@ pub(super) fn close_terminal_intent(
             if deadlines.len().map_err(persist_err)?
                 != deadlines_by_intent.len().map_err(persist_err)?
             {
-                return Err(PersistenceError(
-                    "deadline index cardinalities disagree".into(),
+                return Err(PersistenceError::invariant(
+                    "deadline index cardinalities disagree",
                 ));
             }
             let (deadline_lower, deadline_upper) = prefix_range(intent_row_prefix(intent_id));
@@ -1158,8 +1166,8 @@ pub(super) fn close_terminal_intent(
                 let (key, value) = row.map_err(persist_err)?;
                 let deadline = decode_deadline_by_intent(key.value(), value.value())?;
                 if deadline.key.intent_id != intent_id {
-                    return Err(PersistenceError(
-                        "deadline close range escaped intent prefix".into(),
+                    return Err(PersistenceError::invariant(
+                        "deadline close range escaped intent prefix",
                     ));
                 }
                 stale_rows.push((key.value().to_string(), deadline));
@@ -1171,10 +1179,10 @@ pub(super) fn close_terminal_intent(
                     .map_err(persist_err)?
                     .map(|guard| guard.value().to_string())
                     .ok_or_else(|| {
-                        PersistenceError("by-intent deadline is missing ordered index".into())
+                        PersistenceError::invariant("by-intent deadline is missing ordered index")
                     })?;
                 if decode_deadline(&ordered_key, &ordered)? != deadline {
-                    return Err(PersistenceError("deadline indexes disagree".into()));
+                    return Err(PersistenceError::invariant("deadline indexes disagree"));
                 }
                 deadlines
                     .remove(ordered_key.as_str())

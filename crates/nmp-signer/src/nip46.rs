@@ -3,7 +3,7 @@
 //! The adapter owns an independent relay pool and exactly-correlated remote
 //! RPCs. It deliberately does not own NMP's durable write retry/publication.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -1111,7 +1111,7 @@ fn session_pool_config() -> PoolConfig {
         // legitimate setup, so this session pool keeps admitting the usual
         // local ranges rather than inheriting the network-discovery-only
         // refusal.
-        allowed_local_hosts: Arc::new(BTreeSet::from([
+        destination_policy: Arc::new(nmp_network_policy::DestinationPolicy::new([
             "127.0.0.1".to_string(),
             "::1".to_string(),
             "localhost".to_string(),

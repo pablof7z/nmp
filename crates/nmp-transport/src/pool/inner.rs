@@ -417,7 +417,7 @@ impl PoolInner {
             reconnect_delay_initial,
             reconnect_jitter_max,
             command_queue_capacity,
-            Arc::clone(&self.config.allowed_local_hosts),
+            Arc::clone(&self.config.destination_policy),
             Arc::clone(&self.committed_observations),
             self.spawner.as_ref(),
         )

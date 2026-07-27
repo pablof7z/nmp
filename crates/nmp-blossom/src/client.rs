@@ -3,12 +3,11 @@
 //! with the SAME HTTP admission discipline as the engine's NIP-11
 //! fetcher (`nmp-engine/src/relay_information.rs`, issue #519): literal
 //! loopback/private/link-local/onion hosts are refused BEFORE any socket
-//! I/O unless operator opted-in, resolved DNS answers are filtered through
-//! `nmp_transport::classify_ip` (failing closed when every answer is
-//! local), redirects/proxies/referrers/retries are disabled, and every
-//! response body is read streamed under a byte cap. The engine's private
-//! helpers are reimplemented here from `nmp-transport`'s PUBLIC pure
-//! classifiers because this crate must stay engine-free. Each operation
+//! I/O unless operator opted-in, complete DNS answer sets are admitted or
+//! refused whole by the pure `nmp-network-policy` owner (#885),
+//! redirects/proxies/referrers/retries are disabled, and every response
+//! body is read streamed under a byte cap. Admission rules live in that
+//! engine-free crate, so this client never re-derives them. Each operation
 //! validates its authorization binding FIRST, then host admission, then
 //! performs I/O; each has its own exhaustive error enum (operation
 //! failures are never collapsed into one taxonomy).
@@ -19,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nmp_asset::{Sha256Hash, VerifiedAsset};
-use nmp_transport::{classify_ip, normalize_bare_host, RelayHostClass};
+use nmp_network_policy::{DestinationPolicy, DestinationRefusal};
 
 use crate::auth::{BlossomVerb, SignedAuthorization};
 use crate::descriptor::{BlobDescriptor, DescriptorError};
@@ -181,8 +180,8 @@ impl BlossomServerUrl {
 #[derive(Debug, Clone)]
 pub struct BlossomClientConfig {
     /// Operator opt-in local-host allowlist, in
-    /// `nmp_transport::normalize_bare_host`'s normalized form -- the same
-    /// vocabulary the engine's `RelayAdmissionPolicy` uses (issue #519).
+    /// `nmp_network_policy::normalize_bare_host`'s normalized form -- the
+    /// same vocabulary the engine's `RelayAdmissionPolicy` uses (#519, #885).
     /// Empty (the default) means NO loopback/private/link-local/onion host
     /// or resolved address may be uploaded to.
     pub allowed_local_hosts: BTreeSet<String>,
@@ -677,7 +676,7 @@ impl std::error::Error for ListError {}
 /// HTTP discipline (module doc); one client may serve many operations.
 pub struct BlossomClient {
     http: reqwest::Client,
-    allowed_local_hosts: Arc<BTreeSet<String>>,
+    destination_policy: Arc<DestinationPolicy>,
     max_response_bytes: usize,
     max_list_response_bytes: usize,
 }
@@ -718,11 +717,11 @@ impl BlossomClient {
         resolver_config: Option<hickory_resolver::config::ResolverConfig>,
         resolver_strategy: hickory_resolver::config::LookupIpStrategy,
     ) -> Result<Self, ClientBuildError> {
-        let allowed_local_hosts = Arc::new(config.allowed_local_hosts);
+        let destination_policy = Arc::new(DestinationPolicy::new(config.allowed_local_hosts));
         let resolver = AdmittedDnsResolver::new(
             resolver_config,
             resolver_strategy,
-            Arc::clone(&allowed_local_hosts),
+            Arc::clone(&destination_policy),
         )
         .map_err(|reason| ClientBuildError { reason })?;
         let http = reqwest::Client::builder()
@@ -738,7 +737,7 @@ impl BlossomClient {
             })?;
         Ok(Self {
             http,
-            allowed_local_hosts,
+            destination_policy,
             max_response_bytes: config.max_response_bytes,
             max_list_response_bytes: config.max_list_response_bytes,
         })
@@ -1137,24 +1136,15 @@ impl BlossomClient {
     /// Refuse a literal loopback/private/link-local/unspecified/onion HOST
     /// that the operator did not explicitly opt in -- BEFORE any request
     /// is built (issue #519's discipline; the resolver below cannot see an
-    /// IP-literal host because a literal never reaches DNS). Mirrors the
-    /// hostname-level rules of `nmp-transport::classify_relay_host`
-    /// (`classify_relay_host` itself takes a `RelayUrl`, which does not
-    /// fit an http URL). `Err` carries the refused host text; each
-    /// operation wraps it in its own `LocalHostNotAdmitted` variant.
+    /// IP-literal host because a literal never reaches DNS). The shared
+    /// `nmp-network-policy` owner decides, so this crate never re-derives
+    /// host normalization of its own. `Err` carries the refused host text;
+    /// each operation wraps it in its own `LocalHostNotAdmitted` variant.
     fn reject_unadmitted_local_host(&self, host: &str) -> Result<(), String> {
-        let bare = host
-            .strip_prefix('[')
-            .and_then(|inner| inner.strip_suffix(']'))
-            .unwrap_or(host);
-        if literal_host_class(bare) == RelayHostClass::Local
-            && !self
-                .allowed_local_hosts
-                .contains(&normalize_bare_host(bare))
-        {
-            return Err(host.to_string());
-        }
-        Ok(())
+        self.destination_policy
+            .admit_host(host)
+            .map(|_| ())
+            .map_err(|_| host.to_string())
     }
 }
 
@@ -1199,35 +1189,14 @@ async fn read_bounded_body(
     Ok(bytes)
 }
 
-/// Classify a bare host string (brackets already stripped) by the SAME
-/// rules `nmp-transport::classify_relay_host` applies to a relay URL's
-/// host: IP literals through `classify_ip`, and the `localhost`/
-/// `*.localhost`/`*.onion` domain rules for names.
-fn literal_host_class(bare_host: &str) -> RelayHostClass {
-    match bare_host.parse::<IpAddr>() {
-        Ok(ip) => classify_ip(ip),
-        Err(_) => {
-            let normalized = normalize_bare_host(bare_host);
-            if normalized == "localhost"
-                || normalized.ends_with(".localhost")
-                || normalized.ends_with(".onion")
-            {
-                RelayHostClass::Local
-            } else {
-                RelayHostClass::Public
-            }
-        }
-    }
-}
-
-/// The post-DNS half of admission (issue #519's discipline, reimplemented
-/// engine-free): resolve through hickory, then drop every answer that
-/// classifies `Local` unless the queried name itself was operator opted
-/// in; if EVERY answer is dropped the whole lookup fails closed with the
-/// real reason.
+/// The post-DNS half of admission (issue #519's discipline, #885's single
+/// owner): resolve through hickory, then admit or refuse the COMPLETE fresh
+/// answer set. One unallowed local answer refuses the whole set, mixed
+/// public/local answers included -- nothing is narrowed to a convenient
+/// subset.
 struct AdmittedDnsResolver {
     resolver: hickory_resolver::TokioResolver,
-    allowed_local_hosts: Arc<BTreeSet<String>>,
+    destination_policy: Arc<DestinationPolicy>,
 }
 
 impl AdmittedDnsResolver {
@@ -1238,7 +1207,7 @@ impl AdmittedDnsResolver {
     fn new(
         config: Option<hickory_resolver::config::ResolverConfig>,
         strategy: hickory_resolver::config::LookupIpStrategy,
-        allowed_local_hosts: Arc<BTreeSet<String>>,
+        destination_policy: Arc<DestinationPolicy>,
     ) -> Result<Self, String> {
         let mut builder = match config {
             Some(config) => hickory_resolver::TokioResolver::builder_with_config(
@@ -1254,34 +1223,39 @@ impl AdmittedDnsResolver {
             .map_err(|error| format!("could not construct the DNS resolver: {error}"))?;
         Ok(Self {
             resolver,
-            allowed_local_hosts,
+            destination_policy,
         })
     }
+}
+
+/// Admit one COMPLETE fresh DNS answer for `host` and lift it into reqwest's
+/// address type. The set is admitted or refused whole: a mixed public/local
+/// answer is never reduced to its public subset, because that reduction is
+/// exactly what defeats rebinding protection.
+fn admitted_reqwest_addresses(
+    destination_policy: &DestinationPolicy,
+    host: &str,
+    addresses: impl IntoIterator<Item = IpAddr>,
+) -> Result<Vec<std::net::SocketAddr>, DestinationRefusal> {
+    let admitted_host = destination_policy.admit_host(host)?;
+    let admitted = destination_policy.admit_resolved(&admitted_host, addresses)?;
+    Ok(admitted
+        .into_vec()
+        .into_iter()
+        .map(|address| std::net::SocketAddr::new(address, 0))
+        .collect())
 }
 
 impl reqwest::dns::Resolve for AdmittedDnsResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let resolver = self.resolver.clone();
-        let allowed_local_hosts = Arc::clone(&self.allowed_local_hosts);
+        let destination_policy = Arc::clone(&self.destination_policy);
         let query_name = name.as_str().to_string();
         Box::pin(async move {
             let lookup = resolver.lookup_ip(query_name.clone()).await?;
-            let host_opted_in = allowed_local_hosts.contains(&normalize_bare_host(&query_name));
-            let mut admitted = Vec::new();
-            for address in lookup.iter() {
-                if classify_ip(address) == RelayHostClass::Local && !host_opted_in {
-                    continue;
-                }
-                admitted.push(std::net::SocketAddr::new(address, 0));
-            }
-            if admitted.is_empty() {
-                let message = format!(
-                    "refusing to resolve {query_name}: every resolved address is \
-                     loopback/private/link-local/unspecified and the host is not operator \
-                     opted-in"
-                );
-                return Err(Box::<dyn std::error::Error + Send + Sync>::from(message));
-            }
+            let admitted =
+                admitted_reqwest_addresses(&destination_policy, &query_name, lookup.iter())
+                    .map_err(Box::<dyn std::error::Error + Send + Sync>::from)?;
             let addrs: reqwest::dns::Addrs = Box::new(admitted.into_iter());
             Ok(addrs)
         })
@@ -1340,27 +1314,56 @@ mod tests {
         );
     }
 
-    /// Invariant (#545): the literal-host classifier mirrors
-    /// `nmp-transport`'s admission rules exactly -- IP literals via
-    /// `classify_ip`, `localhost`/`.localhost`/`.onion` names local,
-    /// ordinary public names public.
+    /// Invariant (#545, #885): the literal-host gate is the shared
+    /// `nmp-network-policy` owner's verdict -- IP literals, bracketed IPv6
+    /// literals, and `localhost`/`.localhost`/`.onion` names are refused by
+    /// default; ordinary public names pass.
     #[test]
-    fn literal_host_classification_mirrors_transport_admission_rules() {
-        assert_eq!(literal_host_class("127.0.0.1"), RelayHostClass::Local);
-        assert_eq!(literal_host_class("10.0.0.1"), RelayHostClass::Local);
-        assert_eq!(literal_host_class("::1"), RelayHostClass::Local);
-        assert_eq!(literal_host_class("localhost"), RelayHostClass::Local);
-        assert_eq!(literal_host_class("LOCALHOST"), RelayHostClass::Local);
-        assert_eq!(literal_host_class("foo.localhost"), RelayHostClass::Local);
+    fn literal_host_admission_is_the_shared_destination_policy() {
+        let client = BlossomClient::new(BlossomClientConfig::default())
+            .expect("default client builds without network access");
+        for host in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "::1",
+            "[::1]",
+            "localhost",
+            "LOCALHOST",
+            "foo.localhost",
+            "expyuzz4wqqyqhjn.onion",
+        ] {
+            assert_eq!(
+                client.reject_unadmitted_local_host(host),
+                Err(host.to_string()),
+                "{host} must be refused by default"
+            );
+        }
+        for host in ["cdn.example.com", "8.8.8.8"] {
+            assert_eq!(client.reject_unadmitted_local_host(host), Ok(()), "{host}");
+        }
+    }
+
+    /// #885 falsifier at the Blossom dial site: a mixed public+local DNS
+    /// answer refuses the WHOLE set, and the refusal names both halves. No
+    /// `SocketAddr` reaches reqwest, so the public subset is never dialed.
+    #[test]
+    fn mixed_dns_answer_is_refused_in_full() {
+        let public: IpAddr = "8.8.8.8".parse().unwrap();
+        let local: IpAddr = "127.0.0.1".parse().unwrap();
+        let refusal = admitted_reqwest_addresses(
+            &DestinationPolicy::default(),
+            "blossom.nmp.test",
+            [public, local],
+        )
+        .expect_err("a mixed answer must be refused in full");
         assert_eq!(
-            literal_host_class("expyuzz4wqqyqhjn.onion"),
-            RelayHostClass::Local
+            refusal,
+            DestinationRefusal::ResolvedLocalAddressesNotAllowed {
+                host: "blossom.nmp.test".to_string(),
+                local_addresses: vec![local],
+                public_addresses: vec![public],
+            }
         );
-        assert_eq!(
-            literal_host_class("cdn.example.com"),
-            RelayHostClass::Public
-        );
-        assert_eq!(literal_host_class("8.8.8.8"), RelayHostClass::Public);
     }
 
     fn resolver_config_for_dns_server(
