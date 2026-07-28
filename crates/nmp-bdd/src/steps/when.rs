@@ -14,6 +14,15 @@ async fn open_feed(w: &mut NmpWorld) {
     w.open_my_follows_feed().await;
 }
 
+/// A BOUNDED follows feed. The window belongs to the feed, not to each
+/// author in it (#937), so this must reach each relay as ONE request carrying
+/// that relay's authors and the feed's own `limit` -- never as one request
+/// per author each promising a full page.
+#[when(regex = r#"^I open a feed of the latest (\d+) of my follows' notes$"#)]
+async fn open_feed_limited(w: &mut NmpWorld, limit: usize) {
+    w.open_my_follows_feed_limited(limit).await;
+}
+
 #[when(regex = r#"^my feed of my follows' notes runs to a steady state$"#)]
 async fn feed_runs_to_steady_state(w: &mut NmpWorld) {
     w.open_my_follows_feed().await;

@@ -639,6 +639,41 @@ async fn one_subscription_carries_every_author(w: &mut NmpWorld, relay: String) 
     );
 }
 
+/// The bounded feed's window survived the per-relay join intact (#937).
+///
+/// Asserts on EVERY live request rather than on their sum: the failure this
+/// guards against is a filter that kept a per-author page after the authors
+/// were joined, and one such filter is enough. An UNBOUNDED request fails
+/// here too, deliberately -- dropping the `limit` during the join would
+/// substitute the relay's own undocumented default and make under-fetch
+/// unobservable, which is a worse outcome than fetching too much.
+#[then(regex = r#"^every request on relay "([^"]+)" asks for at most (\d+) notes$"#)]
+async fn every_request_asks_for_at_most(w: &mut NmpWorld, relay: String, most: u64) {
+    w.wire_settled().await;
+    let record = w.wire_record(&relay);
+    let live = record.live_subscription_ids();
+    assert!(
+        !live.is_empty(),
+        "relay {relay:?} is holding no live subscription to check"
+    );
+    for id in &live {
+        let req = record
+            .latest_req_on(id)
+            .unwrap_or_else(|| panic!("live subscription {id:?} has no REQ on {relay:?}"));
+        match req.max_limit() {
+            Some(limit) => assert!(
+                limit <= most,
+                "subscription {id:?} on {relay:?} asks for {limit} notes, more than the {most} \
+                 the feed asked for -- the window was multiplied during the per-relay join"
+            ),
+            None => panic!(
+                "subscription {id:?} on {relay:?} carries no `limit` at all; the feed asked for \
+                 at most {most}, and an unbounded filter makes under-fetch unobservable"
+            ),
+        }
+    }
+}
+
 #[then(regex = r#"^every author I watch is covered by some subscription on relay "([^"]+)"$"#)]
 async fn every_author_is_covered(w: &mut NmpWorld, relay: String) {
     w.wire_settled().await;

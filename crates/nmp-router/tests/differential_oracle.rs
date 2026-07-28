@@ -179,12 +179,38 @@ fn differential_oracle_identical_delivery() {
         );
     }
 
-    // Sanity: path B actually coalesced (fewer WireReqs than path A) --
-    // otherwise this oracle wouldn't be exercising coalescing at all.
-    let total_reqs_a: usize = router_a.plan().reqs.values().map(|v| v.len()).sum();
-    let total_reqs_b: usize = router_b.plan().reqs.values().map(|v| v.len()).sum();
-    assert!(
-        total_reqs_b < total_reqs_a,
-        "path B must coalesce vs path A's floor"
-    );
+    // Sanity: the author axis was actually JOINED -- otherwise this oracle
+    // would be comparing two identical fan-outs and proving nothing.
+    //
+    // This used to assert `total_reqs_b < total_reqs_a`, i.e. that path B's
+    // coalescer beat path A's dedup-only floor. That premise no longer holds
+    // and the change is deliberate (#937): `Router::compile` now emits ONE bag
+    // entry per (relay, skeleton) carrying every author that relay was solved
+    // for, instead of one per (author, relay) route. The join happens in
+    // ROUTING, before either registry runs, so `dedup_only` is no longer a
+    // per-author floor on this axis and both paths land on the same count.
+    //
+    // Asserting `<=` instead would have kept the test green while proving
+    // nothing at all, so assert the property that actually matters now: the
+    // plan carries strictly fewer requests than there are (author, relay)
+    // routes. Provenance is retained per route, so that count is still exact.
+    //
+    // What this oracle still proves is unchanged and is the reason it exists:
+    // `delivered_a == delivered_b` above -- joining authors, by whichever
+    // mechanism, does not alter any consumer's delivered rows.
+    for (label, router) in [("A", &router_a), ("B", &router_b)] {
+        let total_reqs: usize = router.plan().reqs.values().map(|v| v.len()).sum();
+        let total_routes: usize = router
+            .plan()
+            .reqs
+            .values()
+            .flat_map(|reqs| reqs.iter())
+            .map(|req| req.provenance.len())
+            .sum();
+        assert!(
+            total_reqs < total_routes,
+            "path {label} must join the author axis: {total_reqs} request(s) for \
+             {total_routes} (author, relay) route(s)"
+        );
+    }
 }
