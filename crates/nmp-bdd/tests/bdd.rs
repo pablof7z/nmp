@@ -16,6 +16,15 @@
 //! `@wip` scenarios are ALWAYS excluded: a genuine, reported gap (see each
 //! such scenario's own comment) never masquerades as a passing proof (the
 //! approach doc's truth-anchor rule, Appendix item 5).
+//!
+//! `@designed` scenarios are ALWAYS excluded for the same truth-anchor reason,
+//! but they mean something different and the difference is load-bearing when
+//! you read a skipped scenario months later. `@wip` is "this is built and
+//! BROKEN, and here is the report". `@designed` is "this is NOT BUILT YET, and
+//! this scenario is the agreed acceptance criterion for building it". Removing
+//! the tag is the definition of done for the work it describes; a `@designed`
+//! scenario has no step definitions yet by construction, which is precisely
+//! why it must never reach the runner.
 use std::path::PathBuf;
 
 use cucumber::World as _;
@@ -30,7 +39,8 @@ async fn main() {
         .filter_run_and_exit(features_dir, move |_feature, _rule, scenario| {
             let is_live = scenario.tags.iter().any(|t| t == "live");
             let is_wip = scenario.tags.iter().any(|t| t == "wip");
-            (!is_live || run_live) && !is_wip
+            let is_designed = scenario.tags.iter().any(|t| t == "designed");
+            (!is_live || run_live) && !is_wip && !is_designed
         })
         .await;
 }
