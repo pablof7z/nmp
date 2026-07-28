@@ -226,13 +226,35 @@ conventions:
   accepted `Explicit` route — the same absence of insert/extend/union that
   `NarrowOnly` enforces by construction today
   (`crates/nmp-grammar/src/write.rs:230` onward).
-- **Empty refused pre-acceptance.** An `Explicit` with zero relays is refused
-  *before* acceptance — no intent, no journal row, no receipt lifecycle. This
-  is stricter than master, where an empty `PrivateNarrow` is accepted and then
-  fails closed at resolution time with `WriteStatus::Failed`
-  (`crates/nmp/src/core/write.rs:2605-2613`). An empty exact-relay instruction
-  is a caller error and is knowable at the door; nothing is gained by letting
-  it park in the journal first.
+- **Empty refused pre-acceptance — owner ruling, and it deletes something
+  deliberate.** An `Explicit` with zero relays is refused *before* acceptance:
+  no intent, no journal row, no receipt lifecycle. Pablo's ruling was direct —
+  "reject it immediately".
+
+  This is stricter than master, and the difference is not an oversight being
+  corrected. Today an empty `PrivateNarrow` is accepted and then fails closed
+  at resolution with `WriteStatus::Failed`
+  (`crates/nmp/src/core/write.rs:2605-2613`), and ledger #6 built that on
+  purpose — `NarrowOnly`'s own doc says an empty set "is exactly how an
+  unroutable private recipient is expressed structurally"
+  (`crates/nmp-grammar/src/write.rs:230-238`). Emptiness was a *sentence*, not
+  a mistake: it said "I resolved this and there is nowhere safe to send it",
+  and it said so through the receipt like any other outcome.
+
+  That expression is removed here, so the meaning needs somewhere else to live,
+  and it has two homes:
+
+  - **On the resolver path**, `RouteResolution::Refused(reason)` says it, with
+    a reason string the empty set never carried
+    (`docs/internals/routing/resolvers.md`).
+  - **On the app path**, `preview_route`'s `blocked` field says it *before* the
+    app tries to publish (`docs/internals/routing/preview-and-observability.md`).
+
+  So an app that resolves a recipient to nothing does not publish an empty
+  route and wait for a receipt to fail — it learns from the preview and does
+  not publish at all. The reason the stricter rule is safe is that the
+  replacement channels are strictly more informative: an empty `Vec` cannot
+  explain itself, and both of its successors can.
 
 What `Explicit` deliberately does NOT carry: the *privacy* framing.
 `PrivateNarrow`'s wording binds a fail-closed mechanism to a privacy
