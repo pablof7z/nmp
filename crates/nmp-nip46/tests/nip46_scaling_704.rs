@@ -25,7 +25,7 @@
 //!
 //! Thread counter: `nmp_executor::nmp_threads_spawned()` is the exact same
 //! process-wide atomic that `nmp::nmp_threads_spawned()` re-exports (the latter
-//! is `nmp_engine::nmp_threads_spawned()`, which forwards to this counter); this
+//! is `nmp::nmp_threads_spawned()`, which forwards to this counter); this
 //! crate does not depend on `nmp`, so it reads the shared counter directly at
 //! its source. It counts every real NMP-owned OS thread (runtime workers +
 //! transport threads), never logical async tasks.

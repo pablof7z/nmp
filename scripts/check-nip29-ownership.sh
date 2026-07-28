@@ -92,16 +92,16 @@ fi
 # spelling survives once, only in the restart falsifier that proves an old
 # obligation is retained unreadable and never reaches the wire.
 legacy_route_occurrences=$(grep -RInF 'pinned-host-hex' \
-  crates/nmp-grammar crates/nmp-engine crates/nmp crates/nmp-ffi || true)
+  crates/nmp-grammar crates/nmp crates/nmp-ffi || true)
 legacy_route_count=$(printf '%s\n' "$legacy_route_occurrences" | grep -c . || true)
 if [[ $legacy_route_count -ne 1 ]] ||
-  [[ $legacy_route_occurrences != crates/nmp-engine/tests/durable_accepted_restart.rs:*'let legacy_route_prefix = "pinned-host-hex";'* ]]; then
+  [[ $legacy_route_occurrences != crates/nmp/tests/durable_accepted_restart.rs:*'let legacy_route_prefix = "pinned-host-hex";'* ]]; then
   printf '%s\n' "$legacy_route_occurrences"
   fail "legacy pinned-host snapshot must exist exactly once in its restart falsifier"
 fi
 
 found=$(grep -RInE 'HostAuthority|PinnedHost' \
-  crates/nmp-grammar crates/nmp-engine crates/nmp crates/nmp-ffi || true)
+  crates/nmp-grammar crates/nmp crates/nmp-ffi || true)
 if [[ -n $found ]]; then
   printf '%s\n' "$found"
   fail "dead NIP-29-only write authority remains reachable"

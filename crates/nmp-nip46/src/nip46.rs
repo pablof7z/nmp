@@ -742,7 +742,7 @@ impl Nip46Signer {
     ///
     /// `#[doc(hidden)]`: this and [`Self::from_parts`] are fully supported,
     /// exercised directly by this crate's own falsifier
-    /// (`crates/nmp-engine/tests/nip46_restart.rs`) and by `nmp-ffi`'s
+    /// (`crates/nmp-nip46/tests/nip46_restart.rs`) and by `nmp-ffi`'s
     /// restore/import doors -- hidden purely to keep their several
     /// resolved field/parameter shapes off the `nmp` facade's tracked
     /// surface, which the governed size ceiling (`scripts/regenerate-surface-snapshots.sh`,

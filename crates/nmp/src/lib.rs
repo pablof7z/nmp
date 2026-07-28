@@ -60,6 +60,82 @@ mod observation;
 mod relay_information;
 mod subscription;
 
+// #827: the M3 engine, folded in from the former `nmp-engine` crate. These are
+// the SAME modules, at the same names, moved verbatim -- the crate boundary
+// they used to sit behind added nothing but a second published surface.
+//
+// - [`mod@core`] -- `EngineCore`: the PURE synchronous reducer. No I/O, no
+//   threads, no imposed runtime. Its whole surface is
+//   `handle(EngineMsg) -> Vec<Effect>` / `tick(Timestamp) -> Vec<Effect>`.
+//   This is what keeps the whole engine headlessly testable (plan §2
+//   position 1).
+// - [`mod@runtime`] -- the async edge: `EngineThread` (one dedicated OS
+//   thread, blocking `mpsc` recv loop, D8) + `Handle` (the cheap
+//   `Clone + Send` value the app holds).
+// - [`mod@outbox`] -- the write-intent/receipt plane (durability class, typed
+//   routing, the receipt stream).
+// - [`mod@negentropy`] -- the prober FSM + `ProbedRelay` capability token +
+//   `Reconciler` (a MODULE, not a crate -- plan §1: reducer-coupled).
+// - [`mod@relay_information_service`] -- engine-owned one-shot NIP-11
+//   acquisition. Distinct from the facade-OWNED NIP-11 values in
+//   [`mod@relay_information`], which this crate converts to and re-exports;
+//   the two files kept their own contents and only the second one needed a
+//   name, since a crate cannot have two `relay_information` modules.
+//
+// They are PRIVATE, exactly like every other module of this facade, which is
+// what keeps ~242 mechanism items out of the governed surface snapshot: the
+// product surface stays the selective `pub use crate::core::…` /
+// `crate::runtime::…` list below, byte-for-byte the list that used to read
+// `nmp_engine::core::…`. Making them `pub` (even `#[doc(hidden)]`) would
+// instead dump the whole mechanism into `docs/surface/nmp-facade.txt`.
+mod core;
+#[cfg(feature = "bench-instrumentation")]
+mod ingest_attribution;
+mod negentropy;
+mod outbox;
+mod relay_information_service;
+mod runtime;
+
+/// The doc-hidden mechanism door, for IN-WORKSPACE harnesses only.
+///
+/// The reducer and the runtime used to be reachable as `nmp_engine::core` /
+/// `nmp_engine::runtime` because they lived in another crate. Three kinds of
+/// caller genuinely drive them directly and always did: this crate's own
+/// headless reducer tests and runtime integration tests (`tests/`), its
+/// benchmark examples, and the in-workspace harnesses (`nmp-bdd`, and the
+/// remote-signer provider's restart falsifiers) that spawn a real
+/// `EngineThread`. Folding the crate in must not silently delete those
+/// falsifiers, so the same access survives here -- through ONE explicitly
+/// named door rather than by making five modules public.
+///
+/// `#[doc(hidden)]`, so rustdoc omits it and everything beneath it: nothing
+/// here reaches `docs/surface/nmp-facade.txt`, and none of it is an app
+/// contract. An application uses the re-exported product surface below; if
+/// something in here is genuinely needed by an app, the answer is to project
+/// it through that surface, not to reach in.
+#[doc(hidden)]
+pub mod mechanism {
+    pub mod core {
+        pub use crate::core::*;
+    }
+    #[cfg(feature = "bench-instrumentation")]
+    pub mod ingest_attribution {
+        pub use crate::ingest_attribution::*;
+    }
+    pub mod negentropy {
+        pub use crate::negentropy::*;
+    }
+    pub mod outbox {
+        pub use crate::outbox::*;
+    }
+    pub mod relay_information_service {
+        pub use crate::relay_information_service::*;
+    }
+    pub mod runtime {
+        pub use crate::runtime::*;
+    }
+}
+
 // #851: the NIP-22 comment vocabulary and its write operation, owned here so
 // direct Rust and `nmp-ffi` cannot end up with two owners of the same values.
 // Behind the `nip22` cargo feature: an app that never composes a comment does
@@ -92,7 +168,7 @@ pub use observation::ObservationEvidence;
 #[doc(hidden)]
 #[must_use]
 pub fn nmp_threads_spawned() -> u64 {
-    nmp_engine::nmp_threads_spawned()
+    nmp_executor::nmp_threads_spawned()
 }
 
 /// The number of real NMP-owned OS threads currently ALIVE (#704 review
@@ -104,7 +180,7 @@ pub fn nmp_threads_spawned() -> u64 {
 #[doc(hidden)]
 #[must_use]
 pub fn nmp_threads_live() -> u64 {
-    nmp_engine::nmp_threads_live()
+    nmp_executor::nmp_threads_live()
 }
 // The pull-based async observation surface (#680) is the FFI/SDK delivery
 // mechanism — its app contract is documented in `nmp-ffi`'s own surface
@@ -114,7 +190,7 @@ pub fn nmp_threads_live() -> u64 {
 // are doc-hidden so they do not double the facade snapshot with generic
 // auto-trait expansions.
 #[doc(hidden)]
-pub use nmp_engine::runtime::ConcurrentNext;
+pub use crate::runtime::ConcurrentNext;
 pub use relay_information::{
     RelayInformationCachePolicy, RelayInformationDocument, RelayInformationError,
     RelayInformationFreshness, RelayInformationLimitations, RelayInformationSnapshot,
@@ -154,9 +230,9 @@ pub use nmp_grammar::{decode_nostr_entity, NostrEntity, NostrEntityError};
 // not be able to place arbitrary public relays into a route that looks
 // structurally narrow. A validated, opaque private-route mint belongs in a
 // protocol module, not the default facade surface.
-pub use nmp_engine::core::ReceiptId;
-pub use nmp_engine::outbox::WriteStatus;
-pub use nmp_engine::runtime::{
+pub use crate::core::ReceiptId;
+pub use crate::outbox::WriteStatus;
+pub use crate::runtime::{
     ReceiptReattachment, ReceiptStream, SignEventCancel, SignEventError, SignEventOperation,
     SignerRegistration,
 };
@@ -167,7 +243,7 @@ pub use nmp_engine::runtime::{
 // documented product surface keeps its previous shape: `publish` returns a
 // receipt stream you drain, not a new documented type family.
 #[doc(hidden)]
-pub use nmp_engine::runtime::{
+pub use crate::runtime::{
     AsyncFifoReceiver, FifoNextError, FifoReceiver, FifoRecvError, FifoRecvTimeoutError,
     FifoTryRecvError, ReceiptReplayCursor, FACT_CHANNEL_CAPACITY,
 };
@@ -175,7 +251,7 @@ pub use nmp_engine::runtime::{
 // follow-action worker) to feed a receipt/status stream — not app product
 // surface, so doc-hidden and kept out of the facade snapshot.
 #[doc(hidden)]
-pub use nmp_engine::runtime::{fifo_channel, FifoSender};
+pub use crate::runtime::{fifo_channel, FifoSender};
 pub use nmp_grammar::{
     CorrelationToken, CorrelationTokenError, Durability, WriteIntent, WritePayload, WriteRouting,
 };
@@ -198,7 +274,7 @@ pub use nmp_grammar::{
 // `FilterCoverageEntry.coverage` (an `Option<CoverageInterval>`) is the
 // engine-global, per-(relay, filter) diagnostics watermark -- unscoped by
 // design, and never reused as a query-level verdict either.
-pub use nmp_engine::core::{
+pub use crate::core::{
     AcquisitionEvidence, AuthPhase, Row, RowDelta, ShortfallFact, SourceEvidence, SourceStatus,
     WindowLoad,
 };

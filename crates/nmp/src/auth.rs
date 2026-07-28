@@ -28,11 +28,11 @@ use nostr::{PublicKey, RelayUrl};
 /// session, generation, epoch, and token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthPolicyRequest {
-    inner: nmp_engine::runtime::AuthPolicyRequest,
+    inner: crate::runtime::AuthPolicyRequest,
 }
 
 impl AuthPolicyRequest {
-    pub(crate) fn from_engine(inner: nmp_engine::runtime::AuthPolicyRequest) -> Self {
+    pub(crate) fn from_engine(inner: crate::runtime::AuthPolicyRequest) -> Self {
         Self { inner }
     }
 
@@ -103,29 +103,29 @@ impl std::error::Error for AuthPolicyError {}
 pub type AuthPolicyResult = Result<AuthPolicyDecision, AuthPolicyError>;
 
 type EnginePolicyResult =
-    Result<nmp_engine::runtime::AuthPolicyDecision, nmp_engine::runtime::AuthPolicyError>;
+    Result<crate::runtime::AuthPolicyDecision, crate::runtime::AuthPolicyError>;
 
 fn result_to_engine(result: AuthPolicyResult) -> EnginePolicyResult {
     match result {
-        Ok(AuthPolicyDecision::Allow) => Ok(nmp_engine::runtime::AuthPolicyDecision::Allow),
+        Ok(AuthPolicyDecision::Allow) => Ok(crate::runtime::AuthPolicyDecision::Allow),
         Ok(AuthPolicyDecision::Deny { reason }) => {
-            Ok(nmp_engine::runtime::AuthPolicyDecision::Deny { reason })
+            Ok(crate::runtime::AuthPolicyDecision::Deny { reason })
         }
-        Err(AuthPolicyError::Unavailable) => Err(nmp_engine::runtime::AuthPolicyError::Unavailable),
+        Err(AuthPolicyError::Unavailable) => Err(crate::runtime::AuthPolicyError::Unavailable),
         Err(AuthPolicyError::Technical { reason }) => {
-            Err(nmp_engine::runtime::AuthPolicyError::Technical { reason })
+            Err(crate::runtime::AuthPolicyError::Technical { reason })
         }
     }
 }
 
 fn result_from_engine(result: EnginePolicyResult) -> AuthPolicyResult {
     match result {
-        Ok(nmp_engine::runtime::AuthPolicyDecision::Allow) => Ok(AuthPolicyDecision::Allow),
-        Ok(nmp_engine::runtime::AuthPolicyDecision::Deny { reason }) => {
+        Ok(crate::runtime::AuthPolicyDecision::Allow) => Ok(AuthPolicyDecision::Allow),
+        Ok(crate::runtime::AuthPolicyDecision::Deny { reason }) => {
             Ok(AuthPolicyDecision::Deny { reason })
         }
-        Err(nmp_engine::runtime::AuthPolicyError::Unavailable) => Err(AuthPolicyError::Unavailable),
-        Err(nmp_engine::runtime::AuthPolicyError::Technical { reason }) => {
+        Err(crate::runtime::AuthPolicyError::Unavailable) => Err(AuthPolicyError::Unavailable),
+        Err(crate::runtime::AuthPolicyError::Technical { reason }) => {
             Err(AuthPolicyError::Technical { reason })
         }
     }
@@ -137,7 +137,7 @@ fn result_from_engine(result: EnginePolicyResult) -> AuthPolicyResult {
 /// back instead of silently dropping it.
 #[derive(Clone)]
 pub struct AuthPolicyPendingSender {
-    inner: nmp_engine::runtime::AuthPolicyPendingSender,
+    inner: crate::runtime::AuthPolicyPendingSender,
 }
 
 impl AuthPolicyPendingSender {
@@ -163,12 +163,12 @@ pub enum AuthPolicyResolveError {
 }
 
 impl AuthPolicyResolveError {
-    fn from_engine(error: nmp_engine::runtime::AuthPolicyResolveError) -> Self {
+    fn from_engine(error: crate::runtime::AuthPolicyResolveError) -> Self {
         match error {
-            nmp_engine::runtime::AuthPolicyResolveError::AlreadyResolved(result) => {
+            crate::runtime::AuthPolicyResolveError::AlreadyResolved(result) => {
                 Self::AlreadyResolved(result_from_engine(result))
             }
-            nmp_engine::runtime::AuthPolicyResolveError::ReceiverDropped(result) => {
+            crate::runtime::AuthPolicyResolveError::ReceiverDropped(result) => {
                 Self::ReceiverDropped(result_from_engine(result))
             }
         }
@@ -180,11 +180,11 @@ impl AuthPolicyResolveError {
 /// operation: the pending channel, the cancel handshake, and their
 /// linearization live in the engine and are inherited by delegation.
 pub struct AuthPolicyOp {
-    inner: nmp_engine::runtime::AuthPolicyOp,
+    inner: crate::runtime::AuthPolicyOp,
 }
 
 impl AuthPolicyOp {
-    pub(crate) fn into_engine(self) -> nmp_engine::runtime::AuthPolicyOp {
+    pub(crate) fn into_engine(self) -> crate::runtime::AuthPolicyOp {
         self.inner
     }
 
@@ -192,7 +192,7 @@ impl AuthPolicyOp {
     #[must_use]
     pub fn ready(result: AuthPolicyResult) -> Self {
         Self {
-            inner: nmp_engine::runtime::AuthPolicyOp::ready(result_to_engine(result)),
+            inner: crate::runtime::AuthPolicyOp::ready(result_to_engine(result)),
         }
     }
 
@@ -200,7 +200,7 @@ impl AuthPolicyOp {
     #[must_use]
     pub fn allow() -> Self {
         Self {
-            inner: nmp_engine::runtime::AuthPolicyOp::allow(),
+            inner: crate::runtime::AuthPolicyOp::allow(),
         }
     }
 
@@ -208,7 +208,7 @@ impl AuthPolicyOp {
     #[must_use]
     pub fn deny(reason: impl Into<String>) -> Self {
         Self {
-            inner: nmp_engine::runtime::AuthPolicyOp::deny(reason),
+            inner: crate::runtime::AuthPolicyOp::deny(reason),
         }
     }
 
@@ -217,7 +217,7 @@ impl AuthPolicyOp {
     /// [`AuthPolicyResolveError::ReceiverDropped`].
     #[must_use]
     pub fn pending_channel() -> (AuthPolicyPendingSender, Self) {
-        let (sender, op) = nmp_engine::runtime::AuthPolicyOp::pending_channel();
+        let (sender, op) = crate::runtime::AuthPolicyOp::pending_channel();
         (
             AuthPolicyPendingSender { inner: sender },
             Self { inner: op },
@@ -233,7 +233,7 @@ impl AuthPolicyOp {
     pub fn pending_channel_with_cancel(
         cancel: impl FnOnce() + Send + 'static,
     ) -> (AuthPolicyPendingSender, Self) {
-        let (sender, op) = nmp_engine::runtime::AuthPolicyOp::pending_channel_with_cancel(cancel);
+        let (sender, op) = crate::runtime::AuthPolicyOp::pending_channel_with_cancel(cancel);
         (
             AuthPolicyPendingSender { inner: sender },
             Self { inner: op },
@@ -264,11 +264,8 @@ impl<P> EngineAuthPolicyAdapter<P> {
     }
 }
 
-impl<P: AuthPolicy> nmp_engine::runtime::AuthPolicy for EngineAuthPolicyAdapter<P> {
-    fn evaluate(
-        &self,
-        request: nmp_engine::runtime::AuthPolicyRequest,
-    ) -> nmp_engine::runtime::AuthPolicyOp {
+impl<P: AuthPolicy> crate::runtime::AuthPolicy for EngineAuthPolicyAdapter<P> {
+    fn evaluate(&self, request: crate::runtime::AuthPolicyRequest) -> crate::runtime::AuthPolicyOp {
         self.policy
             .evaluate(AuthPolicyRequest::from_engine(request))
             .into_engine()
@@ -353,11 +350,11 @@ mod tests {
         for (op, expected) in [
             (
                 AuthPolicyOp::allow(),
-                Ok(nmp_engine::runtime::AuthPolicyDecision::Allow),
+                Ok(crate::runtime::AuthPolicyDecision::Allow),
             ),
             (
                 AuthPolicyOp::deny("nope"),
-                Ok(nmp_engine::runtime::AuthPolicyDecision::Deny {
+                Ok(crate::runtime::AuthPolicyDecision::Deny {
                     reason: "nope".to_string(),
                 }),
             ),
@@ -365,14 +362,14 @@ mod tests {
                 AuthPolicyOp::ready(Err(AuthPolicyError::Technical {
                     reason: "hsm offline".to_string(),
                 })),
-                Err(nmp_engine::runtime::AuthPolicyError::Technical {
+                Err(crate::runtime::AuthPolicyError::Technical {
                     reason: "hsm offline".to_string(),
                 }),
             ),
         ] {
             match op.into_engine() {
-                nmp_engine::runtime::AuthPolicyOp::Ready(result) => assert_eq!(result, expected),
-                nmp_engine::runtime::AuthPolicyOp::Pending(_) => {
+                crate::runtime::AuthPolicyOp::Ready(result) => assert_eq!(result, expected),
+                crate::runtime::AuthPolicyOp::Pending(_) => {
                     panic!("ready constructor must produce a ready engine op")
                 }
             }

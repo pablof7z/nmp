@@ -1,7 +1,7 @@
 //! BUD-02/04/12 blob client (#545, #551): async, self-verifying `PUT
 //! /upload`, `PUT /mirror`, `DELETE /<sha256>`, and `GET /list/<pubkey>`
 //! with the SAME HTTP admission discipline as the engine's NIP-11
-//! fetcher (`nmp-engine/src/relay_information.rs`, issue #519): literal
+//! fetcher (`crates/nmp/src/relay_information_service.rs`, issue #519): literal
 //! loopback/private/link-local/onion hosts are refused BEFORE any socket
 //! I/O unless operator opted-in, complete DNS answer sets are admitted or
 //! refused whole by the pure `nmp-network-policy` owner (#885),
@@ -695,7 +695,7 @@ impl BlossomClient {
 
     /// Test hook mirroring the engine precedent
     /// (`HttpFetcher::with_resolver_config`,
-    /// `nmp-engine/src/relay_information.rs`): point hickory at an
+    /// `crates/nmp/src/relay_information_service.rs`): point hickory at an
     /// injected nameserver (the unit tests below run a raw loopback UDP
     /// DNS server) so the post-DNS admission filter can be falsified
     /// without touching real DNS. IPv4-only lookup strategy, same as the
@@ -1379,7 +1379,7 @@ mod tests {
     }
 
     /// Engine-precedent DNS harness (issue #519,
-    /// `nmp-engine/src/relay_information.rs` test module): a raw loopback
+    /// `crates/nmp/src/relay_information_service.rs` test module): a raw loopback
     /// UDP server answering ANY A query with `127.0.0.1` (60-second TTL),
     /// injected through [`BlossomClient::with_resolver_config`]. That
     /// DNS-injection harness was the engine's confirmed exploit surface,

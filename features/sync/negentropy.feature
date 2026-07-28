@@ -5,7 +5,7 @@ Feature: Fancy sync only where it is proven to work
     # item 5): "confirmed to support reconciliation" vs. "never probed" is
     # engine-side state (a `ProbedRelay` capability token earned by a
     # completed NEG-OPEN/NEG-MSG round-trip -- see
-    # `nmp-engine/src/negentropy/mod.rs`), not a relay-side toggle
+    # `crates/nmp/src/negentropy/mod.rs`), not a relay-side toggle
     # `ScriptedRelay` can stage as a `Given`: the underlying `LocalRelay`
     # always answers NEG-OPEN correctly regardless of any config here.
     # Proving this scenario for real means driving one full probe

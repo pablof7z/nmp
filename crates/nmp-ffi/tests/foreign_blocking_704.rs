@@ -7,7 +7,7 @@
 //! #704 eliminated the internal task/thread admission-capacity concept and made
 //! every logical operation an async task on ONE shared, fixed-width tokio
 //! runtime — `ADAPTER_RUNTIME_WORKERS == 2` workers (see
-//! `nmp-engine/src/runtime/mod.rs`). The review then asks a sharp question:
+//! `crates/nmp/src/runtime/mod.rs`). The review then asks a sharp question:
 //! when the old dedicated per-operation threads went away, did any place where a
 //! FOREIGN callback can run arbitrary, genuinely-blocking code get moved *onto*
 //! one of those two workers? If it did, a blocking foreign callback would hold a

@@ -42,7 +42,7 @@
 //! wrappers dispatch them off the main thread (Swift: continuation +
 //! global queue; Kotlin: `Dispatchers.IO`). Each call builds a fresh
 //! current-thread tokio runtime AND a fresh `BlossomClient` inside it,
-//! mirroring `nmp-engine/src/relay_information.rs`'s `http_runtime()`
+//! mirroring `crates/nmp/src/relay_information_service.rs`'s `http_runtime()`
 //! discipline: the reqwest/hickory stack is born and dropped inside the
 //! flight's own runtime, so hickory cannot retain DNS state bound to a
 //! runtime that no longer exists on the next call.
@@ -1239,7 +1239,7 @@ fn list_error_to_ffi(error: ListError) -> FfiBlossomListError {
 }
 
 /// One current-thread tokio runtime per client call
-/// (`nmp-engine/src/relay_information.rs`'s `http_runtime()` discipline,
+/// (`crates/nmp/src/relay_information_service.rs`'s `http_runtime()` discipline,
 /// mirrored deliberately): the reqwest/hickory stack is constructed AND
 /// dropped inside this flight's own runtime, so no runtime-bound DNS or
 /// connection state can leak into the next call.

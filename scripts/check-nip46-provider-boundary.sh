@@ -57,7 +57,6 @@ fi
 # files and append-only history are outside this corpus by construction.
 core_roots=(
   crates/nmp-signer/src
-  crates/nmp-engine/src
   crates/nmp/src
   crates/nmp-ffi/src
   Packages/NMP/Sources/NMP

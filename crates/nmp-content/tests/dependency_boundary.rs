@@ -30,7 +30,6 @@ fn normal_dependency_tree_contains_no_engine_or_mechanism_crate() {
     let tree = String::from_utf8(output.stdout).expect("cargo tree output is UTF-8");
     for forbidden in [
         "nmp",
-        "nmp-engine",
         "nmp-store",
         "nmp-router",
         "nmp-resolver",

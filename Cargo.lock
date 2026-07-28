@@ -2008,19 +2008,37 @@ checksum = "f0efe882e02d206d8d279c20eb40e03baf7cb5136a1476dc084a324fbc3ec42d"
 name = "nmp"
 version = "0.1.0"
 dependencies = [
- "nmp-engine",
+ "blake3",
+ "crossbeam-channel",
+ "futures-channel",
+ "hex",
+ "hickory-resolver",
+ "httpdate",
+ "libc",
+ "negentropy",
+ "nmp-executor",
  "nmp-grammar",
  "nmp-local-signer",
+ "nmp-network-policy",
  "nmp-nip22",
+ "nmp-nip51",
  "nmp-resolver",
  "nmp-router",
  "nmp-signer",
  "nmp-store",
+ "nmp-test-support",
  "nmp-transport",
  "nostr 0.44.4",
+ "nostr-relay-builder",
+ "redb",
+ "reqwest",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
+ "tracing-subscriber",
  "tungstenite 0.29.0",
+ "url",
 ]
 
 [[package]]
@@ -2035,7 +2053,7 @@ name = "nmp-bdd"
 version = "0.1.0"
 dependencies = [
  "cucumber",
- "nmp-engine",
+ "nmp",
  "nmp-grammar",
  "nmp-local-signer",
  "nmp-resolver",
@@ -2085,42 +2103,6 @@ version = "0.1.0"
 dependencies = [
  "nmp",
  "nostr 0.44.4",
-]
-
-[[package]]
-name = "nmp-engine"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "crossbeam-channel",
- "futures-channel",
- "hex",
- "hickory-resolver",
- "httpdate",
- "libc",
- "negentropy",
- "nmp-executor",
- "nmp-grammar",
- "nmp-local-signer",
- "nmp-network-policy",
- "nmp-nip51",
- "nmp-resolver",
- "nmp-router",
- "nmp-signer",
- "nmp-store",
- "nmp-test-support",
- "nmp-transport",
- "nostr 0.44.4",
- "nostr-relay-builder",
- "redb",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing-subscriber",
- "tungstenite 0.29.0",
- "url",
 ]
 
 [[package]]
@@ -2220,7 +2202,7 @@ dependencies = [
 name = "nmp-nip46"
 version = "0.1.0"
 dependencies = [
- "nmp-engine",
+ "nmp",
  "nmp-executor",
  "nmp-grammar",
  "nmp-network-policy",

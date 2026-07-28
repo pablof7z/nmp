@@ -16,10 +16,14 @@ pub enum RelayInformationCachePolicy {
 }
 
 impl RelayInformationCachePolicy {
-    pub(crate) fn into_engine(self) -> nmp_engine::relay_information::RelayInformationCachePolicy {
+    pub(crate) fn into_engine(
+        self,
+    ) -> crate::relay_information_service::RelayInformationCachePolicy {
         match self {
-            Self::UseCache => nmp_engine::relay_information::RelayInformationCachePolicy::UseCache,
-            Self::Refresh => nmp_engine::relay_information::RelayInformationCachePolicy::Refresh,
+            Self::UseCache => {
+                crate::relay_information_service::RelayInformationCachePolicy::UseCache
+            }
+            Self::Refresh => crate::relay_information_service::RelayInformationCachePolicy::Refresh,
         }
     }
 }
@@ -32,10 +36,10 @@ pub enum RelayInformationFreshness {
 }
 
 impl RelayInformationFreshness {
-    fn from_engine(value: nmp_engine::relay_information::RelayInformationFreshness) -> Self {
+    fn from_engine(value: crate::relay_information_service::RelayInformationFreshness) -> Self {
         match value {
-            nmp_engine::relay_information::RelayInformationFreshness::Fresh => Self::Fresh,
-            nmp_engine::relay_information::RelayInformationFreshness::Stale => Self::Stale,
+            crate::relay_information_service::RelayInformationFreshness::Fresh => Self::Fresh,
+            crate::relay_information_service::RelayInformationFreshness::Stale => Self::Stale,
         }
     }
 }
@@ -51,23 +55,25 @@ pub enum RelayInformationError {
 }
 
 impl RelayInformationError {
-    pub(crate) fn from_engine(value: nmp_engine::relay_information::RelayInformationError) -> Self {
+    pub(crate) fn from_engine(
+        value: crate::relay_information_service::RelayInformationError,
+    ) -> Self {
         // #704: `WaiterSaturated`/`ThreadUnavailable` were deleted — with the
         // async runtime there is no waiter-capacity or thread-admission refusal.
         match value {
-            nmp_engine::relay_information::RelayInformationError::ServiceClosed => {
+            crate::relay_information_service::RelayInformationError::ServiceClosed => {
                 Self::ServiceClosed
             }
-            nmp_engine::relay_information::RelayInformationError::CredentialedRelayUrl => {
+            crate::relay_information_service::RelayInformationError::CredentialedRelayUrl => {
                 Self::CredentialedRelayUrl
             }
-            nmp_engine::relay_information::RelayInformationError::Http { reason } => {
+            crate::relay_information_service::RelayInformationError::Http { reason } => {
                 Self::Http { reason }
             }
-            nmp_engine::relay_information::RelayInformationError::ResponseTooLarge {
+            crate::relay_information_service::RelayInformationError::ResponseTooLarge {
                 limit_bytes,
             } => Self::ResponseTooLarge { limit_bytes },
-            nmp_engine::relay_information::RelayInformationError::InvalidDocument { reason } => {
+            crate::relay_information_service::RelayInformationError::InvalidDocument { reason } => {
                 Self::InvalidDocument { reason }
             }
         }
@@ -111,7 +117,7 @@ pub struct RelayInformationDocument {
 }
 
 impl RelayInformationDocument {
-    fn from_engine(value: nmp_engine::relay_information::RelayInformationDocument) -> Self {
+    fn from_engine(value: crate::relay_information_service::RelayInformationDocument) -> Self {
         Self {
             name: value.name,
             description: value.description,
@@ -148,7 +154,7 @@ pub struct RelayInformationLimitations {
 }
 
 impl RelayInformationLimitations {
-    fn from_engine(value: nmp_engine::relay_information::RelayInformationLimitations) -> Self {
+    fn from_engine(value: crate::relay_information_service::RelayInformationLimitations) -> Self {
         Self {
             max_message_length: value.max_message_length,
             max_subscriptions: value.max_subscriptions,
@@ -196,7 +202,7 @@ impl RelayInformationSnapshot {
 
 impl RelayInformationSnapshot {
     pub(crate) fn from_engine(
-        value: nmp_engine::relay_information::RelayInformationSnapshot,
+        value: crate::relay_information_service::RelayInformationSnapshot,
     ) -> Self {
         Self {
             // The mechanism layer shares this immutable payload through its

@@ -4,7 +4,7 @@
 //! This set is deliberately SMALL: construction-time failures, identity
 //! parsing, and the closed-lifecycle state. The one thing it explicitly
 //! does NOT contain is a "bad signed event" variant -- that guarantee lives
-//! at `nmp-engine::core::EngineCore::on_publish`'s acceptance boundary now
+//! at `crate::core::EngineCore::on_publish`'s acceptance boundary now
 //! (Unit A0, #56, per the Fable checkpoint's Q2 ruling), so a tampered
 //! `WritePayload::Signed` surfaces on the [`WriteStatus`](crate::WriteStatus)
 //! receipt stream `publish` returns, not as a sync `Err` here. Duplicating a
@@ -126,12 +126,12 @@ impl EngineError {
     /// Map an engine-thread failure raised during engine CONSTRUCTION
     /// (`Engine::new`) to its engine-start error. A genuine OS thread refusal
     /// or an unrepresentable relay budget both mean no engine was built (#704).
-    pub(crate) fn from_start_error(error: nmp_engine::runtime::EngineThreadError) -> Self {
+    pub(crate) fn from_start_error(error: crate::runtime::EngineThreadError) -> Self {
         match error {
-            nmp_engine::runtime::EngineThreadError::ThreadUnavailable { component, reason } => {
+            crate::runtime::EngineThreadError::ThreadUnavailable { component, reason } => {
                 Self::EngineStartFailed { component, reason }
             }
-            nmp_engine::runtime::EngineThreadError::RelayBudgetOverflow { relay_limit } => {
+            crate::runtime::EngineThreadError::RelayBudgetOverflow { relay_limit } => {
                 Self::EngineStartFailed {
                     component: "relay worker budget".to_string(),
                     reason: format!(
@@ -142,7 +142,7 @@ impl EngineError {
             // The runtime's finite shutdown drain (#8 U4) refuses new work
             // with a typed engine-level error; at this facade it is the same
             // closed-engine fact `EngineClosed` already names.
-            nmp_engine::runtime::EngineThreadError::EngineShuttingDown => Self::EngineClosed,
+            crate::runtime::EngineThreadError::EngineShuttingDown => Self::EngineClosed,
         }
     }
 
@@ -153,57 +153,55 @@ impl EngineError {
     /// this mapping. `RelayBudgetOverflow` is construction-only and
     /// `EngineShuttingDown` is the closed-engine fact; both remain exhaustive
     /// defensive arms rather than alternate documented meanings.
-    pub(crate) fn from_observe_error(error: nmp_engine::runtime::EngineThreadError) -> Self {
+    pub(crate) fn from_observe_error(error: crate::runtime::EngineThreadError) -> Self {
         match error {
-            nmp_engine::runtime::EngineThreadError::ThreadUnavailable { component, reason } => {
+            crate::runtime::EngineThreadError::ThreadUnavailable { component, reason } => {
                 Self::ObservationUnavailable {
                     reason: format!("{component}: {reason}"),
                 }
             }
-            nmp_engine::runtime::EngineThreadError::RelayBudgetOverflow { relay_limit } => {
+            crate::runtime::EngineThreadError::RelayBudgetOverflow { relay_limit } => {
                 Self::ObservationUnavailable {
                     reason: format!(
                         "configured max_relays {relay_limit} cannot represent its finite retirement envelope"
                     ),
                 }
             }
-            nmp_engine::runtime::EngineThreadError::EngineShuttingDown => Self::EngineClosed,
+            crate::runtime::EngineThreadError::EngineShuttingDown => Self::EngineClosed,
         }
     }
 
-    pub(crate) fn from_publish_error(err: nmp_engine::core::PublishError) -> Self {
+    pub(crate) fn from_publish_error(err: crate::core::PublishError) -> Self {
         match err {
-            nmp_engine::core::PublishError::ReceiptCorrelationIdExhausted => {
+            crate::core::PublishError::ReceiptCorrelationIdExhausted => {
                 Self::ReceiptCorrelationIdExhausted
             }
-            nmp_engine::core::PublishError::EngineShuttingDown => Self::EngineClosed,
+            crate::core::PublishError::EngineShuttingDown => Self::EngineClosed,
         }
     }
 
-    pub(crate) fn from_add_signer_error(error: nmp_engine::runtime::AddSignerError) -> Self {
+    pub(crate) fn from_add_signer_error(error: crate::runtime::AddSignerError) -> Self {
         match error {
-            nmp_engine::runtime::AddSignerError::MissingPublicKey => Self::SignerMissingPublicKey,
-            nmp_engine::runtime::AddSignerError::CapabilityInstanceExhausted => {
+            crate::runtime::AddSignerError::MissingPublicKey => Self::SignerMissingPublicKey,
+            crate::runtime::AddSignerError::CapabilityInstanceExhausted => {
                 Self::AuthCapabilityInstanceExhausted
             }
-            nmp_engine::runtime::AddSignerError::RegistryFull { limit } => {
+            crate::runtime::AddSignerError::RegistryFull { limit } => {
                 Self::AuthCapabilityRegistryFull { limit }
             }
-            nmp_engine::runtime::AddSignerError::EngineShuttingDown => Self::EngineClosed,
+            crate::runtime::AddSignerError::EngineShuttingDown => Self::EngineClosed,
         }
     }
 
-    pub(crate) fn from_add_auth_policy_error(
-        error: nmp_engine::runtime::AddAuthPolicyError,
-    ) -> Self {
+    pub(crate) fn from_add_auth_policy_error(error: crate::runtime::AddAuthPolicyError) -> Self {
         match error {
-            nmp_engine::runtime::AddAuthPolicyError::CapabilityInstanceExhausted => {
+            crate::runtime::AddAuthPolicyError::CapabilityInstanceExhausted => {
                 Self::AuthCapabilityInstanceExhausted
             }
-            nmp_engine::runtime::AddAuthPolicyError::RegistryFull { limit } => {
+            crate::runtime::AddAuthPolicyError::RegistryFull { limit } => {
                 Self::AuthCapabilityRegistryFull { limit }
             }
-            nmp_engine::runtime::AddAuthPolicyError::EngineShuttingDown => Self::EngineClosed,
+            crate::runtime::AddAuthPolicyError::EngineShuttingDown => Self::EngineClosed,
         }
     }
 }
@@ -215,7 +213,7 @@ mod tests {
     #[test]
     fn receipt_correlation_exhaustion_maps_and_displays_truthfully() {
         let error = EngineError::from_publish_error(
-            nmp_engine::core::PublishError::ReceiptCorrelationIdExhausted,
+            crate::core::PublishError::ReceiptCorrelationIdExhausted,
         );
         assert_eq!(error, EngineError::ReceiptCorrelationIdExhausted);
         assert_eq!(

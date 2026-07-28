@@ -17,7 +17,10 @@ members = [
     # Optional NIP-46 signer provider (#877). Core signer/runtime crates depend
     # only on `nmp-signer`; bunker/session/transport machinery lives here.
     "crates/nmp-nip46",
-    "crates/nmp-engine",
+    # #827: the M3 engine (reducer `core`, async `runtime`, `outbox` write
+    # plane, `negentropy` reconciler) is no longer a separate crate -- it is
+    # folded into `crates/nmp` as private/doc-hidden modules behind the one
+    # canonical product facade.
     "crates/nmp",
     "crates/nmp-consumer-check",
     "crates/nmp-demo",
@@ -88,7 +91,6 @@ nmp-executor = { path = "crates/nmp-executor" }
 nmp-signer = { path = "crates/nmp-signer" }
 nmp-local-signer = { path = "crates/nmp-local-signer" }
 nmp-nip46 = { path = "crates/nmp-nip46" }
-nmp-engine = { path = "crates/nmp-engine" }
 nmp = { path = "crates/nmp" }
 nmp-ffi = { path = "crates/nmp-ffi" }
 nmp-nip46-ffi = { path = "crates/nmp-nip46-ffi" }

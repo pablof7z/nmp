@@ -1,0 +1,2025 @@
+#[cfg(feature = "bench-instrumentation")]
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::collections::{BTreeSet, HashSet};
+use std::error::Error;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::net::{Ipv4Addr, TcpListener};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use nmp::mechanism::core::{HistoryQuery, RelayAdmissionPolicy, RowDelta};
+use nmp::mechanism::runtime::{EngineThread, HistoryReceiver, RowsMsg, RowsReceiver};
+use nmp_grammar::{AccessContext, Binding, Demand, Filter, SourceAuthority};
+use nmp_resolver::LiveQuery;
+use nmp_router::FixtureDirectory;
+use nmp_store::{EventStore, MemoryStore, RedbStore};
+use nmp_transport::PoolConfig;
+use nostr::{EventBuilder, EventId, JsonUtil, Keys, Kind, RelayUrl, Tag, Timestamp};
+use serde::{Deserialize, Serialize};
+use tungstenite::{accept, Message};
+
+pub type ProbeError = Box<dyn Error + Send + Sync>;
+
+const RESULT_SCHEMA: &str = "nmp-relay-ingest-probe-v21";
+const CORPUS_SCHEMA: &str = "nmp-relay-ingest-corpus-v1";
+const BASE_CREATED_AT: u64 = 1_700_000_000;
+// Duplicate replay can advance diagnostics without producing a row delta.
+// Keep completion-clock observation comfortably below #663's 200 ms gate;
+// the former 100 ms poll quantized a true fast path into one or two whole
+// polling intervals and could decide the gate on observer latency alone.
+const OBSERVATION_POLL: Duration = Duration::from_millis(1);
+// Attribution counters and the benchmark-only duplicate ceiling cache are
+// process-global by design. Serialize in-process probe invocations so test
+// binaries cannot reset or reconfigure another run midway through evidence.
+static PROBE_RUN_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(feature = "bench-instrumentation")]
+struct CountingAllocator;
+
+#[cfg(feature = "bench-instrumentation")]
+static ALLOCATION_OPS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "bench-instrumentation")]
+static ALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(feature = "bench-instrumentation")]
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        ALLOCATION_OPS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        System.alloc(layout)
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        ALLOCATION_OPS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        System.alloc_zeroed(layout)
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        System.dealloc(ptr, layout);
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        ALLOCATION_OPS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATED_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
+        System.realloc(ptr, layout, new_size)
+    }
+}
+
+#[global_allocator]
+#[cfg(feature = "bench-instrumentation")]
+static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator;
+
+#[cfg(feature = "bench-instrumentation")]
+fn allocator_snapshot() -> (u64, u64) {
+    (
+        ALLOCATION_OPS.load(Ordering::Relaxed),
+        ALLOCATED_BYTES.load(Ordering::Relaxed),
+    )
+}
+
+#[cfg(not(feature = "bench-instrumentation"))]
+fn allocator_snapshot() -> (u64, u64) {
+    (0, 0)
+}
+
+#[derive(Debug, Clone)]
+pub struct ProbeConfig {
+    pub events: usize,
+    pub relays: usize,
+    pub passes: usize,
+    pub payload_bytes: usize,
+    pub shape_corpus: Option<PathBuf>,
+    pub corpus_output: Option<PathBuf>,
+    pub memory_store: bool,
+    pub redb_nondurable_diagnostic: bool,
+    pub queue_capacity: usize,
+    pub verified_cache_capacity: usize,
+    pub committed_observation_cache_capacity: usize,
+    pub diagnostic_duplicate_ceiling_capacity: usize,
+    pub diagnostic_duplicate_ceiling_event_payload: bool,
+    pub diagnostic_preparsed_ceiling: bool,
+    pub diagnostic_skip_event_id_validation: bool,
+    pub diagnostic_skip_signature_verification: bool,
+    pub verifier_workers: usize,
+    pub verify_batch_size: usize,
+    pub engine_batch_size: usize,
+    pub engine_batch_bytes: usize,
+    pub engine_batch_wait: Duration,
+    pub visible_limit: Option<usize>,
+    pub trim_allocator_during_ingest: bool,
+    pub frame_delay: Duration,
+    pub expect_rejection: bool,
+    pub timeout: Duration,
+    pub store_path: Option<PathBuf>,
+    pub completion_window_output: Option<PathBuf>,
+}
+
+impl Default for ProbeConfig {
+    fn default() -> Self {
+        Self {
+            events: 10_000,
+            relays: 1,
+            passes: 1,
+            payload_bytes: 128,
+            shape_corpus: None,
+            corpus_output: None,
+            memory_store: false,
+            redb_nondurable_diagnostic: false,
+            queue_capacity: 1_024,
+            verified_cache_capacity: 131_072,
+            committed_observation_cache_capacity: 131_072,
+            diagnostic_duplicate_ceiling_capacity: 0,
+            diagnostic_duplicate_ceiling_event_payload: false,
+            diagnostic_preparsed_ceiling: false,
+            diagnostic_skip_event_id_validation: false,
+            diagnostic_skip_signature_verification: false,
+            verifier_workers: 0,
+            verify_batch_size: 128,
+            engine_batch_size: 128,
+            engine_batch_bytes: 8 * 1024 * 1024,
+            engine_batch_wait: Duration::from_micros(200),
+            visible_limit: Some(200),
+            trim_allocator_during_ingest: false,
+            frame_delay: Duration::ZERO,
+            expect_rejection: false,
+            timeout: Duration::from_secs(120),
+            store_path: None,
+            completion_window_output: None,
+        }
+    }
+}
+
+impl ProbeConfig {
+    fn validate(&self) -> Result<(), ProbeError> {
+        if self.events == 0 {
+            return Err("events must be nonzero".into());
+        }
+        if self.relays == 0 {
+            return Err("relays must be nonzero".into());
+        }
+        if self.passes == 0 {
+            return Err("passes must be nonzero".into());
+        }
+        if self.queue_capacity == 0 {
+            return Err("queue-capacity must be nonzero".into());
+        }
+        if self.verify_batch_size == 0 {
+            return Err("verify-batch-size must be nonzero".into());
+        }
+        if self.engine_batch_size == 0 {
+            return Err("engine-batch-size must be nonzero".into());
+        }
+        if self.engine_batch_bytes == 0 {
+            return Err("engine-batch-bytes must be nonzero".into());
+        }
+        if self.visible_limit == Some(0) {
+            return Err("visible-limit must be nonzero".into());
+        }
+        if self.diagnostic_duplicate_ceiling_capacity > 0 && (self.relays != 1 || self.passes < 2) {
+            return Err(
+                "diagnostic duplicate ceiling requires exactly one relay and at least two passes"
+                    .into(),
+            );
+        }
+        if self.diagnostic_duplicate_ceiling_event_payload
+            && self.diagnostic_duplicate_ceiling_capacity == 0
+        {
+            return Err(
+                "diagnostic event-payload ceiling requires a nonzero diagnostic cache capacity"
+                    .into(),
+            );
+        }
+        if self.diagnostic_preparsed_ceiling && (self.relays != 1 || self.passes != 1) {
+            return Err(
+                "diagnostic preparsed ceiling requires exactly one relay and one pass".into(),
+            );
+        }
+        if self.expect_rejection && (self.events != 1 || self.relays != 1 || self.passes != 1) {
+            return Err(
+                "expect-rejection requires exactly one event, one relay, and one pass".into(),
+            );
+        }
+        if self.memory_store && self.store_path.is_some() {
+            return Err("memory-store cannot retain a persistent --store path".into());
+        }
+        if self.memory_store && self.redb_nondurable_diagnostic {
+            return Err(
+                "memory-store and redb-nondurable-diagnostic are mutually exclusive".into(),
+            );
+        }
+        #[cfg(not(feature = "bench-instrumentation"))]
+        if self.diagnostic_skip_event_id_validation
+            || self.diagnostic_skip_signature_verification
+            || self.diagnostic_preparsed_ceiling
+        {
+            return Err("diagnostic validation ceilings require bench-instrumentation".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProbeResult {
+    pub schema: &'static str,
+    pub git_commit: String,
+    pub rustc: String,
+    pub host_os: &'static str,
+    pub host_arch: &'static str,
+    pub host_kernel: String,
+    pub host_cpu: String,
+    pub host_logical_cpus: usize,
+    pub events: usize,
+    pub relays: usize,
+    pub passes: usize,
+    pub payload_bytes: usize,
+    pub corpus_mode: &'static str,
+    pub shape_source_blake3: Option<String>,
+    pub store_backend: &'static str,
+    pub store_durability: &'static str,
+    pub queue_capacity: usize,
+    pub verified_cache_capacity: usize,
+    pub committed_observation_cache_capacity: usize,
+    pub diagnostic_duplicate_ceiling_capacity: usize,
+    pub diagnostic_duplicate_ceiling_event_payload: bool,
+    pub diagnostic_preparsed_ceiling: bool,
+    pub diagnostic_skip_event_id_validation: bool,
+    pub diagnostic_skip_signature_verification: bool,
+    pub verifier_workers: usize,
+    pub verify_batch_size: usize,
+    pub engine_batch_size: usize,
+    pub engine_batch_bytes: usize,
+    pub engine_batch_wait_us: u128,
+    pub visible_limit: Option<usize>,
+    pub delivery_mode: &'static str,
+    pub trim_allocator_during_ingest: bool,
+    pub frame_delay_us: u128,
+    pub expect_rejection: bool,
+    pub expected_relay_frames: u64,
+    pub observed_relay_frames: u64,
+    pub observed_added_rows: u64,
+    pub observed_removed_rows: u64,
+    pub observed_source_growth_deltas: u64,
+    pub final_visible_rows: usize,
+    pub all_sources_reconciled: bool,
+    pub corpus_bytes: u64,
+    pub database_bytes: u64,
+    pub generation_ms: f64,
+    pub completion_ingest_ms: f64,
+    pub completion_relay_frames_per_second: f64,
+    pub replay_completion_ms: Option<f64>,
+    pub replay_frames_per_second: Option<f64>,
+    pub observation_and_quiet_ms: f64,
+    pub first_row_ms: f64,
+    pub last_row_ms: f64,
+    pub apply_latency_p50_ms: f64,
+    pub apply_latency_p95_ms: f64,
+    pub apply_latency_p99_ms: f64,
+    pub apply_latency_max_ms: f64,
+    pub rss_before_ingest_bytes: Option<u64>,
+    pub anonymous_before_ingest_bytes: Option<u64>,
+    pub peak_ingest_rss_bytes: Option<u64>,
+    pub peak_ingest_rss_growth_bytes: Option<u64>,
+    pub peak_ingest_anonymous_bytes: Option<u64>,
+    pub process_write_bytes: Option<u64>,
+    pub allocation_ops: u64,
+    pub allocated_bytes: u64,
+    pub rss_after_ingest_bytes: Option<u64>,
+    pub anonymous_after_ingest_bytes: Option<u64>,
+    pub rss_after_shutdown_bytes: Option<u64>,
+    pub anonymous_after_shutdown_bytes: Option<u64>,
+    pub rss_after_probe_buffers_release_bytes: Option<u64>,
+    pub anonymous_after_probe_buffers_release_bytes: Option<u64>,
+    pub rss_after_rows_release_bytes: Option<u64>,
+    pub anonymous_after_rows_release_bytes: Option<u64>,
+    pub rss_after_handle_release_bytes: Option<u64>,
+    pub anonymous_after_handle_release_bytes: Option<u64>,
+    pub allocator_trim_attempted: bool,
+    pub rss_after_allocator_trim_bytes: Option<u64>,
+    pub anonymous_after_allocator_trim_bytes: Option<u64>,
+    pub shutdown_ms: f64,
+    pub reopen_and_verify_ms: f64,
+    pub first_event_id: String,
+    pub last_event_id: String,
+    pub server_send_ms: Vec<f64>,
+    pub server_bytes: Vec<u64>,
+    pub ingest_attribution: Option<serde_json::Value>,
+}
+
+struct Corpus {
+    path: PathBuf,
+    bytes: u64,
+    selection: Filter,
+    mode: &'static str,
+    shape_source_blake3: Option<String>,
+    first_id: String,
+    last_id: String,
+    generation: Duration,
+}
+
+#[derive(Debug)]
+struct ServerStats {
+    frames: u64,
+    bytes: u64,
+    send_elapsed: Duration,
+}
+
+struct Server {
+    url: RelayUrl,
+    join: thread::JoinHandle<Result<ServerStats, String>>,
+}
+
+#[derive(Default)]
+struct ReplayGate {
+    released: Mutex<bool>,
+    ready: Condvar,
+}
+
+impl ReplayGate {
+    fn release(&self) {
+        if let Ok(mut released) = self.released.lock() {
+            *released = true;
+            self.ready.notify_all();
+        }
+    }
+
+    fn wait(&self, timeout: Duration) -> Result<(), String> {
+        let released = self
+            .released
+            .lock()
+            .map_err(|_| "replay gate lock poisoned".to_string())?;
+        let (released, wait) = self
+            .ready
+            .wait_timeout_while(released, timeout, |released| !*released)
+            .map_err(|_| "replay gate lock poisoned".to_string())?;
+        if !*released && wait.timed_out() {
+            return Err("timed out waiting for first pass to become applied".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct ServerConfig {
+    relay_index: usize,
+    corpus_path: PathBuf,
+    events: usize,
+    passes: usize,
+    frame_delay: Duration,
+    expect_rejection: bool,
+    #[cfg(feature = "bench-instrumentation")]
+    diagnostic_preparsed_events: Arc<Mutex<Option<Vec<Arc<nostr::Event>>>>>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct MemorySample {
+    rss_bytes: Option<u64>,
+    anonymous_bytes: Option<u64>,
+}
+
+struct MemorySampler {
+    stop: Arc<AtomicBool>,
+    join: thread::JoinHandle<MemorySample>,
+}
+
+impl MemorySampler {
+    fn start(trim_during_ingest: bool) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let join = thread::spawn(move || {
+            let mut peak = current_memory();
+            let mut next_trim = Instant::now() + Duration::from_millis(100);
+            while !thread_stop.load(Ordering::Relaxed) {
+                if trim_during_ingest && Instant::now() >= next_trim {
+                    trim_allocator();
+                    next_trim = Instant::now() + Duration::from_millis(100);
+                }
+                let current = current_memory();
+                peak.rss_bytes = max_optional(peak.rss_bytes, current.rss_bytes);
+                peak.anonymous_bytes = max_optional(peak.anonymous_bytes, current.anonymous_bytes);
+                thread::sleep(Duration::from_millis(10));
+            }
+            peak
+        });
+        Self { stop, join }
+    }
+
+    fn stop(self) -> MemorySample {
+        self.stop.store(true, Ordering::Relaxed);
+        self.join.join().unwrap_or_default()
+    }
+}
+
+struct ObservationState {
+    added_rows: u64,
+    removed_rows: u64,
+    source_growth: u64,
+    visible_ids: Option<HashSet<EventId>>,
+    latencies_ns: Vec<u64>,
+    first_row: Option<Duration>,
+    last_row: Option<Duration>,
+}
+
+enum ProbeRows {
+    Unbounded(RowsReceiver),
+    Windowed(HistoryReceiver),
+}
+
+impl ProbeRows {
+    fn recv_timeout(&self, timeout: Duration) -> Result<RowsMsg, mpsc::RecvTimeoutError> {
+        match self {
+            Self::Unbounded(rows) => rows.recv_timeout(timeout),
+            Self::Windowed(batches) => batches
+                .recv_timeout(timeout)
+                .map(|batch| (batch.deltas, batch.evidence, Vec::new())),
+        }
+    }
+}
+
+impl ObservationState {
+    fn new(config: &ProbeConfig) -> Self {
+        Self {
+            added_rows: 0,
+            removed_rows: 0,
+            source_growth: 0,
+            visible_ids: config.visible_limit.map(|_| HashSet::new()),
+            latencies_ns: Vec::with_capacity(config.events.min(1_000_000)),
+            first_row: None,
+            last_row: None,
+        }
+    }
+
+    fn apply(
+        &mut self,
+        deltas: Vec<RowDelta>,
+        config: &ProbeConfig,
+        sent_at: &[AtomicU64],
+        base: Instant,
+        ingest_started: Instant,
+    ) -> Result<(), ProbeError> {
+        for delta in deltas {
+            match delta {
+                RowDelta::Added(row) => {
+                    let ordinal = parse_ordinal(row.event.created_at)?;
+                    if ordinal >= config.events {
+                        return Err(format!("out-of-range event ordinal {ordinal}").into());
+                    }
+                    let sent = sent_at[ordinal].load(Ordering::Acquire);
+                    if sent == 0 {
+                        return Err(format!(
+                            "event ordinal {ordinal} arrived before send timestamp"
+                        )
+                        .into());
+                    }
+                    self.latencies_ns
+                        .push(elapsed_ns(base).saturating_sub(sent));
+                    self.added_rows += 1;
+                    if config.visible_limit.is_none() && self.added_rows > config.events as u64 {
+                        return Err("more Added deltas than canonical corpus rows".into());
+                    }
+                    if let Some(visible_ids) = &mut self.visible_ids {
+                        if !visible_ids.insert(row.event.id) {
+                            return Err("duplicate Added delta for a visible row".into());
+                        }
+                    }
+                    self.first_row
+                        .get_or_insert_with(|| ingest_started.elapsed());
+                    self.last_row = Some(ingest_started.elapsed());
+                }
+                RowDelta::SourcesGrew { .. } => self.source_growth += 1,
+                RowDelta::Removed(id) => {
+                    self.removed_rows += 1;
+                    let Some(visible_ids) = &mut self.visible_ids else {
+                        return Err(
+                            format!("unexpected removal during unlimited ingest: {id}").into()
+                        );
+                    };
+                    if !visible_ids.remove(&id) {
+                        return Err(format!("removed row was not visible: {id}").into());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn final_visible_rows(&self, config: &ProbeConfig) -> usize {
+        self.visible_ids
+            .as_ref()
+            .map_or(config.events, HashSet::len)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CompletionMetrics {
+    completion: Duration,
+    observation_and_quiet: Duration,
+    frames_per_second: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct CompletionProfileWindow {
+    clock: &'static str,
+    start_ns: u64,
+    end_ns: u64,
+}
+
+#[cfg(feature = "bench-instrumentation")]
+fn monotonic_ns() -> Result<u64, ProbeError> {
+    let mut value = std::mem::MaybeUninit::<libc::timespec>::uninit();
+    // SAFETY: `clock_gettime` initializes the owned timespec on success.
+    let result = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC_RAW, value.as_mut_ptr()) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: the successful call above initialized the complete value.
+    let value = unsafe { value.assume_init() };
+    let seconds =
+        u64::try_from(value.tv_sec).map_err(|_| "negative CLOCK_MONOTONIC_RAW seconds")?;
+    let nanos = u64::try_from(value.tv_nsec).map_err(|_| "negative CLOCK_MONOTONIC_RAW nanos")?;
+    seconds
+        .checked_mul(1_000_000_000)
+        .and_then(|value| value.checked_add(nanos))
+        .ok_or_else(|| "CLOCK_MONOTONIC_RAW nanoseconds overflow".into())
+}
+
+#[cfg(not(feature = "bench-instrumentation"))]
+fn monotonic_ns() -> Result<u64, ProbeError> {
+    Err("completion-window-output requires bench-instrumentation".into())
+}
+
+fn write_completion_profile_window(
+    path: &Path,
+    start_ns: u64,
+    end_ns: u64,
+) -> Result<(), ProbeError> {
+    if end_ns < start_ns {
+        return Err("completion profile window ends before it starts".into());
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let window = CompletionProfileWindow {
+        clock: "CLOCK_MONOTONIC_RAW",
+        start_ns,
+        end_ns,
+    };
+    fs::write(
+        path,
+        format!("{}\n", serde_json::to_string_pretty(&window)?),
+    )?;
+    Ok(())
+}
+
+impl CompletionMetrics {
+    fn new(
+        expected_frames: u64,
+        completion: Duration,
+        observation_and_quiet: Duration,
+    ) -> Result<Self, ProbeError> {
+        if completion.is_zero() {
+            return Err("ingest completion duration must be nonzero".into());
+        }
+        if completion > observation_and_quiet {
+            return Err("ingest completion cannot follow observation and quiet proof".into());
+        }
+        Ok(Self {
+            completion,
+            observation_and_quiet,
+            frames_per_second: expected_frames as f64 / completion.as_secs_f64(),
+        })
+    }
+}
+
+pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
+    let _run_guard = PROBE_RUN_LOCK
+        .lock()
+        .map_err(|_| "relay ingest probe run lock poisoned")?;
+    config.validate()?;
+    let scratch = tempfile::tempdir()?;
+    let corpus = generate_corpus(scratch.path(), &config)?;
+    if let Some(output) = &config.corpus_output {
+        if output.exists() {
+            return Err(
+                format!("refusing to overwrite existing corpus {}", output.display()).into(),
+            );
+        }
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&corpus.path, output)?;
+    }
+    let store_path = config
+        .store_path
+        .clone()
+        .unwrap_or_else(|| scratch.path().join("probe.redb"));
+    if !config.memory_store && store_path.exists() {
+        return Err(format!(
+            "refusing to overwrite existing store {}",
+            store_path.display()
+        )
+        .into());
+    }
+    if !config.memory_store {
+        if let Some(parent) = store_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+
+    #[cfg(feature = "bench-instrumentation")]
+    let diagnostic_preparsed_events =
+        Arc::new(Mutex::new(if config.diagnostic_preparsed_ceiling {
+            Some(load_preparsed_events(&corpus.path)?)
+        } else {
+            None
+        }));
+
+    let base = Instant::now();
+    let sent_at = Arc::new(
+        (0..config.events)
+            .map(|_| AtomicU64::new(0))
+            .collect::<Vec<_>>(),
+    );
+    let server_sent_frames = Arc::new(AtomicU64::new(0));
+    let replay_started_at = Arc::new(Mutex::new(None));
+    let replay_gate = Arc::new(ReplayGate::default());
+    let mut servers = Vec::with_capacity(config.relays);
+    for relay_index in 0..config.relays {
+        servers.push(spawn_server(
+            ServerConfig {
+                relay_index,
+                corpus_path: corpus.path.clone(),
+                events: config.events,
+                passes: config.passes,
+                frame_delay: config.frame_delay,
+                expect_rejection: config.expect_rejection,
+                #[cfg(feature = "bench-instrumentation")]
+                diagnostic_preparsed_events: Arc::clone(&diagnostic_preparsed_events),
+            },
+            base,
+            Arc::clone(&sent_at),
+            Arc::clone(&server_sent_frames),
+            Arc::clone(&replay_started_at),
+            Arc::clone(&replay_gate),
+        )?);
+    }
+    let relay_urls: BTreeSet<_> = servers.iter().map(|server| server.url.clone()).collect();
+
+    let selection = corpus.selection.clone();
+    let demand = Demand::new(
+        selection.clone(),
+        SourceAuthority::Pinned(relay_urls.clone()),
+        AccessContext::Public,
+    )?;
+    #[cfg(feature = "bench-instrumentation")]
+    nmp::mechanism::ingest_attribution::reset();
+    #[cfg(feature = "bench-instrumentation")]
+    nmp_transport::configure_diagnostic_duplicate_ceiling(
+        config.diagnostic_duplicate_ceiling_capacity,
+        config.diagnostic_duplicate_ceiling_event_payload,
+    );
+    #[cfg(feature = "bench-instrumentation")]
+    nmp_transport::configure_diagnostic_preparsed_ceiling(None, Vec::new());
+    #[cfg(feature = "bench-instrumentation")]
+    nmp_transport::ingest_attribution::configure_validation_ceiling(
+        config.diagnostic_skip_event_id_validation,
+        config.diagnostic_skip_signature_verification,
+    );
+    #[cfg(not(feature = "bench-instrumentation"))]
+    if config.diagnostic_duplicate_ceiling_capacity > 0 {
+        return Err("diagnostic duplicate ceiling requires bench-instrumentation".into());
+    }
+    let queue_capacity = config.queue_capacity;
+    let verified_cache_capacity = config.verified_cache_capacity;
+    let committed_observation_cache_capacity = config.committed_observation_cache_capacity;
+    let verifier_workers = config.verifier_workers;
+    let verify_batch_size = config.verify_batch_size;
+    let engine_batch_size = config.engine_batch_size;
+    let engine_batch_bytes = config.engine_batch_bytes;
+    let engine_batch_wait = config.engine_batch_wait;
+    let pool_config = PoolConfig {
+        max_relays: config.relays,
+        ingest_queue_capacity: queue_capacity,
+        command_queue_capacity: queue_capacity,
+        event_sink_queue_capacity: queue_capacity,
+        verifier_queue_capacity: queue_capacity,
+        verified_cache_capacity,
+        committed_observation_cache_capacity,
+        verifier_workers,
+        max_verify_batch: verify_batch_size,
+        max_engine_batch: engine_batch_size,
+        max_engine_batch_bytes: engine_batch_bytes,
+        max_engine_batch_wait: engine_batch_wait,
+        reconnect_delay_initial: Some(Duration::from_secs(3600)),
+        reconnect_jitter_max: Some(Duration::ZERO),
+        ..PoolConfig::default()
+    };
+    let (engine_thread, handle) = if config.memory_store {
+        EngineThread::spawn(
+            MemoryStore::default(),
+            FixtureDirectory::new(),
+            config.relays,
+            pool_config,
+            RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+        )?
+    } else {
+        let store = if config.redb_nondurable_diagnostic {
+            #[cfg(feature = "bench-instrumentation")]
+            {
+                RedbStore::open_benchmark_nondurable(&store_path)?
+            }
+            #[cfg(not(feature = "bench-instrumentation"))]
+            {
+                return Err("redb-nondurable-diagnostic requires bench-instrumentation".into());
+            }
+        } else {
+            RedbStore::open(&store_path)?
+        };
+        EngineThread::spawn(
+            store,
+            FixtureDirectory::new(),
+            config.relays,
+            pool_config,
+            RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+        )?
+    };
+    let live_query = LiveQuery(demand);
+    let rows = match config.visible_limit {
+        Some(limit) => {
+            let (_, rows) =
+                handle.subscribe_history(HistoryQuery::new(live_query, limit, limit))?;
+            ProbeRows::Windowed(rows)
+        }
+        None => {
+            let (_, rows) = handle.subscribe(live_query)?;
+            ProbeRows::Unbounded(rows)
+        }
+    };
+    let (diagnostics_handle, diagnostics) = handle.observe_diagnostics();
+    let observed_relay_frames = Arc::new(AtomicU64::new(0));
+    let diagnostic_count = Arc::clone(&observed_relay_frames);
+    let diagnostics_join = thread::spawn(move || {
+        while let Some(snapshot) = diagnostics.recv() {
+            let frames = snapshot
+                .relays
+                .iter()
+                .flat_map(|relay| relay.events_by_kind.iter())
+                .map(|(_, count)| *count)
+                .sum();
+            diagnostic_count.fetch_max(frames, Ordering::Release);
+        }
+    });
+
+    let expected_frames = (config.events as u64)
+        .checked_mul(config.relays as u64)
+        .and_then(|value| value.checked_mul(config.passes as u64))
+        .ok_or("expected frame count overflow")?;
+    let expected_first_pass_frames = (config.events as u64)
+        .checked_mul(config.relays as u64)
+        .ok_or("expected first-pass frame count overflow")?;
+    let expected_last_id = EventId::from_hex(&corpus.last_id)?;
+    let process_write_bytes_before = process_write_bytes();
+    let allocations_before = allocator_snapshot();
+    let completion_window_start_ns = config
+        .completion_window_output
+        .as_ref()
+        .map(|_| monotonic_ns())
+        .transpose()?;
+    let ingest_started = Instant::now();
+    let memory_before_ingest = current_memory();
+    let memory_sampler = MemorySampler::start(config.trim_allocator_during_ingest);
+    let deadline = Instant::now() + config.timeout;
+    let mut observations = ObservationState::new(&config);
+    let mut all_sources_reconciled = false;
+    let mut rejection_quiet_since = None;
+    let mut accepted_quiet_since = None;
+    let mut accepted_completion_elapsed = None;
+    let mut accepted_completion_at = None;
+
+    loop {
+        let observed_frames = observed_relay_frames.load(Ordering::Acquire);
+        let sent_frames = server_sent_frames.load(Ordering::Acquire);
+        if config.expect_rejection && sent_frames == expected_frames && observed_frames == 0 {
+            rejection_quiet_since.get_or_insert_with(Instant::now);
+        } else {
+            rejection_quiet_since = None;
+        }
+        let rejection_complete = rejection_quiet_since
+            .is_some_and(|started| started.elapsed() >= Duration::from_secs(1));
+        let expected_visible_rows = config
+            .visible_limit
+            .map_or(config.events, |limit| config.events.min(limit));
+        let rows_complete = observations.final_visible_rows(&config) == expected_visible_rows;
+        let newest_visible = observations
+            .visible_ids
+            .as_ref()
+            .is_none_or(|ids| ids.contains(&expected_last_id));
+        let accepted_projection_complete =
+            observed_frames >= expected_frames && rows_complete && newest_visible;
+        if config.passes > 1
+            && observed_frames >= expected_first_pass_frames
+            && rows_complete
+            && newest_visible
+        {
+            replay_gate.release();
+        }
+        if accepted_projection_complete {
+            if accepted_completion_at.is_none() {
+                let completed_at = Instant::now();
+                accepted_completion_at = Some(completed_at);
+                accepted_completion_elapsed = Some(completed_at.duration_since(ingest_started));
+                if let (Some(path), Some(start_ns)) = (
+                    config.completion_window_output.as_deref(),
+                    completion_window_start_ns,
+                ) {
+                    write_completion_profile_window(path, start_ns, monotonic_ns()?)?;
+                }
+            }
+            accepted_quiet_since.get_or_insert_with(Instant::now);
+        } else {
+            accepted_quiet_since = None;
+        }
+        let accepted_complete =
+            accepted_quiet_since.is_some_and(|started| started.elapsed() >= Duration::from_secs(1));
+        if (config.expect_rejection && rejection_complete)
+            || (!config.expect_rejection && accepted_complete)
+        {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            handle.shutdown();
+            engine_thread.join();
+            return Err(format!(
+                "timed out: sent={sent_frames}/{expected_frames} observed={observed_frames} added={}/{} reconciled={all_sources_reconciled}",
+                observations.added_rows, config.events,
+            )
+            .into());
+        }
+        match rows.recv_timeout(remaining.min(OBSERVATION_POLL)) {
+            Ok((deltas, evidence, _execution)) => {
+                accepted_quiet_since = None;
+                observations.apply(deltas, &config, &sent_at, base, ingest_started)?;
+                all_sources_reconciled = evidence.sources.len() == config.relays
+                    && evidence
+                        .sources
+                        .iter()
+                        .all(|source| source.reconciled_through.is_some());
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("row stream disconnected before completion".into());
+            }
+        }
+    }
+
+    while let Ok((deltas, _, _)) = rows.recv_timeout(Duration::from_millis(100)) {
+        observations.apply(deltas, &config, &sent_at, base, ingest_started)?;
+    }
+    let observation_and_quiet_elapsed = ingest_started.elapsed();
+    let completion_ingest_elapsed = if config.expect_rejection {
+        // Proving a rejected frame produced no observable state inherently
+        // requires the quiet interval. Rejection probes are correctness
+        // falsifiers, not accepted-ingest throughput measurements.
+        observation_and_quiet_elapsed
+    } else {
+        accepted_completion_elapsed
+            .ok_or("accepted ingest completed without a captured completion instant")?
+    };
+    let completion_metrics = CompletionMetrics::new(
+        expected_frames,
+        completion_ingest_elapsed,
+        observation_and_quiet_elapsed,
+    )?;
+    let replay_metrics = if config.passes > 1 {
+        let replay_started_at = replay_started_at
+            .lock()
+            .map_err(|_| "replay start clock lock poisoned")?
+            .ok_or("replay passes completed without a captured start instant")?;
+        let replay_completed_at = accepted_completion_at
+            .ok_or("replay passes completed without a captured completion instant")?;
+        let replay_elapsed = replay_completed_at
+            .checked_duration_since(replay_started_at)
+            .ok_or("replay completion preceded its first offered frame")?;
+        let replay_frames = (config.events as u64)
+            .checked_mul(config.relays as u64)
+            .and_then(|value| value.checked_mul((config.passes - 1) as u64))
+            .ok_or("expected replay frame count overflow")?;
+        Some(CompletionMetrics::new(
+            replay_frames,
+            replay_elapsed,
+            replay_elapsed,
+        )?)
+    } else {
+        None
+    };
+    let memory_after_ingest = current_memory();
+    let peak_ingest_memory = memory_sampler.stop();
+    let allocations_after = allocator_snapshot();
+
+    diagnostics_handle.cancel();
+    diagnostics_join
+        .join()
+        .map_err(|_| "diagnostics observer thread panicked")?;
+    let observed_relay_frames = observed_relay_frames.load(Ordering::Acquire);
+    let expected_observed_frames = if config.expect_rejection {
+        0
+    } else {
+        expected_frames
+    };
+    if observed_relay_frames != expected_observed_frames {
+        return Err(format!(
+            "diagnostics counted {observed_relay_frames} relay frames, expected {expected_observed_frames}"
+        )
+        .into());
+    }
+
+    let shutdown_started = Instant::now();
+    handle.shutdown();
+    engine_thread.join();
+    let shutdown_elapsed = shutdown_started.elapsed();
+    let process_write_bytes = process_write_bytes()
+        .zip(process_write_bytes_before)
+        .map(|(after, before)| after.saturating_sub(before));
+    #[cfg(feature = "bench-instrumentation")]
+    let ingest_attribution = Some(ingest_attribution_json());
+    #[cfg(not(feature = "bench-instrumentation"))]
+    let ingest_attribution = None;
+    while let Ok((deltas, _, _)) = rows.recv_timeout(Duration::ZERO) {
+        observations.apply(deltas, &config, &sent_at, base, ingest_started)?;
+    }
+    let memory_after_shutdown = current_memory();
+
+    let mut server_stats = Vec::with_capacity(servers.len());
+    for server in servers {
+        let stats = server
+            .join
+            .join()
+            .map_err(|_| "relay server thread panicked")?
+            .map_err(|error| format!("relay server failed: {error}"))?;
+        if stats.frames != (config.events * config.passes) as u64 {
+            return Err(format!(
+                "relay sent {} frames, expected {}",
+                stats.frames,
+                config.events * config.passes
+            )
+            .into());
+        }
+        server_stats.push(stats);
+    }
+
+    let expected_stored_events = if config.expect_rejection {
+        0
+    } else {
+        config.events
+    };
+    let expected_visible_rows = config
+        .visible_limit
+        .map_or(expected_stored_events, |limit| {
+            expected_stored_events.min(limit)
+        });
+    let final_visible_rows = observations.final_visible_rows(&config);
+    if final_visible_rows != expected_visible_rows {
+        return Err(format!(
+            "visible query ended with {final_visible_rows} rows, expected {expected_visible_rows}"
+        )
+        .into());
+    }
+    if !config.expect_rejection
+        && observations.visible_ids.as_ref().is_some_and(|ids| {
+            !ids.iter()
+                .any(|event_id| event_id.to_hex() == corpus.last_id)
+        })
+    {
+        return Err("bounded visible query is missing the newest event".into());
+    }
+
+    observations.latencies_ns.sort_unstable();
+    let observed_added_rows = observations.added_rows;
+    let observed_removed_rows = observations.removed_rows;
+    let observed_source_growth_deltas = observations.source_growth;
+    let first_row_ms = duration_ms(observations.first_row.unwrap_or_default());
+    let last_row_ms = duration_ms(observations.last_row.unwrap_or_default());
+    let apply_latency_p50_ms = ns_ms(percentile(&observations.latencies_ns, 50));
+    let apply_latency_p95_ms = ns_ms(percentile(&observations.latencies_ns, 95));
+    let apply_latency_p99_ms = ns_ms(percentile(&observations.latencies_ns, 99));
+    let apply_latency_max_ms = ns_ms(*observations.latencies_ns.last().unwrap_or(&0));
+    drop(observations);
+    drop(sent_at);
+    let memory_after_probe_buffers_release = current_memory();
+    drop(rows);
+    let memory_after_rows_release = current_memory();
+    drop(handle);
+    let memory_after_handle_release = current_memory();
+    let allocator_trim_attempted = trim_allocator();
+    let memory_after_allocator_trim = current_memory();
+
+    let (database_bytes, reopen_and_verify) = if config.memory_store {
+        (0, Duration::ZERO)
+    } else {
+        let verify_started = Instant::now();
+        let reopened = RedbStore::open(&store_path)?;
+        let mut persisted_selection = selection.clone();
+        persisted_selection.limit = None;
+        let stored = reopened.query(&selection_to_nostr(&persisted_selection)?)?;
+        if stored.len() != expected_stored_events {
+            return Err(format!(
+                "reopened cardinality {}, expected {}",
+                stored.len(),
+                expected_stored_events
+            )
+            .into());
+        }
+        if stored
+            .iter()
+            .any(|row| row.provenance.seen.len() != config.relays)
+        {
+            return Err("one or more rows did not retain every relay provenance".into());
+        }
+        let ids: HashSet<_> = stored.iter().map(|row| row.event.id.to_hex()).collect();
+        if !config.expect_rejection
+            && (!ids.contains(&corpus.first_id) || !ids.contains(&corpus.last_id))
+        {
+            return Err("reopened store is missing the corpus boundary ids".into());
+        }
+        drop(stored);
+        drop(reopened);
+        (fs::metadata(&store_path)?.len(), verify_started.elapsed())
+    };
+
+    Ok(ProbeResult {
+        schema: RESULT_SCHEMA,
+        git_commit: command_output("git", &["rev-parse", "HEAD"]),
+        rustc: command_output("rustc", &["--version"]),
+        host_os: std::env::consts::OS,
+        host_arch: std::env::consts::ARCH,
+        host_kernel: command_output("uname", &["-sr"]),
+        host_cpu: host_cpu(),
+        host_logical_cpus: thread::available_parallelism().map_or(1, usize::from),
+        events: config.events,
+        relays: config.relays,
+        passes: config.passes,
+        payload_bytes: config.payload_bytes,
+        corpus_mode: corpus.mode,
+        shape_source_blake3: corpus.shape_source_blake3,
+        store_backend: if config.memory_store {
+            "memory"
+        } else {
+            "redb"
+        },
+        store_durability: if config.memory_store {
+            "not-applicable"
+        } else if config.redb_nondurable_diagnostic {
+            "none-then-immediate-checkpoint-diagnostic"
+        } else {
+            "immediate"
+        },
+        queue_capacity,
+        verified_cache_capacity,
+        committed_observation_cache_capacity,
+        diagnostic_duplicate_ceiling_capacity: config.diagnostic_duplicate_ceiling_capacity,
+        diagnostic_duplicate_ceiling_event_payload: config
+            .diagnostic_duplicate_ceiling_event_payload,
+        diagnostic_preparsed_ceiling: config.diagnostic_preparsed_ceiling,
+        diagnostic_skip_event_id_validation: config.diagnostic_skip_event_id_validation,
+        diagnostic_skip_signature_verification: config.diagnostic_skip_signature_verification,
+        verifier_workers,
+        verify_batch_size,
+        engine_batch_size,
+        engine_batch_bytes,
+        engine_batch_wait_us: engine_batch_wait.as_micros(),
+        visible_limit: config.visible_limit,
+        delivery_mode: if config.visible_limit.is_some() {
+            "bounded-latest-window"
+        } else {
+            "exact-rebased-delta"
+        },
+        trim_allocator_during_ingest: config.trim_allocator_during_ingest,
+        frame_delay_us: config.frame_delay.as_micros(),
+        expect_rejection: config.expect_rejection,
+        expected_relay_frames: expected_frames,
+        observed_relay_frames,
+        observed_added_rows,
+        observed_removed_rows,
+        observed_source_growth_deltas,
+        final_visible_rows,
+        all_sources_reconciled,
+        corpus_bytes: corpus.bytes,
+        database_bytes,
+        generation_ms: duration_ms(corpus.generation),
+        completion_ingest_ms: duration_ms(completion_metrics.completion),
+        completion_relay_frames_per_second: completion_metrics.frames_per_second,
+        replay_completion_ms: replay_metrics.map(|metrics| duration_ms(metrics.completion)),
+        replay_frames_per_second: replay_metrics.map(|metrics| metrics.frames_per_second),
+        observation_and_quiet_ms: duration_ms(completion_metrics.observation_and_quiet),
+        first_row_ms,
+        last_row_ms,
+        apply_latency_p50_ms,
+        apply_latency_p95_ms,
+        apply_latency_p99_ms,
+        apply_latency_max_ms,
+        rss_before_ingest_bytes: memory_before_ingest.rss_bytes,
+        anonymous_before_ingest_bytes: memory_before_ingest.anonymous_bytes,
+        peak_ingest_rss_bytes: peak_ingest_memory.rss_bytes,
+        peak_ingest_rss_growth_bytes: peak_ingest_memory
+            .rss_bytes
+            .zip(memory_before_ingest.rss_bytes)
+            .map(|(peak, before)| peak.saturating_sub(before)),
+        peak_ingest_anonymous_bytes: peak_ingest_memory.anonymous_bytes,
+        process_write_bytes,
+        allocation_ops: allocations_after.0.saturating_sub(allocations_before.0),
+        allocated_bytes: allocations_after.1.saturating_sub(allocations_before.1),
+        rss_after_ingest_bytes: memory_after_ingest.rss_bytes,
+        anonymous_after_ingest_bytes: memory_after_ingest.anonymous_bytes,
+        rss_after_shutdown_bytes: memory_after_shutdown.rss_bytes,
+        anonymous_after_shutdown_bytes: memory_after_shutdown.anonymous_bytes,
+        rss_after_probe_buffers_release_bytes: memory_after_probe_buffers_release.rss_bytes,
+        anonymous_after_probe_buffers_release_bytes: memory_after_probe_buffers_release
+            .anonymous_bytes,
+        rss_after_rows_release_bytes: memory_after_rows_release.rss_bytes,
+        anonymous_after_rows_release_bytes: memory_after_rows_release.anonymous_bytes,
+        rss_after_handle_release_bytes: memory_after_handle_release.rss_bytes,
+        anonymous_after_handle_release_bytes: memory_after_handle_release.anonymous_bytes,
+        allocator_trim_attempted,
+        rss_after_allocator_trim_bytes: memory_after_allocator_trim.rss_bytes,
+        anonymous_after_allocator_trim_bytes: memory_after_allocator_trim.anonymous_bytes,
+        shutdown_ms: duration_ms(shutdown_elapsed),
+        reopen_and_verify_ms: duration_ms(reopen_and_verify),
+        first_event_id: corpus.first_id,
+        last_event_id: corpus.last_id,
+        server_send_ms: server_stats
+            .iter()
+            .map(|stats| duration_ms(stats.send_elapsed))
+            .collect(),
+        server_bytes: server_stats.iter().map(|stats| stats.bytes).collect(),
+        ingest_attribution,
+    })
+}
+
+#[cfg(feature = "bench-instrumentation")]
+fn ingest_attribution_json() -> serde_json::Value {
+    let transport = nmp_transport::ingest_attribution::snapshot();
+    let engine = nmp::mechanism::ingest_attribution::snapshot();
+    let resolver = nmp_resolver::ingest_attribution::snapshot();
+    let store = nmp_store::ingest_attribution::snapshot();
+    serde_json::json!({
+        "transport": {
+            "committed_observation_lookups": transport.committed_observation_lookups,
+            "committed_observation_hits": transport.committed_observation_hits,
+            "committed_observation_publications": transport.committed_observation_publications,
+            "committed_observation_invalidations": transport.committed_observation_invalidations,
+            "diagnostic_duplicate_ceiling_lookups": transport.diagnostic_duplicate_ceiling_lookups,
+            "diagnostic_duplicate_ceiling_hits": transport.diagnostic_duplicate_ceiling_hits,
+            "diagnostic_duplicate_ceiling_inserts": transport.diagnostic_duplicate_ceiling_inserts,
+            "diagnostic_preparsed_ceiling_lookups": transport.diagnostic_preparsed_ceiling_lookups,
+            "diagnostic_preparsed_ceiling_hits": transport.diagnostic_preparsed_ceiling_hits,
+            "parse_attempts": transport.parse_attempts, "parsed_frames": transport.parsed_frames,
+            "parse_ns": transport.parse_ns, "translator_bursts": transport.translator_bursts,
+            "event_id_validation_attempts": transport.event_id_validation_attempts,
+            "event_id_validation_skips": transport.event_id_validation_skips,
+            "event_id_validation_ns": transport.event_id_validation_ns,
+            "translator_events": transport.translator_events, "max_translator_burst": transport.max_translator_burst,
+            "verify_batches": transport.verify_batches, "verify_candidates": transport.verify_candidates,
+            "verify_ns": transport.verify_ns,
+            "verify_dispatch_ns": transport.verify_dispatch_ns,
+            "verify_collect_ns": transport.verify_collect_ns,
+            "verify_worker_ns": transport.verify_worker_ns,
+            "signature_verification_attempts": transport.signature_verification_attempts,
+            "signature_verification_skips": transport.signature_verification_skips,
+            "verify_task_submissions": transport.verify_task_submissions,
+            "verify_result_messages": transport.verify_result_messages,
+            "verify_worker_candidates": transport.verify_worker_candidates,
+            "max_verify_lane_candidates": transport.max_verify_lane_candidates,
+            "delivered_events": transport.delivered_events,
+            "delivery_ns": transport.delivery_ns,
+            "event_fallback_clones": transport.event_fallback_clones
+        },
+        "engine": {
+            "bridge_batches": engine.bridge_batches, "bridge_frames": engine.bridge_frames,
+            "max_bridge_batch": engine.max_bridge_batch, "bridge_send_ns": engine.bridge_send_ns,
+            "bridge_event_bytes": engine.bridge_event_bytes,
+            "max_bridge_batch_bytes": engine.max_bridge_batch_bytes,
+            "bridge_applied_wait_ns": engine.bridge_applied_wait_ns,
+            "engine_batch_process_ns": engine.engine_batch_process_ns,
+            "relay_core_reduce_ns": engine.relay_core_reduce_ns,
+            "relay_core_reduce_cpu_ns": engine.relay_core_reduce_cpu_ns,
+            "relay_effect_dispatch_ns": engine.relay_effect_dispatch_ns,
+            "relay_ingest_prelude_ns": engine.relay_ingest_prelude_ns,
+            "relay_ingest_prelude_cpu_ns": engine.relay_ingest_prelude_cpu_ns,
+            "relay_ingest_post_store_ns": engine.relay_ingest_post_store_ns,
+            "relay_ingest_post_store_cpu_ns": engine.relay_ingest_post_store_cpu_ns,
+            "relay_ingest_apply_committed_ns": engine.relay_ingest_apply_committed_ns,
+            "relay_ingest_apply_committed_cpu_ns": engine.relay_ingest_apply_committed_cpu_ns,
+            "relay_ingest_effect_build_ns": engine.relay_ingest_effect_build_ns,
+            "relay_ingest_effect_build_cpu_ns": engine.relay_ingest_effect_build_cpu_ns,
+            "relay_ingest_observations_call_ns": engine.relay_ingest_observations_call_ns,
+            "relay_ingest_observations_call_cpu_ns": engine.relay_ingest_observations_call_cpu_ns,
+            "relay_resolver_call_ns": engine.relay_resolver_call_ns,
+            "relay_resolver_call_cpu_ns": engine.relay_resolver_call_cpu_ns,
+            "relay_frame_conversion_ns": engine.relay_frame_conversion_ns,
+            "relay_frame_session_validation_ns": engine.relay_frame_session_validation_ns,
+            "relay_frame_diagnostics_count_ns": engine.relay_frame_diagnostics_count_ns,
+            "relay_frame_candidate_build_ns": engine.relay_frame_candidate_build_ns,
+            "committed_observation_effect_ns": engine.committed_observation_effect_ns,
+            "diagnostics_effect_ns": engine.diagnostics_effect_ns,
+            "committed_projection_total_ns": engine.committed_projection_total_ns,
+            "committed_projection_prelude_ns": engine.committed_projection_prelude_ns,
+            "committed_projection_recompile_ns": engine.committed_projection_recompile_ns,
+            "committed_live_projection_ns": engine.committed_live_projection_ns,
+            "committed_history_projection_ns": engine.committed_history_projection_ns,
+            "history_projection_setup_ns": engine.history_projection_setup_ns,
+            "history_projection_apply_ns": engine.history_projection_apply_ns,
+            "history_projection_delta_ns": engine.history_projection_delta_ns,
+            "history_projection_batch_ns": engine.history_projection_batch_ns,
+            "history_sink_delivery_ns": engine.history_sink_delivery_ns,
+            "history_channel_send_ns": engine.history_channel_send_ns,
+            "history_receiver_reconcile_ns": engine.history_receiver_reconcile_ns,
+            "history_batches": engine.history_batches,
+            "history_deltas": engine.history_deltas,
+            "history_rows": engine.history_rows,
+            "row_sink_delivery_ns": engine.row_sink_delivery_ns,
+            "row_sink_batches": engine.row_sink_batches,
+            "row_sink_deltas": engine.row_sink_deltas,
+            "row_channel_send_ns": engine.row_channel_send_ns,
+            "row_channel_batches": engine.row_channel_batches,
+            "row_channel_deltas": engine.row_channel_deltas,
+            "committed_projection_event_clones": engine.projection_event_clones
+        },
+        "resolver": {
+            "batches": resolver.batches, "events": resolver.events, "max_batch_events": resolver.max_batch_events,
+            "total_ns": resolver.total_ns, "total_cpu_ns": resolver.total_cpu_ns,
+            "prepare_ns": resolver.prepare_ns, "prepare_cpu_ns": resolver.prepare_cpu_ns,
+            "store_ns": resolver.store_ns, "store_cpu_ns": resolver.store_cpu_ns,
+            "classify_ns": resolver.classify_ns, "classify_cpu_ns": resolver.classify_cpu_ns,
+            "react_and_affected_ns": resolver.react_and_affected_ns,
+            "react_and_affected_cpu_ns": resolver.react_and_affected_cpu_ns,
+            "event_clones": resolver.event_clones
+        },
+        "store": {
+            "batches": store.batches, "events": store.events, "max_batch_events": store.max_batch_events,
+            "transaction_total_ns": store.transaction_total_ns, "begin_write_ns": store.begin_write_ns,
+            "open_tables_ns": store.open_tables_ns, "apply_events_ns": store.apply_events_ns,
+            "flush_ns": store.flush_ns, "postings_flush_ns": store.postings_flush_ns,
+            "commit_ns": store.commit_ns, "durability_checkpoint_ns": store.durability_checkpoint_ns,
+            "encode_event_ns": store.encode_event_ns,
+            "encoded_event_bytes": store.encoded_event_bytes, "canonical_insert_ns": store.canonical_insert_ns,
+            "index_insert_ns": store.index_insert_ns,
+            "memory_insert_ns": store.memory_insert_ns,
+            "memory_event_build_ns": store.memory_event_build_ns,
+            "memory_expiration_index_ns": store.memory_expiration_index_ns,
+            "memory_query_index_ns": store.memory_query_index_ns,
+            "memory_canonical_insert_ns": store.memory_canonical_insert_ns,
+            "event_clones": store.event_clones
+        }
+    })
+}
+
+#[cfg(feature = "bench-instrumentation")]
+fn load_preparsed_events(path: &Path) -> Result<Vec<Arc<nostr::Event>>, ProbeError> {
+    BufReader::new(File::open(path)?)
+        .lines()
+        .map(|line| {
+            let event = nostr::Event::from_json(line?)?;
+            Ok(Arc::new(event))
+        })
+        .collect()
+}
+
+fn generate_corpus(dir: &Path, config: &ProbeConfig) -> Result<Corpus, ProbeError> {
+    match &config.shape_corpus {
+        Some(path) => generate_shape_corpus(dir, config, path),
+        None => generate_uniform_corpus(dir, config),
+    }
+}
+
+fn generate_uniform_corpus(dir: &Path, config: &ProbeConfig) -> Result<Corpus, ProbeError> {
+    let started = Instant::now();
+    let path = dir.join("events.jsonl");
+    let mut writer = BufWriter::new(File::create(&path)?);
+    let keys = Keys::parse(&format!("{:064x}", 1u8))?;
+    let author = keys.public_key().to_hex();
+    let mut first_id = None;
+    let mut last_id = String::new();
+    for ordinal in 0..config.events {
+        let prefix = format!("{CORPUS_SCHEMA} ordinal={ordinal} ");
+        let content = if prefix.len() < config.payload_bytes {
+            let mut content = String::with_capacity(config.payload_bytes);
+            content.push_str(&prefix);
+            content.extend(std::iter::repeat_n(
+                'x',
+                config.payload_bytes - prefix.len(),
+            ));
+            content
+        } else {
+            prefix
+        };
+        let event = EventBuilder::new(Kind::TextNote, content)
+            .custom_created_at(Timestamp::from(BASE_CREATED_AT + ordinal as u64))
+            .sign_with_keys(&keys)?;
+        first_id.get_or_insert_with(|| event.id.to_hex());
+        last_id = event.id.to_hex();
+        writeln!(writer, "{}", event.as_json())?;
+    }
+    writer.flush()?;
+    Ok(Corpus {
+        bytes: fs::metadata(&path)?.len(),
+        path,
+        selection: Filter {
+            kinds: Some(BTreeSet::from([Kind::TextNote.as_u16()])),
+            authors: Some(Binding::Literal(BTreeSet::from([author]))),
+            limit: None,
+            ..Filter::default()
+        },
+        mode: "uniform-text-note",
+        shape_source_blake3: None,
+        first_id: first_id.expect("nonempty corpus"),
+        last_id,
+        generation: started.elapsed(),
+    })
+}
+
+#[derive(Deserialize)]
+struct ShapeCorpusInput {
+    schema: String,
+    source_capture_blake3: String,
+    shapes: Vec<EventShapeInput>,
+}
+
+#[derive(Deserialize)]
+struct EventShapeInput {
+    kind: u16,
+    content: StringShapeInput,
+    tags: Vec<TagShapeInput>,
+}
+
+#[derive(Deserialize)]
+struct StringShapeInput {
+    utf8_bytes: usize,
+    json_bytes: usize,
+    class: StringClassInput,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StringClassInput {
+    Empty,
+    LowerHex64,
+    Url,
+    Plain,
+}
+
+#[derive(Deserialize)]
+struct TagShapeInput {
+    name: TagNameShapeInput,
+    values: Vec<StringShapeInput>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "class", rename_all = "snake_case")]
+enum TagNameShapeInput {
+    PublicProtocol {
+        value: String,
+    },
+    SingleLetter {
+        value: char,
+    },
+    Synthetic {
+        utf8_bytes: usize,
+        json_bytes: usize,
+    },
+}
+
+fn generate_shape_corpus(
+    dir: &Path,
+    config: &ProbeConfig,
+    shape_path: &Path,
+) -> Result<Corpus, ProbeError> {
+    let started = Instant::now();
+    let source = fs::read(shape_path)?;
+    let corpus: ShapeCorpusInput = serde_json::from_slice(&source)?;
+    if corpus.schema != "nmp-private-free-event-shapes-v1" {
+        return Err(format!("unsupported shape corpus schema {}", corpus.schema).into());
+    }
+    if corpus.source_capture_blake3.len() != 64
+        || !corpus
+            .source_capture_blake3
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("shape corpus source_capture_blake3 must be 64 lowercase hex bytes".into());
+    }
+    if corpus.shapes.is_empty() {
+        return Err("shape corpus contains no shapes".into());
+    }
+
+    let path = dir.join("events.jsonl");
+    let mut writer = BufWriter::new(File::create(&path)?);
+    let mut first_id = None;
+    let mut last_id = String::new();
+    let kind_one_shape = corpus
+        .shapes
+        .iter()
+        .position(|shape| shape.kind == Kind::TextNote.as_u16())
+        .unwrap_or(0);
+    for ordinal in 0..config.events {
+        let shape_index = if ordinal == 0 || ordinal + 1 == config.events {
+            kind_one_shape
+        } else {
+            ordinal.wrapping_mul(7_919) % corpus.shapes.len()
+        };
+        let shape = &corpus.shapes[shape_index];
+        let keys = Keys::parse(&format!("{:064x}", ordinal as u128 + 1))?;
+        let content = shaped_string(&shape.content, ordinal as u64)?;
+        let tags = shape
+            .tags
+            .iter()
+            .enumerate()
+            .map(|(tag_index, shape)| shaped_tag(shape, ordinal as u64, tag_index, config.events))
+            .collect::<Result<Vec<_>, ProbeError>>()?;
+        let event = EventBuilder::new(Kind::from(shape.kind), content)
+            .tags(tags)
+            .custom_created_at(Timestamp::from(BASE_CREATED_AT + ordinal as u64))
+            .sign_with_keys(&keys)?;
+        first_id.get_or_insert_with(|| event.id.to_hex());
+        last_id = event.id.to_hex();
+        writeln!(writer, "{}", event.as_json())?;
+    }
+    writer.flush()?;
+
+    Ok(Corpus {
+        bytes: fs::metadata(&path)?.len(),
+        path,
+        selection: Filter {
+            since: Some(BASE_CREATED_AT),
+            until: Some(BASE_CREATED_AT + config.events as u64 - 1),
+            limit: None,
+            ..Filter::default()
+        },
+        mode: "representative-private-free-shapes",
+        shape_source_blake3: Some(corpus.source_capture_blake3),
+        first_id: first_id.expect("nonempty corpus"),
+        last_id,
+        generation: started.elapsed(),
+    })
+}
+
+fn shaped_tag(
+    shape: &TagShapeInput,
+    ordinal: u64,
+    tag_index: usize,
+    events: usize,
+) -> Result<Tag, ProbeError> {
+    let name = match &shape.name {
+        TagNameShapeInput::PublicProtocol { value } => value.clone(),
+        TagNameShapeInput::SingleLetter { value } => value.to_string(),
+        TagNameShapeInput::Synthetic {
+            utf8_bytes,
+            json_bytes,
+        } => shaped_text(*utf8_bytes, *json_bytes, ordinal)?,
+    };
+    let mut atoms = Vec::with_capacity(shape.values.len() + 1);
+    atoms.push(name.clone());
+    for (value_index, value) in shape.values.iter().enumerate() {
+        atoms.push(shaped_tag_value(
+            &name,
+            value,
+            ordinal,
+            tag_index,
+            value_index,
+            events,
+        )?);
+    }
+    Ok(Tag::parse(atoms)?)
+}
+
+fn shaped_tag_value(
+    name: &str,
+    shape: &StringShapeInput,
+    ordinal: u64,
+    tag_index: usize,
+    value_index: usize,
+    events: usize,
+) -> Result<String, ProbeError> {
+    if name == "expiration" && value_index == 0 && shape.utf8_bytes >= 10 {
+        // Keep generated NIP-40 rows alive independently of the wall clock on
+        // the machine reproducing the benchmark. This is outside the timed
+        // path and remains a ten-digit Unix timestamp until 2096.
+        let future = 4_000_000_000_u64.saturating_add(events as u64);
+        let value = future.to_string();
+        if value.len() == shape.utf8_bytes && value.len() + 2 == shape.json_bytes {
+            return Ok(value);
+        }
+    }
+    if matches!(shape.class, StringClassInput::LowerHex64) {
+        let seed = ordinal
+            .wrapping_mul(1_000_003)
+            .wrapping_add((tag_index as u64) << 16)
+            .wrapping_add(value_index as u64);
+        let value = format!("{seed:064x}");
+        if value.len() == shape.utf8_bytes && value.len() + 2 == shape.json_bytes {
+            return Ok(value);
+        }
+    }
+    shaped_string(
+        shape,
+        ordinal ^ ((tag_index as u64) << 32) ^ value_index as u64,
+    )
+}
+
+fn shaped_string(shape: &StringShapeInput, seed: u64) -> Result<String, ProbeError> {
+    match shape.class {
+        StringClassInput::Empty => {
+            if shape.utf8_bytes != 0 || shape.json_bytes != 2 {
+                return Err("empty string shape has inconsistent byte counts".into());
+            }
+            Ok(String::new())
+        }
+        StringClassInput::LowerHex64 if shape.utf8_bytes == 64 && shape.json_bytes == 66 => {
+            Ok(format!("{seed:064x}"))
+        }
+        StringClassInput::Url | StringClassInput::Plain | StringClassInput::LowerHex64 => {
+            shaped_text(shape.utf8_bytes, shape.json_bytes, seed)
+        }
+    }
+}
+
+fn shaped_text(utf8_bytes: usize, json_bytes: usize, seed: u64) -> Result<String, ProbeError> {
+    let base_json_bytes = utf8_bytes.checked_add(2).ok_or("shape byte overflow")?;
+    let overhead = json_bytes
+        .checked_sub(base_json_bytes)
+        .ok_or("JSON string is shorter than its UTF-8 payload plus quotes")?;
+    for controls in (0..=utf8_bytes.min(overhead / 5)).rev() {
+        let quotes = overhead - controls * 5;
+        if controls + quotes > utf8_bytes {
+            continue;
+        }
+        let plain = utf8_bytes - controls - quotes;
+        let mut value = String::with_capacity(utf8_bytes);
+        value.extend(std::iter::repeat_n('\0', controls));
+        value.extend(std::iter::repeat_n('"', quotes));
+        let fill = char::from(b'a' + u8::try_from(seed % 26)?);
+        value.extend(std::iter::repeat_n(fill, plain));
+        if value.len() == utf8_bytes && serde_json::to_string(&value)?.len() == json_bytes {
+            return Ok(value);
+        }
+    }
+    Err(
+        format!("cannot synthesize string with utf8_bytes={utf8_bytes} json_bytes={json_bytes}")
+            .into(),
+    )
+}
+
+fn spawn_server(
+    config: ServerConfig,
+    base: Instant,
+    sent_at: Arc<Vec<AtomicU64>>,
+    server_sent_frames: Arc<AtomicU64>,
+    replay_started_at: Arc<Mutex<Option<Instant>>>,
+    replay_gate: Arc<ReplayGate>,
+) -> Result<Server, ProbeError> {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    let address = listener.local_addr()?;
+    let url = RelayUrl::parse(&format!("ws://{address}"))?;
+    listener.set_nonblocking(true)?;
+    let join = thread::Builder::new()
+        .name(format!("nmp-load-relay-{}", config.relay_index))
+        .spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let (stats_tx, stats_rx) = mpsc::sync_channel(1);
+            let claimed = Arc::new(AtomicBool::new(false));
+            let mut connections: Vec<thread::JoinHandle<()>> = Vec::new();
+            loop {
+                if let Ok(stats) = stats_rx.try_recv() {
+                    for connection in connections {
+                        let _ = connection.join();
+                    }
+                    return stats;
+                }
+                if Instant::now() >= deadline && !claimed.load(Ordering::Acquire) {
+                    return Err("timed out waiting for websocket client".to_string());
+                }
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        // `listener` is non-blocking so this accept loop can race the
+                        // deadline/`claimed` checks above. On Linux, a socket returned
+                        // by `accept()` does NOT inherit the listening socket's
+                        // `O_NONBLOCK` flag and always comes back blocking. On macOS
+                        // (and BSD generally) it DOES inherit it, so without this reset
+                        // the per-connection socket below is silently non-blocking:
+                        // `tungstenite::accept`'s handshake read usually still succeeds
+                        // because the client's HTTP upgrade bytes are typically already
+                        // in the kernel receive buffer by the time this thread runs, but
+                        // the very next blocking-style `socket.read()` in `serve_corpus`
+                        // (waiting for the first REQ frame) can hit the socket before the
+                        // client has flushed it, return `WouldBlock`, and — since that
+                        // read loop treats any error as fatal — tear the connection down
+                        // before the client's REQ arrives. That is the exact "ECONNRESET
+                        // before the first REQ flushes" race from #538: forcing the
+                        // accepted socket back to blocking mode makes every platform
+                        // behave like the thread-per-connection design already assumes.
+                        if let Err(error) = stream.set_nonblocking(false) {
+                            return Err(format!(
+                                "failed to clear O_NONBLOCK on accepted connection: {error}"
+                            ));
+                        }
+                        // Bound writes so a rejected-message test can't hang the mock
+                        // for the full probe timeout: a client that detects an
+                        // over-ceiling frame is only required to stop trusting the
+                        // relay, not to promptly close/reset the raw TCP connection.
+                        // If it just stops draining the socket, an unbounded blocking
+                        // write here can stall on a full receive window until
+                        // whatever eventually tears the connection down (in the worst
+                        // case, the probe's own top-level timeout). A write deadline
+                        // turns that stall into a prompt, tolerated send error
+                        // instead (see `expect_rejection` handling in serve_corpus).
+                        if let Err(error) = stream.set_write_timeout(Some(Duration::from_secs(2))) {
+                            return Err(format!(
+                                "failed to set write timeout on accepted connection: {error}"
+                            ));
+                        }
+                        let claimed = Arc::clone(&claimed);
+                        let stats_tx = stats_tx.clone();
+                        let config = config.clone();
+                        let sent_at = Arc::clone(&sent_at);
+                        let server_sent_frames = Arc::clone(&server_sent_frames);
+                        let replay_started_at = Arc::clone(&replay_started_at);
+                        let replay_gate = Arc::clone(&replay_gate);
+                        connections.push(thread::spawn(move || {
+                            let Ok(mut socket) = accept(stream) else {
+                                return;
+                            };
+                            if claimed.swap(true, Ordering::AcqRel) {
+                                let _ = socket.close(None);
+                                return;
+                            }
+                            let result = serve_corpus(
+                                &mut socket,
+                                &config,
+                                base,
+                                &sent_at,
+                                &server_sent_frames,
+                                &replay_started_at,
+                                &replay_gate,
+                            );
+                            let _ = stats_tx.send(result);
+                        }));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(error) => return Err(format!("accept failed: {error}")),
+                }
+            }
+        })?;
+    Ok(Server { url, join })
+}
+
+fn serve_corpus(
+    socket: &mut tungstenite::WebSocket<std::net::TcpStream>,
+    config: &ServerConfig,
+    base: Instant,
+    sent_at: &[AtomicU64],
+    server_sent_frames: &AtomicU64,
+    replay_started_at: &Mutex<Option<Instant>>,
+    replay_gate: &ReplayGate,
+) -> Result<ServerStats, String> {
+    let subscription = loop {
+        let message = socket.read().map_err(|error| error.to_string())?;
+        let Message::Text(text) = message else {
+            continue;
+        };
+        let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        if value.get(0).and_then(serde_json::Value::as_str) == Some("REQ") {
+            break value
+                .get(1)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "REQ has no subscription id".to_string())?
+                .to_owned();
+        }
+    };
+    let encoded_subscription = serde_json::to_string(&subscription).map_err(|e| e.to_string())?;
+    #[cfg(feature = "bench-instrumentation")]
+    if let Some(events) = config
+        .diagnostic_preparsed_events
+        .lock()
+        .map_err(|_| "diagnostic preparsed events lock poisoned".to_string())?
+        .take()
+    {
+        nmp_transport::configure_diagnostic_preparsed_ceiling(
+            Some(nostr::SubscriptionId::new(subscription.clone())),
+            events,
+        );
+    }
+    let started = Instant::now();
+    let mut frames = 0u64;
+    let mut bytes = 0u64;
+    'passes: for pass_index in 0..config.passes {
+        if pass_index == 1 {
+            replay_gate.wait(Duration::from_secs(30))?;
+        }
+        let reader = BufReader::new(File::open(&config.corpus_path).map_err(|e| e.to_string())?);
+        for (ordinal, line) in reader.lines().enumerate() {
+            let line = line.map_err(|e| e.to_string())?;
+            if ordinal >= config.events {
+                return Err("corpus contains more rows than declared".to_string());
+            }
+            if pass_index == 1 && ordinal == 0 {
+                replay_started_at
+                    .lock()
+                    .map_err(|_| "replay start clock lock poisoned".to_string())?
+                    .get_or_insert_with(Instant::now);
+            }
+            let now = elapsed_ns(base).max(1);
+            let _ = sent_at[ordinal].compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire);
+            let frame = format!("[\"EVENT\",{encoded_subscription},{line}]");
+            bytes = bytes.saturating_add(frame.len() as u64);
+            if let Err(error) = socket.send(Message::Text(frame.into())) {
+                if !config.expect_rejection {
+                    return Err(error.to_string());
+                }
+                // A rejected message is expected to make the client close or
+                // reset the connection as soon as it observes the frame
+                // exceeds the ceiling. A payload this large needs several
+                // underlying TCP writes, so the client can hang up mid-write
+                // (racing this thread's send with the client's own close).
+                // Still count the frame as sent — the probe's completion
+                // detection watches `server_sent_frames` to know the mock is
+                // done offering data, and a write the client already
+                // rejected should not make it wait out the full timeout.
+                frames += 1;
+                server_sent_frames.fetch_add(1, Ordering::Release);
+                break 'passes;
+            }
+            frames += 1;
+            server_sent_frames.fetch_add(1, Ordering::Release);
+            if !config.frame_delay.is_zero() {
+                thread::sleep(config.frame_delay);
+            }
+        }
+    }
+    let eose = format!("[\"EOSE\",{encoded_subscription}]");
+    if let Err(error) = socket.send(Message::Text(eose.into())) {
+        if !config.expect_rejection {
+            return Err(error.to_string());
+        }
+    }
+    if let Err(error) = socket.flush() {
+        if !config.expect_rejection {
+            return Err(error.to_string());
+        }
+    }
+    let send_elapsed = started.elapsed();
+    if !config.expect_rejection {
+        // Real subscription sockets remain open after EOSE. Waiting for the
+        // client close also proves it consumed the final TCP window.
+        loop {
+            match socket.read() {
+                Ok(Message::Close(_))
+                | Err(tungstenite::Error::ConnectionClosed)
+                | Err(tungstenite::Error::AlreadyClosed) => break,
+                Ok(_) => {}
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+    }
+    Ok(ServerStats {
+        frames,
+        bytes,
+        send_elapsed,
+    })
+}
+
+fn parse_ordinal(created_at: Timestamp) -> Result<usize, ProbeError> {
+    let ordinal = created_at
+        .as_secs()
+        .checked_sub(BASE_CREATED_AT)
+        .ok_or("event timestamp precedes corpus base")?;
+    Ok(usize::try_from(ordinal)?)
+}
+
+fn selection_to_nostr(selection: &Filter) -> Result<nostr::Filter, ProbeError> {
+    let mut filter = nostr::Filter::new();
+    if let Some(kinds) = &selection.kinds {
+        filter = filter.kinds(kinds.iter().copied().map(Kind::from));
+    }
+    match &selection.authors {
+        Some(Binding::Literal(authors)) => {
+            for author in authors {
+                filter = filter.author(nostr::PublicKey::parse(author)?);
+            }
+        }
+        Some(_) => return Err("probe selection authors must be literal".into()),
+        None => {}
+    }
+    if let Some(since) = selection.since {
+        filter = filter.since(Timestamp::from(since));
+    }
+    if let Some(until) = selection.until {
+        filter = filter.until(Timestamp::from(until));
+    }
+    Ok(filter)
+}
+
+fn percentile(sorted: &[u64], percentile: usize) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    sorted[(sorted.len() - 1) * percentile / 100]
+}
+
+fn elapsed_ns(base: Instant) -> u64 {
+    u64::try_from(base.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1_000.0
+}
+
+fn ns_ms(ns: u64) -> f64 {
+    ns as f64 / 1_000_000.0
+}
+
+fn command_output(program: &str, args: &[&str]) -> String {
+    Command::new(program)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn host_cpu() -> String {
+    fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|cpuinfo| {
+            cpuinfo.lines().find_map(|line| {
+                line.strip_prefix("model name")
+                    .and_then(|value| value.split_once(':'))
+                    .map(|(_, value)| value.trim().to_owned())
+            })
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn host_cpu() -> String {
+    "unknown".to_string()
+}
+
+fn max_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (left, right) => left.or(right),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn current_memory() -> MemorySample {
+    let Ok(rollup) = fs::read_to_string("/proc/self/smaps_rollup") else {
+        return MemorySample::default();
+    };
+    MemorySample {
+        rss_bytes: memory_field_bytes(&rollup, "Rss:"),
+        anonymous_bytes: memory_field_bytes(&rollup, "Anonymous:"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn memory_field_bytes(rollup: &str, field: &str) -> Option<u64> {
+    let line = rollup.lines().find(|line| line.starts_with(field))?;
+    let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    kib.checked_mul(1_024)
+}
+
+#[cfg(target_os = "linux")]
+fn process_write_bytes() -> Option<u64> {
+    fs::read_to_string("/proc/self/io")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("write_bytes:")?.trim().parse().ok())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_write_bytes() -> Option<u64> {
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn current_memory() -> MemorySample {
+    MemorySample::default()
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn trim_allocator() -> bool {
+    // This is measurement-only: it distinguishes reclaimable glibc pages
+    // from live process state after every probe-owned per-event buffer drops.
+    unsafe { libc::malloc_trim(0) != 0 }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn trim_allocator() -> bool {
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completion_throughput_excludes_quiet_proof() {
+        let completion = Duration::from_millis(500);
+        let first = CompletionMetrics::new(100_000, completion, Duration::from_secs(1)).unwrap();
+        let extended =
+            CompletionMetrics::new(100_000, completion, Duration::from_secs(10)).unwrap();
+
+        assert_eq!(first.frames_per_second, 200_000.0);
+        assert_eq!(extended.frames_per_second, first.frames_per_second);
+        assert!(first.completion <= first.observation_and_quiet);
+        assert!(extended.completion <= extended.observation_and_quiet);
+    }
+
+    #[test]
+    fn completion_rejects_an_inverted_timeline() {
+        let error =
+            CompletionMetrics::new(1, Duration::from_secs(2), Duration::from_secs(1)).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("completion cannot follow observation"));
+    }
+
+    #[test]
+    fn completion_profile_window_preserves_raw_clock_bounds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nested/window.json");
+
+        write_completion_profile_window(&path, 10, 20).expect("write completion window");
+
+        let window: serde_json::Value =
+            serde_json::from_slice(&fs::read(path).expect("read completion window"))
+                .expect("parse completion window");
+        assert_eq!(window["clock"], "CLOCK_MONOTONIC_RAW");
+        assert_eq!(window["start_ns"], 10);
+        assert_eq!(window["end_ns"], 20);
+    }
+
+    #[test]
+    fn completion_profile_window_rejects_inverted_bounds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let error = write_completion_profile_window(&dir.path().join("window.json"), 20, 10)
+            .expect_err("inverted profile window must fail");
+        assert!(error
+            .to_string()
+            .contains("completion profile window ends before it starts"));
+    }
+
+    fn string_shape(
+        utf8_bytes: usize,
+        json_bytes: usize,
+        class: StringClassInput,
+    ) -> StringShapeInput {
+        StringShapeInput {
+            utf8_bytes,
+            json_bytes,
+            class,
+        }
+    }
+
+    #[test]
+    fn shaped_text_preserves_utf8_and_json_costs() {
+        for (utf8_bytes, json_bytes) in [(0, 2), (5, 7), (3, 7), (3, 12)] {
+            let value = shaped_text(utf8_bytes, json_bytes, 3).unwrap();
+            assert_eq!(value.len(), utf8_bytes);
+            assert_eq!(serde_json::to_string(&value).unwrap().len(), json_bytes);
+        }
+    }
+
+    #[test]
+    fn generated_expiration_stays_live_and_preserves_shape() {
+        let shape = string_shape(10, 12, StringClassInput::Plain);
+        let value = shaped_tag_value("expiration", &shape, 0, 0, 0, 1_000_000).unwrap();
+        assert_eq!(value, "4001000000");
+        assert_eq!(serde_json::to_string(&value).unwrap().len(), 12);
+    }
+
+    #[test]
+    fn lower_hex_values_are_deterministic_and_shape_exact() {
+        let shape = string_shape(64, 66, StringClassInput::LowerHex64);
+        let first = shaped_tag_value("e", &shape, 7, 2, 1, 10).unwrap();
+        let second = shaped_tag_value("e", &shape, 7, 2, 1, 10).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64);
+        assert!(first
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    }
+}
