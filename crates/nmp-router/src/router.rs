@@ -356,22 +356,65 @@ impl Router {
             });
             uncovered_authors.extend(coverage.shortfall.clone());
 
+            // ONE bag entry per (relay, skeleton), carrying every author this
+            // relay was solved for -- not one entry per (author, relay).
+            //
+            // `provenance_for_outbox` deliberately yields one route per
+            // (author, relay) so each route keeps its own provenance, and this
+            // loop used to turn each of those into its own single-author
+            // filter. For an UNLIMITED demand `coalesce_with` re-joined them
+            // downstream and nothing showed. For a LIMITED one it could not --
+            // `neither_limited` refuses any filter carrying a `limit` -- so a
+            // bounded feed reached the wire as one REQ per author: ~351 wanted
+            // subscriptions over a 1055-author follow list, against relay caps
+            // of ~20 (#937).
+            //
+            // Re-joining here rather than relaxing `neither_limited` is the
+            // point. Those atoms were never independent demands competing for
+            // rows; they are ONE demand that routing fanned for provenance,
+            // and a window belongs to the feed rather than to each author in
+            // it (owner ruling, #937). Two genuinely independent limited
+            // watches still meet `neither_limited` downstream and still stay
+            // apart -- that rule is untouched.
+            //
+            // Coverage needs no special handling: a limited filter poisons its
+            // whole EOSE attribution (`attribution.rs`, `limited:
+            // filter.limit.is_some()`), so a bounded fetch records no coverage
+            // merged or unmerged. The per-author keys are still absorbed so an
+            // UNLIMITED feed goes on proving coverage for each author it named.
+            let mut by_relay: BTreeMap<RelayUrl, (BTreeSet<PubkeyHex>, Vec<RouteProvenance>)> =
+                BTreeMap::new();
             for (relay, prov) in route::provenance_for_outbox(&coverage, &candidates) {
-                let filter = skeleton.with_authors(prov.covers_authors.clone());
-                let key = coverage_key(&ContextualAtom {
-                    filter: filter.clone(),
-                    source: source.clone(),
-                    access,
-                    routing_evidence: evidence_by_author
-                        .get(prov.covers_authors.first().expect("one-author route"))
-                        .cloned()
-                        .unwrap_or_default(),
-                });
+                let entry = by_relay.entry(relay).or_default();
+                entry.0.extend(prov.covers_authors.iter().cloned());
+                entry.1.push(prov);
+            }
+            for (relay, (relay_authors, provenance)) in by_relay {
+                let filter = skeleton.with_authors(relay_authors.clone());
+                // The narrow per-author keys, one per author this relay
+                // serves. `coverage_key` window-erases and zeroes
+                // `routing_evidence`, so each key is exactly the key the
+                // resolver's own per-author atom hashes to -- which is what
+                // lets one merged REQ absorb them all.
+                let keys = relay_authors
+                    .iter()
+                    .map(|author| {
+                        coverage_key(&ContextualAtom {
+                            filter: skeleton.with_authors(BTreeSet::from([author.clone()])),
+                            source: source.clone(),
+                            access,
+                            routing_evidence: evidence_by_author
+                                .get(author)
+                                .cloned()
+                                .unwrap_or_default(),
+                        })
+                    })
+                    .collect::<BTreeSet<_>>();
                 bag.entry(RelaySessionKey::new(relay, access))
                     .or_default()
                     .entry(source.clone())
                     .or_default()
-                    .push((filter, vec![prov], BTreeSet::from([key])));
+                    .push((filter, provenance, keys));
             }
 
             // Additive indexer + app lanes: both route the group's FULL

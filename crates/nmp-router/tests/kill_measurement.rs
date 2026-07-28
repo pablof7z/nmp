@@ -158,13 +158,38 @@ fn kill_measurement_dedup_only_within_relay_limits() {
         );
     }
 
-    // ---- Strict-improvement sanity: the union must actually help ---------
+    // ---- Where the author join now happens -------------------------------
+    //
+    // This used to assert `total_union < total_dedup`: that the coalescer
+    // strictly beat the dedup-only floor. That premise is gone, deliberately
+    // (#937). `Router::compile` now emits ONE bag entry per (relay, skeleton)
+    // carrying every author that relay was solved for, rather than one per
+    // (author, relay) route, so the author join happens in ROUTING -- before
+    // either registry runs -- and the dedup-only "floor" is no longer a
+    // per-author fan-out.
+    //
+    // That is this measurement's own subject matter, so read the numbers
+    // rather than the old inequality: the floor being within limits is the
+    // #937 fix showing up on 300 authors. A bounded feed could not reach the
+    // union rule at all (`neither_limited` refuses any filter carrying a
+    // `limit`), so before this change a paginated 300-author feed shipped one
+    // REQ per author no matter what the registry said.
     let total_dedup: usize = m_dedup.per_relay_sub_count.iter().map(|(_, c)| *c).sum();
     let total_union: usize = m_union.per_relay_sub_count.iter().map(|(_, c)| *c).sum();
     println!("total wire_sub_count: dedup-only={total_dedup}, coalesced={total_union}");
     assert!(
-        total_union < total_dedup,
-        "the union must strictly reduce total wire subscription count"
+        total_union <= total_dedup,
+        "coalescing must never INCREASE the wire subscription count"
+    );
+
+    // The property that actually needs pinning now, and it is stronger than
+    // the old one because it holds for BOTH registries: the plan carries
+    // strictly fewer subscriptions than there are authors, on a demand that
+    // fans out to one atom per author.
+    assert!(
+        total_dedup < NUM_AUTHORS,
+        "the author axis must be joined during routing: {total_dedup} subscription(s) for \
+         {NUM_AUTHORS} authors even with coalescing disabled"
     );
 
     // ---- The pre-committed assertion: report the kill, do not hide it ---

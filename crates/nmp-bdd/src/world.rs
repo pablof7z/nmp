@@ -764,6 +764,32 @@ impl NmpWorld {
         });
     }
 
+    /// `When I open a feed of the latest <n> of my follows' notes` -- the
+    /// same feed as [`Self::open_my_follows_feed`], bounded.
+    ///
+    /// The bound goes on the OUTER selection, which is what makes this a
+    /// per-feed window: one `limit` for the whole feed, carried by a demand
+    /// whose author binding still resolves to the full follow list. The
+    /// resolver then fans that demand into one atom per author for routing,
+    /// every atom carrying the same `limit` -- and it is the re-join of those
+    /// atoms into one REQ per relay that `bounded-feed-window.feature`
+    /// exercises (#937).
+    pub async fn open_my_follows_feed_limited(&mut self, limit: usize) {
+        self.ensure_started().await;
+        let mut query = my_follows_query();
+        query.0.selection.limit = Some(limit);
+        let (handle_id, rx) = self
+            .handle()
+            .subscribe(query)
+            .expect("BDD subscription construction");
+        self.feed = Some(FeedState {
+            handle: handle_id,
+            rx,
+            rows: BTreeMap::new(),
+            evidence: AcquisitionEvidence::default(),
+        });
+    }
+
     /// `When I publish a new follow list with <people>`.
     pub async fn publish_new_follow_list(&mut self, people: &[String]) {
         self.ensure_started().await;
