@@ -24,6 +24,14 @@ The issue must **capture the why**, not just the what:
 
 The point is that six months from now the tracker answers *why did we do this*, and the answer is either a real, referenceable line of thinking or an honest "it was a bug" — never a confabulation.
 
+## Standing conventions — read before proposing a surface change
+
+Three rules that are not negotiable and are violated most often in *proposals*, not in code. Full reasoning, worked examples, and the incidents behind each live in `docs/internals/conventions/`.
+
+1. **No backwards compatibility, ever** (`conventions/no-backwards-compatibility.md`). A replaced spelling is DELETED in the same change — no alias, no deprecation, no wrapper, no "keep both until X". **NMP has no external consumers**: every caller is in this workspace or a sibling that moves with it, so compatibility is a tax paid to strangers who do not exist. Where compatibility and architectural cleanliness conflict, **clean architecture wins absolutely**. Do not offer "replace vs wrap" as an option, and do not weigh breaking Swift/Kotlin/snapshots as an argument against a better design.
+2. **Bech32 only at the user boundary** (`conventions/bech32-boundary.md`). `npub`/`nevent`/`naddr` exist to show something to a human or to accept what a human pasted. Everything internal — parameters, fields, FFI arguments, protocol-crate signatures — uses the decoded type (`PublicKey`, `EventId`). An app decodes at its own boundary and hands NMP a key.
+3. **No invented categories, no repo jargon** (`conventions/naming-no-invented-categories.md`). Do not name a category the protocol does not have, and do not let internal shorthand harden into vocabulary. The worked example: "foreign kinds" described a category that does not exist in Nostr, hardened across 13 sites, and became load-bearing in a CI gate before it was removed (#960).
+
 ## Architecture review gates
 
 Six gates applied to every PR, encoding the type-over-convention doctrine (`docs/bug-class-ledger.md:3-5`: a bad path must be excluded by a type/API mechanism plus a falsifier, never by prose or reviewer memory; `docs/VISION.md:23-31`: the app-facing model is exactly two nouns). Full rules, trained tells, and the real incidents behind each live in `docs/design/architecture-review-gates.md`. Run 1–4 by eye against the diff; 5–6 run mechanically in CI (`.github/workflows/architecture-gates.yml`) and locally.
