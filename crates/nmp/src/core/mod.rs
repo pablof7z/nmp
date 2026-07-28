@@ -745,6 +745,12 @@ pub enum Effect {
     /// buffered/replayed).
     EmitDiagnostics(DiagnosticsSnapshot),
     EmitReceipt(ReceiptId, WriteStatus),
+    /// A correlation-idempotent publish resolved to an existing receipt.
+    /// These retained facts are not new live transitions: runtime must prime
+    /// only that publish caller's fresh mailbox, then join it to live delivery
+    /// at the page's final cursor. Existing observers must never receive this
+    /// replay.
+    ReplayReceipt(ReceiptId, ReceiptReplayPage),
     /// The publish could not even allocate a non-durable correlation id,
     /// so no `EmitReceipt` can truthfully accompany this failure.
     PublishFailed(PublishError),

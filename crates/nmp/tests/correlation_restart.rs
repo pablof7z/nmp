@@ -32,7 +32,7 @@ fn receipt_id(effects: &[Effect]) -> ReceiptId {
     effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::EmitReceipt(id, _status) => Some(*id),
+            Effect::EmitReceipt(id, _) | Effect::ReplayReceipt(id, _) => Some(*id),
             _ => None,
         })
         .expect("every publish emits a receipt id")
@@ -249,9 +249,9 @@ fn double_submit_same_token_across_a_restart_mints_no_second_obligation() {
     );
     let retry_statuses: Vec<_> = effects
         .iter()
-        .filter_map(|effect| match effect {
-            Effect::EmitReceipt(_, status) => Some(status.clone()),
-            _ => None,
+        .flat_map(|effect| match effect {
+            Effect::ReplayReceipt(_, page) => page.facts.clone(),
+            _ => Vec::new(),
         })
         .collect();
     assert_eq!(

@@ -1436,18 +1436,15 @@ impl<S: EventStore> EngineCore<S> {
             match self.resolver.store().lookup_correlation(token.as_ref()) {
                 Ok(Some(existing_receipt_id)) => {
                     let receipt_id = ReceiptId(existing_receipt_id);
-                    let page = self.reattach_receipt(receipt_id);
+                    let mut page = self.reattach_receipt(receipt_id);
                     // A repeated durable correlation is a finite replay of
-                    // the existing obligation, not a second write. Return
-                    // each retained fact exactly once through the reducer's
-                    // one typed output vocabulary.
+                    // the existing obligation, not a second write. Keep that
+                    // replay distinct from a new live fact so runtime can
+                    // prime only this publisher's fresh mailbox before it
+                    // joins live delivery.
                     if page.outcome == ReattachOutcome::Attached {
                         debug_assert!(!page.facts.is_empty());
-                        return page
-                            .facts
-                            .into_iter()
-                            .map(|status| Effect::EmitReceipt(receipt_id, status))
-                            .collect();
+                        return vec![Effect::ReplayReceipt(receipt_id, page)];
                     }
                     // Review (#591, PR #604 finding 1): never mask a corrupt
                     // retained identity behind fabricated acceptance.
@@ -1462,11 +1459,9 @@ impl<S: EventStore> EngineCore<S> {
                                 .to_string(),
                         ),
                     };
-                    // This effect exists only so `publish_result` can
-                    // extract the EXISTING receipt id for the synchronous
-                    // `publish_tracked` reply -- `publish_result` matches
-                    // any `EmitReceipt` regardless of status.
-                    return vec![Effect::EmitReceipt(receipt_id, status)];
+                    debug_assert!(page.facts.is_empty());
+                    page.facts.push(status);
+                    return vec![Effect::ReplayReceipt(receipt_id, page)];
                 }
                 Ok(None) => {}
                 Err(err) => return self.fail_unaccepted(err.to_string()),

@@ -33,7 +33,7 @@ use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, Derived, Filter, Freshness,
     IdentityField, Selector, SourceAuthority,
 };
-use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
+use nmp_grammar::{CorrelationToken, Durability, WriteIntent, WritePayload, WriteRouting};
 use nmp_local_signer::LocalKeySigner;
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
@@ -1248,6 +1248,91 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
     assert!(matches!(
         handle.reattach_receipt(nmp::mechanism::core::ReceiptId(999_999)),
         ReceiptReattachment::NotFound
+    ));
+
+    handle.shutdown();
+    thread.join();
+}
+
+#[test]
+fn correlation_retry_replays_only_to_its_new_observer_then_joins_live_delivery() {
+    let keys = Keys::generate();
+    let correlation =
+        CorrelationToken::try_from("runtime-retry-isolation").expect("bounded fixture token");
+    let (thread, handle) = EngineThread::spawn(
+        MemoryStore::new(),
+        FixtureDirectory::new(),
+        10,
+        PoolConfig::default(),
+        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+    )
+    .expect("test engine thread construction");
+    handle.set_active_account(Some(keys.public_key()));
+
+    let original = handle
+        .publish_tracked(WriteIntent {
+            payload: WritePayload::Unsigned(UnsignedEvent::new(
+                keys.public_key(),
+                Timestamp::from(100),
+                Kind::TextNote,
+                vec![],
+                "original correlation body",
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+            correlation: Some(correlation.clone()),
+        })
+        .expect("original receipt");
+    assert_eq!(original.statuses.recv().unwrap(), WriteStatus::Accepted);
+    assert_eq!(
+        original.statuses.recv().unwrap(),
+        WriteStatus::AwaitingCapability {
+            pubkey: keys.public_key()
+        }
+    );
+
+    let retry = handle
+        .publish_tracked(WriteIntent {
+            payload: WritePayload::Unsigned(UnsignedEvent::new(
+                keys.public_key(),
+                Timestamp::from(101),
+                Kind::TextNote,
+                vec![],
+                "different retry body must not be accepted",
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+            correlation: Some(correlation),
+        })
+        .expect("correlation retry");
+    assert_eq!(retry.id, original.id);
+    assert_eq!(retry.statuses.recv().unwrap(), WriteStatus::Accepted);
+    assert_eq!(
+        retry.statuses.recv().unwrap(),
+        WriteStatus::AwaitingCapability {
+            pubkey: keys.public_key()
+        }
+    );
+    assert_eq!(
+        original.statuses.try_recv(),
+        Err(FifoTryRecvError::Empty),
+        "retained retry facts belong only to the newly attached observer"
+    );
+
+    handle
+        .add_signer(local_signer(&keys))
+        .expect("local signer has a public key");
+    assert!(wait_for_status(
+        &original.statuses,
+        Duration::from_secs(2),
+        |status| matches!(status, WriteStatus::Signed(_))
+    ));
+    assert!(wait_for_status(
+        &retry.statuses,
+        Duration::from_secs(2),
+        |status| matches!(status, WriteStatus::Signed(_))
     ));
 
     handle.shutdown();

@@ -152,8 +152,8 @@ impl nmp_transport::PoolEventSink for EnginePoolSink {
 
 /// One delivered batch for a live subscription: an exact row transition
 /// rebased onto the receiver's previous batch + the query's latest per-source
-/// acquisition evidence (see [`RowsReceiver`] and the module doc's "two
-/// delivery channels" note).
+/// acquisition evidence (see [`RowsReceiver`] and the module doc's "One
+/// reducer-to-runtime delivery path" note).
 pub type RowsMsg = (Vec<RowDelta>, AcquisitionEvidence, Vec<ObservationEvidence>);
 pub type HistoryMsg = HistoryBatch;
 
@@ -729,9 +729,12 @@ fn deliver_receipt_replay_page(
 ) -> (ReattachOutcome, Option<ReceiptReplayCursor>) {
     let outcome = page.outcome;
     let next_cursor = page.next_cursor.clone();
-    let accepted_all = outcome == ReattachOutcome::Attached
-        && page.facts.into_iter().all(|status| sender.send(status));
-    if accepted_all && next_cursor.is_none() && core.receipt_is_live(id) {
+    let accepted_all = page.facts.into_iter().all(|status| sender.send(status));
+    if accepted_all
+        && outcome == ReattachOutcome::Attached
+        && next_cursor.is_none()
+        && core.receipt_is_live(id)
+    {
         deliveries.register(
             id,
             registration,
@@ -747,11 +750,28 @@ fn publish_result(effects: &[Effect]) -> Result<ReceiptId, PublishError> {
     effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::EmitReceipt(id, _) => Some(Ok(*id)),
+            Effect::EmitReceipt(id, _) | Effect::ReplayReceipt(id, _) => Some(Ok(*id)),
             Effect::PublishFailed(err) => Some(Err(*err)),
             _ => None,
         })
         .expect("every publish produces a receipt id or typed allocation failure")
+}
+
+fn take_publish_replay(effects: &mut Vec<Effect>) -> Option<(ReceiptId, core::ReceiptReplayPage)> {
+    let replay_index = effects
+        .iter()
+        .position(|effect| matches!(effect, Effect::ReplayReceipt(..)))?;
+    let replay = match effects.remove(replay_index) {
+        Effect::ReplayReceipt(id, page) => (id, page),
+        _ => unreachable!("the located effect is a receipt replay"),
+    };
+    debug_assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::ReplayReceipt(..))),
+        "one publish can resolve at most one existing receipt"
+    );
+    Some(replay)
 }
 
 #[cfg(test)]
@@ -4662,26 +4682,58 @@ fn engine_loop<S, D>(
                 registration,
                 reply,
             } => {
-                let mut effects = core.handle(EngineMsg::Tick(Timestamp::now()));
-                let publish_effects = core.handle(EngineMsg::Publish(intent));
+                // Deliver any wall-clock transition before calculating a
+                // correlation retry's retained page. Otherwise the replay
+                // would already include that transition, then registering
+                // its fresh observer before dispatching the Tick effect would
+                // deliver the same fact to it a second time.
+                let tick_effects = core.handle(EngineMsg::Tick(Timestamp::now()));
+                dispatch_core_effects(
+                    &mut core,
+                    tick_effects,
+                    &pool,
+                    &mut row_channels,
+                    &mut history_channels,
+                    &mut diag_channels,
+                    &mut preambles,
+                    &registry,
+                    dispatch_runtime,
+                );
+                let mut publish_effects = core.handle(EngineMsg::Publish(intent));
                 let result = publish_result(&publish_effects);
+                let replay = take_publish_replay(&mut publish_effects);
                 if let Ok(id) = result {
-                    receipt_deliveries.borrow_mut().register(
-                        id,
-                        registration.clone(),
-                        sender,
-                        ReceiptReplayCursor::new(id),
-                    );
+                    if let Some((replay_id, page)) = replay {
+                        debug_assert_eq!(replay_id, id);
+                        let (_, next_cursor) = deliver_receipt_replay_page(
+                            &core,
+                            &mut receipt_deliveries.borrow_mut(),
+                            id,
+                            sender,
+                            registration.clone(),
+                            page,
+                        );
+                        debug_assert!(
+                            next_cursor.is_none(),
+                            "correlation publish replay is calculated as one complete page"
+                        );
+                    } else {
+                        receipt_deliveries.borrow_mut().register(
+                            id,
+                            registration.clone(),
+                            sender,
+                            ReceiptReplayCursor::new(id),
+                        );
+                    }
                 }
                 if reply.send(result).is_err() {
                     if let Ok(id) = result {
                         receipt_deliveries.borrow_mut().detach(id, &registration);
                     }
                 }
-                effects.extend(publish_effects);
                 dispatch_core_effects(
                     &mut core,
-                    effects,
+                    publish_effects,
                     &pool,
                     &mut row_channels,
                     &mut history_channels,
@@ -4953,24 +5005,8 @@ fn engine_loop<S, D>(
                     dispatch_runtime,
                 );
             }
-            Cmd::Engine(EngineMsg::Publish(intent)) => {
-                // Acceptance timestamps and NIP-40 refusal are wall-clock
-                // facts. Advance the pure reducer clock immediately before
-                // the one accept transaction; otherwise a fresh runtime's
-                // clock would remain zero until its first unrelated deadline.
-                let mut effects = core.handle(EngineMsg::Tick(Timestamp::now()));
-                effects.extend(core.handle(EngineMsg::Publish(intent)));
-                dispatch_core_effects(
-                    &mut core,
-                    effects,
-                    &pool,
-                    &mut row_channels,
-                    &mut history_channels,
-                    &mut diag_channels,
-                    &mut preambles,
-                    &registry,
-                    dispatch_runtime,
-                );
+            Cmd::Engine(EngineMsg::Publish(_)) => {
+                unreachable!("runtime publishes always carry a fresh delivery target")
             }
             Cmd::Engine(EngineMsg::SignerCompleted(id, generation, result)) => {
                 registry.finish_pending_write(id, generation);
@@ -5675,6 +5711,9 @@ fn dispatch_effect(
                 .receipt_deliveries
                 .borrow_mut()
                 .deliver(core, id, status);
+        }
+        Effect::ReplayReceipt(..) => {
+            unreachable!("publish replay must be consumed with its fresh delivery target")
         }
         Effect::PublishFailed(..) => {
             // `PublishTracked` consumes this typed pre-receipt failure for
