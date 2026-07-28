@@ -53,7 +53,7 @@ public enum ReactionError: Error, Sendable, Equatable {
     case targetNotVerified(eventID: String)
     case canonicalLookupUnavailable(reason: String)
     case engineClosed
-    case noActiveAccount
+    case noActiveReactionAuthor
     case emptyEmoji
     case standardValueRequiresTypedVariant(got: String)
     case customEmojiRequiresMetadata(got: String)
@@ -73,8 +73,8 @@ public enum ReactionError: Error, Sendable, Equatable {
             self = .canonicalLookupUnavailable(reason: reason)
         case .EngineClosed:
             self = .engineClosed
-        case .NoActiveAccount:
-            self = .noActiveAccount
+        case .NoActiveReactionAuthor:
+            self = .noActiveReactionAuthor
         case .EmptyEmoji:
             self = .emptyEmoji
         case .StandardValueRequiresTypedVariant(let got):

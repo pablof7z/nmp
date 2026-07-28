@@ -33,6 +33,17 @@ class NIP25Test {
             withTimeout(5_000) {
                 receipt.status.first { it is WriteStatus.Signed }
             } as WriteStatus.Signed
+        val observed =
+            withTimeout(5_000) {
+                engine
+                    .observe(
+                        NMPFilter(
+                            kinds = listOf(1u),
+                            authors = NMPBinding.Literal(setOf(account.publicKey)),
+                        ),
+                    ).first { batch -> batch.rows.any { it.id == signed.eventId } }
+            }
+        assertEquals(signed.eventId, observed.rows.first { it.id == signed.eventId }.id)
         return signed.eventId
     }
 
@@ -96,7 +107,7 @@ class NIP25Test {
                     assertThrows(ReactionError::class.java) {
                         engine.reactionDraft(target, ReactionValue.Like)
                     }
-                assertEquals(ReactionError.NoActiveAccount, error)
+                assertEquals(ReactionError.NoActiveReactionAuthor, error)
 
                 val account = engine.addAccount(secret)
                 engine.setActiveAccount(account.publicKey)
@@ -118,7 +129,8 @@ class NIP25Test {
                 FfiReactionException.CanonicalLookupUnavailable("closed") to
                     ReactionError.CanonicalLookupUnavailable("closed"),
                 FfiReactionException.EngineClosed() to ReactionError.EngineClosed,
-                FfiReactionException.NoActiveAccount() to ReactionError.NoActiveAccount,
+                FfiReactionException.NoActiveReactionAuthor() to
+                    ReactionError.NoActiveReactionAuthor,
                 FfiReactionException.EmptyEmoji() to ReactionError.EmptyEmoji,
                 FfiReactionException.StandardValueRequiresTypedVariant("+") to
                     ReactionError.StandardValueRequiresTypedVariant("+"),

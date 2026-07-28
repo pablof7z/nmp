@@ -29,14 +29,16 @@ impl ReactionDraft {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReactionDraftError {
     EngineClosed,
-    NoActiveAccount,
+    NoActiveReactionAuthor,
 }
 
 impl fmt::Display for ReactionDraftError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EngineClosed => f.write_str("engine already shut down"),
-            Self::NoActiveAccount => f.write_str("NIP-25 draft requires an active account"),
+            Self::NoActiveReactionAuthor => {
+                f.write_str("NIP-25 draft requires an active reaction author")
+            }
         }
     }
 }
@@ -72,6 +74,6 @@ pub fn reaction_draft(
     let author = engine
         .active_account()
         .map_err(|_| ReactionDraftError::EngineClosed)?
-        .ok_or(ReactionDraftError::NoActiveAccount)?;
+        .ok_or(ReactionDraftError::NoActiveReactionAuthor)?;
     Ok(compose_reaction_at(target, value, author, Timestamp::now()))
 }

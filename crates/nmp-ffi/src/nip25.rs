@@ -41,7 +41,7 @@ pub enum FfiReactionError {
     TargetNotVerified { event_id: String },
     CanonicalLookupUnavailable { reason: String },
     EngineClosed,
-    NoActiveAccount,
+    NoActiveReactionAuthor,
     EmptyEmoji,
     StandardValueRequiresTypedVariant { got: String },
     CustomEmojiRequiresMetadata { got: String },
@@ -64,7 +64,9 @@ impl fmt::Display for FfiReactionError {
                 write!(f, "canonical target lookup unavailable: {reason}")
             }
             Self::EngineClosed => f.write_str("engine already shut down"),
-            Self::NoActiveAccount => f.write_str("NIP-25 draft requires an active account"),
+            Self::NoActiveReactionAuthor => {
+                f.write_str("NIP-25 draft requires an active reaction author")
+            }
             Self::EmptyEmoji => f.write_str("Unicode reaction must not be empty"),
             Self::StandardValueRequiresTypedVariant { got } => {
                 write!(f, "{got:?} must use the typed like/dislike variant")
@@ -108,7 +110,9 @@ fn target_error_to_ffi(error: nmp_nip25::ReactionTargetError) -> FfiReactionErro
 fn draft_error_to_ffi(error: nmp_nip25::ReactionDraftError) -> FfiReactionError {
     match error {
         nmp_nip25::ReactionDraftError::EngineClosed => FfiReactionError::EngineClosed,
-        nmp_nip25::ReactionDraftError::NoActiveAccount => FfiReactionError::NoActiveAccount,
+        nmp_nip25::ReactionDraftError::NoActiveReactionAuthor => {
+            FfiReactionError::NoActiveReactionAuthor
+        }
     }
 }
 

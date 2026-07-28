@@ -13,6 +13,9 @@ final class NIP25Tests: XCTestCase {
     private func seedCanonicalTarget(_ engine: NMPEngine) async throws -> String {
         let account = try await engine.addAccount(secretKey: secret)
         try engine.setActiveAccount(account.publicKey)
+        let canonicalQuery = try engine.observe(
+            NMPFilter(kinds: [1], authors: .literal([account.publicKey]))
+        )
         let receipt = try await engine.publish(
             WriteIntent(
                 payload: .unsigned(
@@ -26,7 +29,7 @@ final class NIP25Tests: XCTestCase {
                 routing: .authorOutbox
             )
         )
-        return try await withThrowingTaskGroup(of: String.self) { group in
+        let eventID = try await withThrowingTaskGroup(of: String.self) { group in
             group.addTask {
                 for try await status in receipt.status {
                     if case .signed(let eventID) = status {
@@ -45,6 +48,27 @@ final class NIP25Tests: XCTestCase {
             group.cancelAll()
             return eventID
         }
+        let observedID = try await withThrowingTaskGroup(of: String.self) { group in
+            group.addTask {
+                for try await batch in canonicalQuery {
+                    if let row = batch.rows.first(where: { $0.id == eventID }) {
+                        return row.id
+                    }
+                }
+                throw TestFailure.noSignedEvent
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: 5_000_000_000)
+                throw TestFailure.timeout
+            }
+            guard let observedID = try await group.next() else {
+                throw TestFailure.noSignedEvent
+            }
+            group.cancelAll()
+            return observedID
+        }
+        XCTAssertEqual(observedID, eventID)
+        return eventID
     }
 
     private func fabricatedRow(id: String) -> Row {
@@ -100,7 +124,7 @@ final class NIP25Tests: XCTestCase {
         XCTAssertThrowsError(
             try engine.reactionDraft(target: target, value: .like)
         ) { error in
-            XCTAssertEqual(error as? ReactionError, .noActiveAccount)
+            XCTAssertEqual(error as? ReactionError, .noActiveReactionAuthor)
         }
 
         let account = try await engine.addAccount(secretKey: secret)
@@ -125,7 +149,7 @@ final class NIP25Tests: XCTestCase {
                 .canonicalLookupUnavailable(reason: "closed")
             ),
             (.EngineClosed, .engineClosed),
-            (.NoActiveAccount, .noActiveAccount),
+            (.NoActiveReactionAuthor, .noActiveReactionAuthor),
             (.EmptyEmoji, .emptyEmoji),
             (
                 .StandardValueRequiresTypedVariant(got: "+"),

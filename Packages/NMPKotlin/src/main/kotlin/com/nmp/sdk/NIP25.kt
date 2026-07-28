@@ -56,7 +56,8 @@ sealed class ReactionError(message: String) : Exception(message) {
 
     data object EngineClosed : ReactionError("engine already shut down")
 
-    data object NoActiveAccount : ReactionError("NIP-25 draft requires an active account")
+    data object NoActiveReactionAuthor :
+        ReactionError("NIP-25 draft requires an active reaction author")
 
     data object EmptyEmoji : ReactionError("Unicode reaction must not be empty")
 
@@ -84,7 +85,7 @@ sealed class ReactionError(message: String) : Exception(message) {
                 is FfiReactionException.CanonicalLookupUnavailable ->
                     CanonicalLookupUnavailable(ffi.reason)
                 is FfiReactionException.EngineClosed -> EngineClosed
-                is FfiReactionException.NoActiveAccount -> NoActiveAccount
+                is FfiReactionException.NoActiveReactionAuthor -> NoActiveReactionAuthor
                 is FfiReactionException.EmptyEmoji -> EmptyEmoji
                 is FfiReactionException.StandardValueRequiresTypedVariant ->
                     StandardValueRequiresTypedVariant(ffi.got)

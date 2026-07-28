@@ -133,7 +133,7 @@ fn ffi_refuses_malformed_unknown_signed_out_and_invalid_value_inputs() {
             Arc::clone(&target),
             FfiReactionValue::Like
         )),
-        FfiReactionError::NoActiveAccount
+        FfiReactionError::NoActiveReactionAuthor
     );
     engine.set_active_account(Some(keys.public_key())).unwrap();
     assert_eq!(

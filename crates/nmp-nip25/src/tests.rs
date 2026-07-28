@@ -288,7 +288,7 @@ fn account_change_reroots_author_and_signed_out_refuses() {
     engine.set_active_account(None).unwrap();
     assert_eq!(
         reaction_draft(&engine, &target, ReactionValue::like()),
-        Err(ReactionDraftError::NoActiveAccount)
+        Err(ReactionDraftError::NoActiveReactionAuthor)
     );
     engine.shutdown();
 }

@@ -3671,7 +3671,7 @@ enum Enum {
             docstring: None,
         },
         Variant {
-            name: "NoActiveAccount",
+            name: "NoActiveReactionAuthor",
             discr: None,
             fields: [],
             docstring: None,
