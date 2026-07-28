@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use nmp::{
-    Durability, Engine, EngineConfig, Kind, Timestamp, WriteIntent, WritePayload, WriteRouting,
-    WriteStatus,
+    Binding, Demand, Durability, Engine, EngineConfig, EventId, Filter, Freshness, Kind, LiveQuery,
+    RowDelta, Subscription, Timestamp, WriteIntent, WritePayload, WriteRouting, WriteStatus,
 };
 use nostr::{EventBuilder, Keys};
 
@@ -15,11 +15,30 @@ fn expect_error<T>(result: Result<T, FfiReactionError>) -> FfiReactionError {
     }
 }
 
+fn exact_cache_observation(engine: &Engine, event_id: EventId) -> Subscription {
+    let mut demand = Demand::from_filter(Filter {
+        ids: Some(Binding::Literal([event_id.to_hex()].into_iter().collect())),
+        ..Filter::default()
+    });
+    demand.freshness = Freshness::CacheOnly;
+    let observation = engine.observe(LiveQuery(demand), None).unwrap();
+    assert!(
+        observation
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .deltas
+            .is_empty(),
+        "fixture event must not exist before acceptance"
+    );
+    observation
+}
+
 fn accepted_target(engine: &Engine, keys: &Keys) -> nostr::Event {
     let event = EventBuilder::new(Kind::TextNote, "target")
         .custom_created_at(Timestamp::from(42u64))
         .sign_with_keys(keys)
         .unwrap();
+    let observation = exact_cache_observation(engine, event.id);
     engine.set_active_account(Some(keys.public_key())).unwrap();
     let receipt = engine
         .publish_tracked(WriteIntent {
@@ -36,6 +55,16 @@ fn accepted_target(engine: &Engine, keys: &Keys) -> nostr::Event {
             .recv_timeout(Duration::from_secs(2))
             .unwrap(),
         WriteStatus::Accepted
+    );
+    let frame = observation
+        .recv_timeout(Duration::from_secs(2))
+        .expect("canonical update after durable acceptance");
+    assert!(
+        frame
+            .deltas
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event.id)),
+        "durable acceptance must make the fixture visible through the canonical query"
     );
     event
 }

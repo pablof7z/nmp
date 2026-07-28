@@ -1,8 +1,9 @@
 use std::time::Duration;
 
 use nmp::{
-    Durability, Engine, EngineConfig, EventId, Kind, RelayUrl, Row, Tag, Timestamp, UnsignedEvent,
-    WriteIntent, WritePayload, WriteRouting, WriteStatus,
+    Binding, Demand, Durability, Engine, EngineConfig, EventId, Filter, Freshness, Kind, LiveQuery,
+    RelayUrl, Row, RowDelta, Subscription, Tag, Timestamp, UnsignedEvent, WriteIntent,
+    WritePayload, WriteRouting, WriteStatus,
 };
 use nostr::{Event, EventBuilder, Keys};
 
@@ -34,6 +35,37 @@ fn canonical_target(event: Event, sources: impl IntoIterator<Item = RelayUrl>) -
         sources: sources.into_iter().collect(),
     })
     .expect("signed fixture qualifies")
+}
+
+fn exact_cache_observation(engine: &Engine, event_id: EventId) -> Subscription {
+    let mut demand = Demand::from_filter(Filter {
+        ids: Some(Binding::Literal([event_id.to_hex()].into_iter().collect())),
+        ..Filter::default()
+    });
+    demand.freshness = Freshness::CacheOnly;
+    let observation = engine.observe(LiveQuery(demand), None).unwrap();
+    assert!(
+        observation
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .deltas
+            .is_empty(),
+        "fixture event must not exist before acceptance"
+    );
+    observation
+}
+
+fn assert_observation_added(observation: &Subscription, event_id: EventId) {
+    let frame = observation
+        .recv_timeout(Duration::from_secs(2))
+        .expect("canonical update after durable acceptance");
+    assert!(
+        frame
+            .deltas
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event_id)),
+        "durable acceptance must make the fixture visible through the canonical query"
+    );
 }
 
 #[test]
@@ -170,6 +202,7 @@ fn malformed_reaction_values_fail_before_draft_composition() {
 
 fn accepted_signed_target(engine: &Engine, target_keys: &Keys) -> Event {
     let event = signed_event(target_keys, Kind::TextNote, 42, vec![]);
+    let observation = exact_cache_observation(engine, event.id);
     engine
         .set_active_account(Some(target_keys.public_key()))
         .unwrap();
@@ -189,6 +222,7 @@ fn accepted_signed_target(engine: &Engine, target_keys: &Keys) -> Event {
             .expect("accepted status"),
         WriteStatus::Accepted
     );
+    assert_observation_added(&observation, event.id);
     event
 }
 
@@ -211,6 +245,7 @@ fn canonical_lookup_refuses_unknown_and_unverified_pending_rows() {
         "unsigned target".to_string(),
     );
     let pending_id = pending.id();
+    let observation = exact_cache_observation(&engine, pending_id);
     let receipt = engine
         .publish_tracked(WriteIntent {
             payload: WritePayload::Unsigned(pending),
@@ -227,6 +262,7 @@ fn canonical_lookup_refuses_unknown_and_unverified_pending_rows() {
             .unwrap(),
         WriteStatus::Accepted
     );
+    assert_observation_added(&observation, pending_id);
     assert_eq!(
         reaction_target(&engine, pending_id),
         Err(ReactionTargetError::TargetNotVerified {
