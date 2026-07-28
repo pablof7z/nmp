@@ -273,6 +273,23 @@ impl WireReq {
             .collect()
     }
 
+    /// The largest `limit` any of this REQ's filters carries, or `None` if
+    /// none of them is bounded.
+    ///
+    /// `max` rather than a set: the question these assertions ask is "did the
+    /// wire promise more rows than the feed asked for", and one over-large
+    /// filter is enough to answer yes. An absent `limit` is unbounded and is
+    /// deliberately NOT reported as zero -- unbounded and "asks for nothing"
+    /// are opposite conditions, and conflating them is how a bounded-feed
+    /// assertion would pass against a filter that dropped its window.
+    pub fn max_limit(&self) -> Option<u64> {
+        self.filters
+            .iter()
+            .filter_map(|f| f.get("limit"))
+            .filter_map(serde_json::Value::as_u64)
+            .max()
+    }
+
     /// Every kind this REQ asks for.
     pub fn kinds(&self) -> BTreeSet<u16> {
         self.filters
