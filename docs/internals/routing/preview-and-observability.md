@@ -19,7 +19,8 @@ related:
   - docs/internals/writes/event-builder.md
   - docs/internals/writes/identity.md
 issues:
-  - "OPEN: an observable preview that re-emits as knowledge changes was NOT designed (§5)"
+  - "DECIDED: preview stays one-shot; EOSE settlement is why the send-button race does not exist (§5)"
+  - "OPEN: an optional observeRoutePreview for knowledge changing after settlement is unspecified (§5)"
 ---
 
 # Route preview and stalled-write observability
@@ -203,13 +204,37 @@ explicit cancellation remains the one abandonment door.
 
 ---
 
-## 5. OPEN — a preview that re-emits
+## 5. DESIGNED — one-shot is the right shape, and why
 
-`preview_route` is poll-based: the compose screen re-calls it (on p-tag
-change, on its own timer, on whatever the app chooses) and convergence relies
-on §2.3 having armed discovery. An **observable preview** — a subscription
-that re-emits `RoutePreview` as directory knowledge changes, so the send
-button flips to enabled the moment the 10050 arrives without the app
-polling — was raised and NOT designed. No contract exists for its lifecycle,
-its interaction with the one-door `observe` rule, or its teardown. Design it
-before building it; do not grow it ad hoc out of §2.3.
+**Pablo ruled `preview_route` stays one-shot.** The reasoning corrects a
+mistaken framing that motivated an observable variant, and it is worth stating
+because the mistake is easy to repeat:
+
+> preview route should probably stay one shot, yes; since the preview would
+> complete once we EOSE from the relays anyway, so the "400ms later bob's 10050
+> arrives would imply that bob actually published their 10050 400ms after we
+> checked for it, not that the relay responded *after* we checked -- that
+> doesn't mean we can't offer an observeRoutePreview
+
+The argument for an observable preview had been: the compose screen previews,
+the answer is incomplete, the relay list lands moments later, and the send
+button is left stuck disabled. That story does not survive contact with §3's
+settlement rule. A preview does not return "incomplete" merely because a
+response has not arrived yet — it stays `Pending` until the discovery sources
+EOSE, and EOSE is precisely the point at which the answer is known one way or
+the other. So a preview that completes with unknowns remaining means the data
+genuinely was not published at the time we asked.
+
+That reframes the gap. "Bob's 10050 arrives 400ms later" does not describe a
+slow relay; it describes **Bob publishing a relay list 400ms after we looked**.
+That is a real event worth reacting to, but it is a rare one, and it is not the
+race the observable variant was invented to fix — because that race does not
+exist.
+
+So: one-shot is correct for the send-button case, which was the motivating use.
+An `observeRoutePreview` may still be offered for the genuine case (knowledge
+changing after settlement), and Pablo explicitly left that door open — "that
+doesn't mean we can't offer an observeRoutePreview". It is not required for
+correctness of the compose flow, and it must not be grown ad hoc out of §2.3:
+its lifecycle, its interaction with the one-door `observe` rule, and its
+teardown all need designing first.

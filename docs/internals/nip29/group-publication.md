@@ -173,7 +173,7 @@ Pre-signed is load-bearing there. @lark-codex's 29er-next is **100% unsigned**,
 with no pre-signed call site at all. So this is one app's real requirement,
 not a universal pattern — it earns a path, not the center of the design.
 
-## 7. NIP-29's own kinds (9000–9021) belong in `nmp-nip29` — OPEN, deliberately
+## 7. NIP-29's own kinds (9000–9021) belong in `nmp-nip29` — DESIGNED, IN SCOPE
 
 Pablo, on where join/leave/moderation composition lives:
 
@@ -182,11 +182,36 @@ Pablo, on where join/leave/moderation composition lives:
 
 Unlike kind 9 — which NIP-29 does **not** own; C7 chat is `nmp-nipc7`'s, and
 the ownership gate enforces that boundary (`scripts/check-nip29-ownership.sh`)
-— the 9000–9021 join/leave/moderation schema genuinely IS NIP-29's own. Typed
-composers for them are deliberately **not designed yet**; when they exist they
-are `nmp-nip29`'s, presumably as `EventBuilder`-producing composers under the
-composer rule in `docs/internals/writes/event-builder.md`, published through
-the same `Group` door.
+— the 9000–9021 join/leave/moderation schema genuinely IS NIP-29's own.
+
+**Pablo ruled these IN SCOPE for this effort — not a later addition:**
+
+> nmp doesn't know what 'remove user from group means', but nmp-nip29 crate
+> does and must provide the group.publish.... group.remove_user....
+> group.join_request... -- and no, it's not "additive" in the sense that we can
+> avoid shipping it during this current effort; it's IN SCOPE.
+
+So `Group` carries typed composers for NIP-29's own operations alongside
+`publish`:
+
+```rust
+group.publish(&engine, builder)?;          // any kind — kind-blind
+group.join_request(&engine, invite_code)?; // 9021
+group.remove_user(&engine, pubkey)?;       // 9001
+group.edit_metadata(&engine, name, about)?;// 9002
+```
+
+Why this is not optional polish: without it every app looks up NIP-29's kind
+numbers and tag schema itself, and a subtly wrong tag produces a relay
+rejection that presents as a permissions or routing problem rather than a
+malformed event. The knowledge exists in exactly one place or it is
+reimplemented, differently, in every consumer.
+
+The boundary that keeps this honest: these are the kinds NIP-29 *defines*. Kind
+9 chat is NOT one of them — it is `nmp-nipc7`'s, and the ownership gate
+enforces that (`scripts/check-nip29-ownership.sh`). Owning 9000–9021 does not
+reopen the defect #838 closed, because that defect was NIP-29 claiming schema
+belonging to others.
 
 ## 8. What the app never does — summary of the boundary
 

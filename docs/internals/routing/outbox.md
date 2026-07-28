@@ -22,7 +22,7 @@ related:
 issues:
   - "master's AuthorOutbox is author-write-relays-only; the full fan-out is designed, unbuilt"
   - "publishing before the first relay-list fetch terminally fails today (§2.2)"
-  - "OPEN: does the write side adopt fallback_relays() with the read path's suppression rule (§6)"
+  - "DECIDED: the write side adopts fallback_relays() with the read path's suppression rule (§6.2)"
 ---
 
 # Outbox — the built-in default write resolver
@@ -210,15 +210,27 @@ reaches the app relays with no exception, no special case, and no route the
 app ever names. The request is retired by the model, not by an
 accommodation. Recorded so nobody re-adds a kind:0-shaped special path.
 
-### 6.2 OPEN — does the write side adopt `fallback_relays()`?
+### 6.2 DESIGNED — the write side adopts `fallback_relays()`
 
 The read path has a third operator set: `fallback_relays`
 (`crates/nmp-router/src/facts.rs:93-103`), applied per-author only when the
 author's own-relay coverage falls under the 2-relay-min **and** no app relay
 is configured — its doc states "`app_relays` suppresses fallback entirely".
-Whether the write-side outbox resolver adopts the same set with the same
-suppression rule was NOT settled in the design session. Either answer is
-coherent: symmetry with reads says yes; "a write fans out to every known
-write relay, it does not need coverage-solving" (the shipped `resolve_routes`
-doc, `write.rs:2570-2578`) says the 2-relay-min trigger has no write-side
-analogue. Undecided — do not assume either way.
+
+**Pablo ruled yes: the write-side outbox resolver adopts the same set with the
+same suppression rule.**
+
+The failure mode this closes is concrete. You reply to someone whose kind 10002
+lists exactly one relay. Without fallback the reply goes to that single relay
+and nowhere else, so if it is down the person you are replying to never sees
+it. Reads already faced this exact question for the same author and answered
+it; a write that cannot reach its addressee is the worse half of the problem,
+not the lesser one.
+
+The counter-argument considered and rejected: the shipped `resolve_routes` doc
+says "a write fans out to every known write relay, it does not need
+coverage-solving" (`write.rs:2570-2578`), which reads as though the
+2-relay-min trigger has no write-side analogue. It does have one — it is just
+about the RECIPIENT's coverage rather than the author's fan-out. Fanning out to
+every known write relay and topping up a recipient below coverage are
+independent, and adopting the second does not weaken the first.
