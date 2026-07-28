@@ -10,17 +10,19 @@
 # Deliberately NOT checked, because the check would be mostly false positives
 # and an allowlist is the same maintenance trap as a shim:
 #
-#   *_v1        storage table and schema identifiers (packed_postings_v1,
-#               index_cardinality_meta_v1) -- versioned names, not shims.
-#   *_old       English in test names ("closes old before new").
+#   *_vN        storage table identifiers (events_v6, postings_meta_v8).
+#               These name the ONE current epoch's tables; they are not a set
+#               of readable epochs. SCHEMA_VERSION refuses any store that is
+#               not exactly current, and no pre-current decoder exists.
+#   *_old       English in local names ("older before newer"), not a surface.
 #   compat*     UniFFI ABI metadata between core and provider components
 #               (nmp-nip46-ffi) -- build-time type identity, not versioning.
-#   legacy*     interop with FOREIGN implementations. `nmp-nip46`'s
-#               `legacy_secret` accepts an older NIP-46 request shape so
-#               third-party signers can migrate. That is legitimate: those
-#               signers are strangers we genuinely cannot update. The rule
-#               bans compatibility with OUR OWN retired surface, not interop
-#               with other people's protocol implementations.
+#   legacy*     one-way import of FOREIGN material. `nmp-nip46-ffi`'s
+#               brownfield door (#571) reads a pre-NMP client's own persisted
+#               session parts. The rule bans compatibility with OUR OWN
+#               retired surface; it does not ban reading someone else's bytes
+#               once, on the way in. NMP's own retired NIP-46 connect shape
+#               was deleted outright rather than kept behind a second branch.
 #
 # Distinguishing those cases needs judgement, so review owns them. This gate
 # owns the part that does not: a declared deprecation.
