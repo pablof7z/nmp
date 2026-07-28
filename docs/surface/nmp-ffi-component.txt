@@ -3607,6 +3607,215 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiReactionError",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "InvalidEventId",
+            discr: None,
+            fields: [
+                Field {
+                    name: "got",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "TargetNotFound",
+            discr: None,
+            fields: [
+                Field {
+                    name: "event_id",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "TargetNotVerified",
+            discr: None,
+            fields: [
+                Field {
+                    name: "event_id",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "CanonicalLookupUnavailable",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "EngineClosed",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "NoActiveAccount",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "EmptyEmoji",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "StandardValueRequiresTypedVariant",
+            discr: None,
+            fields: [
+                Field {
+                    name: "got",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "CustomEmojiRequiresMetadata",
+            discr: None,
+            fields: [
+                Field {
+                    name: "got",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "InvalidEmojiToken",
+            discr: None,
+            fields: [
+                Field {
+                    name: "got",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "InvalidCustomEmojiShortcode",
+            discr: None,
+            fields: [
+                Field {
+                    name: "got",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "InvalidCustomEmojiUrl",
+            discr: None,
+            fields: [
+                Field {
+                    name: "got",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Error {
+        flat: false,
+    },
+    non_exhaustive: false,
+    docstring: Some(
+        "Typed failures from canonical target qualification and draft composition.",
+    ),
+}
+
+enum Enum {
+    name: "FfiReactionValue",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Like",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Dislike",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Emoji",
+            discr: None,
+            fields: [
+                Field {
+                    name: "value",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "CustomEmoji",
+            discr: None,
+            fields: [
+                Field {
+                    name: "shortcode",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "image_url",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "Native semantic input for one reaction. Standard values and NIP-30\ncustom emoji cannot be smuggled through an unvalidated raw content field.",
+    ),
+}
+
+enum Enum {
     name: "FfiReceiptReattachment",
     module_path: "nmp_ffi",
     remote: false,
@@ -8918,6 +9127,102 @@ object Object {
 }
 
 object Object {
+    name: "FfiProtocolDraft",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [],
+    methods: [],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_ffiprotocoldraft",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiProtocolDraft",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiProtocolDraft",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_ffiprotocoldraft",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiProtocolDraft",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: None,
+}
+
+object Object {
+    name: "FfiReactionTarget",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [],
+    methods: [],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_ffireactiontarget",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiReactionTarget",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiReactionTarget",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_ffireactiontarget",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiReactionTarget",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "A target qualified from one exact event in NMP's canonical store.\n\nThe inner NIP-25 schema is intentionally unavailable through UniFFI.",
+    ),
+}
+
+object Object {
     name: "FfiSetOp",
     imp: Struct,
     module_path: "nmp_ffi",
@@ -10079,6 +10384,155 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_publish",
             checksum: Some(
                 14085,
+            ),
+        },
+        Method {
+            name: "reaction_draft",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "target",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "FfiReactionTarget",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "value",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiReactionValue",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "FfiProtocolDraft",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_reaction_draft",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "target",
+                        type_: RustArcPtr(
+                            "FfiReactionTarget",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "value",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiReactionValue",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiProtocolDraft",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Compose one opaque unsigned kind:7 draft using the active engine\naccount and Rust-owned time. This does not route, sign, persist, or\npublish the event.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiReactionError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_reaction_draft",
+            checksum: Some(
+                52563,
+            ),
+        },
+        Method {
+            name: "reaction_target",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "event_id",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "FfiReactionTarget",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_reaction_target",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "event_id",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiReactionTarget",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Qualify one event as an opaque NIP-25 target through NMP's canonical\ncache. Native-provided row fields and provenance are never accepted.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiReactionError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_reaction_target",
+            checksum: Some(
+                21932,
             ),
         },
         Method {
