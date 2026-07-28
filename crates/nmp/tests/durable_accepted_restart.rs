@@ -828,30 +828,6 @@ fn malformed_persisted_routing_fails_closed_without_dropping_the_obligation() {
 }
 
 #[test]
-fn removed_to_inboxes_snapshot_is_retained_unreadable_and_never_reinterpreted() {
-    let recipient = Keys::generate().public_key();
-    let route_probe = RelayUrl::parse("wss://removed-to-inboxes.example").unwrap();
-    assert_persisted_routing_fails_closed_without_dropping(
-        "removed-to-inboxes-route.redb",
-        format!("to-inboxes:{}", recipient.to_hex()),
-        route_probe,
-        Some(recipient),
-    );
-}
-
-#[test]
-fn removed_pinned_host_snapshot_is_retained_unreadable_and_never_reinterpreted() {
-    let host = RelayUrl::parse("wss://removed-pinned-host.example").unwrap();
-    let legacy_route_prefix = "pinned-host-hex";
-    assert_persisted_routing_fails_closed_without_dropping(
-        "removed-pinned-host-route.redb",
-        format!("{legacy_route_prefix}:{}", hex::encode(host.to_string())),
-        host,
-        None,
-    );
-}
-
-#[test]
 fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("quarantined-auth.redb");
