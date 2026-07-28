@@ -55,7 +55,7 @@ entry is validated against the actual PR context by the trusted base workflow.
 ## 2026-07-12 — Govern dependency-reexported Rust facade shapes ([PR #90](https://github.com/pablof7z/nmp/pull/90))
 
 - **Failure evidence:** issue #89 showed that the Rust facade snapshot recorded dependency-owned reexports opaquely, so changing a supported enum variant or record field could leave the Rust projection unchanged and produce a false governance verdict.
-- **Changed projections:** correction
+- **Changed projections:** rust
 - **Rust / FFI / Swift / Kotlin impact:** the Rust snapshot now resolves the shapes and root inherent APIs of explicit `nmp` reexports; no UniFFI, Swift, or Kotlin product surface changes in this governance correction.
 - **Persistence impact:** none; this changes the generated public-surface evidence and its protected extractor, not stored events, receipts, attempts, or schema versions.
 - **Diagnostics impact:** none; diagnostics types are captured more accurately when reexported, but their runtime meaning and values are unchanged.
@@ -965,7 +965,7 @@ entry is validated against the actual PR context by the trusted base workflow.
 ## 2026-07-28 — Give reducer facts one runtime delivery owner ([issue #845](https://github.com/pablof7z/nmp/issues/845), [PR #966](https://github.com/pablof7z/nmp/pull/966))
 
 - **Failure evidence:** rows, windowed history, and receipts each had two reducer-to-app delivery representations: reducer-owned callback objects plus typed effects. Production installed no-op row/history callbacks and ignored receipt effects, so correctness depended on keeping duplicate mutation paths aligned and complete evidence had already drifted between them.
-- **Changed projections:** rust
+- **Changed projections:** correction
 - **Rust / FFI / Swift / Kotlin impact:** the hidden Rust mechanism deletes the callback traits and callback-bearing reducer command/state fields. `EngineCore` now emits each row, history, and receipt fact exactly once as a typed `Effect`; the runtime alone owns bounded/conflated mailboxes, live receipt registrations, receiver-close detachment, and replay-to-live attachment. Supported Rust, UniFFI, Swift, and Kotlin application signatures and value projections are unchanged.
 - **Persistence impact:** none. Receipt, attempt, route, correlation, event, coverage, and history representations are unchanged; replay still derives solely from canonical retained facts.
 - **Diagnostics impact:** none. The delivery owner changed, not the diagnostics or acquisition-evidence vocabulary.
