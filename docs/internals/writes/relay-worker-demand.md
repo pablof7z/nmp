@@ -2,7 +2,7 @@
 title: Durable write relay-worker demand
 category: writes
 slug: relay-worker-demand
-status: designed
+status: built
 date: 2026-07-28
 investigated_revision: 057f59ef9f3a5cbc1a3ce4e3c88d189d55b28244
 runtime_evidence_revision: 9a8ad1fd1a2999b067c19d842467a76a257f7f25
@@ -33,9 +33,11 @@ database while preserving that access pattern would leave the architectural
 mistake intact.
 
 The design is tracked by
-[#985](https://github.com/pablof7z/nmp/issues/985). As of the date and
-`investigated_revision` above, the repeated scan is **built** and the
-in-memory projection is **designed, not implemented**.
+[#985](https://github.com/pablof7z/nmp/issues/985). The "Built behavior"
+section below describes what existed at `investigated_revision`; the
+projection described under "Designed behavior" is now **implemented**, in
+`crates/nmp/src/core/lane_projection.rs`. See "What was built" for the exact
+shape and for the residuals that deliberately remain.
 
 ## The questions that led here
 
@@ -441,19 +443,62 @@ removed and re-profiled.
   - existing read-count coverage and explicit evidence that worker accounting
     remained globally scanned after the narrower wake-index optimization
 
-## Open decisions
+## What was built
 
-The implementation PR still needs to settle these internal details without
-weakening the invariants above:
+The projection landed as designed. The details the design left open were
+settled as follows.
 
-- the exact type boundary that makes committed lane projection updates
-  mechanically unavoidable;
-- the precise degraded-state representation and reconciliation trigger for
-  `DurabilityOutcome::Unknown`;
-- service behavior when startup cannot reconstruct durable lane state at all;
-- whether performance counters live only in tests or also appear in runtime
-  diagnostics;
-- whether an O(pending) in-memory union remains sufficient once parked writes
-  from #968 exist at production scale.
+**The mutation boundary.** `crates/nmp/src/core/lane_projection.rs` owns one
+`commit_*` door per `EventStore` lane-mutation constructor. Each wraps its
+store counterpart, returns exactly what the store door returns (so no call
+site's error handling changed), and routes the committed `RecoveredLane`
+through `EngineCore::project_committed_lane`. Nonterminal inserts the relay;
+terminal removes it; the same door also subsumes what the two
+`bootstrap_outbox_lanes` call sites used to do by hand for `lane_relays` and
+the #525 reverse wake index.
 
-None of these requires choosing a database winner before implementation begins.
+Bypassing is mechanically prevented rather than reviewed for.
+`every_lane_mutation_constructor_goes_through_the_projection_door` derives the
+door list from `nmp-store`'s own trait signatures (`&mut self` plus
+`RecoveredLane`, with `record_route_revision` and `close_terminal_intent`
+named explicitly because their signatures do not mention it), then asserts
+that no file under `crates/nmp/src` outside the projection module reaches
+`store_mut().<door>(`. Whitespace is stripped before matching, so rustfmt's
+multi-line builder chains are caught identically.
+
+**Degraded state.** `EngineCore::worker_projection_degraded` is latched
+whenever a lane mutation fails with `DurabilityOutcome::Unknown`, and the
+projection is widened with every relay that mutation could have created or
+left nonterminal. It is a reconciliation/diagnostic signal, never a fallback
+switch: nothing reads it to decide to scan. `recover_on_boot`'s existing
+one-shot rebuild from canonical rows is the only reconciliation and the only
+thing that clears it — which is sufficient, because every `Unknown` fault also
+reports `PersistenceFault::requires_reopen`.
+
+**Startup that cannot reconstruct.** Unchanged, and still owned with #771/#904:
+`recover_on_boot` already fabricates nothing from an unreadable journal and
+degrades read-only. #985 did not widen that behavior.
+
+**Counters.** Test-only. `write_relay_workers` performs no store read at all
+now, so there is no per-dispatch quantity left for runtime diagnostics to
+report; the counting store double lives in `core/lane_projection_tests.rs`.
+
+### Residuals this PR deliberately leaves
+
+- `schedule_ready` still calls `recover_all_lanes`, an `O(pending)` scan. It
+  needs per-lane states, revisions and ordinals, which a relay-name projection
+  cannot answer; #525's stance that this accounting is global by definition is
+  unchanged, and the scan is a much smaller share of the observed profile than
+  worker demand was. It is now the last `O(pending)` lane read on the dispatch
+  path.
+- The in-memory union is still `O(pending)`. Measured on the calculation
+  itself — 200 intents × 3 relays on a `RedbStore`, 500 passes, both bodies run
+  against the same populated store in one process — it is 1.50 s and 100 000
+  lane reads before versus 219 ms and 0 lane reads after. The remaining 219 ms
+  is the union itself. A global refcounted set stays a separately measured
+  follow-up, exactly as the design sequenced it.
+- No Mosaico-shaped end-to-end before/after profile has been taken.
+  Whole-process and engine-thread CPU therefore remain unmeasured and must not
+  be claimed from the number above.
+
+None of this required choosing a database winner.
