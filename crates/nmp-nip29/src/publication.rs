@@ -1,13 +1,14 @@
 //! Pure NIP-29 contextual publication (#838).
 //!
-//! The foreign event's schema is already complete when it enters this
-//! module. NIP-29 owns only the selected group host and the `h` context it
-//! appends. It does not choose an event kind, interpret content, materialize
-//! mentions or notifications, or invent reply semantics.
+//! The event's schema is already complete when it enters this module.
+//! NIP-29 owns neither the event's kind nor its schema: it owns only the
+//! selected group host and the `h` context it appends. It does not choose an
+//! event kind, interpret content, materialize mentions or notifications, or
+//! invent reply semantics.
 
 use nostr::{RelayUrl, Tag, UnsignedEvent};
 
-/// A complete foreign-schema draft contextualized for one NIP-29 group host.
+/// A complete draft contextualized for one NIP-29 group host.
 ///
 /// Keeping the selected host and event together prevents the context owner
 /// from returning an `h`-tagged event while silently dropping the relay on
@@ -35,15 +36,15 @@ impl GroupPublication {
 /// NIP-29 contextualization rejects tags whose authority belongs here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupContextError {
-    /// The complete foreign draft already carried `h` or `previous`.
+    /// The complete draft already carried `h` or `previous`.
     ///
     /// `h` is derived from the selected group. `previous` remains impossible
     /// until a real scoped live-window capability can mint it; callers cannot
-    /// smuggle either tag through as foreign schema.
+    /// smuggle either tag through in a draft.
     ReservedTag(String),
 }
 
-/// Add exactly one `["h", group_id]` row to a complete foreign-schema draft.
+/// Add exactly one `["h", group_id]` row to a complete draft.
 ///
 /// Every existing field and tag survives byte-for-byte and in its original
 /// order. The selected host is retained in [`GroupPublication`]. No
@@ -94,7 +95,7 @@ mod tests {
     }
 
     #[test]
-    fn foreign_kind_and_schema_survive_except_for_appended_h() {
+    fn draft_kind_and_schema_survive_except_for_appended_h() {
         let pubkey = author();
         let created_at = Timestamp::from(1_700_000_000u64);
         let draft = UnsignedEvent::new(
@@ -105,7 +106,7 @@ mod tests {
                 Tag::parse(["title", "sunset"]).unwrap(),
                 Tag::parse(["imeta", "url https://cdn.example/sunset.jpg"]).unwrap(),
             ],
-            "foreign content".to_string(),
+            "draft content".to_string(),
         );
 
         let publication = contextualize_group_event(host(), "photographers", draft).unwrap();
@@ -113,7 +114,7 @@ mod tests {
         assert_eq!(publication.event().pubkey, pubkey);
         assert_eq!(publication.event().created_at, created_at);
         assert_eq!(publication.event().kind, Kind::from(20u16));
-        assert_eq!(publication.event().content, "foreign content");
+        assert_eq!(publication.event().content, "draft content");
         assert_eq!(
             rows(publication.event()),
             vec![

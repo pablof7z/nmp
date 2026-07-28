@@ -10,9 +10,9 @@
 //! `nmp_nip51::SimpleGroupEntry` AS ITSELF and passes the exact fields it
 //! chose -- a host `RelayUrl`, a `group_id` string -- into
 //! [`group_discovery_demand`] or [`contextualize_group_event`]. Nothing here
-//! copies, renames, or re-owns that foreign schema's decode result.
+//! copies, renames, or re-owns that schema's decode result.
 //! `contextualize_group_event` contributes only the NIP-29-owned `h` tag and
-//! retains the selected host alongside a complete foreign-schema draft --
+//! retains the selected host alongside a complete draft --
 //! "contextual publication is not kind ownership"
 //! (`docs/design/routing-and-ownership.md` §3.2.1).
 //!

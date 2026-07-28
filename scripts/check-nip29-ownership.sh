@@ -32,7 +32,7 @@ if grep -nE '(^|[[:space:]])nmp([[:space:]]*=|-engine|-router|-resolver|-store)'
   fail "pure NIP-29/C7 schema crates gained core or mechanism dependencies"
 fi
 
-# NIP-29 may preserve a foreign C7 `q` row, but it may not define kind:9,
+# NIP-29 may preserve a C7 `q` row, but it may not define kind:9,
 # chat replies, mention materialization, notification p rows, or a fixed
 # content-kind catalog.
 for source in crates/nmp-nip29/src/*.rs; do
@@ -43,7 +43,7 @@ for source in crates/nmp-nip29/src/*.rs; do
   )
   if [[ -n $found ]]; then
     printf '%s:%s\n' "$source" "$found"
-    fail "NIP-29 re-acquired foreign chat/content-schema ownership"
+    fail "NIP-29 re-acquired chat/content-schema ownership it does not have"
   fi
 done
 
@@ -56,9 +56,9 @@ fi
 
 grep -qF 'pub fn contextualize_group_event(' crates/nmp-nip29/src/publication.rs ||
   fail "complete-draft NIP-29 contextualization seam is missing"
-grep -qF 'foreign_kind_and_schema_survive_except_for_appended_h' \
+grep -qF 'draft_kind_and_schema_survive_except_for_appended_h' \
   crates/nmp-nip29/src/publication.rs ||
-  fail "foreign-schema preservation falsifier is missing"
+  fail "draft schema preservation falsifier is missing"
 grep -qF 'publication_never_synthesizes_previous' crates/nmp-nip29/src/publication.rs ||
   fail "no-previous falsifier is missing"
 
