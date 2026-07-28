@@ -83,7 +83,11 @@ no sleep-and-check polling.
 
 The suite uses `cucumber` with plain `.feature` files and one fresh `NmpWorld`
 per scenario. It runs the real `EngineThread` against scripted in-process
-relays. Existing crate-level mechanism tests remain in place.
+relays. Because `EngineThread` deliberately requires explicit lifecycle
+ownership, dropping a world shuts down its handle and joins its engine before
+the next scenario starts; a thread-census regression test prevents detached
+engine graphs from accumulating across the suite. Existing crate-level
+mechanism tests remain in place.
 
 ```text
 features/

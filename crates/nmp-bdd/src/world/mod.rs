@@ -14,7 +14,10 @@
 //! `relay_contacted`/`relay_contact_count`) are the ONLY things a `Then`
 //! step is allowed to assert on (approach doc §1.3).
 //!
-//! THIS FILE OWNS THE STATE AND NOTHING ELSE. `NmpWorld` is one struct with
+//! THIS FILE OWNS THE STATE AND ITS LIFETIME, AND NOTHING ELSE -- the fields,
+//! and the `Drop` that shuts the engine down again (#994), because a field
+//! that is never released is not a state declaration a reader can check in
+//! isolation. `NmpWorld` is one struct with
 //! one lifetime (the scenario), so its fields have to be declared in one
 //! place to be read as a whole; its BEHAVIOUR splits cleanly by the phase of
 //! a scenario it serves, and each of those phases is a sibling module below.
@@ -316,6 +319,23 @@ impl std::fmt::Debug for NmpWorld {
             .field("started", &self.started)
             .field("feed_open", &self.feed.is_some())
             .finish()
+    }
+}
+
+impl Drop for NmpWorld {
+    fn drop(&mut self) {
+        // #994: EngineThread intentionally has no implicit Drop shutdown:
+        // production owners must make their lifecycle explicit. A cucumber
+        // World is one such owner. Dropping only its JoinHandles detached the
+        // engine, pool, transport, verifier, and adapter threads after every
+        // scenario, so a full BDD run accumulated one complete engine graph
+        // per scenario until the host exhausted memory and threads.
+        if let Some(handle) = self.handle.take() {
+            handle.shutdown();
+        }
+        if let Some(engine) = self.engine.take() {
+            engine.join();
+        }
     }
 }
 
