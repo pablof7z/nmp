@@ -605,18 +605,12 @@ impl<S: EventStore> EngineCore<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{EngineMsg, RowSink};
+    use crate::core::EngineMsg;
     use nmp_grammar::{Binding, Demand, Derived, Filter, Selector};
     use nmp_resolver::LiveQuery;
     use nmp_router::FixtureDirectory;
     use nmp_store::{MemoryStore, RelayObserved};
     use nostr::{EventBuilder, Keys, Kind, Tag};
-
-    struct NullRows;
-
-    impl RowSink for NullRows {
-        fn on_rows(&self, _rows: Vec<crate::core::RowDelta>) {}
-    }
 
     fn articles_by_follows() -> LiveQuery {
         LiveQuery::from_filter(Filter {
@@ -685,10 +679,7 @@ mod tests {
         let mut core = EngineCore::new(store, Box::new(directory), 20);
         core.handle(EngineMsg::SetActivePubkey(Some(account_a.public_key())));
 
-        let opened = core.handle(EngineMsg::Subscribe(
-            articles_by_follows(),
-            Box::new(NullRows),
-        ));
+        let opened = core.handle(EngineMsg::Subscribe(articles_by_follows()));
         let opened_facts = observation_facts(&opened);
         let paths: Vec<_> = opened_facts
             .iter()

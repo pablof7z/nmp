@@ -12,14 +12,6 @@ use super::*;
 const POLICY: AuthCapabilityInstance = AuthCapabilityInstance(41);
 const SIGNER: AuthCapabilityInstance = AuthCapabilityInstance(42);
 
-struct DiscardReceipt;
-
-impl ReceiptSink for DiscardReceipt {
-    fn on_status(&self, _: WriteStatus) -> bool {
-        true
-    }
-}
-
 struct Fixture {
     core: EngineCore<MemoryStore>,
     keys: Keys,
@@ -454,16 +446,13 @@ fn auth_state_stays_one_entry_per_session_under_churn_and_kind_is_reserved() {
 
     let unsigned = EventBuilder::new(Kind::Authentication, "ordinary publish forbidden")
         .build(fixture.keys.public_key());
-    let effects = fixture.core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(unsigned),
-            durability: Durability::Ephemeral,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(DiscardReceipt),
-    ));
+    let effects = fixture.core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned),
+        durability: Durability::Ephemeral,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     assert!(effects.iter().any(|effect| matches!(
         effect,
         Effect::EmitReceipt(
@@ -488,16 +477,13 @@ fn only_exact_ready_wakes_the_current_waiting_auth_write_once() {
         .custom_created_at(Timestamp::from(9))
         .sign_with_keys(&fixture.keys)
         .unwrap();
-    let parked = fixture.core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Signed(event.clone()),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(DiscardReceipt),
-    ));
+    let parked = fixture.core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Signed(event.clone()),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     assert!(parked.iter().any(|effect| matches!(
         effect,
         Effect::EmitReceipt(_, WriteStatus::AwaitingAuth { relay })
@@ -542,16 +528,13 @@ fn unchallenged_protected_write_parks_only_for_the_bounded_probe_then_proceeds()
         .custom_created_at(Timestamp::from(9))
         .sign_with_keys(&fixture.keys)
         .unwrap();
-    let parked = fixture.core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Signed(event.clone()),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(DiscardReceipt),
-    ));
+    let parked = fixture.core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Signed(event.clone()),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     assert!(!parked
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));

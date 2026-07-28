@@ -258,9 +258,9 @@ implementation:
    atomically attaches live work. Persisted attempt-history retention/GC
    remains the separate #46 concern; the live delivery edge neither grows
    without bound nor claims a dropped fact was delivered. Each live receipt
-   sink has a private identity tied to the consumer FIFO's close/drop hook;
+   delivery registration has a private identity tied to the consumer FIFO's close/drop hook;
    cancellation sends an exact detach command, so a pending write cannot
-   accumulate dead sinks while parked without another status
+   accumulate dead registrations while parked without another status
    (bounded-delivery.md §3).
 4. **`sign_event`** stays a handle (`NmpSignEventHandle`) and gains
    `async fn signed() -> FfiSignedEvent` (one-shot; a second call is a typed

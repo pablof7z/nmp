@@ -9,10 +9,10 @@ fn subscribe_opens_wire_for_resolved_demand() {
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
     let mut core = new_core(dir);
 
-    let effects = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
 
     let (_sub_id, filter) = req_for(&effects, &relay0);
     assert_eq!(filter, &cf(&[1], &[&a.public_key().to_hex()]));
@@ -45,9 +45,8 @@ fn ingest_frame_recompiles_wire_and_emits_rows() {
         ..Filter::default()
     });
 
-    let sink = CapturingSink::default();
     let _ = core.handle(EngineMsg::SetActivePubkey(Some(a.public_key())));
-    let _ = core.handle(EngineMsg::Subscribe(my_follows, Box::new(sink.clone())));
+    let _ = core.handle(EngineMsg::Subscribe(my_follows));
 
     // B's kind:1 post arrives UNSOLICITED (before B is ever followed) --
     // the store holds it, but it matches no handle's root atoms yet.
@@ -95,12 +94,6 @@ fn ingest_frame_recompiles_wire_and_emits_rows() {
         Some(b_post.id),
         "the single delta must be an Added(b_post), never a Removed or a re-delivered full set"
     );
-
-    // The sink was also called synchronously with the same rows.
-    let captured = sink.0.lock().unwrap();
-    assert!(captured
-        .iter()
-        .any(|batch| batch.len() == 1 && batch[0].event().map(|e| e.id) == Some(b_post.id)));
 }
 
 // ---- P0 load test (docs/known-gaps.md): redelivery must be O(distinct
@@ -133,14 +126,14 @@ fn ingesting_n_distinct_events_delivers_order_n_row_entries_not_order_n_squared(
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let sink = CapturingSink::default();
-    let _ = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(sink.clone()),
-    ));
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
 
     const N: u64 = 2_000;
     let mut total_delta_entries = 0usize;
+    let mut distinct_delivered = BTreeSet::new();
     for i in 0..N {
         let event = nmp_resolver::testkit::kind1(&a, &format!("load-test post #{i}"), 1_000 + i);
         let effects = core.handle(EngineMsg::RelayFrame(
@@ -154,6 +147,11 @@ fn ingesting_n_distinct_events_delivers_order_n_row_entries_not_order_n_squared(
         for effect in &effects {
             if let Effect::EmitRows(_, rows, _) = effect {
                 total_delta_entries += rows.len();
+                distinct_delivered.extend(
+                    rows.iter()
+                        .filter_map(RowDelta::event)
+                        .map(|event| event.id),
+                );
             }
         }
     }
@@ -161,13 +159,6 @@ fn ingesting_n_distinct_events_delivers_order_n_row_entries_not_order_n_squared(
     // The fix must not have traded over-delivery for under-delivery: every
     // one of the N distinct events actually reaches the sink at least once
     // (as an `Added`), or this "load test" would be vacuous.
-    let captured = sink.0.lock().unwrap();
-    let distinct_delivered: BTreeSet<nostr::EventId> = captured
-        .iter()
-        .flatten()
-        .filter_map(RowDelta::event)
-        .map(|e| e.id)
-        .collect();
     assert_eq!(
         distinct_delivered.len(),
         N as usize,
@@ -235,17 +226,19 @@ fn limited_handle_projects_only_the_n_newest_of_m_matches() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let sink = CapturingSink::default();
-    let _ = core.handle(EngineMsg::Subscribe(
-        limited_literal_query(&[1], &a.public_key().to_hex(), 3),
-        Box::new(sink.clone()),
-    ));
+    let _ = core.handle(EngineMsg::Subscribe(limited_literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+        3,
+    )));
 
     let mut ids_by_time: Vec<(u64, nostr::EventId)> = Vec::new();
+    let mut current = BTreeSet::new();
+    let mut high_water = 0usize;
     for created_at in [10u64, 20, 30, 40, 50] {
         let event = nmp_resolver::testkit::kind1(&a, &format!("note @{created_at}"), created_at);
         ids_by_time.push((created_at, event.id));
-        let _ = core.handle(EngineMsg::RelayFrame(
+        let effects = core.handle(EngineMsg::RelayFrame(
             RelayHandle {
                 slot: 0,
                 generation: 1,
@@ -253,15 +246,14 @@ fn limited_handle_projects_only_the_n_newest_of_m_matches() {
             public_session(&relay0),
             event_frame("s", event),
         ));
+        for effect in effects {
+            if let Effect::EmitRows(_, rows, _) = effect {
+                apply_deltas(&mut current, &rows);
+                high_water = high_water.max(current.len());
+            }
+        }
     }
 
-    // Replay the delivered stream; assert it never exceeds N mid-flight.
-    let mut current = BTreeSet::new();
-    let mut high_water = 0usize;
-    for batch in sink.0.lock().unwrap().iter() {
-        apply_deltas(&mut current, batch);
-        high_water = high_water.max(current.len());
-    }
     assert!(
         high_water <= 3,
         "a limit:3 handle must never accumulate more than 3 rows (peak was {high_water})"
@@ -294,26 +286,23 @@ fn limited_multi_atom_handle_merges_then_applies_the_global_top_n() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let sink = CapturingSink::default();
-    let _ = core.handle(EngineMsg::Subscribe(
-        LiveQuery::from_filter(Filter {
-            kinds: Some(BTreeSet::from([1u16])),
-            authors: Some(Binding::Literal(BTreeSet::from([
-                a.public_key().to_hex(),
-                b.public_key().to_hex(),
-            ]))),
-            limit: Some(2),
-            ..Filter::default()
-        }),
-        Box::new(sink.clone()),
-    ));
+    let _ = core.handle(EngineMsg::Subscribe(LiveQuery::from_filter(Filter {
+        kinds: Some(BTreeSet::from([1u16])),
+        authors: Some(Binding::Literal(BTreeSet::from([
+            a.public_key().to_hex(),
+            b.public_key().to_hex(),
+        ]))),
+        limit: Some(2),
+        ..Filter::default()
+    })));
 
     let a_100 = nmp_resolver::testkit::kind1(&a, "a-100", 100);
     let a_90 = nmp_resolver::testkit::kind1(&a, "a-90", 90);
     let b_95 = nmp_resolver::testkit::kind1(&b, "b-95", 95);
     let b_85 = nmp_resolver::testkit::kind1(&b, "b-85", 85);
+    let mut current = BTreeSet::new();
     for event in [a_90, b_85, a_100.clone(), b_95.clone()] {
-        let _ = core.handle(EngineMsg::RelayFrame(
+        let effects = core.handle(EngineMsg::RelayFrame(
             RelayHandle {
                 slot: 0,
                 generation: 1,
@@ -321,11 +310,11 @@ fn limited_multi_atom_handle_merges_then_applies_the_global_top_n() {
             public_session(&relay0),
             event_frame("s", event),
         ));
-    }
-
-    let mut current = BTreeSet::new();
-    for batch in sink.0.lock().unwrap().iter() {
-        apply_deltas(&mut current, batch);
+        for effect in effects {
+            if let Effect::EmitRows(_, rows, _) = effect {
+                apply_deltas(&mut current, &rows);
+            }
+        }
     }
     assert_eq!(
         current,
@@ -346,16 +335,17 @@ fn newer_event_evicts_oldest_of_top_n_via_delta() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let sink = CapturingSink::default();
-    let _ = core.handle(EngineMsg::Subscribe(
-        limited_literal_query(&[1], &a.public_key().to_hex(), 2),
-        Box::new(sink.clone()),
-    ));
+    let _ = core.handle(EngineMsg::Subscribe(limited_literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+        2,
+    )));
 
     let oldest = nmp_resolver::testkit::kind1(&a, "oldest", 100);
     let middle = nmp_resolver::testkit::kind1(&a, "middle", 200);
+    let mut current = BTreeSet::new();
     for event in [oldest.clone(), middle.clone()] {
-        let _ = core.handle(EngineMsg::RelayFrame(
+        let effects = core.handle(EngineMsg::RelayFrame(
             RelayHandle {
                 slot: 0,
                 generation: 1,
@@ -363,6 +353,11 @@ fn newer_event_evicts_oldest_of_top_n_via_delta() {
             public_session(&relay0),
             event_frame("s", event),
         ));
+        for effect in effects {
+            if let Effect::EmitRows(_, rows, _) = effect {
+                apply_deltas(&mut current, &rows);
+            }
+        }
     }
 
     // The top-2 is now {oldest, middle}. A strictly newer event arrives.
@@ -399,11 +394,8 @@ fn newer_event_evicts_oldest_of_top_n_via_delta() {
         !batch.iter().any(|d| d.id() == middle.id),
         "the surviving middle row must not churn (no delta for it): {batch:?}"
     );
+    apply_deltas(&mut current, &batch);
 
-    let mut current = BTreeSet::new();
-    for b in sink.0.lock().unwrap().iter() {
-        apply_deltas(&mut current, b);
-    }
     assert_eq!(
         current,
         BTreeSet::from([middle.id, newest.id]),
@@ -422,18 +414,19 @@ fn retracting_top_n_member_pulls_in_next_newest() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let sink = CapturingSink::default();
-    let _ = core.handle(EngineMsg::Subscribe(
-        limited_literal_query(&[1], &a.public_key().to_hex(), 2),
-        Box::new(sink.clone()),
-    ));
+    let _ = core.handle(EngineMsg::Subscribe(limited_literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+        2,
+    )));
 
     // Three matches; the top-2 is {second, third}, `first` is excluded.
     let first = nmp_resolver::testkit::kind1(&a, "first", 100);
     let second = nmp_resolver::testkit::kind1(&a, "second", 200);
     let third = nmp_resolver::testkit::kind1(&a, "third", 300);
+    let mut current = BTreeSet::new();
     for event in [first.clone(), second.clone(), third.clone()] {
-        let _ = core.handle(EngineMsg::RelayFrame(
+        let effects = core.handle(EngineMsg::RelayFrame(
             RelayHandle {
                 slot: 0,
                 generation: 1,
@@ -441,12 +434,13 @@ fn retracting_top_n_member_pulls_in_next_newest() {
             public_session(&relay0),
             event_frame("s", event),
         ));
+        for effect in effects {
+            if let Effect::EmitRows(_, rows, _) = effect {
+                apply_deltas(&mut current, &rows);
+            }
+        }
     }
     {
-        let mut current = BTreeSet::new();
-        for b in sink.0.lock().unwrap().iter() {
-            apply_deltas(&mut current, b);
-        }
         assert_eq!(
             current,
             BTreeSet::from([second.id, third.id]),
@@ -483,11 +477,8 @@ fn retracting_top_n_member_pulls_in_next_newest() {
             .any(|d| matches!(d, RowDelta::Added(row) if row.event.id == first.id)),
         "the next-newest previously-excluded match must be pulled IN as Added: {batch:?}"
     );
+    apply_deltas(&mut current, &batch);
 
-    let mut current = BTreeSet::new();
-    for b in sink.0.lock().unwrap().iter() {
-        apply_deltas(&mut current, b);
-    }
     assert_eq!(
         current,
         BTreeSet::from([first.id, second.id]),
@@ -505,18 +496,18 @@ fn unlimited_handle_projects_every_match() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let sink = CapturingSink::default();
     // `literal_query` carries no limit (limit: None).
-    let _ = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(sink.clone()),
-    ));
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
 
     let mut all_ids = BTreeSet::new();
+    let mut current = BTreeSet::new();
     for created_at in [10u64, 20, 30, 40, 50] {
         let event = nmp_resolver::testkit::kind1(&a, &format!("note @{created_at}"), created_at);
         all_ids.insert(event.id);
-        let _ = core.handle(EngineMsg::RelayFrame(
+        let effects = core.handle(EngineMsg::RelayFrame(
             RelayHandle {
                 slot: 0,
                 generation: 1,
@@ -524,12 +515,13 @@ fn unlimited_handle_projects_every_match() {
             public_session(&relay0),
             event_frame("s", event),
         ));
+        for effect in effects {
+            if let Effect::EmitRows(_, rows, _) = effect {
+                apply_deltas(&mut current, &rows);
+            }
+        }
     }
 
-    let mut current = BTreeSet::new();
-    for b in sink.0.lock().unwrap().iter() {
-        apply_deltas(&mut current, b);
-    }
     assert_eq!(
         current, all_ids,
         "with no limit, every one of the 5 matching rows must be projected"
@@ -547,10 +539,10 @@ fn eose_records_coverage_watermark_and_non_eose_does_not() {
     connect(&mut core, 0, &relay0);
 
     let atom = cf(&[3], &[&a.public_key().to_hex()]);
-    let effects = core.handle(EngineMsg::Subscribe(
-        literal_query(&[3], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+        &[3],
+        &a.public_key().to_hex(),
+    )));
     let (sub_id, _filter) = req_for(&effects, &relay0);
     let wire = wire_sub_string(sub_id);
 
@@ -621,10 +613,7 @@ fn get_coverage_distinguishes_true_context_from_the_static_default_guess() {
     )
     .expect("Public over an author-bearing selection is legal (#106)");
 
-    let effects = core.handle(EngineMsg::Subscribe(
-        LiveQuery(demand),
-        Box::new(CapturingSink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(LiveQuery(demand)));
     let (sub_id, _f) = req_for(&effects, &relay0);
     let wire = wire_sub_string(sub_id);
 
@@ -674,10 +663,10 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
 
     // Seed the store: an ordinary AuthorOutboxes subscribe pulls the event
     // in from relay_other, giving it Row.sources == {relay_other}.
-    let outbox_effects = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let outbox_effects = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     let (outbox_sub, _f) = req_for(&outbox_effects, &relay_other);
     let outbox_wire = wire_sub_string(outbox_sub);
     let event = unsigned(&a, 1, "seeded via relay_other")
@@ -710,10 +699,7 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
     let mut strict_demand = agnostic_demand.clone();
     strict_demand.cache = nmp_grammar::CacheMode::Strict;
 
-    let effects_agnostic = core.handle(EngineMsg::Subscribe(
-        LiveQuery(agnostic_demand),
-        Box::new(CapturingSink::default()),
-    ));
+    let effects_agnostic = core.handle(EngineMsg::Subscribe(LiveQuery(agnostic_demand)));
 
     // Wire contacts ONLY the declared pinned relay for this new atom --
     // never relay_other (no re-req there at all: nothing about that atom
@@ -740,10 +726,7 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
     // The Strict handle dedups onto the SAME graph/wire (no new Req at
     // relay_pinned), yet must NOT see the row: its provenance ({relay_other})
     // is disjoint from the pinned set ({relay_pinned}).
-    let effects_strict = core.handle(EngineMsg::Subscribe(
-        LiveQuery(strict_demand),
-        Box::new(CapturingSink::default()),
-    ));
+    let effects_strict = core.handle(EngineMsg::Subscribe(LiveQuery(strict_demand)));
     assert!(
         !effects_strict
             .iter()
@@ -826,10 +809,7 @@ fn identical_filter_pinned_to_different_relays_stays_fully_independent() {
     )
     .expect("nonempty pinned relay set is legal");
 
-    let effects1 = core.handle(EngineMsg::Subscribe(
-        LiveQuery(demand1),
-        Box::new(CapturingSink::default()),
-    ));
+    let effects1 = core.handle(EngineMsg::Subscribe(LiveQuery(demand1)));
     let id1 = effects1
         .iter()
         .find_map(|e| match e {
@@ -846,10 +826,7 @@ fn identical_filter_pinned_to_different_relays_stays_fully_independent() {
         "demand1's Pinned({{relay1}}) atom must never touch relay2"
     );
 
-    let effects2 = core.handle(EngineMsg::Subscribe(
-        LiveQuery(demand2),
-        Box::new(CapturingSink::default()),
-    ));
+    let effects2 = core.handle(EngineMsg::Subscribe(LiveQuery(demand2)));
     let id2 = effects2
         .iter()
         .find_map(|e| match e {
@@ -936,10 +913,10 @@ fn eose_overwrite_race_credits_only_the_intersection() {
 
     // First subscribe: sends REQ(sub, {authors:{a}}) -- snapshot1 absorbs
     // {h_a} only.
-    let effects1 = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let effects1 = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     let (sub_id, _f) = req_for(&effects1, &relay0);
     let sub_id = sub_id.clone();
     let wire = wire_sub_string(&sub_id);
@@ -947,10 +924,10 @@ fn eose_overwrite_race_credits_only_the_intersection() {
     // Second subscribe (same skeleton, same relay): the union widens the
     // SAME sub_id's filter to {a, e} -- an OVERWRITING REQ, snapshot2
     // absorbs {h_a, h_e}, pushed onto the SAME FIFO alongside snapshot1.
-    let effects2 = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &e_key.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let effects2 = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &e_key.public_key().to_hex(),
+    )));
     let (sub_id2, filter2) = req_for(&effects2, &relay0);
     assert_eq!(sub_id2, &sub_id, "same skeleton must reuse the sub id");
     assert_eq!(
@@ -1019,10 +996,7 @@ fn limited_fetch_never_records_coverage() {
         limit: Some(500),
         ..Filter::default()
     });
-    let effects = core.handle(EngineMsg::Subscribe(
-        limited_query,
-        Box::new(CapturingSink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(limited_query));
     let (sub_id, filter) = req_for(&effects, &relay0);
     assert_eq!(filter.limit, Some(500));
     let wire = wire_sub_string(sub_id);
@@ -1069,10 +1043,10 @@ fn a_reopened_plan_subscription_never_inherits_a_closed_tokens_eose() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let subscribed = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let subscribed = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     let handle = subscribed_handle(&subscribed);
     let closed_sub_id = req_for(&subscribed, &relay0).0.clone();
 
@@ -1082,10 +1056,10 @@ fn a_reopened_plan_subscription_never_inherits_a_closed_tokens_eose() {
         "withdrawing the only demand owner must close its request: {withdrawn:?}"
     );
 
-    let redemanded = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let redemanded = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     let _ = subscribed_handle(&redemanded);
     let reopened_sub_id = req_for(&redemanded, &relay0).0.clone();
     assert_ne!(
@@ -1154,10 +1128,7 @@ fn zero_atom_query_reports_no_resolved_demand_instead_of_vacuous_evidence() {
         ..Filter::default()
     });
 
-    let effects = core.handle(EngineMsg::Subscribe(
-        unresolved,
-        Box::new(CapturingSink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(unresolved));
     let evidence = effects
         .iter()
         .find_map(|effect| match effect {
@@ -1176,10 +1147,10 @@ fn resolved_atom_without_a_planned_relay_reports_no_planned_source() {
     let atom = cf(&[9999], &[&a.public_key().to_hex()]);
     let mut core = new_core(FixtureDirectory::new());
 
-    let effects = core.handle(EngineMsg::Subscribe(
-        literal_query(&[9999], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+        &[9999],
+        &a.public_key().to_hex(),
+    )));
     let evidence = effects
         .iter()
         .find_map(|effect| match effect {
@@ -1202,10 +1173,10 @@ fn equal_evidence_on_reconnect_does_not_spuriously_emit_rows() {
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]);
     let mut core = new_core(dir);
 
-    let _ = core.handle(EngineMsg::Subscribe(
-        literal_query(&[9999], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+        &[9999],
+        &a.public_key().to_hex(),
+    )));
     let first_connect = core.handle(EngineMsg::RelayConnected(
         RelayHandle {
             slot: 7,
@@ -1247,10 +1218,10 @@ fn surviving_handle_evidence_tracks_plan_changes_from_other_handle_lifetimes() {
         .with_write(b.public_key().to_hex(), [r1.clone(), r2.clone()]);
     let mut core = EngineCore::new(MemoryStore::new(), Box::new(dir), 2);
 
-    let effects = core.handle(EngineMsg::Subscribe(
-        literal_query(&[9999], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+        &[9999],
+        &a.public_key().to_hex(),
+    )));
     let a_id = effects
         .iter()
         .find_map(|effect| match effect {
@@ -1268,10 +1239,10 @@ fn surviving_handle_evidence_tracks_plan_changes_from_other_handle_lifetimes() {
         BTreeSet::from([r2.clone(), r3.clone()])
     );
 
-    let effects = core.handle(EngineMsg::Subscribe(
-        literal_query(&[9999], &b.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+        &[9999],
+        &b.public_key().to_hex(),
+    )));
     let b_id = effects
         .iter()
         .filter_map(|effect| match effect {
@@ -1321,11 +1292,10 @@ fn per_source_evidence_reflects_each_relays_own_proof_independently() {
     connect(&mut core, 0, &relay0);
     connect(&mut core, 1, &relay1);
 
-    let sink = CapturingSink::default();
-    let effects = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(sink.clone()),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     let id = effects
         .iter()
         .find_map(|e| match e {
@@ -1412,10 +1382,7 @@ fn derived_query_evidence_surfaces_the_unproven_inner_atom_independently_of_the_
     });
 
     let _ = core.handle(EngineMsg::SetActivePubkey(Some(a.public_key())));
-    let effects = core.handle(EngineMsg::Subscribe(
-        my_follows,
-        Box::new(CapturingSink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(my_follows));
     let id = effects
         .iter()
         .find_map(|e| match e {
@@ -1519,10 +1486,10 @@ fn source_watermark_survives_disconnect_alongside_the_disconnected_status() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let effects = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     let id = effects
         .iter()
         .find_map(|e| match e {
@@ -1580,10 +1547,10 @@ fn stale_disconnect_cannot_erase_a_reopened_slot_generation() {
     let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]);
     let mut core = new_core(dir);
-    let effects = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     let id = effects
         .iter()
         .find_map(|effect| match effect {
@@ -1670,10 +1637,10 @@ fn permanently_failed_relay_never_re_ensures_and_records_terminal_diagnostics() 
     let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]);
     let mut core = new_core(dir);
-    let _ = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
 
     let handle = RelayHandle {
         slot: 0,
@@ -1710,10 +1677,10 @@ fn permanently_failed_relay_never_re_ensures_and_records_terminal_diagnostics() 
     // not touch that path at all.
     let mut core_transient =
         new_core(FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]));
-    let _ = core_transient.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let _ = core_transient.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     let _ = core_transient.handle(EngineMsg::RelayConnected(handle, public_session(&relay)));
     let transient_effects = core_transient.handle(EngineMsg::RelayDisconnected(
         handle,
@@ -1755,10 +1722,7 @@ fn set_active_pubkey_reroots_and_recompiles() {
     });
 
     let _ = core.handle(EngineMsg::SetActivePubkey(Some(a.public_key())));
-    let effects = core.handle(EngineMsg::Subscribe(
-        whoami,
-        Box::new(CapturingSink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(whoami));
     req_for(&effects, &relay_a); // demand is currently for `a`.
 
     let effects = core.handle(EngineMsg::SetActivePubkey(Some(b.public_key())));

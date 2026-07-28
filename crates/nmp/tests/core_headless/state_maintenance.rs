@@ -18,11 +18,10 @@ fn root_query_emits_removed_on_delete() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let sink = CapturingSink::default();
-    let _ = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(sink.clone()),
-    ));
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
 
     let note = nmp_resolver::testkit::kind1(&a, "delete me", 100);
     let note_id = note.id;
@@ -79,11 +78,10 @@ fn expiry_emits_removed_via_manual_tick() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let sink = CapturingSink::default();
-    let _ = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(sink.clone()),
-    ));
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
 
     let expiring = nmp_resolver::testkit::expiring_kind1(&a, "ephemeral", 100, 150);
     let expiring_id = expiring.id;
@@ -143,10 +141,10 @@ fn next_deadline_is_min_over_expiry_and_neg_liveness() {
         "a fresh core tracks no expiring events and no open neg session"
     );
 
-    let _ = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     let connect_effects = connect(&mut core, 0, &relay0);
 
     // Ingest an event expiring at t=150 on the open sub -- the store's
@@ -188,10 +186,10 @@ fn next_deadline_is_min_over_expiry_and_neg_liveness() {
         public_session(&relay0),
         neg_msg_frame(&probe_wire, "6100"),
     ));
-    let effects = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &b.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &b.public_key().to_hex(),
+    )));
     let (live_sub_id, live_filter) = req_for(&effects, &relay0);
     assert_eq!(live_filter.limit, Some(0));
     let effects = core.handle(EngineMsg::RelayFrame(

@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nmp::mechanism::core::{Effect, EngineCore, EngineMsg, RowDelta, RowSink};
+use nmp::mechanism::core::{Effect, EngineCore, EngineMsg};
 use nmp_grammar::{
     Binding, ConcreteFilter, Demand, Derived, Filter, IdentityField, RelaySessionKey, Selector,
 };
@@ -25,13 +25,6 @@ use nostr::nips::nip65::RelayMetadata;
 use nostr::{
     EventBuilder, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Tag, Tags, Timestamp,
 };
-
-/// A `RowSink` that discards everything -- these tests only care about
-/// wire-routing effects, not row delivery.
-struct NullSink;
-impl RowSink for NullSink {
-    fn on_rows(&self, _rows: Vec<RowDelta>) {}
-}
 
 /// Replays every `Effect::Wire` delta into the authoritative current
 /// per-relay plan (mirrors `nmp_router::RelayPlan` -- `EngineCore` has no
@@ -176,10 +169,7 @@ fn content_atom_adds_write_relay_without_erasing_projected_source_provenance() {
 
     plan.apply(&connect(&mut core, 0, &indexer));
     plan.apply(&core.handle(EngineMsg::SetActivePubkey(Some(me.public_key()))));
-    plan.apply(&core.handle(EngineMsg::Subscribe(
-        follow_feed_query(),
-        Box::new(NullSink),
-    )));
+    plan.apply(&core.handle(EngineMsg::Subscribe(follow_feed_query())));
 
     // No follow named yet: `me`'s own kind:3 (a discovery-kind atom in its
     // own right, per `nmp_router::DiscoveryKinds`) and the engine's own
@@ -305,10 +295,7 @@ fn relay_list_parse_excludes_explicit_read_only_relays() {
     plan.apply(&connect(&mut core, 1, &write_r));
     plan.apply(&connect(&mut core, 2, &read_only_r));
     plan.apply(&core.handle(EngineMsg::SetActivePubkey(Some(me.public_key()))));
-    plan.apply(&core.handle(EngineMsg::Subscribe(
-        follow_feed_query(),
-        Box::new(NullSink),
-    )));
+    plan.apply(&core.handle(EngineMsg::Subscribe(follow_feed_query())));
     plan.apply(&core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
@@ -366,10 +353,7 @@ fn discovery_grows_reactively_as_the_follow_set_grows() {
 
     plan.apply(&connect(&mut core, 0, &indexer));
     plan.apply(&core.handle(EngineMsg::SetActivePubkey(Some(me.public_key()))));
-    plan.apply(&core.handle(EngineMsg::Subscribe(
-        follow_feed_query(),
-        Box::new(NullSink),
-    )));
+    plan.apply(&core.handle(EngineMsg::Subscribe(follow_feed_query())));
 
     plan.apply(&core.handle(EngineMsg::RelayFrame(
         RelayHandle {

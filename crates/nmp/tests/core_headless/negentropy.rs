@@ -38,10 +38,10 @@ fn unprobed_relay_never_routes_to_negentropy() {
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
     let mut core = new_core(dir);
 
-    let effects = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
 
     assert!(
         !effects.iter().any(|e| matches!(e, Effect::NegOpen(..))),
@@ -56,10 +56,10 @@ fn explicit_nip11_negative_suppresses_probe_without_minting_behavioral_proof() {
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
     let mut core = new_core(dir);
-    let subscribed = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let subscribed = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     let handle = subscribed
         .iter()
         .find_map(|effect| match effect {
@@ -105,10 +105,10 @@ fn explicit_nip11_negative_suppresses_probe_without_minting_behavioral_proof() {
     assert_eq!(relay.nip77_behavior, "unknown");
 
     let _ = core.handle(EngineMsg::Unsubscribe(handle));
-    let _ = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     let replanned = core
         .diagnostics_snapshot()
         .relays
@@ -126,10 +126,10 @@ fn positive_nip11_advertisement_starts_probe_but_is_not_behavioral_proof() {
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
     let mut core = new_core(dir);
-    let _ = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     let _ = core.handle(EngineMsg::RelayConnected(
         RelayHandle {
             slot: 0,
@@ -164,10 +164,10 @@ fn absent_supported_nips_is_proven_document_unknown_not_explicit_negative() {
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
     let mut core = new_core(dir);
-    let _ = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     let _ = core.handle(EngineMsg::RelayConnected(
         RelayHandle {
             slot: 0,
@@ -204,10 +204,10 @@ fn nip11_diagnostics_freshness_expires_from_engine_clock_without_another_acquisi
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
     let mut core = new_core(dir);
-    let _ = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(100u64)));
     let _ = core.handle(EngineMsg::RelayInformationResolved(
         relay0.clone(),
@@ -277,10 +277,10 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
     // Bootstrap: a's kind:1 atom -- the relay is `Unknown` at this point
     // (probing can only start once SOME demand causes a connection), so
     // this is unavoidably a plain REQ.
-    let effects = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     req_for(&effects, &relay0);
 
     let connect_effects = connect(&mut core, 0, &relay0);
@@ -310,10 +310,10 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
     // b's kind:1 atom widens the SAME (kind:1) skeleton -- same sub-id,
     // now the relay is Supported and the widened filter is broad
     // (unlimited), so it first opens a distinct live REQ with `limit:0`.
-    let effects = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &b.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &b.public_key().to_hex(),
+    )));
     let (live_sub_id, live_filter) = req_for(&effects, &relay0);
     let live_sub_id = live_sub_id.clone();
     assert_eq!(live_filter.limit, Some(0));
@@ -411,10 +411,7 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
         limit: Some(1),
         ..Filter::default()
     });
-    let effects = core.handle(EngineMsg::Subscribe(
-        limited,
-        Box::new(CapturingSink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(limited));
     req_for(&effects, &relay0); // must still be a plain REQ.
     assert!(
         !effects.iter().any(|e| matches!(e, Effect::NegOpen(..))),
@@ -432,10 +429,10 @@ fn relay_that_rejects_the_probe_is_classified_unsupported_and_stays_on_req() {
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
     let mut core = new_core(dir);
 
-    let effects = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     req_for(&effects, &relay0);
 
     let connect_effects = connect(&mut core, 0, &relay0);
@@ -460,10 +457,10 @@ fn relay_that_rejects_the_probe_is_classified_unsupported_and_stays_on_req() {
     ));
 
     let b = Keys::generate();
-    let effects = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &b.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &b.public_key().to_hex(),
+    )));
     assert!(
         !effects.iter().any(|e| matches!(e, Effect::NegOpen(..))),
         "an Unsupported-classified relay must never route to negentropy"
@@ -505,10 +502,10 @@ fn stale_negentropy_session_falls_back_to_req_after_the_liveness_deadline() {
         .with_write(b.public_key().to_hex(), [relay0.clone()]);
     let mut core = new_core(dir);
 
-    let effects = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     req_for(&effects, &relay0);
 
     let connect_effects = connect(&mut core, 0, &relay0);
@@ -531,10 +528,10 @@ fn stale_negentropy_session_falls_back_to_req_after_the_liveness_deadline() {
         neg_msg_frame(&probe_wire, "6100"),
     ));
 
-    let effects = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &b.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &b.public_key().to_hex(),
+    )));
     let (live_sub_id, live_filter) = req_for(&effects, &relay0);
     let live_sub_id = live_sub_id.clone();
     assert_eq!(live_filter.limit, Some(0));
@@ -590,17 +587,17 @@ fn neg_err_falls_back_without_closing_the_active_live_req() {
         .with_write(b.public_key().to_hex(), [relay.clone()]);
     let mut core = new_core(dir);
 
-    let initial = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let initial = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     req_for(&initial, &relay);
     connect_and_prove_nip77(&mut core, &relay);
 
-    let candidate = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &b.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let candidate = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &b.public_key().to_hex(),
+    )));
     let (live_sub_id, filter) = req_for(&candidate, &relay);
     let live_sub_id = live_sub_id.clone();
     assert_eq!(filter.limit, Some(0));
@@ -661,16 +658,16 @@ fn live_eose_timeout_uses_a_distinct_backlog_and_keeps_overlap_until_proven() {
         .with_write(b.public_key().to_hex(), [relay.clone()]);
     let mut core = new_core(dir);
 
-    let initial = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let initial = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     let prior_live_id = req_for(&initial, &relay).0.clone();
     connect_and_prove_nip77(&mut core, &relay);
-    let candidate = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &b.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let candidate = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &b.public_key().to_hex(),
+    )));
     let live_sub_id = req_for(&candidate, &relay).0.clone();
 
     // No candidate EOSE arrives. At the exact deadline a separate full
@@ -734,15 +731,15 @@ fn reconnect_repeats_live_first_and_only_the_fresh_generation_eose_opens_neg() {
         .with_write(b.public_key().to_hex(), [relay.clone()]);
     let mut core = new_core(dir);
 
-    let _ = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     connect_and_prove_nip77(&mut core, &relay);
-    let candidate = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &b.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let candidate = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &b.public_key().to_hex(),
+    )));
     let old_live_id = req_for(&candidate, &relay).0.clone();
     let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -811,16 +808,16 @@ fn withdrawing_all_demand_closes_live_candidate_and_every_repair_owner() {
         .with_write(b.public_key().to_hex(), [relay.clone()]);
     let mut core = new_core(dir);
 
-    let initial = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let initial = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     let a_handle = subscribed_handle(&initial);
     connect_and_prove_nip77(&mut core, &relay);
-    let widened = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &b.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let widened = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &b.public_key().to_hex(),
+    )));
     let b_handle = subscribed_handle(&widened);
     let live_id = req_for(&widened, &relay).0.clone();
     let opened = core.handle(EngineMsg::RelayFrame(
@@ -882,10 +879,10 @@ fn live_eose_timeout_fallback_then_full_withdrawal_closes_orphaned_candidate() {
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]);
     let mut core = new_core(dir);
 
-    let subscribed = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let subscribed = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     let a_handle = subscribed_handle(&subscribed);
     connect_and_prove_nip77(&mut core, &relay);
 
@@ -984,16 +981,16 @@ fn live_eose_timeout_fallback_then_supersession_closes_orphaned_candidate() {
         .with_write(b.public_key().to_hex(), [relay.clone()]);
     let mut core = new_core(dir);
 
-    let initial = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let initial = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     let a_handle = subscribed_handle(&initial);
     connect_and_prove_nip77(&mut core, &relay);
-    let widened = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &b.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let widened = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &b.public_key().to_hex(),
+    )));
     let b_handle = subscribed_handle(&widened);
     let live_sub_id = req_for(&widened, &relay).0.clone();
 
@@ -1089,20 +1086,20 @@ fn a_reopened_backlog_req_never_inherits_a_closed_incarnations_eose() {
         .with_write(b.public_key().to_hex(), [relay.clone()]);
     let mut core = new_core(dir);
 
-    let initial = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let initial = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     let _ = subscribed_handle(&initial);
     connect_and_prove_nip77(&mut core, &relay);
 
     // Widening to a+b starts a live-first handoff; letting its liveness
     // deadline expire parks an unlimited backlog REQ carrying both authors'
     // coverage keys.
-    let widened = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &b.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let widened = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &b.public_key().to_hex(),
+    )));
     let b_handle = subscribed_handle(&widened);
     let timed_out = core.handle(EngineMsg::Tick(Timestamp::from(30u64)));
     let (first_backlog, backlog_filter) = req_for(&timed_out, &relay);
@@ -1121,10 +1118,10 @@ fn a_reopened_backlog_req_never_inherits_a_closed_incarnations_eose() {
         wire_closes(&narrowed, &relay).contains(&first_backlog),
         "narrowing must close the superseded backlog REQ: {narrowed:?}"
     );
-    let rewidened = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &b.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let rewidened = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &b.public_key().to_hex(),
+    )));
     let _ = subscribed_handle(&rewidened);
     let timed_out_again = core.handle(EngineMsg::Tick(Timestamp::from(90u64)));
     let (reopened_backlog, _) = req_for(&timed_out_again, &relay);
@@ -1201,17 +1198,17 @@ fn a_reopened_live_candidate_never_inherits_a_closed_incarnations_eose() {
         .with_write(b.public_key().to_hex(), [relay.clone()]);
     let mut core = new_core(dir);
 
-    let initial = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let initial = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     let a_handle = subscribed_handle(&initial);
     connect_and_prove_nip77(&mut core, &relay);
 
-    let widened = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &b.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let widened = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &b.public_key().to_hex(),
+    )));
     let b_handle = subscribed_handle(&widened);
     let candidate_ab = req_for(&widened, &relay).0.clone();
     let opened = core.handle(EngineMsg::RelayFrame(
@@ -1234,10 +1231,10 @@ fn a_reopened_live_candidate_never_inherits_a_closed_incarnations_eose() {
     // re-derives the identical role/plan/filter triple.
     let narrowed = core.handle(EngineMsg::Unsubscribe(b_handle));
     let candidate_a = req_for(&narrowed, &relay).0.clone();
-    let rewidened = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &b.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let rewidened = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &b.public_key().to_hex(),
+    )));
     let b_handle_again = subscribed_handle(&rewidened);
     let narrowed_again = core.handle(EngineMsg::Unsubscribe(b_handle_again));
     let reopened_candidate = req_for(&narrowed_again, &relay).0.clone();

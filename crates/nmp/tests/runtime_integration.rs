@@ -26,7 +26,9 @@ use std::time::{Duration, Instant};
 use nmp::mechanism::core::RelayAdmissionPolicy;
 use nmp::mechanism::core::RowDelta;
 use nmp::mechanism::outbox::WriteStatus;
-use nmp::mechanism::runtime::{EngineThread, FifoReceiver, ReceiptReattachment, RowsReceiver};
+use nmp::mechanism::runtime::{
+    EngineThread, FifoReceiver, FifoTryRecvError, ReceiptReattachment, RowsReceiver,
+};
 use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, Derived, Filter, Freshness,
     IdentityField, Selector, SourceAuthority,
@@ -1196,6 +1198,17 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
         "accepted ids use store namespace"
     );
     assert_eq!(tracked.statuses.recv().unwrap(), WriteStatus::Accepted);
+    assert_eq!(
+        tracked.statuses.recv().unwrap(),
+        WriteStatus::AwaitingCapability {
+            pubkey: keys.public_key()
+        }
+    );
+    assert_eq!(
+        tracked.statuses.try_recv(),
+        Err(FifoTryRecvError::Empty),
+        "one reducer publish must deliver each emitted fact exactly once"
+    );
 
     let first = expect_attached(handle.reattach_receipt(tracked.id));
     let second = expect_attached(handle.reattach_receipt(tracked.id));

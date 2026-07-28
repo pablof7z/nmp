@@ -17,19 +17,15 @@ fn private_route_fails_closed() {
     let mut core = new_core(dir);
     activate(&mut core, &a);
 
-    let sink = CapturingReceiptSink::default();
-    let effects = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&a, 1, "private dm")),
-            durability: Durability::Durable,
-            routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                relays: NarrowOnly::new(std::iter::empty::<RelayUrl>()),
-            }),
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(sink.clone()),
-    ));
+    let effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(&a, 1, "private dm")),
+        durability: Durability::Durable,
+        routing: WriteRouting::PrivateNarrow(PrivateRoute {
+            relays: NarrowOnly::new(std::iter::empty::<RelayUrl>()),
+        }),
+        identity_override: None,
+        correlation: None,
+    }));
     let (id, generation, u) = find_sign_request(&effects);
     let signed = u.sign_with_keys(&a).unwrap();
     let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
@@ -46,10 +42,6 @@ fn private_route_fails_closed() {
             .any(|e| matches!(e, Effect::EmitReceipt(rid, WriteStatus::Failed(_)) if *rid == id)),
         "must fail CLOSED with a typed error, not silently drop the write"
     );
-    assert!(matches!(
-        sink.0.lock().unwrap().last(),
-        Some(WriteStatus::Failed(_))
-    ));
 }
 
 /// Test 11 analog: `write_ack_per_relay`. A durable publish to two relays,
@@ -62,19 +54,13 @@ fn one_attempt_start_failure_is_owned_nonterminal_and_never_hits_the_wire() {
     let good = RelayUrl::parse("wss://persisted.example").unwrap();
     let blocked = RelayUrl::parse("wss://blocked.example").unwrap();
     let store = SharedFailStartStore::new([blocked.clone()]);
-    let sink = CapturingReceiptSink::default();
     let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
     connect_signer(&mut core, 0, &good, author.public_key());
     connect_signer(&mut core, 1, &blocked, author.public_key());
     authenticate_signer(&mut core, 0, &good, &author);
     authenticate_signer(&mut core, 1, &blocked, &author);
 
-    let (id, _, effects) = publish_private(
-        &mut core,
-        &author,
-        [good.clone(), blocked.clone()],
-        sink.clone(),
-    );
+    let (id, _, effects) = publish_private(&mut core, &author, [good.clone(), blocked.clone()]);
     assert!(effects.iter().any(
         |effect| matches!(effect, Effect::PublishEvent(session, event, _)
             if session == &signer_session(&good, event.pubkey))
@@ -88,14 +74,10 @@ fn one_attempt_start_failure_is_owned_nonterminal_and_never_hits_the_wire() {
         Effect::EmitReceipt(receipt, WriteStatus::PersistenceBlocked(relay))
             if *receipt == id && relay == &blocked
     )));
-    let replay = CapturingReceiptSink::default();
-    assert!(core
-        .reattach_receipt(id, Box::new(replay.clone()))
-        .is_attached());
+    let replay = core.reattach_receipt(id);
+    assert!(replay.is_attached());
     assert!(replay
-        .0
-        .lock()
-        .unwrap()
+        .facts
         .contains(&WriteStatus::PersistenceBlocked(blocked)));
 }
 
@@ -112,26 +94,16 @@ fn sent_never_fires_synchronously_and_only_written_handoff_produces_it() {
     let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let dir = FixtureDirectory::new().with_write(author.public_key().to_hex(), [relay.clone()]);
     let mut core = new_core(dir);
-    let sink = CapturingReceiptSink::default();
     connect_signer(&mut core, 0, &relay, author.public_key());
     authenticate_signer(&mut core, 0, &relay, &author);
 
-    let (id, _signed, effects) = publish_private(&mut core, &author, [relay.clone()], sink.clone());
+    let (id, _signed, effects) = publish_private(&mut core, &author, [relay.clone()]);
 
     assert!(
         !effects
             .iter()
             .any(|e| matches!(e, Effect::EmitReceipt(_, WriteStatus::Sent { .. }))),
         "Sent must never fire synchronously at enqueue time, got {effects:?}"
-    );
-    assert!(
-        !sink
-            .0
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|s| matches!(s, WriteStatus::Sent { .. })),
-        "the sink must not have observed Sent before any handoff result arrives"
     );
 
     let correlation = effects
@@ -144,15 +116,11 @@ fn sent_never_fires_synchronously_and_only_written_handoff_produces_it() {
         })
         .expect("a PublishEvent effect must have been emitted for this relay");
 
-    let reattached = CapturingReceiptSink::default();
-    assert!(core
-        .reattach_receipt(id, Box::new(reattached.clone()))
-        .is_attached());
+    let reattached = core.reattach_receipt(id);
+    assert!(reattached.is_attached());
     assert!(
         !reattached
-            .0
-            .lock()
-            .unwrap()
+            .facts
             .iter()
             .any(|status| matches!(status, WriteStatus::Sent { .. })),
         "a persisted Started row is pre-wire and must not replay as Sent"
@@ -174,16 +142,9 @@ fn sent_never_fires_synchronously_and_only_written_handoff_produces_it() {
         )),
         "a Written handoff must emit exactly one Sent, got {handoff_effects:?}"
     );
-    assert!(sink
-        .0
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|s| matches!(s, WriteStatus::Sent { relay: r, .. } if r == &relay)));
-    assert!(reattached
-        .0
-        .lock()
-        .unwrap()
+    assert!(core
+        .reattach_receipt(id)
+        .facts
         .iter()
         .any(|s| matches!(s, WriteStatus::Sent { relay: r, .. } if r == &relay)));
 
@@ -204,28 +165,21 @@ fn ephemeral_written_handoff_cannot_mint_persisted_sent_truth() {
     let relay_b = RelayUrl::parse("wss://ephemeral-b.example").unwrap();
     let mut core = new_core(FixtureDirectory::new());
     activate(&mut core, &author);
-    let sink = CapturingReceiptSink::default();
-    let accepted = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&author, 93, "ephemeral handoff")),
-            durability: Durability::Ephemeral,
-            routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                relays: NarrowOnly::new([relay_a.clone(), relay_b.clone()]),
-            }),
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(sink.clone()),
-    ));
+    let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(&author, 93, "ephemeral handoff")),
+        durability: Durability::Ephemeral,
+        routing: WriteRouting::PrivateNarrow(PrivateRoute {
+            relays: NarrowOnly::new([relay_a.clone(), relay_b.clone()]),
+        }),
+        identity_override: None,
+        correlation: None,
+    }));
     let (id, generation, unsigned) = find_sign_request(&accepted);
     let signed = unsigned.sign_with_keys(&author).unwrap();
     let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
-    assert!(!sink
-        .0
-        .lock()
-        .unwrap()
+    assert!(!effects
         .iter()
-        .any(|status| matches!(status, WriteStatus::Sent { .. })));
+        .any(|effect| matches!(effect, Effect::EmitReceipt(_, WriteStatus::Sent { .. }))));
     let correlation_for = |relay: &RelayUrl| {
         effects
             .iter()
@@ -251,12 +205,6 @@ fn ephemeral_written_handoff_cannot_mint_persisted_sent_truth() {
         HandoffResult::Written,
     ));
     assert!(written.is_empty());
-    assert!(!sink
-        .0
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|status| matches!(status, WriteStatus::Sent { .. })));
 }
 
 /// The exact handoff class is public receipt truth: `NotHandedOff` waits for
@@ -272,18 +220,13 @@ fn not_handed_off_and_ambiguous_project_distinct_truth_without_sent() {
         [relay_a.clone(), relay_b.clone()],
     );
     let mut core = new_core(dir);
-    let sink = CapturingReceiptSink::default();
     connect_signer(&mut core, 0, &relay_a, author.public_key());
     connect_signer(&mut core, 1, &relay_b, author.public_key());
     authenticate_signer(&mut core, 0, &relay_a, &author);
     authenticate_signer(&mut core, 1, &relay_b, &author);
 
-    let (id, _signed, effects) = publish_private(
-        &mut core,
-        &author,
-        [relay_a.clone(), relay_b.clone()],
-        sink.clone(),
-    );
+    let (id, _signed, effects) =
+        publish_private(&mut core, &author, [relay_a.clone(), relay_b.clone()]);
     let correlation_for = |relay: &RelayUrl| {
         effects
             .iter()
@@ -324,12 +267,10 @@ fn not_handed_off_and_ambiguous_project_distinct_truth_without_sent() {
         ) if *receipt == id && relay == &relay_b && *observed_at == Timestamp::from(10)
     )));
     assert!(
-        !sink
-            .0
-            .lock()
-            .unwrap()
+        !not_handed_off
             .iter()
-            .any(|s| matches!(s, WriteStatus::Sent { .. })),
+            .chain(&ambiguous)
+            .any(|effect| matches!(effect, Effect::EmitReceipt(_, WriteStatus::Sent { .. }))),
         "neither NotHandedOff nor Ambiguous may ever surface as Sent"
     );
 }
@@ -343,7 +284,7 @@ fn event_handoff_for_an_unknown_correlation_is_inert() {
     let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let dir = FixtureDirectory::new().with_write(author.public_key().to_hex(), [relay.clone()]);
     let mut core = new_core(dir);
-    let _ = publish_private(&mut core, &author, [relay], CapturingReceiptSink::default());
+    let _ = publish_private(&mut core, &author, [relay]);
 
     let unknown = nmp_transport::AttemptCorrelation(u64::MAX);
     let effects = core.handle(EngineMsg::EventHandoff(unknown, HandoffResult::Written));
@@ -357,14 +298,12 @@ fn all_attempt_start_failures_retain_every_lane_without_empty_terminal_sentinel(
     let b = RelayUrl::parse("wss://blocked-b.example").unwrap();
     let store = SharedFailStartStore::new([a.clone(), b.clone()]);
     let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
-    let sink = CapturingReceiptSink::default();
     connect_signer(&mut core, 0, &a, author.public_key());
     connect_signer(&mut core, 1, &b, author.public_key());
     authenticate_signer(&mut core, 0, &a, &author);
     authenticate_signer(&mut core, 1, &b, &author);
 
-    let (id, _, effects) =
-        publish_private(&mut core, &author, [a.clone(), b.clone()], sink.clone());
+    let (id, _, effects) = publish_private(&mut core, &author, [a.clone(), b.clone()]);
     assert_eq!(
         effects
             .iter()
@@ -372,15 +311,12 @@ fn all_attempt_start_failures_retain_every_lane_without_empty_terminal_sentinel(
             .count(),
         0
     );
-    let statuses = sink.0.lock().unwrap();
+    let statuses = receipt_statuses(&effects);
     assert!(statuses.contains(&WriteStatus::PersistenceBlocked(a.clone())));
     assert!(statuses.contains(&WriteStatus::PersistenceBlocked(b.clone())));
-    drop(statuses);
-    let replay = CapturingReceiptSink::default();
-    assert!(core
-        .reattach_receipt(id, Box::new(replay.clone()))
-        .is_attached());
-    let replayed = replay.0.lock().unwrap();
+    let replay = core.reattach_receipt(id);
+    assert!(replay.is_attached());
+    let replayed = replay.facts;
     assert!(replayed.contains(&WriteStatus::PersistenceBlocked(a)));
     assert!(replayed.contains(&WriteStatus::PersistenceBlocked(b)));
 }
@@ -402,12 +338,8 @@ fn ack_of_persisted_lane_does_not_terminalize_mixed_blocked_obligation() {
     connect_signer(&mut core, 1, &blocked, author.public_key());
     authenticate_signer(&mut core, 0, &good, &author);
     authenticate_signer(&mut core, 1, &blocked, &author);
-    let (id, signed, scheduled) = publish_private(
-        &mut core,
-        &author,
-        [good.clone(), blocked.clone()],
-        CapturingReceiptSink::default(),
-    );
+    let (id, signed, scheduled) =
+        publish_private(&mut core, &author, [good.clone(), blocked.clone()]);
     mark_written(&mut core, &scheduled, &good);
     let acked = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -422,14 +354,10 @@ fn ack_of_persisted_lane_does_not_terminalize_mixed_blocked_obligation() {
         Effect::EmitReceipt(receipt, WriteStatus::Acked(relay))
             if *receipt == id && relay == &good
     )));
-    let replay = CapturingReceiptSink::default();
-    assert!(core
-        .reattach_receipt(id, Box::new(replay.clone()))
-        .is_attached());
+    let replay = core.reattach_receipt(id);
+    assert!(replay.is_attached());
     assert!(replay
-        .0
-        .lock()
-        .unwrap()
+        .facts
         .contains(&WriteStatus::PersistenceBlocked(blocked)));
 }
 
@@ -447,12 +375,7 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
         );
         connect_signer(&mut first, 0, &relay, author.public_key());
         authenticate_signer(&mut first, 0, &relay, &author);
-        let (id, _, effects) = publish_private(
-            &mut first,
-            &author,
-            [relay.clone()],
-            CapturingReceiptSink::default(),
-        );
+        let (id, _, effects) = publish_private(&mut first, &author, [relay.clone()]);
         assert!(!effects
             .iter()
             .any(|effect| matches!(effect, Effect::PublishEvent(..))));
@@ -471,14 +394,10 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
             if r == &signer_session(&relay, author.public_key()))));
     connect_signer(&mut still_blocked, 0, &relay, author.public_key());
     authenticate_signer(&mut still_blocked, 0, &relay, &author);
-    let replay = CapturingReceiptSink::default();
-    assert!(still_blocked
-        .reattach_receipt(receipt, Box::new(replay.clone()))
-        .is_attached());
+    let replay = still_blocked.reattach_receipt(receipt);
+    assert!(replay.is_attached());
     assert!(replay
-        .0
-        .lock()
-        .unwrap()
+        .facts
         .contains(&WriteStatus::PersistenceBlocked(relay.clone())));
     drop(still_blocked);
 
@@ -536,16 +455,13 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
         connect_signer(&mut core, 0, &relay, author.public_key());
         authenticate_signer(&mut core, 0, &relay, &author);
         activate(&mut core, &author);
-        let accepted = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Unsigned(unsigned(&author, 86, "dynamic author route")),
-                durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(CapturingReceiptSink::default()),
-        ));
+        let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&author, 86, "dynamic author route")),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+            correlation: None,
+        }));
         let (id, generation, unsigned) = find_sign_request(&accepted);
         let signed = unsigned.sign_with_keys(&author).unwrap();
         let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
@@ -592,9 +508,7 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
             .count(),
         1
     );
-    assert!(recovered
-        .reattach_receipt(receipt, Box::new(CapturingReceiptSink::default()))
-        .is_attached());
+    assert!(recovered.reattach_receipt(receipt).is_attached());
 }
 
 #[test]
@@ -614,16 +528,13 @@ fn author_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vo
         );
         connect_signer(&mut core, 0, &old, author.public_key());
         activate(&mut core, &author);
-        let accepted = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Unsigned(unsigned(&author, 87, "dynamic author route")),
-                durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(CapturingReceiptSink::default()),
-        ));
+        let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&author, 87, "dynamic author route")),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+            correlation: None,
+        }));
         let (id, generation, unsigned) = find_sign_request(&accepted);
         let signed = unsigned.sign_with_keys(&author).unwrap();
         let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
@@ -687,14 +598,10 @@ fn author_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vo
             effect,
             Effect::EmitReceipt(_, WriteStatus::Acked(r)) if r == &old
         )));
-        let replay = CapturingReceiptSink::default();
-        assert!(core
-            .reattach_receipt(receipt, Box::new(replay.clone()))
-            .is_attached());
+        let replay = core.reattach_receipt(receipt);
+        assert!(replay.is_attached());
         assert!(replay
-            .0
-            .lock()
-            .unwrap()
+            .facts
             .contains(&WriteStatus::RoutePersistenceBlocked(new.clone())));
     }
 
@@ -751,16 +658,13 @@ fn route_revision_failure_emits_no_attempt_or_wire_and_claims_no_crash_durable_u
             10,
         );
         activate(&mut core, &author);
-        let accepted = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Unsigned(unsigned(&author, 88, "volatile route")),
-                durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(CapturingReceiptSink::default()),
-        ));
+        let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&author, 88, "volatile route")),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+            correlation: None,
+        }));
         let (id, generation, unsigned) = find_sign_request(&accepted);
         let signed = unsigned.sign_with_keys(&author).unwrap();
         let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
@@ -802,17 +706,13 @@ fn write_ack_per_relay() {
     authenticate_signer(&mut core, 0, &relay_ok, &a);
     authenticate_signer(&mut core, 1, &relay_bad, &a);
 
-    let sink = CapturingReceiptSink::default();
-    let effects = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&a, 1, "durable ack test")),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(sink.clone()),
-    ));
+    let effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(&a, 1, "durable ack test")),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     let (id, generation, u) = find_sign_request(&effects);
     let signed = u.sign_with_keys(&a).unwrap();
     let effects = core.handle(EngineMsg::SignerCompleted(
@@ -857,7 +757,7 @@ fn write_ack_per_relay() {
         |e| matches!(e, Effect::EmitReceipt(rid, WriteStatus::Rejected(r, msg)) if *rid == id && r == &relay_bad && msg.contains("blocked"))
     ));
 
-    let statuses = sink.0.lock().unwrap();
+    let statuses = core.reattach_receipt(id).facts;
     assert!(statuses
         .iter()
         .any(|s| matches!(s, WriteStatus::Acked(r) if r == &relay_ok)));
@@ -885,16 +785,13 @@ fn uncommitted_attempt_terminal_emits_no_receipt_and_keeps_lane_live() {
         signer_session(&relay, a.public_key()),
     ));
     authenticate_signer(&mut core, 0, &relay, &a);
-    let effects = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&a, 2, "finish persistence")),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(CapturingReceiptSink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(&a, 2, "finish persistence")),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     let (id, generation, unsigned) = find_sign_request(&effects);
     let signed = unsigned.sign_with_keys(&a).unwrap();
     let scheduled = core.handle(EngineMsg::SignerCompleted(
@@ -933,16 +830,13 @@ fn unaccepted_failure_ids_are_distinct_and_disjoint_from_store_receipts() {
     let a = Keys::generate();
     let mut core = new_core(FixtureDirectory::new());
     let fail = |core: &mut EngineCore<MemoryStore>, seq| {
-        core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Unsigned(unsigned(&a, seq, "unaccepted")),
-                durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(CapturingReceiptSink::default()),
-        ))
+        core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&a, seq, "unaccepted")),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+            correlation: None,
+        }))
         .into_iter()
         .find_map(|effect| match effect {
             Effect::EmitReceipt(id, WriteStatus::Failed(_)) => Some(id),

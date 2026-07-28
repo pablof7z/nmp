@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 
-use nmp::mechanism::core::{Effect, EngineCore, EngineMsg, RowDelta, RowSink};
+use nmp::mechanism::core::{Effect, EngineCore, EngineMsg};
 use nmp_grammar::{Binding, Filter, RelaySessionKey};
 use nmp_resolver::testkit::{kind1, kind3};
 use nmp_resolver::LiveQuery;
@@ -17,14 +17,6 @@ use nmp_router::{FixtureDirectory, SubId, WireOp};
 use nmp_store::MemoryStore;
 use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::{EventBuilder, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp};
-
-/// A `RowSink` that ignores everything -- these tests only care about
-/// `Effect`s and `diagnostics_snapshot()`, never the row-delivery path
-/// itself (already covered by `core_headless.rs`).
-struct NullSink;
-impl RowSink for NullSink {
-    fn on_rows(&self, _rows: Vec<RowDelta>) {}
-}
 
 fn new_core(dir: FixtureDirectory) -> EngineCore<MemoryStore> {
     EngineCore::new(MemoryStore::new(), Box::new(dir), 10)
@@ -114,16 +106,10 @@ fn diagnostics_snapshot_reports_real_per_relay_subs_filters_and_per_kind_event_c
     connect(&mut core, 0, &relay0);
     connect(&mut core, 1, &relay1);
 
-    let effects_a = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &me_hex),
-        Box::new(NullSink),
-    ));
+    let effects_a = core.handle(EngineMsg::Subscribe(literal_query(&[1], &me_hex)));
     let sub0 = sub_id_for(&effects_a, &relay0).clone();
 
-    let effects_b = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &friend_hex),
-        Box::new(NullSink),
-    ));
+    let effects_b = core.handle(EngineMsg::Subscribe(literal_query(&[1], &friend_hex)));
     let sub1 = sub_id_for(&effects_b, &relay1).clone();
 
     // ---- before any event: real sub counts + exact wire filters ---------
@@ -264,10 +250,7 @@ fn diagnostics_coverage_flips_none_to_proven_interval_on_eose_and_pushes_reactiv
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let effects = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &me_hex),
-        Box::new(NullSink),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(literal_query(&[1], &me_hex)));
     let sub0 = sub_id_for(&effects, &relay0).clone();
 
     let snap = core.diagnostics_snapshot();
@@ -315,14 +298,8 @@ fn coalesced_wire_diagnostics_reads_absorbed_atom_evidence() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay);
 
-    let _ = core.handle(EngineMsg::Subscribe(
-        literal_query(&[9999], &a_hex),
-        Box::new(NullSink),
-    ));
-    let effects = core.handle(EngineMsg::Subscribe(
-        literal_query(&[9999], &b_hex),
-        Box::new(NullSink),
-    ));
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(&[9999], &a_hex)));
+    let effects = core.handle(EngineMsg::Subscribe(literal_query(&[9999], &b_hex)));
     let sub = sub_id_for(&effects, &relay).clone();
 
     let before = core.diagnostics_snapshot();

@@ -11,13 +11,12 @@
 //! engine-level replay/reattachment contract across each named boundary.
 
 use std::borrow::Cow;
-use std::sync::{Arc, Mutex};
 
 use nmp::mechanism::core::{
     AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome, AuthSendCompletion,
     AuthSendOutcome, AuthSignerOutcome, Effect, EngineCore, EngineMsg, ReattachOutcome, ReceiptId,
 };
-use nmp::mechanism::outbox::{ReceiptSink, WriteStatus};
+use nmp::mechanism::outbox::WriteStatus;
 use nmp_grammar::{
     AccessContext, CorrelationToken, Durability, RelaySessionKey, WriteIntent, WritePayload,
     WriteRouting,
@@ -28,16 +27,6 @@ use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::{
     EventBuilder, Keys, Kind, PublicKey, RelayMessage, RelayUrl, Timestamp, UnsignedEvent,
 };
-
-#[derive(Clone, Default)]
-struct Sink(Arc<Mutex<Vec<WriteStatus>>>);
-
-impl ReceiptSink for Sink {
-    fn on_status(&self, status: WriteStatus) -> bool {
-        self.0.lock().unwrap().push(status);
-        true
-    }
-}
 
 fn receipt_id(effects: &[Effect]) -> ReceiptId {
     effects
@@ -83,8 +72,7 @@ fn kill_before_acceptance_leaves_the_token_unresolved() {
             Box::new(directory(keys.public_key(), relay.clone())),
             10,
         );
-        let (outcome, resolved_id) =
-            core.reattach_by_correlation("never-accepted".to_string(), Box::new(Sink::default()));
+        let (outcome, resolved_id) = core.reattach_by_correlation("never-accepted".to_string());
         assert_eq!(outcome, ReattachOutcome::NotFound);
         assert_eq!(resolved_id, None);
     }
@@ -93,8 +81,7 @@ fn kill_before_acceptance_leaves_the_token_unresolved() {
     // fabricate a mapping.
     let store = RedbStore::open(&path).unwrap();
     let mut core = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
-    let (outcome, resolved_id) =
-        core.reattach_by_correlation("never-accepted".to_string(), Box::new(Sink::default()));
+    let (outcome, resolved_id) = core.reattach_by_correlation("never-accepted".to_string());
     assert_eq!(outcome, ReattachOutcome::NotFound);
     assert_eq!(resolved_id, None);
 }
@@ -120,20 +107,17 @@ fn kill_after_durable_acceptance_reattaches_by_token_alone_after_restart() {
             10,
         );
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
-        let effects = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Unsigned(unsigned_draft(
-                    keys.public_key(),
-                    100,
-                    "kill-after-accept",
-                )),
-                durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
-                identity_override: None,
-                correlation: Some(token(tok)),
-            },
-            Box::new(Sink::default()),
-        ));
+        let effects = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned_draft(
+                keys.public_key(),
+                100,
+                "kill-after-accept",
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+            correlation: Some(token(tok)),
+        }));
         let id = receipt_id(&effects);
         assert!(effects
             .iter()
@@ -147,14 +131,12 @@ fn kill_after_durable_acceptance_reattaches_by_token_alone_after_restart() {
     let store = RedbStore::open(&path).unwrap();
     let mut core = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
     core.recover_on_boot();
-    let replay = Sink::default();
-    let (outcome, resolved_id) =
-        core.reattach_by_correlation(tok.to_string(), Box::new(replay.clone()));
-    assert_eq!(outcome, ReattachOutcome::Attached);
+    let (replay, resolved_id) = core.reattach_by_correlation(tok.to_string());
+    assert_eq!(replay.outcome, ReattachOutcome::Attached);
     assert_eq!(resolved_id, Some(original_id));
     assert_eq!(
-        *replay.0.lock().unwrap(),
-        vec![
+        replay.facts.as_slice(),
+        [
             WriteStatus::Accepted,
             WriteStatus::AwaitingCapability {
                 pubkey: keys.public_key()
@@ -165,12 +147,9 @@ fn kill_after_durable_acceptance_reattaches_by_token_alone_after_restart() {
     // The by-id door (unreachable to the "app" in this scenario, but usable
     // here to prove the token resolved to the SAME retained obligation, not
     // a distinct one) replays identically.
-    let by_id = Sink::default();
-    assert_eq!(
-        core.reattach_receipt(original_id, Box::new(by_id.clone())),
-        ReattachOutcome::Attached
-    );
-    assert_eq!(*replay.0.lock().unwrap(), *by_id.0.lock().unwrap());
+    let by_id = core.reattach_receipt(original_id);
+    assert_eq!(by_id, ReattachOutcome::Attached);
+    assert_eq!(replay.facts, by_id.facts);
 }
 
 /// Boundary 4: a receipt that reached a genuinely TERMINAL state
@@ -192,32 +171,27 @@ fn terminal_convergence_survives_restart_and_replays_by_token() {
             10,
         );
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
-        let effects = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Unsigned(unsigned_draft(
-                    keys.public_key(),
-                    200,
-                    "terminal correlation",
-                )),
-                durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
-                identity_override: None,
-                correlation: Some(token(tok)),
-            },
-            Box::new(Sink::default()),
-        ));
+        let effects = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned_draft(
+                keys.public_key(),
+                200,
+                "terminal correlation",
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+            correlation: Some(token(tok)),
+        }));
         let id = receipt_id(&effects);
         core.handle(EngineMsg::CancelWrite(id));
     }
 
     let store = RedbStore::open(&path).unwrap();
     let mut core = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
-    let replay = Sink::default();
-    let (outcome, resolved_id) =
-        core.reattach_by_correlation(tok.to_string(), Box::new(replay.clone()));
-    assert_eq!(outcome, ReattachOutcome::Attached);
+    let (replay, resolved_id) = core.reattach_by_correlation(tok.to_string());
+    assert_eq!(replay.outcome, ReattachOutcome::Attached);
     assert!(resolved_id.is_some());
-    assert_eq!(*replay.0.lock().unwrap(), vec![WriteStatus::Cancelled]);
+    assert_eq!(replay.facts, vec![WriteStatus::Cancelled]);
 }
 
 /// Boundary 5: a caller that does not know whether its first publish
@@ -241,20 +215,13 @@ fn double_submit_same_token_across_a_restart_mints_no_second_obligation() {
             10,
         );
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
-        let effects = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Unsigned(unsigned_draft(
-                    keys.public_key(),
-                    300,
-                    "first body",
-                )),
-                durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
-                identity_override: None,
-                correlation: Some(token(tok)),
-            },
-            Box::new(Sink::default()),
-        ));
+        let effects = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned_draft(keys.public_key(), 300, "first body")),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+            correlation: Some(token(tok)),
+        }));
         receipt_id(&effects)
     };
 
@@ -264,28 +231,31 @@ fn double_submit_same_token_across_a_restart_mints_no_second_obligation() {
     let mut core = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
     core.recover_on_boot();
     core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
-    let retry_sink = Sink::default();
-    let effects = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(unsigned_draft(
-                keys.public_key(),
-                301,
-                "second, different body",
-            )),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: Some(token(tok)),
-        },
-        Box::new(retry_sink.clone()),
-    ));
+    let effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned_draft(
+            keys.public_key(),
+            301,
+            "second, different body",
+        )),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: Some(token(tok)),
+    }));
     let retried_id = receipt_id(&effects);
     assert_eq!(
         retried_id, first_id,
         "the same token must resolve to the SAME receipt id, never a second one"
     );
+    let retry_statuses: Vec<_> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::EmitReceipt(_, status) => Some(status.clone()),
+            _ => None,
+        })
+        .collect();
     assert_eq!(
-        *retry_sink.0.lock().unwrap(),
+        retry_statuses,
         vec![
             WriteStatus::Accepted,
             WriteStatus::AwaitingCapability {
@@ -448,16 +418,13 @@ fn partial_relay_ack_survives_restart_and_replays_by_token() {
         };
         core.handle(EngineMsg::RelayConnected(handle, session.clone()));
         authenticate(&mut core, handle, &session, &keys);
-        let effects = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Signed(event.clone()),
-                durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
-                identity_override: None,
-                correlation: Some(token(tok)),
-            },
-            Box::new(Sink::default()),
-        ));
+        let effects = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Signed(event.clone()),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+            correlation: Some(token(tok)),
+        }));
         assert!(effects.iter().any(|effect| matches!(effect,
             Effect::PublishEvent(r, e, _) if r == &session && e == &event
         )));
@@ -491,12 +458,10 @@ fn partial_relay_ack_survives_restart_and_replays_by_token() {
         10,
     );
     core.recover_on_boot();
-    let replay = Sink::default();
-    let (outcome, resolved_id) =
-        core.reattach_by_correlation(tok.to_string(), Box::new(replay.clone()));
-    assert_eq!(outcome, ReattachOutcome::Attached);
+    let (replay, resolved_id) = core.reattach_by_correlation(tok.to_string());
+    assert_eq!(replay.outcome, ReattachOutcome::Attached);
     assert!(resolved_id.is_some());
-    let statuses = replay.0.lock().unwrap();
+    let statuses = replay.facts;
     assert!(
         statuses
             .iter()
@@ -537,16 +502,13 @@ fn partial_relay_reject_survives_restart_and_replays_by_token() {
         };
         core.handle(EngineMsg::RelayConnected(handle, session.clone()));
         authenticate(&mut core, handle, &session, &keys);
-        let effects = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Signed(event.clone()),
-                durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
-                identity_override: None,
-                correlation: Some(token(tok)),
-            },
-            Box::new(Sink::default()),
-        ));
+        let effects = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Signed(event.clone()),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+            correlation: Some(token(tok)),
+        }));
         assert!(effects.iter().any(|effect| matches!(effect,
             Effect::PublishEvent(r, e, _) if r == &session && e == &event
         )));
@@ -581,12 +543,10 @@ fn partial_relay_reject_survives_restart_and_replays_by_token() {
         10,
     );
     core.recover_on_boot();
-    let replay = Sink::default();
-    let (outcome, resolved_id) =
-        core.reattach_by_correlation(tok.to_string(), Box::new(replay.clone()));
-    assert_eq!(outcome, ReattachOutcome::Attached);
+    let (replay, resolved_id) = core.reattach_by_correlation(tok.to_string());
+    assert_eq!(replay.outcome, ReattachOutcome::Attached);
     assert!(resolved_id.is_some());
-    let statuses = replay.0.lock().unwrap();
+    let statuses = replay.facts;
     assert!(
         statuses.iter().any(|status| matches!(
             status,
