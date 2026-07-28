@@ -33,6 +33,7 @@ Feature: A bounded window belongs to the feed, never to each author in it
 
   Background:
     Given I am logged in as my own account
+    And relay "hub" is the relay I watch directly
 
   # ---- the subscription count -------------------------------------------
 
