@@ -30,10 +30,10 @@ pub struct ObservationEvidence {
     pub attributes: Vec<(String, String)>,
 }
 
-fn resolved_value_string(value: nmp_engine::core::ResolvedBindingValue) -> String {
+fn resolved_value_string(value: crate::core::ResolvedBindingValue) -> String {
     match value {
-        nmp_engine::core::ResolvedBindingValue::Scalar(value) => value,
-        nmp_engine::core::ResolvedBindingValue::AddressCoordinate {
+        crate::core::ResolvedBindingValue::Scalar(value) => value,
+        crate::core::ResolvedBindingValue::AddressCoordinate {
             kind,
             author,
             identifier,
@@ -59,8 +59,8 @@ fn attribute(key: &str, value: impl ToString) -> (String, String) {
 }
 
 impl ObservationEvidence {
-    pub(crate) fn from_engine(value: nmp_engine::core::ObservationEvidence) -> Self {
-        let nmp_engine::core::ObservationEvidence { sequence, fact } = value;
+    pub(crate) fn from_engine(value: crate::core::ObservationEvidence) -> Self {
+        let crate::core::ObservationEvidence { sequence, fact } = value;
         let mut evidence = Self {
             sequence,
             kind: "",
@@ -71,7 +71,7 @@ impl ObservationEvidence {
             attributes: vec![],
         };
         match fact {
-            nmp_engine::core::ObservationFact::ReactiveInput {
+            crate::core::ObservationFact::ReactiveInput {
                 path,
                 field,
                 revision,
@@ -88,7 +88,7 @@ impl ObservationEvidence {
                     .attributes
                     .push(attribute("field", identity_field_string(field)));
             }
-            nmp_engine::core::ObservationFact::DerivedSet {
+            crate::core::ObservationFact::DerivedSet {
                 path,
                 revision,
                 values,
@@ -101,7 +101,7 @@ impl ObservationEvidence {
                 evidence.values = values.into_iter().map(resolved_value_string).collect();
                 evidence.fingerprint = Some(fingerprint);
             }
-            nmp_engine::core::ObservationFact::ConcreteFilter {
+            crate::core::ObservationFact::ConcreteFilter {
                 path,
                 revision,
                 filters,
@@ -117,7 +117,7 @@ impl ObservationEvidence {
                     .collect();
                 evidence.fingerprint = Some(fingerprint);
             }
-            nmp_engine::core::ObservationFact::RelayRequest {
+            crate::core::ObservationFact::RelayRequest {
                 path,
                 filter_revision,
                 relay,
@@ -139,7 +139,7 @@ impl ObservationEvidence {
                     attribute("replay", replay),
                 ];
             }
-            nmp_engine::core::ObservationFact::RelayEose {
+            crate::core::ObservationFact::RelayEose {
                 path,
                 filter_revision,
                 relay,
@@ -159,7 +159,7 @@ impl ObservationEvidence {
                     attribute("observed_at", observed_at.as_secs()),
                 ];
             }
-            nmp_engine::core::ObservationFact::RelayClosed {
+            crate::core::ObservationFact::RelayClosed {
                 path,
                 filter_revision,
                 relay,
@@ -183,7 +183,7 @@ impl ObservationEvidence {
                 }
                 evidence.attributes.push(attribute("reason", reason));
             }
-            nmp_engine::core::ObservationFact::RelayRefused {
+            crate::core::ObservationFact::RelayRefused {
                 path,
                 filter_revision,
                 relay,
@@ -209,10 +209,10 @@ impl ObservationEvidence {
                     .push(attribute("request_revision", request_revision));
                 evidence.attributes.push(attribute("reason", reason));
             }
-            nmp_engine::core::ObservationFact::Withdrawn => {
+            crate::core::ObservationFact::Withdrawn => {
                 evidence.kind = "withdrawn";
             }
-            nmp_engine::core::ObservationFact::Overflow {
+            crate::core::ObservationFact::Overflow {
                 first_sequence,
                 last_sequence,
                 dropped,

@@ -27,7 +27,7 @@ nmp-resolver.workspace = true
 nmp-router.workspace = true
 nmp-transport.workspace = true
 nmp-local-signer.workspace = true
-nmp-engine.workspace = true
+nmp.workspace = true
 nmp-test-support.workspace = true
 
 cucumber = "0.21"

@@ -111,7 +111,7 @@ Feature: One subscription per relay, not one per thing you asked about
     # A never-confirming relay produces the same wire traffic as a
     # well-behaved one. The concern this pins is that nothing may start gating
     # the collapse on EOSE to get it -- the engine-level twin is
-    # `crates/nmp-engine/tests/core_headless/derived_tag_fanout.rs`'s D.
+    # `crates/nmp/tests/core_headless/derived_tag_fanout.rs`'s D.
     Given relay "hub" never confirms end of stored events
     When I watch for notes tagged "p" as "alice"
     And I watch for notes tagged "p" as "bob"
@@ -289,7 +289,7 @@ Feature: One subscription per relay, not one per thing you asked about
     #
     # A newly resolved value must widen the live subscription, not open
     # another one. That is proven deterministically, for this exact shape, by
-    # `crates/nmp-engine/tests/core_headless/derived_tag_fanout.rs`'s
+    # `crates/nmp/tests/core_headless/derived_tag_fanout.rs`'s
     # `b2_one_more_value_after_a_warm_set_replaces_in_place` -- a warm set of
     # five, then a sixth arriving live, measured as `opened: 0, replaced: 1,
     # closed: 0` against a real `EngineCore`. That test was written FOR this
@@ -339,7 +339,7 @@ Feature: One subscription per relay, not one per thing you asked about
     # and the two steps below do not exist in the catalog. The behavior a
     # warm cache must have -- resolve the whole set in a SINGLE recompile,
     # and emit one subscription rather than one per value -- is measured
-    # instead in `crates/nmp-engine/tests/core_headless/derived_tag_fanout.rs`,
+    # instead in `crates/nmp/tests/core_headless/derived_tag_fanout.rs`,
     # which shows the single recompile already holds and the fan-out inside
     # it does not.
     Given I administer 40 groups

@@ -4,7 +4,7 @@
 //! before anything hits a real socket or the real `EngineThread`. The first
 //! step that actually needs the engine calls [`NmpWorld::ensure_started`],
 //! which starts every staged [`ScriptedRelay`], seeds their fixture events,
-//! and spawns the real `nmp_engine::runtime::EngineThread` against them --
+//! and spawns the real `nmp::mechanism::runtime::EngineThread` against them --
 //! never a mocked engine, never a resolver-only shortcut (§2.1).
 //!
 //! Everything in this module is internal plumbing for the step catalog
@@ -20,9 +20,9 @@ use std::time::{Duration, Instant};
 
 use nostr::{EventId, Keys, PublicKey, Tag, Timestamp, UnsignedEvent};
 
-use nmp_engine::core::{AcquisitionEvidence, DiagnosticsSnapshot, RowDelta, ShortfallFact};
-use nmp_engine::outbox::WriteStatus;
-use nmp_engine::runtime::{DiagnosticsHandle, EngineThread, Handle, QueryHandle, RowsReceiver};
+use nmp::mechanism::core::{AcquisitionEvidence, DiagnosticsSnapshot, RowDelta, ShortfallFact};
+use nmp::mechanism::outbox::WriteStatus;
+use nmp::mechanism::runtime::{DiagnosticsHandle, EngineThread, Handle, QueryHandle, RowsReceiver};
 use nmp_grammar::{AccessContext, IndexedTagName, SourceAuthority};
 use nmp_grammar::{Binding, Demand, Derived, Filter, IdentityField, Selector};
 use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
@@ -307,7 +307,7 @@ impl FeedState {
 /// only ever names "the receipt", singular -- one implicit publish in
 /// flight per scenario).
 struct ReceiptState {
-    rx: nmp_engine::runtime::FifoReceiver<WriteStatus>,
+    rx: nmp::mechanism::runtime::FifoReceiver<WriteStatus>,
     seen: Vec<WriteStatus>,
 }
 
@@ -355,7 +355,7 @@ struct DiagFeed {
 impl DiagFeed {
     fn new(
         handle: DiagnosticsHandle,
-        rx: nmp_engine::runtime::LatestReceiver<DiagnosticsSnapshot>,
+        rx: nmp::mechanism::runtime::LatestReceiver<DiagnosticsSnapshot>,
     ) -> Self {
         let shared = Arc::new((Mutex::new(None), Condvar::new()));
         let shared2 = Arc::clone(&shared);
@@ -716,7 +716,7 @@ impl NmpWorld {
             // #121). Opt those local hosts in anyway, so any scenario that DOES
             // exercise kind:10002 discovery of a scripted local relay is
             // admitted rather than silently dropped.
-            nmp_engine::core::RelayAdmissionPolicy::new([
+            nmp::mechanism::core::RelayAdmissionPolicy::new([
                 "127.0.0.1".to_string(),
                 "localhost".to_string(),
                 "[::1]".to_string(),

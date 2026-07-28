@@ -1,7 +1,7 @@
 //! The `harness = false` cucumber entry point (approach doc §2.2): parses
 //! every `.feature` file under the repo-root `features/` directory and runs
 //! the closed step catalog (`nmp_bdd::steps::{given,when,then}`) against
-//! `NmpWorld` -- a REAL `nmp_engine::runtime::EngineThread` driven against
+//! `NmpWorld` -- a REAL `nmp::mechanism::runtime::EngineThread` driven against
 //! real in-process scripted relays, never a mocked engine.
 //!
 //! Two tiers (approach doc §2.2):

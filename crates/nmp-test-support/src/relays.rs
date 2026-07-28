@@ -1,7 +1,7 @@
 //! `ScriptedRelay` — the in-process, real-websocket relay every scenario's
 //! world topology is built from (approach doc §2.2/§2.3). Wraps
 //! `nostr_relay_builder::local::LocalRelay` (the same fixture the engine's
-//! own `nmp-engine/tests/runtime_integration.rs` drives) with two things a
+//! own `crates/nmp/tests/runtime_integration.rs` drives) with two things a
 //! plain `LocalRelay` doesn't give a caller:
 //!
 //! - **behavior knobs** (`reject_writes`, `reject_queries` — a `Given` about
@@ -28,7 +28,7 @@
 //! Deliberately NOT a glob import of `nostr_relay_builder::prelude::*` in
 //! the signature-facing parts of this module: that re-exports a DIFFERENT
 //! `nostr` (0.45-alpha) than this workspace's pinned `nostr = "0.44.4"` --
-//! see `nmp-engine/tests/runtime_integration.rs`'s identical comment. Every
+//! see `crates/nmp/tests/runtime_integration.rs`'s identical comment. Every
 //! cross-version value (keypairs, seeded events) is bridged explicitly by
 //! hex/id string round-trip (`mirror_keys`).
 
@@ -706,7 +706,7 @@ impl ScriptedRelay {
     /// Start a `LocalRelay` on a SPECIFIC port -- the reconnect/drop-and-
     /// come-back scenarios' "relay X comes back" step rebinds the exact
     /// port a just-shut-down relay used (`self.port`), the same trick
-    /// `nmp-engine/tests/runtime_integration.rs` uses, so the engine's own
+    /// `crates/nmp/tests/runtime_integration.rs` uses, so the engine's own
     /// `Pool` reconnects to the SAME `RelayUrl` it already had open.
     pub async fn start_on_port(port: u16, config: &RelayConfig) -> Self {
         Self::start_on_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)), config).await

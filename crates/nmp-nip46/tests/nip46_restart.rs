@@ -8,9 +8,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nmp_engine::core::{RelayAdmissionPolicy, RowDelta};
-use nmp_engine::outbox::WriteStatus;
-use nmp_engine::runtime::{EngineThread, FifoReceiver, ReceiptReattachment, RowsReceiver};
+use nmp::mechanism::core::{RelayAdmissionPolicy, RowDelta};
+use nmp::mechanism::outbox::WriteStatus;
+use nmp::mechanism::runtime::{EngineThread, FifoReceiver, ReceiptReattachment, RowsReceiver};
 use nmp_grammar::{Binding, Durability, Filter, WriteIntent, WritePayload, WriteRouting};
 use nmp_nip46::Nip46Signer;
 use nmp_resolver::LiveQuery;

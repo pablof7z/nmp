@@ -4,7 +4,7 @@
 //! duplicate by hand.
 //!
 //! No `Signed`-payload verify lives here: that guarantee moved to
-//! `nmp-engine::core::EngineCore::on_publish`'s acceptance boundary (Unit
+//! `crate::core::EngineCore::on_publish`'s acceptance boundary (Unit
 //! A0, #56) precisely so it holds for every entry point -- this facade,
 //! `nmp-ffi`, and any `from_parts`/raw-`EngineThread` caller alike -- not
 //! only the one that happens to verify locally. See [`crate::error`]'s doc.
@@ -22,12 +22,12 @@
 //! calls `shutdown` too, so a dropped-without-`shutdown` `Engine` still
 //! tears down `EngineThread` cleanly rather than detaching it.
 
-use nmp_engine::runtime::FifoReceiver;
+use crate::runtime::FifoReceiver;
 use std::sync::Mutex;
 
-use nmp_engine::core::ReceiptId;
-use nmp_engine::outbox::WriteStatus;
-use nmp_engine::runtime::{
+use crate::core::ReceiptId;
+use crate::outbox::WriteStatus;
+use crate::runtime::{
     EngineThread, Handle, HistoryHandle, HistoryReceiver, QueryHandle, ReceiptReattachment,
     ReceiptReplayCursor, ReceiptStream, RowsReceiver, RuntimeConfig, SignEventError,
     SignEventOperation, SignerRegistration,
@@ -100,35 +100,35 @@ pub enum CancelWriteError {
 }
 
 fn cancel_write_outcome_from_engine(
-    outcome: nmp_engine::outbox::CancelWriteOutcome,
+    outcome: crate::outbox::CancelWriteOutcome,
 ) -> CancelWriteOutcome {
     match outcome {
-        nmp_engine::outbox::CancelWriteOutcome::Cancelled => CancelWriteOutcome::Cancelled,
+        crate::outbox::CancelWriteOutcome::Cancelled => CancelWriteOutcome::Cancelled,
     }
 }
 
-fn cancel_write_error_from_engine(error: nmp_engine::outbox::CancelWriteError) -> CancelWriteError {
+fn cancel_write_error_from_engine(error: crate::outbox::CancelWriteError) -> CancelWriteError {
     match error {
-        nmp_engine::outbox::CancelWriteError::UnknownReceipt { receipt_id } => {
+        crate::outbox::CancelWriteError::UnknownReceipt { receipt_id } => {
             CancelWriteError::UnknownReceipt { receipt_id }
         }
-        nmp_engine::outbox::CancelWriteError::AlreadySigned {
+        crate::outbox::CancelWriteError::AlreadySigned {
             receipt_id,
             event_id,
         } => CancelWriteError::AlreadySigned {
             receipt_id,
             event_id,
         },
-        nmp_engine::outbox::CancelWriteError::AlreadyCompensated { receipt_id } => {
+        crate::outbox::CancelWriteError::AlreadyCompensated { receipt_id } => {
             CancelWriteError::AlreadyCompensated { receipt_id }
         }
-        nmp_engine::outbox::CancelWriteError::AlreadyAbandoned { receipt_id } => {
+        crate::outbox::CancelWriteError::AlreadyAbandoned { receipt_id } => {
             CancelWriteError::AlreadyAbandoned { receipt_id }
         }
-        nmp_engine::outbox::CancelWriteError::PersistenceFailed { receipt_id, reason } => {
+        crate::outbox::CancelWriteError::PersistenceFailed { receipt_id, reason } => {
             CancelWriteError::PersistenceFailed { receipt_id, reason }
         }
-        nmp_engine::outbox::CancelWriteError::EngineClosed => CancelWriteError::EngineClosed,
+        crate::outbox::CancelWriteError::EngineClosed => CancelWriteError::EngineClosed,
     }
 }
 
@@ -195,7 +195,7 @@ impl std::fmt::Debug for AccountRegistration {
 /// invalidates it, and a stale clone cannot detach the replacement.
 #[derive(Clone, PartialEq, Eq)]
 pub struct AuthPolicyRegistration {
-    inner: nmp_engine::runtime::AuthPolicyRegistration,
+    inner: crate::runtime::AuthPolicyRegistration,
 }
 
 impl AuthPolicyRegistration {
@@ -345,7 +345,7 @@ impl Engine {
         directory: D,
         cap: usize,
         pool_config: PoolConfig,
-        admission: nmp_engine::core::RelayAdmissionPolicy,
+        admission: crate::core::RelayAdmissionPolicy,
     ) -> Result<Self, EngineError>
     where
         S: nmp_store::EventStore + Send + 'static,
@@ -474,8 +474,7 @@ impl Engine {
                 if query.0.selection.limit.is_some() {
                     return Err(EngineError::WindowSelectionHasLimit);
                 }
-                let history_query =
-                    nmp_engine::core::HistoryQuery::new(query, initial.get(), max.get());
+                let history_query = crate::core::HistoryQuery::new(query, initial.get(), max.get());
                 self.with_handle(|handle| {
                     handle
                         .subscribe_history(history_query)
@@ -714,7 +713,7 @@ impl Engine {
         &self,
         request: SignEventRequest,
         completion: impl FnOnce(Result<nostr::Event, SignEventError>) + Send + 'static,
-    ) -> Result<nmp_engine::runtime::SignEventCancel, SignEventError> {
+    ) -> Result<crate::runtime::SignEventCancel, SignEventError> {
         let (handle, pubkey) = {
             let guard = self
                 .inner
@@ -829,14 +828,14 @@ impl Engine {
     #[cfg(test)]
     fn relay_information_retention_census(
         &self,
-    ) -> nmp_engine::relay_information::RelayInformationRetentionCensus {
+    ) -> crate::relay_information_service::RelayInformationRetentionCensus {
         let guard = self
             .inner
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         guard
             .as_ref()
-            .map(|inner| nmp_engine::runtime::relay_information_retention_census(&inner.handle))
+            .map(|inner| crate::runtime::relay_information_retention_census(&inner.handle))
             .expect("test census requires an open engine")
     }
 
@@ -1308,7 +1307,7 @@ mod tests {
             nmp_router::FixtureDirectory::new(),
             10,
             PoolConfig::default(),
-            nmp_engine::core::RelayAdmissionPolicy::default(),
+            crate::core::RelayAdmissionPolicy::default(),
         )
         .expect("from_parts engine must build");
         assert!(matches!(
@@ -1328,7 +1327,7 @@ mod tests {
                 max_relays: usize::MAX,
                 ..PoolConfig::default()
             },
-            nmp_engine::core::RelayAdmissionPolicy::default(),
+            crate::core::RelayAdmissionPolicy::default(),
         )
         .err()
         .expect("unrepresentable relay envelope must refuse construction");
@@ -2229,9 +2228,9 @@ mod tests {
                     panic!("override publish must not fail pre-routing: {reason}")
                 }
                 Ok(_) => {}
-                Err(nmp_engine::runtime::FifoRecvTimeoutError::Timeout) => {}
-                Err(nmp_engine::runtime::FifoRecvTimeoutError::Closed) => break,
-                Err(nmp_engine::runtime::FifoRecvTimeoutError::Lagged) => {
+                Err(crate::runtime::FifoRecvTimeoutError::Timeout) => {}
+                Err(crate::runtime::FifoRecvTimeoutError::Closed) => break,
+                Err(crate::runtime::FifoRecvTimeoutError::Lagged) => {
                     panic!("short identity-override receipt unexpectedly lagged")
                 }
             }
@@ -2585,7 +2584,7 @@ mod tests {
                         .ok()
                         .and_then(|frame| frame.window.as_ref())
                         .map(|window| window.load),
-                    Some(nmp_engine::core::WindowLoad::Returned { .. })
+                    Some(crate::core::WindowLoad::Returned { .. })
                 );
                 if returned || frame.is_err() {
                     batch_tx.send(frame).unwrap();
@@ -2604,7 +2603,7 @@ mod tests {
         let contents = frame.window.expect("windowed frames carry window contents");
         assert_eq!(
             contents.load,
-            nmp_engine::core::WindowLoad::Returned { added: 1 }
+            crate::core::WindowLoad::Returned { added: 1 }
         );
         assert_eq!(contents.rows.len(), 2);
         drain.join().unwrap();

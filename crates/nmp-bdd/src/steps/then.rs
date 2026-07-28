@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 
 use cucumber::then;
 
-use nmp_engine::outbox::WriteStatus;
+use nmp::mechanism::outbox::WriteStatus;
 
 use crate::steps::{parse_people, parse_tag};
 use crate::world::NmpWorld;
@@ -667,8 +667,8 @@ async fn every_author_is_covered(w: &mut NmpWorld, relay: String) {
 fn relay_row_matching(
     w: &NmpWorld,
     relay: &str,
-    pred: impl Fn(&nmp_engine::core::RelayDiagnosticsSnapshot) -> bool,
-) -> Option<nmp_engine::core::RelayDiagnosticsSnapshot> {
+    pred: impl Fn(&nmp::mechanism::core::RelayDiagnosticsSnapshot) -> bool,
+) -> Option<nmp::mechanism::core::RelayDiagnosticsSnapshot> {
     let url = w.relay_url(relay);
     w.diagnostics_matching(|snap| snap.relays.iter().any(|row| row.relay == url && pred(row)))
         .and_then(|snap| snap.relays.into_iter().find(|row| row.relay == url))
@@ -677,7 +677,7 @@ fn relay_row_matching(
 /// The latest row for `relay`, whatever it says. Used by the negative
 /// assertions, which must read a row that EXISTS and find the fact absent
 /// rather than mistake "no diagnostics yet" for "nothing was refused".
-fn latest_relay_row(w: &NmpWorld, relay: &str) -> nmp_engine::core::RelayDiagnosticsSnapshot {
+fn latest_relay_row(w: &NmpWorld, relay: &str) -> nmp::mechanism::core::RelayDiagnosticsSnapshot {
     relay_row_matching(w, relay, |_| true)
         .unwrap_or_else(|| panic!("diagnostics never showed relay {relay:?} at all"))
 }
