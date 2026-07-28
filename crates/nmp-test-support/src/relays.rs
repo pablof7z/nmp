@@ -710,6 +710,8 @@ pub struct ScriptedRelay {
     contacted: Arc<ContactLog>,
     queries: Arc<QueryLog>,
     wire: Arc<WireLog>,
+    connections: Arc<AtomicU64>,
+    admitted: Arc<Mutex<Vec<u16>>>,
 }
 
 impl ScriptedRelay {
@@ -731,6 +733,7 @@ impl ScriptedRelay {
 
     async fn start_on_addr(public_addr: SocketAddr, config: &RelayConfig) -> Self {
         let contacted = Arc::new(ContactLog::default());
+        let admitted: Arc<Mutex<Vec<u16>>> = Arc::new(Mutex::new(Vec::new()));
         let queries = Arc::new(QueryLog::default());
         let wire = Arc::new(WireLog::default());
         let backend_port = free_port();
@@ -740,6 +743,7 @@ impl ScriptedRelay {
             .port(backend_port)
             .write_policy(LoggingWritePolicy {
                 contacted: contacted.clone(),
+                admitted: admitted.clone(),
                 reject: config.reject_writes,
             })
             .query_policy(LoggingQueryPolicy {
@@ -756,7 +760,14 @@ impl ScriptedRelay {
             .await
             .expect("nmp-bdd: scripted relay must start");
         let tap_log = Arc::clone(&wire);
+        let connections = Arc::new(AtomicU64::new(0));
+        let tap_connections = Arc::clone(&connections);
         let tap: ClientTapFactory = Arc::new(move || {
+            // The factory is called once per ACCEPTED connection (see
+            // `ClientTapFactory`'s doc), which makes this the world-side
+            // "how many times has a client connected here" witness -- what
+            // tells a reconnect-replay REQ apart from a recompiled one.
+            tap_connections.fetch_add(1, Ordering::Relaxed);
             let mut frames = ClientFrames::new(Arc::clone(&tap_log));
             Box::new(move |bytes: &[u8]| frames.push(bytes)) as ClientTap
         });
@@ -783,7 +794,28 @@ impl ScriptedRelay {
             contacted,
             queries,
             wire,
+            connections,
+            admitted,
         }
+    }
+
+    /// Every EVENT kind this relay's write policy has admitted, in arrival
+    /// order -- the other half of the contacted-log (which counts REQ and
+    /// EVENT alike without saying which).
+    pub fn admitted_event_kinds(&self) -> Vec<u16> {
+        self.admitted
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// How many client connections this address has ACCEPTED, ever --
+    /// websocket sessions and NIP-11 document fetches alike (one accept is
+    /// one connection either way). A second accept after the engine was
+    /// already talking to this relay is a RECONNECT, and a reconnect
+    /// replays the whole live req list (`apply_replay`).
+    pub fn connection_count(&self) -> u64 {
+        self.connections.load(Ordering::Relaxed)
     }
 
     /// The port this relay is (or was, if since shut down) bound to.
@@ -972,16 +1004,21 @@ pub fn free_port() -> u16 {
 #[derive(Debug)]
 struct LoggingWritePolicy {
     contacted: Arc<ContactLog>,
+    admitted: Arc<Mutex<Vec<u16>>>,
     reject: bool,
 }
 
 impl WritePolicy for LoggingWritePolicy {
     fn admit_event<'a>(
         &'a self,
-        _event: &'a nostr_relay_builder::prelude::Event,
+        event: &'a nostr_relay_builder::prelude::Event,
         _addr: &'a SocketAddr,
     ) -> nostr_relay_builder::prelude::BoxedFuture<'a, WritePolicyResult> {
         self.contacted.record();
+        self.admitted
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(event.kind.as_u16());
         let reject = self.reject;
         Box::pin(async move {
             if reject {
