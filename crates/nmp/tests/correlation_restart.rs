@@ -73,7 +73,7 @@ fn kill_before_acceptance_leaves_the_token_unresolved() {
             10,
         );
         let (outcome, resolved_id) = core.reattach_by_correlation("never-accepted".to_string());
-        assert_eq!(outcome, ReattachOutcome::NotFound);
+        assert_eq!(outcome.outcome, ReattachOutcome::NotFound);
         assert_eq!(resolved_id, None);
     }
 
@@ -82,7 +82,7 @@ fn kill_before_acceptance_leaves_the_token_unresolved() {
     let store = RedbStore::open(&path).unwrap();
     let mut core = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
     let (outcome, resolved_id) = core.reattach_by_correlation("never-accepted".to_string());
-    assert_eq!(outcome, ReattachOutcome::NotFound);
+    assert_eq!(outcome.outcome, ReattachOutcome::NotFound);
     assert_eq!(resolved_id, None);
 }
 
@@ -148,7 +148,7 @@ fn kill_after_durable_acceptance_reattaches_by_token_alone_after_restart() {
     // here to prove the token resolved to the SAME retained obligation, not
     // a distinct one) replays identically.
     let by_id = core.reattach_receipt(original_id);
-    assert_eq!(by_id, ReattachOutcome::Attached);
+    assert_eq!(by_id.outcome, ReattachOutcome::Attached);
     assert_eq!(replay.facts, by_id.facts);
 }
 
