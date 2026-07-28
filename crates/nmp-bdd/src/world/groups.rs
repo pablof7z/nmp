@@ -330,10 +330,12 @@ impl NmpWorld {
             op(&group, engine)
         };
         match outcome {
-            Ok(receipts) => self.last_receipt = Some(ReceiptState::new(receipts)),
+            Ok(receipts) => self.receipts.push(ReceiptState::new(receipts)),
             Err(GroupPublishError::Context(error)) => {
+                // A refusal at the door minted no obligation, so it adds
+                // nothing to the world's list of publishes -- which is what
+                // makes `receipt_count() == 0` the honest assertion for it.
                 self.group_refusal = Some(error);
-                self.last_receipt = None;
             }
             Err(GroupPublishError::Engine(error)) => {
                 panic!("nmp-bdd: the publish door refused a group write: {error:?}")

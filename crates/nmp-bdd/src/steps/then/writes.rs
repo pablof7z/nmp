@@ -70,6 +70,60 @@ async fn receipt_rejected_by(w: &mut NmpWorld, relay_name: String) {
     );
 }
 
+// ---- one publish retiring another ---------------------------------------
+//
+// These are the only steps that name a publish by ORDER instead of by
+// recency. A scenario about a newer replaceable write retiring an older one
+// has TWO live obligations at once and has to say something different about
+// each, which "the receipt" cannot express.
+
+fn receipt_ordinal(name: &str) -> usize {
+    match name {
+        "first" => 0,
+        "second" => 1,
+        other => panic!("unsupported receipt ordinal {other:?}"),
+    }
+}
+
+#[then(regex = r#"^the (first|second) receipt reports waiting for "([^"]+)"$"#)]
+async fn numbered_receipt_waiting(w: &mut NmpWorld, ordinal: String, relay_name: String) {
+    let relay_url = w.relay_url(&relay_name);
+    let waiting = w.receipt_eventually_at(receipt_ordinal(&ordinal), |seen| {
+        seen.iter().any(
+            |status| matches!(status, WriteStatus::AwaitingRelay { relay } if *relay == relay_url),
+        )
+    });
+    assert!(
+        waiting,
+        "expected the {ordinal} receipt to wait for {relay_name:?}"
+    );
+}
+
+#[then(regex = r#"^the (first|second) receipt reports superseded by the newer replaceable write$"#)]
+async fn numbered_receipt_superseded(w: &mut NmpWorld, ordinal: String) {
+    let superseded = w.receipt_eventually_at(receipt_ordinal(&ordinal), |seen| {
+        seen.iter()
+            .any(|status| matches!(status, WriteStatus::Superseded))
+    });
+    assert!(
+        superseded,
+        "expected the {ordinal} receipt to terminate as superseded"
+    );
+}
+
+#[then(regex = r#"^the (first|second) receipt reports acked by "([^"]+)"$"#)]
+async fn numbered_receipt_acked(w: &mut NmpWorld, ordinal: String, relay_name: String) {
+    let relay_url = w.relay_url(&relay_name);
+    let acked = w.receipt_eventually_at(receipt_ordinal(&ordinal), |seen| {
+        seen.iter()
+            .any(|status| matches!(status, WriteStatus::Acked(relay) if *relay == relay_url))
+    });
+    assert!(
+        acked,
+        "expected the {ordinal} receipt to be acked by {relay_name:?}"
+    );
+}
+
 // ---- routing: the two words ---------------------------------------------
 //
 // "Delivered to <relay>" is read off the RECEIPT, not off a harness-side

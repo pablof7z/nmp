@@ -2,7 +2,7 @@ use super::canonical::{
     encode_stored_event, encode_stored_event_record, record_to_stored_event,
     stored_event_to_record, try_decode_stored_event, try_decode_stored_event_record,
 };
-use super::ingest_txn::{GovernedIngestTxn, GovernedWrite};
+use super::ingest_txn::{GovernedIngestTxn, GovernedWrite, RedbIngestTxn};
 use super::mutation::{
     fan_out_signed_in_txn, find_any_displaced_key_by_event_id_in_txn,
     find_displaced_key_by_event_id_in_txn, missing_addr_index_target,
@@ -10,13 +10,17 @@ use super::mutation::{
     tombstone_refuses,
 };
 use super::outbox::{
-    alloc_intent_id_in_txn, alloc_receipt_id_in_txn, decrement_pending_ephemeral_in_txn,
-    intent_key, is_suppressed_in_txn, receipt_key, remove_addr_claimant_in_txn,
-    remove_claimant_in_txn, update_outbox_receipt, OutboxIntentRecord, OutboxReceiptRecord,
-    SuppressClaimRecord,
+    alloc_intent_id_in_txn, alloc_receipt_id_in_txn, decode_deadline_by_intent, decode_lane,
+    decrement_pending_ephemeral_in_txn, intent_key, intent_row_prefix, is_suppressed_in_txn,
+    prefix_range, receipt_key, remove_addr_claimant_in_txn, remove_claimant_in_txn,
+    update_outbox_receipt, OutboxIntentRecord, OutboxReceiptRecord, SuppressClaimRecord,
 };
 use super::query::expiration_key;
-use super::schema::{persist_err, EventKey, OUTBOX_CORRELATIONS, OUTBOX_META, OUTBOX_RECEIPTS};
+use super::schema::{
+    persist_err, EventKey, OUTBOX_ATTEMPTS, OUTBOX_ATTEMPT_DETAILS, OUTBOX_CORRELATIONS,
+    OUTBOX_DEADLINES, OUTBOX_DEADLINES_BY_INTENT, OUTBOX_LANES, OUTBOX_META, OUTBOX_RECEIPTS,
+    OUTBOX_ROUTE_REVISIONS,
+};
 #[cfg(test)]
 use super::store::RedbCrashPoint;
 use super::store::RedbStore;
@@ -26,8 +30,174 @@ use super::{
     LocalOrigin, PersistenceError, PromoteOutcome, Provenance, ReceiptState, RefuseReason,
     SigState, Signature, StoredEvent, Timestamp,
 };
+use crate::RetiredIntent;
 use nostr::JsonUtil;
 use redb::ReadableTable;
+
+/// Redb half of replaceable-outbox coalescing. Everything here runs inside
+/// the same governed transaction that installs the newer canonical winner.
+fn retire_superseded_owners_in_txn(
+    ingest: &mut RedbIngestTxn<'_, '_>,
+    write_txn: &redb::WriteTransaction,
+    mut replaced: StoredEvent,
+) -> Result<(Option<StoredEvent>, Vec<RetiredIntent>), PersistenceError> {
+    let attempts = write_txn.open_table(OUTBOX_ATTEMPTS).map_err(persist_err)?;
+    let attempt_details = write_txn
+        .open_table(OUTBOX_ATTEMPT_DETAILS)
+        .map_err(persist_err)?;
+    let mut lanes = write_txn.open_table(OUTBOX_LANES).map_err(persist_err)?;
+    let mut route_revisions = write_txn
+        .open_table(OUTBOX_ROUTE_REVISIONS)
+        .map_err(persist_err)?;
+    let mut deadlines = write_txn
+        .open_table(OUTBOX_DEADLINES)
+        .map_err(persist_err)?;
+    let mut deadlines_by_intent = write_txn
+        .open_table(OUTBOX_DEADLINES_BY_INTENT)
+        .map_err(persist_err)?;
+
+    let owners = replaced
+        .provenance
+        .local
+        .as_ref()
+        .map(|local| local.owners.clone())
+        .unwrap_or_default();
+    let mut eligible = Vec::new();
+    for owner in owners {
+        let key = intent_key(owner);
+        let Some(intent_json) = ingest
+            .outbox_intents
+            .get(key.as_str())
+            .map_err(persist_err)?
+            .map(|guard| guard.value().to_string())
+        else {
+            continue;
+        };
+        let intent: OutboxIntentRecord = serde_json::from_str(&intent_json).map_err(|error| {
+            PersistenceError::invariant(format!("decode outbox intent {}: {error}", owner.0))
+        })?;
+        let (lower, upper) = prefix_range(intent_row_prefix(owner));
+        let has_attempt = attempts
+            .range(lower.as_str()..upper.as_str())
+            .map_err(persist_err)?
+            .next()
+            .transpose()
+            .map_err(persist_err)?
+            .is_some()
+            || attempt_details
+                .range(lower.as_str()..upper.as_str())
+                .map_err(persist_err)?
+                .next()
+                .transpose()
+                .map_err(persist_err)?
+                .is_some();
+        if has_attempt {
+            continue;
+        }
+        let mut lane_keys = Vec::new();
+        let mut lane_started = false;
+        for row in lanes
+            .range(lower.as_str()..upper.as_str())
+            .map_err(persist_err)?
+        {
+            let (lane_key, lane_json) = row.map_err(persist_err)?;
+            let lane = decode_lane(lane_key.value(), lane_json.value())?;
+            if lane.key.intent_id != owner {
+                return Err(PersistenceError::invariant(
+                    "lane retirement range escaped intent prefix",
+                ));
+            }
+            lane_started |= lane.last_ordinal != 0;
+            lane_keys.push(lane_key.value().to_string());
+        }
+        if !lane_started {
+            eligible.push((owner, intent.receipt_id, lane_keys));
+        }
+    }
+
+    let mut predecessor = None;
+    for (owner, receipt_id, lane_keys) in &eligible {
+        if let Some(local) = replaced.provenance.local.as_mut() {
+            local.owners.remove(owner);
+        }
+        let key = intent_key(*owner);
+        let displaced_bytes = ingest
+            .outbox_displaced
+            .remove(key.as_str())
+            .map_err(persist_err)?
+            .map(|guard| guard.value().to_vec());
+        if let Some(bytes) = displaced_bytes {
+            predecessor.get_or_insert(try_decode_stored_event(&bytes)?);
+        }
+        ingest
+            .outbox_intents
+            .remove(key.as_str())
+            .map_err(persist_err)?;
+        for lane_key in lane_keys {
+            lanes.remove(lane_key.as_str()).map_err(persist_err)?;
+        }
+
+        let (lower, upper) = prefix_range(intent_row_prefix(*owner));
+        let route_keys = route_revisions
+            .range(lower.as_str()..upper.as_str())
+            .map_err(persist_err)?
+            .map(|row| {
+                row.map(|(key, _)| key.value().to_string())
+                    .map_err(persist_err)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for route_key in route_keys {
+            route_revisions
+                .remove(route_key.as_str())
+                .map_err(persist_err)?;
+        }
+
+        let deadline_rows = deadlines_by_intent
+            .range(lower.as_str()..upper.as_str())
+            .map_err(persist_err)?
+            .map(|row| {
+                let (by_intent_key, json) = row.map_err(persist_err)?;
+                Ok((
+                    by_intent_key.value().to_string(),
+                    decode_deadline_by_intent(by_intent_key.value(), json.value())?,
+                ))
+            })
+            .collect::<Result<Vec<_>, PersistenceError>>()?;
+        for (by_intent_key, deadline) in deadline_rows {
+            deadlines
+                .remove(super::outbox::deadline_key(&deadline).as_str())
+                .map_err(persist_err)?;
+            deadlines_by_intent
+                .remove(by_intent_key.as_str())
+                .map_err(persist_err)?;
+        }
+        update_outbox_receipt(
+            &mut ingest.outbox_receipts,
+            *receipt_id,
+            ReceiptState::Superseded,
+        )?;
+    }
+
+    let remains_valid = replaced
+        .provenance
+        .local
+        .as_ref()
+        .is_some_and(|local| !local.owners.is_empty() || local.sig_state == SigState::Signed)
+        || !replaced.provenance.seen.is_empty();
+    let displaced = if remains_valid {
+        Some(replaced)
+    } else {
+        predecessor
+    };
+    let retired = eligible
+        .into_iter()
+        .map(|(intent_id, receipt_id, _)| RetiredIntent {
+            intent_id,
+            receipt_id,
+        })
+        .collect();
+    Ok((displaced, retired))
+}
 
 pub(super) fn accept_write(
     store: &mut RedbStore,
@@ -389,14 +559,20 @@ pub(super) fn accept_write(
                                         .insert(&exp_key, event_key)
                                         .map_err(persist_err)?;
                                 }
+                                let (displaced, retired) = retire_superseded_owners_in_txn(
+                                    ingest,
+                                    write_txn,
+                                    replaced.clone(),
+                                )?;
                                 (
                                     AcceptOutcome::Superseded {
                                         intent_id,
                                         receipt_id,
                                         row: stored,
                                         replaced: Box::new(replaced.clone()),
+                                        retired,
                                     },
-                                    Some(replaced),
+                                    displaced,
                                 )
                             } else {
                                 (
@@ -1062,6 +1238,7 @@ pub(super) fn cancel_ephemeral_receipt(
                 ReceiptState::Cancelled => crate::CancelEphemeralOutcome::AlreadyCancelled,
                 ReceiptState::Abandoned => crate::CancelEphemeralOutcome::AlreadyAbandoned,
                 ReceiptState::Compensated => crate::CancelEphemeralOutcome::AlreadyCompensated,
+                ReceiptState::Superseded => crate::CancelEphemeralOutcome::AlreadySuperseded,
             }
         }
     };

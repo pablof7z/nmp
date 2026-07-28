@@ -5701,7 +5701,10 @@ fn dispatch_effect(
             crate::ingest_attribution::diagnostics_effect(phase_started.elapsed());
         }
         Effect::EmitReceipt(id, status) => {
-            if matches!(&status, WriteStatus::Signed(_) | WriteStatus::Cancelled) {
+            if matches!(
+                &status,
+                WriteStatus::Signed(_) | WriteStatus::Cancelled | WriteStatus::Superseded
+            ) {
                 registry.cancel_pending_write(id);
             }
             runtime

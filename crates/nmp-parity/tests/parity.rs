@@ -246,6 +246,11 @@ struct NormEvidence {
 enum NormStatus {
     Accepted,
     Cancelled,
+    /// Terminal like `Cancelled`, and like it carries nothing: a retired
+    /// obligation's whole content is that a newer write at the same NIP-01
+    /// address took its place. Both surfaces must therefore agree on the
+    /// bare tag with no payload to compare.
+    Superseded,
     /// #47 Unit B: carries the parked pubkey (hex) so the direct/FFI
     /// parity proof covers the payload, not just the variant tag.
     AwaitingCapability(String),
@@ -565,6 +570,7 @@ fn normalize_direct_status(status: WriteStatus, relay: &str) -> NormStatus {
     match status {
         WriteStatus::Accepted => NormStatus::Accepted,
         WriteStatus::Cancelled => NormStatus::Cancelled,
+        WriteStatus::Superseded => NormStatus::Superseded,
         WriteStatus::AwaitingCapability { pubkey } => {
             NormStatus::AwaitingCapability(pubkey.to_hex())
         }
@@ -628,6 +634,7 @@ fn normalize_ffi_status(status: FfiWriteStatus, relay: &str) -> NormStatus {
     match status {
         FfiWriteStatus::Accepted => NormStatus::Accepted,
         FfiWriteStatus::Cancelled => NormStatus::Cancelled,
+        FfiWriteStatus::Superseded => NormStatus::Superseded,
         FfiWriteStatus::AwaitingCapability { pubkey } => NormStatus::AwaitingCapability(pubkey),
         FfiWriteStatus::Signed { event_id } => NormStatus::Signed(event_id),
         FfiWriteStatus::Routed { mut relays } => {
@@ -1261,6 +1268,11 @@ fn direct_follow_receipt_name(status: &WriteStatus) -> &'static str {
     match status {
         WriteStatus::Accepted => "accepted",
         WriteStatus::Cancelled => "cancelled",
+        // A follow list is kind:3 — replaceable — so a second `set_following`
+        // while the first is still unsent retires the first at the same
+        // `(pubkey, kind)` address. Both surfaces must name that terminal
+        // with the same word, and both must stop reading the stream on it.
+        WriteStatus::Superseded => "superseded",
         WriteStatus::AwaitingCapability { .. } => "awaiting_capability",
         WriteStatus::Signed(_) => "signed",
         WriteStatus::Routed(_) => "routed",
@@ -1284,6 +1296,7 @@ fn ffi_follow_receipt_name(status: &FfiWriteStatus) -> &'static str {
     match status {
         FfiWriteStatus::Accepted => "accepted",
         FfiWriteStatus::Cancelled => "cancelled",
+        FfiWriteStatus::Superseded => "superseded",
         FfiWriteStatus::AwaitingCapability { .. } => "awaiting_capability",
         FfiWriteStatus::Signed { .. } => "signed",
         FfiWriteStatus::Routed { .. } => "routed",
@@ -1328,7 +1341,12 @@ fn collect_direct_follow_action(action: FollowAction) -> Vec<NormFollowActionSta
             NormFollowActionStatus::NoChange(_)
                 | NormFollowActionStatus::Failed(_)
                 | NormFollowActionStatus::Receipt(
-                    "acked" | "rejected" | "gave_up" | "replaceable_conflict" | "failed"
+                    "acked"
+                        | "rejected"
+                        | "gave_up"
+                        | "replaceable_conflict"
+                        | "superseded"
+                        | "failed"
                 )
         );
         result.push(normalized);
@@ -1362,7 +1380,12 @@ fn collect_ffi_follow_action(
             NormFollowActionStatus::NoChange(_)
                 | NormFollowActionStatus::Failed(_)
                 | NormFollowActionStatus::Receipt(
-                    "acked" | "rejected" | "gave_up" | "replaceable_conflict" | "failed"
+                    "acked"
+                        | "rejected"
+                        | "gave_up"
+                        | "replaceable_conflict"
+                        | "superseded"
+                        | "failed"
                 )
         );
         result.push(normalized);

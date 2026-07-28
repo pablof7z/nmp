@@ -19,6 +19,8 @@ boundary records:
 - the canonical pending row inserted through the ordinary event-store mutation
   path;
 - any displaced replaceable winner needed for pre-signature compensation;
+- any older, unattempted delivery obligations made obsolete by this
+  replaceable/addressable winner, retired with retained receipt facts;
 - initial route/retry state that is already known.
 
 If that transaction fails, the caller receives an acceptance error and no
@@ -45,6 +47,29 @@ watermark into global completeness: the protocol operation separately owns
 which planned sources and evidence are sufficient to compose at all. Raw FFI
 writes cannot mint the guard; native callers reach it through semantic
 operations such as NMP's NIP-02 `follow` / `unfollow` action.
+
+### Replaceable outbox coalescing
+
+Acceptance uses the same NIP-01 coordinate as canonical replacement:
+`(pubkey, kind)` for kinds `0`, `3`, and `10000...19999`, and
+`(pubkey, kind, d)` for `30000...39999`. When a newer winner is accepted,
+every older open intent that owns the displaced row and has not started a
+wire attempt is retired in the same transaction. Its intent, waiting lanes,
+route revisions, and deadlines are removed, while its retained receipt and
+correlation identity remain and report terminal `Superseded`.
+
+An offline or AUTH-blocked lane with attempt ordinal zero is still unattempted:
+route resolution alone is not evidence that bytes reached a relay. Once an
+attempt row exists, or a lane cursor proves an attempt existed, the older
+obligation is preserved because delivery may already have crossed the
+transport handoff boundary. Co-owners are classified independently, so an
+attempted owner survives while an unattempted duplicate owner is retired.
+
+Compensation chains remain valid. A signed, relay-observed, or still-owned
+predecessor stays stashed under the newer intent. A purely pending row whose
+last owner was retired is not restorable; its own valid predecessor is spliced
+forward instead. Cancelling the newer write can therefore never resurrect an
+ownerless sentinel draft.
 
 ## 2. One row path
 
@@ -127,18 +152,18 @@ cancels it; NMP must not silently discard or re-author it.
 
 Receipt facts are persisted and reattachable by intent/receipt id. Dropping an
 observer does not cancel the write or lose its history. `Accepted`, signer
-waiting, signature promotion, route revisions, attempts, ACKs, rejections,
-expiry, cancellation, and ambiguous at-most-once outcomes remain inspectable
-after restart.
+waiting, signature promotion, replaceable supersession, route revisions,
+attempts, ACKs, rejections, expiry, cancellation, and ambiguous at-most-once
+outcomes remain inspectable after restart.
 
 The canonical facade operation is `cancel(receipt_id)`. It commits only for a
 still-unsigned accepted obligation, returns `CancelWriteOutcome::Cancelled`,
 persists and broadcasts the matching `WriteStatus::Cancelled` fact, and is
-idempotent once that fact exists. Unknown ids, signed writes, and each other
-terminal state are distinct typed refusals. Store failure is a typed error:
-ownership and signer work remain live, and no observer sees `Cancelled` unless
-the compensation transaction committed. UniFFI, Swift, and Kotlin project the
-same result and refusal axes.
+idempotent once that fact exists. Unknown ids, signed writes, superseded
+writes, and each other terminal state are distinct typed refusals. Store
+failure is a typed error: ownership and signer work remain live, and no
+observer sees `Cancelled` unless the compensation transaction committed.
+UniFFI, Swift, and Kotlin project the same result and refusal axes.
 
 `Enqueued`, `sent`, and `converged` are never synonyms. Product policy may
 interpret a set of per-relay facts; the engine reports them without inventing a
@@ -165,6 +190,8 @@ deterministic jitter and explicit caps so restart does not reset or synchronize
 the fleet.
 
 - Offline and AUTH-blocked time do not consume attempts.
+- A newer same-coordinate winner retires an older lane only while its attempt
+  ordinal is still zero; attempted delivery remains owned until terminal.
 - Recovery wakes work whose persisted eligibility time has passed.
 - A transient delivery failure advances backoff.
 - A relay ACK closes its lane.
@@ -218,6 +245,11 @@ Required proofs include:
 - signer absence survives restart as `AwaitingSigner` and resumes after attach;
 - an invalid or mismatched signer response cannot promote the row;
 - pre-signature cancellation restores a displaced replaceable winner;
+- kinds `0`, `3`, `10000...19999`, and same-`d` `30000...39999` retire older
+  offline obligations atomically, retain a reattachable `Superseded` receipt,
+  and recover only the newer open intent after restart;
+- different `d` coordinates remain independent, and a started attempt
+  prevents retirement of the older obligation;
 - an exact-base guarded replacement is accepted, while a concurrent winner
   produces a typed conflict with no intent, receipt, or pending-row residue;
 - all relays rejecting a signed event leaves the signed row intact;

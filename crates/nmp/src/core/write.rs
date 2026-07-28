@@ -1120,6 +1120,7 @@ impl<S: EventStore> EngineCore<S> {
             ReceiptState::Signed => WriteStatus::Signed(receipt.frozen_id),
             ReceiptState::Compensated => WriteStatus::Failed("write compensated".to_string()),
             ReceiptState::Cancelled => WriteStatus::Cancelled,
+            ReceiptState::Superseded => WriteStatus::Superseded,
             ReceiptState::Abandoned => {
                 WriteStatus::Failed("ephemeral write abandoned after restart".to_string())
             }
@@ -1704,96 +1705,103 @@ impl<S: EventStore> EngineCore<S> {
 
         let mut frozen = Self::freeze_payload(&payload, signing_pubkey, self.clock);
 
-        let (id, intent_id, already_signed, accepted_signed_event, committed) = if durability
-            == Durability::Ephemeral
-        {
-            match self
-                .resolver
-                .store_mut()
-                .accept_ephemeral(frozen.id, signing_pubkey)
-            {
-                Ok(receipt_id) => (ReceiptId(receipt_id), None, false, None, None),
-                Err(err) => return self.fail_unaccepted(err.to_string()),
-            }
-        } else {
-            let store_durability = match durability {
-                Durability::Durable => WriteDurability::Durable,
-                Durability::AtMostOnce => WriteDurability::AtMostOnce,
-                Durability::Ephemeral => unreachable!("handled above"),
-            };
-            let accept = AcceptWrite {
-                frozen: frozen.clone(),
-                replaceable_base,
-                monotonic_stamp,
-                expected_pubkey: signing_pubkey,
-                signing_identity_ref: signing_pubkey.to_hex(),
-                durability: store_durability,
-                routing: Self::routing_snapshot(&routing),
-                // Treat an unsigned acceptance as reattachable signer work.
-                // If a signer is already present the immediate request below
-                // promotes it; if not, restart safely re-requests it.
-                sig_state: match payload {
-                    WritePayload::Event(_) | WritePayload::ReplaceableEdit { .. } => {
-                        IntentSigState::AwaitingSigner
+        let (id, intent_id, already_signed, accepted_signed_event, committed, retired_intents) =
+            if durability == Durability::Ephemeral {
+                match self
+                    .resolver
+                    .store_mut()
+                    .accept_ephemeral(frozen.id, signing_pubkey)
+                {
+                    Ok(receipt_id) => (ReceiptId(receipt_id), None, false, None, None, Vec::new()),
+                    Err(err) => return self.fail_unaccepted(err.to_string()),
+                }
+            } else {
+                let store_durability = match durability {
+                    Durability::Durable => WriteDurability::Durable,
+                    Durability::AtMostOnce => WriteDurability::AtMostOnce,
+                    Durability::Ephemeral => unreachable!("handled above"),
+                };
+                let accept = AcceptWrite {
+                    frozen: frozen.clone(),
+                    replaceable_base,
+                    monotonic_stamp,
+                    expected_pubkey: signing_pubkey,
+                    signing_identity_ref: signing_pubkey.to_hex(),
+                    durability: store_durability,
+                    routing: Self::routing_snapshot(&routing),
+                    // Treat an unsigned acceptance as reattachable signer work.
+                    // If a signer is already present the immediate request below
+                    // promotes it; if not, restart safely re-requests it.
+                    sig_state: match payload {
+                        WritePayload::Event(_) | WritePayload::ReplaceableEdit { .. } => {
+                            IntentSigState::AwaitingSigner
+                        }
+                        WritePayload::Signed(_) => IntentSigState::Pending,
+                    },
+                    accepted_at: self.clock,
+                    correlation,
+                };
+                let LocalAcceptResult { outcome, committed } =
+                    match self.resolver.accept_local(accept) {
+                        Ok(value) => value,
+                        Err(err) => return self.fail_unaccepted(err.to_string()),
+                    };
+                let Some(intent_id) = outcome.journaled_intent_id() else {
+                    let AcceptOutcome::Refused(reason) = outcome else {
+                        unreachable!("only Refused omits journal ids")
+                    };
+                    return match reason {
+                        nmp_store::RefuseReason::ReplaceableBaseChanged { expected, actual } => {
+                            self.fail_unaccepted_with_status(WriteStatus::ReplaceableConflict {
+                                expected,
+                                actual,
+                            })
+                        }
+                        other => self.fail_unaccepted(format!("write refused: {other:?}")),
+                    };
+                };
+                let receipt_id = outcome
+                    .journaled_receipt_id()
+                    .expect("journaled intent always has a receipt id");
+                // The acceptance transaction may have moved a replaceable
+                // edit's `created_at` forward against the row it CAS-ed, which
+                // re-derives the id. The body it actually froze is the one
+                // everything downstream must target — the signer request, the
+                // pending row, the delivered bytes.
+                if let Some(row) = outcome.accepted_row() {
+                    if row.event.id != frozen.id {
+                        frozen = SignedEvent::new(
+                            row.event.id,
+                            row.event.pubkey,
+                            row.event.created_at,
+                            row.event.kind,
+                            row.event.tags.clone(),
+                            row.event.content.clone(),
+                            sentinel_signature(),
+                        );
                     }
-                    WritePayload::Signed(_) => IntentSigState::Pending,
-                },
-                accepted_at: self.clock,
-                correlation,
-            };
-            let LocalAcceptResult { outcome, committed } = match self.resolver.accept_local(accept)
-            {
-                Ok(value) => value,
-                Err(err) => return self.fail_unaccepted(err.to_string()),
-            };
-            let Some(intent_id) = outcome.journaled_intent_id() else {
-                let AcceptOutcome::Refused(reason) = outcome else {
-                    unreachable!("only Refused omits journal ids")
-                };
-                return match reason {
-                    nmp_store::RefuseReason::ReplaceableBaseChanged { expected, actual } => self
-                        .fail_unaccepted_with_status(WriteStatus::ReplaceableConflict {
-                            expected,
-                            actual,
-                        }),
-                    other => self.fail_unaccepted(format!("write refused: {other:?}")),
-                };
-            };
-            let receipt_id = outcome
-                .journaled_receipt_id()
-                .expect("journaled intent always has a receipt id");
-            // The acceptance transaction may have moved a replaceable
-            // edit's `created_at` forward against the row it CAS-ed, which
-            // re-derives the id. The body it actually froze is the one
-            // everything downstream must target — the signer request, the
-            // pending row, the delivered bytes.
-            if let Some(row) = outcome.accepted_row() {
-                if row.event.id != frozen.id {
-                    frozen = SignedEvent::new(
-                        row.event.id,
-                        row.event.pubkey,
-                        row.event.created_at,
-                        row.event.kind,
-                        row.event.tags.clone(),
-                        row.event.content.clone(),
-                        sentinel_signature(),
-                    );
                 }
-            }
-            let accepted_signed_event = match &outcome {
-                AcceptOutcome::Duplicate { row, .. } if row.event.sig != sentinel_signature() => {
-                    Some(row.event.clone())
-                }
-                _ => None,
+                let accepted_signed_event = match &outcome {
+                    AcceptOutcome::Duplicate { row, .. }
+                        if row.event.sig != sentinel_signature() =>
+                    {
+                        Some(row.event.clone())
+                    }
+                    _ => None,
+                };
+                let retired_intents = match &outcome {
+                    AcceptOutcome::Superseded { retired, .. } => retired.clone(),
+                    _ => Vec::new(),
+                };
+                (
+                    ReceiptId(receipt_id),
+                    Some(intent_id),
+                    accepted_signed_event.is_some(),
+                    accepted_signed_event,
+                    Some(committed),
+                    retired_intents,
+                )
             };
-            (
-                ReceiptId(receipt_id),
-                Some(intent_id),
-                accepted_signed_event.is_some(),
-                accepted_signed_event,
-                Some(committed),
-            )
-        };
 
         let mut effects = Vec::new();
         effects.push(Effect::EmitReceipt(id, WriteStatus::Accepted));
@@ -1831,6 +1839,24 @@ impl<S: EventStore> EngineCore<S> {
             // facts through the same O(committed delta) projection path as a
             // relay batch. Any demand change keeps the broad refresh oracle.
             self.apply_committed_mutation(committed, &mut effects);
+        }
+
+        for retired in retired_intents {
+            let retired_id = ReceiptId(retired.receipt_id);
+            self.emit_write_status(retired_id, WriteStatus::Superseded, &mut effects);
+            if let Some(retired_pending) = self.pending.remove(&retired_id) {
+                self.forget_pending_indexes(retired_id, &retired_pending);
+                if let Some(event_id) = retired_pending.event_id {
+                    if let Some(receipts) = self.event_to_receipts.get_mut(&event_id) {
+                        receipts.remove(&retired_id);
+                        if receipts.is_empty() {
+                            self.event_to_receipts.remove(&event_id);
+                        }
+                    }
+                }
+            } else {
+                self.intent_receipts.remove(&retired.intent_id);
+            }
         }
 
         match payload {
@@ -1954,6 +1980,7 @@ impl<S: EventStore> EngineCore<S> {
             ReceiptState::Compensated => {
                 Err(CancelWriteError::AlreadyCompensated { receipt_id: id })
             }
+            ReceiptState::Superseded => Err(CancelWriteError::AlreadySuperseded { receipt_id: id }),
             ReceiptState::Abandoned => Err(CancelWriteError::AlreadyAbandoned { receipt_id: id }),
             ReceiptState::Accepted => Err(CancelWriteError::PersistenceFailed {
                 receipt_id: id,
@@ -2135,6 +2162,13 @@ impl<S: EventStore> EngineCore<S> {
                     self.pending.insert(id, pending);
                     return (
                         Err(CancelWriteError::AlreadyCompensated { receipt_id: id }),
+                        effects,
+                    );
+                }
+                Ok(CancelEphemeralOutcome::AlreadySuperseded) => {
+                    self.pending.insert(id, pending);
+                    return (
+                        Err(CancelWriteError::AlreadySuperseded { receipt_id: id }),
                         effects,
                     );
                 }

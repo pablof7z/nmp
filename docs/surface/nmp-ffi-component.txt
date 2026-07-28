@@ -2005,6 +2005,19 @@ enum Enum {
             docstring: None,
         },
         Variant {
+            name: "AlreadySuperseded",
+            discr: None,
+            fields: [
+                Field {
+                    name: "receipt_id",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
             name: "AlreadyAbandoned",
             discr: None,
             fields: [
@@ -4435,6 +4448,12 @@ enum Enum {
         },
         Variant {
             name: "Cancelled",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Superseded",
             discr: None,
             fields: [],
             docstring: None,

@@ -277,8 +277,8 @@ fn recover_outbox_reports_a_corrupt_displaced_snapshot() {
     {
         let mut store = fixture.open();
         store
-            .accept_write(accept_of(frozen_from(&first)))
-            .expect("accept first");
+            .insert(first, observed())
+            .expect("insert relay-observed predecessor");
         store
             .accept_write(accept_of(frozen_from(&second)))
             .expect("accept second");

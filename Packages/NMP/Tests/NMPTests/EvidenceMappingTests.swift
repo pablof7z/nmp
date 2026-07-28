@@ -5,6 +5,7 @@ import NMPFFI
 final class EvidenceMappingTests: XCTestCase {
     func testCancellationFactAndEveryRefusalRemainTyped() {
         XCTAssertEqual(WriteStatus(.cancelled), .cancelled)
+        XCTAssertEqual(WriteStatus(.superseded), .superseded)
         XCTAssertEqual(
             NMPWriteCancellationError(.UnknownReceipt(receiptId: 42)),
             .unknownReceipt(receiptId: 42)
@@ -16,6 +17,10 @@ final class EvidenceMappingTests: XCTestCase {
         XCTAssertEqual(
             NMPWriteCancellationError(.AlreadyCompensated(receiptId: 42)),
             .alreadyCompensated(receiptId: 42)
+        )
+        XCTAssertEqual(
+            NMPWriteCancellationError(.AlreadySuperseded(receiptId: 42)),
+            .alreadySuperseded(receiptId: 42)
         )
         XCTAssertEqual(
             NMPWriteCancellationError(.AlreadyAbandoned(receiptId: 42)),
