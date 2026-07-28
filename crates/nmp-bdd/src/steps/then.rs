@@ -4,16 +4,55 @@
 //! `NmpWorld`'s public observers (`feed_*`/`receipt_*`/`diagnostics_*`/
 //! `relay_contacted`/`relay_untouched_since_snapshot`) -- never anything
 //! engine-internal.
+//!
+//! # The empty-world rule: a step that cannot fail is not coverage
+//!
+//! Ask of every assertion here: IF THE WORLD PRODUCED NOTHING AT ALL, DOES
+//! THIS STEP STILL PASS? A loop over an empty collection, an `.all()` over
+//! nothing, a `difference()` from an empty wanted-set, a count that is zero
+//! because the engine never ran -- each of those is green, and green for the
+//! same reason a correct implementation is green. A scenario whose `Given`
+//! is incomplete then reads exactly like a scenario that proves something:
+//! four `features/routing/bounded-feed-window.feature` scenarios were once
+//! written without `Given my relay list names ... as my write relay`, so the
+//! kind:3 follow list was never discoverable, no REQ ever reached the wire,
+//! and every assertion behaved identically with and without the fix they
+//! existed to test.
+//!
+//! So a step must establish that there was something to observe BEFORE it
+//! asserts anything about it, through [`nothing_to_observe`] -- whose message
+//! names WHAT WAS MISSING and is deliberately worded unlike a failed
+//! assertion, so the two classes are distinguishable at a glance in suite
+//! output and `NOTHING TO OBSERVE` greps for exactly the scenarios that
+//! proved nothing.
 
 use std::collections::BTreeSet;
+use std::time::{Duration, Instant};
 
 use cucumber::then;
 
 use nmp::mechanism::outbox::WriteStatus;
 
 use crate::steps::{parse_people, parse_tag};
-use crate::world::NmpWorld;
+use crate::world::{NmpWorld, EVENTUALLY};
 use nmp_test_support::relays::{WireRecord, WireReq};
+
+/// A step's precondition that the world produced the thing it reads (see this
+/// module's doc). `$present` is the PRECONDITION -- true when there is
+/// something to observe -- and the message names what was missing when there
+/// is not. The shared tail lives here so the phrasing is identical
+/// everywhere and the class is greppable by its `NOTHING TO OBSERVE` prefix.
+macro_rules! nothing_to_observe {
+    ($present:expr, $($missing:tt)+) => {
+        assert!(
+            $present,
+            "NOTHING TO OBSERVE -- {} -- so this step reads an empty world and \
+             would pass whatever the engine did; a check that cannot fail is not \
+             coverage, and the scenario's setup is what needs fixing",
+            format_args!($($missing)+)
+        )
+    };
+}
 
 /// Parse the kind numbers a diagnostics filter's exact wire JSON asks for
 /// (`RelayDiagnosticsSnapshot::filters`/`FilterCoverageEntry::filter` are
@@ -76,6 +115,10 @@ async fn feed_shows_note_text(w: &mut NmpWorld, text: String) {
 
 #[then(regex = r#"^notes from (\S+) no longer arrive$"#)]
 async fn notes_no_longer_arrive(w: &mut NmpWorld, person: String) {
+    nothing_to_observe!(
+        w.feed_eventually(|rows, _| !rows.is_empty()),
+        "my feed never held a single row, so nobody's notes could stop arriving from it"
+    );
     let pk = w.pubkey_hex(&person);
     let pk_for_gone = pk.clone();
     let gone = w.feed_eventually(|rows, _| !rows.iter().any(|e| e.pubkey.to_hex() == pk_for_gone));
@@ -146,12 +189,23 @@ async fn indexers_discovery_only(w: &mut NmpWorld) {
     // never a content fallback").
     let names: Vec<String> = w.indexer_names().to_vec();
     let urls: Vec<_> = names.iter().map(|n| w.relay_url(n)).collect();
-    let snapshot = w
-        .diagnostics_matching(|snap| {
-            urls.iter()
-                .any(|u| snap.relays.iter().any(|r| &r.relay == u))
+    // Polled through the predicate rather than read off the first snapshot
+    // that mentions an indexer at all: a relay's row appears before its
+    // filters do, so a one-shot read of `filters` would make this precondition
+    // a race rather than a fact.
+    let snapshot = w.diagnostics_matching(|snap| {
+        urls.iter().any(|u| {
+            snap.relays
+                .iter()
+                .any(|r| &r.relay == u && !r.filters.is_empty())
         })
-        .expect("diagnostics never showed any indexer activity at all");
+    });
+    nothing_to_observe!(
+        snapshot.is_some(),
+        "no indexer ({names:?}) was ever seen carrying a filter, so none of them was \
+         asked for anything and discovery-only holds trivially"
+    );
+    let snapshot = snapshot.expect("checked just above");
     for (name, url) in names.iter().zip(urls.iter()) {
         let Some(relay_diag) = snapshot.relays.iter().find(|r| &r.relay == url) else {
             // This particular indexer was never contacted -- trivially
@@ -185,10 +239,39 @@ async fn persons_notes_arrive_from(w: &mut NmpWorld, person: String, relay_name:
     );
 }
 
+/// Bounded wait for the engine to have contacted at least one of `names`.
+///
+/// THE PRECONDITION OF EVERY "was never contacted" ASSERTION, and it has to
+/// be a wait rather than a read. The contact log answers about the instant
+/// the step runs, and `When my feed of my follows' notes runs to a steady
+/// state` returns as soon as the feed's first bounded poll does -- which can
+/// be before the engine has opened a single connection. A one-shot read
+/// there says, truthfully and uselessly, that no relay outside the plan was
+/// contacted, because no relay at all was. Waiting for routing to actually
+/// begin is also strictly SAFER for the assertion that follows: it gives a
+/// wrongly-contacted relay more time to show up, never less.
+async fn some_relay_contacted(w: &NmpWorld, names: &[String]) -> bool {
+    let deadline = Instant::now() + EVENTUALLY;
+    loop {
+        if names.iter().any(|name| w.relay_contacted(name)) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[then(regex = r#"^no relay outside the indexers(.*) was ever contacted$"#)]
 async fn no_relay_outside_the_plan(w: &mut NmpWorld, extra: String) {
     let mut allowed: Vec<String> = w.indexer_names().to_vec();
     allowed.extend(parse_relay_list_tail(&extra));
+    nothing_to_observe!(
+        some_relay_contacted(w, &allowed).await,
+        "not one relay INSIDE the plan ({allowed:?}) was contacted either, so no \
+         routing ever happened to stay inside it"
+    );
     for relay in w.relay_names().cloned().collect::<Vec<_>>() {
         if allowed.contains(&relay) {
             continue;
@@ -202,6 +285,12 @@ async fn no_relay_outside_the_plan(w: &mut NmpWorld, extra: String) {
 
 #[then(regex = r#"^relay "([^"]+)" received no connection at all$"#)]
 async fn relay_received_no_connection(w: &mut NmpWorld, name: String) {
+    let others: Vec<String> = w.relay_names().filter(|n| **n != name).cloned().collect();
+    nothing_to_observe!(
+        some_relay_contacted(w, &others).await,
+        "no relay in this world was contacted at all, so {name:?} is unreached only \
+         because nothing ever ran"
+    );
     assert!(
         !w.relay_contacted(&name),
         "expected relay {name:?} to never be contacted"
@@ -239,8 +328,10 @@ async fn every_contacted_relay_has_a_lane(w: &mut NmpWorld) {
 
 #[then(regex = r#"^the receipt first reports only accepted -- never sent$"#)]
 async fn receipt_first_accepted(w: &mut NmpWorld) {
-    let has_any = w.receipt_eventually(|seen| !seen.is_empty());
-    assert!(has_any, "expected at least one receipt status");
+    nothing_to_observe!(
+        w.receipt_eventually(|seen| !seen.is_empty()),
+        "the receipt reported no status at all, so it has no FIRST status to be wrong"
+    );
     let first_is_accepted =
         w.receipt_eventually(|seen| matches!(seen.first(), Some(WriteStatus::Accepted)));
     assert!(
@@ -316,6 +407,11 @@ async fn relay_serves_tag_with_n_subscriptions(
     w.wire_settled().await;
     let tag = parse_tag(&tag);
     let record = w.wire_record(&relay);
+    nothing_to_observe!(
+        !record.reqs.is_empty(),
+        "relay {relay:?} received no REQ at all, so it is serving the #{tag} watches \
+         with no subscriptions for want of an engine, not for want of a merge"
+    );
     let ids = record.live_subscription_ids_naming_tag(tag);
     assert_eq!(
         ids.len(),
@@ -357,6 +453,11 @@ async fn relay_serves_tag_with_at_most_n_subscriptions(
     let tag = parse_tag(&tag);
     let record = w.wire_record(&relay);
     let ids = record.live_subscription_ids_naming_tag(tag);
+    nothing_to_observe!(
+        !ids.is_empty(),
+        "relay {relay:?} is holding no live #{tag} subscription at all, and nothing is \
+         comfortably under any bound"
+    );
     assert!(
         ids.len() <= bound,
         "relay {relay:?} is serving the #{tag} watches with {} live subscriptions, \
@@ -381,6 +482,13 @@ async fn no_request_names_a_tag_and_authors(w: &mut NmpWorld, relay: String, tag
     w.wire_settled().await;
     let tag = parse_tag(&tag);
     let record = w.wire_record(&relay);
+    nothing_to_observe!(
+        !record.reqs_naming_tag(tag).is_empty() && !record.reqs_naming_authors().is_empty(),
+        "relay {relay:?} received {} REQ(s) naming #{tag} and {} naming authors -- both \
+         axes must actually reach the wire before their non-merger means anything",
+        record.reqs_naming_tag(tag).len(),
+        record.reqs_naming_authors().len()
+    );
     for req in &record.reqs {
         assert!(
             !(req.names_tag(tag) && !req.authors().is_empty()),
@@ -399,7 +507,7 @@ async fn one_subscription_carries_every_tag_value(w: &mut NmpWorld, relay: Strin
     w.wire_settled().await;
     let tag = parse_tag(&tag);
     let wanted = w.watched_tag_values(tag);
-    assert!(!wanted.is_empty(), "no #{tag} value is being watched");
+    nothing_to_observe!(!wanted.is_empty(), "no #{tag} value is being watched");
     let record = w.wire_record(&relay);
     let carried: Vec<BTreeSet<String>> = record
         .live_subscription_ids_naming_tag(tag)
@@ -421,6 +529,10 @@ async fn every_tag_value_is_covered(w: &mut NmpWorld, tag: String, relay: String
     w.wire_settled().await;
     let tag = parse_tag(&tag);
     let wanted = w.watched_tag_values(tag);
+    nothing_to_observe!(
+        !wanted.is_empty(),
+        "no #{tag} value is being watched, so every one of them is covered vacuously"
+    );
     let record = w.wire_record(&relay);
     let covered: BTreeSet<String> = record
         .live_subscription_ids()
@@ -447,7 +559,13 @@ async fn no_subscription_exceeds_the_value_bound(
     w.wire_settled().await;
     let tag = parse_tag(&tag);
     let record = w.wire_record(&relay);
-    for id in record.live_subscription_ids_naming_tag(tag) {
+    let ids = record.live_subscription_ids_naming_tag(tag);
+    nothing_to_observe!(
+        !ids.is_empty(),
+        "relay {relay:?} is holding no live #{tag} subscription at all, so none of them \
+         carries too many values"
+    );
+    for id in ids {
         let carried = live_tag_values(&record, &id, tag).len();
         assert!(
             carried <= bound,
@@ -509,7 +627,13 @@ async fn relay_closed_no_tag_subscription(w: &mut NmpWorld, relay: String, tag: 
     w.wire_settled().await;
     let tag = parse_tag(&tag);
     let record = w.wire_record(&relay);
-    let closed = closes_among(&record, &record.subscription_ids_naming_tag(tag));
+    let ids = record.subscription_ids_naming_tag(tag);
+    nothing_to_observe!(
+        !ids.is_empty(),
+        "relay {relay:?} never had a #{tag} subscription opened on it at all, so none \
+         could have been retired instead of replaced"
+    );
+    let closed = closes_among(&record, &ids);
     assert!(
         closed.is_empty(),
         "relay {relay:?} was asked to close {} #{tag} subscription(s) -- growing or \
@@ -522,7 +646,13 @@ async fn relay_closed_no_tag_subscription(w: &mut NmpWorld, relay: String, tag: 
 async fn relay_closed_no_author_subscription(w: &mut NmpWorld, relay: String) {
     w.wire_settled().await;
     let record = w.wire_record(&relay);
-    let closed = closes_among(&record, &record.subscription_ids_naming_authors());
+    let ids = record.subscription_ids_naming_authors();
+    nothing_to_observe!(
+        !ids.is_empty(),
+        "relay {relay:?} never had an author subscription opened on it at all, so none \
+         could have been retired instead of replaced"
+    );
+    let closed = closes_among(&record, &ids);
     assert!(
         closed.is_empty(),
         "relay {relay:?} was asked to close {} author subscription(s) -- growing or \
@@ -535,6 +665,11 @@ async fn relay_closed_no_author_subscription(w: &mut NmpWorld, relay: String) {
 async fn relay_never_revives_a_stopped_request(w: &mut NmpWorld, relay: String) {
     w.wire_settled().await;
     let record = w.wire_record(&relay);
+    nothing_to_observe!(
+        !record.reqs.is_empty(),
+        "relay {relay:?} received no REQ at all, so nothing was ever opened that could \
+         be stopped and reopened"
+    );
     let revived = record.revived_subscription_ids();
     assert!(
         revived.is_empty(),
@@ -550,6 +685,10 @@ async fn relay_never_revives_a_stopped_request(w: &mut NmpWorld, relay: String) 
 async fn relay_never_asked_twice(w: &mut NmpWorld, relay: String) {
     w.wire_settled().await;
     let record = w.wire_record(&relay);
+    nothing_to_observe!(
+        !record.reqs.is_empty(),
+        "relay {relay:?} received no REQ at all, so nothing could have been re-sent"
+    );
     let redundant = record.redundant_reqs();
     assert!(
         redundant.is_empty(),
@@ -567,6 +706,13 @@ async fn no_request_names_both_tags(w: &mut NmpWorld, relay: String, left: Strin
     w.wire_settled().await;
     let (left, right) = (parse_tag(&left), parse_tag(&right));
     let record = w.wire_record(&relay);
+    nothing_to_observe!(
+        !record.reqs_naming_tag(left).is_empty() && !record.reqs_naming_tag(right).is_empty(),
+        "relay {relay:?} received {} REQ(s) naming #{left} and {} naming #{right} -- both \
+         tag names must actually reach the wire before their non-merger means anything",
+        record.reqs_naming_tag(left).len(),
+        record.reqs_naming_tag(right).len()
+    );
     for req in &record.reqs {
         assert!(
             !(req.names_tag(left) && req.names_tag(right)),
@@ -582,6 +728,11 @@ async fn no_request_names_both_tags(w: &mut NmpWorld, relay: String, left: Strin
 async fn relay_never_asked_unfiltered(w: &mut NmpWorld, relay: String) {
     w.wire_settled().await;
     let record = w.wire_record(&relay);
+    nothing_to_observe!(
+        !record.reqs.is_empty(),
+        "relay {relay:?} received no REQ at all, so no resolved set could have widened \
+         into 'send me everything'"
+    );
     for req in &record.reqs {
         assert!(
             !req.narrows_by_kind_alone(),
@@ -600,6 +751,11 @@ async fn relay_serves_authors_with_n_subscriptions(
 ) {
     w.wire_settled().await;
     let record = w.wire_record(&relay);
+    nothing_to_observe!(
+        !record.reqs.is_empty(),
+        "relay {relay:?} received no REQ at all, so it is serving the author watches \
+         with no subscriptions for want of an engine, not for want of a merge"
+    );
     let ids = record.live_subscription_ids_naming_authors();
     assert_eq!(
         ids.len(),
@@ -621,7 +777,7 @@ async fn relay_serves_authors_with_n_subscriptions(
 async fn one_subscription_carries_every_author(w: &mut NmpWorld, relay: String) {
     w.wire_settled().await;
     let wanted = w.watched_authors();
-    assert!(!wanted.is_empty(), "no author is being watched");
+    nothing_to_observe!(!wanted.is_empty(), "no author is being watched");
     let record = w.wire_record(&relay);
     let carried: Vec<usize> = record
         .live_subscription_ids()
@@ -652,7 +808,7 @@ async fn every_request_asks_for_at_most(w: &mut NmpWorld, relay: String, most: u
     w.wire_settled().await;
     let record = w.wire_record(&relay);
     let live = record.live_subscription_ids();
-    assert!(
+    nothing_to_observe!(
         !live.is_empty(),
         "relay {relay:?} is holding no live subscription to check"
     );
@@ -678,6 +834,10 @@ async fn every_request_asks_for_at_most(w: &mut NmpWorld, relay: String, most: u
 async fn every_author_is_covered(w: &mut NmpWorld, relay: String) {
     w.wire_settled().await;
     let wanted = w.watched_authors();
+    nothing_to_observe!(
+        !wanted.is_empty(),
+        "no author is being watched, so every one of them is covered vacuously"
+    );
     let record = w.wire_record(&relay);
     let covered: BTreeSet<String> = record
         .live_subscription_ids()
@@ -748,6 +908,11 @@ async fn nothing_known_about_relay_limit(w: &mut NmpWorld, relay: String) {
 async fn relay_holding_n_subscriptions(w: &mut NmpWorld, relay: String, expected: usize) {
     w.wire_settled().await;
     let record = w.wire_record(&relay);
+    nothing_to_observe!(
+        !record.reqs.is_empty(),
+        "relay {relay:?} received no REQ at all, so it holds nothing for want of an \
+         engine rather than for want of a merge"
+    );
     let live = record.live_subscription_ids();
     assert_eq!(
         live.len(),
@@ -762,6 +927,11 @@ async fn relay_never_over_n_subscriptions(w: &mut NmpWorld, relay: String, bound
     w.wire_settled().await;
     let record = w.wire_record(&relay);
     let live = record.live_subscription_ids();
+    nothing_to_observe!(
+        !live.is_empty(),
+        "relay {relay:?} is holding no live subscription at all, and nothing is under \
+         every bound"
+    );
     assert!(
         live.len() <= bound,
         "{relay:?} is holding {} live subscriptions, over the {bound} it allows: {live:?}",
@@ -772,9 +942,17 @@ async fn relay_never_over_n_subscriptions(w: &mut NmpWorld, relay: String, bound
 #[then(regex = r#"^nothing I asked for was refused for want of a subscription$"#)]
 async fn nothing_refused_for_want_of_a_subscription(w: &mut NmpWorld) {
     w.wire_settled().await;
-    let snapshot = w
-        .diagnostics_matching(|_| true)
-        .expect("diagnostics never arrived at all");
+    // The non-emptiness is POLLED (in the predicate), not read off whatever
+    // snapshot happens to arrive first: the earliest snapshot legitimately
+    // predates every relay row, and a one-shot read of it would report "there
+    // was nothing to observe" about a scenario that was merely early.
+    let snapshot = w.diagnostics_matching(|snap| !snap.relays.is_empty());
+    nothing_to_observe!(
+        snapshot.is_some(),
+        "diagnostics never knew of a single relay, so nothing was ever asked and \
+         nothing could have been refused"
+    );
+    let snapshot = snapshot.expect("checked just above");
     let refused: Vec<(String, usize)> = snapshot
         .relays
         .iter()
