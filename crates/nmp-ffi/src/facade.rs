@@ -39,10 +39,11 @@ use crate::nip02::{NmpFollowActionStream, NmpFollowStream};
 use crate::signer::FfiSignerMailbox;
 use crate::types::{
     FfiCancelWriteError, FfiCancelWriteOutcome, FfiCorrelationReattachment, FfiDemand,
-    FfiDiagnosticsSnapshot, FfiFilter, FfiFrame, FfiReceiptReattachment, FfiRelayInformation,
-    FfiRelayInformationCachePolicy, FfiRelayInformationDocument, FfiRelayInformationFreshness,
-    FfiRelayInformationLimitations, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent,
-    FfiWindow, FfiWriteIntent, FfiWriteStatus,
+    FfiDiagnosticsSnapshot, FfiFilter, FfiFrame, FfiReceiptIdentity, FfiReceiptReattachment,
+    FfiReceiptSetError, FfiReceiptSetEvent, FfiRelayInformation, FfiRelayInformationCachePolicy,
+    FfiRelayInformationDocument, FfiRelayInformationFreshness, FfiRelayInformationLimitations,
+    FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiWindow, FfiWriteIntent,
+    FfiWriteStatus,
 };
 use nmp::ReceiptReattachment;
 
@@ -525,6 +526,28 @@ impl NmpEngine {
         })
     }
 
+    /// Open one bounded fair pull sequence over retained receipt identities.
+    /// Admission is all-or-nothing and capped by [`Self::receipt_set_capacity`].
+    pub fn observe_receipts(
+        &self,
+        identities: Vec<FfiReceiptIdentity>,
+    ) -> Result<Arc<NmpReceiptSetStream>, FfiReceiptSetError> {
+        let identities = identities
+            .into_iter()
+            .map(receipt_identity_from_ffi)
+            .collect();
+        let inner = self
+            .engine
+            .observe_receipts(identities)
+            .map_err(receipt_set_error_to_ffi)?;
+        Ok(Arc::new(NmpReceiptSetStream { inner }))
+    }
+
+    /// Exact maximum identity count accepted by [`Self::observe_receipts`].
+    pub fn receipt_set_capacity(&self) -> u64 {
+        nmp::RECEIPT_SET_CAPACITY as u64
+    }
+
     /// Explicitly cancel one accepted unsigned write. A successful outcome
     /// means the matching durable terminal fact was delivered to receipt
     /// observers.
@@ -841,6 +864,112 @@ impl NmpReceiptStream {
 impl Drop for NmpReceiptStream {
     fn drop(&mut self) {
         self.cancel();
+    }
+}
+
+#[derive(uniffi::Object)]
+pub struct NmpReceiptSetStream {
+    inner: nmp::ReceiptSetSubscription,
+}
+
+#[uniffi::export]
+impl NmpReceiptSetStream {
+    pub async fn next(&self) -> Result<Option<FfiReceiptSetEvent>, FfiError> {
+        self.inner
+            .next()
+            .await
+            .map(|event| event.map(receipt_set_event_to_ffi))
+            .map_err(|_| FfiError::ConcurrentNext)
+    }
+
+    /// Withdraw all live receipt attachments without cancelling any write.
+    pub fn cancel(&self) {
+        self.inner.cancel();
+    }
+}
+
+impl Drop for NmpReceiptSetStream {
+    fn drop(&mut self) {
+        self.inner.cancel();
+    }
+}
+
+fn receipt_identity_from_ffi(identity: FfiReceiptIdentity) -> nmp::ReceiptIdentity {
+    match identity {
+        FfiReceiptIdentity::Id { receipt_id } => {
+            nmp::ReceiptIdentity::Id(nmp::ReceiptId(receipt_id))
+        }
+        FfiReceiptIdentity::Correlation { token } => nmp::ReceiptIdentity::Correlation(token),
+    }
+}
+
+fn receipt_identity_to_ffi(identity: nmp::ReceiptIdentity) -> FfiReceiptIdentity {
+    match identity {
+        nmp::ReceiptIdentity::Id(id) => FfiReceiptIdentity::Id { receipt_id: id.0 },
+        nmp::ReceiptIdentity::Correlation(token) => FfiReceiptIdentity::Correlation { token },
+    }
+}
+
+fn receipt_set_error_to_ffi(error: nmp::ReceiptSetError) -> FfiReceiptSetError {
+    match error {
+        nmp::ReceiptSetError::CapacityExceeded {
+            capacity,
+            requested,
+        } => FfiReceiptSetError::CapacityExceeded {
+            capacity: capacity as u64,
+            requested: requested as u64,
+        },
+        nmp::ReceiptSetError::DuplicateIdentity { identity } => {
+            FfiReceiptSetError::DuplicateIdentity {
+                identity: format!("{identity:?}"),
+            }
+        }
+        nmp::ReceiptSetError::EngineClosed => FfiReceiptSetError::EngineClosed,
+    }
+}
+
+fn receipt_set_event_to_ffi(event: nmp::ReceiptSetEvent) -> FfiReceiptSetEvent {
+    match event {
+        nmp::ReceiptSetEvent::Fact {
+            identity,
+            receipt_id,
+            status,
+        } => FfiReceiptSetEvent::Fact {
+            identity: receipt_identity_to_ffi(identity),
+            receipt_id: receipt_id.0,
+            status: write_status_to_ffi(WriteStatusRef(&status)),
+        },
+        nmp::ReceiptSetEvent::NotFound { identity } => FfiReceiptSetEvent::NotFound {
+            identity: receipt_identity_to_ffi(identity),
+        },
+        nmp::ReceiptSetEvent::RetainedButUnreadable {
+            identity,
+            receipt_id,
+        } => FfiReceiptSetEvent::RetainedButUnreadable {
+            identity: receipt_identity_to_ffi(identity),
+            receipt_id: receipt_id.map(|id| id.0),
+        },
+        nmp::ReceiptSetEvent::ReplayAfterLag {
+            identity,
+            receipt_id,
+        } => FfiReceiptSetEvent::ReplayAfterLag {
+            identity: receipt_identity_to_ffi(identity),
+            receipt_id: receipt_id.0,
+        },
+        nmp::ReceiptSetEvent::ReplayUnavailable {
+            identity,
+            receipt_id,
+        } => FfiReceiptSetEvent::ReplayUnavailable {
+            identity: receipt_identity_to_ffi(identity),
+            receipt_id: receipt_id.0,
+        },
+        nmp::ReceiptSetEvent::Closed {
+            identity,
+            receipt_id,
+        } => FfiReceiptSetEvent::Closed {
+            identity: receipt_identity_to_ffi(identity),
+            receipt_id: receipt_id.0,
+        },
     }
 }
 
@@ -1923,6 +2052,16 @@ mod tests {
             outcome,
             FfiReceiptReattachment::RetainedButUnreadable
         ));
+        let set = engine
+            .observe_receipts(vec![FfiReceiptIdentity::Id { receipt_id }])
+            .expect("bounded set must open over corrupt retained evidence");
+        assert!(matches!(
+            set.next().await.expect("single reader"),
+            Some(FfiReceiptSetEvent::RetainedButUnreadable {
+                receipt_id: Some(found),
+                ..
+            }) if found == receipt_id
+        ));
 
         engine.shutdown();
     }
@@ -2112,6 +2251,37 @@ mod tests {
             "the receipt stream must end in None once the sender is dropped, not hang"
         );
 
+        engine.shutdown();
+    }
+
+    #[tokio::test]
+    async fn ffi_receipt_set_exposes_exact_capacity_and_tagged_absence() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine");
+        assert_eq!(
+            engine.receipt_set_capacity(),
+            nmp::RECEIPT_SET_CAPACITY as u64
+        );
+        let exact = (1..=engine.receipt_set_capacity())
+            .map(|receipt_id| FfiReceiptIdentity::Id { receipt_id })
+            .collect();
+        let stream = engine.observe_receipts(exact).expect("exact capacity");
+        assert!(matches!(
+            stream.next().await.expect("single reader"),
+            Some(FfiReceiptSetEvent::NotFound { .. })
+        ));
+        stream.cancel();
+
+        let plus_one = (1..=engine.receipt_set_capacity() + 1)
+            .map(|receipt_id| FfiReceiptIdentity::Id { receipt_id })
+            .collect();
+        assert!(matches!(
+            engine.observe_receipts(plus_one),
+            Err(FfiReceiptSetError::CapacityExceeded {
+                capacity,
+                requested
+            }) if capacity == nmp::RECEIPT_SET_CAPACITY as u64
+                && requested == capacity + 1
+        ));
         engine.shutdown();
     }
 }

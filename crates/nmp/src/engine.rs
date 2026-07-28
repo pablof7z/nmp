@@ -23,7 +23,7 @@
 //! tears down `EngineThread` cleanly rather than detaching it.
 
 use crate::runtime::FifoReceiver;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::core::ReceiptId;
 use crate::outbox::WriteStatus;
@@ -65,7 +65,41 @@ struct Inner {
 /// through here. See this module's doc for the serialized lifecycle gate
 /// `inner` implements.
 pub struct Engine {
-    inner: Mutex<Option<Inner>>,
+    inner: Arc<Mutex<Option<Inner>>>,
+}
+
+/// Cloneable receipt-only access to the serialized engine lifecycle gate.
+/// It cannot publish, cancel, route, or mutate identity.
+#[derive(Clone)]
+pub(crate) struct ReceiptObservationAccess {
+    inner: Arc<Mutex<Option<Inner>>>,
+}
+
+impl ReceiptObservationAccess {
+    pub(crate) fn reattach(&self, id: ReceiptId) -> Result<ReceiptReattachment, EngineError> {
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref().ok_or(EngineError::EngineClosed)?;
+        Ok(inner.handle.reattach_receipt(id))
+    }
+
+    pub(crate) fn reattach_from(
+        &self,
+        id: ReceiptId,
+        cursor: ReceiptReplayCursor,
+    ) -> Result<ReceiptReattachment, EngineError> {
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref().ok_or(EngineError::EngineClosed)?;
+        Ok(inner.handle.reattach_receipt_from(id, cursor))
+    }
+
+    pub(crate) fn reattach_by_correlation(
+        &self,
+        token: String,
+    ) -> Result<ReceiptReattachment, EngineError> {
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref().ok_or(EngineError::EngineClosed)?;
+        Ok(inner.handle.reattach_by_correlation(token))
+    }
 }
 
 /// The only successful result from explicit pre-signature cancellation.
@@ -243,6 +277,12 @@ impl std::fmt::Display for RelayInformationRequestError {
 impl std::error::Error for RelayInformationRequestError {}
 
 impl Engine {
+    pub(crate) fn receipt_observation_access(&self) -> ReceiptObservationAccess {
+        ReceiptObservationAccess {
+            inner: self.inner.clone(),
+        }
+    }
+
     /// Destructively remove one closed persistent engine store.
     ///
     /// This clears NMP's canonical events, pending writes, receipts,
@@ -318,11 +358,11 @@ impl Engine {
         };
 
         Ok(Self {
-            inner: Mutex::new(Some(Inner {
+            inner: Arc::new(Mutex::new(Some(Inner {
                 handle,
                 engine_thread,
                 active_pubkey: None,
-            })),
+            }))),
         })
     }
 
@@ -355,11 +395,11 @@ impl Engine {
             EngineThread::spawn(store, directory, cap, pool_config, admission)
                 .map_err(EngineError::from_start_error)?;
         Ok(Self {
-            inner: Mutex::new(Some(Inner {
+            inner: Arc::new(Mutex::new(Some(Inner {
                 handle,
                 engine_thread,
                 active_pubkey: None,
-            })),
+            }))),
         })
     }
 
@@ -562,6 +602,11 @@ impl Engine {
             .map_err(|_| CancelWriteError::EngineClosed)?
             .map(cancel_write_outcome_from_engine)
             .map_err(cancel_write_error_from_engine)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn receipt_sink_count(&self, id: ReceiptId) -> Result<usize, EngineError> {
+        self.with_handle(|handle| handle.receipt_sink_count(id))
     }
 
     /// Register an account from its secret key (hex or bech32 `nsec`). Does

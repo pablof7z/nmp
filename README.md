@@ -85,6 +85,11 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 
 **Publishing**
 - ✅ **Durable write intents** — `Accepted` is one atomic persistence boundary (frozen body, receipt, pending row visible to queries)
+- ✅ **Bounded fair retained-receipt observation** — one pull sequence accepts
+  at most 32 stable ids/correlation tokens, round-robins their existing durable
+  replay/live handles, reports exact per-identity outcomes and resolved ids,
+  automatically restarts durable replay after typed live lag, and tears down
+  every attachment through one cancellation surface
 - ✅ **Explicit pre-signature write cancellation** — `Engine::cancel(ReceiptId)` (Rust/FFI/Swift/Kotlin) atomically compensates the optimistic row, restores any displaced predecessor, persists a durable `Cancelled` receipt fact, and cancels in-flight signer work. Idempotent; a write that already signed returns a precise typed refusal instead of silently no-op'ing ([#533](https://github.com/pablof7z/nmp/issues/533) closed, [#585](https://github.com/pablof7z/nmp/pull/585))
 - ✅ Signature promotion, internal-failure cancellation + compensation, persisted **bounded-retry outbox** (32 global / 1 per relay, deterministic backoff)
 - ✅ At-most-once ambiguity becomes `OutcomeUnknown` — never a blind resend
