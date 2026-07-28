@@ -3607,6 +3607,44 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiReceiptIdentity",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Id",
+            discr: None,
+            fields: [
+                Field {
+                    name: "receipt_id",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Correlation",
+            discr: None,
+            fields: [
+                Field {
+                    name: "token",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: None,
+}
+
+enum Enum {
     name: "FfiReceiptReattachment",
     module_path: "nmp_ffi",
     remote: false,
@@ -3647,6 +3685,207 @@ enum Enum {
     docstring: Some(
         "Result of looking up a stable retained receipt id. The `Attached` variant\ncarries the pull-based [`crate::facade::NmpReceiptStream`] that traverses\ndurable `WriteStatus` facts in finite pages and streams onward (#680).",
     ),
+}
+
+enum Enum {
+    name: "FfiReceiptSetError",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "CapacityExceeded",
+            discr: None,
+            fields: [
+                Field {
+                    name: "capacity",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "requested",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "DuplicateIdentity",
+            discr: None,
+            fields: [
+                Field {
+                    name: "identity",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "EngineClosed",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Error {
+        flat: false,
+    },
+    non_exhaustive: false,
+    docstring: None,
+}
+
+enum Enum {
+    name: "FfiReceiptSetEvent",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Fact",
+            discr: None,
+            fields: [
+                Field {
+                    name: "identity",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiReceiptIdentity",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "receipt_id",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "status",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiWriteStatus",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "NotFound",
+            discr: None,
+            fields: [
+                Field {
+                    name: "identity",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiReceiptIdentity",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "RetainedButUnreadable",
+            discr: None,
+            fields: [
+                Field {
+                    name: "identity",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiReceiptIdentity",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "receipt_id",
+                    type_: Optional {
+                        inner_type: UInt64,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "ReplayAfterLag",
+            discr: None,
+            fields: [
+                Field {
+                    name: "identity",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiReceiptIdentity",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "receipt_id",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "ReplayUnavailable",
+            discr: None,
+            fields: [
+                Field {
+                    name: "identity",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiReceiptIdentity",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "receipt_id",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Closed",
+            discr: None,
+            fields: [
+                Field {
+                    name: "identity",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiReceiptIdentity",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "receipt_id",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: None,
 }
 
 enum Enum {
@@ -10012,6 +10251,73 @@ object Object {
             ),
         },
         Method {
+            name: "observe_receipts",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "identities",
+                    type_: Sequence {
+                        inner_type: Enum {
+                            module_path: "nmp_ffi",
+                            name: "FfiReceiptIdentity",
+                        },
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "NmpReceiptSetStream",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_observe_receipts",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "identities",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "NmpReceiptSetStream",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Open one bounded fair pull sequence over retained receipt identities.\nAdmission is all-or-nothing and capped by [`Self::receipt_set_capacity`].",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiReceiptSetError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_observe_receipts",
+            checksum: Some(
+                32195,
+            ),
+        },
+        Method {
             name: "publish",
             object_name: "NmpEngine",
             object_module_path: "nmp_ffi",
@@ -10209,6 +10515,43 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_reattach_receipt",
             checksum: Some(
                 49194,
+            ),
+        },
+        Method {
+            name: "receipt_set_capacity",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                UInt64,
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_receipt_set_capacity",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    UInt64,
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Exact maximum identity count accepted by [`Self::observe_receipts`].",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_receipt_set_capacity",
+            checksum: Some(
+                46592,
             ),
         },
         Method {
@@ -10965,6 +11308,132 @@ object Object {
     docstring: Some(
         "Pull-based following-relationship observation handle (#680). Each `next()`\nawaits the engine's waker-driven async row mailbox and folds a complete\nself-contained relationship snapshot inline — no NMP-owned OS thread per\nobservation. `None` is the terminal signal (the demand was withdrawn or the\nengine shut down). `Drop`/`cancel` withdraw the observation.",
     ),
+}
+
+object Object {
+    name: "NmpReceiptSetStream",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [],
+    methods: [
+        Method {
+            name: "cancel",
+            object_name: "NmpReceiptSetStream",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpreceiptsetstream_cancel",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpReceiptSetStream",
+                        ),
+                    },
+                ],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Withdraw all live receipt attachments without cancelling any write.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpreceiptsetstream_cancel",
+            checksum: Some(
+                53512,
+            ),
+        },
+        Method {
+            name: "next",
+            object_name: "NmpReceiptSetStream",
+            object_module_path: "nmp_ffi",
+            is_async: true,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Optional {
+                    inner_type: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiReceiptSetEvent",
+                    },
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpreceiptsetstream_next",
+                is_async: true,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpReceiptSetStream",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    Handle,
+                ),
+                has_rust_call_status_arg: false,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpreceiptsetstream_next",
+            checksum: Some(
+                7153,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_nmpreceiptsetstream",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "NmpReceiptSetStream",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "NmpReceiptSetStream",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_nmpreceiptsetstream",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "NmpReceiptSetStream",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: None,
 }
 
 object Object {

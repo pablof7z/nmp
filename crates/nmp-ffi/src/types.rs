@@ -827,6 +827,67 @@ pub enum FfiWriteStatus {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Enum)]
+pub enum FfiReceiptIdentity {
+    Id { receipt_id: u64 },
+    Correlation { token: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Enum)]
+pub enum FfiReceiptSetEvent {
+    Fact {
+        identity: FfiReceiptIdentity,
+        receipt_id: u64,
+        status: FfiWriteStatus,
+    },
+    NotFound {
+        identity: FfiReceiptIdentity,
+    },
+    RetainedButUnreadable {
+        identity: FfiReceiptIdentity,
+        receipt_id: Option<u64>,
+    },
+    ReplayAfterLag {
+        identity: FfiReceiptIdentity,
+        receipt_id: u64,
+    },
+    ReplayUnavailable {
+        identity: FfiReceiptIdentity,
+        receipt_id: u64,
+    },
+    Closed {
+        identity: FfiReceiptIdentity,
+        receipt_id: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
+pub enum FfiReceiptSetError {
+    CapacityExceeded { capacity: u64, requested: u64 },
+    DuplicateIdentity { identity: String },
+    EngineClosed,
+}
+
+impl std::fmt::Display for FfiReceiptSetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CapacityExceeded {
+                capacity,
+                requested,
+            } => write!(
+                f,
+                "receipt set capacity {capacity} exceeded by {requested} requested identities"
+            ),
+            Self::DuplicateIdentity { identity } => {
+                write!(f, "duplicate receipt identity {identity}")
+            }
+            Self::EngineClosed => write!(f, "engine already shut down"),
+        }
+    }
+}
+
+impl std::error::Error for FfiReceiptSetError {}
+
 /// Typed refusal from explicit pre-signature write cancellation. The current
 /// receipt fact survives intact when cancellation is no longer legal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]

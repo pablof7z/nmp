@@ -30,6 +30,14 @@ macros and extracts component metadata from a compiled library; there is no UDL
 source of truth. Swift and Kotlin add native observation/lifecycle ergonomics
 over generated bindings without becoming independent semantic engines.
 
+Retained receipt recovery extends the write noun through
+`Engine::observe_receipts`: one finite observation accepts at most 32 stable
+receipt ids or caller correlation tokens, fairly multiplexes the existing
+per-receipt replay/live handles, and reports every fact with both its requested
+identity and resolved receipt id. It owns no receipt store, reducer callback,
+retry decision, or second live registry. Its one cancellation surface closes
+all composed attachments while leaving the durable obligations untouched.
+
 ## How public changes are governed
 
 - `docs/surface/nmp-facade.txt` starts with pinned `cargo-public-api` output for

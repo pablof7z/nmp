@@ -22,6 +22,7 @@ extension NmpRowStream: NMPPullHandle {}
 extension NmpDiagnosticsStream: NMPPullHandle {}
 extension NmpFollowStream: NMPPullHandle {}
 extension NmpReceiptStream: NMPPullHandle {}
+extension NmpReceiptSetStream: NMPPullHandle {}
 extension NmpFollowActionStream: NMPPullHandle {}
 
 /// One live Swift iterator may own a native pull handle at a time. The gate is

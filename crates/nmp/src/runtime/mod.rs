@@ -6477,7 +6477,7 @@ impl Handle {
     }
 
     #[cfg(test)]
-    fn receipt_sink_count(&self, id: ReceiptId) -> usize {
+    pub(crate) fn receipt_sink_count(&self, id: ReceiptId) -> usize {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox
             .send(Cmd::ReceiptSinkCount {

@@ -57,6 +57,7 @@ mod diagnostics;
 mod engine;
 mod error;
 mod observation;
+mod receipt_set;
 mod relay_information;
 mod subscription;
 
@@ -232,6 +233,10 @@ pub use nmp_grammar::{decode_nostr_entity, NostrEntity, NostrEntityError};
 // protocol module, not the default facade surface.
 pub use crate::core::ReceiptId;
 pub use crate::outbox::WriteStatus;
+pub use crate::receipt_set::{
+    ReceiptIdentity, ReceiptSetError, ReceiptSetEvent, ReceiptSetNextError, ReceiptSetSubscription,
+    RECEIPT_SET_CAPACITY,
+};
 pub use crate::runtime::{
     ReceiptReattachment, ReceiptStream, SignEventCancel, SignEventError, SignEventOperation,
     SignerRegistration,
