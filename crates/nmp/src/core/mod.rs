@@ -36,6 +36,7 @@ mod history;
 mod history_lifecycle;
 #[cfg(test)]
 mod history_lifecycle_tests;
+mod lane_projection;
 mod observation;
 mod query;
 #[cfg(test)]
@@ -76,9 +77,9 @@ use nmp_signer::SignerError;
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome,
     CancelEphemeralOutcome, CloseIntentOutcome, CompensateOutcome, CoverageKey, DeadlineKind,
-    EventStore, HandoffEvidence, InFlightPhase, IntentId, IntentSigState, LaneKey, LaneState,
-    PersistenceError, PostHandoffState, PromoteOutcome, ReceiptState, RecoveredLane, RelayObserved,
-    TransientCause, WriteDurability,
+    DurabilityOutcome, EventStore, HandoffEvidence, InFlightPhase, IntentId, IntentSigState,
+    LaneKey, LaneState, PersistenceError, PostHandoffState, PromoteOutcome, ReceiptState,
+    RecoveredLane, RelayObserved, TransientCause, WriteDurability,
 };
 use nmp_transport::{
     AttemptCorrelation, CommittedObservationCandidate, CommittedObservationHit,
@@ -897,6 +898,57 @@ struct QuarantinedWrite {
     frozen: SignedEvent,
 }
 
+/// Reducer-owned, rebuildable view of one intent's durable lane rows.
+///
+/// The store remains authoritative. `persisted` supports exact reverse-index
+/// cleanup, `nonterminal` answers steady-state worker demand, and `uncertain`
+/// is a conservative superset used only when a commit may have landed but its
+/// post-state was not observable. Uncertainty may keep a worker alive; it may
+/// never cause a possibly durable lane to lose its worker.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct LaneWorkerProjection {
+    persisted: BTreeSet<RelayUrl>,
+    nonterminal: BTreeSet<RelayUrl>,
+    uncertain: BTreeSet<RelayUrl>,
+}
+
+impl LaneWorkerProjection {
+    fn from_recovered(lanes: &[RecoveredLane]) -> Self {
+        let mut projection = Self::default();
+        for lane in lanes {
+            projection.apply(lane);
+        }
+        projection
+    }
+
+    /// Apply one exact committed post-state. Returns whether this relay was
+    /// newly learned as a persisted lane and therefore needs reverse indexing.
+    fn apply(&mut self, lane: &RecoveredLane) -> bool {
+        let relay = lane.key.relay.clone();
+        let newly_persisted = self.persisted.insert(relay.clone());
+        self.uncertain.remove(&relay);
+        if matches!(lane.state, LaneState::Terminal { .. }) {
+            self.nonterminal.remove(&relay);
+        } else {
+            self.nonterminal.insert(relay);
+        }
+        newly_persisted
+    }
+
+    fn mark_uncertain(&mut self, relay: RelayUrl) -> bool {
+        self.uncertain.insert(relay.clone());
+        self.persisted.insert(relay)
+    }
+
+    fn required_relays(&self) -> impl Iterator<Item = &RelayUrl> {
+        self.nonterminal.iter().chain(&self.uncertain)
+    }
+
+    fn can_close(&self) -> bool {
+        !self.persisted.is_empty() && self.nonterminal.is_empty() && self.uncertain.is_empty()
+    }
+}
+
 struct PendingWrite {
     durability: Durability,
     routing: WriteRouting,
@@ -943,14 +995,10 @@ struct PendingWrite {
     /// The persisted started ordinal currently awaiting a terminal outcome
     /// for each relay.
     attempt_ordinals: BTreeMap<RelayUrl, u64>,
-    /// Every relay this reducer has ever learned owns a persisted outbox
-    /// lane for this intent (epic #507 finding E5). Populated exactly where
-    /// the core learns an intent's lanes — `bootstrap_outbox_lanes`'s two
-    /// call sites (`recover_on_boot`, `on_signed`) — and never elsewhere:
-    /// this is the per-receipt half of `EngineCore::receipts_by_lane_relay`,
-    /// kept so a permanent removal from `pending` can walk exactly this set
-    /// to clean the reverse index rather than scanning it.
-    lane_relays: BTreeSet<RelayUrl>,
+    /// Exact rebuildable projection of this intent's persisted lane rows.
+    /// All mutation results enter through `core::lane_projection`; ordinary
+    /// worker-demand calculation never re-reads the store.
+    lane_projection: LaneWorkerProjection,
 }
 
 /// Runtime-private identity for one live receipt observer. Pointer identity
@@ -1162,9 +1210,9 @@ pub struct EngineCore<S: EventStore> {
     /// outstanding write's lanes on every relay connect/disconnect/auth
     /// event -- it only narrows WHICH intents to re-read via
     /// `recover_outbox_lanes`, the store read itself remains the truth.
-    /// Kept in lockstep with each `PendingWrite::lane_relays` (its per-
-    /// receipt half): populated at the same two `bootstrap_outbox_lanes`
-    /// call sites, cleaned by walking `lane_relays` on a real removal.
+    /// Kept in lockstep with each `PendingWrite::lane_projection.persisted`
+    /// set by the one projection door; cleaned by walking that exact set on
+    /// a real removal.
     receipts_by_lane_relay: HashMap<RelayUrl, BTreeSet<ReceiptId>>,
     /// Safety valve for `receipts_by_lane_relay` (epic #507 finding E5): set
     /// to true the moment ANY path could have created/learned lanes but the
@@ -1182,6 +1230,12 @@ pub struct EngineCore<S: EventStore> {
     /// finding), so an unprovable index is always treated as untrustworthy
     /// rather than guessed at.
     lane_relay_index_degraded: bool,
+    /// Whether the reducer can prove its lane-worker projection is a
+    /// conservative superset of durable nonterminal lanes. Unlike
+    /// `lane_relay_index_degraded`, false never triggers a fallback scan:
+    /// worker reconciliation returns `None` and the runtime retains existing
+    /// sessions until a reopened store rebuilds the projection at boot.
+    lane_worker_projection_available: bool,
     /// The negentropy capability-probe cache (plan §6 E).
     prober: Prober,
     /// Latest provenance-bearing NIP-11 advertisement for relays in the
@@ -1363,6 +1417,7 @@ impl<S: EventStore> EngineCore<S> {
             intent_receipts: HashMap::new(),
             receipts_by_lane_relay: HashMap::new(),
             lane_relay_index_degraded: false,
+            lane_worker_projection_available: true,
             prober: Prober::new(),
             nip11_information: HashMap::new(),
             active_nip77_live: HashMap::new(),
@@ -1415,11 +1470,14 @@ impl<S: EventStore> EngineCore<S> {
     /// bounds live work without turning historical read connections into
     /// permanent slot owners.
     ///
-    /// A store read failure returns `None`. In that case the runtime retains
-    /// every worker rather than risking eviction of a durable lane whose
-    /// persisted state could not be inspected.
+    /// This is a pure reducer projection: durable lane reads happen only at
+    /// bootstrap/recovery and mutation boundaries, never while reconciling
+    /// ordinary worker ownership.
     pub(crate) fn relay_worker_requirements(&self) -> Option<RelayWorkerRequirements> {
-        let writes = self.write_relay_workers()?;
+        if !self.lane_worker_projection_available {
+            return None;
+        }
+        let writes = self.write_relay_workers();
         let mut all: BTreeSet<RelaySessionKey> = self.router.plan().reqs.keys().cloned().collect();
         all.extend(writes.iter().cloned());
         Some(RelayWorkerRequirements { all, writes })
@@ -1431,10 +1489,7 @@ impl<S: EventStore> EngineCore<S> {
     /// obligation bounded same-relay time-sharing priority (#598) without
     /// accidentally giving a long-lived protected read the same authority.
     ///
-    /// As with the union above, a store read failure returns `None`; callers
-    /// then retain current workers and decline priority changes rather than
-    /// guessing about durable ownership.
-    fn write_relay_workers(&self) -> Option<BTreeSet<RelaySessionKey>> {
+    fn write_relay_workers(&self) -> BTreeSet<RelaySessionKey> {
         let mut required: BTreeSet<RelaySessionKey> = self
             .attempt_correlations
             .values()
@@ -1449,21 +1504,13 @@ impl<S: EventStore> EngineCore<S> {
                     .iter()
                     .chain(&pending.unstarted_relays)
                     .chain(&pending.route_blocked_relays)
+                    .chain(pending.lane_projection.required_relays())
                     .cloned()
                     .map(|relay| RelaySessionKey::new(relay, access)),
             );
-
-            let Some(intent_id) = pending.intent_id else {
-                continue;
-            };
-            let lanes = self.resolver.store().recover_outbox_lanes(intent_id).ok()?;
-            required.extend(lanes.into_iter().filter_map(|lane| {
-                (!matches!(lane.state, LaneState::Terminal { .. }))
-                    .then_some(RelaySessionKey::new(lane.key.relay, access))
-            }));
         }
 
-        Some(required)
+        required
     }
 
     /// Read-only access to the resolver's current demand (test/diagnostic
@@ -1922,10 +1969,6 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     fn prune_unowned_relay_state(&mut self) -> bool {
-        // `relay_worker_requirements()` reads outbox lanes from the store; with
-        // nothing to prune it must not tax every reducer message with that
-        // scan (the wake-falsifiers in `core_headless.rs` count exactly
-        // these reads).
         if self.relay_open_failures.is_empty() && self.auth_required_sessions.is_empty() {
             return false;
         }

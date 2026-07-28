@@ -2,14 +2,17 @@
 title: Durable write relay-worker demand
 category: writes
 slug: relay-worker-demand
-status: designed
+status: built
 date: 2026-07-28
+audience: llms
+scope: durable outbox lane projection into relay-worker ownership
 investigated_revision: 057f59ef9f3a5cbc1a3ce4e3c88d189d55b28244
 runtime_evidence_revision: 9a8ad1fd1a2999b067c19d842467a76a257f7f25
+implementation_pr: https://github.com/pablof7z/nmp/pull/988
 owns:
   - how durable outbox lanes determine which relay sessions the write plane must keep alive
-  - why the current implementation repeatedly reads and decodes every lane
-  - the rebuildable in-memory projection intended to remove those reads
+  - why the investigated implementation repeatedly read and decoded every lane
+  - the rebuildable in-memory projection that removes those reads
   - the projection's ordering, restart, and degraded-state requirements
 related:
   - docs/design-record.md
@@ -25,17 +28,19 @@ issues:
 
 # Durable write relay-worker demand
 
-This document records both the built behavior and the intended replacement for
-NMP's repeated outbox-lane scans. It is deliberately not a backend-selection
-record. The performance problem is caused by asking durable storage to
-reconstruct already-known reducer state during ordinary dispatch; changing the
-database while preserving that access pattern would leave the architectural
-mistake intact.
+This document records the repeated outbox-lane scans present at
+`investigated_revision` and the reducer-owned replacement built in
+[#988](https://github.com/pablof7z/nmp/pull/988). It is deliberately not a
+backend-selection record. The performance problem was caused by asking durable
+storage to reconstruct already-known reducer state during ordinary dispatch;
+changing the database while preserving that access pattern would have left the
+architectural mistake intact.
 
 The design is tracked by
-[#985](https://github.com/pablof7z/nmp/issues/985). As of the date and
-`investigated_revision` above, the repeated scan is **built** and the
-in-memory projection is **designed, not implemented**.
+[#985](https://github.com/pablof7z/nmp/issues/985). The source sections below
+label the former behavior explicitly. The replacement is **built and
+verified** on the implementation PR; future route-revision and parked-write
+behavior remains owned by #975 and #968 rather than being claimed here.
 
 ## The questions that led here
 
@@ -90,12 +95,12 @@ runtime opens, retains, or retires relay workers
 The store answers “what survived?” The reducer answers “what workers are
 needed now?” The runtime owns the workers themselves.
 
-## Built behavior: reconstructing demand during dispatch
+## Previous behavior: reconstructing demand during dispatch
 
 `EngineCore::relay_worker_requirements` combines read and write demand.
 `EngineCore::write_relay_workers` computes the write half.
 
-Today `write_relay_workers`:
+At `investigated_revision`, `write_relay_workers`:
 
 1. starts with relay sessions referenced by in-flight attempt correlations;
 2. walks every `PendingWrite`;
@@ -111,9 +116,9 @@ before dispatching effects. Worker retirement and relay-state pruning also ask
 for the requirements. An unchanged reducer can therefore perform the same
 store reads, B-tree comparisons, JSON decoding, and URL parsing many times.
 
-This is not recovery in the operational sense even though the store method is
-named `recover_outbox_lanes`. Recovery data is being used as a recurring query
-interface.
+This was not recovery in the operational sense even though the store method is
+named `recover_outbox_lanes`. Recovery data was being used as a recurring
+query interface.
 
 ### What is binary and what is JSON
 
@@ -182,16 +187,16 @@ observation-thread removal from #680. The old runtime sample remains valid for
 the scan diagnosis because the path still exists, but its thread-count finding
 must not be presented as current-master evidence.
 
-## Designed behavior: a rebuildable projection
+## Built behavior: a rebuildable projection
 
-Each `PendingWrite` should carry an exact set such as
-`nonterminal_lane_relays`. The name is illustrative; the semantic distinction
-is load-bearing:
+Each `PendingWrite` now owns a `LaneWorkerProjection` with three sets:
 
-- `lane_relays` continues to mean every persisted lane learned for the intent,
-  including terminal lanes needed by the reverse wake index;
-- `nonterminal_lane_relays` means exactly the durable lanes that still require
-  write-plane work.
+- `persisted`: every persisted lane learned for the intent, including terminal
+  lanes needed by the reverse wake index and exact removal cleanup;
+- `nonterminal`: durable lanes whose latest committed state still requires
+  write-plane work;
+- `uncertain`: conservative ownership after an indeterminate commit outcome.
+  This set may temporarily over-retain a worker but may never under-retain one.
 
 The reducer populates the projection from the lanes returned by startup
 recovery and bootstrap. Every successful durable lane mutation then feeds its
@@ -202,7 +207,7 @@ committed lane state is nonterminal -> insert relay
 committed lane state is terminal    -> remove relay
 ```
 
-`write_relay_workers` becomes a pure in-memory union of:
+`write_relay_workers` is now a pure in-memory union of:
 
 - the projected nonterminal lane relays;
 - unstarted or conservatively route-blocked relay ownership that has not yet
@@ -216,23 +221,22 @@ accidentally merged.
 
 ### One mutation boundary, not remembered call sites
 
-The store API already returns post-commit lane state from bootstrap and most
-lane transitions. Many current call sites discard those returned values.
+The store API already returned post-commit lane state from bootstrap and lane
+transitions, but many former call sites discarded those returned values.
+`core/lane_projection.rs` now owns wrappers for bootstrap and every lane-writing
+store door. Each wrapper commits first and applies the returned
+`RecoveredLane` before returning to ordinary reducer flow.
 
-The implementation must introduce a reducer-owned boundary that consumes all
-returned `RecoveredLane` values and updates both lane projections. Merely
-adding projection updates to today's visible call sites would turn correctness
-into reviewer memory. A future transition or route-revision path could persist
-a lane while forgetting to update worker demand.
-
-The exact internal type is an implementation choice, but bypassing the
-projection should be mechanically difficult. The relevant rule is:
+A recursive source-census falsifier scans every production module under
+`core/` and fails if any module outside `lane_projection.rs` invokes a raw
+lane-writing store method. This combines an internal API boundary with a
+mechanical proof rather than relying on reviewer memory. The rule is:
 
 > Any code path that makes a lane durably visible must also pass the committed
 > lane state through the reducer projection before ordinary dispatch resumes.
 
 The durable store remains the sole retry authority. The projection is derived
-state and can always be rebuilt; it is not a second outbox.
+state rebuilt from complete bootstrap results; it is not a second outbox.
 
 ### Route revisions and parked intents
 
@@ -248,10 +252,9 @@ per-dispatch store read. A large parked population could still make an
 O(pending) in-memory union expensive; the current production profile
 under-predicts that future population.
 
-The first implementation should keep the simple reducer-local union and
-measure it. A global relay-session reference-count projection is a possible
-follow-up only if the in-memory walk itself becomes material. It should not be
-introduced speculatively.
+The implementation keeps the simple reducer-local union. A global
+relay-session reference-count projection remains a possible follow-up only if
+the in-memory walk itself becomes material under the future parked population.
 
 ## Atomicity, ordering, and recovery
 
@@ -270,12 +273,13 @@ The projection must never claim a transition that the store rejected.
 Conversely, ordinary execution must not dispatch from stale pre-transition
 state after the store returned a committed post-state.
 
-Closing an intent is special only in shape, not authority. The current
-`close_if_all_lanes_terminal` performs a recovery scan before calling
-`close_terminal_intent`. The store's close operation already validates
-transactionally that all lanes are terminal. The projection may decide that a
-close attempt is plausible; the store remains the final authority and must
-refuse an invalid close.
+Closing an intent is special only in shape, not authority.
+`close_if_all_lanes_terminal` now asks whether the projection has at least one
+persisted lane and no nonterminal, uncertain, or route-blocked ownership. It
+then calls `close_terminal_intent` without a preceding lane scan. The store
+still validates transactionally that every lane is terminal, so the projection
+only decides that a close attempt is plausible; the store remains the final
+authority and refuses an invalid close.
 
 ### Startup
 
@@ -290,33 +294,36 @@ pre-close durable meaning.
 
 ### Persistence failures
 
-This design must use the durability classification introduced by #904:
+The projection wrappers use the durability classification introduced by #904:
 
 - `DurabilityOutcome::Absent` means the transition is known not to have
   committed. Keep the old projection.
 - `DurabilityOutcome::Unknown` means the transition may be absent or durable.
   The reducer cannot safely pretend either outcome is known.
 
-An unknown terminal transition can conservatively retain the previously
-required worker until reconciliation. An unknown lane-creation transition is
-harder: retaining the old projection is insufficient because the possibly
-durable lane may be new. The reducer must conservatively retain or add every
-candidate relay that the attempted mutation could have created, mark the
-projection degraded, and reconcile from reopened durable state.
+An unknown terminal transition retains the previously required worker until
+reconciliation. An unknown lane-creation transition is harder: retaining the
+old projection is insufficient because the possibly durable lane may be new.
+Bootstrap therefore records every candidate relay as `uncertain`; the
+individual transition wrapper records the exact lane key as uncertain.
 
 The degraded projection must be a conservative superset of possibly required
 sessions. It may temporarily keep an unnecessary worker. It must not drop a
 worker for a lane that may have committed.
 
 Falling back to a full lane scan on every dispatch would recreate the original
-problem and is not an acceptable degraded mode. Reconciliation is an explicit
-recovery action.
+problem and is not an acceptable degraded mode. When the reducer cannot prove
+even a conservative projection, `lane_worker_projection_available` becomes
+false and worker reconciliation returns `None`; the runtime retains its
+existing workers. Reopening the store and running boot recovery is the
+reconciliation boundary.
 
 [#771](https://github.com/pablof7z/nmp/issues/771) owns the broader contract for
 preserving durable lane-transition evidence when store operations fail. Its
 older premise that an error always means “committed none” is superseded for
-`DurabilityOutcome::Unknown`. #985 must integrate with that contract rather
-than silently deciding ambiguous durability.
+`DurabilityOutcome::Unknown`. #985 integrates only the worker-retention part of
+that contract; #771 still owns complete durable transition evidence and
+user-visible recovery policy.
 
 If startup cannot read enough durable state to construct even a conservative
 projection, there is no prior worker set to retain. The correct service-level
@@ -333,16 +340,15 @@ The implementation is correct only if all of these hold:
    lane-store read.
 3. Every committed lane creation or transition updates the projection before
    ordinary effect dispatch resumes.
-4. A relay is present in `nonterminal_lane_relays` exactly when its known
-   committed lane is nonterminal, except during an explicitly marked degraded
-   state where the set may only over-retain.
+4. A relay is present in `LaneWorkerProjection::nonterminal` exactly when its
+   known committed lane is nonterminal; `uncertain` may only over-retain.
 5. A persistence outcome classified Unknown never causes a possibly required
    relay worker to be dropped.
 6. Public, NIP-42, account, and session identities do not alias merely because
    their relay URLs match.
-7. Route revision uses the same lane-minting/projection boundary as initial
-   bootstrap.
-8. A parked intent with no lane contributes no worker and causes no
+7. Future route revision must use the same lane-minting/projection boundary as
+   initial bootstrap.
+8. A future parked intent with no lane must contribute no worker and cause no
    per-dispatch store read.
 9. The store transaction, not the projection, is the final authority for
    terminal intent closure.
@@ -351,40 +357,61 @@ The implementation is correct only if all of these hold:
 
 ## Falsifiers and performance evidence
 
-The first implementation should include tests that would fail if the old
-architecture or a partial projection survived:
+The implementation carries these permanent falsifiers:
 
-- With many pending intents and no state changes, repeated dispatch performs
-  zero `recover_outbox_lanes` calls after reconstruction.
-- Every lane state transition updates the projected set, and reconstruction
-  from the store produces the same exact set after each transition.
-- A newly minted route-revision lane becomes worker demand without a global
-  rescan.
-- Many route-parked intents create zero worker demand and zero lane reads
-  during repeated dispatch.
-- The same URL under Public and NIP-42 access, and under distinct signing
-  identities, remains isolated.
-- A known-absent persistence failure leaves the old projection unchanged.
-- An unknown terminal transition retains the old worker.
-- An unknown lane-creation transition conservatively retains every candidate
-  worker until explicit reconciliation.
-- Exact state and ordered worker requirements survive close and multiple
-  reopens; row counts alone are not sufficient.
+- `unchanged_worker_demand_reads_zero_outbox_lanes` first failed on the base
+  revision with 6 recovery reads for 3 pending intents, then passed with 0.
+  It also proves that the required worker is still recognized; eliminating
+  reads by forgetting demand would fail.
+- `projection_matches_durable_state_after_every_normal_delivery_transition`
+  compares projected worker sessions with an independent store reconstruction
+  after bootstrap, connection/auth wake, attempt start, handoff, and terminal
+  ACK.
+- `same_url_keeps_distinct_signing_identities_in_worker_demand` proves 2
+  NIP-42 identities at one URL remain distinct and do not alias the Public
+  session.
+- `close_reopen_rebuilds_the_same_exact_worker_projection` compares exact
+  worker sets before close and after redb reopen/boot recovery.
+- `durability_unknown_marks_the_lane_uncertain_and_retains_its_worker` proves
+  an indeterminate transition cannot drop the possibly durable worker.
+- `durability_absent_leaves_the_exact_projection_unchanged` proves a rejected,
+  known-absent transition cannot fabricate projected state.
+- `every_core_lane_mutation_uses_the_projection_door` recursively scans the
+  production core source and rejects a raw lane-writing store call outside the
+  projection module.
 
-Performance verification should replay the workload that exposed the problem
-and compare:
+Future #975 route-revision minting and #968 route-parking still require their
+own positive falsifiers when those states exist. The projection boundary is
+already the bootstrap/lane-minting boundary they must use, but this PR does not
+claim unimplemented states were tested.
 
-- process and engine-thread CPU;
-- calls to `recover_outbox_lanes`;
-- lane rows and bytes decoded during unchanged dispatch;
-- engine command latency or facade wait time;
-- relay-worker counts, to prove the reduction did not come from dropping
-  required work.
+### Measured magnitude
 
-The expected architectural gain is exact: unchanged worker-demand calculation
-goes from store reads proportional to pending durable writes and their lanes to
-zero store reads. Whole-process CPU gain remains a measurement, not a design
-claim.
+`relay_worker_projection_redb_benchmark` exercises the real redb lane
+representation and the same `RelayOpenFailed` ownership path used by the
+zero-read regression. Its fixed workload has 64 pending intents and 200
+unchanged ownership passes.
+
+Five release-mode samples were run from separate clean Cargo target
+directories for the base and candidate, preventing cross-worktree artifact
+reuse:
+
+```text
+base 057f59e median:       51,624 microseconds
+projection median:         5,162 microseconds
+median reduction:             90%
+median speedup:                10x
+```
+
+The behavioral count moves from reads proportional to pending durable writes
+to exactly 0 lane-store reads during worker calculation. The benchmark keeps
+relay-worker outcomes equal and measures the actual redb representation, so the
+speedup did not come from dropping work or replacing redb.
+
+This is strong evidence for the isolated hot path, not a claim that the whole
+Mosaico process is 90% faster. A production rollout should still compare
+process CPU, engine-thread CPU, command latency, and facade wait time against
+the original workload.
 
 ## Backend independence and non-goals
 
@@ -417,12 +444,17 @@ removed and re-profiled.
 
 - `crates/nmp/src/core/mod.rs`
   - `PendingWrite`
+  - `LaneWorkerProjection`
   - `EngineCore::relay_worker_requirements`
   - `EngineCore::write_relay_workers`
   - relay-state pruning and wake indexes
+- `crates/nmp/src/core/lane_projection.rs`
+  - the one projected bootstrap/transition boundary
+  - exact rebuild, uncertainty, and the recursive bypass falsifier
+  - store-oracle, identity, restart, and failure tests
 - `crates/nmp/src/core/write.rs`
-  - durable lane bootstrap and transition call sites
-  - places currently discarding returned `RecoveredLane` values
+  - durable lane lifecycle call sites using the projection boundary
+  - store-validated terminal intent closure
 - `crates/nmp/src/runtime/mod.rs`
   - `dispatch_core_effects`
   - worker retirement and retry
@@ -438,22 +470,17 @@ removed and re-profiled.
 - `crates/nmp-store/src/redb_store/canonical.rs`
   - binary canonical-event insertion
 - `crates/nmp/tests/core_headless/persistence_failures.rs`
-  - existing read-count coverage and explicit evidence that worker accounting
-    remained globally scanned after the narrower wake-index optimization
+  - the red/green zero-read falsifier
+  - the repeatable redb before/after benchmark
 
 ## Open decisions
 
-The implementation PR still needs to settle these internal details without
-weakening the invariants above:
+The following adjacent decisions remain without weakening the built invariants:
 
-- the exact type boundary that makes committed lane projection updates
-  mechanically unavoidable;
-- the precise degraded-state representation and reconciliation trigger for
-  `DurabilityOutcome::Unknown`;
 - service behavior when startup cannot reconstruct durable lane state at all;
 - whether performance counters live only in tests or also appear in runtime
   diagnostics;
 - whether an O(pending) in-memory union remains sufficient once parked writes
   from #968 exist at production scale.
 
-None of these requires choosing a database winner before implementation begins.
+None requires choosing a database winner or reverting to per-dispatch scans.
