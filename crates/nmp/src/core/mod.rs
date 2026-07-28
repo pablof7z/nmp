@@ -36,6 +36,9 @@ mod history;
 mod history_lifecycle;
 #[cfg(test)]
 mod history_lifecycle_tests;
+mod lane_projection;
+#[cfg(test)]
+mod lane_projection_tests;
 mod observation;
 mod query;
 #[cfg(test)]
@@ -76,9 +79,10 @@ use nmp_signer::SignerError;
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome,
     CancelEphemeralOutcome, CloseIntentOutcome, CompensateOutcome, CoverageKey, DeadlineKind,
-    EventStore, HandoffEvidence, InFlightPhase, IntentId, IntentSigState, LaneKey, LaneState,
-    PersistenceError, PostHandoffState, PromoteOutcome, ReceiptState, RecoveredLane, RelayObserved,
-    TransientCause, WriteDurability,
+    DurabilityOutcome, EventStore, HandoffEvidence, InFlightPhase, IntentId, IntentSigState,
+    LaneKey, LaneState, PersistenceError, PostHandoffState, PromoteOutcome, ReceiptState,
+    RecoveredAttempt, RecoveredLane, RecoveredRouteRevision, RelayObserved, TransientCause,
+    WriteDurability,
 };
 use nmp_transport::{
     AttemptCorrelation, CommittedObservationCandidate, CommittedObservationHit,
@@ -944,13 +948,38 @@ struct PendingWrite {
     /// for each relay.
     attempt_ordinals: BTreeMap<RelayUrl, u64>,
     /// Every relay this reducer has ever learned owns a persisted outbox
-    /// lane for this intent (epic #507 finding E5). Populated exactly where
-    /// the core learns an intent's lanes — `bootstrap_outbox_lanes`'s two
-    /// call sites (`recover_on_boot`, `on_signed`) — and never elsewhere:
-    /// this is the per-receipt half of `EngineCore::receipts_by_lane_relay`,
-    /// kept so a permanent removal from `pending` can walk exactly this set
-    /// to clean the reverse index rather than scanning it.
+    /// lane for this intent (epic #507 finding E5). This is the per-receipt
+    /// half of `EngineCore::receipts_by_lane_relay`, kept so a permanent
+    /// removal from `pending` can walk exactly this set to clean the reverse
+    /// index rather than scanning it.
+    ///
+    /// Since #985 it is populated by exactly one door —
+    /// [`EngineCore::project_committed_lane`], which every committed lane
+    /// fact passes through — rather than by hand at the two
+    /// `bootstrap_outbox_lanes` call sites.
     lane_relays: BTreeSet<RelayUrl>,
+    /// The subset of `lane_relays` whose LATEST COMMITTED `LaneState` still
+    /// requires this intent to own a relay worker (issue #985). A relay is a
+    /// member iff its committed lane is nonterminal; it leaves the set only
+    /// when the store commits a `Terminal` state for it.
+    ///
+    /// This is the whole point of the projection: `write_relay_workers` used
+    /// to reconstruct exactly this set by calling `recover_outbox_lanes` for
+    /// every pending intent on every effect-dispatch pass — a redb range
+    /// scan, a JSON decode per lane, and a `RelayUrl` reparse, repeated for
+    /// state the reducer had just committed itself. A production Mosaico
+    /// profile put 67.5% of a pegged engine thread in that reconstruction.
+    ///
+    /// Kept SEPARATE from `lane_relays` on purpose: `lane_relays` must keep
+    /// meaning "every lane ever learned" (terminal lane rows are deliberately
+    /// retained by `close_terminal_intent`, and the #525 reverse wake index
+    /// and its cleanup are defined over all of them), while worker demand is
+    /// defined only over the nonterminal ones.
+    ///
+    /// It is derived state, never a second outbox: `recover_on_boot` rebuilds
+    /// it from canonical rows before normal service, and the store stays the
+    /// sole retry/closure authority.
+    nonterminal_lane_relays: BTreeSet<RelayUrl>,
 }
 
 /// Runtime-private identity for one live receipt observer. Pointer identity
@@ -1182,6 +1211,22 @@ pub struct EngineCore<S: EventStore> {
     /// finding), so an unprovable index is always treated as untrustworthy
     /// rather than guessed at.
     lane_relay_index_degraded: bool,
+    /// Latched the moment a lane mutation failed with
+    /// [`DurabilityOutcome::Unknown`] (#904/#985): the transition may already
+    /// be durable, so `nonterminal_lane_relays` was widened to a conservative
+    /// SUPERSET of possibly-required workers rather than left describing a
+    /// state that may no longer be true.
+    ///
+    /// This is a diagnostic/reconciliation signal, NOT a fallback switch.
+    /// Turning degradation into a per-dispatch `recover_outbox_lanes` scan
+    /// would reinstate the exact defect #985 removes, so nothing reads this
+    /// to decide to scan. The one reconciliation is `recover_on_boot`'s
+    /// existing from-scratch rebuild from canonical rows — which is also the
+    /// only thing that can clear it, because an unknown-durability fault
+    /// requires a store reopen anyway (`PersistenceFault::requires_reopen`).
+    /// Over-retaining a worker until then is the intended cost; dropping one
+    /// a possibly-committed lane still needs is the bug class this closes.
+    worker_projection_degraded: bool,
     /// The negentropy capability-probe cache (plan §6 E).
     prober: Prober,
     /// Latest provenance-bearing NIP-11 advertisement for relays in the
@@ -1363,6 +1408,7 @@ impl<S: EventStore> EngineCore<S> {
             intent_receipts: HashMap::new(),
             receipts_by_lane_relay: HashMap::new(),
             lane_relay_index_degraded: false,
+            worker_projection_degraded: false,
             prober: Prober::new(),
             nip11_information: HashMap::new(),
             active_nip77_live: HashMap::new(),
@@ -1415,9 +1461,11 @@ impl<S: EventStore> EngineCore<S> {
     /// bounds live work without turning historical read connections into
     /// permanent slot owners.
     ///
-    /// A store read failure returns `None`. In that case the runtime retains
-    /// every worker rather than risking eviction of a durable lane whose
-    /// persisted state could not be inspected.
+    /// Since #985 this performs NO store read at all, so it cannot fail for
+    /// that reason; the `Option` remains because a projection that cannot be
+    /// proven exact (see `worker_projection_degraded`) is answered by
+    /// retaining every current worker rather than by guessing — and never by
+    /// a fallback scan, which is the exact defect the projection removes.
     pub(crate) fn relay_worker_requirements(&self) -> Option<RelayWorkerRequirements> {
         let writes = self.write_relay_workers()?;
         let mut all: BTreeSet<RelaySessionKey> = self.router.plan().reqs.keys().cloned().collect();
@@ -1431,9 +1479,28 @@ impl<S: EventStore> EngineCore<S> {
     /// obligation bounded same-relay time-sharing priority (#598) without
     /// accidentally giving a long-lived protected read the same authority.
     ///
-    /// As with the union above, a store read failure returns `None`; callers
-    /// then retain current workers and decline priority changes rather than
-    /// guessing about durable ownership.
+    /// A PURE in-memory union since #985: reducer-owned projections plus the
+    /// sessions in-flight attempt correlations already name. Zero store
+    /// reads, zero JSON decodes, zero `RelayUrl` parses — see
+    /// [`crate::core::lane_projection`] and `PendingWrite::
+    /// nonterminal_lane_relays` for why this used to call
+    /// `recover_outbox_lanes` once per pending intent on every dispatch pass
+    /// and what now keeps the answer exact instead.
+    ///
+    /// The four contributing sets are genuinely different obligations and
+    /// none of them subsumes another: `nonterminal_lane_relays` is committed
+    /// durable lane demand, `pending_relays` is a live wire attempt,
+    /// `unstarted_relays` is a routed lane whose `start_lane_attempt` failed
+    /// (owned, nonterminal, but with no Started fact), and
+    /// `route_blocked_relays` is a resolved URL whose route revision never
+    /// persisted (owned for this process only). A route-PARKED intent under
+    /// #968 has never routed, so it has minted no lane and appears in none of
+    /// them: it contributes exactly zero worker demand, for free.
+    ///
+    /// Every relay projects through the intent's frozen `signing_pubkey`, so
+    /// two intents on the same URL under different signing identities — or
+    /// under Public read access — stay distinct `RelaySessionKey`s and can
+    /// never alias.
     fn write_relay_workers(&self) -> Option<BTreeSet<RelaySessionKey>> {
         let mut required: BTreeSet<RelaySessionKey> = self
             .attempt_correlations
@@ -1445,22 +1512,14 @@ impl<S: EventStore> EngineCore<S> {
             let access = AccessContext::Nip42(pending.signing_pubkey);
             required.extend(
                 pending
-                    .pending_relays
+                    .nonterminal_lane_relays
                     .iter()
+                    .chain(&pending.pending_relays)
                     .chain(&pending.unstarted_relays)
                     .chain(&pending.route_blocked_relays)
                     .cloned()
                     .map(|relay| RelaySessionKey::new(relay, access)),
             );
-
-            let Some(intent_id) = pending.intent_id else {
-                continue;
-            };
-            let lanes = self.resolver.store().recover_outbox_lanes(intent_id).ok()?;
-            required.extend(lanes.into_iter().filter_map(|lane| {
-                (!matches!(lane.state, LaneState::Terminal { .. }))
-                    .then_some(RelaySessionKey::new(lane.key.relay, access))
-            }));
         }
 
         Some(required)

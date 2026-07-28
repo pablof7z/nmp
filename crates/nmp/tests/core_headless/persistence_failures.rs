@@ -505,6 +505,16 @@ impl EventStore for WakeLaneProbeStore {
 /// `N` reads (the old `recover_all_lanes` + relay filter) down to exactly
 /// `1` (only the receipt actually routed through the woken relay). Total:
 /// `N + 1`, strictly less than the old `2 * N`.
+///
+/// #985 update: relay-WORKER accounting used to be a third, separate
+/// `O(pending)` contributor, but it was invisible here because
+/// `relay_worker_requirements` is called by the runtime's
+/// `dispatch_core_effects`, not by `EngineCore::handle`. It now performs zero
+/// store reads; the falsifier for that lives in
+/// `core::lane_projection_tests::unchanged_dispatch_passes_add_zero_lane_reads`
+/// (in-crate, because the door is `pub(crate)`). The `N + 1` below is
+/// therefore still exactly `schedule_ready` + the narrowed wake, and remains
+/// the last `O(pending)` lane read on this path.
 #[test]
 fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
     const N: usize = 3;

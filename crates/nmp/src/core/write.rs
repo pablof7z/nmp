@@ -138,27 +138,36 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
+    /// Close an intent whose obligations are all discharged.
+    ///
+    /// Before #985 this re-read and JSON-decoded every lane of the intent
+    /// purely to re-derive "are they all terminal?" — a fact the reducer had
+    /// just committed itself — and only then called `close_terminal_intent`.
+    /// The scan was never the authority: that store door validates the
+    /// complete non-empty-and-all-terminal invariant inside its own write
+    /// transaction and refuses an invalid close. So the projection decides
+    /// only that an attempt is PLAUSIBLE, and the store stays the authority.
+    ///
+    /// The two projection guards are exact, not heuristic:
+    /// `nonterminal_lane_relays` empty is the all-terminal condition, and
+    /// `lane_relays` non-empty is the store's own "a non-empty lane set"
+    /// precondition — which also means a route-parked intent that has never
+    /// minted a lane costs zero store calls here.
     pub(super) fn close_if_all_lanes_terminal(&mut self, id: ReceiptId) {
         let Some((intent_id, event_id)) = self
             .pending
             .get(&id)
-            .filter(|pending| pending.route_blocked_relays.is_empty())
+            .filter(|pending| {
+                pending.route_blocked_relays.is_empty()
+                    && pending.nonterminal_lane_relays.is_empty()
+                    && !pending.lane_relays.is_empty()
+            })
             .and_then(|pending| Some((pending.intent_id?, pending.event_id)))
         else {
             return;
         };
-        let Ok(lanes) = self.resolver.store().recover_outbox_lanes(intent_id) else {
-            return;
-        };
-        if lanes.is_empty()
-            || lanes
-                .iter()
-                .any(|lane| !matches!(lane.state, LaneState::Terminal { .. }))
-        {
-            return;
-        }
         let Ok(CloseIntentOutcome::Closed | CloseIntentOutcome::AlreadyClosed) =
-            self.resolver.store_mut().close_terminal_intent(intent_id)
+            self.commit_terminal_intent_close(intent_id)
         else {
             return;
         };
@@ -244,9 +253,7 @@ impl<S: EventStore> EngineCore<S> {
             (HandoffResult::Ambiguous, _) => return effects,
         };
         if self
-            .resolver
-            .store_mut()
-            .record_lane_handoff(&key, lane.revision, ordinal, detail, next)
+            .commit_lane_handoff(&key, lane.revision, ordinal, detail, next)
             .is_err()
         {
             return effects;
@@ -384,9 +391,7 @@ impl<S: EventStore> EngineCore<S> {
             );
             if !self.connected_relays.contains(&session) {
                 if self
-                    .resolver
-                    .store_mut()
-                    .set_lane_waiting(&lane.key, lane.revision, false)
+                    .commit_lane_waiting(&lane.key, lane.revision, false)
                     .is_ok()
                 {
                     self.emit_write_status(
@@ -419,9 +424,7 @@ impl<S: EventStore> EngineCore<S> {
                     && !self.auth_ready_sessions.contains_key(&session))
             {
                 if self
-                    .resolver
-                    .store_mut()
-                    .set_lane_waiting(&lane.key, lane.revision, true)
+                    .commit_lane_waiting(&lane.key, lane.revision, true)
                     .is_ok()
                 {
                     self.emit_write_status(
@@ -445,7 +448,7 @@ impl<S: EventStore> EngineCore<S> {
             let Ok(correlation) = self.alloc_attempt_correlation() else {
                 continue;
             };
-            let (attempt, advanced) = match self.resolver.store_mut().start_lane_attempt(
+            let (attempt, advanced) = match self.commit_lane_attempt_start(
                 &lane.key,
                 lane.revision,
                 event.clone(),
@@ -619,9 +622,7 @@ impl<S: EventStore> EngineCore<S> {
                 continue;
             }
             if self
-                .resolver
-                .store_mut()
-                .set_lane_eligible(&lane.key, lane.revision, self.clock)
+                .commit_lane_eligible(&lane.key, lane.revision, self.clock)
                 .is_err()
             {
                 self.retry_scheduler_blocked = true;
@@ -675,9 +676,7 @@ impl<S: EventStore> EngineCore<S> {
                 match (deadline.kind, lane.state.clone()) {
                     (DeadlineKind::RetryEligible, LaneState::Transient { .. }) => {
                         if self
-                            .resolver
-                            .store_mut()
-                            .set_lane_eligible(&lane.key, lane.revision, deadline.at)
+                            .commit_lane_eligible(&lane.key, lane.revision, deadline.at)
                             .is_err()
                         {
                             self.retry_scheduler_blocked = true;
@@ -694,9 +693,7 @@ impl<S: EventStore> EngineCore<S> {
                             id.and_then(|id| self.pending.get(&id).map(|p| p.durability));
                         if durability == Some(Durability::AtMostOnce) {
                             if self
-                                .resolver
-                                .store_mut()
-                                .finish_lane_attempt(
+                                .commit_lane_finish(
                                     &lane.key,
                                     lane.revision,
                                     ordinal,
@@ -720,9 +717,7 @@ impl<S: EventStore> EngineCore<S> {
                         } else {
                             let eligible_at = now + retry_delay_secs(&lane.key, ordinal);
                             if self
-                                .resolver
-                                .store_mut()
-                                .set_lane_transient(
+                                .commit_lane_transient(
                                     &lane.key,
                                     lane.revision,
                                     ordinal,
@@ -787,6 +782,12 @@ impl<S: EventStore> EngineCore<S> {
         // moment `receipts_by_lane_relay` can be trusted again regardless of
         // what happened in a prior process (epic #507 finding E5).
         self.lane_relay_index_degraded = false;
+        // Same one-shot rebuild, same reasoning, for the #985 worker
+        // projection: this is the moment every `nonterminal_lane_relays` is
+        // re-derived from canonical rows, so a conservative superset latched
+        // by a previous process's unknown-durability fault is discharged
+        // here -- and only here.
+        self.worker_projection_degraded = false;
 
         for intent in recovered {
             if intent.frozen.kind == nostr::Kind::Authentication {
@@ -835,6 +836,7 @@ impl<S: EventStore> EngineCore<S> {
                     route_blocked_relays: BTreeSet::new(),
                     attempt_ordinals: BTreeMap::new(),
                     lane_relays: BTreeSet::new(),
+                    nonterminal_lane_relays: BTreeSet::new(),
                 },
             );
             self.intent_receipts.insert(intent.intent_id, id);
@@ -880,9 +882,7 @@ impl<S: EventStore> EngineCore<S> {
                     .collect::<BTreeSet<_>>();
                 if !new_routes.is_empty()
                     && self
-                        .resolver
-                        .store_mut()
-                        .record_route_revision(intent.intent_id, current_routes)
+                        .commit_route_revision(intent.intent_id, current_routes)
                         .is_err()
                 {
                     if let Some(pending) = self.pending.get_mut(&id) {
@@ -891,11 +891,12 @@ impl<S: EventStore> EngineCore<S> {
                 }
             }
 
-            let lanes = match self
-                .resolver
-                .store_mut()
-                .bootstrap_outbox_lanes(intent.intent_id)
-            {
+            // The ONE lane recovery per open intent, before normal query and
+            // command service (#985). Its returned lanes populate both
+            // `lane_relays` and `nonterminal_lane_relays` through the
+            // projection door, which is also the reconciliation that clears
+            // any `worker_projection_degraded` a previous process latched.
+            let lanes = match self.commit_lane_bootstrap(intent.intent_id, &durable_relays) {
                 Ok(lanes) => lanes,
                 Err(_) => {
                     // Same reasoning as the `recover_route_revisions` error
@@ -908,7 +909,6 @@ impl<S: EventStore> EngineCore<S> {
                 }
             };
             for lane in lanes {
-                let relay = lane.key.relay.clone();
                 // The recovered write lane's worker demand is the intent's
                 // identity-scoped authenticated session (#8 U2); recovery
                 // redials exactly the session the lane will publish on. The
@@ -919,14 +919,6 @@ impl<S: EventStore> EngineCore<S> {
                     lane.key.relay.clone(),
                     AccessContext::Nip42(intent.expected_pubkey),
                 );
-                if let Some(pending) = self.pending.get_mut(&id) {
-                    if pending.lane_relays.insert(relay.clone()) {
-                        self.receipts_by_lane_relay
-                            .entry(relay)
-                            .or_default()
-                            .insert(id);
-                    }
-                }
                 match lane.state {
                     LaneState::InFlight {
                         ordinal,
@@ -934,7 +926,7 @@ impl<S: EventStore> EngineCore<S> {
                     } => match durability {
                         Durability::Durable => {
                             let eligible_at = self.clock;
-                            let _ = self.resolver.store_mut().set_lane_transient(
+                            let _ = self.commit_lane_transient(
                                 &lane.key,
                                 lane.revision,
                                 ordinal,
@@ -945,9 +937,7 @@ impl<S: EventStore> EngineCore<S> {
                         }
                         Durability::AtMostOnce => {
                             if self
-                                .resolver
-                                .store_mut()
-                                .finish_lane_attempt(
+                                .commit_lane_finish(
                                     &lane.key,
                                     lane.revision,
                                     ordinal,
@@ -991,9 +981,7 @@ impl<S: EventStore> EngineCore<S> {
                         // recovery signal) rather than warm a connection that
                         // cannot wake a still-`WaitingAuth` lane.
                         if self
-                            .resolver
-                            .store_mut()
-                            .set_lane_waiting(&lane.key, lane.revision, false)
+                            .commit_lane_waiting(&lane.key, lane.revision, false)
                             .is_ok()
                         {
                             effects.push(Effect::EnsureWriteRelay(session));
@@ -1756,6 +1744,7 @@ impl<S: EventStore> EngineCore<S> {
                 route_blocked_relays: BTreeSet::new(),
                 attempt_ordinals: BTreeMap::new(),
                 lane_relays: BTreeSet::new(),
+                nonterminal_lane_relays: BTreeSet::new(),
             },
         );
         // `intent_id` is `None` only for Ephemeral, which never owns a
@@ -2291,9 +2280,7 @@ impl<S: EventStore> EngineCore<S> {
             return;
         };
         if self
-            .resolver
-            .store_mut()
-            .record_route_revision(intent_id, relays.clone())
+            .commit_route_revision(intent_id, relays.clone())
             .is_err()
         {
             if let Some(pending) = self.pending.get_mut(&id) {
@@ -2305,7 +2292,7 @@ impl<S: EventStore> EngineCore<S> {
             return;
         }
 
-        let lanes = match self.resolver.store_mut().bootstrap_outbox_lanes(intent_id) {
+        let lanes = match self.commit_lane_bootstrap(intent_id, &relays) {
             Ok(lanes) => lanes,
             Err(_) => {
                 // This is the sole call that teaches the reverse index this
@@ -2325,15 +2312,6 @@ impl<S: EventStore> EngineCore<S> {
             .or_default()
             .insert(id);
         for lane in lanes {
-            let lane_relay = lane.key.relay.clone();
-            if let Some(pending) = self.pending.get_mut(&id) {
-                if pending.lane_relays.insert(lane_relay.clone()) {
-                    self.receipts_by_lane_relay
-                        .entry(lane_relay)
-                        .or_default()
-                        .insert(id);
-                }
-            }
             if matches!(lane.state, LaneState::WaitingConnection) {
                 // The freshly-bootstrapped lane's connectivity check is
                 // against the intent's identity-scoped authenticated
@@ -2341,11 +2319,7 @@ impl<S: EventStore> EngineCore<S> {
                 // publish on.
                 let session = RelaySessionKey::new(lane.key.relay.clone(), write_access);
                 if self.connected_relays.contains(&session) {
-                    let _ = self.resolver.store_mut().set_lane_eligible(
-                        &lane.key,
-                        lane.revision,
-                        self.clock,
-                    );
+                    let _ = self.commit_lane_eligible(&lane.key, lane.revision, self.clock);
                 } else {
                     self.emit_write_status(
                         id,
@@ -2684,9 +2658,7 @@ impl<S: EventStore> EngineCore<S> {
             match &class {
                 RelayAckClass::Acked => {
                     if self
-                        .resolver
-                        .store_mut()
-                        .finish_lane_attempt(
+                        .commit_lane_finish(
                             &key,
                             lane.revision,
                             ordinal,
@@ -2702,9 +2674,7 @@ impl<S: EventStore> EngineCore<S> {
                 }
                 RelayAckClass::Rejected => {
                     if self
-                        .resolver
-                        .store_mut()
-                        .finish_lane_attempt(
+                        .commit_lane_finish(
                             &key,
                             lane.revision,
                             ordinal,
@@ -2725,9 +2695,7 @@ impl<S: EventStore> EngineCore<S> {
                 RelayAckClass::Transient(cause) => {
                     let eligible_at = self.clock + retry_delay_secs(&key, ordinal);
                     if self
-                        .resolver
-                        .store_mut()
-                        .set_lane_transient(
+                        .commit_lane_transient(
                             &key,
                             lane.revision,
                             ordinal,
@@ -2753,9 +2721,7 @@ impl<S: EventStore> EngineCore<S> {
                     self.auth_probe_sessions.remove(session);
                     self.auth_required_sessions.insert(session.clone());
                     if self
-                        .resolver
-                        .store_mut()
-                        .suspend_lane_attempt(
+                        .commit_lane_suspend(
                             &key,
                             lane.revision,
                             ordinal,
@@ -2808,9 +2774,7 @@ impl<S: EventStore> EngineCore<S> {
             match lane.state {
                 LaneState::Eligible { .. } => {
                     if self
-                        .resolver
-                        .store_mut()
-                        .set_lane_waiting(&lane.key, lane.revision, false)
+                        .commit_lane_waiting(&lane.key, lane.revision, false)
                         .is_ok()
                     {
                         self.emit_write_status(
@@ -2829,9 +2793,7 @@ impl<S: EventStore> EngineCore<S> {
                     let durability = self.pending.get(&id).map(|pending| pending.durability);
                     if durability == Some(Durability::AtMostOnce) {
                         if self
-                            .resolver
-                            .store_mut()
-                            .finish_lane_attempt(
+                            .commit_lane_finish(
                                 &lane.key,
                                 lane.revision,
                                 ordinal,
@@ -2851,9 +2813,7 @@ impl<S: EventStore> EngineCore<S> {
                     } else {
                         let eligible_at = self.clock + retry_delay_secs(&lane.key, ordinal);
                         if self
-                            .resolver
-                            .store_mut()
-                            .set_lane_transient(
+                            .commit_lane_transient(
                                 &lane.key,
                                 lane.revision,
                                 ordinal,
@@ -2889,9 +2849,7 @@ impl<S: EventStore> EngineCore<S> {
                     // wake is `finish_auth_ok`, which for a lazy-challenging
                     // relay never fires again without a client-provoked EVENT.
                     if self
-                        .resolver
-                        .store_mut()
-                        .set_lane_waiting(&lane.key, lane.revision, false)
+                        .commit_lane_waiting(&lane.key, lane.revision, false)
                         .is_ok()
                     {
                         self.emit_write_status(
