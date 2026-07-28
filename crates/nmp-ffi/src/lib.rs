@@ -46,6 +46,10 @@
 //!   takes its author/time as explicit caller parameters). The composer
 //!   returns an ordinary [`types::FfiWriteIntent`]; generic
 //!   [`facade::NmpEngine::publish`] owns the receipt lifecycle.
+//! - [`nip25`] -- typed native-event reactions qualified through one exact
+//!   canonical NMP row. It returns opaque [`protocol::FfiProtocolDraft`]
+//!   objects: no raw kind/tags/author/time or publication authority crosses
+//!   into Swift/Kotlin.
 //!
 //! This crate has NO production dependency on `nmp-engine`, `nmp-grammar`,
 //! `nmp-signer`, or any other mechanism crate at all (#851) -- every
@@ -54,9 +58,9 @@
 //! NIP-22 comment vocabulary, which it reaches by enabling the facade's
 //! `nip22` feature rather than by a second edge to `nmp-nip22`.
 //! `scripts/check-ffi-facade-boundary.sh` is the mechanism that keeps that
-//! true. `nmp-nip51`/`nmp-nip29` (see [`nip29`]'s own doc) and
-//! `nmp-blossom` (#555, see [`blossom`]'s) are the opt-in protocol
-//! dependencies projected by this boundary.
+//! true. `nmp-nip25`/`nmp-nip29`/`nmp-nip51` and `nmp-blossom` (#555, see
+//! [`blossom`]'s) are the opt-in protocol dependencies projected by this
+//! boundary.
 
 pub mod auth;
 pub mod blossom;
@@ -66,8 +70,10 @@ pub mod entity;
 pub mod facade;
 pub mod nip02;
 pub mod nip22;
+pub mod nip25;
 pub mod nip29;
 pub mod nip51;
+pub mod protocol;
 pub mod signer;
 pub mod types;
 

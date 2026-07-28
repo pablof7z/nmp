@@ -25,6 +25,18 @@ ordinary `WriteIntent`; FFI, Swift, and Kotlin expose matching engine-free
 `publish` door and receipt lifecycle. There is no `Engine.commentIntent`,
 `CommentIntent` wrapper, or NIP-22-specific composed-publication overload.
 
+The first NIP-25 native-event surface is deliberately narrower.
+`nmp-nip25::reaction_target` qualifies an event through an ordinary exact-id,
+cache-only canonical query, then `reaction_draft` composes a complete unsigned
+kind:7 using the engine's active account and Rust-owned time. FFI, Swift, and
+Kotlin expose only opaque `ReactionTarget` and `ProtocolDraft` capabilities plus
+a typed reaction value. A caller-constructible native `Row` contributes only
+its event id; Rust re-reads the signed event and relay provenance from the
+canonical store. No raw kind, tags, author, time, route, host, write intent, or
+publication lifecycle crosses this boundary. The opaque draft exists so a
+separately governed closed contextual publisher can consume it without making
+native code an event builder.
+
 `nmp-ffi` is a projection of that facade. The repository uses UniFFI proc
 macros and extracts component metadata from a compiled library; there is no UDL
 source of truth. Swift and Kotlin add native observation/lifecycle ergonomics

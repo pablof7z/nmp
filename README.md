@@ -103,6 +103,13 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
   Swift, and Kotlin. Composition is an engine-free protocol function returning
   the ordinary `WriteIntent`; apps publish it through the one generic
   `publish` → `Receipt` lifecycle.
+- 🧪 NIP-25 native-event reaction drafts — an opaque typed target is
+  re-qualified from one exact canonical signed row, then Rust composes the
+  unsigned kind:7 using the active account and Rust-owned time. Exact
+  `e`/optional `a`/`p`/`k`/relay-hint and NIP-30 emoji rows are protocol-owned
+  across FFI, Swift, and Kotlin. The draft has no native inspection or generic
+  publication door; live reaction resources, ordinary author-outbox actions,
+  NIP-09 unreaction, and NIP-29 contextual publication remain separate work.
 - ✅ Optional parser-only content module (source-ranged plaintext/Markdown and
   NIP-19 occurrences), exact five-variant locator values shared by
   Rust/Swift/Kotlin, and a SwiftUI family whose app-selected components—not
@@ -121,7 +128,7 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 - 🧪 Blossom (BUD-11) media/blob — `nmp-blossom` ships kind:24242-authorized, sha256-verified blob upload plus mirror/delete/list, each with its own bound authorization ([#216](https://github.com/pablof7z/nmp/issues/216) epic, closes [#545](https://github.com/pablof7z/nmp/issues/545)/[#551](https://github.com/pablof7z/nmp/issues/551), [#552](https://github.com/pablof7z/nmp/pull/552)/[#557](https://github.com/pablof7z/nmp/pull/557)) — and **projected through FFI to Swift and Kotlin** ([#555](https://github.com/pablof7z/nmp/issues/555) closes, [#560](https://github.com/pablof7z/nmp/pull/560) merged): a native app can call upload/mirror/delete/list from Rust, Swift, or Kotlin today, each with typed error taxonomies and no collapsed variants. Upload durability is currently **app-owned** (a standalone async call, not yet a persisted/retried engine obligation) — an engine-integrated durable-upload upgrade is tracked as an explicit additive follow-up ([#562](https://github.com/pablof7z/nmp/issues/562)), not a silent gap.
 - ✅ NIP-68 picture events — `nmp-nip68` builds an unsigned kind:20 draft with `imeta` images minted only from a verified, content-addressed Blossom `BlobDescriptor`, plus a tolerant decoder that surfaces a missing sha256 as recorded diagnostics rather than trusting it ([#558](https://github.com/pablof7z/nmp/issues/558) closes, [#566](https://github.com/pablof7z/nmp/pull/566) merged). `build_picture` now takes an explicit `created_at` instead of sampling the clock — a determinism/FFI-parity fix ([#568](https://github.com/pablof7z/nmp/pull/568)). Engine-free, signing-free, first-cut tags only (`title`/`imeta`/`content-warning`/`t`); FFI/Swift/Kotlin projection is a separate later unit.
 - ✅ Upload-then-publish composition — the new `nmp-media` crate wires `prepare → upload → compose` into three witness-typed stages so a skipped stage is unrepresentable: `prepare` holds the exact bytes it hashed/authorized (an authorized-hash/uploaded-bytes mismatch is structurally impossible), `PreparedUpload::upload` is a used-once obligation yielding a verified asset, and `compose_picture` hands the app an unsigned kind:20 for the *existing* `publish()` path. Upload failure, publish failure, and success are three **separate error types** (`PrepareError`/`MediaUploadError`/`MediaComposeError`), never one collapsed boolean — closes [#559](https://github.com/pablof7z/nmp/issues/559) (T15-C, [#575](https://github.com/pablof7z/nmp/pull/575) merged). The crate owns no event kind and exports no `claims()`; still not in this unit: durable upload ([#562](https://github.com/pablof7z/nmp/issues/562)), the FFI/Swift/Kotlin projection, and BUD-03 server-list placement.
-- ⛔ No NIP-25 reactions, no general draft composition
+- ⛔ No app-constructible general draft composition
 
 **Storage**
 - ✅ Crash-safe redb: binary canonical rows, secondary + tag + cardinality indexes, interned relay URLs

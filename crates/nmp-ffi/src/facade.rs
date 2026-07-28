@@ -36,6 +36,8 @@ use crate::convert::{
     write_status_to_ffi, FfiError, FfiRequestRowsError, WriteStatusRef,
 };
 use crate::nip02::{NmpFollowActionStream, NmpFollowStream};
+use crate::nip25::{FfiReactionError, FfiReactionTarget, FfiReactionValue};
+use crate::protocol::FfiProtocolDraft;
 use crate::signer::FfiSignerMailbox;
 use crate::types::{
     FfiCancelWriteError, FfiCancelWriteOutcome, FfiCorrelationReattachment, FfiDemand,
@@ -193,6 +195,26 @@ pub struct NmpEngine {
 
 #[uniffi::export]
 impl NmpEngine {
+    /// Qualify one event as an opaque NIP-25 target through NMP's canonical
+    /// cache. Native-provided row fields and provenance are never accepted.
+    pub fn reaction_target(
+        &self,
+        event_id: String,
+    ) -> Result<Arc<FfiReactionTarget>, FfiReactionError> {
+        crate::nip25::reaction_target(&self.engine, event_id)
+    }
+
+    /// Compose one opaque unsigned kind:7 draft using the active engine
+    /// account and Rust-owned time. This does not route, sign, persist, or
+    /// publish the event.
+    pub fn reaction_draft(
+        &self,
+        target: Arc<FfiReactionTarget>,
+        value: FfiReactionValue,
+    ) -> Result<Arc<FfiProtocolDraft>, FfiReactionError> {
+        crate::nip25::reaction_draft(&self.engine, target, value)
+    }
+
     /// Explicit one-shot NIP-11 acquisition. Fresh reads are cache hits;
     /// concurrent misses/refreshes share one bounded engine-owned flight.
     pub async fn relay_information(

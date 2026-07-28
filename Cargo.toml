@@ -34,6 +34,9 @@ members = [
     "crates/nmp-nip02",
     "crates/nmp-nip65",
     "crates/nmp-nip65-consumer-check",
+    # NIP-25 native-event reaction schema owner (#155): canonical-row target
+    # qualification plus engine-authored immutable kind:7 drafts.
+    "crates/nmp-nip25",
     "crates/nmp-nip29",
     # NIP-C7 kind:9 chat schema owner (#838): pure draft construction and
     # `q`-tag replies, with no NIP-29 group or client notification policy.
@@ -98,6 +101,7 @@ nmp-bdd = { path = "crates/nmp-bdd" }
 nmp-nip51 = { path = "crates/nmp-nip51" }
 nmp-nip02 = { path = "crates/nmp-nip02" }
 nmp-nip65 = { path = "crates/nmp-nip65" }
+nmp-nip25 = { path = "crates/nmp-nip25" }
 nmp-nip29 = { path = "crates/nmp-nip29" }
 nmp-nipc7 = { path = "crates/nmp-nipc7" }
 nmp-asset = { path = "crates/nmp-asset" }

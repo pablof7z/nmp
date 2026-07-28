@@ -481,6 +481,18 @@ about current code:
 
 ## Protocol modules
 
+- **NIP-25 native-event target qualification and opaque unsigned draft
+  composition are projected across Rust/FFI/Swift/Kotlin (#155), but the live
+  resource and actions remain open.** The shipped slice re-reads an exact
+  canonical signed row by id, retains its event kind/author/address coordinate
+  and deterministic canonical relay hint in an opaque target, validates
+  like/dislike/Unicode/NIP-30 custom-emoji inputs, and samples active
+  author/time in Rust. Its opaque `ProtocolDraft` exposes no raw event or
+  publication lifecycle. Still missing: the source-scoped kind:7 reaction
+  resource/fold, ordinary author-outbox `react`, exact same-author NIP-09
+  `unreact`, and consumption by the separately governed NIP-29 contextual
+  publication gate. Kind:17 external-content reactions remain out of scope.
+
 - **NIP-65 first-publication bootstrap is shipped for direct Rust only
   (#719).** `nmp-nip65` exclusively owns kind:10002 composition and exposes
   one semantic `publish_relay_list_bootstrap` operation. Its request separates
