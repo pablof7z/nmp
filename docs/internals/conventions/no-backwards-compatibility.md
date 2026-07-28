@@ -65,12 +65,43 @@ review.
 
 ## 3. The reasoning — POLICY
 
-Two ways to say one thing is **itself a defect**, independent of any migration
-concern: every reader must learn both, every tool must handle both, and every
-future change must be made twice or drift. Meanwhile the cost the alias is
-supposed to avoid is small here by construction — the workspace moves
-together, all callers are in reach of one change, so breaking them is cheap. A
-permanent second surface is not cheap; it is permanent.
+### 3.1 There are no external consumers
+
+The entire cost that backwards compatibility exists to avoid is **absent
+here**. NMP has no external consumers. Every caller of every surface — the
+facade, the FFI component, the Swift and Kotlin SDKs, the protocol crates, the
+harnesses, the example apps — is inside this workspace or in a sibling
+repository that moves with it. Nobody is pinned to a version we cannot reach
+and update in the same change.
+
+Compatibility policy is a tax paid to strangers. There are no strangers. Paying
+it anyway buys nothing and costs a permanent second surface.
+
+This is a *fact about the current situation*, not a value judgement, and it is
+the load-bearing premise of the whole rule: an argument for compatibility must
+first establish a consumer who would be broken. If it cannot name one, it is
+not an argument.
+
+### 3.2 Clean architecture is the absolute priority
+
+Where the two conflict, **architectural cleanliness wins outright** — not on
+balance, not usually, but absolutely. A design that is correct and singular
+beats a design that is compatible. The old spelling has no standing to
+influence the new one.
+
+The practical form: when replacing something, do not let its shape leak into
+the replacement to ease migration. Do not keep a field because callers set it,
+do not keep a parameter because a composer passes it, do not keep a variant
+because a match arm exists. Design the thing as if the old one had never
+existed, then move every caller.
+
+### 3.3 Two spellings is itself a defect
+
+Independent of migration entirely: every reader must learn both, every tool
+must handle both, and every future change must be made twice or drift. That
+cost is permanent and compounds. The cost it is traded against — moving
+in-workspace callers once — is small, bounded, and paid by the same change that
+creates the value.
 
 This is the same instinct behind #838's deletion of `publish_composed` (a
 second write lifecycle) and behind refusing `group.observe` as a second read
