@@ -2,45 +2,104 @@ use super::*;
 
 // ---- durable write delivery and recovery -------------------------------
 
-/// Test 5 analog: `private_route_fails_closed` (ledger #6). A
-/// `PrivateNarrow` route whose relay set is empty (unroutable) fails CLOSED
-/// with a typed `WriteStatus::Failed` -- it never reaches a public relay.
-/// `NarrowOnly` exposes no widen/insert method by construction (compile-
-/// level: there is no method this test -- or any caller -- could call to
-/// grow the set after `NarrowOnly::new`).
+/// An explicit route naming no relays is refused AT THE DOOR: "reject it
+/// immediately". `Failed` is the first and only fact -- never `Accepted`,
+/// never a sign request, never a journal row, and never a quiet degradation
+/// into `Auto`.
+///
+/// This is deliberately stricter than the route it replaces. That route
+/// accepted an empty set and failed closed later, at resolution, so
+/// emptiness was a sentence an app read off a receipt. The sentence now
+/// lives where it can explain itself, and the empty route stops being
+/// acceptable at all.
 #[test]
-fn private_route_fails_closed() {
+fn an_explicit_route_with_no_relays_is_refused_before_acceptance() {
     let a = Keys::generate();
-    // Deliberately empty directory: even if `PrivateNarrow` DID consult it
-    // (it must not), there would be no public write relay to fall back to.
+    // The directory is empty on purpose: there is no write relay anywhere
+    // for a refusal-turned-fallback to leak into, so a passing assertion
+    // here is about the door, not about luck.
     let dir = FixtureDirectory::new();
     let mut core = new_core(dir);
     activate(&mut core, &a);
 
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&a, 1, "private dm")),
+        payload: WritePayload::Unsigned(unsigned(&a, 1, "nowhere")),
         durability: Durability::Durable,
-        routing: WriteRouting::PrivateNarrow(PrivateRoute {
-            relays: NarrowOnly::new(std::iter::empty::<RelayUrl>()),
-        }),
+        routing: WriteRouting::Explicit(Vec::new()),
         identity_override: None,
         correlation: None,
     }));
-    let (id, generation, u) = find_sign_request(&effects);
-    let signed = u.sign_with_keys(&a).unwrap();
-    let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
 
+    let receipts: Vec<&WriteStatus> = effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::EmitReceipt(_, status) => Some(status),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(receipts.len(), 1, "exactly one fact: {receipts:?}");
+    assert!(
+        matches!(receipts.first(), Some(WriteStatus::Failed(_))),
+        "Failed must be the first and only fact -- never Accepted: {receipts:?}"
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::RequestSign(..))),
+        "no signer is asked for anything on a refused publish"
+    );
     assert!(
         !effects
             .iter()
-            .any(|e| matches!(e, Effect::PublishEvent(..))),
-        "an unroutable private recipient must never reach ANY relay, public or otherwise"
+            .any(|e| matches!(e, Effect::PublishEvent(..) | Effect::EnsureWriteRelay(..))),
+        "no relay is contacted, and no lane is opened, for a refused publish"
     );
+}
+
+/// The sibling of the refusal above, and the reason it is safe to be this
+/// strict: emptiness is a property of the REQUEST, knowable at the door,
+/// while reachability is a property of the world and is not. A write aimed
+/// at a relay nobody can reach is accepted and routed verbatim to exactly
+/// that relay -- it fails per relay afterwards, never at the door.
+#[test]
+fn an_unreachable_explicit_relay_is_accepted_because_the_door_cannot_know() {
+    let a = Keys::generate();
+    let nowhere = RelayUrl::parse("wss://non-existent.example").unwrap();
+    let mut core = new_core(FixtureDirectory::new());
+    activate(&mut core, &a);
+
+    let effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(&a, 1, "hello")),
+        durability: Durability::Durable,
+        routing: WriteRouting::Explicit(vec![nowhere.clone()]),
+        identity_override: None,
+        correlation: None,
+    }));
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::EmitReceipt(rid, WriteStatus::Failed(_)) if *rid == id)),
-        "must fail CLOSED with a typed error, not silently drop the write"
+            .any(|e| matches!(e, Effect::EmitReceipt(_, WriteStatus::Accepted))),
+        "acceptance cannot validate that a relay exists, so it does not try"
+    );
+
+    let (id, generation, u) = find_sign_request(&effects);
+    let signed = u.sign_with_keys(&a).unwrap();
+    let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
+    let opened: Vec<RelaySessionKey> = effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::EnsureWriteRelay(session) => Some(session.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        opened,
+        vec![signer_session(&nowhere, a.public_key())],
+        "the write is routed verbatim to the relay the caller named"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::EmitReceipt(_, WriteStatus::Failed(_)))),
+        "an unreachable relay is a per-relay outcome, never a whole-intent refusal"
     );
 }
 
@@ -60,7 +119,7 @@ fn one_attempt_start_failure_is_owned_nonterminal_and_never_hits_the_wire() {
     authenticate_signer(&mut core, 0, &good, &author);
     authenticate_signer(&mut core, 1, &blocked, &author);
 
-    let (id, _, effects) = publish_private(&mut core, &author, [good.clone(), blocked.clone()]);
+    let (id, _, effects) = publish_explicit(&mut core, &author, [good.clone(), blocked.clone()]);
     assert!(effects.iter().any(
         |effect| matches!(effect, Effect::PublishEvent(session, event, _)
             if session == &signer_session(&good, event.pubkey))
@@ -97,7 +156,7 @@ fn sent_never_fires_synchronously_and_only_written_handoff_produces_it() {
     connect_signer(&mut core, 0, &relay, author.public_key());
     authenticate_signer(&mut core, 0, &relay, &author);
 
-    let (id, _signed, effects) = publish_private(&mut core, &author, [relay.clone()]);
+    let (id, _signed, effects) = publish_explicit(&mut core, &author, [relay.clone()]);
 
     assert!(
         !effects
@@ -168,9 +227,7 @@ fn ephemeral_written_handoff_cannot_mint_persisted_sent_truth() {
     let accepted = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(unsigned(&author, 93, "ephemeral handoff")),
         durability: Durability::Ephemeral,
-        routing: WriteRouting::PrivateNarrow(PrivateRoute {
-            relays: NarrowOnly::new([relay_a.clone(), relay_b.clone()]),
-        }),
+        routing: WriteRouting::Explicit(vec![relay_a.clone(), relay_b.clone()]),
         identity_override: None,
         correlation: None,
     }));
@@ -226,7 +283,7 @@ fn not_handed_off_and_ambiguous_project_distinct_truth_without_sent() {
     authenticate_signer(&mut core, 1, &relay_b, &author);
 
     let (id, _signed, effects) =
-        publish_private(&mut core, &author, [relay_a.clone(), relay_b.clone()]);
+        publish_explicit(&mut core, &author, [relay_a.clone(), relay_b.clone()]);
     let correlation_for = |relay: &RelayUrl| {
         effects
             .iter()
@@ -284,7 +341,7 @@ fn event_handoff_for_an_unknown_correlation_is_inert() {
     let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let dir = FixtureDirectory::new().with_write(author.public_key().to_hex(), [relay.clone()]);
     let mut core = new_core(dir);
-    let _ = publish_private(&mut core, &author, [relay]);
+    let _ = publish_explicit(&mut core, &author, [relay]);
 
     let unknown = nmp_transport::AttemptCorrelation(u64::MAX);
     let effects = core.handle(EngineMsg::EventHandoff(unknown, HandoffResult::Written));
@@ -303,7 +360,7 @@ fn all_attempt_start_failures_retain_every_lane_without_empty_terminal_sentinel(
     authenticate_signer(&mut core, 0, &a, &author);
     authenticate_signer(&mut core, 1, &b, &author);
 
-    let (id, _, effects) = publish_private(&mut core, &author, [a.clone(), b.clone()]);
+    let (id, _, effects) = publish_explicit(&mut core, &author, [a.clone(), b.clone()]);
     assert_eq!(
         effects
             .iter()
@@ -339,7 +396,7 @@ fn ack_of_persisted_lane_does_not_terminalize_mixed_blocked_obligation() {
     authenticate_signer(&mut core, 0, &good, &author);
     authenticate_signer(&mut core, 1, &blocked, &author);
     let (id, signed, scheduled) =
-        publish_private(&mut core, &author, [good.clone(), blocked.clone()]);
+        publish_explicit(&mut core, &author, [good.clone(), blocked.clone()]);
     mark_written(&mut core, &scheduled, &good);
     let acked = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -375,7 +432,7 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
         );
         connect_signer(&mut first, 0, &relay, author.public_key());
         authenticate_signer(&mut first, 0, &relay, &author);
-        let (id, _, effects) = publish_private(&mut first, &author, [relay.clone()]);
+        let (id, _, effects) = publish_explicit(&mut first, &author, [relay.clone()]);
         assert!(!effects
             .iter()
             .any(|effect| matches!(effect, Effect::PublishEvent(..))));
@@ -458,7 +515,7 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Unsigned(unsigned(&author, 86, "dynamic author route")),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         }));
@@ -531,7 +588,7 @@ fn author_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vo
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Unsigned(unsigned(&author, 87, "dynamic author route")),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         }));
@@ -661,7 +718,7 @@ fn route_revision_failure_emits_no_attempt_or_wire_and_claims_no_crash_durable_u
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Unsigned(unsigned(&author, 88, "volatile route")),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         }));
@@ -709,7 +766,7 @@ fn write_ack_per_relay() {
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(unsigned(&a, 1, "durable ack test")),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -788,7 +845,7 @@ fn uncommitted_attempt_terminal_emits_no_receipt_and_keeps_lane_live() {
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(unsigned(&a, 2, "finish persistence")),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -833,7 +890,7 @@ fn unaccepted_failure_ids_are_distinct_and_disjoint_from_store_receipts() {
         core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Unsigned(unsigned(&a, seq, "unaccepted")),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         }))

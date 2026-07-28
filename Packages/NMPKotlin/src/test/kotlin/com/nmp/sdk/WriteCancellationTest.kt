@@ -32,7 +32,7 @@ class WriteCancellationTest {
                                     content = "cancel through the public Kotlin SDK",
                                 ),
                             durability = Durability.Durable,
-                            routing = WriteRouting.AuthorOutbox,
+                            routing = WriteRouting.Auto,
                         ),
                     )
 

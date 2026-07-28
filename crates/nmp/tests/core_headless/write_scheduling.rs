@@ -22,7 +22,7 @@ fn enqueue_is_not_converged() {
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(unsigned(&a, 1, "durable write")),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -38,7 +38,7 @@ fn enqueue_is_not_converged() {
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(unsigned(&a, 2, "ephemeral write")),
         durability: Durability::Ephemeral,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -67,7 +67,7 @@ fn enqueue_is_not_converged() {
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(unsigned(&a, 3, "at most once write")),
         durability: Durability::AtMostOnce,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -118,7 +118,7 @@ fn ordinary_author_relay_without_auth_challenge_publishes_and_acks() {
         generation: 1,
     };
     let mut core = new_core(FixtureDirectory::new());
-    let (receipt, event, offline) = publish_private(&mut core, &author, [relay.clone()]);
+    let (receipt, event, offline) = publish_explicit(&mut core, &author, [relay.clone()]);
     assert!(!offline
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
@@ -189,7 +189,7 @@ fn challenged_author_relay_suppresses_event_until_exact_auth_ready() {
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
 
-    let (_, event, scheduled) = publish_private(&mut core, &author, [relay.clone()]);
+    let (_, event, scheduled) = publish_explicit(&mut core, &author, [relay.clone()]);
     assert!(!scheduled
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
@@ -243,7 +243,7 @@ fn auth_required_session_reconnect_cannot_publish_before_fresh_generation_auth()
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
 
-    let (_, event, parked) = publish_private(&mut core, &author, [relay.clone()]);
+    let (_, event, parked) = publish_explicit(&mut core, &author, [relay.clone()]);
     assert!(!parked
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
@@ -296,7 +296,7 @@ fn stale_auth_probe_release_after_reconnect_cannot_wake_current_generation() {
         nmp_transport::DisconnectReason::Error,
     ));
     core.handle(EngineMsg::RelayConnected(generation_two, session.clone()));
-    let (_, event, parked) = publish_private(&mut core, &author, [relay.clone()]);
+    let (_, event, parked) = publish_explicit(&mut core, &author, [relay.clone()]);
     assert!(!parked
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
@@ -333,7 +333,7 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
             Box::new(FixtureDirectory::new()),
             10,
         );
-        let (receipt, event, offline) = publish_private(&mut core, &author, [relay.clone()]);
+        let (receipt, event, offline) = publish_explicit(&mut core, &author, [relay.clone()]);
         let session = signer_session(&relay, event.pubkey);
         assert!(
             receipt_statuses(&offline).contains(&WriteStatus::AwaitingRelay {
@@ -529,7 +529,7 @@ fn parked_auth_write_is_redriven_across_reconnect_not_wedged() {
     let session = signer_session(&relay, author.public_key());
 
     let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 10);
-    let (_receipt, event, _) = publish_private(&mut core, &author, [relay.clone()]);
+    let (_receipt, event, _) = publish_explicit(&mut core, &author, [relay.clone()]);
 
     // First generation: connect, release the bounded AUTH-discovery probe,
     // hand off, and let the relay demand auth via an `OK false
@@ -635,7 +635,7 @@ fn boot_recovers_parked_auth_write_as_redrivable_not_wedged() {
             Box::new(FixtureDirectory::new()),
             10,
         );
-        let (_receipt, event, _) = publish_private(&mut core, &author, [relay.clone()]);
+        let (_receipt, event, _) = publish_explicit(&mut core, &author, [relay.clone()]);
         connect_signer(&mut core, 0, &relay, author.public_key());
         let connected = release_author_probe(
             &mut core,
@@ -726,7 +726,7 @@ fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
         authenticate_signer(&mut core, 0, &auth, &author);
         authenticate_signer(&mut core, 1, &retry, &author);
         authenticate_signer(&mut core, 2, &ambiguous, &author);
-        let (receipt, event, scheduled) = publish_private(
+        let (receipt, event, scheduled) = publish_explicit(
             &mut core,
             &author,
             [
@@ -859,7 +859,7 @@ fn transient_deadline_is_consumed_once_without_polling_or_duplicate_queue() {
     let mut core = new_core(FixtureDirectory::new());
     connect_signer(&mut core, 0, &relay, author.public_key());
     authenticate_signer(&mut core, 0, &relay, &author);
-    let (receipt, event, first) = publish_private(&mut core, &author, [relay.clone()]);
+    let (receipt, event, first) = publish_explicit(&mut core, &author, [relay.clone()]);
     mark_written(&mut core, &first, &relay);
     let classified = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -928,7 +928,7 @@ fn paused_receipt_across_repeated_durable_retries_is_bounded_and_loud() {
     connect_signer(&mut core, 0, &relay, author.public_key());
     authenticate_signer(&mut core, 0, &relay, &author);
 
-    let (receipt, event, mut scheduled) = publish_private(&mut core, &author, [relay.clone()]);
+    let (receipt, event, mut scheduled) = publish_explicit(&mut core, &author, [relay.clone()]);
 
     for attempt in 1..=40 {
         mark_written(&mut core, &scheduled, &relay);
@@ -1008,7 +1008,7 @@ fn live_receipt_mutation_between_pages_is_exactly_once() {
     }
 
     let (receipt, event, mut scheduled) =
-        publish_private(&mut core, &author, [early.clone(), late.clone()]);
+        publish_explicit(&mut core, &author, [early.clone(), late.clone()]);
     let early_correlation = scheduled
         .iter()
         .find_map(|effect| match effect {
@@ -1153,7 +1153,7 @@ fn scheduler_has_stable_order_and_enforces_global_and_per_relay_caps() {
         connect_signer(&mut core, slot as u32, relay, author.public_key());
         authenticate_signer(&mut core, slot as u32, relay, &author);
     }
-    let (_, event, first_wave) = publish_private(&mut core, &author, relays.clone());
+    let (_, event, first_wave) = publish_explicit(&mut core, &author, relays.clone());
     let published = first_wave
         .iter()
         .filter_map(|effect| match effect {

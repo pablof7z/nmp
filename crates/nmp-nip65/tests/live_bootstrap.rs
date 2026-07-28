@@ -80,7 +80,7 @@ fn ordinary_write(author: PublicKey, content: &str) -> WriteIntent {
             content,
         )),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }
@@ -91,12 +91,12 @@ fn ordinary_write(author: PublicKey, content: &str) -> WriteIntent {
 /// 1. a real local signer publishes kind:10002 through only the selected
 ///    bootstrap relay and receives an ordinary tracked receipt;
 /// 2. while that real relay is deliberately holding the EVENT before
-///    acceptance/broadcast, a subsequent AuthorOutbox write fails because the
+///    acceptance/broadcast, a subsequent Auto-routed write fails because the
 ///    bootstrap operation did not inject a directory fact from its local
 ///    pending row;
 /// 3. after the relay accepts the EVENT, the already-open ordinary observation
 ///    receives the relay source/provenance;
-/// 4. only then does another ordinary AuthorOutbox write route to and ACK on
+/// 4. only then does another ordinary Auto-routed write route to and ACK on
 ///    that relay.
 ///
 /// The test never opens a transport from application code and never writes the
@@ -238,7 +238,7 @@ async fn relay_echo_is_the_only_transition_from_bootstrap_to_author_outbox() {
     assert_eq!(
         routed,
         WriteStatus::Routed(BTreeSet::from([relay_url.clone()])),
-        "ordinary AuthorOutbox must now consume the network-ingested NIP-65 fact"
+        "ordinary Auto routing must now consume the network-ingested NIP-65 fact"
     );
     wait_for_status(
         &after_echo.statuses,

@@ -34,7 +34,7 @@ class CorrelationTest {
                                     content = "first draft",
                                 ),
                             durability = Durability.Durable,
-                            routing = WriteRouting.AuthorOutbox,
+                            routing = WriteRouting.Auto,
                             correlation = token,
                         ),
                     )
@@ -59,7 +59,7 @@ class CorrelationTest {
                                     content = "second, different draft",
                                 ),
                             durability = Durability.Durable,
-                            routing = WriteRouting.AuthorOutbox,
+                            routing = WriteRouting.Auto,
                             correlation = token,
                         ),
                     )
@@ -92,7 +92,7 @@ class CorrelationTest {
                                     content = "reattach by correlation",
                                 ),
                             durability = Durability.Durable,
-                            routing = WriteRouting.AuthorOutbox,
+                            routing = WriteRouting.Auto,
                             correlation = token,
                         ),
                     )
@@ -137,7 +137,7 @@ class CorrelationTest {
                                         content = "malformed correlation token",
                                     ),
                                 durability = Durability.Durable,
-                                routing = WriteRouting.AuthorOutbox,
+                                routing = WriteRouting.Auto,
                                 correlation = "",
                             ),
                         )

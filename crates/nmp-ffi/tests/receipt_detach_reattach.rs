@@ -52,7 +52,7 @@ async fn receipt_detached_before_terminal_reattaches_full_durable_prefix_from_th
                 content: "detach-before-terminal".to_string(),
             },
             durability: FfiDurability::Durable,
-            routing: FfiWriteRouting::AuthorOutbox,
+            routing: FfiWriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -137,7 +137,7 @@ async fn ffi_reattachment_transparently_traverses_more_than_one_durable_page() {
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: "ffi-paged-replay".into(),
                 durability: WriteDurability::Durable,
-                routing: "author-outbox".into(),
+                routing: "auto".into(),
                 sig_state: IntentSigState::Pending,
                 accepted_at: nostr::Timestamp::from(1_000u64),
                 correlation: None,

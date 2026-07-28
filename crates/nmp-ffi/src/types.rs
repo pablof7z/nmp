@@ -534,31 +534,37 @@ pub enum FfiDurability {
     AtMostOnce,
 }
 
-/// `nmp::WriteRouting` mirror -- `PrivateNarrow` deliberately has NO wire
-/// form here (#22/#52). `nmp_grammar::NarrowOnly::new`'s
-/// own doc requires "the caller must already have resolved and narrowed
-/// this itself" -- i.e. a trusted protocol module's own logic, not a raw
-/// relay-URL string handed across the FFI boundary by an app with no way to
-/// prove those URLs are actually private. Minting `PrivateRoute` from
-/// FFI-supplied strings would be exactly the "raw app-provided expanded
-/// relay set"/"route escape hatch" #22's canonical design rules out; the
-/// `nmp` facade itself withholds re-exporting `NarrowOnly`/`PrivateRoute`
-/// for the identical reason (see `crates/nmp/src/lib.rs`'s doc). A
-/// validated, opaque private-route mint belongs in a protocol module built
-/// on direct Rust, not this FFI surface. `AuthorOutbox` is the only
-/// FFI-constructible routing choice.
+/// `nmp::WriteRouting` mirror. BOTH words project, deliberately: `Auto`
+/// ("figure out how to route whatever I'm publishing") and `Explicit`
+/// ("use these exact relays and that is that").
 ///
-/// #838 deletes the former pinned-host write route instead of exposing a
-/// generic host-authority escape hatch. #839 removes raw recipient routing
-/// for the same reason: a
-/// generic recipient array cannot prove that the event schema owns those
-/// recipients or that its body agrees with them. This exhaustive
-/// single-variant match IS the enforcement: a new `WriteRouting` variant
-/// landing in `nmp-grammar` without a corresponding `FfiWriteRouting`
-/// decision is a compile error here, not a silent gap.
+/// An earlier premise held that letting an app route a write to a chosen
+/// relay was a dangerous primitive, and this enum having exactly ONE variant
+/// was the enforcement of that ban. The premise was reversed
+/// outright (`docs/internals/routing/removed-routes.md` §2-3): publishing to
+/// chosen relays is a first-class GENERAL capability with many legitimate
+/// consumers — an app offering "publish this event to relay: [user input]",
+/// a wiki crate publishing to the user's preferred wiki relays, a DM crate
+/// publishing to two parties' DM relays, a group crate routing to its host,
+/// and a user right-clicking someone else's note to archive it. Guarding it
+/// is not protection, it is a defect, so `Explicit` is app-constructible
+/// here on every platform.
+///
+/// What survives from the old shape is the tripwire, not its premise: this
+/// exhaustive match still means a new `WriteRouting` variant landing in
+/// `nmp-grammar` without a corresponding `FfiWriteRouting` decision is a
+/// compile error, not a silent gap.
+///
+/// `relays` are relay-URL strings parsed at this boundary
+/// (`convert::parse_relay_url`); a malformed one is a typed synchronous
+/// [`crate::convert::FfiError::InvalidRelayUrl`] before any engine call. An
+/// EMPTY list is refused at the engine's acceptance door — a routing rule
+/// enforced once, identically, for every surface — with no receipt, no
+/// journal row, and no fallback to `Auto`.
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiWriteRouting {
-    AuthorOutbox,
+    Auto,
+    Explicit { relays: Vec<String> },
 }
 
 /// The event payload of a write intent (`nmp::WritePayload` mirror). VISION

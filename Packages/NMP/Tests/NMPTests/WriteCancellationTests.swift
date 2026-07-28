@@ -55,7 +55,7 @@ final class WriteCancellationTests: XCTestCase {
                     content: "cancel through the public Swift SDK"
                 ),
                 durability: .durable,
-                routing: .authorOutbox
+                routing: .auto
             )
         )
 

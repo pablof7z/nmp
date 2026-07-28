@@ -365,9 +365,7 @@ mod tests {
                 format!("worker projection {created_at}"),
             )),
             durability: Durability::Durable,
-            routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                relays: NarrowOnly::new(relays.to_vec()),
-            }),
+            routing: WriteRouting::Explicit(relays.to_vec()),
             identity_override: None,
             correlation: None,
         }));

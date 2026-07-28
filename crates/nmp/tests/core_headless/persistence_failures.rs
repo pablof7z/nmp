@@ -530,9 +530,7 @@ fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
                 &format!("falsifier {i}"),
             )),
             durability: Durability::Durable,
-            routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                relays: NarrowOnly::new([relay.clone()]),
-            }),
+            routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity_override: None,
             correlation: None,
         }));
@@ -612,9 +610,7 @@ fn unchanged_worker_demand_reads_zero_outbox_lanes() {
                 &format!("worker projection {i}"),
             )),
             durability: Durability::Durable,
-            routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                relays: NarrowOnly::new([relay.clone()]),
-            }),
+            routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity_override: None,
             correlation: None,
         }));
@@ -881,9 +877,7 @@ fn relay_worker_projection_redb_benchmark() {
                 &format!("worker benchmark {i}"),
             )),
             durability: Durability::Durable,
-            routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                relays: NarrowOnly::new([relay.clone()]),
-            }),
+            routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity_override: None,
             correlation: None,
         }));
@@ -946,9 +940,7 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
     let accepted1 = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(unsigned(&author, 200, "degraded 1")),
         durability: Durability::Durable,
-        routing: WriteRouting::PrivateNarrow(PrivateRoute {
-            relays: NarrowOnly::new([relay.clone()]),
-        }),
+        routing: WriteRouting::Explicit(vec![relay.clone()]),
         identity_override: None,
         correlation: None,
     }));
@@ -970,9 +962,7 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
     let accepted2 = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(unsigned(&author, 201, "degraded 2")),
         durability: Durability::Durable,
-        routing: WriteRouting::PrivateNarrow(PrivateRoute {
-            relays: NarrowOnly::new([relay.clone()]),
-        }),
+        routing: WriteRouting::Explicit(vec![relay.clone()]),
         identity_override: None,
         correlation: None,
     }));
@@ -1040,7 +1030,7 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
 /// crashing, so this must be checked positively, not just for panics).
 #[test]
 fn receipt_for_intent_resolves_correctly_after_boot_recovery() {
-    // Two DISTINCT authors: `publish_private` freezes a fixed (seq, content)
+    // Two DISTINCT authors: `publish_explicit` freezes a fixed (seq, content)
     // pair, so reusing one author for both calls on the same core would
     // freeze the identical event twice and collide as an exact duplicate
     // instead of creating two independent intents.
@@ -1080,12 +1070,12 @@ fn receipt_for_intent_resolves_correctly_after_boot_recovery() {
 
         let _ = core.handle(EngineMsg::Tick(Timestamp::from(10)));
         let (receipt_a, _event_a, scheduled_a) =
-            publish_private(&mut core, &author_a, [relay_a.clone()]);
+            publish_explicit(&mut core, &author_a, [relay_a.clone()]);
         mark_written(&mut core, &scheduled_a, &relay_a); // AckTimeout deadline = 10 + 30
 
         let _ = core.handle(EngineMsg::Tick(Timestamp::from(20)));
         let (receipt_b, _event_b, scheduled_b) =
-            publish_private(&mut core, &author_b, [relay_b.clone()]);
+            publish_explicit(&mut core, &author_b, [relay_b.clone()]);
         mark_written(&mut core, &scheduled_b, &relay_b); // AckTimeout deadline = 20 + 30
 
         (receipt_a, receipt_b)
@@ -1139,7 +1129,7 @@ fn receipt_for_intent_resolves_correctly_after_boot_recovery() {
 #[test]
 fn receipt_for_intent_unaffected_by_an_earlier_pending_removal() {
     // Two DISTINCT authors, same reason as the boot-recovery test above:
-    // `publish_private` freezes a fixed (seq, content) pair per call, so
+    // `publish_explicit` freezes a fixed (seq, content) pair per call, so
     // reusing one author for both writes on the same core would collide as
     // an exact duplicate instead of creating two independent intents.
     let author1 = Keys::generate();
@@ -1170,7 +1160,7 @@ fn receipt_for_intent_unaffected_by_an_earlier_pending_removal() {
 
     // Write #1: drive it all the way to a real, permanent `pending` removal
     // -- a successful ACK closes the intent once its one lane is terminal.
-    let (_receipt1, event1, first1) = publish_private(&mut core, &author1, [relay1.clone()]);
+    let (_receipt1, event1, first1) = publish_explicit(&mut core, &author1, [relay1.clone()]);
     mark_written(&mut core, &first1, &relay1);
     let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -1183,7 +1173,7 @@ fn receipt_for_intent_unaffected_by_an_earlier_pending_removal() {
 
     // Write #2: a completely separate, still-open intent.
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(5)));
-    let (receipt2, _event2, first2) = publish_private(&mut core, &author2, [relay2.clone()]);
+    let (receipt2, _event2, first2) = publish_explicit(&mut core, &author2, [relay2.clone()]);
     mark_written(&mut core, &first2, &relay2); // AckTimeout deadline = 5 + 30 = 35
 
     let effects = core.handle(EngineMsg::Tick(Timestamp::from(35)));

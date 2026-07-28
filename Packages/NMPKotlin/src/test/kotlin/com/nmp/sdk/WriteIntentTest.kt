@@ -32,7 +32,7 @@ class WriteIntentTest {
             WriteIntent(
                 payload = unsignedPayload(overridePubkey),
                 durability = Durability.Durable,
-                routing = WriteRouting.AuthorOutbox,
+                routing = WriteRouting.Auto,
                 identityOverride = overridePubkey,
             )
         assertEquals(overridePubkey, intent.toFfi().identityOverride)
@@ -47,7 +47,7 @@ class WriteIntentTest {
             WriteIntent(
                 payload = unsignedPayload("b".repeat(64)),
                 durability = Durability.Durable,
-                routing = WriteRouting.AuthorOutbox,
+                routing = WriteRouting.Auto,
             )
         assertNull(intent.identityOverride)
         assertNull(intent.toFfi().identityOverride)
@@ -67,7 +67,7 @@ class WriteIntentTest {
                             content = "unsigned",
                         ),
                     durability = FfiDurability.AT_MOST_ONCE,
-                    routing = FfiWriteRouting.AUTHOR_OUTBOX,
+                    routing = FfiWriteRouting.Auto,
                     identityOverride = "a".repeat(64),
                     correlation = "correlation-42",
                 ),
@@ -83,7 +83,7 @@ class WriteIntentTest {
             unsigned.payload,
         )
         assertEquals(Durability.AtMostOnce, unsigned.durability)
-        assertEquals(WriteRouting.AuthorOutbox, unsigned.routing)
+        assertEquals(WriteRouting.Auto, unsigned.routing)
         assertEquals("a".repeat(64), unsigned.identityOverride)
         assertEquals("correlation-42", unsigned.correlation)
 
@@ -101,7 +101,7 @@ class WriteIntentTest {
                             sig = "e".repeat(128),
                         ),
                     durability = FfiDurability.EPHEMERAL,
-                    routing = FfiWriteRouting.AUTHOR_OUTBOX,
+                    routing = FfiWriteRouting.Auto,
                     identityOverride = null,
                     correlation = null,
                 ),
@@ -119,10 +119,44 @@ class WriteIntentTest {
             signed.payload,
         )
         assertEquals(Durability.Ephemeral, signed.durability)
-        assertEquals(WriteRouting.AuthorOutbox, signed.routing)
+        assertEquals(WriteRouting.Auto, signed.routing)
         assertNull(signed.identityOverride)
         assertNull(signed.correlation)
 
         assertEquals(Durability.Durable, Durability.from(FfiDurability.DURABLE))
+    }
+
+    /** #972: a Kotlin app can name the exact relays a write goes to -- the
+     * relay list an app typed into a text field crosses the boundary
+     * verbatim, in order, and comes back unchanged. */
+    @Test
+    fun explicitRoutingCarriesTheAppsExactRelayListBothWays() {
+        val typed = listOf("wss://user-typed-relay.example", "wss://second.example")
+        val intent =
+            WriteIntent(
+                payload = unsignedPayload("a".repeat(64)),
+                durability = Durability.Durable,
+                routing = WriteRouting.Explicit(typed),
+            )
+        assertEquals(FfiWriteRouting.Explicit(typed), intent.toFfi().routing)
+
+        val back =
+            WriteIntent.from(
+                FfiWriteIntent(
+                    payload =
+                        FfiWritePayload.Unsigned(
+                            pubkey = "a".repeat(64),
+                            createdAt = 42uL,
+                            kind = 1u,
+                            tags = emptyList(),
+                            content = "for the archive",
+                        ),
+                    durability = FfiDurability.DURABLE,
+                    routing = FfiWriteRouting.Explicit(typed),
+                    identityOverride = null,
+                    correlation = null,
+                ),
+            )
+        assertEquals(WriteRouting.Explicit(typed), back.routing)
     }
 }

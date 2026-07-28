@@ -1605,7 +1605,7 @@ mod tests {
                 sig: event.sig.to_string(),
             },
             durability: FfiDurability::Durable,
-            routing: FfiWriteRouting::AuthorOutbox,
+            routing: FfiWriteRouting::Auto,
             identity_override: None,
             correlation: None,
         };
@@ -1655,7 +1655,7 @@ mod tests {
                 content: "override park".to_string(),
             },
             durability: FfiDurability::Durable,
-            routing: FfiWriteRouting::AuthorOutbox,
+            routing: FfiWriteRouting::Auto,
             identity_override: Some(overridden.public_key().to_hex()),
             correlation: None,
         };
@@ -1707,7 +1707,7 @@ mod tests {
                 content: "cancel through ffi".to_string(),
             },
             durability: FfiDurability::Durable,
-            routing: FfiWriteRouting::AuthorOutbox,
+            routing: FfiWriteRouting::Auto,
             identity_override: None,
             correlation: None,
         };
@@ -1790,7 +1790,7 @@ mod tests {
                 content: "reattach e2e".to_string(),
             },
             durability: FfiDurability::Durable,
-            routing: FfiWriteRouting::AuthorOutbox,
+            routing: FfiWriteRouting::Auto,
             identity_override: None,
             correlation: None,
         };
@@ -1880,7 +1880,7 @@ mod tests {
                     content: "corrupt-receipt".to_string(),
                 },
                 durability: FfiDurability::Durable,
-                routing: FfiWriteRouting::AuthorOutbox,
+                routing: FfiWriteRouting::Auto,
                 identity_override: None,
                 correlation: None,
             };
@@ -2021,7 +2021,7 @@ mod tests {
                 .publish_tracked(nmp::WriteIntent {
                     payload: nmp::WritePayload::Unsigned(unsigned),
                     durability: nmp::Durability::Durable,
-                    routing: nmp::WriteRouting::AuthorOutbox,
+                    routing: nmp::WriteRouting::Auto,
                     identity_override: None,
                     correlation: None,
                 })
@@ -2089,7 +2089,7 @@ mod tests {
                 sig: event.sig.to_string(),
             },
             durability: FfiDurability::Durable,
-            routing: FfiWriteRouting::AuthorOutbox,
+            routing: FfiWriteRouting::Auto,
             identity_override: None,
             correlation: None,
         };

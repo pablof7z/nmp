@@ -72,7 +72,7 @@ async fn dense_composition_never_refuses_and_delivers_current_state() {
                 content: "composition".to_string(),
             },
             durability: nmp_ffi::types::FfiDurability::Durable,
-            routing: nmp_ffi::types::FfiWriteRouting::AuthorOutbox,
+            routing: nmp_ffi::types::FfiWriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })

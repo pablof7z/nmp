@@ -5,6 +5,17 @@
 
 use super::*;
 
+/// The one refusal reason for an explicit route naming no relays.
+///
+/// Emptiness is a property of the REQUEST, knowable at the door, so it is
+/// refused there — before an intent id, a receipt id, or a journal row
+/// exists. (Reachability is a property of the world and is not knowable at
+/// the door: a write aimed at a relay that does not exist is accepted,
+/// routed, and fails visibly per relay instead.)
+pub(super) const EMPTY_EXPLICIT_ROUTE: &str =
+    "explicit routing names no relays: a route with nothing in it is refused at the door, never \
+     widened to the author's write relays";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ReceiptReplayFactKey {
     ReceiptStatus,
@@ -789,11 +800,13 @@ impl<S: EventStore> EngineCore<S> {
             }
             let parsed_routing = Self::parse_routing_snapshot(&intent.routing);
             let routing_valid = parsed_routing.is_some();
-            let routing = parsed_routing.unwrap_or_else(|| {
-                WriteRouting::PrivateNarrow(PrivateRoute {
-                    relays: NarrowOnly::new(Vec::<RelayUrl>::new()),
-                })
-            });
+            // An unreadable row is retained exactly as written and never
+            // resolved (`routing_valid == false` gates every send path). The
+            // in-memory stand-in is the one value that cannot contact a
+            // relay even if that gate were ever bypassed — guessing `Auto`
+            // here would republish an old obligation to relays nobody chose
+            // for it.
+            let routing = parsed_routing.unwrap_or(WriteRouting::Explicit(Vec::new()));
             let id = ReceiptId(intent.receipt_id);
             let durability = match intent.durability {
                 WriteDurability::Durable => Durability::Durable,
@@ -1517,6 +1530,16 @@ impl<S: EventStore> EngineCore<S> {
             identity_override,
             correlation,
         } = intent;
+
+        // The empty explicit route is refused FIRST, ahead of every other
+        // door check: "reject it immediately". Nothing durable may exist for
+        // it — no intent, no journal row, no receipt lifecycle, no signer
+        // request, no correlation lookup — and it never degrades into `Auto`,
+        // because sending a write to relays the caller did not choose is the
+        // failure this refusal exists to prevent.
+        if matches!(&routing, WriteRouting::Explicit(relays) if relays.is_empty()) {
+            return self.fail_unaccepted(EMPTY_EXPLICIT_ROUTE.to_string());
+        }
 
         // #591 review (PR #604 finding 2): `Durability::Ephemeral` has no
         // outbox row for a correlation token to name -- `accept_ephemeral`
@@ -2404,21 +2427,16 @@ impl<S: EventStore> EngineCore<S> {
             .map_err(|err| format!("signer returned an invalid signature: {err}"))
     }
 
+    /// The durable spelling of a routing STRATEGY — never a resolved relay
+    /// set. `Auto` journals the label alone; resolution runs fresh at every
+    /// send opportunity against whatever the engine knows then.
     pub(super) fn routing_snapshot(routing: &WriteRouting) -> String {
         match routing {
-            WriteRouting::AuthorOutbox => "author-outbox".to_string(),
-            WriteRouting::PrivateNarrow(route) => format!(
-                "private-narrow-hex:{}",
-                route
-                    .relays
+            WriteRouting::Auto => "auto".to_string(),
+            WriteRouting::Explicit(relays) => format!(
+                "explicit-hex:{}",
+                relays
                     .iter()
-                    .map(|relay| hex::encode(relay.to_string()))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ),
-            WriteRouting::RelayListBootstrap(auth) => format!(
-                "nip65-bootstrap-hex:{}",
-                auth.iter()
                     .map(|relay| hex::encode(relay.to_string()))
                     .collect::<Vec<_>>()
                     .join(",")
@@ -2426,43 +2444,37 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
+    /// Read back a routing snapshot this build understands, or `None`.
+    ///
+    /// `None` is not an error path to recover from by guessing: a row spelled
+    /// under a routing this build cannot read is retained exactly as written
+    /// and never resolved (`routing_valid == false`). Reinterpreting a
+    /// removed spelling would republish an old obligation to relays nobody
+    /// chose for it, which is strictly worse than leaving it inert. Every
+    /// spelling this build's own writer does not produce therefore falls here
+    /// deliberately, and this decoder names none of them: asserting a dead
+    /// approach is still encoding awareness of it.
+    ///
+    /// An `explicit-hex:` row with no relays is likewise unreadable: an empty
+    /// explicit route is refused at the acceptance door, so no legitimate row
+    /// can carry one.
     pub(super) fn parse_routing_snapshot(snapshot: &str) -> Option<WriteRouting> {
-        if snapshot == "author-outbox" {
-            return Some(WriteRouting::AuthorOutbox);
+        if snapshot == "auto" {
+            return Some(WriteRouting::Auto);
         }
-        if let Some(encoded) = snapshot.strip_prefix("private-narrow-hex:") {
-            let relays = if encoded.is_empty() {
-                Vec::new()
-            } else {
-                encoded
-                    .split(',')
-                    .map(|part| {
-                        let bytes = hex::decode(part).ok()?;
-                        let url = String::from_utf8(bytes).ok()?;
-                        RelayUrl::parse(&url).ok()
-                    })
-                    .collect::<Option<Vec<_>>>()?
-            };
-            return Some(WriteRouting::PrivateNarrow(PrivateRoute {
-                relays: NarrowOnly::new(relays),
-            }));
-        }
-        if let Some(encoded) = snapshot.strip_prefix("nip65-bootstrap-hex:") {
-            let relays = if encoded.is_empty() {
-                Vec::new()
-            } else {
-                encoded
-                    .split(',')
-                    .map(|part| {
-                        let bytes = hex::decode(part).ok()?;
-                        let url = String::from_utf8(bytes).ok()?;
-                        RelayUrl::parse(&url).ok()
-                    })
-                    .collect::<Option<Vec<_>>>()?
-            };
-            return Some(WriteRouting::RelayListBootstrap(
-                RelayListBootstrapAuthority::from_validated_relays(relays),
-            ));
+        if let Some(encoded) = snapshot.strip_prefix("explicit-hex:") {
+            if encoded.is_empty() {
+                return None;
+            }
+            let relays = encoded
+                .split(',')
+                .map(|part| {
+                    let bytes = hex::decode(part).ok()?;
+                    let url = String::from_utf8(bytes).ok()?;
+                    RelayUrl::parse(&url).ok()
+                })
+                .collect::<Option<Vec<_>>>()?;
+            return Some(WriteRouting::Explicit(relays));
         }
         None
     }
@@ -2540,28 +2552,34 @@ impl<S: EventStore> EngineCore<S> {
         effects.push(Effect::EmitReceipt(id, WriteStatus::Failed(reason)));
     }
 
-    /// Resolve a `WriteRouting` to a concrete relay set using the SAME
-    /// `RelayDirectory` lane facts the read path routes against (plan
-    /// §3.4). `AuthorOutbox` reuses the author's NIP-65 write-relay lane
-    /// directly (the same fact `nmp_router::route::build_candidates` reads
-    /// for outbox coverage-solving, minus the 2-relay-min solver — a write
-    /// fans out to every known write relay, it does not need coverage-
-    /// solving). `PrivateNarrow` never consults the directory at all — its
-    /// relay set is exactly whatever the caller pre-narrowed into the
-    /// `NarrowOnly` set, empty or not (ledger #6's fail-closed mechanism).
+    /// Execute a routing STRATEGY against what the engine knows right now.
     ///
-    /// `RelayListBootstrap` follows the same directory-blind execution rule
-    /// for a finite set minted by the NIP-65 module. Crucially, resolving
-    /// this route does NOT install those relays as author-outbox facts; only
-    /// the ordinary network-ingest path for the resulting kind:10002 can do
-    /// that.
+    /// This runs on the SEND path — first attempt, boot recovery, queue
+    /// drain — never at compose time, so a write that parks while offline is
+    /// resolved against the directory as it stands when it finally goes out,
+    /// not as it stood when the app called `publish`.
+    ///
+    /// `Auto` derives the route from the event. Today that is the author's
+    /// NIP-65 write-relay lane (the same fact
+    /// `nmp_router::route::build_candidates` reads for outbox
+    /// coverage-solving, minus the 2-relay-min solver — a write fans out to
+    /// every known write relay, it does not need coverage-solving).
+    ///
+    /// `Explicit` never consults the directory at all: the answer is exactly
+    /// the relays the caller named, and nothing here adds to them. That is
+    /// ledger #6's fail-closed discipline, kept structurally rather than by
+    /// convention — there is no widen path, and no directory fact,
+    /// active-account change, or newly-learned relay list can reach into an
+    /// accepted explicit route. The empty case is unreachable from
+    /// acceptance (`on_publish` refuses it at the door); it is spelled out
+    /// here only so the fail-closed answer is the one this arm can give.
     pub(super) fn resolve_routes(
         &self,
         routing: &WriteRouting,
         author_hex: &str,
     ) -> Result<BTreeSet<RelayUrl>, String> {
         match routing {
-            WriteRouting::AuthorOutbox => {
+            WriteRouting::Auto => {
                 let author = author_hex.to_string();
                 let relays: BTreeSet<RelayUrl> = self
                     .directory
@@ -2575,22 +2593,11 @@ impl<S: EventStore> EngineCore<S> {
                     Ok(relays)
                 }
             }
-            WriteRouting::PrivateNarrow(route) => {
-                if route.relays.is_empty() {
-                    Err(
-                        "private route has no narrow relay set -- fails closed, never widens to a public relay"
-                            .to_string(),
-                    )
-                } else {
-                    Ok(route.relays.iter().cloned().collect())
-                }
-            }
-            WriteRouting::RelayListBootstrap(auth) => {
-                let relays = auth.iter().cloned().collect::<BTreeSet<_>>();
+            WriteRouting::Explicit(relays) => {
                 if relays.is_empty() {
-                    Err("NIP-65 bootstrap route has no validated relay set".to_string())
+                    Err(EMPTY_EXPLICIT_ROUTE.to_string())
                 } else {
-                    Ok(relays)
+                    Ok(relays.iter().cloned().collect())
                 }
             }
         }

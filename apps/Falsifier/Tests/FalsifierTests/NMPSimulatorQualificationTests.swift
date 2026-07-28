@@ -146,7 +146,7 @@ final class NMPSimulatorQualificationTests: XCTestCase {
     /// `.awaitingRelay`, reach the relay exactly once, consume its `OK`, and
     /// feed the relay echo back into the still-live canonical query.
     @MainActor
-    func testDurableAuthorOutboxWriteProgressesPastAwaitingRelay() async throws {
+    func testDurableAutoRoutedWriteProgressesPastAwaitingRelay() async throws {
         let relay = try ControlledRelayHarness()
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("nmp-598-simulator-\(UUID().uuidString)", isDirectory: true)
@@ -243,7 +243,7 @@ final class NMPSimulatorQualificationTests: XCTestCase {
                     content: "NMP issue 598 simulator qualification"
                 ),
                 durability: .durable,
-                routing: .authorOutbox,
+                routing: .auto,
                 identityOverride: account.publicKey
             )
         )

@@ -10,8 +10,7 @@ use nmp::mechanism::core::{
 };
 use nmp::mechanism::outbox::WriteStatus;
 use nmp_grammar::{
-    AccessContext, Durability, RelayListBootstrapAuthority, RelaySessionKey, WriteIntent,
-    WritePayload, WriteRouting,
+    AccessContext, Durability, RelaySessionKey, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_router::FixtureDirectory;
 use nmp_store::{
@@ -167,7 +166,7 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Signed(event.clone()),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         }));
@@ -322,7 +321,7 @@ fn at_most_once_started_attempt_becomes_outcome_unknown_and_is_never_resent() {
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Signed(event),
             durability: Durability::AtMostOnce,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         }));
@@ -388,7 +387,7 @@ fn pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates() {
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Unsigned(unsigned),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         }));
@@ -475,7 +474,7 @@ fn overridden_unsigned_intent_replays_and_resumes_pinned_to_override_after_reope
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Unsigned(unsigned),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: Some(override_keys.public_key()),
             correlation: None,
         }));
@@ -595,7 +594,7 @@ fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
             core.handle(EngineMsg::Publish(WriteIntent {
                 payload: WritePayload::Signed(event.clone()),
                 durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
+                routing: WriteRouting::Auto,
                 identity_override: None,
                 correlation: None,
             }))
@@ -791,7 +790,7 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: keys.public_key().to_hex(),
                 durability: WriteDurability::Durable,
-                routing: "author-outbox".to_string(),
+                routing: "auto".to_string(),
                 sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(777),
                 correlation: None,
@@ -886,7 +885,7 @@ fn signed_ephemeral_receipt_replays_signed_and_refuses_cancellation_after_reopen
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Signed(event.clone()),
             durability: Durability::Ephemeral,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         }));
@@ -943,7 +942,7 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Signed(event),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         }));
@@ -1017,7 +1016,7 @@ fn retained_terminal_receipt_is_attached_and_replays_terminal_fact() {
             "terminal retained",
         )),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -1048,7 +1047,7 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
                 "corrupt receipt",
             )),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         }));
@@ -1135,12 +1134,7 @@ fn relay_list_bootstrap_routing_round_trips_across_a_restart() {
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Signed(event),
             durability: Durability::Durable,
-            routing: WriteRouting::RelayListBootstrap(
-                RelayListBootstrapAuthority::from_validated_relays([
-                    relay_b.clone(),
-                    relay_a.clone(),
-                ]),
-            ),
+            routing: WriteRouting::Explicit(vec![relay_b.clone(), relay_a.clone()]),
             identity_override: None,
             correlation: None,
         }));
@@ -1171,7 +1165,7 @@ fn relay_list_bootstrap_routing_round_trips_across_a_restart() {
     assert_eq!(
         ensured,
         std::collections::BTreeSet::from([session_a, session_b]),
-        "restart must recover the exact bootstrap set without an AuthorOutbox fact"
+        "restart must recover the exact relay set without consulting the directory"
     );
     assert!(
         !recovery
@@ -1194,7 +1188,7 @@ fn corrupt_route_lane_evidence_is_unreadable_not_absent() {
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Signed(event),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         }));
@@ -1274,7 +1268,7 @@ fn boot_degrades_explicitly_when_the_durable_journal_will_not_decode() {
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: "local".to_string(),
                 durability: WriteDurability::Durable,
-                routing: "author-outbox".to_string(),
+                routing: "auto".to_string(),
                 sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(991),
                 correlation: None,

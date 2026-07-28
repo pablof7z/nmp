@@ -398,7 +398,7 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
         .publish(WriteIntent {
             payload: WritePayload::Unsigned(contact_list),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -1188,7 +1188,7 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
                 "tracked",
             )),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -1279,7 +1279,7 @@ fn correlation_retry_replays_only_to_its_new_observer_then_joins_live_delivery()
                 "original correlation body",
             )),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: Some(correlation.clone()),
         })
@@ -1302,7 +1302,7 @@ fn correlation_retry_replays_only_to_its_new_observer_then_joins_live_delivery()
                 "different retry body must not be accepted",
             )),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: Some(correlation),
         })
@@ -1375,7 +1375,7 @@ fn runtime_boot_recovery_precedes_first_reattach_command() {
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: keys.public_key().to_hex(),
                 durability: WriteDurability::Durable,
-                routing: "author-outbox".into(),
+                routing: "auto".into(),
                 sig_state: IntentSigState::AwaitingSigner,
                 accepted_at: Timestamp::now(),
                 correlation: None,

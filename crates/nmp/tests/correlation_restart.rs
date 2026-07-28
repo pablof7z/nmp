@@ -114,7 +114,7 @@ fn kill_after_durable_acceptance_reattaches_by_token_alone_after_restart() {
                 "kill-after-accept",
             )),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: Some(token(tok)),
         }));
@@ -178,7 +178,7 @@ fn terminal_convergence_survives_restart_and_replays_by_token() {
                 "terminal correlation",
             )),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: Some(token(tok)),
         }));
@@ -218,7 +218,7 @@ fn double_submit_same_token_across_a_restart_mints_no_second_obligation() {
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Unsigned(unsigned_draft(keys.public_key(), 300, "first body")),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: Some(token(tok)),
         }));
@@ -238,7 +238,7 @@ fn double_submit_same_token_across_a_restart_mints_no_second_obligation() {
             "second, different body",
         )),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: Some(token(tok)),
     }));
@@ -421,7 +421,7 @@ fn partial_relay_ack_survives_restart_and_replays_by_token() {
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Signed(event.clone()),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: Some(token(tok)),
         }));
@@ -505,7 +505,7 @@ fn partial_relay_reject_survives_restart_and_replays_by_token() {
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Signed(event.clone()),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: Some(token(tok)),
         }));

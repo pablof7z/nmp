@@ -846,7 +846,7 @@ impl NmpWorld {
             .publish(WriteIntent {
                 payload: WritePayload::Unsigned(unsigned),
                 durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
+                routing: WriteRouting::Auto,
                 identity_override: None,
                 correlation: None,
             })
@@ -877,7 +877,7 @@ impl NmpWorld {
             .publish(WriteIntent {
                 payload: WritePayload::Unsigned(unsigned),
                 durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
+                routing: WriteRouting::Auto,
                 identity_override: None,
                 correlation: None,
             })

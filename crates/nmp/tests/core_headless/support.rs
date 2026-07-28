@@ -19,8 +19,8 @@ use nmp::mechanism::core::{
 };
 use nmp::mechanism::outbox::WriteStatus;
 use nmp_grammar::{
-    AccessContext, Binding, ConcreteFilter, ContextualAtom, Durability, Filter, NarrowOnly,
-    PrivateRoute, RelaySessionKey, SourceAuthority, WriteIntent, WritePayload, WriteRouting,
+    AccessContext, Binding, ConcreteFilter, ContextualAtom, Durability, Filter, RelaySessionKey,
+    SourceAuthority, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{FixtureDirectory, SubId, WireOp};
@@ -1008,7 +1008,7 @@ fn mark_written<S: EventStore>(
     core.handle(EngineMsg::EventHandoff(correlation, HandoffResult::Written))
 }
 
-fn publish_private<S: EventStore>(
+fn publish_explicit<S: EventStore>(
     core: &mut EngineCore<S>,
     author: &Keys,
     relays: impl IntoIterator<Item = RelayUrl>,
@@ -1017,9 +1017,7 @@ fn publish_private<S: EventStore>(
     let accepted = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(unsigned(author, 85, "attempt-start failure")),
         durability: Durability::Durable,
-        routing: WriteRouting::PrivateNarrow(PrivateRoute {
-            relays: NarrowOnly::new(relays),
-        }),
+        routing: WriteRouting::Explicit(Vec::from_iter(relays)),
         identity_override: None,
         correlation: None,
     }));
