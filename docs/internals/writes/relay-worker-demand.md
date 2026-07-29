@@ -20,6 +20,7 @@ related:
   - docs/known-gaps.md
 issues:
   - https://github.com/pablof7z/nmp/issues/985
+  - https://github.com/pablof7z/nmp/issues/1000
   - https://github.com/pablof7z/nmp/issues/975
   - https://github.com/pablof7z/nmp/issues/968
   - https://github.com/pablof7z/nmp/issues/771
@@ -313,10 +314,52 @@ worker for a lane that may have committed.
 
 Falling back to a full lane scan on every dispatch would recreate the original
 problem and is not an acceptable degraded mode. When the reducer cannot prove
-even a conservative projection, `lane_worker_projection_available` becomes
-false and worker reconciliation returns `None`; the runtime retains its
-existing workers. Reopening the store and running boot recovery is the
-reconciliation boundary.
+even a conservative projection, worker reconciliation returns `None` and the
+runtime retains its existing workers.
+
+### The way out of retention
+
+Conservative retention is only safe if it is temporary. The first #985
+implementation had no exit:
+[#1000](https://github.com/pablof7z/nmp/issues/1000) found that `uncertain` is
+cleared solely by a committed `RecoveredLane` for that exact relay, while an
+intent whose bootstrap failed owns no lane rows at all — so `schedule_ready`,
+the deadline sweep and the wake index all find nothing for it and no committed
+lane fact can ever arrive. Its relay workers stayed pinned and its receipt
+stayed in `pending` for the life of the process.
+
+A failed bootstrap therefore records a **retryable gap** for that intent
+(`EngineCore::lane_bootstrap_retries`). The gap:
+
+- carries the route candidates held as `uncertain`, or `None` when the
+  durable route set itself could not be read;
+- arms a deadline through the existing `next_deadline`/`Tick` machinery, with
+  the same capped exponential backoff shape as the lane retry schedule, so
+  nothing new scans and steady state pays one empty-map probe;
+- is closed by exactly one event — a committed `bootstrap_outbox_lanes`, whose
+  exact rebuild supersedes every conservative guess it stood in for — or by
+  the pending write leaving `pending`.
+
+Projection availability is derived from that state rather than latched:
+
+```text
+available = not unprovable
+            and every outstanding gap names at least one candidate relay
+```
+
+`lane_projection_unprovable` covers only gaps that no in-process
+reconciliation can close: a committed lane fact for an intent this reducer
+does not track, or a boot that could not read the pending set at all. Those
+still wait for the next `recover_on_boot`. A gap with known candidates is
+already covered by `uncertain` and keeps the projection available, so exact
+worker reconciliation — including #598's cap-refused worker retry — keeps
+working while the gap stands.
+
+A lane set established late is indistinguishable from one established at boot,
+so the retry drives it through the same door boot uses, and additionally
+replays the wake for any session that is already connected: mid-process, the
+`RelayConnected` a fresh `WaitingConnection` lane is waiting for may already
+have happened.
 
 [#771](https://github.com/pablof7z/nmp/issues/771) owns the broader contract for
 preserving durable lane-transition evidence when store operations fail. Its
@@ -344,6 +387,10 @@ The implementation is correct only if all of these hold:
    known committed lane is nonterminal; `uncertain` may only over-retain.
 5. A persistence outcome classified Unknown never causes a possibly required
    relay worker to be dropped.
+5b. Every conservative retention has a path out of it that does not require
+   another process: a store that becomes usable again must return the
+   projection to what a canonical rebuild yields, without any per-dispatch
+   lane scan.
 6. Public, NIP-42, account, and session identities do not alias merely because
    their relay URLs match.
 7. Future route revision must use the same lane-minting/projection boundary as
@@ -379,6 +426,21 @@ The implementation carries these permanent falsifiers:
 - `every_core_lane_mutation_uses_the_projection_door` recursively scans the
   production core source and rejects a raw lane-writing store call outside the
   projection module.
+- `transient_io_bootstrap_failure_leaves_no_pinned_worker_behind` and its
+  `Invariant` twin drive a failed bootstrap through recovery to a terminal
+  receipt and assert the worker set returns to what a canonical rebuild from
+  durable rows yields. Both fail on the pre-#1000 reducer with both candidate
+  relays still pinned against an empty oracle.
+- `a_failed_bootstrap_never_parks_an_intent_permanently` proves the intent
+  progresses or terminates rather than sitting in `pending` with a
+  `uncertain` set nothing can drain.
+- `an_unresolved_bootstrap_keeps_retaining_and_backs_off` proves the fix did
+  not buy that exit with under-retention: while the store keeps refusing,
+  every candidate stays owned and the retry backs off instead of spinning.
+- `a_boot_route_revision_read_error_re_enables_worker_reconciliation` proves a
+  boot-time read error no longer disables `retry_required_relay_workers` for
+  the process lifetime, and that the recovered projection equals a clean
+  boot's.
 
 Future #975 route-revision minting and #968 route-parking still require their
 own positive falsifiers when those states exist. The projection boundary is
@@ -450,10 +512,14 @@ removed and re-profiled.
   - relay-state pruning and wake indexes
 - `crates/nmp/src/core/lane_projection.rs`
   - the one projected bootstrap/transition boundary
-  - exact rebuild, uncertainty, and the recursive bypass falsifier
+  - exact rebuild, uncertainty, retryable-gap registration, and the recursive
+    bypass falsifier
   - store-oracle, identity, restart, and failure tests
+- `crates/nmp/src/core/lane_bootstrap_retry_tests.rs`
+  - the retention-with-an-exit falsifiers
 - `crates/nmp/src/core/write.rs`
   - durable lane lifecycle call sites using the projection boundary
+  - `retry_lane_bootstraps` and the shared post-bootstrap lane opening
   - store-validated terminal intent closure
 - `crates/nmp/src/runtime/mod.rs`
   - `dispatch_core_effects`
