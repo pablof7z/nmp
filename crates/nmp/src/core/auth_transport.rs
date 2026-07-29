@@ -113,9 +113,7 @@ impl<S: EventStore> EngineCore<S> {
                 continue;
             }
             if self
-                .resolver
-                .store_mut()
-                .set_lane_waiting(&lane.key, lane.revision, true)
+                .commit_lane_waiting(&lane.key, lane.revision, true)
                 .is_err()
             {
                 self.retry_scheduler_blocked = true;

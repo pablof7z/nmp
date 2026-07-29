@@ -587,6 +587,157 @@ fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
     );
 }
 
+/// BDD falsifier for #985: answering whether an unchanged durable write still
+/// owns its relay worker is reducer state, not recovery. `RelayOpenFailed`
+/// asks that question once to decide whether the failure is still relevant
+/// and pruning asks it again after recording the fact. Neither answer may
+/// range-scan or decode the durable lane table after signing/bootstrap has
+/// already established the exact lane state.
+#[test]
+fn unchanged_worker_demand_reads_zero_outbox_lanes() {
+    const N: usize = 3;
+    let author = Keys::generate();
+    let relays: Vec<RelayUrl> = (0..N)
+        .map(|i| RelayUrl::parse(&format!("wss://worker-projection-{i}.example.com")).unwrap())
+        .collect();
+
+    let calls = Rc::new(Cell::new(0u64));
+    let mut core = EngineCore::new(
+        WakeLaneProbeStore::new(calls.clone()),
+        Box::new(FixtureDirectory::new()),
+        10,
+    );
+    activate(&mut core, &author);
+
+    for (i, relay) in relays.iter().enumerate() {
+        let accepted = core.handle(EngineMsg::Publish(
+            WriteIntent {
+                payload: WritePayload::Unsigned(unsigned(
+                    &author,
+                    300 + i as u64,
+                    &format!("worker projection {i}"),
+                )),
+                durability: Durability::Durable,
+                routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                    relays: NarrowOnly::new([relay.clone()]),
+                }),
+                identity_override: None,
+                correlation: None,
+            },
+            Box::new(CapturingReceiptSink::default()),
+        ));
+        let (id, generation, unsigned) = find_sign_request(&accepted);
+        let signed = unsigned.sign_with_keys(&author).unwrap();
+        let signed_effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
+        assert!(
+            signed_effects.iter().any(|effect| matches!(
+                effect,
+                Effect::EnsureWriteRelay(session)
+                    if session == &signer_session(relay, author.public_key())
+            )),
+            "bootstrap must establish real worker demand before the read-count assertion"
+        );
+    }
+
+    calls.set(0);
+    let required = signer_session(&relays[0], author.public_key());
+    let effects = core.handle(EngineMsg::RelayOpenFailed(
+        required,
+        "injected worker-open failure".to_string(),
+    ));
+
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitDiagnostics(_))),
+        "the reducer must still recognize the projected worker as owned"
+    );
+    assert_eq!(
+        calls.get(),
+        0,
+        "unchanged worker-demand checks must use reducer memory; durable lane \
+         reads belong to bootstrap/recovery and actual lane transitions"
+    );
+}
+
+/// Manual before/after harness for #985. Run in release mode on the base and
+/// candidate revisions with the same constants:
+///
+/// `cargo test -p nmp --release --test core_headless
+/// relay_worker_projection_redb_benchmark -- --ignored --nocapture`
+///
+/// No wall-clock threshold lives in CI; the behavioral regression above owns
+/// correctness. This harness supplies empirical magnitude through the real
+/// redb lane representation and the real `RelayOpenFailed` ownership path.
+#[test]
+#[ignore = "manual before/after performance qualification"]
+fn relay_worker_projection_redb_benchmark() {
+    const INTENTS: usize = 64;
+    const PASSES: usize = 200;
+
+    let author = Keys::generate();
+    let relays: Vec<RelayUrl> = (0..INTENTS)
+        .map(|i| RelayUrl::parse(&format!("wss://worker-benchmark-{i}.example.com")).unwrap())
+        .collect();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("worker-projection-benchmark.redb");
+    let mut core = EngineCore::new(
+        RedbStore::open(&path).unwrap(),
+        Box::new(FixtureDirectory::new()),
+        INTENTS + 1,
+    );
+    activate(&mut core, &author);
+
+    for (i, relay) in relays.iter().enumerate() {
+        let accepted = core.handle(EngineMsg::Publish(
+            WriteIntent {
+                payload: WritePayload::Unsigned(unsigned(
+                    &author,
+                    10_000 + i as u64,
+                    &format!("worker benchmark {i}"),
+                )),
+                durability: Durability::Durable,
+                routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                    relays: NarrowOnly::new([relay.clone()]),
+                }),
+                identity_override: None,
+                correlation: None,
+            },
+            Box::new(CapturingReceiptSink::default()),
+        ));
+        let (id, generation, unsigned) = find_sign_request(&accepted);
+        let signed = unsigned.sign_with_keys(&author).unwrap();
+        let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::EnsureWriteRelay(session)
+                if session == &signer_session(relay, author.public_key())
+        )));
+    }
+
+    let required = signer_session(&relays[0], author.public_key());
+    let started = Instant::now();
+    let mut diagnostic_batches = 0usize;
+    for _ in 0..PASSES {
+        let effects = core.handle(EngineMsg::RelayOpenFailed(
+            required.clone(),
+            "injected benchmark worker-open failure".to_string(),
+        ));
+        diagnostic_batches += effects
+            .iter()
+            .filter(|effect| matches!(effect, Effect::EmitDiagnostics(_)))
+            .count();
+        std::hint::black_box(effects);
+    }
+    let elapsed = started.elapsed();
+
+    assert_eq!(diagnostic_batches, PASSES);
+    println!(
+        "relay_worker_projection_redb_benchmark intents={INTENTS} passes={PASSES} elapsed_us={}",
+        elapsed.as_micros()
+    );
+}
+
 /// Degraded-mode safety valve (epic #507 finding E5): when
 /// `bootstrap_outbox_lanes` fails for one intent, the reverse index can no
 /// longer be proven a superset of live lanes, so `wake_relay_lanes` must
