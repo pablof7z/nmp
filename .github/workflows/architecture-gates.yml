@@ -125,6 +125,21 @@ jobs:
       - name: Keep nmp-ffi off direct mechanism-crate edges
         run: bash scripts/check-ffi-facade-boundary.sh
 
+  # A 600-line hard cap per file, scoped to crates/nmp-bdd. The cap was a norm
+  # before it was a check, which is how that tree's `world.rs` reached 1,333
+  # lines; the script's own header records why the scope is this one crate and
+  # not the workspace (97 of 299 tracked .rs files are over the cap today).
+  bdd-file-length:
+    name: BDD file-length cap
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Keep every crates/nmp-bdd file under 600 lines
+        run: bash scripts/check-bdd-file-length.sh
+
   falsifier-honesty:
     name: Falsifier honesty (gate 6)
     if: github.event_name == 'pull_request'

@@ -98,11 +98,16 @@ features/
   limits/        # target boundedness/shortfall
   must-never/
 crates/nmp-bdd/
-  src/world.rs
+  src/world/       # {budgets,queries,observe,staging,actions,watches}.rs
   src/relays.rs
-  src/steps/{given,when,then}.rs
+  src/steps/{given,when}.rs
+  src/steps/then/  # {feed,receipts,routing,wire,budget}.rs
   tests/bdd.rs
 ```
+
+Every file in `crates/nmp-bdd` stays under 600 lines
+(`scripts/check-bdd-file-length.sh`); each module's own doc comment says what
+it owns and why that is the boundary.
 
 Tags carry meaning:
 
