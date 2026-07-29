@@ -489,6 +489,30 @@ impl core::marker::Unpin for nmp::SourceStatus
 impl core::marker::UnsafeUnpin for nmp::SourceStatus
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::SourceStatus
 impl core::panic::unwind_safe::UnwindSafe for nmp::SourceStatus
+pub enum nmp::StalledWriteStage
+pub nmp::StalledWriteStage::Undeliverable
+pub nmp::StalledWriteStage::Unroutable
+pub nmp::StalledWriteStage::Unsignable
+impl core::clone::Clone for nmp::StalledWriteStage
+pub fn nmp::StalledWriteStage::clone(&self) -> nmp::StalledWriteStage
+impl core::cmp::Eq for nmp::StalledWriteStage
+impl core::cmp::Ord for nmp::StalledWriteStage
+pub fn nmp::StalledWriteStage::cmp(&self, &nmp::StalledWriteStage) -> core::cmp::Ordering
+impl core::cmp::PartialEq for nmp::StalledWriteStage
+pub fn nmp::StalledWriteStage::eq(&self, &nmp::StalledWriteStage) -> bool
+impl core::cmp::PartialOrd for nmp::StalledWriteStage
+pub fn nmp::StalledWriteStage::partial_cmp(&self, &nmp::StalledWriteStage) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for nmp::StalledWriteStage
+pub fn nmp::StalledWriteStage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nmp::StalledWriteStage
+impl core::marker::StructuralPartialEq for nmp::StalledWriteStage
+impl core::marker::Freeze for nmp::StalledWriteStage
+impl core::marker::Send for nmp::StalledWriteStage
+impl core::marker::Sync for nmp::StalledWriteStage
+impl core::marker::Unpin for nmp::StalledWriteStage
+impl core::marker::UnsafeUnpin for nmp::StalledWriteStage
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::StalledWriteStage
+impl core::panic::unwind_safe::UnwindSafe for nmp::StalledWriteStage
 #[non_exhaustive] pub enum nmp::Window
 pub nmp::Window::Expandable
 pub nmp::Window::Expandable::initial: core::num::nonzero::NonZeroUsize
@@ -724,6 +748,8 @@ pub nmp::DiagnosticsSnapshot::dropped_merge_rules: alloc::vec::Vec<&'static str>
 pub nmp::DiagnosticsSnapshot::relays: alloc::vec::Vec<nmp::RelayDiagnosticsSnapshot>
 pub nmp::DiagnosticsSnapshot::sessions_refused_by_subscription_budget: u64
 pub nmp::DiagnosticsSnapshot::sessions_rejected_over_cap: u64
+pub nmp::DiagnosticsSnapshot::stalled_write_totals: nmp::StalledWriteTotals
+pub nmp::DiagnosticsSnapshot::stalled_writes: alloc::vec::Vec<nmp::StalledWrite>
 pub nmp::DiagnosticsSnapshot::store_degraded: core::option::Option<alloc::string::String>
 pub nmp::DiagnosticsSnapshot::transport_degraded: core::option::Option<alloc::string::String>
 pub nmp::DiagnosticsSnapshot::uncovered_author_count: usize
@@ -1118,6 +1144,50 @@ impl core::marker::Unpin for nmp::SourceEvidence
 impl core::marker::UnsafeUnpin for nmp::SourceEvidence
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::SourceEvidence
 impl core::panic::unwind_safe::UnwindSafe for nmp::SourceEvidence
+pub struct nmp::StalledWrite
+pub nmp::StalledWrite::detail: alloc::string::String
+pub nmp::StalledWrite::id: alloc::string::String
+pub nmp::StalledWrite::stage: nmp::StalledWriteStage
+pub nmp::StalledWrite::stalled_since: nostr::types::time::Timestamp
+impl core::clone::Clone for nmp::StalledWrite
+pub fn nmp::StalledWrite::clone(&self) -> nmp::StalledWrite
+impl core::cmp::Eq for nmp::StalledWrite
+impl core::cmp::PartialEq for nmp::StalledWrite
+pub fn nmp::StalledWrite::eq(&self, &nmp::StalledWrite) -> bool
+impl core::fmt::Debug for nmp::StalledWrite
+pub fn nmp::StalledWrite::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::StalledWrite
+impl core::marker::Freeze for nmp::StalledWrite
+impl core::marker::Send for nmp::StalledWrite
+impl core::marker::Sync for nmp::StalledWrite
+impl core::marker::Unpin for nmp::StalledWrite
+impl core::marker::UnsafeUnpin for nmp::StalledWrite
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::StalledWrite
+impl core::panic::unwind_safe::UnwindSafe for nmp::StalledWrite
+pub struct nmp::StalledWriteTotals
+pub nmp::StalledWriteTotals::detail_limit: u64
+pub nmp::StalledWriteTotals::omitted_details: u64
+pub nmp::StalledWriteTotals::undeliverable: u64
+pub nmp::StalledWriteTotals::unroutable: u64
+pub nmp::StalledWriteTotals::unsignable: u64
+impl core::clone::Clone for nmp::StalledWriteTotals
+pub fn nmp::StalledWriteTotals::clone(&self) -> nmp::StalledWriteTotals
+impl core::cmp::Eq for nmp::StalledWriteTotals
+impl core::cmp::PartialEq for nmp::StalledWriteTotals
+pub fn nmp::StalledWriteTotals::eq(&self, &nmp::StalledWriteTotals) -> bool
+impl core::default::Default for nmp::StalledWriteTotals
+pub fn nmp::StalledWriteTotals::default() -> nmp::StalledWriteTotals
+impl core::fmt::Debug for nmp::StalledWriteTotals
+pub fn nmp::StalledWriteTotals::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nmp::StalledWriteTotals
+impl core::marker::StructuralPartialEq for nmp::StalledWriteTotals
+impl core::marker::Freeze for nmp::StalledWriteTotals
+impl core::marker::Send for nmp::StalledWriteTotals
+impl core::marker::Sync for nmp::StalledWriteTotals
+impl core::marker::Unpin for nmp::StalledWriteTotals
+impl core::marker::UnsafeUnpin for nmp::StalledWriteTotals
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::StalledWriteTotals
+impl core::panic::unwind_safe::UnwindSafe for nmp::StalledWriteTotals
 pub struct nmp::Subscription
 impl nmp::Subscription
 pub fn nmp::Subscription::cancel(self)
