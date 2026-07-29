@@ -278,11 +278,6 @@ async fn indexers_have_confirmed(w: &mut NmpWorld, person: String) {
     w.assert_indexers_confirm_end_of_stored_events();
 }
 
-#[given(regex = r#"^an indexer relay is configured$"#)]
-async fn one_indexer_configured(w: &mut NmpWorld) {
-    w.configure_n_indexers(1);
-}
-
 #[given(regex = r#"^no indexer relays are configured$"#)]
 async fn no_indexers_configured(w: &mut NmpWorld) {
     w.assert_no_indexers();
