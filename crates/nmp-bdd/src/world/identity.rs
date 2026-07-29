@@ -231,10 +231,6 @@ impl NmpWorld {
     pub async fn switch_active_identity(&mut self, label: &str) {
         self.ensure_started().await;
         let keys = self.person(label);
-        if self.identities_with_signers.iter().any(|l| l == label) {
-            // Already registered at start; re-registering is a no-op the
-            // engine tolerates, and switching is the only thing under test.
-        }
         self.handle().set_active_account(Some(keys.public_key()));
         self.active_person = Some(label.to_string());
     }
@@ -345,6 +341,8 @@ impl NmpWorld {
                 .get_mut(text)
                 .unwrap_or_else(|| panic!("nmp-bdd: nothing was published saying {text:?}"));
         }
+        // A restart replaces the live stream with the reattached one: on the
+        // far side of a process boundary that is the only stream that exists.
         if let Some(receipt) = self.restarted_receipt.as_mut() {
             return receipt;
         }

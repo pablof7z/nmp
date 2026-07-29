@@ -341,9 +341,25 @@ impl NmpWorld {
             directory.ingest_write_relays(pk_hex, laned);
         }
 
-        let (engine_thread, handle) = match self.open_store() {
-            BddStore::Memory(store) => self.spawn_over(*store, directory),
-            BddStore::Durable(store) => self.spawn_over(*store, directory),
+        // Which store, decided where the decision is: in memory by default,
+        // which is what the whole catalog has always used and what keeps its
+        // wall clock inside the crate's `timeout 240` contract -- redb
+        // commits real transactions to real files, and a suite that ingests a
+        // fixture backlog per scenario would pay that on every one of them.
+        //
+        // On disk when the scenario staged an identity by key. A
+        // `MemoryStore` cannot be reopened, so a world that will be asked to
+        // reconstruct its engine over the SAME store needs a real one -- and
+        // every restart step in the catalog belongs to `features/identity/`,
+        // whose scenarios all name their accounts that way (see
+        // `world::identity`). The flag is set by those `Given`s rather than
+        // inferred later because the store is chosen once, at start-up,
+        // before any `When` exists to ask.
+        let (engine_thread, handle) = if self.durable_store {
+            let store = self.open_durable_store();
+            self.spawn_over(store, directory)
+        } else {
+            self.spawn_over(MemoryStore::new(), directory)
         };
 
         self.engine = Some(engine_thread);
@@ -401,25 +417,13 @@ impl NmpWorld {
         .expect("BDD engine thread construction")
     }
 
-    /// The store this scenario runs on.
+    /// This scenario's on-disk store, at a path created on FIRST use and kept
+    /// for the whole scenario.
     ///
-    /// In memory by default, which is what the whole catalog has always used
-    /// and what keeps its wall clock inside the crate's `timeout 240`
-    /// contract: redb commits real transactions to real files, and a suite
-    /// that ingests a fixture backlog per scenario pays that on every one of
-    /// them.
-    ///
-    /// On disk when the scenario staged an identity by key. A `MemoryStore`
-    /// cannot be reopened, so a world that will be asked to reconstruct its
-    /// engine over the SAME store needs a real one -- and every restart step
-    /// in the catalog belongs to `features/identity/`, whose scenarios all
-    /// name their accounts that way (see `world::identity`). The flag is set
-    /// by those `Given`s rather than inferred later because the store is
-    /// chosen once, at start-up, before any `When` exists to ask.
-    fn open_store(&mut self) -> BddStore {
-        if !self.durable_store {
-            return BddStore::Memory(Box::new(MemoryStore::new()));
-        }
+    /// The path outliving the engine is the entire point: reconstructing the
+    /// engine opens this same file again, so what the second engine reads is
+    /// the journal the first one wrote, and nothing else.
+    fn open_durable_store(&mut self) -> RedbStore {
         let path = match &self.store_path {
             Some(path) => path.clone(),
             None => {
@@ -430,19 +434,6 @@ impl NmpWorld {
                 path
             }
         };
-        BddStore::Durable(Box::new(
-            RedbStore::open(&path).expect("nmp-bdd: the scenario's durable store must open"),
-        ))
+        RedbStore::open(&path).expect("nmp-bdd: the scenario's durable store must open")
     }
-}
-
-/// Which store a scenario got, so the two spawn arms below stay one decision
-/// made in one place.
-enum BddStore {
-    /// Both variants are boxed. `MemoryStore` is the large one here (>=1024
-    /// bytes), so leaving it inline would make every `BddStore` value carry
-    /// that footprint; boxing both keeps the enum small whichever store grows
-    /// next.
-    Memory(Box<MemoryStore>),
-    Durable(Box<RedbStore>),
 }
