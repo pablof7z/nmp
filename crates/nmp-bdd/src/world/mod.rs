@@ -411,9 +411,6 @@ pub struct NmpWorld {
     /// The descriptor of the row a scenario named, so a later step can prove
     /// THAT row left rather than merely that the list shrank.
     named_stalled_write: Option<String>,
-    /// Simulated elapsed seconds -- see `stalled::time_passes` for why the
-    /// elapsed half of an age belongs to the reader and not to NMP.
-    simulated_elapsed: u64,
 }
 
 impl std::fmt::Debug for NmpWorld {

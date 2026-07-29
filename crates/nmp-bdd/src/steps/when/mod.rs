@@ -430,21 +430,6 @@ async fn read_diagnostics_n_times(w: &mut NmpWorld, times: usize) {
     w.read_diagnostics_repeatedly(times);
 }
 
-/// Time passing, as far as anything observable is concerned: the engine gets
-/// a real, unshortened settle window in which it could have given up, and
-/// the READER's clock advances by what the scenario declared. See
-/// `world::stalled::time_passes` for why the elapsed half of an age belongs
-/// to the reader and not to NMP.
-#[when(regex = r#"^(\d+) (seconds?|days?) pass$"#)]
-async fn time_passes(w: &mut NmpWorld, amount: u64, unit: String) {
-    let seconds = match unit.trim_end_matches('s') {
-        "second" => amount,
-        "day" => amount * 86_400,
-        other => panic!("nmp-bdd: unsupported elapsed unit {other:?}"),
-    };
-    w.time_passes(seconds).await;
-}
-
 #[when(regex = r#"^I cancel that write$"#)]
 async fn cancel_that_write(w: &mut NmpWorld) {
     w.cancel_last_write();

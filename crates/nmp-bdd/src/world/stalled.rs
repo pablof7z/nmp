@@ -8,13 +8,11 @@
 //! is an obligation nobody is holding a receipt for, which is exactly the
 //! thing every other observable in this world reaches through a receipt.
 
-use std::time::Instant;
-
 use nmp::mechanism::core::{DiagnosticsSnapshot, StalledWrite};
 use nmp_grammar::{Durability, EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_router::RelayUrl;
 
-use super::budgets::{EVENTUALLY, NEVER};
+use super::budgets::EVENTUALLY;
 use super::observe::ReceiptState;
 use super::NmpWorld;
 
@@ -165,38 +163,19 @@ impl NmpWorld {
         self.named_stalled_write.as_deref()
     }
 
-    /// How much simulated time this scenario has declared to have passed.
+    /// The reader's "now" -- the instant the ENGINE is running at.
     ///
-    /// NMP reports WHEN an obligation was accepted and never how long ago,
-    /// precisely so that nothing in the engine has to hold a stopwatch --
-    /// which means the elapsed side of "stalled for about 40 days" belongs
-    /// to whoever is reading, and in this suite that is the world. The engine
-    /// is given the wall-clock window a real one would get anyway (below),
-    /// so anything it WOULD have done with the time still had its chance to
-    /// happen; what this offset changes is only the number the reader
-    /// subtracts against.
-    pub async fn time_passes(&mut self, elapsed_secs: u64) {
-        self.ensure_started().await;
-        self.simulated_elapsed = self.simulated_elapsed.saturating_add(elapsed_secs);
-        // A real settle window, unshortened: "nothing gave up on its own" is
-        // only worth asserting once the engine has had an uninterrupted
-        // stretch in which to give up.
-        let deadline = Instant::now() + NEVER;
-        while Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-    }
-
-    /// The reader's "now": real wall clock plus whatever the scenario said
-    /// had passed.
+    /// NMP reports WHEN an obligation was accepted and never how long ago, so
+    /// the elapsed side of "stalled for about 40 days" belongs to whoever is
+    /// reading. That reader has to subtract against the same clock the
+    /// acceptance was stamped by, which is the engine's own stated one
+    /// (`world::clock`, #1013) and never the host's wall clock -- a scenario
+    /// that advanced the stated clock by forty days has not waited forty
+    /// days, and reading the real one would report an age of seconds.
     pub fn reader_now(&self) -> u64 {
-        nostr::Timestamp::now()
+        self.stated_clock()
+            .unwrap_or_else(nostr::Timestamp::now)
             .as_secs()
-            .saturating_add(self.simulated_elapsed)
-    }
-
-    pub fn simulated_elapsed(&self) -> u64 {
-        self.simulated_elapsed
     }
 
     /// A bounded settle over the receipt stream, used by the "nothing

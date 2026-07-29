@@ -171,6 +171,10 @@ async fn reports_how_long(w: &mut NmpWorld) {
     );
 }
 
+/// The age is the READER's subtraction, against the same clock the
+/// acceptance was stamped by -- the engine's stated one, which the matching
+/// `<n> days pass` step advanced. NMP never computes this number, which is
+/// the whole point of the scenario it serves.
 #[then(regex = r#"^it reports the write as stalled for about (\d+) (seconds|days)$"#)]
 async fn stalled_for_about(w: &mut NmpWorld, amount: u64, unit: String) {
     let expected = match unit.as_str() {
@@ -178,22 +182,18 @@ async fn stalled_for_about(w: &mut NmpWorld, amount: u64, unit: String) {
         "days" => amount * 86_400,
         other => panic!("nmp-bdd: unsupported elapsed unit {other:?}"),
     };
-    assert_eq!(
-        w.simulated_elapsed(),
-        expected,
-        "this scenario declared a different amount of time to have passed than it asserts"
-    );
     let row = only_row(w);
-    let age = w.reader_now().saturating_sub(row.stalled_since.as_secs());
-    // The tolerance is the real wall-clock the scenario also spent: the
-    // reader's "now" is the true clock plus what the scenario declared, so
-    // the age is the declared elapsed plus however long the run took.
+    let now = w.reader_now();
+    let age = now.saturating_sub(row.stalled_since.as_secs());
+    // "About", because the scenario also spends real time between accepting
+    // the write and advancing the clock. It can only ever be LONGER than what
+    // was stated, never shorter -- a shorter age means the acceptance instant
+    // moved, which is the failure this asserts against.
     assert!(
         age >= expected,
         "expected the write to read as stalled for at least {expected}s; the list says it was \
-         accepted at {:?} and this reader's now is {}",
-        row.stalled_since,
-        w.reader_now()
+         accepted at {:?} and this reader's clock reads {now}",
+        row.stalled_since
     );
 }
 
