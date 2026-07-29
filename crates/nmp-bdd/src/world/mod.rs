@@ -32,12 +32,21 @@
 //! - `observe` -- the observation plane: the accumulating channels
 //!   (`FeedState`/`ReceiptState`/`DiagFeed`) and the bounded observers a
 //!   `Then` step reads them through.
-//! - `outbox` -- the write plane's DEFAULT route: the two operator relay
-//!   sets an `Auto` write adds to whatever a relay list said, the
-//!   three-valued knowledge those scenarios turn on, and the route/refusal
-//!   observables read back off the receipt. Distinct from `actions` because
-//!   nothing here is a stimulus, and from `staging` because what it stages
-//!   belongs to the OPERATOR rather than to a person.
+//! - `contacts` -- the OTHER witness: the scripted relay's own log of what
+//!   reached its socket, and what changed since a marked moment. Apart from
+//!   `observe` deliberately -- a "never contacted" claim must not rest solely
+//!   on the engine's own self-report, or a diagnostics bug could make the
+//!   claim un-falsifiable.
+//! - `outbox` -- the world an `Auto` write's DEFAULT route is derived from:
+//!   the two operator relay sets, the two halves of one person's relay list,
+//!   and the three-valued knowledge those scenarios turn on. Distinct from
+//!   `staging` because what it stages is what the engine has been able to
+//!   LEARN, and because the operator sets belong to nobody in particular.
+//! - `routes` -- the other end of that scenario: what the receipt said about
+//!   where the write goes, and what it said when the answer was nothing.
+//!   Apart from `outbox` because a derivation's inputs and its answer are
+//!   separate concerns, and a reader chasing a wrong route wants one or the
+//!   other, never both at once.
 //! - `staging` -- `Given`-time staging (plain data, no I/O) and the single
 //!   lazy `ensure_started` that turns all of it into a running world.
 //! - `actions` -- `When`-time acts: open a feed, publish, switch account,
@@ -88,6 +97,7 @@
 mod actions;
 mod budgets;
 mod clock;
+mod contacts;
 mod group_fixtures;
 mod group_surface;
 mod groups;
@@ -97,6 +107,7 @@ mod outbox;
 mod queries;
 mod replaceable;
 mod restart;
+mod routes;
 mod signers;
 mod staging;
 mod stalled;

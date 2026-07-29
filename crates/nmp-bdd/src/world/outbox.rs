@@ -25,18 +25,14 @@
 //!   directory: the absence settles because a real relay really did say end
 //!   of stored events, which is the only thing that may settle one.
 
-use std::collections::BTreeSet;
-
-use nostr::{Tag, Timestamp};
+use nostr::Tag;
 
 use nmp_grammar::{Durability, EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_router::RelayUrl;
 
-use nmp::mechanism::core::StalledWriteStage;
-use nmp::mechanism::outbox::WriteStatus;
 use nmp_test_support::relays::ScriptedRelay;
 
-use super::budgets::{EVENTUALLY, RECONNECT};
+use super::budgets::RECONNECT;
 use super::{NmpWorld, ME};
 
 impl NmpWorld {
@@ -153,6 +149,108 @@ impl NmpWorld {
     pub fn declare_unmarked_relay(&mut self, person: &str, relay: &str) {
         self.declare_write_relay(person, relay);
         self.declare_read_relay(person, relay);
+    }
+
+    // ---- Given: three-valued knowledge, and the sources behind it -------
+    //
+    // Moved here from `staging` because these are not staging of a PERSON's
+    // protocol state at all -- they are staging of what the engine has been
+    // ABLE TO LEARN, which is the axis this whole family turns on. A relay
+    // list naming relays is `Known`, one declaring none is still `Known` (a
+    // fact, just an empty one), and one never ingested is `Unknown` until the
+    // sources finish looking.
+
+    /// `Given <person>'s relay list names <relay> as their read relay` --
+    /// their INBOX, which is what a p-tag fan-out reaches them at.
+    pub fn declare_read_relay(&mut self, person: &str, relay: &str) {
+        self.person(person);
+        self.relay_config_mut(relay);
+        let relays = self.read_relay_of.entry(person.to_string()).or_default();
+        if !relays.iter().any(|r| r == relay) {
+            relays.push(relay.to_string());
+        }
+    }
+
+    /// `Given <person>'s relay list is ingested and names no relays at all`
+    /// -- a REAL kind:10002 declaring nothing. Settled knowledge, not
+    /// ignorance: a write mentioning them completes routing without ever
+    /// parking on them.
+    pub fn declare_no_relays(&mut self, person: &str) {
+        self.person(person);
+        if !self.declares_no_relays.iter().any(|p| p == person) {
+            self.declares_no_relays.push(person.to_string());
+        }
+    }
+
+    /// `Given <person>'s relay list has never been fetched` / `no relay list
+    /// for <person> has ever been ingested` -- the world states out loud that
+    /// it staged nothing for them, so a scenario cannot pass because a
+    /// `Given` was silently forgotten.
+    pub fn assert_relay_list_never_fetched(&self, person: &str) {
+        assert!(
+            !self.write_relay_of.contains_key(person)
+                && !self.read_relay_of.contains_key(person)
+                && !self.declares_no_relays.iter().any(|p| p == person)
+                && !self.declares_no_write_relays.iter().any(|p| p == person),
+            "nmp-bdd: {person}'s relay list is staged, so it HAS been fetched"
+        );
+    }
+
+    /// Every configured indexer stops answering end-of-stored-events, which
+    /// is what "we have not finished looking" is on the wire. Nothing can
+    /// settle from here, so every unknown stays `Unknown` and every write
+    /// depending on one stays parked.
+    pub fn indexers_never_confirm_end_of_stored_events(&mut self) {
+        assert!(
+            !self.indexer_names.is_empty(),
+            "nmp-bdd: an indexer must be configured before it can withhold its EOSE"
+        );
+        for name in self.indexer_names.clone() {
+            self.set_reject_queries(&name);
+        }
+    }
+
+    /// The complement: a well-behaved indexer answers end-of-stored-events,
+    /// which is the DEFAULT here. Stated out loud where a scenario turns on
+    /// it, so a settlement that happens cannot be mistaken for one the
+    /// harness arranged behind the engine's back.
+    pub fn assert_indexers_confirm_end_of_stored_events(&self) {
+        assert!(
+            !self.indexer_names.is_empty(),
+            "nmp-bdd: nothing settles without a source; configure an indexer first"
+        );
+        for name in &self.indexer_names {
+            assert!(
+                !self
+                    .relay_configs
+                    .get(name)
+                    .is_some_and(|config| config.reject_queries),
+                "nmp-bdd: indexer {name:?} was staged to withhold its EOSE, so it cannot \
+                 also be the source that settles an absence"
+            );
+        }
+    }
+
+    /// `Given no indexer relays are configured` -- fail-closed by
+    /// construction: with no source to ask, nothing can ever settle.
+    pub fn assert_no_indexers(&self) {
+        assert!(
+            self.indexer_names.is_empty(),
+            "nmp-bdd: state the indexer topology before anything runs"
+        );
+    }
+
+    /// `Given no app relays are configured` -- a statement about the world's
+    /// final topology, so it CLEARS whatever a Background configured rather
+    /// than merely asserting. A feature whose Background gives every scenario
+    /// an app relay still needs one scenario without: "always additive" is
+    /// only falsifiable against the empty set.
+    pub fn no_app_relays(&mut self) {
+        assert!(
+            !self.started,
+            "nmp-bdd: state the app-relay topology before anything runs"
+        );
+        self.app_relay_names.clear();
     }
 
     // ---- Given/When: whether the sources have finished looking ----------
@@ -282,313 +380,5 @@ impl NmpWorld {
             identity: Identity::Active,
             correlation: None,
         });
-    }
-
-    // ---- Then: where the write was routed -------------------------------
-
-    /// The relay set the receipt reported, resolved from scenario names.
-    fn urls_of(&self, names: &[String]) -> BTreeSet<RelayUrl> {
-        names.iter().map(|name| self.relay_url(name)).collect()
-    }
-
-    /// `Then the <thing> is routed to exactly <relays>` -- the WHOLE answer,
-    /// read off the receipt's own routing picture.
-    pub fn routed_exactly(&mut self, names: &[String]) -> bool {
-        let wanted = self.urls_of(names);
-        self.receipt_eventually(
-            |seen| matches!(seen.iter().rev().find(|s| matches!(s, WriteStatus::Routed { .. })), Some(WriteStatus::Routed { relays, .. }) if *relays == wanted),
-        )
-    }
-
-    /// `Then the <thing> is routed to <relay>` -- a member of the answer,
-    /// which is the right claim when a scenario names one source of several.
-    pub fn routed_to(&mut self, name: &str) -> bool {
-        let url = self.relay_url(name);
-        self.receipt_eventually(|seen| {
-            seen.iter()
-                .any(|s| matches!(s, WriteStatus::Routed { relays, .. } if relays.contains(&url)))
-        })
-    }
-
-    /// `Then the note is never routed to <relay>` -- costs its full negative
-    /// budget, and is a claim about the ROUTE rather than about contact: a
-    /// relay may be contacted for a read and still never be a destination.
-    pub fn never_routed_to(&mut self, name: &str) -> bool {
-        let url = self.relay_url(name);
-        self.receipt_never(|seen| {
-            seen.iter()
-                .any(|s| matches!(s, WriteStatus::Routed { relays, .. } if relays.contains(&url)))
-        })
-    }
-
-    /// `Then routing is complete` -- zero unknowns remain, so the answer can
-    /// never change again.
-    pub fn routing_is_complete(&mut self) -> bool {
-        self.receipt_eventually(|seen| {
-            seen.iter()
-                .any(|s| matches!(s, WriteStatus::Routed { complete: true, .. }))
-        })
-    }
-
-    /// `Then routing is not complete`.
-    pub fn routing_stays_open(&mut self) -> bool {
-        self.receipt_never(|seen| {
-            seen.iter()
-                .any(|s| matches!(s, WriteStatus::Routed { complete: true, .. }))
-        })
-    }
-
-    /// `Then the note is routed to no relay` -- no destination was ever
-    /// named, which is different from one being named and never delivered to.
-    pub fn routed_nowhere(&mut self) -> bool {
-        self.receipt_never(|seen| {
-            seen.iter()
-                .any(|s| matches!(s, WriteStatus::Routed { relays, .. } if !relays.is_empty()))
-        })
-    }
-
-    /// The FINAL route of a publish named by order -- what "the profile and
-    /// the note are routed to the same relays" compares.
-    pub fn final_route_at(&mut self, ordinal: usize) -> BTreeSet<RelayUrl> {
-        // Wait for a route to exist at all before reading it, or an empty
-        // answer would compare equal to another empty answer and prove
-        // nothing.
-        let _ = self.receipt_eventually_at(ordinal, |seen| {
-            seen.iter()
-                .any(|s| matches!(s, WriteStatus::Routed { complete: true, .. }))
-        });
-        self.receipt_statuses_at(ordinal)
-            .iter()
-            .rev()
-            .find_map(|s| match s {
-                WriteStatus::Routed { relays, .. } => Some(relays.clone()),
-                _ => None,
-            })
-            .unwrap_or_default()
-    }
-
-    // ---- Then: the refusal ----------------------------------------------
-
-    /// Bounded wait for a park whose reason contains `needle`.
-    ///
-    /// A wait rather than a read, because a park's REASON converges: the same
-    /// write is first parked on "nobody has looked yet" and later, once every
-    /// source has finished, on "there is nothing to find". Both are true in
-    /// turn and the second is the one a scenario about settled absence means,
-    /// so reading the first reason to arrive would assert the opposite of
-    /// what the scenario says.
-    pub fn park_reason_contains(&mut self, needle: &str) -> bool {
-        let owned = needle.to_string();
-        let matches = move |seen: &[WriteStatus]| {
-            seen.iter()
-                .filter_map(park_reason)
-                .any(|reason| reason.contains(&owned))
-        };
-        if self.restarted_receipt.is_some() {
-            return self.restarted_receipt_eventually(matches);
-        }
-        self.receipt_eventually(matches)
-    }
-
-    /// Every park reason this write has reported so far, newest last -- for
-    /// assertion MESSAGES and for the diagnostics cross-check, never as a
-    /// substitute for the bounded wait above. Reads the REATTACHED stream
-    /// after a restart, because on the far side of a process boundary that is
-    /// the only stream that exists.
-    pub fn park_reasons(&mut self) -> Vec<String> {
-        let reasoned = |seen: &[WriteStatus]| {
-            seen.iter()
-                .any(|s| matches!(s, WriteStatus::AwaitingRoute { .. }))
-        };
-        if self.restarted_receipt.is_some() {
-            let _ = self.restarted_receipt_eventually(reasoned);
-            return self
-                .restarted_receipt_statuses()
-                .iter()
-                .filter_map(park_reason)
-                .collect();
-        }
-        let _ = self.receipt_eventually(reasoned);
-        self.receipt_statuses()
-            .iter()
-            .filter_map(park_reason)
-            .collect()
-    }
-
-    /// `Then the publish reports no routing problem` -- the negative form,
-    /// costing its own budget: nothing ever parked this write.
-    pub fn never_parked(&mut self) -> bool {
-        self.receipt_never(|seen| {
-            seen.iter()
-                .any(|s| matches!(s, WriteStatus::AwaitingRoute { .. }))
-        })
-    }
-
-    /// `Then the note is never reported as sent`.
-    pub fn never_sent(&mut self) -> bool {
-        self.receipt_never(|seen| {
-            seen.iter().any(|s| {
-                matches!(
-                    s,
-                    WriteStatus::Sent { .. }
-                        | WriteStatus::Acked(_)
-                        | WriteStatus::HandoffAmbiguous { .. }
-                )
-            })
-        })
-    }
-
-    /// `Then the publish has not failed`.
-    pub fn never_failed(&mut self) -> bool {
-        self.receipt_never(|seen| seen.iter().any(|s| matches!(s, WriteStatus::Failed(_))))
-    }
-
-    // ---- Then: what reached a socket ------------------------------------
-
-    /// How many copies of `event` the named relay actually admitted -- the
-    /// wire-side count behind "offered exactly once".
-    pub fn copies_admitted(&self, relay: &str, event: nostr::EventId) -> usize {
-        self.relays
-            .get(relay)
-            .map(|r| {
-                r.admitted_events()
-                    .into_iter()
-                    .filter(|e| e.id == event)
-                    .count()
-            })
-            .unwrap_or(0)
-    }
-
-    /// Wait (bounded) for `relay` to admit `event` at all.
-    ///
-    /// The precondition of every count: a receipt beat and a socket write are
-    /// not the same instant, so reading the relay's log the moment routing
-    /// reported a destination says only that nothing has arrived YET. Waiting
-    /// is also strictly safer for the count that follows -- it gives a second
-    /// copy more time to show up, never less.
-    pub async fn wait_for_copy(&self, relay: &str, event: nostr::EventId) -> bool {
-        let deadline = std::time::Instant::now() + EVENTUALLY;
-        loop {
-            if self.copies_admitted(relay, event) > 0 {
-                return true;
-            }
-            if std::time::Instant::now() >= deadline {
-                return false;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    }
-
-    /// Wait (bounded) for ANY relay in this world to be contacted -- the
-    /// precondition of every "nothing outside X was contacted" claim, which
-    /// on an empty world is true and worthless.
-    pub async fn wait_any_relay_contacted(&self) -> bool {
-        let deadline = std::time::Instant::now() + EVENTUALLY;
-        loop {
-            if self.any_relay_contacted() {
-                return true;
-            }
-            if std::time::Instant::now() >= deadline {
-                return false;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    }
-
-    /// Every relay this world ever admitted the given event at.
-    pub fn relays_holding(&self, event: nostr::EventId) -> Vec<String> {
-        self.relay_order
-            .iter()
-            .filter(|name| self.copies_admitted(name, event) > 0)
-            .cloned()
-            .collect()
-    }
-
-    /// Every relay the ENGINE planned a session to, by scenario name where
-    /// this world knows one and by URL where it does not. A URL with no name
-    /// is a relay nobody configured -- exactly what "no relay outside the
-    /// ones configured" is looking for.
-    pub fn planned_relays(&mut self) -> Vec<String> {
-        let known: Vec<(RelayUrl, String)> = self
-            .relay_order
-            .iter()
-            .filter(|name| self.relays.contains_key(*name))
-            .map(|name| (self.relay_url(name), name.clone()))
-            .collect();
-        let Some(snapshot) = self.diagnostics_matching(|snap| !snap.relays.is_empty()) else {
-            return Vec::new();
-        };
-        snapshot
-            .relays
-            .iter()
-            .map(|row| {
-                known
-                    .iter()
-                    .find(|(url, _)| *url == row.relay)
-                    .map(|(_, name)| name.clone())
-                    .unwrap_or_else(|| row.relay.to_string())
-            })
-            .collect()
-    }
-
-    /// `Then diagnostics reports the note among the stalled writes` -- the
-    /// engine-global answer to "is anything quietly stuck", which no single
-    /// receipt can give.
-    ///
-    /// Narrowed to `Unroutable`, which is the only stage a scenario about the
-    /// OUTBOX can produce: the write is signed and its author has a signer, so
-    /// it is neither unsignable nor undeliverable -- it has nowhere to be
-    /// delivered TO. Reading every stage would let this pass on a stall that
-    /// had nothing to do with routing.
-    ///
-    /// A bounded WAIT, and named apart from #1025's [`Self::stalled_writes`]
-    /// for exactly that reason: that one reads the snapshot a scenario
-    /// explicitly captured, which is right when the scenario says `When I read
-    /// the diagnostics`. An outbox scenario never says that -- it publishes
-    /// and asks -- so it has to wait for the census to move on its own.
-    pub fn unroutable_writes(&mut self) -> Vec<(String, Timestamp)> {
-        let unroutable = |snap: &nmp::mechanism::core::DiagnosticsSnapshot| {
-            snap.stalled_writes
-                .iter()
-                .any(|stalled| stalled.stage == StalledWriteStage::Unroutable)
-        };
-        let Some(snapshot) = self.diagnostics_matching(unroutable) else {
-            return Vec::new();
-        };
-        snapshot
-            .stalled_writes
-            .iter()
-            .filter(|stalled| stalled.stage == StalledWriteStage::Unroutable)
-            .map(|stalled| (stalled.detail.clone(), stalled.stalled_since))
-            .collect()
-    }
-
-    /// The engine's clock as this world last saw it before publishing -- the
-    /// lower bound a stalled entry's `stalled_since` must fall above, so
-    /// "how long it has been so" is a fact the engine recorded rather than a
-    /// number it made up.
-    pub fn last_publish_at(&self) -> Timestamp {
-        self.last_publish_at
-            .expect("nmp-bdd: nothing has been published in this scenario")
-    }
-
-    /// A bounded wait for the diagnostics stream to say anything at all --
-    /// the precondition behind every claim about what it does NOT contain.
-    pub fn diagnostics_ran(&mut self) -> bool {
-        self.diagnostics_matching(|_| true).is_some()
-    }
-
-    /// Give the world one full observation budget of quiet. Used by the
-    /// steps whose claim is about the absence of contact, so the world has
-    /// had as long to do the wrong thing as any positive assertion allows.
-    pub async fn settle(&mut self) {
-        tokio::time::sleep(EVENTUALLY).await;
-    }
-}
-
-fn park_reason(status: &WriteStatus) -> Option<String> {
-    match status {
-        WriteStatus::AwaitingRoute { detail } => Some(detail.clone()),
-        _ => None,
     }
 }
