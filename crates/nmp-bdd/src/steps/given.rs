@@ -215,10 +215,11 @@ async fn logged_in_as_pubkey(w: &mut NmpWorld, pubkey: String) {
 // still `Known` (a fact, just an empty one), and one never ingested is
 // `Unknown` -- which, until the indexers finish looking, keeps a write parked.
 
-#[given(regex = r#"^my relay list has never been fetched$"#)]
-async fn my_relay_list_never_fetched(w: &mut NmpWorld) {
-    w.assert_relay_list_never_fetched(ME);
-}
+// `my relay list has never been fetched` is defined once, alongside the
+// group staging that first needed it (`NmpWorld::forget_my_relay_list`): it
+// UNSTAGES rather than asserts, which is the only spelling that works for
+// both a scenario whose Background staged one and a cold-start scenario
+// whose Background did not.
 
 /// Every spelling of "we have nothing for them", including the plural form
 /// the three-mention case needs. It takes a LIST rather than one name because

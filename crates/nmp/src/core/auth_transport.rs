@@ -1488,15 +1488,17 @@ impl<S: EventStore> EngineCore<S> {
                     .map_or((None, Vec::new()), |(send, coverage)| {
                         (Some(send), coverage)
                     });
-                let mut settled_any = false;
+                // Absence settlement reads the SAME EOSE frame the coverage
+                // watermark does, on the SAME resolved subscription id -- the
+                // discovery subscription is just another entry in
+                // `active_demand()`, so nothing parallel exists here for the
+                // write plane to have opened. It deliberately does NOT ride
+                // the attributed coverage keys: those credit backlog
+                // watermarks and can legitimately be empty for a
+                // subscription this EOSE really does end.
+                let settled_any = self.settle_relay_list_eose(&session, resolved.as_ref());
                 for (key, interval) in attributed {
                     if let Some(atom) = self.attribution.shape_of(key) {
-                        // Absence settlement rides the SAME attributed EOSE
-                        // the coverage watermark does: the discovery
-                        // subscription is just another entry in
-                        // `active_demand()`, so nothing parallel exists here
-                        // for the write plane to have opened.
-                        settled_any |= self.settle_relay_list_eose(&session.relay, &atom);
                         // Coverage rows stay keyed (context-hashed key,
                         // relay URL) — the access distinction already lives
                         // inside the key's own hash, so the store door takes

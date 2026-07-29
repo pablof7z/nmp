@@ -556,19 +556,39 @@ impl<S: EventStore> EngineCore<S> {
     /// were waiting on exactly that.
     pub(super) fn settle_relay_list_eose(
         &mut self,
-        relay: &RelayUrl,
-        atom: &ContextualAtom,
+        session: &RelaySessionKey,
+        sub_id: Option<&SubId>,
     ) -> bool {
-        // Only a relay-list atom attests anything about a relay list. A
-        // content atom EOSE'ing says nothing about whether a kind:10002
-        // exists, and indexers are never a content fallback in either
-        // direction.
-        if atom.filter.kinds != Some(BTreeSet::from([NIP65_RELAY_LIST_KIND])) {
-            return false;
-        }
-        let Some(authors) = atom.filter.authors.clone() else {
+        // Which filter this EOSE ends is read off the PLAN -- the reqs this
+        // engine actually sent on this session -- and NOT off coverage
+        // attribution.
+        //
+        // That distinction is the whole of this function's correctness, and
+        // it was found the expensive way. Attribution credits BACKLOG
+        // watermarks, and it legitimately credits nothing for a subscription
+        // whose snapshot absorbed no coverage key; hanging settlement off it
+        // meant the indexers EOSE'd, the frames arrived, and the absence
+        // never settled -- silently, and only once a discovery filter
+        // carried more than one author, which is exactly the shape the
+        // three-p-tag retirement case needs. The plan says what was asked;
+        // the EOSE says it has been answered. Nothing else is required.
+        let Some(sub_id) = sub_id else {
             return false;
         };
+        let Some(authors) = self.router.plan().reqs.get(session).and_then(|reqs| {
+            reqs.iter()
+                .find(|req| &req.sub_id == sub_id)
+                // Only a relay-list req attests anything about a relay list.
+                // A content atom EOSE'ing says nothing about whether a
+                // kind:10002 exists, and a kind:0 or kind:3 discovery req
+                // reaches these very same indexers -- so this check is what
+                // keeps absence from being settled off an unrelated answer.
+                .filter(|req| req.filter.kinds == Some(BTreeSet::from([NIP65_RELAY_LIST_KIND])))
+                .and_then(|req| req.filter.authors.clone())
+        }) else {
+            return false;
+        };
+        let relay = &session.relay;
         // Sources are the CONFIGURED indexers -- the only relays a
         // discovery-kind atom is ever routed to. Nothing settles without
         // them, by design.
