@@ -22,14 +22,14 @@ use super::store_bench::{
 };
 
 const COMPACT_BY_CREATED_AT: TableDefinition<&[u8; 16], EventKey> =
-    TableDefinition::new("compact_by_created_at_v1");
+    TableDefinition::new("compact_by_created_at");
 const COMPACT_BY_AUTHOR: TableDefinition<&[u8; 48], EventKey> =
-    TableDefinition::new("compact_by_author_v1");
+    TableDefinition::new("compact_by_author");
 const COMPACT_BY_KIND: TableDefinition<&[u8; 18], EventKey> =
-    TableDefinition::new("compact_by_kind_v1");
+    TableDefinition::new("compact_by_kind");
 const COMPACT_BY_AUTHOR_KIND: TableDefinition<&[u8; 50], EventKey> =
-    TableDefinition::new("compact_by_author_kind_v1");
-const COMPACT_BY_TAG: TableDefinition<&[u8], EventKey> = TableDefinition::new("compact_by_tag_v1");
+    TableDefinition::new("compact_by_author_kind");
+const COMPACT_BY_TAG: TableDefinition<&[u8], EventKey> = TableDefinition::new("compact_by_tag");
 
 fn compact_fixed<const FULL: usize, const COMPACT: usize>(
     key: &[u8],

@@ -75,9 +75,9 @@ jobs:
       - name: Forbid derived NIP-51 authority and authoritative-sounding parser names
         run: bash scripts/check-nip51-no-derived-authority.sh
 
-  # #838: NIP-29 contributes group context to a complete foreign draft;
-  # NIP-C7 independently owns kind:9/q replies; client mention and
-  # notification policy belongs to neither protocol module.
+  # #838: NIP-29 contributes group context to a complete draft whose kind and
+  # schema it does not own; NIP-C7 independently owns kind:9/q replies; client
+  # mention and notification policy belongs to neither protocol module.
   nip29-ownership:
     name: NIP-29 exact context ownership
     runs-on: ubuntu-latest
@@ -88,6 +88,20 @@ jobs:
 
       - name: Keep NIP-29 context separate from C7 and client policy
         run: bash scripts/check-nip29-ownership.sh
+
+  # NMP keeps no backwards compatibility: a replaced spelling is deleted in the
+  # same change. There are no external consumers, so compatibility is a tax
+  # paid to strangers who do not exist.
+  no-compatibility-surface:
+    name: No compatibility surface
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Refuse a declared deprecation
+        run: bash scripts/check-no-compatibility-surface.sh
 
   nip46-provider-boundary:
     name: NIP-46 optional provider boundary

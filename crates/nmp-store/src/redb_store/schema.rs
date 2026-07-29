@@ -111,7 +111,7 @@ pub(super) const SCHEMA_VERSION_KEY: &str = "version";
 /// accepted writes, lanes, attempts, receipts, and route facts — because they
 /// share one `redb::Database` transaction boundary and are therefore one
 /// epoch, not seven independently-versioned ones.
-pub(super) const SCHEMA_VERSION: u64 = 9;
+pub(super) const SCHEMA_VERSION: u64 = 10;
 /// Bound redb's process-private page cache for mobile/desktop clients.
 ///
 /// redb 4.1 defaults this cache to 1 GiB. A million-event sequential ingest
@@ -207,13 +207,13 @@ pub(super) const POSTINGS_READY: &str = "query_ready";
 /// sufficient for choosing an index and avoids one durable row for nearly
 /// every unique author/tag while never changing query correctness.
 pub(super) const INDEX_CARDINALITY: TableDefinition<&[u8], u64> =
-    TableDefinition::new("index_cardinality_v1");
+    TableDefinition::new("index_cardinality");
 pub(super) const INDEX_CARDINALITY_META: TableDefinition<&str, u64> =
-    TableDefinition::new("index_cardinality_meta_v1");
+    TableDefinition::new("index_cardinality_meta");
 pub(super) const INDEX_CARDINALITY_VERSION_KEY: &str = "version";
 pub(super) const INDEX_CARDINALITY_VERSION: u64 = 3;
 pub(super) const INDEX_CARDINALITY_SAMPLE_META: TableDefinition<&str, &[u8]> =
-    TableDefinition::new("index_cardinality_sample_meta_v1");
+    TableDefinition::new("index_cardinality_sample_meta");
 pub(super) const INDEX_CARDINALITY_SAMPLE_KEY: &str = "key";
 /// The durable write-outbox journal (crashsafe-accepted-2-3-plan.md §2.2,
 /// Fable checkpoint Q2 — APPROVED as co-resident in this same `Database`:

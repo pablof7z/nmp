@@ -1,10 +1,13 @@
 use super::*;
 
 /// #867: NMP defines ONE current Redb schema epoch and carries no
-/// persistent-schema compatibility obligation. Every previously-shipped epoch
-/// -- the unversioned/v5 table layouts that predate the schema marker, and the
-/// v6/v7/v8 markers -- must refuse at open, before a store exists and without
-/// changing a single durable fact.
+/// persistent-schema compatibility obligation. Anything that is not exactly
+/// that epoch -- a database whose tables predate the schema marker, and a
+/// marker that is not exactly `SCHEMA_VERSION` -- must refuse at open, before
+/// a store exists and without changing a single durable fact. Which markers
+/// and table layouts shipped before is deliberately not written down here:
+/// the refusal is "not exactly current", so naming the retired ones would be
+/// knowledge of them that this repository does not keep.
 ///
 /// "Durable fact" is the exact table inventory, every table's row count, and
 /// the schema marker itself. It is deliberately NOT raw file bytes: redb
@@ -62,7 +65,9 @@ fn a_non_owner_is_refused_for_ownership_before_the_schema_epoch_is_inspected() {
     let db = Database::create(&path).unwrap();
     let write_txn = db.begin_write().unwrap();
     write_txn
-        .open_table(TableDefinition::<u64, &[u8]>::new("events_v5"))
+        .open_table(TableDefinition::<u64, &[u8]>::new(
+            "a-table-this-schema-never-writes",
+        ))
         .unwrap();
     write_txn.commit().unwrap();
     drop(db);
@@ -79,40 +84,43 @@ fn a_non_owner_is_refused_for_ownership_before_the_schema_epoch_is_inspected() {
 
     // Once unowned, the same target reaches the epoch check and produces the
     // one schema refusal.
-    assert_refuses_without_mutation(&path, "owned then released v5 epoch");
+    assert_refuses_without_mutation(&path, "owned then released non-current epoch");
 }
 
 #[test]
-fn pre_marker_table_epochs_refuse_at_open_without_mutating_durable_facts() {
-    for legacy in [
-        "events",
-        "events_v2",
-        "events_v3",
-        "events_v4",
-        "events_v5",
-        "outbox_displaced_v2",
-        "outbox_displaced_v5",
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("pre-marker-epoch.redb");
-        let db = Database::create(&path).unwrap();
-        let write_txn = db.begin_write().unwrap();
-        write_txn
-            .open_table(TableDefinition::<u64, &[u8]>::new(legacy))
-            .unwrap();
-        write_txn.commit().unwrap();
-        drop(db);
+fn a_marker_less_database_refuses_at_open_without_mutating_durable_facts() {
+    // The refusal reads two things -- the database has at least one table, and
+    // none of them is the schema-marker table. It never reads a table NAME, so
+    // one table whose name this schema does not write proves it exactly. The
+    // names retired layouts actually used are deliberately not enumerated:
+    // that list would be knowledge of those layouts, and it decays into a
+    // fixture nobody can check the moment the last one is forgotten.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("marker-less.redb");
+    let db = Database::create(&path).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    write_txn
+        .open_table(TableDefinition::<u64, &[u8]>::new(
+            "a-table-this-schema-never-writes",
+        ))
+        .unwrap();
+    write_txn.commit().unwrap();
+    drop(db);
 
-        assert_refuses_without_mutation(&path, legacy);
-    }
+    assert_refuses_without_mutation(&path, "a database with tables but no marker");
 }
 
 #[test]
 fn superseded_schema_markers_refuse_at_open_without_mutating_durable_facts() {
-    // 6, 7, and 8 are the exact markers earlier NMP builds wrote. 10 stands in
-    // for a store written by a FUTURE epoch: the refusal is "not exactly the
-    // current epoch", not "older than the current epoch".
-    for superseded in [6u64, 7, 8, 10] {
+    // The invariant is "not EXACTLY the current epoch", in both directions --
+    // one below and one above prove it. Both are derived from
+    // `SCHEMA_VERSION` rather than written out, deliberately: a hard-coded
+    // list of the markers earlier builds wrote is knowledge of retired
+    // schemas, and this repository keeps none. Writing them out also rots
+    // silently, because such a list has to name a stand-in for a FUTURE epoch
+    // -- and the next version bump turns that stand-in into the current one,
+    // leaving the test asserting that the current schema is refused.
+    for superseded in [SCHEMA_VERSION - 1, SCHEMA_VERSION + 1] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("superseded-marker.redb");
         drop(RedbStore::open(&path).unwrap());
