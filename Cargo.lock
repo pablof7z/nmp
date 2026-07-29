@@ -2008,6 +2008,7 @@ checksum = "f0efe882e02d206d8d279c20eb40e03baf7cb5136a1476dc084a324fbc3ec42d"
 name = "nmp"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "blake3",
  "crossbeam-channel",
  "futures-channel",
@@ -2016,9 +2017,12 @@ dependencies = [
  "httpdate",
  "libc",
  "negentropy",
+ "nmp-asset",
+ "nmp-blossom",
  "nmp-executor",
  "nmp-grammar",
  "nmp-local-signer",
+ "nmp-media",
  "nmp-network-policy",
  "nmp-nip22",
  "nmp-nip29",

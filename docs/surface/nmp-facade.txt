@@ -13,6 +13,7 @@ pub use nmp::CryptoCapability
 pub use nmp::Demand
 pub use nmp::DemandError
 pub use nmp::Derived
+pub use nmp::DescriptorError
 pub use nmp::Durability
 pub use nmp::Event
 pub use nmp::EventBuilder
@@ -32,6 +33,7 @@ pub use nmp::PendingSignerSender
 pub use nmp::PublicKey
 pub use nmp::RelayUrl
 pub use nmp::Selector
+pub use nmp::ServerUrlError
 pub use nmp::SetAlgebra
 pub use nmp::SetOp
 pub use nmp::SignerError
@@ -44,6 +46,7 @@ pub use nmp::SourceAuthority
 pub use nmp::Tag
 pub use nmp::Timestamp
 pub use nmp::UnsignedEvent
+pub use nmp::UploadedAsset
 pub use nmp::WriteIntent
 pub use nmp::WritePayload
 pub use nmp::WriteRouting
@@ -148,6 +151,69 @@ impl core::marker::Unpin for nmp::AuthPolicyResolveError
 impl core::marker::UnsafeUnpin for nmp::AuthPolicyResolveError
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::AuthPolicyResolveError
 impl core::panic::unwind_safe::UnwindSafe for nmp::AuthPolicyResolveError
+pub enum nmp::BlossomUploadError
+pub nmp::BlossomUploadError::AuthRejected
+pub nmp::BlossomUploadError::AuthRejected::reason: core::option::Option<alloc::string::String>
+pub nmp::BlossomUploadError::AuthRejected::status: u16
+pub nmp::BlossomUploadError::AuthorizationExpired
+pub nmp::BlossomUploadError::AuthorizationExpired::expiration_secs: u64
+pub nmp::BlossomUploadError::AuthorizationExpired::now_secs: u64
+pub nmp::BlossomUploadError::AuthorizationWindow
+pub nmp::BlossomUploadError::AuthorizationWindow::created_at_secs: u64
+pub nmp::BlossomUploadError::AuthorizationWindow::lifetime_secs: u64
+pub nmp::BlossomUploadError::Cancelled
+pub nmp::BlossomUploadError::ClientBuild
+pub nmp::BlossomUploadError::ClientBuild::reason: alloc::string::String
+pub nmp::BlossomUploadError::ClockMovedBackward
+pub nmp::BlossomUploadError::ClockMovedBackward::created_at_secs: u64
+pub nmp::BlossomUploadError::ClockMovedBackward::now_secs: u64
+pub nmp::BlossomUploadError::DescriptorInvalid(nmp_blossom::descriptor::DescriptorError)
+pub nmp::BlossomUploadError::EmptyContentType
+pub nmp::BlossomUploadError::EngineClosed
+pub nmp::BlossomUploadError::InvalidServerUrl(nmp_blossom::client::ServerUrlError)
+pub nmp::BlossomUploadError::InvalidSignerOutput
+pub nmp::BlossomUploadError::InvalidSignerOutput::reason: alloc::string::String
+pub nmp::BlossomUploadError::LocalHostNotAdmitted
+pub nmp::BlossomUploadError::LocalHostNotAdmitted::host: alloc::string::String
+pub nmp::BlossomUploadError::Network
+pub nmp::BlossomUploadError::Network::detail: alloc::string::String
+pub nmp::BlossomUploadError::NoActiveSigner
+pub nmp::BlossomUploadError::RedirectRefused
+pub nmp::BlossomUploadError::RedirectRefused::status: u16
+pub nmp::BlossomUploadError::ResponseTooLarge
+pub nmp::BlossomUploadError::ResponseTooLarge::limit_bytes: usize
+pub nmp::BlossomUploadError::ServerError
+pub nmp::BlossomUploadError::ServerError::reason: core::option::Option<alloc::string::String>
+pub nmp::BlossomUploadError::ServerError::status: u16
+pub nmp::BlossomUploadError::ServerRejected
+pub nmp::BlossomUploadError::ServerRejected::reason: core::option::Option<alloc::string::String>
+pub nmp::BlossomUploadError::ServerRejected::status: u16
+pub nmp::BlossomUploadError::Sha256Mismatch
+pub nmp::BlossomUploadError::Sha256Mismatch::expected_sha256_hex: alloc::string::String
+pub nmp::BlossomUploadError::Sha256Mismatch::returned_sha256_hex: alloc::string::String
+pub nmp::BlossomUploadError::SignerRejected
+pub nmp::BlossomUploadError::SignerRejected::reason: alloc::string::String
+pub nmp::BlossomUploadError::SignerUnavailable
+pub nmp::BlossomUploadError::SignerUnavailable::reason: alloc::string::String
+impl core::clone::Clone for nmp::BlossomUploadError
+pub fn nmp::BlossomUploadError::clone(&self) -> nmp::BlossomUploadError
+impl core::cmp::Eq for nmp::BlossomUploadError
+impl core::cmp::PartialEq for nmp::BlossomUploadError
+pub fn nmp::BlossomUploadError::eq(&self, &nmp::BlossomUploadError) -> bool
+impl core::error::Error for nmp::BlossomUploadError
+pub fn nmp::BlossomUploadError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for nmp::BlossomUploadError
+pub fn nmp::BlossomUploadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nmp::BlossomUploadError
+pub fn nmp::BlossomUploadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::BlossomUploadError
+impl core::marker::Freeze for nmp::BlossomUploadError
+impl core::marker::Send for nmp::BlossomUploadError
+impl core::marker::Sync for nmp::BlossomUploadError
+impl core::marker::Unpin for nmp::BlossomUploadError
+impl core::marker::UnsafeUnpin for nmp::BlossomUploadError
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::BlossomUploadError
+impl core::panic::unwind_safe::UnwindSafe for nmp::BlossomUploadError
 pub enum nmp::CancelWriteError
 pub nmp::CancelWriteError::AlreadyAbandoned
 pub nmp::CancelWriteError::AlreadyAbandoned::receipt_id: nmp::ReceiptId
@@ -741,6 +807,55 @@ impl core::marker::Unpin for nmp::AuthPolicyRequest
 impl core::marker::UnsafeUnpin for nmp::AuthPolicyRequest
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::AuthPolicyRequest
 impl core::panic::unwind_safe::UnwindSafe for nmp::AuthPolicyRequest
+pub struct nmp::BlossomUploadCancel
+impl nmp::BlossomUploadCancel
+pub fn nmp::BlossomUploadCancel::cancel(&self)
+impl core::clone::Clone for nmp::BlossomUploadCancel
+pub fn nmp::BlossomUploadCancel::clone(&self) -> nmp::BlossomUploadCancel
+impl core::fmt::Debug for nmp::BlossomUploadCancel
+pub fn nmp::BlossomUploadCancel::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for nmp::BlossomUploadCancel
+impl core::marker::Send for nmp::BlossomUploadCancel
+impl core::marker::Sync for nmp::BlossomUploadCancel
+impl core::marker::Unpin for nmp::BlossomUploadCancel
+impl core::marker::UnsafeUnpin for nmp::BlossomUploadCancel
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::BlossomUploadCancel
+impl core::panic::unwind_safe::UnwindSafe for nmp::BlossomUploadCancel
+pub struct nmp::BlossomUploadOperation
+impl nmp::BlossomUploadOperation
+pub fn nmp::BlossomUploadOperation::cancel_handle(&self) -> nmp::BlossomUploadCancel
+pub fn nmp::BlossomUploadOperation::recv(self) -> core::result::Result<nmp_media::upload::UploadedAsset, nmp::BlossomUploadError>
+impl core::fmt::Debug for nmp::BlossomUploadOperation
+pub fn nmp::BlossomUploadOperation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::ops::drop::Drop for nmp::BlossomUploadOperation
+pub fn nmp::BlossomUploadOperation::drop(&mut self)
+impl core::marker::Freeze for nmp::BlossomUploadOperation
+impl core::marker::Send for nmp::BlossomUploadOperation
+impl core::marker::Sync for nmp::BlossomUploadOperation
+impl core::marker::Unpin for nmp::BlossomUploadOperation
+impl core::marker::UnsafeUnpin for nmp::BlossomUploadOperation
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::BlossomUploadOperation
+impl core::panic::unwind_safe::UnwindSafe for nmp::BlossomUploadOperation
+pub struct nmp::BlossomUploadRequest
+pub nmp::BlossomUploadRequest::bytes: alloc::vec::Vec<u8>
+pub nmp::BlossomUploadRequest::content_type: alloc::string::String
+pub nmp::BlossomUploadRequest::description: alloc::string::String
+pub nmp::BlossomUploadRequest::server_url: alloc::string::String
+impl core::clone::Clone for nmp::BlossomUploadRequest
+pub fn nmp::BlossomUploadRequest::clone(&self) -> nmp::BlossomUploadRequest
+impl core::cmp::Eq for nmp::BlossomUploadRequest
+impl core::cmp::PartialEq for nmp::BlossomUploadRequest
+pub fn nmp::BlossomUploadRequest::eq(&self, &nmp::BlossomUploadRequest) -> bool
+impl core::fmt::Debug for nmp::BlossomUploadRequest
+pub fn nmp::BlossomUploadRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::BlossomUploadRequest
+impl core::marker::Freeze for nmp::BlossomUploadRequest
+impl core::marker::Send for nmp::BlossomUploadRequest
+impl core::marker::Sync for nmp::BlossomUploadRequest
+impl core::marker::Unpin for nmp::BlossomUploadRequest
+impl core::marker::UnsafeUnpin for nmp::BlossomUploadRequest
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::BlossomUploadRequest
+impl core::panic::unwind_safe::UnwindSafe for nmp::BlossomUploadRequest
 pub struct nmp::DiagnosticsSnapshot
 pub nmp::DiagnosticsSnapshot::auth_sessions: alloc::vec::Vec<nmp::AuthDiagnosticsSnapshot>
 pub nmp::DiagnosticsSnapshot::discovered_private_relays_rejected: u64
@@ -802,6 +917,8 @@ pub fn nmp::Engine::reset_persistent_store(impl core::convert::AsRef<std::path::
 pub fn nmp::Engine::set_active_account(&self, core::option::Option<nostr::key::public_key::PublicKey>) -> core::result::Result<(), nmp::EngineError>
 pub fn nmp::Engine::shutdown(&self)
 pub fn nmp::Engine::sign_event(&self, nmp::SignEventRequest) -> core::result::Result<nmp::SignEventOperation, nmp::SignEventError>
+impl nmp::Engine
+pub fn nmp::Engine::upload_blossom(&self, nmp::BlossomUploadRequest) -> core::result::Result<nmp::BlossomUploadOperation, nmp::BlossomUploadError>
 impl core::ops::drop::Drop for nmp::Engine
 pub fn nmp::Engine::drop(&mut self)
 impl !core::marker::Freeze for nmp::Engine
@@ -7610,6 +7727,216 @@ reexport nmp::DemandError => nmp_grammar::descriptor::DemandError
 reexport nmp::Derived => nmp_grammar::binding::Derived
 {
   "previously_defined": "nmp_grammar::binding::Derived"
+}
+reexport nmp::DescriptorError => nmp_blossom::descriptor::DescriptorError
+{
+  "attrs": [],
+  "inner": {
+    "enum": {
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "has_stripped_variants": false,
+      "variants": [
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "primitive": "usize"
+                        }
+                      },
+                      "name": "limit_bytes",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "TooLarge",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": null,
+                            "path": "String",
+                            "resolved_item": {
+                              "path": "alloc::string::String"
+                            }
+                          }
+                        }
+                      },
+                      "name": "reason",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "Json",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "MissingUrl",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "MissingSha256",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "MissingSize",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "tuple": [
+                  {
+                    "attrs": [],
+                    "inner": {
+                      "struct_field": {
+                        "resolved_path": {
+                          "args": null,
+                          "path": "nmp_asset::Sha256HexError",
+                          "resolved_item": {
+                            "definition": {
+                              "attrs": [],
+                              "inner": {
+                                "enum": {
+                                  "generics": {
+                                    "params": [],
+                                    "where_predicates": []
+                                  },
+                                  "has_stripped_variants": false,
+                                  "variants": [
+                                    {
+                                      "attrs": [],
+                                      "inner": {
+                                        "variant": {
+                                          "discriminant": null,
+                                          "kind": {
+                                            "struct": {
+                                              "fields": [
+                                                {
+                                                  "attrs": [],
+                                                  "inner": {
+                                                    "struct_field": {
+                                                      "primitive": "usize"
+                                                    }
+                                                  },
+                                                  "name": "length",
+                                                  "visibility": "default"
+                                                }
+                                              ],
+                                              "has_stripped_fields": false
+                                            }
+                                          }
+                                        }
+                                      },
+                                      "name": "BadLength",
+                                      "visibility": "default"
+                                    },
+                                    {
+                                      "attrs": [],
+                                      "inner": {
+                                        "variant": {
+                                          "discriminant": null,
+                                          "kind": {
+                                            "struct": {
+                                              "fields": [
+                                                {
+                                                  "attrs": [],
+                                                  "inner": {
+                                                    "struct_field": {
+                                                      "primitive": "char"
+                                                    }
+                                                  },
+                                                  "name": "character",
+                                                  "visibility": "default"
+                                                }
+                                              ],
+                                              "has_stripped_fields": false
+                                            }
+                                          }
+                                        }
+                                      },
+                                      "name": "NotLowercaseHex",
+                                      "visibility": "default"
+                                    }
+                                  ]
+                                }
+                              },
+                              "name": "Sha256HexError",
+                              "visibility": "public"
+                            },
+                            "path": "nmp_asset::Sha256HexError"
+                          }
+                        }
+                      }
+                    },
+                    "name": "0",
+                    "visibility": "default"
+                  }
+                ]
+              }
+            }
+          },
+          "name": "BadSha256",
+          "visibility": "default"
+        }
+      ]
+    }
+  },
+  "name": "DescriptorError",
+  "visibility": "public"
 }
 reexport nmp::Durability => nmp_grammar::write::Durability
 {
@@ -22346,6 +22673,155 @@ reexport nmp::Selector => nmp_grammar::selector::Selector
 {
   "previously_defined": "nmp_grammar::selector::Selector"
 }
+reexport nmp::ServerUrlError => nmp_blossom::client::ServerUrlError
+{
+  "attrs": [],
+  "inner": {
+    "enum": {
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "has_stripped_variants": false,
+      "variants": [
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": null,
+                            "path": "String",
+                            "resolved_item": {
+                              "path": "alloc::string::String"
+                            }
+                          }
+                        }
+                      },
+                      "name": "reason",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "Parse",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "MissingHost",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": null,
+                            "path": "String",
+                            "resolved_item": {
+                              "path": "alloc::string::String"
+                            }
+                          }
+                        }
+                      },
+                      "name": "scheme",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "UnsupportedScheme",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "Credentialed",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": {
+                "struct": {
+                  "fields": [
+                    {
+                      "attrs": [],
+                      "inner": {
+                        "struct_field": {
+                          "resolved_path": {
+                            "args": null,
+                            "path": "String",
+                            "resolved_item": {
+                              "path": "alloc::string::String"
+                            }
+                          }
+                        }
+                      },
+                      "name": "path",
+                      "visibility": "default"
+                    }
+                  ],
+                  "has_stripped_fields": false
+                }
+              }
+            }
+          },
+          "name": "NonRootPath",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "variant": {
+              "discriminant": null,
+              "kind": "plain"
+            }
+          },
+          "name": "QueryOrFragment",
+          "visibility": "default"
+        }
+      ]
+    }
+  },
+  "name": "ServerUrlError",
+  "visibility": "public"
+}
 reexport nmp::SetAlgebra => nmp_grammar::binding::SetAlgebra
 {
   "previously_defined": "nmp_grammar::binding::SetAlgebra"
@@ -26343,6 +26819,547 @@ reexport nmp::UnsignedEvent => nostr::event::unsigned::UnsignedEvent
     }
   },
   "name": "UnsignedEvent",
+  "visibility": "public"
+}
+reexport nmp::UploadedAsset => nmp_media::upload::UploadedAsset
+{
+  "attrs": [],
+  "inherent_impls": [
+    {
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "items": [
+        {
+          "attrs": [],
+          "inner": {
+            "function": {
+              "default_unstable": null,
+              "generics": {
+                "params": [],
+                "where_predicates": []
+              },
+              "has_body": true,
+              "header": {
+                "abi": "Rust",
+                "is_async": false,
+                "is_const": false,
+                "is_unsafe": false
+              },
+              "sig": {
+                "inputs": [
+                  [
+                    "self",
+                    {
+                      "borrowed_ref": {
+                        "is_mutable": false,
+                        "lifetime": null,
+                        "type": {
+                          "generic": "Self"
+                        }
+                      }
+                    }
+                  ]
+                ],
+                "is_c_variadic": false,
+                "output": {
+                  "borrowed_ref": {
+                    "is_mutable": false,
+                    "lifetime": null,
+                    "type": {
+                      "resolved_path": {
+                        "args": null,
+                        "path": "BlobDescriptor",
+                        "resolved_item": {
+                          "definition": {
+                            "attrs": [],
+                            "inner": {
+                              "struct": {
+                                "generics": {
+                                  "params": [],
+                                  "where_predicates": []
+                                },
+                                "kind": {
+                                  "plain": {
+                                    "fields": [
+                                      {
+                                        "attrs": [],
+                                        "inner": {
+                                          "struct_field": {
+                                            "resolved_path": {
+                                              "args": null,
+                                              "path": "String",
+                                              "resolved_item": {
+                                                "path": "alloc::string::String"
+                                              }
+                                            }
+                                          }
+                                        },
+                                        "name": "url",
+                                        "visibility": "public"
+                                      },
+                                      {
+                                        "attrs": [],
+                                        "inner": {
+                                          "struct_field": {
+                                            "resolved_path": {
+                                              "args": null,
+                                              "path": "nmp_asset::Sha256Hash",
+                                              "resolved_item": {
+                                                "definition": {
+                                                  "attrs": [],
+                                                  "inner": {
+                                                    "struct": {
+                                                      "generics": {
+                                                        "params": [],
+                                                        "where_predicates": []
+                                                      },
+                                                      "kind": {
+                                                        "tuple": [
+                                                          null
+                                                        ]
+                                                      }
+                                                    }
+                                                  },
+                                                  "name": "Sha256Hash",
+                                                  "visibility": "public"
+                                                },
+                                                "path": "nmp_asset::Sha256Hash"
+                                              }
+                                            }
+                                          }
+                                        },
+                                        "name": "sha256",
+                                        "visibility": "public"
+                                      },
+                                      {
+                                        "attrs": [],
+                                        "inner": {
+                                          "struct_field": {
+                                            "primitive": "u64"
+                                          }
+                                        },
+                                        "name": "size",
+                                        "visibility": "public"
+                                      },
+                                      {
+                                        "attrs": [],
+                                        "inner": {
+                                          "struct_field": {
+                                            "resolved_path": {
+                                              "args": {
+                                                "angle_bracketed": {
+                                                  "args": [
+                                                    {
+                                                      "type": {
+                                                        "resolved_path": {
+                                                          "args": null,
+                                                          "path": "String",
+                                                          "resolved_item": {
+                                                            "path": "alloc::string::String"
+                                                          }
+                                                        }
+                                                      }
+                                                    }
+                                                  ],
+                                                  "constraints": []
+                                                }
+                                              },
+                                              "path": "Option",
+                                              "resolved_item": {
+                                                "path": "core::option::Option"
+                                              }
+                                            }
+                                          }
+                                        },
+                                        "name": "mime_type",
+                                        "visibility": "public"
+                                      },
+                                      {
+                                        "attrs": [],
+                                        "inner": {
+                                          "struct_field": {
+                                            "resolved_path": {
+                                              "args": {
+                                                "angle_bracketed": {
+                                                  "args": [
+                                                    {
+                                                      "type": {
+                                                        "primitive": "u64"
+                                                      }
+                                                    }
+                                                  ],
+                                                  "constraints": []
+                                                }
+                                              },
+                                              "path": "Option",
+                                              "resolved_item": {
+                                                "path": "core::option::Option"
+                                              }
+                                            }
+                                          }
+                                        },
+                                        "name": "uploaded",
+                                        "visibility": "public"
+                                      }
+                                    ],
+                                    "has_stripped_fields": false
+                                  }
+                                }
+                              }
+                            },
+                            "name": "BlobDescriptor",
+                            "visibility": "public"
+                          },
+                          "path": "nmp_blossom::descriptor::BlobDescriptor"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "name": "descriptor",
+          "visibility": "public"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "function": {
+              "default_unstable": null,
+              "generics": {
+                "params": [],
+                "where_predicates": []
+              },
+              "has_body": true,
+              "header": {
+                "abi": "Rust",
+                "is_async": false,
+                "is_const": false,
+                "is_unsafe": false
+              },
+              "sig": {
+                "inputs": [
+                  [
+                    "self",
+                    {
+                      "borrowed_ref": {
+                        "is_mutable": false,
+                        "lifetime": null,
+                        "type": {
+                          "generic": "Self"
+                        }
+                      }
+                    }
+                  ]
+                ],
+                "is_c_variadic": false,
+                "output": {
+                  "borrowed_ref": {
+                    "is_mutable": false,
+                    "lifetime": null,
+                    "type": {
+                      "resolved_path": {
+                        "args": null,
+                        "path": "VerifiedAsset",
+                        "resolved_item": {
+                          "definition": {
+                            "attrs": [],
+                            "inner": {
+                              "struct": {
+                                "generics": {
+                                  "params": [],
+                                  "where_predicates": []
+                                },
+                                "kind": {
+                                  "plain": {
+                                    "fields": [],
+                                    "has_stripped_fields": true
+                                  }
+                                }
+                              }
+                            },
+                            "name": "VerifiedAsset",
+                            "visibility": "public"
+                          },
+                          "path": "nmp_asset::VerifiedAsset"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "name": "asset",
+          "visibility": "public"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "function": {
+              "default_unstable": null,
+              "generics": {
+                "params": [],
+                "where_predicates": []
+              },
+              "has_body": true,
+              "header": {
+                "abi": "Rust",
+                "is_async": false,
+                "is_const": false,
+                "is_unsafe": false
+              },
+              "sig": {
+                "inputs": [
+                  [
+                    "self",
+                    {
+                      "borrowed_ref": {
+                        "is_mutable": false,
+                        "lifetime": null,
+                        "type": {
+                          "generic": "Self"
+                        }
+                      }
+                    }
+                  ]
+                ],
+                "is_c_variadic": false,
+                "output": {
+                  "resolved_path": {
+                    "args": null,
+                    "path": "Sha256Hash",
+                    "resolved_item": {
+                      "definition": {
+                        "previously_defined": "nmp_asset::Sha256Hash"
+                      },
+                      "path": "nmp_asset::Sha256Hash"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "name": "sha256",
+          "visibility": "public"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "function": {
+              "default_unstable": null,
+              "generics": {
+                "params": [],
+                "where_predicates": []
+              },
+              "has_body": true,
+              "header": {
+                "abi": "Rust",
+                "is_async": false,
+                "is_const": false,
+                "is_unsafe": false
+              },
+              "sig": {
+                "inputs": [
+                  [
+                    "self",
+                    {
+                      "borrowed_ref": {
+                        "is_mutable": false,
+                        "lifetime": null,
+                        "type": {
+                          "generic": "Self"
+                        }
+                      }
+                    }
+                  ]
+                ],
+                "is_c_variadic": false,
+                "output": {
+                  "resolved_path": {
+                    "args": {
+                      "angle_bracketed": {
+                        "args": [
+                          {
+                            "type": {
+                              "resolved_path": {
+                                "args": null,
+                                "path": "PictureImage",
+                                "resolved_item": {
+                                  "definition": {
+                                    "attrs": [],
+                                    "inner": {
+                                      "struct": {
+                                        "generics": {
+                                          "params": [],
+                                          "where_predicates": []
+                                        },
+                                        "kind": {
+                                          "plain": {
+                                            "fields": [],
+                                            "has_stripped_fields": true
+                                          }
+                                        }
+                                      }
+                                    },
+                                    "name": "PictureImage",
+                                    "visibility": "public"
+                                  },
+                                  "path": "nmp_nip68::image::PictureImage"
+                                }
+                              }
+                            }
+                          },
+                          {
+                            "type": {
+                              "resolved_path": {
+                                "args": null,
+                                "path": "PictureImageError",
+                                "resolved_item": {
+                                  "definition": {
+                                    "attrs": [],
+                                    "inner": {
+                                      "enum": {
+                                        "generics": {
+                                          "params": [],
+                                          "where_predicates": []
+                                        },
+                                        "has_stripped_variants": false,
+                                        "variants": [
+                                          {
+                                            "attrs": [],
+                                            "inner": {
+                                              "variant": {
+                                                "discriminant": null,
+                                                "kind": "plain"
+                                              }
+                                            },
+                                            "name": "MissingMimeType",
+                                            "visibility": "default"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    "name": "PictureImageError",
+                                    "visibility": "public"
+                                  },
+                                  "path": "nmp_nip68::image::PictureImageError"
+                                }
+                              }
+                            }
+                          }
+                        ],
+                        "constraints": []
+                      }
+                    },
+                    "path": "Result",
+                    "resolved_item": {
+                      "path": "core::result::Result"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "name": "picture_image",
+          "visibility": "public"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "function": {
+              "default_unstable": null,
+              "generics": {
+                "params": [],
+                "where_predicates": []
+              },
+              "has_body": true,
+              "header": {
+                "abi": "Rust",
+                "is_async": false,
+                "is_const": false,
+                "is_unsafe": false
+              },
+              "sig": {
+                "inputs": [
+                  [
+                    "self",
+                    {
+                      "generic": "Self"
+                    }
+                  ]
+                ],
+                "is_c_variadic": false,
+                "output": {
+                  "resolved_path": {
+                    "args": {
+                      "angle_bracketed": {
+                        "args": [
+                          {
+                            "type": {
+                              "resolved_path": {
+                                "args": null,
+                                "path": "PictureImage",
+                                "resolved_item": {
+                                  "definition": {
+                                    "previously_defined": "nmp_nip68::image::PictureImage"
+                                  },
+                                  "path": "nmp_nip68::image::PictureImage"
+                                }
+                              }
+                            }
+                          },
+                          {
+                            "type": {
+                              "resolved_path": {
+                                "args": null,
+                                "path": "PictureImageError",
+                                "resolved_item": {
+                                  "definition": {
+                                    "previously_defined": "nmp_nip68::image::PictureImageError"
+                                  },
+                                  "path": "nmp_nip68::image::PictureImageError"
+                                }
+                              }
+                            }
+                          }
+                        ],
+                        "constraints": []
+                      }
+                    },
+                    "path": "Result",
+                    "resolved_item": {
+                      "path": "core::result::Result"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "name": "into_picture_image",
+          "visibility": "public"
+        }
+      ]
+    }
+  ],
+  "inner": {
+    "struct": {
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "kind": {
+        "plain": {
+          "fields": [],
+          "has_stripped_fields": true
+        }
+      }
+    }
+  },
+  "name": "UploadedAsset",
   "visibility": "public"
 }
 reexport nmp::WriteIntent => nmp_grammar::write::WriteIntent

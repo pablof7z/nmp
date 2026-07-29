@@ -1890,6 +1890,371 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiBlossomUploadFailure",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "InvalidServerUrl",
+            discr: None,
+            fields: [
+                Field {
+                    name: "error",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomServerUrlError",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "`server_url` failed [`FfiBlossomServerUrlError`]'s admission rules.",
+            ),
+        },
+        Variant {
+            name: "EmptyContentType",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "`content_type` is empty.",
+            ),
+        },
+        Variant {
+            name: "AuthorizationWindow",
+            discr: None,
+            fields: [
+                Field {
+                    name: "created_at_secs",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "lifetime_secs",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "NMP could not compose a representable BUD-11 window at this instant.",
+            ),
+        },
+        Variant {
+            name: "NoActiveSigner",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "No active account, so there is no author and no signer. Zero HTTP.",
+            ),
+        },
+        Variant {
+            name: "SignerUnavailable",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The active signer could not be reached.",
+            ),
+        },
+        Variant {
+            name: "SignerRejected",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The active signer was reached and refused.",
+            ),
+        },
+        Variant {
+            name: "InvalidSignerOutput",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The signer did not return a valid signature over the exact\nauthorization NMP composed.",
+            ),
+        },
+        Variant {
+            name: "AuthorizationExpired",
+            discr: None,
+            fields: [
+                Field {
+                    name: "expiration_secs",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "now_secs",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The authorization window closed before the upload could use it.",
+            ),
+        },
+        Variant {
+            name: "ClockMovedBackward",
+            discr: None,
+            fields: [
+                Field {
+                    name: "created_at_secs",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "now_secs",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The engine clock moved backwards between composition and validation.",
+            ),
+        },
+        Variant {
+            name: "ClientBuild",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The HTTP stack could not be constructed.",
+            ),
+        },
+        Variant {
+            name: "LocalHostNotAdmitted",
+            discr: None,
+            fields: [
+                Field {
+                    name: "host",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Loopback/private/link-local/onion without operator opt-in. Zero I/O.",
+            ),
+        },
+        Variant {
+            name: "Network",
+            discr: None,
+            fields: [
+                Field {
+                    name: "detail",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Connect/DNS/TLS/timeout, or the body stream died.",
+            ),
+        },
+        Variant {
+            name: "RedirectRefused",
+            discr: None,
+            fields: [
+                Field {
+                    name: "status",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The server answered with a redirect; redirects are never followed.",
+            ),
+        },
+        Variant {
+            name: "AuthRejected",
+            discr: None,
+            fields: [
+                Field {
+                    name: "status",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "401/403: the server refused the authorization itself.",
+            ),
+        },
+        Variant {
+            name: "ServerRejected",
+            discr: None,
+            fields: [
+                Field {
+                    name: "status",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Any other non-success, non-5xx status.",
+            ),
+        },
+        Variant {
+            name: "ServerError",
+            discr: None,
+            fields: [
+                Field {
+                    name: "status",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "5xx.",
+            ),
+        },
+        Variant {
+            name: "ResponseTooLarge",
+            discr: None,
+            fields: [
+                Field {
+                    name: "limit_bytes",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The descriptor response exceeded the streamed response bound.",
+            ),
+        },
+        Variant {
+            name: "DescriptorInvalid",
+            discr: None,
+            fields: [
+                Field {
+                    name: "error",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomDescriptorError",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The BUD-02 descriptor did not parse or did not satisfy its own rules.",
+            ),
+        },
+        Variant {
+            name: "Sha256Mismatch",
+            discr: None,
+            fields: [
+                Field {
+                    name: "expected_sha256_hex",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "returned_sha256_hex",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The server's descriptor hash is not the hash of the uploaded bytes.",
+            ),
+        },
+        Variant {
+            name: "EngineClosed",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "The engine was closed before or during the operation.",
+            ),
+        },
+        Variant {
+            name: "Cancelled",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "The operation was withdrawn. If the request had already been\ntransmitted this is an OBSERVATION GAP, not a rollback: whether the\nremote stored the bytes is unknown and unclaimed.",
+            ),
+        },
+        Variant {
+            name: "AlreadyConsumed",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "`NmpBlossomUploadHandle::uploaded()` is one-shot: the single result\nwas already delivered to a prior await.",
+            ),
+        },
+    ],
+    shape: Error {
+        flat: false,
+    },
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp::BlossomUploadError` mirror plus the boundary's own one-shot rule.\n\nExhaustive and variant-for-variant: the signer taxonomy, the BUD-11 time\ntaxonomy and the transport/integrity taxonomy each keep their own\nvariants rather than flattening to strings. DELIBERATELY separate from\n[`FfiBlossomUploadError`], which is the low-level client's taxonomy for a\ncaller that already holds a signed authorization -- that operation cannot\nfail for a signer, clock or active-account reason, and this one cannot\nfail for an authorization the caller supplied.",
+    ),
+}
+
+enum Enum {
     name: "FfiBlossomVerb",
     module_path: "nmp_ffi",
     remote: false,
@@ -5117,6 +5482,49 @@ record Record {
     ],
     docstring: Some(
         "[`FfiBlossomClient`] construction knobs\n(`nmp_blossom::BlossomClientConfig` mirror). `None` means the crate\ndefault.",
+    ),
+}
+
+record Record {
+    name: "FfiBlossomUploadRequest",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "server_url",
+            type_: String,
+            default: None,
+            docstring: Some(
+                "The Blossom server base URL, as the product/operator configured it.",
+            ),
+        },
+        Field {
+            name: "blob",
+            type_: Bytes,
+            default: None,
+            docstring: Some(
+                "The exact bytes to upload. Hashed once in Rust and sent verbatim.",
+            ),
+        },
+        Field {
+            name: "content_type",
+            type_: String,
+            default: None,
+            docstring: Some(
+                "The governed MIME type these bytes are uploaded with.",
+            ),
+        },
+        Field {
+            name: "description",
+            type_: String,
+            default: None,
+            docstring: Some(
+                "The product's description of the action, carried as the BUD-11\nauthorization `content`.",
+            ),
+        },
+    ],
+    docstring: Some(
+        "The semantic inputs to one engine-authorized upload (`nmp::\nBlossomUploadRequest` mirror).",
     ),
 }
 
@@ -9463,6 +9871,134 @@ object Object {
 }
 
 object Object {
+    name: "NmpBlossomUploadHandle",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [],
+    methods: [
+        Method {
+            name: "cancel",
+            object_name: "NmpBlossomUploadHandle",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpblossomuploadhandle_cancel",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpBlossomUploadHandle",
+                        ),
+                    },
+                ],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Withdraw this upload. Idempotent; safe after completion. After the\nrequest has been transmitted this is an observation gap, not a\nrollback.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpblossomuploadhandle_cancel",
+            checksum: Some(
+                51892,
+            ),
+        },
+        Method {
+            name: "uploaded",
+            object_name: "NmpBlossomUploadHandle",
+            object_module_path: "nmp_ffi",
+            is_async: true,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiBlobDescriptor",
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpblossomuploadhandle_uploaded",
+                is_async: true,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpBlossomUploadHandle",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    Handle,
+                ),
+                has_rust_call_status_arg: false,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Await the one-shot outcome: the integrity-verified BUD-02 descriptor,\nor a typed [`FfiBlossomUploadFailure`]. A second await returns\n[`FfiBlossomUploadFailure::AlreadyConsumed`].",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiBlossomUploadFailure",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpblossomuploadhandle_uploaded",
+            checksum: Some(
+                46634,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_nmpblossomuploadhandle",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "NmpBlossomUploadHandle",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "NmpBlossomUploadHandle",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_nmpblossomuploadhandle",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "NmpBlossomUploadHandle",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "One live engine-authorized upload. Await [`Self::uploaded`] once for the\nverified descriptor or a typed failure; [`Self::cancel`] withdraws only\nthis operation.\n\nThe handle exposes no draft, hash, author, timestamp or signature -- there\nis nothing here for a native caller to inspect or substitute.",
+    ),
+}
+
+object Object {
     name: "NmpDiagnosticsStream",
     imp: Struct,
     module_path: "nmp_ffi",
@@ -10904,6 +11440,76 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_unfollow",
             checksum: Some(
                 25680,
+            ),
+        },
+        Method {
+            name: "upload_blossom",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "request",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiBlossomUploadRequest",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "NmpBlossomUploadHandle",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_upload_blossom",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "request",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiBlossomUploadRequest",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "NmpBlossomUploadHandle",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Upload one blob to a Blossom server, authorized by the active governed\nsigner (#971).\n\nThe caller states only product inputs: where it goes, the exact bytes,\nthe MIME type, and a description. NMP owns the author, the clock, the\nhash, the BUD-11 composition, the signing, the re-validation and the\nrequest -- none of which appear in this signature in either direction.\nReturns synchronously with either a typed refusal that made ZERO HTTP\nrequests, or a one-shot [`NmpBlossomUploadHandle`] to await once.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiBlossomUploadFailure",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_upload_blossom",
+            checksum: Some(
+                2294,
             ),
         },
     ],

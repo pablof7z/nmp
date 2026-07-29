@@ -28,6 +28,10 @@ use std::sync::{Arc, Mutex};
 use crate::auth::{
     FfiAccountRegistration, FfiAuthPolicyAdapter, FfiAuthPolicyCallback, FfiAuthPolicyRegistration,
 };
+use crate::blossom::{
+    blossom_upload_failure, FfiBlossomUploadFailure, FfiBlossomUploadRequest,
+    NmpBlossomUploadHandle,
+};
 use crate::convert::{
     cancel_write_error_to_ffi, cancel_write_outcome_to_ffi, demand_from_ffi,
     diagnostics_snapshot_to_ffi, filter_from_ffi, frame_to_ffi, parse_pubkey,
@@ -353,6 +357,31 @@ impl NmpEngine {
             cancel,
             result: receiver.into_async(),
         }))
+    }
+
+    /// Upload one blob to a Blossom server, authorized by the active governed
+    /// signer (#971).
+    ///
+    /// The caller states only product inputs: where it goes, the exact bytes,
+    /// the MIME type, and a description. NMP owns the author, the clock, the
+    /// hash, the BUD-11 composition, the signing, the re-validation and the
+    /// request -- none of which appear in this signature in either direction.
+    /// Returns synchronously with either a typed refusal that made ZERO HTTP
+    /// requests, or a one-shot [`NmpBlossomUploadHandle`] to await once.
+    pub fn upload_blossom(
+        &self,
+        request: FfiBlossomUploadRequest,
+    ) -> Result<Arc<NmpBlossomUploadHandle>, FfiBlossomUploadFailure> {
+        let operation = self
+            .engine
+            .upload_blossom(nmp::BlossomUploadRequest {
+                server_url: request.server_url,
+                bytes: request.blob,
+                content_type: request.content_type,
+                description: request.description,
+            })
+            .map_err(blossom_upload_failure)?;
+        Ok(NmpBlossomUploadHandle::new(operation))
     }
 
     /// Observe the active account's relationship to `target` through the
@@ -1564,6 +1593,84 @@ mod tests {
         // resolves, so it has fired exactly once by the time `signed()` returns.
         assert_eq!(cancellations.load(Ordering::SeqCst), 1);
         engine.shutdown();
+    }
+
+    fn ffi_upload_request(server_url: &str, blob: &[u8]) -> FfiBlossomUploadRequest {
+        FfiBlossomUploadRequest {
+            server_url: server_url.to_string(),
+            blob: blob.to_vec(),
+            content_type: "application/pdf".to_string(),
+            description: "upload through the FFI boundary".to_string(),
+        }
+    }
+
+    /// #971's FFI shape: the boundary refuses with the SAME typed taxonomy the
+    /// Rust operation uses, synchronously, before any handle exists — so a
+    /// native caller never has to distinguish a start error from an await
+    /// error by string.
+    #[test]
+    fn ffi_upload_blossom_preflight_refusals_are_typed_and_start_no_operation() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        assert!(matches!(
+            engine
+                .upload_blossom(ffi_upload_request("https://blobs.example", b"no signer"))
+                .unwrap_err(),
+            FfiBlossomUploadFailure::NoActiveSigner
+        ));
+        assert!(matches!(
+            engine
+                .upload_blossom(ffi_upload_request("ftp://blobs.example", b"bad scheme"))
+                .unwrap_err(),
+            FfiBlossomUploadFailure::InvalidServerUrl { .. }
+        ));
+        engine.shutdown();
+    }
+
+    /// The handle is one-shot and its cancel is wired: cancelling withdraws
+    /// the governed signer exactly once, `uploaded()` wakes `Cancelled`, and a
+    /// second await is `AlreadyConsumed` rather than a hang.
+    #[tokio::test]
+    async fn ffi_upload_blossom_cancel_withdraws_the_signer_and_completes_once() {
+        let (engine, cancellations) = pending_ffi_sign_engine();
+        let handle = engine
+            .upload_blossom(ffi_upload_request("https://blobs.example", b"pending"))
+            .expect("upload must start");
+        handle.cancel();
+        assert!(matches!(
+            handle.uploaded().await.unwrap_err(),
+            FfiBlossomUploadFailure::Cancelled
+        ));
+        assert!(matches!(
+            handle.uploaded().await.unwrap_err(),
+            FfiBlossomUploadFailure::AlreadyConsumed
+        ));
+        // The upload's own terminal wakes the caller rather than waiting for
+        // the signer to answer -- deliberately, so a wedged signer cannot hold
+        // a cancelled upload open -- so the withdrawal reaches the engine
+        // thread just after. It must arrive, and exactly once.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while cancellations.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(cancellations.load(Ordering::SeqCst), 1);
+        engine.shutdown();
+        assert_eq!(cancellations.load(Ordering::SeqCst), 1);
+    }
+
+    /// Engine shutdown reaches an upload parked on its signer through the same
+    /// door that reaches a parked sign-only operation.
+    #[tokio::test]
+    async fn ffi_upload_blossom_shutdown_completes_once() {
+        let (engine, cancellations) = pending_ffi_sign_engine();
+        let handle = engine
+            .upload_blossom(ffi_upload_request("https://blobs.example", b"pending"))
+            .expect("upload must start");
+        engine.shutdown();
+        assert!(matches!(
+            handle.uploaded().await.unwrap_err(),
+            FfiBlossomUploadFailure::Cancelled
+        ));
+        assert_eq!(cancellations.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

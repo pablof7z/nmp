@@ -147,6 +147,10 @@ pub mod mechanism {
 #[cfg(feature = "nip22")]
 pub mod nip22;
 
+// #971: the one-shot engine-authorized Blossom upload. Unconditional and
+// ungated -- see `Cargo.toml` for why a cargo feature was the wrong answer.
+mod blossom_upload;
+
 // #977: the engine binding for the NIP-29 `Group` door. Unconditional, unlike
 // `nip22` above: `nmp-nip29` is pure composition over `nostr` +
 // `nmp-grammar` with no mechanism crate behind it, so there is nothing for a
@@ -164,6 +168,12 @@ pub use auth::{
     AuthPolicy, AuthPolicyDecision, AuthPolicyError, AuthPolicyOp, AuthPolicyPendingSender,
     AuthPolicyRequest, AuthPolicyResolveError, AuthPolicyResult,
 };
+// #971. `UploadedAsset` is `nmp-media`'s existing verified-upload result and
+// is re-exported AS ITSELF -- the operation returns the vocabulary that
+// already exists rather than minting a second verified-asset type.
+pub use blossom_upload::{
+    BlossomUploadCancel, BlossomUploadError, BlossomUploadOperation, BlossomUploadRequest,
+};
 pub use config::EngineConfig;
 pub use diagnostics::{
     AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, DiagnosticsSnapshot, FilterCoverageEntry,
@@ -175,6 +185,12 @@ pub use engine::{
     SignEventRequest,
 };
 pub use error::EngineError;
+// #971's result vocabulary and the taxonomy its typed refusals carry. The
+// upload does not flatten `nmp-blossom`'s URL/descriptor errors into strings,
+// so the facade projects them; `UploadedAsset` is `nmp-media`'s own verified
+// result, not a second one minted here.
+pub use nmp_blossom::{DescriptorError, ServerUrlError};
+pub use nmp_media::UploadedAsset;
 pub use observation::ObservationEvidence;
 
 /// Monotonic count of real NMP-owned OS threads spawned this process (#680

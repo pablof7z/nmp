@@ -231,6 +231,18 @@ class NMPEngine(
     suspend fun signEvent(event: NMPUnsignedEvent): NMPSignedEvent =
         com.nmp.sdk.signEvent(ffi, event)
 
+    /** Upload one blob to a Blossom server, authorized by the active signer
+     * (#971). NMP owns the author, clock, hash, BUD-11 composition, signature,
+     * re-validation and request; the caller states only product inputs. See
+     * `BlossomUpload.kt`. */
+    suspend fun uploadBlossom(
+        serverUrl: String,
+        blob: ByteArray,
+        contentType: String,
+        description: String,
+    ): BlobDescriptor =
+        com.nmp.sdk.uploadBlossom(ffi, serverUrl, blob, contentType, description)
+
     /** Remove the plaintext checkpoint. The live signer remains until close. */
     fun clearPersistedAccount() {
         synchronized(checkpointLock) {

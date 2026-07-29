@@ -1427,6 +1427,313 @@ impl FfiBlossomClient {
     }
 }
 
+// ---------------------------------------------------------------------------
+// #971: the one-shot ENGINE-AUTHORIZED upload.
+//
+// Everything above this line is the engine-less low-level projection: the app
+// builds a draft, signs it, validates it, and drives the client. Everything
+// below is the opposite bargain -- the app states only what it is uploading
+// and where, and NMP owns the author, the clock, the hash, the BUD-11
+// composition, the signature, the validation and the request.
+//
+// This projection carries NO author pubkey, event kind, tag, unsigned event,
+// signed authorization, caller timestamp, expiration or blob hash in either
+// direction, which is exactly #971's required shape. It returns the
+// [`FfiBlobDescriptor`] the low-level upload already returns rather than
+// minting a second verified-asset record.
+// ---------------------------------------------------------------------------
+
+/// The semantic inputs to one engine-authorized upload (`nmp::
+/// BlossomUploadRequest` mirror).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiBlossomUploadRequest {
+    /// The Blossom server base URL, as the product/operator configured it.
+    pub server_url: String,
+    /// The exact bytes to upload. Hashed once in Rust and sent verbatim.
+    pub blob: Vec<u8>,
+    /// The governed MIME type these bytes are uploaded with.
+    pub content_type: String,
+    /// The product's description of the action, carried as the BUD-11
+    /// authorization `content`.
+    pub description: String,
+}
+
+/// `nmp::BlossomUploadError` mirror plus the boundary's own one-shot rule.
+///
+/// Exhaustive and variant-for-variant: the signer taxonomy, the BUD-11 time
+/// taxonomy and the transport/integrity taxonomy each keep their own
+/// variants rather than flattening to strings. DELIBERATELY separate from
+/// [`FfiBlossomUploadError`], which is the low-level client's taxonomy for a
+/// caller that already holds a signed authorization -- that operation cannot
+/// fail for a signer, clock or active-account reason, and this one cannot
+/// fail for an authorization the caller supplied.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
+pub enum FfiBlossomUploadFailure {
+    /// `server_url` failed [`FfiBlossomServerUrlError`]'s admission rules.
+    InvalidServerUrl { error: FfiBlossomServerUrlError },
+    /// `content_type` is empty.
+    EmptyContentType,
+    /// NMP could not compose a representable BUD-11 window at this instant.
+    AuthorizationWindow {
+        created_at_secs: u64,
+        lifetime_secs: u64,
+    },
+    /// No active account, so there is no author and no signer. Zero HTTP.
+    NoActiveSigner,
+    /// The active signer could not be reached.
+    SignerUnavailable { reason: String },
+    /// The active signer was reached and refused.
+    SignerRejected { reason: String },
+    /// The signer did not return a valid signature over the exact
+    /// authorization NMP composed.
+    InvalidSignerOutput { reason: String },
+    /// The authorization window closed before the upload could use it.
+    AuthorizationExpired { expiration_secs: u64, now_secs: u64 },
+    /// The engine clock moved backwards between composition and validation.
+    ClockMovedBackward { created_at_secs: u64, now_secs: u64 },
+    /// The HTTP stack could not be constructed.
+    ClientBuild { reason: String },
+    /// Loopback/private/link-local/onion without operator opt-in. Zero I/O.
+    LocalHostNotAdmitted { host: String },
+    /// Connect/DNS/TLS/timeout, or the body stream died.
+    Network { detail: String },
+    /// The server answered with a redirect; redirects are never followed.
+    RedirectRefused { status: u16 },
+    /// 401/403: the server refused the authorization itself.
+    AuthRejected { status: u16, reason: Option<String> },
+    /// Any other non-success, non-5xx status.
+    ServerRejected { status: u16, reason: Option<String> },
+    /// 5xx.
+    ServerError { status: u16, reason: Option<String> },
+    /// The descriptor response exceeded the streamed response bound.
+    ResponseTooLarge { limit_bytes: u64 },
+    /// The BUD-02 descriptor did not parse or did not satisfy its own rules.
+    DescriptorInvalid { error: FfiBlossomDescriptorError },
+    /// The server's descriptor hash is not the hash of the uploaded bytes.
+    Sha256Mismatch {
+        expected_sha256_hex: String,
+        returned_sha256_hex: String,
+    },
+    /// The engine was closed before or during the operation.
+    EngineClosed,
+    /// The operation was withdrawn. If the request had already been
+    /// transmitted this is an OBSERVATION GAP, not a rollback: whether the
+    /// remote stored the bytes is unknown and unclaimed.
+    Cancelled,
+    /// `NmpBlossomUploadHandle::uploaded()` is one-shot: the single result
+    /// was already delivered to a prior await.
+    AlreadyConsumed,
+}
+
+impl std::fmt::Display for FfiBlossomUploadFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidServerUrl { error } => write!(f, "invalid Blossom server URL: {error:?}"),
+            Self::EmptyContentType => f.write_str("Blossom upload content type is empty"),
+            Self::AuthorizationWindow {
+                created_at_secs,
+                lifetime_secs,
+            } => write!(
+                f,
+                "no representable BUD-11 authorization window at {created_at_secs} for a \
+                 {lifetime_secs}s lifetime"
+            ),
+            Self::NoActiveSigner => f.write_str("no active signer"),
+            Self::SignerUnavailable { reason } => write!(f, "signer unavailable: {reason}"),
+            Self::SignerRejected { reason } => write!(f, "signer rejected request: {reason}"),
+            Self::InvalidSignerOutput { reason } => {
+                write!(f, "signer returned invalid output: {reason}")
+            }
+            Self::AuthorizationExpired {
+                expiration_secs,
+                now_secs,
+            } => write!(
+                f,
+                "Blossom authorization expired at {expiration_secs}; current time is {now_secs}"
+            ),
+            Self::ClockMovedBackward {
+                created_at_secs,
+                now_secs,
+            } => write!(
+                f,
+                "clock moved backward after composition: created_at {created_at_secs}, current \
+                 time {now_secs}"
+            ),
+            Self::ClientBuild { reason } => {
+                write!(f, "Blossom HTTP client construction failed: {reason}")
+            }
+            Self::LocalHostNotAdmitted { host } => {
+                write!(f, "Blossom destination host {host:?} is not admitted")
+            }
+            Self::Network { detail } => write!(f, "Blossom transport failed: {detail}"),
+            Self::RedirectRefused { status } => {
+                write!(f, "Blossom redirect is refused (HTTP {status})")
+            }
+            Self::AuthRejected { status, reason } => write!(
+                f,
+                "Blossom server rejected authorization (HTTP {status}, reason {reason:?})"
+            ),
+            Self::ServerRejected { status, reason } => write!(
+                f,
+                "Blossom server rejected the upload (HTTP {status}, reason {reason:?})"
+            ),
+            Self::ServerError { status, reason } => {
+                write!(
+                    f,
+                    "Blossom server failed (HTTP {status}, reason {reason:?})"
+                )
+            }
+            Self::ResponseTooLarge { limit_bytes } => {
+                write!(f, "Blossom descriptor response exceeds {limit_bytes} bytes")
+            }
+            Self::DescriptorInvalid { error } => {
+                write!(f, "Blossom descriptor is invalid: {error:?}")
+            }
+            Self::Sha256Mismatch {
+                expected_sha256_hex,
+                returned_sha256_hex,
+            } => write!(
+                f,
+                "Blossom descriptor hash {returned_sha256_hex} does not match uploaded bytes \
+                 {expected_sha256_hex}"
+            ),
+            Self::EngineClosed => f.write_str("engine is closed"),
+            Self::Cancelled => f.write_str(
+                "Blossom upload was cancelled; if bytes were transmitted, remote storage is \
+                 unknown",
+            ),
+            Self::AlreadyConsumed => {
+                f.write_str("Blossom upload result was already delivered to a prior await")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FfiBlossomUploadFailure {}
+
+/// Mirror `nmp::BlossomUploadError` variant-for-variant. Total, so a new Rust
+/// variant fails to compile here rather than silently becoming a string.
+pub fn blossom_upload_failure(error: nmp::BlossomUploadError) -> FfiBlossomUploadFailure {
+    use nmp::BlossomUploadError as Source;
+    match error {
+        Source::InvalidServerUrl(error) => FfiBlossomUploadFailure::InvalidServerUrl {
+            error: server_url_error_to_ffi(error),
+        },
+        Source::EmptyContentType => FfiBlossomUploadFailure::EmptyContentType,
+        Source::AuthorizationWindow {
+            created_at_secs,
+            lifetime_secs,
+        } => FfiBlossomUploadFailure::AuthorizationWindow {
+            created_at_secs,
+            lifetime_secs,
+        },
+        Source::NoActiveSigner => FfiBlossomUploadFailure::NoActiveSigner,
+        Source::SignerUnavailable { reason } => {
+            FfiBlossomUploadFailure::SignerUnavailable { reason }
+        }
+        Source::SignerRejected { reason } => FfiBlossomUploadFailure::SignerRejected { reason },
+        Source::InvalidSignerOutput { reason } => {
+            FfiBlossomUploadFailure::InvalidSignerOutput { reason }
+        }
+        Source::AuthorizationExpired {
+            expiration_secs,
+            now_secs,
+        } => FfiBlossomUploadFailure::AuthorizationExpired {
+            expiration_secs,
+            now_secs,
+        },
+        Source::ClockMovedBackward {
+            created_at_secs,
+            now_secs,
+        } => FfiBlossomUploadFailure::ClockMovedBackward {
+            created_at_secs,
+            now_secs,
+        },
+        Source::ClientBuild { reason } => FfiBlossomUploadFailure::ClientBuild { reason },
+        Source::LocalHostNotAdmitted { host } => {
+            FfiBlossomUploadFailure::LocalHostNotAdmitted { host }
+        }
+        Source::Network { detail } => FfiBlossomUploadFailure::Network { detail },
+        Source::RedirectRefused { status } => FfiBlossomUploadFailure::RedirectRefused { status },
+        Source::AuthRejected { status, reason } => {
+            FfiBlossomUploadFailure::AuthRejected { status, reason }
+        }
+        Source::ServerRejected { status, reason } => {
+            FfiBlossomUploadFailure::ServerRejected { status, reason }
+        }
+        Source::ServerError { status, reason } => {
+            FfiBlossomUploadFailure::ServerError { status, reason }
+        }
+        Source::ResponseTooLarge { limit_bytes } => FfiBlossomUploadFailure::ResponseTooLarge {
+            limit_bytes: limit_bytes as u64,
+        },
+        Source::DescriptorInvalid(error) => FfiBlossomUploadFailure::DescriptorInvalid {
+            error: descriptor_error_to_ffi(error),
+        },
+        Source::Sha256Mismatch {
+            expected_sha256_hex,
+            returned_sha256_hex,
+        } => FfiBlossomUploadFailure::Sha256Mismatch {
+            expected_sha256_hex,
+            returned_sha256_hex,
+        },
+        Source::EngineClosed => FfiBlossomUploadFailure::EngineClosed,
+        Source::Cancelled => FfiBlossomUploadFailure::Cancelled,
+    }
+}
+
+/// One live engine-authorized upload. Await [`Self::uploaded`] once for the
+/// verified descriptor or a typed failure; [`Self::cancel`] withdraws only
+/// this operation.
+///
+/// The handle exposes no draft, hash, author, timestamp or signature -- there
+/// is nothing here for a native caller to inspect or substitute.
+#[derive(uniffi::Object)]
+pub struct NmpBlossomUploadHandle {
+    cancel: nmp::BlossomUploadCancel,
+    result: nmp::AsyncFifoReceiver<Result<nmp::UploadedAsset, nmp::BlossomUploadError>>,
+}
+
+impl std::fmt::Debug for NmpBlossomUploadHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NmpBlossomUploadHandle")
+    }
+}
+
+impl NmpBlossomUploadHandle {
+    pub(crate) fn new(operation: nmp::BlossomUploadOperation) -> Arc<Self> {
+        let (cancel, result) = operation.into_async();
+        Arc::new(Self { cancel, result })
+    }
+}
+
+#[uniffi::export]
+impl NmpBlossomUploadHandle {
+    /// Await the one-shot outcome: the integrity-verified BUD-02 descriptor,
+    /// or a typed [`FfiBlossomUploadFailure`]. A second await returns
+    /// [`FfiBlossomUploadFailure::AlreadyConsumed`].
+    pub async fn uploaded(&self) -> Result<FfiBlobDescriptor, FfiBlossomUploadFailure> {
+        match self.result.next().await {
+            Ok(Some(Ok(asset))) => Ok(descriptor_to_ffi(asset.descriptor().clone())),
+            Ok(Some(Err(error))) => Err(blossom_upload_failure(error)),
+            Ok(None) | Err(_) => Err(FfiBlossomUploadFailure::AlreadyConsumed),
+        }
+    }
+
+    /// Withdraw this upload. Idempotent; safe after completion. After the
+    /// request has been transmitted this is an observation gap, not a
+    /// rollback.
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
+}
+
+impl Drop for NmpBlossomUploadHandle {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1434,6 +1741,169 @@ mod tests {
 
     fn hex_of(bytes: &[u8]) -> String {
         Sha256Hash::of(bytes).to_hex()
+    }
+
+    /// #971's FFI falsifier: "error mapping covers every signer/auth/
+    /// transport/integrity variant without flattening them to strings."
+    ///
+    /// Every `nmp::BlossomUploadError` is mapped ONCE, to its own variant,
+    /// carrying its own payload. The `match` in this test is exhaustive over
+    /// the Rust enum, so adding a Rust variant without projecting it fails to
+    /// COMPILE here rather than silently becoming a message string.
+    #[test]
+    fn every_engine_upload_failure_crosses_as_its_own_variant_with_its_own_payload() {
+        use nmp::BlossomUploadError as Source;
+        let sample = [
+            Source::InvalidServerUrl(nmp::ServerUrlError::MissingHost),
+            Source::EmptyContentType,
+            Source::AuthorizationWindow {
+                created_at_secs: 7,
+                lifetime_secs: 300,
+            },
+            Source::NoActiveSigner,
+            Source::SignerUnavailable {
+                reason: "away".to_string(),
+            },
+            Source::SignerRejected {
+                reason: "no".to_string(),
+            },
+            Source::InvalidSignerOutput {
+                reason: "forged".to_string(),
+            },
+            Source::AuthorizationExpired {
+                expiration_secs: 11,
+                now_secs: 12,
+            },
+            Source::ClockMovedBackward {
+                created_at_secs: 12,
+                now_secs: 11,
+            },
+            Source::ClientBuild {
+                reason: "dns".to_string(),
+            },
+            Source::LocalHostNotAdmitted {
+                host: "127.0.0.1".to_string(),
+            },
+            Source::Network {
+                detail: "reset".to_string(),
+            },
+            Source::RedirectRefused { status: 302 },
+            Source::AuthRejected {
+                status: 401,
+                reason: Some("nope".to_string()),
+            },
+            Source::ServerRejected {
+                status: 409,
+                reason: None,
+            },
+            Source::ServerError {
+                status: 503,
+                reason: None,
+            },
+            Source::ResponseTooLarge {
+                limit_bytes: 65_536,
+            },
+            Source::DescriptorInvalid(nmp::DescriptorError::MissingUrl),
+            Source::Sha256Mismatch {
+                expected_sha256_hex: hex_of(b"a"),
+                returned_sha256_hex: hex_of(b"b"),
+            },
+            Source::EngineClosed,
+            Source::Cancelled,
+        ];
+
+        let mut crossed = Vec::new();
+        for error in sample {
+            // Exhaustive on purpose: a new Rust variant breaks this arm list.
+            let expected = match &error {
+                Source::InvalidServerUrl(_) => FfiBlossomUploadFailure::InvalidServerUrl {
+                    error: FfiBlossomServerUrlError::MissingHost,
+                },
+                Source::EmptyContentType => FfiBlossomUploadFailure::EmptyContentType,
+                Source::AuthorizationWindow { .. } => {
+                    FfiBlossomUploadFailure::AuthorizationWindow {
+                        created_at_secs: 7,
+                        lifetime_secs: 300,
+                    }
+                }
+                Source::NoActiveSigner => FfiBlossomUploadFailure::NoActiveSigner,
+                Source::SignerUnavailable { .. } => FfiBlossomUploadFailure::SignerUnavailable {
+                    reason: "away".to_string(),
+                },
+                Source::SignerRejected { .. } => FfiBlossomUploadFailure::SignerRejected {
+                    reason: "no".to_string(),
+                },
+                Source::InvalidSignerOutput { .. } => {
+                    FfiBlossomUploadFailure::InvalidSignerOutput {
+                        reason: "forged".to_string(),
+                    }
+                }
+                Source::AuthorizationExpired { .. } => {
+                    FfiBlossomUploadFailure::AuthorizationExpired {
+                        expiration_secs: 11,
+                        now_secs: 12,
+                    }
+                }
+                Source::ClockMovedBackward { .. } => FfiBlossomUploadFailure::ClockMovedBackward {
+                    created_at_secs: 12,
+                    now_secs: 11,
+                },
+                Source::ClientBuild { .. } => FfiBlossomUploadFailure::ClientBuild {
+                    reason: "dns".to_string(),
+                },
+                Source::LocalHostNotAdmitted { .. } => {
+                    FfiBlossomUploadFailure::LocalHostNotAdmitted {
+                        host: "127.0.0.1".to_string(),
+                    }
+                }
+                Source::Network { .. } => FfiBlossomUploadFailure::Network {
+                    detail: "reset".to_string(),
+                },
+                Source::RedirectRefused { .. } => {
+                    FfiBlossomUploadFailure::RedirectRefused { status: 302 }
+                }
+                Source::AuthRejected { .. } => FfiBlossomUploadFailure::AuthRejected {
+                    status: 401,
+                    reason: Some("nope".to_string()),
+                },
+                Source::ServerRejected { .. } => FfiBlossomUploadFailure::ServerRejected {
+                    status: 409,
+                    reason: None,
+                },
+                Source::ServerError { .. } => FfiBlossomUploadFailure::ServerError {
+                    status: 503,
+                    reason: None,
+                },
+                Source::ResponseTooLarge { .. } => FfiBlossomUploadFailure::ResponseTooLarge {
+                    limit_bytes: 65_536,
+                },
+                Source::DescriptorInvalid(_) => FfiBlossomUploadFailure::DescriptorInvalid {
+                    error: FfiBlossomDescriptorError::MissingUrl,
+                },
+                Source::Sha256Mismatch { .. } => FfiBlossomUploadFailure::Sha256Mismatch {
+                    expected_sha256_hex: hex_of(b"a"),
+                    returned_sha256_hex: hex_of(b"b"),
+                },
+                Source::EngineClosed => FfiBlossomUploadFailure::EngineClosed,
+                Source::Cancelled => FfiBlossomUploadFailure::Cancelled,
+            };
+            let actual = blossom_upload_failure(error);
+            assert_eq!(actual, expected);
+            crossed.push(std::mem::discriminant(&actual));
+        }
+
+        let distinct: std::collections::BTreeSet<_> = crossed
+            .iter()
+            .map(|discriminant| format!("{discriminant:?}"))
+            .collect();
+        assert_eq!(
+            distinct.len(),
+            crossed.len(),
+            "two Rust failures collapsed onto one FFI variant"
+        );
+        // `AlreadyConsumed` is the boundary's own one-shot rule and has no
+        // Rust counterpart, so the FFI enum is exactly one larger.
+        assert_eq!(crossed.len(), 21);
     }
 
     /// A signed authorization for `verb` over `blob`, built through the

@@ -57,6 +57,14 @@ struct Inner {
     handle: Handle,
     engine_thread: EngineThread,
     active_pubkey: Option<PublicKey>,
+    /// The operator's local-host opt-in, in `nmp-network-policy`'s normalized
+    /// bare-host form. Held here because the `RelayAdmissionPolicy` it comes
+    /// from is moved into `EngineThread` at spawn and is not readable back
+    /// out, and [`crate::BlossomUploadRequest`] has to admit a Blossom server
+    /// on exactly the same terms this engine admits a relay: one operator
+    /// decision, not two. Config, not a scheduler -- nothing here is
+    /// per-operation state.
+    allowed_local_hosts: std::collections::BTreeSet<String>,
 }
 
 /// The one supported Rust product surface (canonical-facade-52-plan.md §1).
@@ -283,6 +291,7 @@ impl Engine {
     pub fn new(config: EngineConfig) -> Result<Self, EngineError> {
         let directory = build_directory(&config)?;
         let admission = build_admission_policy(&config);
+        let allowed_local_hosts = admission.destination_policy().allowed_local_hosts().clone();
         // #20: one effective ceiling is threaded to both the whole-demand
         // compiler and transport. EngineThread normalizes legacy zero to the
         // finite default and resolves any mechanism-level mismatch downward.
@@ -335,6 +344,7 @@ impl Engine {
                 handle,
                 engine_thread,
                 active_pubkey: None,
+                allowed_local_hosts,
             })),
         })
     }
@@ -364,6 +374,7 @@ impl Engine {
         S: nmp_store::EventStore + Send + 'static,
         D: nmp_router::RelayDirectory + Send + 'static,
     {
+        let allowed_local_hosts = admission.destination_policy().allowed_local_hosts().clone();
         let (engine_thread, handle) =
             EngineThread::spawn(store, directory, cap, pool_config, admission)
                 .map_err(EngineError::from_start_error)?;
@@ -372,6 +383,7 @@ impl Engine {
                 handle,
                 engine_thread,
                 active_pubkey: None,
+                allowed_local_hosts,
             })),
         })
     }
@@ -423,6 +435,37 @@ impl Engine {
             .unwrap_or_else(|poison| poison.into_inner());
         match &*guard {
             Some(inner) => Ok(inner.engine_thread.clock()),
+            None => Err(EngineError::EngineClosed),
+        }
+    }
+
+    /// Freeze everything one engine-authorized Blossom upload (#971) needs
+    /// under the SAME lifecycle mutex that account switching and shutdown
+    /// take: the active author, the signer door, the adapter runtime the
+    /// transport task runs on, the engine's own wall clock, and the operator's
+    /// local-host opt-in.
+    ///
+    /// One door rather than five getters because the whole point is that the
+    /// author, the clock reading and the signer that will be asked to sign
+    /// belong to one instant. Two separate calls could straddle a
+    /// `set_active_account`, and the upload would then authorize one identity
+    /// and be signed by another.
+    pub(crate) fn with_blossom_upload_context<T>(
+        &self,
+        operation: impl FnOnce(crate::blossom_upload::BlossomUploadContext<'_>) -> T,
+    ) -> Result<T, EngineError> {
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        match &*guard {
+            Some(inner) => Ok(operation(crate::blossom_upload::BlossomUploadContext {
+                author: inner.active_pubkey,
+                handle: &inner.handle,
+                runtime: inner.engine_thread.adapter_runtime(),
+                clock: inner.engine_thread.clock(),
+                allowed_local_hosts: inner.allowed_local_hosts.clone(),
+            })),
             None => Err(EngineError::EngineClosed),
         }
     }
@@ -917,6 +960,7 @@ impl Engine {
             handle,
             engine_thread,
             active_pubkey: _,
+            allowed_local_hosts: _,
         }) = inner
         {
             handle.shutdown();

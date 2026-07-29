@@ -47,9 +47,14 @@
 //! dependency direction -- nmp-media depends on those crates and neither
 //! re-implements nor re-exports their builders/codecs.
 //!
-//! The FFI/Swift/Kotlin projection of this seam is a SEPARATE later unit
-//! (batched with the nip68 projection, compile-gated) -- see
-//! `docs/known-gaps.md`.
+//! # Projection (#971)
+//! The PREPARE + UPLOAD stages now have one supported native projection:
+//! `nmp::Engine::upload_blossom` composes [`prepare`] and
+//! [`PreparedUpload::upload`] with the governed engine signer into a single
+//! call, projected through `nmp-ffi`/Swift/Kotlin. That operation is still the
+//! STANDALONE upload described above -- it adds no durability, no receipt and
+//! no scheduler, so #562 stays rejected. The COMPOSE stage's projection
+//! remains a separate later unit -- see `docs/known-gaps.md`.
 
 mod compose;
 mod prepare;

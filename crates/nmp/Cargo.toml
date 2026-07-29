@@ -45,6 +45,15 @@ required-features = ["bench-instrumentation"]
 nostr.workspace = true
 nmp-grammar.workspace = true
 nmp-nip22 = { workspace = true, optional = true }
+# #971: the one-shot engine-authorized Blossom upload. Unconditional, and
+# deliberately NOT behind a cargo feature: a feature that hides an API from
+# `docs/surface/*.txt` is new public surface that surface-governance cannot
+# see, which is a governance dodge whatever the intent. This composes the two
+# crates that already own the problem -- `nmp-media` binds the exact bytes to
+# the exact authorization, `nmp-blossom` owns kind:24242 and the hardened
+# transport -- and reimplements neither.
+nmp-blossom.workspace = true
+nmp-media.workspace = true
 # #977: the NIP-29 `Group` door. The dependency runs THIS WAY ROUND and
 # only this way round -- `Group` is pure composition over `nostr` +
 # `nmp-grammar`, and `crate::nip29`'s extension trait is what binds it to
@@ -127,6 +136,12 @@ libc = "0.2"
 tungstenite = "0.29"
 serde = { version = "1", features = ["derive"] }
 url = "2"
+# #971: the engine-authorized Blossom upload falsifiers decode the BUD-11
+# `Authorization: Nostr <base64url>` header the operation put on the wire and
+# hash the exact captured request body, so they read the header the same way a
+# real server would rather than trusting NMP's own account of it.
+base64.workspace = true
+nmp-asset.workspace = true
 # #108: proves nmp-nip51's active_account_demand() reroots/reconstructs
 # correctly against a REAL engine (SetActivePubkey) -- a cross-crate
 # integration proof, not something nmp-nip51 itself (deliberately
