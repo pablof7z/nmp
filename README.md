@@ -134,7 +134,7 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 
 **Platforms**
 - ✅ Rust core (the source of truth)
-- 🧪 Swift SDK — qualified on the macOS host; XCFramework simulator slices compile, iOS-Simulator runtime target [pending](https://github.com/pablof7z/nmp/issues/465)
+- 🧪 Swift SDK — qualified on the macOS host; XCFramework simulator slices compile, and the repository-owned Falsifier target runs NIP-11 hostname qualification on a real iOS Simulator ([#465](https://github.com/pablof7z/nmp/issues/465), [#601](https://github.com/pablof7z/nmp/pull/601)). Physical-device qualification remains separate.
 - 🧪 Kotlin SDK — desktop-JVM projection; **no Android AAR** qualified yet
 
 ## Status / maturity
