@@ -212,6 +212,15 @@ magnitude inside the ~20-subscription ceiling. Improving it means changing the
 fixed point, which a differential oracle pins byte-for-byte against its naive
 twin — separate work, not a tidy-up.
 
+The scale falsifiers divide responsibility without making the BDD runner a
+load generator (#994). The router mechanism test still feeds all 1200
+singleton atoms and pins the exact `[256, 256, 256, 432]` result. The BDD
+scenario carries the same 1200 values through 21 independent app watches:
+without structural union that exceeds its relay ceiling of 20, while the
+passing path must still put every value on the wire and keep each filter at or
+below 500. This avoids 1200 synchronous whole-plan recompiles while preserving
+the acceptance kill.
+
 ### 3.4 The tag axis had no rule — CLOSED
 
 Until 2026-07-27 nothing in the registry merged on tags. `AuthorUnion` and

@@ -29,9 +29,37 @@ use nmp_test_support::relays::WireRecord;
 use super::budgets::{WIRE_QUIET, WIRE_SETTLE};
 use super::observe::FeedState;
 use super::queries::{
-    authored_note_query, my_group_state_query, tagged_note_query, WatchShape, GROUP_ADMINS_KIND,
+    authored_note_query, my_group_state_query, tagged_note_query, tagged_note_query_values,
+    WatchShape, GROUP_ADMINS_KIND,
 };
 use super::NmpWorld;
+
+/// How many independent app watches the scale step splits its values across.
+///
+/// One over the 20-subscription relay ceiling the collapse scenario asserts,
+/// and deliberately so: that is the whole falsifier. Remove the structural
+/// union and these 21 watches reach the wire as 21 subscriptions, which is
+/// already too many, so the scenario fails without needing 1,200 of them.
+const UNCOALESCED_CATALOG_WATCHES: usize = 21;
+
+/// Deal `value-0001..value-{n}` round-robin into [`UNCOALESCED_CATALOG_WATCHES`]
+/// batches (fewer, if `n` is smaller than that).
+///
+/// Round-robin rather than contiguous runs so no batch is a naturally
+/// compact range: the coalescer must union genuinely interleaved value sets,
+/// as it would for a catalog an app discovered in arbitrary order.
+fn catalog_value_batches(n: usize) -> Vec<BTreeSet<String>> {
+    let batch_count = n.min(UNCOALESCED_CATALOG_WATCHES);
+    if batch_count == 0 {
+        return Vec::new();
+    }
+
+    let mut batches = vec![BTreeSet::new(); batch_count];
+    for i in 1..=n {
+        batches[(i - 1) % batch_count].insert(format!("value-{i:04}"));
+    }
+    batches
+}
 
 impl NmpWorld {
     // ---- wire subscription aggregation --------------------------------
@@ -91,11 +119,30 @@ impl NmpWorld {
 
     /// `When I watch for notes tagged <tag> as <n> different values` -- the
     /// scale shape (a catalog of groups, a directory of channels), where the
-    /// per-value fan-out is the difference between one relay connection
-    /// working and hitting its concurrent-subscription ceiling.
+    /// fan-out is the difference between one relay connection working and
+    /// hitting its concurrent-subscription ceiling.
+    ///
+    /// The scale scenario needs 1,200 VALUES but not 1,200 synchronous app
+    /// handles. Opening each singleton separately forced 1,200 whole-plan
+    /// recompiles and made the test harness itself superlinear (#994), even
+    /// though the router coalesces the identical 1,200-atom final bag in
+    /// milliseconds. Twenty-one independent batches preserve the falsifier:
+    /// without coalescing they exceed the scenario's 20-subscription relay
+    /// ceiling; with coalescing every value must still survive into filters
+    /// bounded at 500 values apiece.
     pub async fn watch_n_tag_values(&mut self, tag: char, n: usize) {
-        for i in 1..=n {
-            self.watch_tag_value(tag, &format!("value-{i:04}")).await;
+        self.ensure_started().await;
+        let url = self.watch_relay_url();
+        for (index, values) in catalog_value_batches(n).into_iter().enumerate() {
+            self.watched_tag_values
+                .entry(tag)
+                .or_default()
+                .extend(values.iter().cloned());
+            self.open_watch(
+                format!("{tag}=catalog-batch-{index:02}"),
+                tagged_note_query_values(&url, tag, values, WatchShape::default()),
+            )
+            .await;
         }
     }
 
@@ -287,5 +334,30 @@ impl NmpWorld {
             .get(name)
             .unwrap_or_else(|| panic!("nmp-bdd: unknown relay {name:?}"))
             .wire_record()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The batching is only legitimate if it is invisible to the contract:
+    /// the same 1,200 values, and still one more watch than the relay ceiling
+    /// the scenario asserts.
+    #[test]
+    fn catalog_batches_preserve_every_value_and_exceed_the_uncoalesced_relay_ceiling() {
+        let batches = catalog_value_batches(1_200);
+        let values = batches
+            .iter()
+            .flat_map(|batch| batch.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        let expected = (1..=1_200)
+            .map(|i| format!("value-{i:04}"))
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(batches.len(), UNCOALESCED_CATALOG_WATCHES);
+        assert!(batches.len() > 20);
+        assert!(batches.iter().all(|batch| !batch.is_empty()));
+        assert_eq!(values, expected);
     }
 }
