@@ -11,14 +11,14 @@ Feature: A group is an identity, not a subscription
     Given the group "photographers" hosted by relay "wss://relay.groups.example"
     And I am logged in as "a1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1ce"
 
-  @designed @nip29
+  @nip29
   Scenario: Constructing a group contacts nothing
     When I construct the group and do nothing else
     Then no relay received a connection
     And no subscription exists
     And no query was sent to "wss://relay.groups.example"
 
-  @designed @nip29
+  @nip29
   Scenario: A join request is publishable with no subscription at all
     Given I have never observed anything from this group
     When I publish a join request through the group
@@ -26,7 +26,7 @@ Feature: A group is an identity, not a subscription
     And no subscription existed at any point during that publication
     And the publication did not require a read to succeed first
 
-  @designed @nip29
+  @nip29
   Scenario: I can write into a group whose content I am not allowed to read
     Given relay "wss://relay.groups.example" refuses my reads until I am a member
     And a filter selecting kind 9
@@ -36,7 +36,7 @@ Feature: A group is an identity, not a subscription
     And the query reports the refused read as a source fact
     And the query does not report the group as empty
 
-  @designed @nip29
+  @nip29
   Scenario: One group instance serves reads and writes across the room's lifetime
     Given a filter selecting kind 9
     When I observe a live query built from the group's demand for that filter

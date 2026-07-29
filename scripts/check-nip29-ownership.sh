@@ -9,8 +9,9 @@ cd "$ROOT"
 fail() { echo "nip29-ownership: $*" >&2; exit 1; }
 
 required=(
-  crates/nmp-nip29/src/publication.rs
+  crates/nmp-nip29/src/group.rs
   crates/nmp-nip29/src/demand.rs
+  crates/nmp/src/group.rs
   crates/nmp-nipc7/src/lib.rs
   crates/nmp-ffi/src/nip29.rs
   Packages/NMP/Sources/NMP/NIP29.swift
@@ -61,13 +62,57 @@ if grep -nE 'GroupTimelineEvidence|PREVIOUS_MAX|from_events|Tag::parse\(\["previ
   fail "caller-mintable previous authority reappeared"
 fi
 
-grep -qF 'pub fn contextualize_group_event(' crates/nmp-nip29/src/publication.rs ||
-  fail "complete-draft NIP-29 contextualization seam is missing"
+# #977 revises this block. It used to require the free function
+# `contextualize_group_event` and the carrier struct `GroupPublication` in
+# `crates/nmp-nip29/src/publication.rs`. Both are DELETED: they were the
+# build-but-cannot-deliver half of the old world -- nothing in the workspace
+# could route what they returned -- and their duties moved inside `Group`,
+# which mints the `h` row AND the `Explicit([host])` route as one closed
+# value (`docs/internals/nip29/group-publication.md` §9).
+#
+# What the gate pins now is the door, not the deleted seam: the `Group` type,
+# its two write-intent constructors (unsigned-contextualize and
+# presigned-validate), and BOTH PROPERTIES the old falsifiers proved, carried
+# over verbatim under their own names.
+grep -qF 'pub struct Group {' crates/nmp-nip29/src/group.rs ||
+  fail "the NIP-29 Group door is missing"
+grep -qF 'pub fn write_intent(' crates/nmp-nip29/src/group.rs ||
+  fail "the unsigned group write-intent constructor is missing"
+grep -qF 'pub fn signed_write_intent(' crates/nmp-nip29/src/group.rs ||
+  fail "the pre-signed group write-intent constructor is missing"
 grep -qF 'draft_kind_and_schema_survive_except_for_appended_h' \
-  crates/nmp-nip29/src/publication.rs ||
+  crates/nmp-nip29/src/group.rs ||
   fail "draft schema preservation falsifier is missing"
-grep -qF 'publication_never_synthesizes_previous' crates/nmp-nip29/src/publication.rs ||
+grep -qF 'publication_never_synthesizes_previous' crates/nmp-nip29/src/group.rs ||
   fail "no-previous falsifier is missing"
+
+# The tombstones themselves. #977 deleted `contextualize_group_event` and
+# `GroupPublication` outright -- no alias, no deprecation window
+# (`docs/internals/conventions/no-backwards-compatibility.md`) -- so neither
+# spelling may return anywhere a caller could reach, including in a test that
+# asserts one stays gone.
+tombstones=$(grep -RInE 'contextualize_group_event|GroupPublication' \
+  crates/ Packages/ skills/ || true)
+if [[ -n $tombstones ]]; then
+  printf '%s\n' "$tombstones"
+  fail "a deleted NIP-29 publication spelling reappeared"
+fi
+
+# `Group` mints a read DEMAND and nothing else: the one read door is
+# `Engine::observe`, and a group-shaped stream would be the read-side twin of
+# the `publish_composed` second write lifecycle #838 deleted.
+if grep -nE 'fn observe|fn subscribe|fn stream' \
+  crates/nmp-nip29/src/*.rs crates/nmp/src/group.rs; then
+  fail "a second read door for groups appeared; LiveQuery/Engine::observe is the one"
+fi
+
+# One publish door. The group binding composes an intent and hands it over;
+# it never grows a write lifecycle of its own.
+grep -qF 'engine.publish(intent)' crates/nmp/src/group.rs ||
+  fail "the group binding no longer routes through the one publish door"
+if grep -nE 'publish_composed' crates/nmp/src/group.rs; then
+  fail "a second write lifecycle for groups appeared"
+fi
 
 # C7 itself owns the exact kind and q reply schema, independently of NIP-29.
 grep -qF 'pub const CHAT_KIND: u16 = 9;' crates/nmp-nipc7/src/lib.rs ||

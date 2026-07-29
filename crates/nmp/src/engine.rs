@@ -363,6 +363,29 @@ impl Engine {
         })
     }
 
+    /// The read side of [`Self::from_parts`]'s hatch: the live `Handle` this
+    /// engine drives, cloned out.
+    ///
+    /// Same gating and same justification as the constructor -- `#[doc(hidden)]`
+    /// and behind `unstable-mechanism`, an in-workspace/test exception rather
+    /// than an app contract. `nmp-bdd` needs it because it drives ONE engine
+    /// through two surfaces at once: the product verbs a scenario is about
+    /// (`Engine::publish`, and the group door built on it), and the raw delta /
+    /// diagnostics channels a `Then` step has to FOLD to assert anything (see
+    /// that crate's `world::observe`). Rebuilding those accumulators on top of
+    /// `Subscription` would put the thing under test between the harness and
+    /// its own witness.
+    ///
+    /// Escaping the serialized lifecycle gate is the cost: a `Handle` taken
+    /// here outlives a later [`Self::shutdown`] and is the caller's to stop
+    /// using. That is acceptable for a fixture that owns both ends and
+    /// unacceptable for an app, which is exactly what the gate expresses.
+    #[cfg(feature = "unstable-mechanism")]
+    #[doc(hidden)]
+    pub fn mechanism_handle(&self) -> Result<Handle, EngineError> {
+        self.with_handle(Handle::clone)
+    }
+
     /// Run `f` against the live `Handle` while holding `inner`'s lock for
     /// the duration of the call -- see this module's doc for why that,
     /// rather than cloning the `Handle` and releasing the lock first, is

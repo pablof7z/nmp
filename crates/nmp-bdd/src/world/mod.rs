@@ -40,6 +40,15 @@
 //!   when they answer, and who was asked. Distinct from `identity` because
 //!   a capability may arrive minutes after the identity was frozen, and the
 //!   gap between them is what `awaiting-signer.feature` is about.
+//! - `group_fixtures` -- the event a scenario hands the group door: an
+//!   unsigned draft, or one signed earlier and published unchanged.
+//! - `group_surface` -- what the group door DECLARES, and what the NIP-29
+//!   ownership gate says about it: the questions no run can answer.
+//! - `groups` -- the NIP-29 `Group` door: staging a group identity, reading
+//!   through it, publishing through it, and the wire/receipt facts a group
+//!   `Then` reads. Its own module for the same reason `watches` is: a group
+//!   scenario asks what reached ONE host and what the delivered event
+//!   literally was, which needs bookkeeping no feed step wants.
 //! - `watches` -- watching one named relay directly, which is a separate
 //!   concern from the feed: it exists to observe what NMP puts on a SOCKET,
 //!   so it owns the watch bookkeeping, the group fixtures that feed it, and
@@ -51,6 +60,9 @@
 
 mod actions;
 mod budgets;
+mod group_fixtures;
+mod group_surface;
+mod groups;
 mod identity;
 mod observe;
 mod queries;
@@ -60,12 +72,13 @@ mod watches;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use nostr::{Keys, PublicKey};
+use nostr::{EventId, Keys, PublicKey};
 
-use nmp::mechanism::runtime::{EngineThread, Handle};
+use nmp::mechanism::runtime::Handle;
+use nmp::Engine;
 use nmp_local_signer::LocalKeySigner;
 
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
@@ -75,6 +88,8 @@ use self::signers::SignerGate;
 use self::staging::{PendingContactList, PendingNote};
 
 pub use self::budgets::{EVENTUALLY, NEVER, RECONNECT, WIRE_QUIET, WIRE_SETTLE};
+pub use self::group_surface::GroupSurface;
+pub use self::groups::{parse_kind_list, GroupCall};
 pub use self::queries::{
     authored_note_query, my_follows_query, my_group_state_query, tagged_note_query, WatchShape,
 };
@@ -108,6 +123,11 @@ struct CountingSigner {
     /// was asked to sign it" is a claim about which signer was approached,
     /// and the total above cannot answer it.
     asked_by: Arc<Mutex<BTreeMap<PublicKey, usize>>>,
+    /// `Given signing fails for this account`. A REFUSAL, not an outage:
+    /// `SignerError::Rejected` is terminal for the accepted write, which is
+    /// what makes "the failure is reported as a signing failure, not as a
+    /// routing failure" a distinguishable claim.
+    fails: Arc<AtomicBool>,
 }
 
 impl nmp_signer::SigningCapability for CountingSigner {
@@ -125,6 +145,11 @@ impl nmp_signer::SigningCapability for CountingSigner {
     ) -> nmp_signer::SignerOp<nmp_signer::SignerSignedEvent> {
         self.asked.fetch_add(1, Ordering::SeqCst);
         NmpWorld::count_ask(&self.asked_by, self.pubkey);
+        if self.fails.load(Ordering::SeqCst) {
+            return nmp_signer::SignerOp::err(nmp_signer::SignerError::Rejected(
+                "nmp-bdd: signing is configured to fail for this account".to_string(),
+            ));
+        }
         self.inner.sign(unsigned)
     }
 }
@@ -154,6 +179,8 @@ pub struct NmpWorld {
     signer_asked: Arc<AtomicUsize>,
     /// The same, per key -- see [`CountingSigner::asked_by`].
     signer_asked_by: Arc<Mutex<BTreeMap<PublicKey, usize>>>,
+    /// Whether every registered signer refuses (`Given signing fails ...`).
+    signer_fails: Arc<AtomicBool>,
     /// Groups I administer, staged as kind:39001 fixtures at the watched
     /// relay (see [`NmpWorld::stage_administered_groups`]).
     pending_groups: Vec<String>,
@@ -222,7 +249,7 @@ pub struct NmpWorld {
     /// The same, for the author-axis control.
     watched_authors: BTreeSet<String>,
 
-    engine: Option<EngineThread>,
+    engine: Option<Engine>,
     handle: Option<Handle>,
     feed: Option<FeedState>,
     last_receipt: Option<ReceiptState>,
@@ -240,6 +267,43 @@ pub struct NmpWorld {
     /// And how many EVENTs each relay had already admitted, so an
     /// unexplained contact-count move can name the KINDS that landed.
     admitted_snapshot: HashMap<String, usize>,
+
+    // ---- NIP-29 groups (features/groups/) -------------------------------
+    /// Staged group identities: group id -> the relay name hosting it. The
+    /// `nip29::Group` VALUE cannot exist yet, because a scripted relay has no
+    /// URL until it is bound.
+    group_hosts: BTreeMap<String, String>,
+    /// One `nip29::Group` per id, built on first use and NEVER rebuilt: this
+    /// map's insert count is what "no group had to be reconstructed" reads.
+    group_values: BTreeMap<String, nmp::nip29::Group>,
+    group_builds: BTreeMap<String, usize>,
+    /// The group an unqualified "through the group" means: the first staged.
+    default_group: Option<String>,
+    /// App-supplied read selections, in the order the scenario named them.
+    staged_filters: Vec<nmp_grammar::Filter>,
+    /// The unsigned draft a scenario staged, kept verbatim so a `Then` can
+    /// compare the delivered event against what was actually supplied.
+    staged_draft: Option<nmp_grammar::EventBuilder>,
+    /// The already-signed event a scenario staged, and the parts it is built
+    /// from while the scenario is still adding tags to it.
+    staged_signed_parts: Option<group_fixtures::PendingSignedEvent>,
+    staged_signed_event: Option<nostr::Event>,
+    /// Scenario-visible id LABELS bound to the real ids they stand for. A
+    /// `.feature` cannot spell a real event id -- one is only known after
+    /// signing -- so `has id "9f2c..."` BINDS that word to the id the event
+    /// actually got, and every later step naming it compares against the
+    /// binding. What the scenario asserts is identity preservation, which is
+    /// exactly what a binding proves.
+    id_labels: BTreeMap<String, EventId>,
+    /// The typed refusal the last group publication produced, if any.
+    group_refusal: Option<nmp::nip29::GroupContextError>,
+    /// What the STEP itself named on the last group call.
+    group_call: GroupCall,
+    /// Relays that are bound (so they have a URL) and then severed, so a
+    /// connection to them is refused: `Given relay "R" cannot connect`.
+    unreachable_relays: BTreeSet<String>,
+    /// What `scripts/check-nip29-ownership.sh` said, and whether it passed.
+    gate_outcome: Option<(bool, String)>,
 }
 
 impl std::fmt::Debug for NmpWorld {
@@ -277,6 +341,7 @@ impl NmpWorld {
             pubkey: keys.public_key(),
             asked: Arc::clone(&self.signer_asked),
             asked_by: Arc::clone(&self.signer_asked_by),
+            fails: Arc::clone(&self.signer_fails),
         }
     }
 }

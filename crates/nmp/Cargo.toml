@@ -45,6 +45,12 @@ required-features = ["bench-instrumentation"]
 nostr.workspace = true
 nmp-grammar.workspace = true
 nmp-nip22 = { workspace = true, optional = true }
+# #977: the NIP-29 `Group` door. The dependency runs THIS WAY ROUND and
+# only this way round -- `Group` is pure composition over `nostr` +
+# `nmp-grammar`, and `crate::nip29`'s extension trait is what binds it to
+# the one publish door. `scripts/check-nip29-ownership.sh` fails the build
+# if `crates/nmp-nip29/Cargo.toml` ever gains the reverse edge.
+nmp-nip29.workspace = true
 nmp-signer.workspace = true
 nmp-local-signer.workspace = true
 nmp-store.workspace = true

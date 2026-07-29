@@ -371,3 +371,8 @@ async fn cancel_that_write(w: &mut NmpWorld) {
 async fn app_decodes_pasted_npub(w: &mut NmpWorld) {
     w.decode_pasted_npub();
 }
+
+// The group family lives next door for the same reason `then/` is a directory:
+// this catalog is shared by every feature, and one family's whole vocabulary is
+// readable on its own only when it has a name. See `when::groups`.
+mod groups;

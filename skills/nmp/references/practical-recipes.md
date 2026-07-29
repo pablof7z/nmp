@@ -72,11 +72,14 @@ Rules:
 - Content kinds are selected by their real schema owners/app composition;
   NIP-29 has no fixed `[9,30315]` catalog.
 - Sort the accumulated rows in the app. Preserve each row's source proof and the query evidence.
-- Direct Rust may build a complete foreign draft, then call
-  `nmp_nip29::contextualize_group_event`; NIP-29 adds only `h` and retains the
-  host. It emits no `previous`.
-- No engine/native NIP-29 group-publication operation is shipped yet. Do not
-  recreate the deleted composer from raw tags or generic routing.
+- Direct Rust holds a `nip29::Group` for the room's whole lifetime and
+  publishes through it: `group.publish(&engine, builder)` appends the one `h`
+  row before signing and routes explicitly to the host. It emits no
+  `previous`, and a draft that arrives carrying `h` or `previous` is a typed
+  refusal.
+- The app never names the host on a write, never spells a routing value, and
+  never touches `h`. Do not hand-assemble a group write from raw tags plus a
+  routing value.
 
 For rich rendering, use Swift `NMPContent` resources or Kotlin `NMPContentClient(engine).session(...) -> NostrContentSession` for only a bounded visible-plus-prefetch window keyed by stable event id. Session policy limits are per session, not engine-global. Enforce a separate aggregate app permit pool before claiming a distinct target: use the reference-demand plan's `1 + helpers.count` as that target's query cost (one canonical query plus its helper queries), and cap the number of open row sessions independently. `claim(referenceID:)` in Swift / `claim(referenceId)` in Kotlin accepts an occurrence id from that session's parsed document and may return `nil`/`null`; it is not a row id or target key. Record the permits with the claim, then cancel/close claims and release their permits before stopping/closing the row's session on eviction.
 
