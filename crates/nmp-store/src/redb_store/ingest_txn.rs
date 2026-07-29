@@ -84,10 +84,9 @@ impl GovernedWrite {
         crash_if_postings("postings-before-commit");
         #[cfg(feature = "bench-instrumentation")]
         let commit_started = std::time::Instant::now();
-        let committed = self.write_txn.commit().map_err(persist_err);
+        self.write_txn.commit().map_err(persist_err)?;
         #[cfg(feature = "bench-instrumentation")]
         crate::ingest_attribution::commit(commit_started.elapsed());
-        committed?;
         #[cfg(test)]
         crash_if_postings("postings-after-commit");
         Ok(prepared)
