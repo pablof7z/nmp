@@ -1,7 +1,11 @@
-//! `nmp-nip29` -- NIP-29 group context over an explicitly selected host.
-//! This crate defines neither kind:10009's schema (owned exclusively by
-//! `nmp-nip51`, which this crate does not depend on at all -- #858) nor the
-//! schema of any event published into a group. NIP-C7 kind:9 chat belongs to
+//! `nmp-nip29` -- NIP-29 group context over an explicitly selected host, plus
+//! composers for the kinds NIP-29 itself defines (#989, kinds 9000-9022:
+//! [`join_request`], [`leave_request`], [`add_user`], [`remove_user`],
+//! [`edit_metadata`], [`delete_event`], [`create_group`], [`delete_group`],
+//! [`create_invite`]). This crate defines neither kind:10009's schema (owned
+//! exclusively by `nmp-nip51`, which this crate does not depend on at all --
+//! #858) nor the schema of any event that is merely *published into* a group
+//! rather than defined by NIP-29 itself. NIP-C7 kind:9 chat belongs to
 //! `nmp-nipc7`; mention and notification policy belongs to the client/content
 //! layer (#838).
 //!
@@ -24,7 +28,12 @@
 //! no `rememberGroup`/`forgetGroup` mutation (gated on #50).
 
 mod demand;
+mod operations;
 mod publication;
 
 pub use demand::group_discovery_demand;
+pub use operations::{
+    add_user, create_group, create_invite, delete_event, delete_group, edit_metadata, join_request,
+    leave_request, remove_user,
+};
 pub use publication::{contextualize_group_event, GroupContextError, GroupPublication};
