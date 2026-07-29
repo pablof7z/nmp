@@ -350,6 +350,7 @@ impl NmpWorld {
             self.seed_group_admins(&group).await;
         }
 
+        self.seed_staged_group_metadata().await;
         self.spawn_engine().await;
     }
 

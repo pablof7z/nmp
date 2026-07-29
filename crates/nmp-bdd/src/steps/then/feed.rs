@@ -48,6 +48,20 @@ async fn notes_no_longer_arrive(w: &mut NmpWorld, person: String) {
     );
 }
 
+/// A COUNT, which is a claim no "shows the note saying ..." step can make:
+/// two versions of one addressable coordinate both being present is only
+/// observable as a number, because either one alone is also "shown".
+#[then(regex = r#"^my feed holds exactly (\d+) rows$"#)]
+async fn feed_holds_exactly_n_rows(w: &mut NmpWorld, n: usize) {
+    let settled = w.feed_row_count_eventually(n);
+    assert_eq!(
+        settled,
+        n,
+        "expected my feed to hold exactly {n} rows; it holds {:?}",
+        w.row_provenance()
+    );
+}
+
 #[then(regex = r#"^my feed is empty$"#)]
 async fn feed_is_empty(w: &mut NmpWorld) {
     let stays_empty = w.feed_never(|rows| !rows.is_empty());
