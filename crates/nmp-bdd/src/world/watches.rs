@@ -217,17 +217,13 @@ impl NmpWorld {
     /// derived set, recompiles and emits a REQ" has a genuinely quiet client
     /// wire in the MIDDLE of it.
     ///
-    /// USED FOR SEQUENCING A STIMULUS, NOT FOR TAKING AN ASSERTION. Making
-    /// the wire `Then` steps poll like this was tried and reverted: it does
-    /// make them more honest, and what it honestly showed is that the
-    /// in-place-replacement family of claims ("widened in place", "was never
-    /// asked to close") is not deterministic in this harness on EITHER axis
-    /// -- the pre-existing author-axis regression guards flaked too, having
-    /// been green only because a one-shot read landed before the CLOSE. That
-    /// is a real finding
-    /// (`docs/internals/subscriptions/identity-grouping-and-limits.md`
-    /// §8.1c) and a bigger change to this suite than it belongs in; the
-    /// steps stay one-shot until it is addressed on its own terms.
+    /// USED FOR SEQUENCING A STIMULUS, NOT FOR TAKING AN ASSERTION. A quiet
+    /// outbound socket cannot prove that an inbound EVENT has traversed
+    /// ingestion, resolution, and recompilation. The subscription-collapse
+    /// feature's ordinary tag/author scenarios now separately exclude the
+    /// NIP-77 capability crossover that caused #1004; its derived-group
+    /// scenario still uses this helper only to make the initial outer REQ
+    /// observable before injecting one more inbound group (§8.1c).
     pub async fn wire_record_when(
         &self,
         relay: &str,
