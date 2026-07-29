@@ -322,6 +322,7 @@ impl NmpWorld {
             let latest = feed
                 .rows
                 .values()
+                .map(|row| &row.event)
                 .max_by_key(|event| (event.created_at, event.id))
                 .map(|event| event.id);
             match (latest, expected) {
