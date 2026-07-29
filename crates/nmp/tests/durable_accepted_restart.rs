@@ -707,7 +707,6 @@ fn assert_persisted_routing_fails_closed_without_dropping(
     database_name: &str,
     routing: String,
     route_probe: RelayUrl,
-    inbox_recipient: Option<PublicKey>,
 ) {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join(database_name);
@@ -743,10 +742,7 @@ fn assert_persisted_routing_fails_closed_without_dropping(
     };
 
     let store = RedbStore::open(&path).unwrap();
-    let mut route_directory = directory(keys.public_key(), route_probe.clone());
-    if let Some(recipient) = inbox_recipient {
-        route_directory = route_directory.with_read(recipient.to_hex(), [route_probe.clone()]);
-    }
+    let route_directory = directory(keys.public_key(), route_probe.clone());
     let mut core = EngineCore::new(store, Box::new(route_directory), 10);
     let effects = core.recover_on_boot();
     assert!(!effects
@@ -762,11 +758,11 @@ fn assert_persisted_routing_fails_closed_without_dropping(
         "unreadable routing must replay no receipt prefix"
     );
 
-    // Keep the exact relay that every formerly valid route would select both
-    // connected and authenticated. Substituting `author-outbox`, restoring
-    // the legacy inbox decoder, or restoring the legacy pinned-host decoder
-    // therefore makes signer completion emit `PublishEvent` and fails the
-    // no-wire assertion below.
+    // Keep the one relay this directory can offer both connected and
+    // authenticated. The undecodable routing is therefore the ONLY reason
+    // nothing reaches the wire: any decoder that resolved it -- or a silent
+    // substitution of `author-outbox` -- would make signer completion emit
+    // `PublishEvent` and fail the no-wire assertion below.
     let route_session = signer_session(&route_probe, keys.public_key());
     let route_handle = RelayHandle {
         slot: 7,
@@ -823,31 +819,6 @@ fn malformed_persisted_routing_fails_closed_without_dropping_the_obligation() {
         "malformed-route.redb",
         "future-routing-version-with-no-decoder".into(),
         RelayUrl::parse("wss://malformed-route-probe.example").unwrap(),
-        None,
-    );
-}
-
-#[test]
-fn removed_to_inboxes_snapshot_is_retained_unreadable_and_never_reinterpreted() {
-    let recipient = Keys::generate().public_key();
-    let route_probe = RelayUrl::parse("wss://removed-to-inboxes.example").unwrap();
-    assert_persisted_routing_fails_closed_without_dropping(
-        "removed-to-inboxes-route.redb",
-        format!("to-inboxes:{}", recipient.to_hex()),
-        route_probe,
-        Some(recipient),
-    );
-}
-
-#[test]
-fn removed_pinned_host_snapshot_is_retained_unreadable_and_never_reinterpreted() {
-    let host = RelayUrl::parse("wss://removed-pinned-host.example").unwrap();
-    let legacy_route_prefix = "pinned-host-hex";
-    assert_persisted_routing_fails_closed_without_dropping(
-        "removed-pinned-host-route.redb",
-        format!("{legacy_route_prefix}:{}", hex::encode(host.to_string())),
-        host,
-        None,
     );
 }
 

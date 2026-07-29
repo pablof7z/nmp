@@ -1006,10 +1006,6 @@ struct RpcRequest<'a> {
 struct RpcEnvelope {
     id: String,
     #[serde(default)]
-    method: Option<String>,
-    #[serde(default)]
-    params: Vec<String>,
-    #[serde(default)]
     result: Option<Value>,
     #[serde(default)]
     error: Option<String>,
@@ -1873,15 +1869,11 @@ impl SessionWorker {
                 .as_ref()
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            // Current NIP-46 sends a connect response whose result is the
-            // invitation secret. Accept the older request-shaped form too so
-            // existing signers can migrate without weakening the secret gate.
-            let legacy_secret = (envelope.method.as_deref() == Some("connect"))
-                .then(|| envelope.params.get(1).cloned())
-                .flatten();
-            if current_result.as_deref() != Some(expected_secret.as_str())
-                && legacy_secret.as_deref() != Some(expected_secret.as_str())
-            {
+            // NIP-46 sends a connect response whose result is the invitation
+            // secret. That is the only shape accepted: an older request-shaped
+            // form was removed rather than carried, because accepting two
+            // spellings of one thing is the defect, not the compatibility.
+            if current_result.as_deref() != Some(expected_secret.as_str()) {
                 // A forged p-tagged response must not consume the one-shot
                 // invitation and turn the anti-spoofing secret into a DoS.
                 return;
