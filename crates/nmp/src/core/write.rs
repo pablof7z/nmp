@@ -152,7 +152,7 @@ impl<S: EventStore> EngineCore<S> {
             return;
         };
         let Ok(CloseIntentOutcome::Closed | CloseIntentOutcome::AlreadyClosed) =
-            self.resolver.store_mut().close_terminal_intent(intent_id)
+            self.commit_terminal_close(intent_id)
         else {
             return;
         };
@@ -870,9 +870,7 @@ impl<S: EventStore> EngineCore<S> {
                     .collect::<BTreeSet<_>>();
                 if !new_routes.is_empty() {
                     if self
-                        .resolver
-                        .store_mut()
-                        .record_route_revision(intent.intent_id, current_routes.clone())
+                        .commit_route_revision(intent.intent_id, current_routes.clone())
                         .is_err()
                     {
                         if let Some(pending) = self.pending.get_mut(&id) {
@@ -2288,9 +2286,7 @@ impl<S: EventStore> EngineCore<S> {
             return;
         };
         if self
-            .resolver
-            .store_mut()
-            .record_route_revision(intent_id, relays.clone())
+            .commit_route_revision(intent_id, relays.clone())
             .is_err()
         {
             if let Some(pending) = self.pending.get_mut(&id) {

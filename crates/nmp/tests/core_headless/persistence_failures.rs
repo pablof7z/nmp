@@ -633,23 +633,216 @@ fn unchanged_worker_demand_reads_zero_outbox_lanes() {
 
     calls.set(0);
     let required = signer_session(&relays[0], author.public_key());
-    let effects = core.handle(EngineMsg::RelayOpenFailed(
-        required,
-        "injected worker-open failure".to_string(),
-    ));
+    // REPEATED unchanged passes, not one: the residual #985 names is that the
+    // count grew by `N` on EVERY dispatch pass, so a single pass could hide a
+    // per-pass cost behind a one-off.
+    for pass in 0..5 {
+        let effects = core.handle(EngineMsg::RelayOpenFailed(
+            required.clone(),
+            "injected worker-open failure".to_string(),
+        ));
 
-    assert!(
-        effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::EmitDiagnostics(_))),
-        "the reducer must still recognize the projected worker as owned"
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::EmitDiagnostics(_))),
+            "the reducer must still recognize the projected worker as owned on pass {pass}"
+        );
+        assert_eq!(
+            calls.get(),
+            0,
+            "unchanged worker-demand checks must use reducer memory; durable lane \
+             reads belong to bootstrap/recovery and actual lane transitions. After \
+             {} passes over {N} pending intents the old body would have read {}",
+            pass + 1,
+            (pass + 1) * N
+        );
+    }
+}
+
+/// The #968 parking property that #985's sequencing comment asks for, stated
+/// now so it is testable before parking itself lands: `N` intents that have
+/// never routed own no lane, so they contribute zero worker demand and cost
+/// zero per-dispatch store reads.
+///
+/// An accepted-but-unsigned durable write is exactly the shape `AwaitingRoute`
+/// will have -- a live obligation in `pending`, owning a durable intent row,
+/// having minted no lane -- so the property is asserted against that shape
+/// rather than against a lifecycle that does not exist yet. When #968 lands, a
+/// parked write that somehow acquired worker demand fails here.
+#[test]
+fn route_parked_intents_add_no_worker_demand_and_no_store_reads() {
+    const PARKED: usize = 6;
+    let author = Keys::generate();
+    let routed_relay = RelayUrl::parse("wss://parked-routed.example.com").unwrap();
+    let parked_relay = RelayUrl::parse("wss://parked-unrouted.example.com").unwrap();
+
+    let calls = Rc::new(Cell::new(0u64));
+    let mut core = EngineCore::new(
+        WakeLaneProbeStore::new(calls.clone()),
+        Box::new(FixtureDirectory::new()),
+        10,
     );
+    activate(&mut core, &author);
+
+    // One ordinary routed write, so the assertions below distinguish "parked
+    // writes contribute nothing" from "this core computes nothing at all".
+    let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(&author, 400, "parked control")),
+        durability: Durability::Durable,
+        routing: WriteRouting::PrivateNarrow(PrivateRoute {
+            relays: NarrowOnly::new([routed_relay.clone()]),
+        }),
+        identity_override: None,
+        correlation: None,
+    }));
+    let (id, generation, unsigned_event) = find_sign_request(&accepted);
+    let signed = unsigned_event.sign_with_keys(&author).unwrap();
+    let signed_effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
+    assert!(
+        signed_effects.iter().any(|effect| matches!(
+            effect,
+            Effect::EnsureWriteRelay(session)
+                if session == &signer_session(&routed_relay, author.public_key())
+        )),
+        "the routed control write must establish real worker demand"
+    );
+
+    for i in 0..PARKED {
+        let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(
+                &author,
+                500 + i as u64,
+                &format!("parked {i}"),
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                relays: NarrowOnly::new([parked_relay.clone()]),
+            }),
+            identity_override: None,
+            correlation: None,
+        }));
+        assert!(
+            accepted
+                .iter()
+                .any(|effect| matches!(effect, Effect::RequestSign(..))),
+            "the parked-shape fixture must actually be accepted as a durable obligation"
+        );
+        assert!(
+            !accepted
+                .iter()
+                .any(|effect| matches!(effect, Effect::EnsureWriteRelay(_))),
+            "a write that has not routed yet must not claim a relay worker: {accepted:?}"
+        );
+    }
+
+    calls.set(0);
+    let parked_session = signer_session(&parked_relay, author.public_key());
+    for pass in 0..5 {
+        let effects = core.handle(EngineMsg::RelayOpenFailed(
+            parked_session.clone(),
+            "injected parked-relay open failure".to_string(),
+        ));
+        assert!(
+            effects.is_empty(),
+            "{PARKED} parked intents own no lane at {parked_relay}, so an open \
+             failure there is not the engine's concern (pass {pass}): {effects:?}"
+        );
+    }
+
+    let routed_session = signer_session(&routed_relay, author.public_key());
+    for pass in 0..5 {
+        let effects = core.handle(EngineMsg::RelayOpenFailed(
+            routed_session.clone(),
+            "injected routed-relay open failure".to_string(),
+        ));
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::EmitDiagnostics(_))),
+            "the one routed write still owns its worker on pass {pass}"
+        );
+    }
+
     assert_eq!(
         calls.get(),
         0,
-        "unchanged worker-demand checks must use reducer memory; durable lane \
-         reads belong to bootstrap/recovery and actual lane transitions"
+        "{PARKED} parked intents plus ten unchanged dispatch passes must cost \
+         zero recover_outbox_lanes calls"
     );
+}
+
+/// #985's hardest fail-closed shape: a lane CREATION whose post-state was
+/// never observed. Retaining the previous projection is not enough, because
+/// the lanes that may or may not have committed are NEW -- so every relay the
+/// attempted bootstrap could have minted a lane for stays conservatively
+/// owned until an explicit recovery proves otherwise. A false-positive worker
+/// can be retired later; a false negative strands a durable obligation
+/// forever.
+///
+/// `bootstrap_outbox_lanes` is both the create-if-missing mutation and the
+/// one complete read that establishes the projection, so even a provably
+/// `Absent` outcome (the injected fault here) does not prove that OLDER lanes
+/// were absent.
+#[test]
+fn an_unknown_lane_creation_failure_retains_every_candidate_worker() {
+    let author = Keys::generate();
+    let relays: Vec<RelayUrl> = (0..3)
+        .map(|i| RelayUrl::parse(&format!("wss://unproven-creation-{i}.example.com")).unwrap())
+        .collect();
+
+    let calls = Rc::new(Cell::new(0u64));
+    let mut core = EngineCore::new(
+        WakeLaneProbeStore::with_failing_bootstrap(calls.clone()),
+        Box::new(FixtureDirectory::new()),
+        10,
+    );
+    activate(&mut core, &author);
+
+    let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(&author, 600, "unproven lane creation")),
+        durability: Durability::Durable,
+        routing: WriteRouting::PrivateNarrow(PrivateRoute {
+            relays: NarrowOnly::new(relays.clone()),
+        }),
+        identity_override: None,
+        correlation: None,
+    }));
+    let (id, generation, unsigned_event) = find_sign_request(&accepted);
+    let signed = unsigned_event.sign_with_keys(&author).unwrap();
+    let signed_effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
+
+    // Non-vacuity: the injected bootstrap failure really is the path taken,
+    // so the ownership below cannot be coming from an ordinary lane. The one
+    // delivery owner publishes every receipt fact as an effect, so the whole
+    // accept-and-sign sequence is the exact status stream a receipt observer
+    // would have seen.
+    let statuses: Vec<WriteStatus> = receipt_statuses(&accepted)
+        .into_iter()
+        .chain(receipt_statuses(&signed_effects))
+        .collect();
+    for relay in &relays {
+        assert!(
+            statuses
+                .iter()
+                .any(|status| status == &WriteStatus::PersistenceBlocked(relay.clone())),
+            "the fixture must actually take the failed-creation path for {relay}: {statuses:?}"
+        );
+    }
+
+    for relay in &relays {
+        let effects = core.handle(EngineMsg::RelayOpenFailed(
+            signer_session(relay, author.public_key()),
+            "injected open failure after an unprovable lane creation".to_string(),
+        ));
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::EmitDiagnostics(_))),
+            "{relay} was a candidate of the failed bootstrap, so it must stay \
+             owned rather than lose its worker on an unproven creation"
+        );
+    }
 }
 
 /// Manual before/after harness for #985. Run in release mode on the base and
