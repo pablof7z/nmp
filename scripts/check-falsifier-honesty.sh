@@ -69,6 +69,12 @@
 #   2  the script could not run soundly (bad refs, usage error)
 set -u
 
+SCRIPT_PATH=${BASH_SOURCE[0]}
+SCRIPT_DIR=${SCRIPT_PATH%/*}
+[[ $SCRIPT_DIR != "$SCRIPT_PATH" ]] || SCRIPT_DIR=.
+source "$SCRIPT_DIR/lib/require-commands.sh" || exit 2
+require_commands awk cat git grep mktemp rm sed sort tr wc || exit 2
+
 if [[ $# -lt 2 || $# -gt 3 ]]; then
   echo "usage: $0 BASE_REF HEAD_REF [CLAIMS_FILE]" >&2
   exit 2

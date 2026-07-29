@@ -31,6 +31,17 @@ on:
   pull_request:
 
 jobs:
+  tool-requirements:
+    name: Verification tools fail closed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Refuse success when a checker dependency is absent
+        run: bash scripts/test-check-tool-requirements.sh
+
   sdk-parity:
     name: Cross-SDK parity (gate 5)
     runs-on: ubuntu-latest

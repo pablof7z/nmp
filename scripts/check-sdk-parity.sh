@@ -92,6 +92,12 @@
 #
 set -u
 
+SCRIPT_PATH=${BASH_SOURCE[0]}
+SCRIPT_DIR=${SCRIPT_PATH%/*}
+[[ $SCRIPT_DIR != "$SCRIPT_PATH" ]] || SCRIPT_DIR=.
+source "$SCRIPT_DIR/lib/require-commands.sh" || exit 2
+require_commands awk cat comm cut dirname find git grep mktemp rm sed sort tr wc xargs || exit 2
+
 QUIET=0
 if [[ "${1:-}" == "--quiet" ]]; then
   QUIET=1
