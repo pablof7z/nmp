@@ -36,9 +36,9 @@ use super::{binary_event, StoreBenchProcessCounters};
 const PACKED_SEGMENTS: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("packed_postings_segments_v2");
 const PACKED_DICTIONARIES: TableDefinition<u64, &[u8]> =
-    TableDefinition::new("packed_postings_dictionaries_v1");
+    TableDefinition::new("packed_postings_dictionaries");
 const PACKED_RUN_META: TableDefinition<u64, &[u8]> =
-    TableDefinition::new("packed_postings_run_meta_v1");
+    TableDefinition::new("packed_postings_run_meta");
 const PACKED_DEAD_KEYS: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("packed_postings_dead_keys_v2");
 const FAMILY_COUNT: usize = 4;
@@ -470,8 +470,8 @@ impl FjallKeyspaces {
             relay_keys: open("packed_relay_keys")?,
             relay_refs: open("packed_relay_refs")?,
             segments: open("packed_segments_v2")?,
-            dictionaries: open("packed_dictionaries_v1")?,
-            run_meta: open("packed_run_meta_v1")?,
+            dictionaries: open("packed_dictionaries")?,
+            run_meta: open("packed_run_meta")?,
             dead_keys: open("packed_dead_keys_v2")?,
         })
     }

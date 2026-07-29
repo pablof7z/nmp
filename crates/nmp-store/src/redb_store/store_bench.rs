@@ -27,7 +27,7 @@ use super::schema::{
 use super::*;
 
 const UNIFIED_BENCH_INDEXES: TableDefinition<&[u8], &[u8]> =
-    TableDefinition::new("unified_bench_indexes_v1");
+    TableDefinition::new("unified_bench_indexes");
 const BENCH_CARDINALITY_SAMPLE_KEY: [u8; 32] = [0x42; 32];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

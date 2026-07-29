@@ -23,7 +23,7 @@ use super::store_bench::{
     StoreBenchPreparedTable, StoreBenchProcessCounters,
 };
 
-const INDEX_REDO: TableDefinition<u64, &[u8]> = TableDefinition::new("index_redo_bench_v1");
+const INDEX_REDO: TableDefinition<u64, &[u8]> = TableDefinition::new("index_redo_bench");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedbRedoIndexMetrics {

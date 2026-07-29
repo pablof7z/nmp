@@ -35,10 +35,17 @@ fi
 # NIP-29 may preserve a C7 `q` row, but it may not define kind:9,
 # chat replies, mention materialization, notification p rows, or a fixed
 # content-kind catalog.
+#
+# NIP-29's OWN kinds (9000-9022 join/leave/moderation) are this crate's, per
+# #989, so the kind ban is exact rather than prefix-shaped: `Kind::from(9)`
+# is refused while `Kind::from(JOIN_REQUEST)` at 9021 is allowed. Because a
+# named constant would otherwise launder kind 9 past an exact match, a
+# constant bound to 9 (`= 9;`) is refused too. Prefer adding a kind here only
+# when NIP-29 itself defines it.
 for source in crates/nmp-nip29/src/*.rs; do
   found=$(
     awk '/^#\[cfg\(test\)\]/{exit} {print}' "$source" |
-      grep -nE 'CHAT_KIND|Kind::from\(9|compose_chat|GroupReply|recipient_pubkeys|group_content_demand|\[9[^0-9]+30315\]' ||
+      grep -nE 'CHAT_KIND|Kind::from\(9\)|=[[:space:]]*9;|compose_chat|GroupReply|recipient_pubkeys|group_content_demand|\[9[^0-9]+30315\]' ||
       true
   )
   if [[ -n $found ]]; then
@@ -87,17 +94,18 @@ if [[ -n $found ]]; then
   fail "superseded NIP-29 native surface reappeared"
 fi
 
-# With no supported NIP-29 write operation, the universal write plane must
-# not retain a speculative single-host route. The exact legacy snapshot
-# spelling survives once, only in the restart falsifier that proves an old
-# obligation is retained unreadable and never reaches the wire.
-legacy_route_occurrences=$(grep -RInF 'pinned-host-hex' \
+# A removed wire/journal spelling must not survive ANYWHERE, including in a
+# test that asserts it stays unreadable. Asserting a dead approach is still
+# encoding awareness of it; positive and negative awareness are both awareness.
+# The invariant those tests proved -- an uninterpretable persisted routing
+# fails closed without dropping the obligation -- is proved instead by
+# `malformed_persisted_routing_fails_closed_without_dropping_the_obligation`,
+# which uses a generic undecodable string and names no dead vocabulary.
+dead_spellings=$(grep -RInE 'pinned-host-hex|to-inboxes:' \
   crates/nmp-grammar crates/nmp crates/nmp-ffi || true)
-legacy_route_count=$(printf '%s\n' "$legacy_route_occurrences" | grep -c . || true)
-if [[ $legacy_route_count -ne 1 ]] ||
-  [[ $legacy_route_occurrences != crates/nmp/tests/durable_accepted_restart.rs:*'let legacy_route_prefix = "pinned-host-hex";'* ]]; then
-  printf '%s\n' "$legacy_route_occurrences"
-  fail "legacy pinned-host snapshot must exist exactly once in its restart falsifier"
+if [[ -n $dead_spellings ]]; then
+  printf '%s\n' "$dead_spellings"
+  fail "a removed routing spelling reappeared -- delete it, do not assert it"
 fi
 
 found=$(grep -RInE 'HostAuthority|PinnedHost' \

@@ -928,8 +928,9 @@ impl<S: EventStore> EngineCore<S> {
     /// set established late is indistinguishable from one established at
     /// boot: both may hold an attempt interrupted by a previous process, a
     /// generation-scoped AUTH park that cannot survive, or a lane simply
-    /// waiting for its session. Only `Eligible` and `Transient` lanes are
-    /// left to the ordinary scheduler and deadline sweep.
+    /// waiting for its session. `Eligible` and `Transient` lanes need only
+    /// their session; the ordinary scheduler and deadline sweep drive them
+    /// from there.
     fn open_bootstrapped_lanes(
         &mut self,
         id: ReceiptId,
