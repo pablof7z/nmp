@@ -326,6 +326,18 @@ impl NmpWorld {
         receipt.seen.clone()
     }
 
+    /// Has the write under discussion reported its first receipt fact?
+    ///
+    /// `publish` may return after registering this receipt but before the
+    /// engine thread dispatches its first status. A step whose claim requires
+    /// a real receipt fact must therefore wait boundedly here; the
+    /// zero-duration [`Self::identity_receipt_statuses`] snapshot is only for
+    /// assertion messages after a positive observation has established what
+    /// exists.
+    pub fn identity_receipt_reported_anything(&mut self, text: Option<&str>) -> bool {
+        self.identity_receipt_eventually(text, EVENTUALLY, |seen| !seen.is_empty())
+    }
+
     /// `Then the write reports accepted`.
     pub fn write_reported_accepted(&mut self, text: Option<&str>) -> bool {
         self.identity_receipt_eventually(text, EVENTUALLY, |seen| {
