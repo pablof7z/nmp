@@ -37,7 +37,7 @@ pub enum WriteStatus {
     Cancelled,
     /// No registered signer answers for `pubkey` -- the exact identity
     /// FROZEN at acceptance (`AcceptWrite::expected_pubkey` / an
-    /// `identity_override`, #47 Unit A). Retained, not terminal: re-armed
+    /// the resolved `Identity`, #47). Retained, not terminal: re-armed
     /// only by a `SignerAttached` for this exact key (never a different
     /// one, even across `set_active_account`) and re-emitted verbatim on
     /// restart replay. #47 Unit B carries the pubkey so an observer can act

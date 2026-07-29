@@ -37,6 +37,6 @@ pub use indexed_tag_name::IndexedTagName;
 pub use nip19::{decode as decode_nostr_entity, NostrEntity, NostrEntityError};
 pub use selector::{IdentityField, Selector};
 pub use write::{
-    CorrelationToken, CorrelationTokenError, Durability, EventBuilder, WriteIntent, WritePayload,
-    WriteRouting,
+    CorrelationToken, CorrelationTokenError, Durability, EventBuilder, Identity, WriteIntent,
+    WritePayload, WriteRouting,
 };

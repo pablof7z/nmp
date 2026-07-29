@@ -536,7 +536,7 @@ mod history_mutation_tests {
             },
             durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay]),
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         });
         let receipt = accepted

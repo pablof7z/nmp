@@ -23,7 +23,7 @@ fn enqueue_is_not_converged() {
         payload: WritePayload::Event(draft(1, "durable write")),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
-        identity_override: None,
+        identity: Identity::Active,
         correlation: None,
     }));
     assert!(
@@ -39,7 +39,7 @@ fn enqueue_is_not_converged() {
         payload: WritePayload::Event(draft(2, "ephemeral write")),
         durability: Durability::Ephemeral,
         routing: WriteRouting::Auto,
-        identity_override: None,
+        identity: Identity::Active,
         correlation: None,
     }));
     assert!(matches!(
@@ -68,7 +68,7 @@ fn enqueue_is_not_converged() {
         payload: WritePayload::Event(draft(3, "at most once write")),
         durability: Durability::AtMostOnce,
         routing: WriteRouting::Auto,
-        identity_override: None,
+        identity: Identity::Active,
         correlation: None,
     }));
     let (amo_id, amo_generation, amo_unsigned) = find_sign_request(&effects);

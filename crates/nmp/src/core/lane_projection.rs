@@ -364,7 +364,7 @@ mod tests {
             ),
             durability: Durability::Durable,
             routing: WriteRouting::Explicit(relays.to_vec()),
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         }));
         let (id, generation, unsigned) = accepted

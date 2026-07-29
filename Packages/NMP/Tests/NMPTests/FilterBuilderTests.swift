@@ -187,28 +187,28 @@ final class FilterBuilderTests: XCTestCase {
         XCTAssertEqual(sig, String(repeating: "d", count: 128))
     }
 
-    /// #47: an `identityOverride` crosses to `FfiWriteIntent` intact -- the
+    /// #47: an explicit identity crosses to `FfiWriteIntent` intact -- the
     /// per-write identity is data, never rewritten or dropped by the mirror.
-    func testWriteIntentConversionCarriesIdentityOverride() {
-        let overridePubkey = String(repeating: "b", count: 64)
+    func testWriteIntentConversionCarriesAnExplicitIdentity() {
+        let named = String(repeating: "b", count: 64)
         let intent = WriteIntent(
             payload: .event(
                 kind: 1,
                 tags: [],
-                content: "as the override identity",
+                content: "as the named identity",
                 createdAt: 1_700_000_000
             ),
             durability: .durable,
             routing: .auto,
-            identityOverride: overridePubkey
+            identity: .explicit(pubkey: named)
         )
-        XCTAssertEqual(intent.toFfi().identityOverride, overridePubkey)
+        XCTAssertEqual(intent.toFfi().identity, .explicit(pubkey: named))
     }
 
-    /// #47: the pre-existing init shape stays source-compatible AND
-    /// semantically identical -- no override means `nil`, the
-    /// active-account default, all the way through `toFfi()`.
-    func testWriteIntentDefaultInitLeavesIdentityOverrideNil() {
+    /// #47: naming nobody is not the absence of a choice -- the default init
+    /// means `.active`, "whoever is active at acceptance", all the way
+    /// through `toFfi()`. There is no third "unset" state to observe.
+    func testWriteIntentDefaultInitMeansTheActiveAccount() {
         let intent = WriteIntent(
             payload: .event(
                 kind: 1,
@@ -219,8 +219,8 @@ final class FilterBuilderTests: XCTestCase {
             durability: .durable,
             routing: .auto
         )
-        XCTAssertNil(intent.identityOverride)
-        XCTAssertNil(intent.toFfi().identityOverride)
+        XCTAssertEqual(intent.identity, .active)
+        XCTAssertEqual(intent.toFfi().identity, .active)
     }
 
     func testWriteIntentReverseProjectionPreservesEveryGenericField() {
@@ -236,7 +236,7 @@ final class FilterBuilderTests: XCTestCase {
                 ),
                 durability: .atMostOnce,
                 routing: .auto,
-                identityOverride: String(repeating: "a", count: 64),
+                identity: .explicit(pubkey: String(repeating: "a", count: 64)),
                 correlation: "correlation-42"
             )
         )
@@ -251,7 +251,7 @@ final class FilterBuilderTests: XCTestCase {
         )
         XCTAssertEqual(composed.durability, .atMostOnce)
         XCTAssertEqual(composed.routing, .auto)
-        XCTAssertEqual(composed.identityOverride, String(repeating: "a", count: 64))
+        XCTAssertEqual(composed.identity, .explicit(pubkey: String(repeating: "a", count: 64)))
         XCTAssertEqual(composed.correlation, "correlation-42")
 
         let signed = WriteIntent(
@@ -267,7 +267,7 @@ final class FilterBuilderTests: XCTestCase {
                 ),
                 durability: .ephemeral,
                 routing: .auto,
-                identityOverride: nil,
+                identity: .active,
                 correlation: nil
             )
         )
@@ -285,7 +285,7 @@ final class FilterBuilderTests: XCTestCase {
         )
         XCTAssertEqual(signed.durability, .ephemeral)
         XCTAssertEqual(signed.routing, .auto)
-        XCTAssertNil(signed.identityOverride)
+        XCTAssertEqual(signed.identity, .active)
         XCTAssertNil(signed.correlation)
 
         XCTAssertEqual(Durability(FfiDurability.durable), .durable)
@@ -311,7 +311,7 @@ final class FilterBuilderTests: XCTestCase {
                 ),
                 durability: .durable,
                 routing: .explicit(relays: typed),
-                identityOverride: nil,
+                identity: .active,
                 correlation: nil
             )
         )

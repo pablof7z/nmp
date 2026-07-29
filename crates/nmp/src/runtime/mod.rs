@@ -1747,7 +1747,7 @@ impl EngineThread {
 #[cfg(test)]
 mod receipt_delivery_lifecycle_tests {
     use super::*;
-    use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
+    use nmp_grammar::{Durability, Identity, WriteIntent, WritePayload, WriteRouting};
     use nmp_router::FixtureDirectory;
     use nmp_store::MemoryStore;
     use nostr::{Keys, Kind};
@@ -1764,7 +1764,7 @@ mod receipt_delivery_lifecycle_tests {
                 }),
                 durability: Durability::Durable,
                 routing: WriteRouting::Auto,
-                identity_override: None,
+                identity: Identity::Active,
                 correlation: None,
             })
             .expect("parked write is accepted")
@@ -2733,7 +2733,7 @@ mod relay_worker_reconciliation_tests {
     use std::collections::BTreeSet;
 
     use nmp_grammar::{
-        AccessContext, Binding, Demand, Durability, Filter, SourceAuthority, WriteIntent,
+        AccessContext, Binding, Demand, Durability, Filter, Identity, SourceAuthority, WriteIntent,
         WritePayload, WriteRouting,
     };
     use nmp_router::FixtureDirectory;
@@ -3245,7 +3245,7 @@ mod relay_worker_reconciliation_tests {
             ),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         }));
         let (receipt_id, generation, unsigned) = accepted

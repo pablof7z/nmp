@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpReceiptStream};
 use nmp_ffi::types::{
-    FfiDurability, FfiReceiptReattachment, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
-    FfiWriteStatus,
+    FfiDurability, FfiIdentity, FfiReceiptReattachment, FfiWriteIntent, FfiWritePayload,
+    FfiWriteRouting, FfiWriteStatus,
 };
 use nmp_store::{
     AcceptWrite, AttemptHandoffDetail, AttemptOutcome, EventStore, HandoffEvidence, IntentSigState,
@@ -54,7 +54,7 @@ async fn receipt_detached_before_terminal_reattaches_full_durable_prefix_from_th
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
-            identity_override: None,
+            identity: FfiIdentity::Active,
             correlation: None,
         })
         .expect("publish enqueues");

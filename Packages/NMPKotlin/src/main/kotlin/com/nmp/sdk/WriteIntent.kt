@@ -4,6 +4,7 @@ package com.nmp.sdk
 
 import uniffi.nmp_ffi.FfiDurability
 import uniffi.nmp_ffi.FfiEventBuilder
+import uniffi.nmp_ffi.FfiIdentity
 import uniffi.nmp_ffi.FfiWriteIntent
 import uniffi.nmp_ffi.FfiWritePayload
 import uniffi.nmp_ffi.FfiWriteRouting
@@ -71,7 +72,7 @@ sealed class WriteRouting {
  * event NMP stamps, freezes and signs itself. The kind is the one thing it
  * cannot invent, so the kind is the one thing it demands; the account it
  * publishes as comes from the write's identity (see
- * [NMPEngine.setActiveAccount] and [WriteIntent.identityOverride]), never
+ * [NMPEngine.setActiveAccount] and [WriteIntent.identity]), never
  * from the payload, and [Event.createdAt] is stamped at acceptance unless
  * you state one -- state one and it is kept exactly.
  *
@@ -131,31 +132,61 @@ sealed class WritePayload {
     }
 }
 
+/** The identity one write publishes under (`FfiIdentity` mirror). Exactly
+ * two words, and neither of them is an absence: [Active] is a positive
+ * instruction ("whoever is the active account when this is accepted"),
+ * which is why there is no third "unset" state here or anywhere else.
+ *
+ * On a [WritePayload.Event] payload the identity SELECTS the author -- a
+ * builder states none, so there is nothing for it to contradict. On a
+ * [WritePayload.Signed] payload it may only RESTATE the author already
+ * frozen in the bytes: naming that author changes nothing, naming anybody
+ * else is a consent/author contradiction that surfaces as
+ * [WriteStatus.Failed] on the receipt stream with no [WriteStatus.Accepted]
+ * before it.
+ *
+ * [Explicit.pubkey] is 64-char HEX and nothing else. A bech32 `npub` is
+ * refused however well-formed it is ([NMPError.InvalidPublicKey], thrown
+ * synchronously from `publish`): bech32 is how something is shown to a
+ * person or received from one, so an app that took an npub from a paste box
+ * decodes it there -- with `decodeNostrEntity` -- and hands NMP a key.
+ * Naming a pubkey with no registered signer is NOT an error: the write
+ * parks as [WriteStatus.AwaitingCapability] until that capability attaches.
+ * Acceptance pins the resolved key either way, so a later
+ * [NMPEngine.setActiveAccount] cannot retarget the write. */
+sealed class Identity {
+    object Active : Identity()
+
+    data class Explicit(val pubkey: String) : Identity()
+
+    fun toFfi(): FfiIdentity =
+        when (this) {
+            is Active -> FfiIdentity.Active
+            is Explicit -> FfiIdentity.Explicit(pubkey)
+        }
+
+    companion object {
+        internal fun from(ffi: FfiIdentity): Identity =
+            when (ffi) {
+                is FfiIdentity.Active -> Active
+                is FfiIdentity.Explicit -> Explicit(ffi.pubkey)
+            }
+    }
+}
+
 /** A caller's publish request (`FfiWriteIntent` mirror).
  *
- * [identityOverride] (#47) is the identity this ONE write is published
- * under, as 64-char hex or bech32 `npub`. `null` -- the default every
- * existing call site keeps -- means the active account at acceptance time
- * (see [NMPEngine.setActiveAccount]), unchanged. On a [WritePayload.Event]
- * payload non-`null` SELECTS the author -- a builder states none, so there
- * is nothing for it to contradict. On a [WritePayload.Signed] payload it
- * may only RESTATE the author already frozen in the bytes: naming that
- * author changes nothing, naming anybody else is a consent/author
- * contradiction. A malformed string throws synchronously from `publish`
- * ([NMPError.InvalidPublicKey]), while a well-formed contradiction
- * override surfaces as [WriteStatus.Failed] on the receipt stream with no
- * [WriteStatus.Accepted] before it. An override naming a pubkey with no
- * registered signer parks as [WriteStatus.AwaitingCapability] until that
- * capability attaches; acceptance pins the override, so a later
- * [NMPEngine.setActiveAccount] cannot retarget the write. [WriteStatus.
- * AwaitingCapability.pubkey] (#47 Unit B) is the exact frozen identity
- * parked -- the override when one was given, else the active account at
- * publish time -- never the (possibly different) currently active account. */
+ * [identity] (#47) defaults to [Identity.Active] -- the overwhelming
+ * majority of writes publish as the logged-in account, and saying so costs
+ * nothing. [WriteStatus.AwaitingCapability.pubkey] (#47 Unit B) is the
+ * exact frozen identity parked -- the key [Identity.Explicit] named, else
+ * the account active at publish time -- never the (possibly different)
+ * currently active account. */
 data class WriteIntent(
     val payload: WritePayload,
     val durability: Durability,
     val routing: WriteRouting,
-    val identityOverride: String? = null,
+    val identity: Identity = Identity.Active,
     /** Crash-safe client correlation token (#591). `null` -- the default --
      * opts this write out of correlation entirely. A non-`null` token is
      * validated (non-empty, length-capped) on the way across the boundary;
@@ -174,7 +205,7 @@ data class WriteIntent(
             payload = payload.toFfi(),
             durability = durability.toFfi(),
             routing = routing.toFfi(),
-            identityOverride = identityOverride,
+            identity = identity.toFfi(),
             correlation = correlation,
         )
 
@@ -187,7 +218,7 @@ data class WriteIntent(
                 payload = WritePayload.from(ffi.payload),
                 durability = Durability.from(ffi.durability),
                 routing = WriteRouting.from(ffi.routing),
-                identityOverride = ffi.identityOverride,
+                identity = Identity.from(ffi.identity),
                 correlation = ffi.correlation,
             )
     }

@@ -38,6 +38,10 @@
 //! needs, so a helper never outlives the claims it was written for.
 //!
 //! - `feed` -- what the app-visible feed shows, and what it must never show.
+//! - `identity` -- WHO a write published as: the account it resolved to, the
+//!   key it stayed pinned to, and what a named key with no signer does
+//!   instead of failing. Distinct from `writes`; both read the receipt, only
+//!   one is about authorship.
 //! - `writes` -- the write plane: where a publish was routed, what its
 //!   receipt said, and that a republished payload came back out untouched.
 //! - `routing` -- the READ plane: which relay was asked for what kind, in
@@ -73,6 +77,7 @@ macro_rules! nothing_to_observe {
 
 mod budget;
 mod feed;
+mod identity;
 mod routing;
 mod wire;
 mod writes;

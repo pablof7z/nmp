@@ -19,8 +19,8 @@ use nmp::mechanism::core::{
 };
 use nmp::mechanism::outbox::WriteStatus;
 use nmp_grammar::{
-    AccessContext, Binding, ConcreteFilter, ContextualAtom, Durability, Filter, RelaySessionKey,
-    SourceAuthority, WriteIntent, WritePayload, WriteRouting,
+    AccessContext, Binding, ConcreteFilter, ContextualAtom, Durability, Filter, Identity,
+    RelaySessionKey, SourceAuthority, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{FixtureDirectory, SubId, WireOp};
@@ -1033,7 +1033,7 @@ fn publish_explicit<S: EventStore>(
         payload: WritePayload::Event(draft(85, "attempt-start failure")),
         durability: Durability::Durable,
         routing: WriteRouting::Explicit(Vec::from_iter(relays)),
-        identity_override: None,
+        identity: Identity::Active,
         correlation: None,
     }));
     let (id, generation, unsigned) = find_sign_request(&accepted);

@@ -527,7 +527,7 @@ fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
             payload: WritePayload::Event(draft(100 + i as u64, &format!("falsifier {i}"))),
             durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay.clone()]),
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         }));
         let (id, generation, u) = find_sign_request(&accepted);
@@ -603,7 +603,7 @@ fn unchanged_worker_demand_reads_zero_outbox_lanes() {
             payload: WritePayload::Event(draft(300 + i as u64, &format!("worker projection {i}"))),
             durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay.clone()]),
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         }));
         let (id, generation, unsigned) = find_sign_request(&accepted);
@@ -679,7 +679,7 @@ fn route_parked_intents_add_no_worker_demand_and_no_store_reads() {
         payload: WritePayload::Event(draft(400, "parked control")),
         durability: Durability::Durable,
         routing: WriteRouting::Explicit(vec![routed_relay.clone()]),
-        identity_override: None,
+        identity: Identity::Active,
         correlation: None,
     }));
     let (id, generation, unsigned_event) = find_sign_request(&accepted);
@@ -699,7 +699,7 @@ fn route_parked_intents_add_no_worker_demand_and_no_store_reads() {
             payload: WritePayload::Event(draft(500 + i as u64, &format!("parked {i}"))),
             durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![parked_relay.clone()]),
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         }));
         assert!(
@@ -783,7 +783,7 @@ fn an_unknown_lane_creation_failure_retains_every_candidate_worker() {
         payload: WritePayload::Event(draft(600, "unproven lane creation")),
         durability: Durability::Durable,
         routing: WriteRouting::Explicit(relays.to_vec()),
-        identity_override: None,
+        identity: Identity::Active,
         correlation: None,
     }));
     let (id, generation, unsigned_event) = find_sign_request(&accepted);
@@ -859,7 +859,7 @@ fn relay_worker_projection_redb_benchmark() {
             )),
             durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay.clone()]),
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         }));
         let (id, generation, unsigned) = find_sign_request(&accepted);
@@ -922,7 +922,7 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
         payload: WritePayload::Event(draft(200, "degraded 1")),
         durability: Durability::Durable,
         routing: WriteRouting::Explicit(vec![relay.clone()]),
-        identity_override: None,
+        identity: Identity::Active,
         correlation: None,
     }));
     let (id1, gen1, u1) = find_sign_request(&accepted1);
@@ -944,7 +944,7 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
         payload: WritePayload::Event(draft(201, "degraded 2")),
         durability: Durability::Durable,
         routing: WriteRouting::Explicit(vec![relay.clone()]),
-        identity_override: None,
+        identity: Identity::Active,
         correlation: None,
     }));
     let (id2, gen2, u2) = find_sign_request(&accepted2);
