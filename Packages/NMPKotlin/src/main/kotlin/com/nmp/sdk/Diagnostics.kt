@@ -12,6 +12,9 @@ import uniffi.nmp_ffi.FfiFilterCoverage
 import uniffi.nmp_ffi.FfiKindCount
 import uniffi.nmp_ffi.FfiLaneCount
 import uniffi.nmp_ffi.FfiRelayDiagnostics
+import uniffi.nmp_ffi.FfiStalledWrite
+import uniffi.nmp_ffi.FfiStalledWriteStage
+import uniffi.nmp_ffi.FfiStalledWriteTotals
 
 /** One (kind, count) pair -- events actually RECEIVED from a relay, counted
  * by kind. */
@@ -129,6 +132,80 @@ data class AuthDiagnostics(
     }
 }
 
+/** Where a durable write obligation is stuck. Three stages, kept apart
+ * because an app acts on each differently and because one rolled-up "stuck"
+ * tells nobody anything. */
+enum class StalledWriteStage {
+    /** No destination could be computed. */
+    UNROUTABLE,
+
+    /** No signer answers for the author this write was FROZEN to -- never
+     * the mutable active account. */
+    UNSIGNABLE,
+
+    /** Destinations exist and none of them is working. */
+    UNDELIVERABLE;
+
+    companion object {
+        fun from(ffi: FfiStalledWriteStage): StalledWriteStage =
+            when (ffi) {
+                FfiStalledWriteStage.UNROUTABLE -> UNROUTABLE
+                FfiStalledWriteStage.UNSIGNABLE -> UNSIGNABLE
+                FfiStalledWriteStage.UNDELIVERABLE -> UNDELIVERABLE
+            }
+    }
+}
+
+/** One durable write obligation that cannot currently progress. Read-only
+ * evidence: nothing here cancels, retries, prunes or acknowledges a write.
+ *
+ * `id` is a stable, restart-reproducible descriptor -- deliberately NOT a
+ * receipt id and not parseable back into one. It exists to tell two rows
+ * apart and to recognise the same row across snapshots.
+ *
+ * `stalledSince` is when the obligation was ACCEPTED (Unix seconds),
+ * replayed verbatim across restarts. The age is `now - stalledSince`; NMP
+ * reports the instant rather than a duration because a duration baked into a
+ * snapshot goes stale exactly while nothing is happening. */
+data class StalledWrite(
+    val id: String,
+    val stage: StalledWriteStage,
+    val detail: String,
+    val stalledSince: ULong,
+) {
+    companion object {
+        fun from(ffi: FfiStalledWrite): StalledWrite =
+            StalledWrite(
+                id = ffi.id,
+                stage = StalledWriteStage.from(ffi.stage),
+                detail = ffi.detail,
+                stalledSince = ffi.stalledSince,
+            )
+    }
+}
+
+/** The exact census behind `DiagnosticsSnapshot.stalledWrites`. Totals count
+ * every stalled obligation, including the ones no detail row was emitted
+ * for: a bound on memory is never a lie about how much is stuck. */
+data class StalledWriteTotals(
+    val unroutable: ULong = 0uL,
+    val unsignable: ULong = 0uL,
+    val undeliverable: ULong = 0uL,
+    val omittedDetails: ULong = 0uL,
+    val detailLimit: ULong = 0uL,
+) {
+    companion object {
+        fun from(ffi: FfiStalledWriteTotals): StalledWriteTotals =
+            StalledWriteTotals(
+                unroutable = ffi.unroutable,
+                unsignable = ffi.unsignable,
+                undeliverable = ffi.undeliverable,
+                omittedDetails = ffi.omittedDetails,
+                detailLimit = ffi.detailLimit,
+            )
+    }
+}
+
 /** The engine-global diagnostics snapshot -- one snapshot covers every
  * currently-planned relay. Delivered by `observeDiagnostics()`, pushed
  * reactively, never polled. */
@@ -138,6 +215,12 @@ data class DiagnosticsSnapshot(
     val uncoveredAuthorCount: UInt = 0u,
     val droppedMergeRules: List<String> = emptyList(),
     val transportDegraded: String? = null,
+    /** Every durable write obligation that cannot progress, bounded to
+     * `stalledWriteTotals.detailLimit` rows in a deterministic display
+     * order. Reading it changes nothing. */
+    val stalledWrites: List<StalledWrite> = emptyList(),
+    /** Exact counts behind that window. */
+    val stalledWriteTotals: StalledWriteTotals = StalledWriteTotals(),
 ) {
     companion object {
         fun from(ffi: FfiDiagnosticsSnapshot): DiagnosticsSnapshot =
@@ -147,6 +230,8 @@ data class DiagnosticsSnapshot(
                 uncoveredAuthorCount = ffi.uncoveredAuthorCount,
                 droppedMergeRules = ffi.droppedMergeRules,
                 transportDegraded = ffi.transportDegraded,
+                stalledWrites = ffi.stalledWrites.map { StalledWrite.from(it) },
+                stalledWriteTotals = StalledWriteTotals.from(ffi.stalledWriteTotals),
             )
     }
 }

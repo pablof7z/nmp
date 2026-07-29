@@ -4,6 +4,7 @@
 //! a later step calls `ensure_started` (most directly via the `my feed ...
 //! is open` shorthand below).
 
+use cucumber::gherkin::Step;
 use cucumber::given;
 
 use crate::steps::{parse_people, parse_quoted_list};
@@ -34,9 +35,13 @@ async fn bystander_relay(w: &mut NmpWorld, name: String) {
     w.register_bystander_relay(&name);
 }
 
-#[given(regex = r#"^relay "([^"]+)" rejects every event$"#)]
-async fn relay_rejects_writes(w: &mut NmpWorld, name: String) {
-    w.set_reject_writes(&name);
+/// The bare form, and the form that writes the relay's own refusal. NMP has
+/// no business paraphrasing a message it did not write, so a scenario that
+/// cares about the words supplies them and they reach the receipt verbatim.
+#[given(regex = r#"^relay "([^"]+)" rejects every event(?: with "([^"]+)")?$"#)]
+async fn relay_rejects_writes(w: &mut NmpWorld, name: String, message: String) {
+    let message = (!message.is_empty()).then_some(message);
+    w.set_reject_writes(&name, message.as_deref());
 }
 
 #[given(regex = r#"^relay "([^"]+)" never confirms end of stored events$"#)]
@@ -76,6 +81,28 @@ async fn my_write_relay(w: &mut NmpWorld, relay: String) {
 async fn my_write_relays(w: &mut NmpWorld, list: String) {
     for relay in parse_quoted_list(&list) {
         w.declare_write_relay(ME, &relay);
+    }
+}
+
+/// The same declaration as a TABLE. Four destinations read as a list rather
+/// than as a sentence, and a scenario whose subject is "four independent
+/// fates" is unreadable written the other way.
+#[given(regex = r#"^my relay list names these as my write relays:$"#)]
+async fn my_write_relays_table(w: &mut NmpWorld, step: &Step) {
+    let table = step
+        .table
+        .as_ref()
+        .expect("nmp-bdd: this step is written with a table of relay URLs");
+    assert!(
+        !table.rows.is_empty(),
+        "nmp-bdd: an empty relay table declares nothing"
+    );
+    for row in &table.rows {
+        let relay = row
+            .first()
+            .expect("nmp-bdd: each row names one relay")
+            .trim();
+        w.declare_write_relay(ME, relay);
     }
 }
 
@@ -378,6 +405,23 @@ async fn key_write_relay(w: &mut NmpWorld, secret_hex: String, relay: String) {
     w.declare_write_relay(&secret_hex, &relay);
 }
 
+// ---- the global stalled-write list -------------------------------------
+
+/// The destination is a LITERAL URL this world deliberately never starts --
+/// see `world::stalled::told_to_publish_to` for why registering it as an
+/// ordinary scripted relay would delete the case.
+#[given(regex = r#"^I am told to publish a note to exactly "([^"]+)"$"#)]
+async fn told_to_publish_to(w: &mut NmpWorld, url: String) {
+    w.told_to_publish_to(&url);
+}
+
+/// Accepted, signed, and routed, so whatever fails next is a DELIVERY
+/// failure and never a signing or routing one.
+#[given(regex = r#"^a note saying "([^"]+)" was published and signed$"#)]
+async fn note_published_and_signed(w: &mut NmpWorld, text: String) {
+    w.publish_and_await_signature(&text).await;
+}
+
 #[given(regex = r#"^my relay list has never been fetched$"#)]
 async fn relay_list_never_fetched(w: &mut NmpWorld) {
     w.forget_my_relay_list();
@@ -391,7 +435,11 @@ async fn relay_refuses_my_reads(w: &mut NmpWorld, relay: String) {
     w.set_reject_queries(&relay);
 }
 
-#[given(regex = r#"^relay "([^"]+)" cannot connect$"#)]
+/// Both spellings of the same staged fact: the relay is bound (so it has a
+/// real URL and a real port nobody else can take) and then severed, so a
+/// connection attempt is REFUSED rather than quietly succeeding against a
+/// relay that answers nothing.
+#[given(regex = r#"^relay "([^"]+)" cannot (?:connect|be connected to)$"#)]
 async fn relay_cannot_connect(w: &mut NmpWorld, relay: String) {
     w.set_unreachable(&relay);
 }

@@ -19,7 +19,7 @@
 use nmp_grammar::AccessContext;
 use nmp_router::Lane;
 use nmp_store::CoverageInterval;
-use nostr::{EventId, RelayUrl};
+use nostr::{EventId, RelayUrl, Timestamp};
 
 /// One filter's proven coverage state at one relay (parallel to
 /// [`RelayDiagnosticsSnapshot::filters`] — same order, same rendering).
@@ -240,6 +240,110 @@ impl AuthDiagnosticsPhase {
     }
 }
 
+/// Where a durable write obligation is stuck (#756/#968) — the documented
+/// projection of the engine's own stall vocabulary. Three stages, because
+/// an app that has to look in three places to answer one question looks in
+/// none of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StalledWriteStage {
+    /// No destination could be computed.
+    Unroutable,
+    /// No signer answers for the author this write was FROZEN to — never
+    /// the mutable active account.
+    Unsignable,
+    /// Destinations exist and none of them is working.
+    Undeliverable,
+}
+
+impl StalledWriteStage {
+    fn from_engine(value: crate::core::StalledWriteStage) -> Self {
+        match value {
+            crate::core::StalledWriteStage::Unroutable => Self::Unroutable,
+            crate::core::StalledWriteStage::Unsignable => Self::Unsignable,
+            crate::core::StalledWriteStage::Undeliverable => Self::Undeliverable,
+        }
+    }
+}
+
+/// One durable write obligation that cannot currently progress.
+///
+/// Evidence, not a workload noun: nothing here cancels, retries, prunes or
+/// acknowledges a write, and nothing here is a receipt id. Cancellation
+/// remains the typed receipt door.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StalledWrite {
+    /// A stable, restart-reproducible BLAKE3 descriptor of this exact
+    /// obligation — NOT a [`ReceiptId`](crate::ReceiptId) and not parseable
+    /// back into one. It exists to tell two rows apart and to recognise the
+    /// same row across snapshots, so an app can watch a write leave the
+    /// list; making it round-trippable would turn this bounded view of
+    /// active obligations into an undecided receipt-discovery door.
+    pub id: String,
+    pub stage: StalledWriteStage,
+    /// What this write is waiting for, in the write plane's own recorded
+    /// words — the same detail its receipt carries. Never empty.
+    pub detail: String,
+    /// When this obligation was ACCEPTED, replayed verbatim across
+    /// restarts. The age is `now - stalled_since`; NMP reports the instant
+    /// rather than a duration because a duration baked into a snapshot goes
+    /// stale exactly while nothing is happening, and NMP draws no
+    /// conclusion from either number — deciding a write has waited long
+    /// enough is the app's or the person's, never a timer's.
+    pub stalled_since: Timestamp,
+}
+
+impl StalledWrite {
+    fn from_engine(value: crate::core::StalledWrite) -> Self {
+        let crate::core::StalledWrite {
+            id,
+            stage,
+            detail,
+            stalled_since,
+        } = value;
+        Self {
+            id,
+            stage: StalledWriteStage::from_engine(stage),
+            detail,
+            stalled_since,
+        }
+    }
+}
+
+/// The exact census behind [`DiagnosticsSnapshot::stalled_writes`]'s bounded
+/// detail window. Totals count every stalled obligation, including the ones
+/// no detail row was emitted for: a bound on memory is never a lie about how
+/// much is stuck, and moving a write into or out of the window changes no
+/// total.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StalledWriteTotals {
+    pub unroutable: u64,
+    pub unsignable: u64,
+    pub undeliverable: u64,
+    /// Stalled obligations with no detail row in this snapshot.
+    pub omitted_details: u64,
+    /// The detail-window bound this snapshot was built under.
+    pub detail_limit: u64,
+}
+
+impl StalledWriteTotals {
+    fn from_engine(value: crate::core::StalledWriteTotals) -> Self {
+        let crate::core::StalledWriteTotals {
+            unroutable,
+            unsignable,
+            undeliverable,
+            omitted_details,
+            detail_limit,
+        } = value;
+        Self {
+            unroutable,
+            unsignable,
+            undeliverable,
+            omitted_details,
+            detail_limit,
+        }
+    }
+}
+
 /// The engine-global diagnostics snapshot — "the acceptance test rendered
 /// on screen, permanently." One snapshot covers every currently-planned
 /// relay session; there is no separate per-query diagnostics (that is
@@ -275,6 +379,19 @@ pub struct DiagnosticsSnapshot {
     /// Latest transport acceptance/verifier failure surfaced by the pool.
     /// Observational only; it never changes routing or trust policy.
     pub transport_degraded: Option<String>,
+    /// Every durable write obligation that cannot progress, bounded to
+    /// [`StalledWriteTotals::detail_limit`] rows in a deterministic display
+    /// order (stage, then acceptance instant, then descriptor) that no
+    /// scheduler reads.
+    ///
+    /// A receipt answers "what happened to THIS write", which needs someone
+    /// still holding it. Nobody holds the receipt for the message composed
+    /// on a train three weeks ago, and that is exactly the write worth
+    /// surfacing. Reading this list changes nothing: no retry, no wake, no
+    /// receipt retained, no transport or signer kept alive.
+    pub stalled_writes: Vec<StalledWrite>,
+    /// Exact counts behind that window. See [`StalledWriteTotals`].
+    pub stalled_write_totals: StalledWriteTotals,
 }
 
 impl DiagnosticsSnapshot {
@@ -289,6 +406,8 @@ impl DiagnosticsSnapshot {
             sessions_refused_by_subscription_budget,
             store_degraded,
             transport_degraded,
+            stalled_writes,
+            stalled_write_totals,
         } = value;
         Self {
             relays: relays
@@ -306,6 +425,11 @@ impl DiagnosticsSnapshot {
             sessions_refused_by_subscription_budget,
             store_degraded,
             transport_degraded,
+            stalled_writes: stalled_writes
+                .into_iter()
+                .map(StalledWrite::from_engine)
+                .collect(),
+            stalled_write_totals: StalledWriteTotals::from_engine(stalled_write_totals),
         }
     }
 }
@@ -422,6 +546,19 @@ mod tests {
             sessions_refused_by_subscription_budget: 2,
             store_degraded: Some("read-only".to_string()),
             transport_degraded: Some("verifier unavailable".to_string()),
+            stalled_writes: vec![crate::core::StalledWrite {
+                id: "descriptor".to_string(),
+                stage: crate::core::StalledWriteStage::Undeliverable,
+                detail: "no destination is reachable: wss://nowhere.example".to_string(),
+                stalled_since: nostr::Timestamp::from(1_700_000_000u64),
+            }],
+            stalled_write_totals: crate::core::StalledWriteTotals {
+                unroutable: 1,
+                unsignable: 2,
+                undeliverable: 3,
+                omitted_details: 5,
+                detail_limit: 64,
+            },
         };
 
         let facade = DiagnosticsSnapshot::from_engine(engine);
@@ -481,5 +618,41 @@ mod tests {
             facade.transport_degraded.as_deref(),
             Some("verifier unavailable")
         );
+
+        assert_eq!(facade.stalled_writes.len(), 1);
+        let stalled = &facade.stalled_writes[0];
+        assert_eq!(stalled.id, "descriptor");
+        assert_eq!(stalled.stage, StalledWriteStage::Undeliverable);
+        assert_eq!(
+            stalled.detail,
+            "no destination is reachable: wss://nowhere.example"
+        );
+        assert_eq!(stalled.stalled_since, Timestamp::from(1_700_000_000u64));
+        assert_eq!(
+            facade.stalled_write_totals,
+            StalledWriteTotals {
+                unroutable: 1,
+                unsignable: 2,
+                undeliverable: 3,
+                omitted_details: 5,
+                detail_limit: 64,
+            }
+        );
+        for (engine_stage, facade_stage) in [
+            (
+                crate::core::StalledWriteStage::Unroutable,
+                StalledWriteStage::Unroutable,
+            ),
+            (
+                crate::core::StalledWriteStage::Unsignable,
+                StalledWriteStage::Unsignable,
+            ),
+            (
+                crate::core::StalledWriteStage::Undeliverable,
+                StalledWriteStage::Undeliverable,
+            ),
+        ] {
+            assert_eq!(StalledWriteStage::from_engine(engine_stage), facade_stage);
+        }
     }
 }

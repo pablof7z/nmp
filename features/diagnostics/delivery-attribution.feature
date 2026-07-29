@@ -36,7 +36,7 @@ Feature: Which destination failed, and why, one destination at a time
 
   # ---- one destination, one answer --------------------------------------
 
-  @designed @ledger-9
+  @ledger-9
   Scenario: A relay's refusal is reported in the relay's own words
     Given relay "wss://one.example" rejects every event with "blocked: not admitted"
     When I publish a note saying "hello"

@@ -67,7 +67,7 @@ Feature: Everything that cannot progress, in one place, without a receipt
     And one of them is reported as undeliverable
     And each of them reports its own reason
 
-  @designed @ledger-9
+  @ledger-9
   Scenario: The relay that does not exist
     # Pablo's own example. Routing succeeded perfectly and instantly; the
     # world is what refuses. Nothing about this write was ever malformed and
@@ -140,7 +140,6 @@ Feature: Everything that cannot progress, in one place, without a receipt
     And it reports the reason as Bob's missing DM relay list
     And it reports the write as having been stalled since before the restart
 
-  @designed
   Scenario: Reading the list changes nothing
     # Diagnostics is a mirror. If reading it retried, an app that polled would
     # publish differently from an app that did not, and the diagnostic would
