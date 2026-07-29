@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use nmp::{
     AcquisitionEvidence, AuthPhase, Binding, CancelWriteOutcome, CorrelationToken,
     DiagnosticsSnapshot, Durability, Engine, EngineConfig, FifoReceiver, FifoRecvTimeoutError,
-    Filter, Identity, Lane, LiveQuery, ObservationCancel, ReceiptId, ReceiptReattachment, Row,
-    RowDelta, ShortfallFact, SourceStatus, StalledWriteStage, Timestamp, UnsignedEvent,
+    Filter, Identity, Lane, LiveQuery, ReceiptId, ReceiptReattachment, Row, RowDelta,
+    ShortfallFact, SourceStatus, StalledWriteStage, Subscription, Timestamp, UnsignedEvent,
     WriteIntent, WritePayload, WriteRouting, WriteStatus,
 };
 use nmp_ffi::convert::{write_status_to_ffi, WriteStatusRef};
@@ -967,6 +967,10 @@ fn handoff_is_quiescent(
     let [relay] = snapshot.relays.as_slice() else {
         return None;
     };
+    let has_discovery = relay
+        .filters
+        .iter()
+        .any(|filter| filter_names_kind(filter, DISCOVERY_TRIGGER_KIND));
     let has_content = relay
         .filters
         .iter()
@@ -983,12 +987,13 @@ fn handoff_is_quiescent(
         discovery: relay_witness.query_count_for_kind(Kind::RelayList.as_u16()),
         content: relay_witness.query_count_for_kind(QUERY_KIND),
     };
-    // Diagnostics is intentionally a latest-value stream, so the transient
-    // two-filter handoff snapshot may be conflated with the stable
-    // content-only snapshot before this consumer reads it (#722). The actual
-    // relay REQ counters plus cumulative engine event counters below are the
-    // durable proof that both phases crossed the wire and were processed.
-    (has_content
+    // The explicit discovery-trigger subscription is still owned at this
+    // barrier, so its filter must remain in every current snapshot until the
+    // named cancellation below. The actual relay REQ counters plus cumulative
+    // engine event counters are the durable proof that the internal NIP-65
+    // discovery and content phases crossed the wire and were processed (#722).
+    (has_discovery
+        && has_content
         && !has_internal_discovery
         && routed_through_nip65
         && baseline.discovery != 0
@@ -1048,7 +1053,11 @@ fn assert_content_phase_diagnostics(
     );
 }
 
+// Borrow the live discovery subscription across the barrier. This is an
+// ownership witness, not data input: the caller cannot consume/cancel the
+// subscription before the pre-cancel diagnostics state has been accepted.
 fn wait_for_direct_handoff_quiescence(
+    _discovery_subscription: &Subscription,
     rx: &mpsc::Receiver<DiagnosticsSnapshot>,
     relay: &ScriptedRelay,
 ) -> HandoffBaseline {
@@ -1228,36 +1237,30 @@ fn expected_auth_parked_receipts(keys: &Keys) -> Vec<NormStatus> {
     receipts
 }
 
-fn stage_direct_discovery(
-    engine: &Engine,
-    pubkey: &str,
-    relay: &ScriptedRelay,
-) -> ObservationCancel {
+fn stage_direct_discovery(engine: &Engine, pubkey: &str, relay: &ScriptedRelay) -> Subscription {
     let subscription = engine
         .observe(
             LiveQuery::from_filter(direct_filter(pubkey, DISCOVERY_TRIGGER_KIND)),
             None,
         )
         .expect("direct discovery query must open");
-    let cancel = subscription.cancel_handle();
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        while let Ok(batch) = subscription.recv() {
-            if tx.send(batch).is_err() {
-                break;
-            }
-        }
-    });
 
     let deadline = Instant::now() + WAIT;
     loop {
-        let frame = recv_before(&rx, deadline, "direct discovery query");
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let frame = subscription
+            .recv_timeout(remaining)
+            .unwrap_or_else(|error| {
+                panic!(
+                "direct discovery query did not settle within the total {WAIT:?} bound: {error}"
+            )
+            });
         let evidence = normalize_direct_evidence(frame.evidence, relay.url.as_str());
         if evidence == expected_limited_evidence() {
             break;
         }
     }
-    cancel
+    subscription
 }
 
 fn stage_ffi_discovery(
@@ -1872,7 +1875,7 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
         }
     });
 
-    let discovery_cancel = stage_direct_discovery(&engine, &pubkey.to_hex(), &relay);
+    let discovery_subscription = stage_direct_discovery(&engine, &pubkey.to_hex(), &relay);
 
     let subscription = engine
         .observe(
@@ -1905,8 +1908,9 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
     // discovery/content response crossed the handoff. That equality barrier
     // is the stable baseline; only then may withdrawing discovery prove the
     // handoff caused no replay.
-    let handoff_baseline = wait_for_direct_handoff_quiescence(&diag_rx, &relay);
-    discovery_cancel.cancel();
+    let handoff_baseline =
+        wait_for_direct_handoff_quiescence(&discovery_subscription, &diag_rx, &relay);
+    discovery_subscription.cancel();
 
     let diagnostics_deadline = Instant::now() + WAIT;
     let mut last_diagnostics = None;
