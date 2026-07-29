@@ -1071,7 +1071,11 @@ async fn relay_never_contacted(w: &mut NmpWorld, name: String) {
     );
 }
 
-#[then(regex = r#"^no relay outside (.+) was ever contacted$"#)]
+/// The all-quoted form. Its sibling above starts with the unquoted words
+/// "the indexers" and owns every phrase that names the configured indexer
+/// set; this one owns the phrases that name relays and nothing else, so the
+/// two regexes cannot both match the same sentence.
+#[then(regex = r#"^no relay outside ("[^"]+".*) was ever contacted$"#)]
 async fn no_relay_outside(w: &mut NmpWorld, targets: String) {
     let allowed = crate::steps::parse_quoted_list(&targets);
     nothing_to_observe!(

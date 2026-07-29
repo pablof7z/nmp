@@ -80,6 +80,10 @@ fn an_unreachable_explicit_relay_is_accepted_because_the_door_cannot_know() {
         "acceptance cannot validate that a relay exists, so it does not try"
     );
 
+    // Routing happened and named exactly the caller's relay: the lane the
+    // engine opens is for that session and no other. Nothing reaches the
+    // wire, because nothing can -- which is the point. Failing per relay is
+    // what an unreachable target gets, not a refusal at the door.
     let (id, generation, u) = find_sign_request(&effects);
     let signed = u.sign_with_keys(&a).unwrap();
     let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
