@@ -787,7 +787,7 @@ fn write_ack_per_relay() {
             .filter(|e| matches!(e, Effect::PublishEvent(..)))
             .count(),
         2,
-        "a durable AuthorOutbox write reaches both of the author's write relays"
+        "a durable Auto-routed write reaches both of the author's write relays"
     );
     mark_written(&mut core, &effects, &relay_ok);
     mark_written(&mut core, &effects, &relay_bad);
