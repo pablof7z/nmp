@@ -16,7 +16,7 @@ impl<S: EventStore> EngineCore<S> {
     /// the per-intent projection.
     fn replace_lane_projection(&mut self, id: ReceiptId, lanes: &[RecoveredLane]) {
         if !self.pending.contains_key(&id) {
-            self.lane_worker_projection_available = false;
+            self.lane_projection_unprovable = true;
             return;
         }
         let next = LaneWorkerProjection::from_recovered(lanes);
@@ -48,11 +48,11 @@ impl<S: EventStore> EngineCore<S> {
     /// Apply one successful store mutation's exact post-state.
     fn apply_committed_lane(&mut self, lane: &RecoveredLane) {
         let Some(id) = self.intent_receipts.get(&lane.key.intent_id).copied() else {
-            self.lane_worker_projection_available = false;
+            self.lane_projection_unprovable = true;
             return;
         };
         let Some(pending) = self.pending.get_mut(&id) else {
-            self.lane_worker_projection_available = false;
+            self.lane_projection_unprovable = true;
             return;
         };
         let newly_persisted = pending.lane_projection.apply(lane);
@@ -71,11 +71,11 @@ impl<S: EventStore> EngineCore<S> {
     /// obligation forever.
     fn mark_lane_projection_uncertain(&mut self, key: &LaneKey) {
         let Some(id) = self.intent_receipts.get(&key.intent_id).copied() else {
-            self.lane_worker_projection_available = false;
+            self.lane_projection_unprovable = true;
             return;
         };
         let Some(pending) = self.pending.get_mut(&id) else {
-            self.lane_worker_projection_available = false;
+            self.lane_projection_unprovable = true;
             return;
         };
         let newly_persisted = pending.lane_projection.mark_uncertain(key.relay.clone());
@@ -107,18 +107,30 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
+    /// Establish (or re-establish) one intent's projection from the durable
+    /// lane set, creating the lanes its recorded route revisions imply.
+    ///
+    /// `candidate_relays` is what the caller can prove about the intent's
+    /// durable route set. `None` means it could not be read at all — the
+    /// caller has nothing to hold conservatively, so the whole projection
+    /// reports unavailable until a retry commits.
     pub(super) fn bootstrap_projected_lanes(
         &mut self,
         intent_id: IntentId,
-        candidate_relays: &BTreeSet<RelayUrl>,
+        candidate_relays: Option<&BTreeSet<RelayUrl>>,
     ) -> Result<Vec<RecoveredLane>, PersistenceError> {
         let result = self.resolver.store_mut().bootstrap_outbox_lanes(intent_id);
         match result {
             Ok(lanes) => {
                 if let Some(id) = self.intent_receipts.get(&intent_id).copied() {
                     self.replace_lane_projection(id, &lanes);
+                    // The exact rebuild above supersedes every conservative
+                    // guess this gap was standing in for, including any
+                    // `uncertain` relay it left behind. This is the one place
+                    // a bootstrap gap is allowed to close.
+                    self.lane_bootstrap_retries.remove(&id);
                 } else {
-                    self.lane_worker_projection_available = false;
+                    self.lane_projection_unprovable = true;
                 }
                 Ok(lanes)
             }
@@ -127,19 +139,56 @@ impl<S: EventStore> EngineCore<S> {
                 // complete read used to establish the projection. Even an
                 // Absent mutation outcome does not prove that older lanes were
                 // absent, so every route candidate remains conservatively
-                // owned until explicit recovery.
-                for relay in candidate_relays {
+                // owned until a retry commits.
+                for relay in candidate_relays.into_iter().flatten() {
                     self.mark_lane_projection_uncertain(&LaneKey {
                         intent_id,
                         relay: relay.clone(),
                     });
                 }
-                if candidate_relays.is_empty() {
-                    self.lane_worker_projection_available = false;
-                }
+                self.schedule_lane_bootstrap_retry(intent_id, candidate_relays);
                 Err(error)
             }
         }
+    }
+
+    /// Record (or re-arm) the retryable gap left by a failed bootstrap.
+    ///
+    /// The conservative retention taken at the failure is only safe because
+    /// this exists: `uncertain` can be cleared solely by a committed lane
+    /// fact for that exact relay, and for an intent with no lane rows no
+    /// other path in the reducer can ever produce one.
+    pub(super) fn schedule_lane_bootstrap_retry(
+        &mut self,
+        intent_id: IntentId,
+        candidates: Option<&BTreeSet<RelayUrl>>,
+    ) {
+        let Some(id) = self.intent_receipts.get(&intent_id).copied() else {
+            // No receipt owns this intent, so there is no pending write to
+            // retry on behalf of and nothing that could later close the gap.
+            self.lane_projection_unprovable = true;
+            return;
+        };
+        let entry = self
+            .lane_bootstrap_retries
+            .entry(id)
+            .or_insert(LaneBootstrapRetry {
+                candidates: Some(BTreeSet::new()),
+                due: self.clock,
+                failures: 0,
+            });
+        // Unknown is sticky and unions are conservative: a later failure that
+        // happens to know its candidates must not shrink an earlier gap or
+        // upgrade an unreadable route set into a covered one.
+        entry.candidates = match (entry.candidates.take(), candidates) {
+            (Some(mut known), Some(more)) => {
+                known.extend(more.iter().cloned());
+                Some(known)
+            }
+            _ => None,
+        };
+        entry.failures = entry.failures.saturating_add(1);
+        entry.due = self.clock + bootstrap_retry_delay_secs(entry.failures);
     }
 
     pub(super) fn commit_lane_waiting(
@@ -524,7 +573,7 @@ mod tests {
 
         assert_eq!(result.unwrap_err().durability(), DurabilityOutcome::Absent);
         assert_eq!(core.pending[&receipt].lane_projection, before);
-        assert!(core.lane_worker_projection_available);
+        assert!(core.lane_worker_projection_available());
     }
 
     /// The projection wrapper is an API mechanism, and this census is its

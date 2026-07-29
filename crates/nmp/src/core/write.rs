@@ -109,6 +109,11 @@ impl<S: EventStore> EngineCore<S> {
         if let Some(intent_id) = pending.intent_id {
             self.intent_receipts.remove(&intent_id);
         }
+        // A removed write owns no projection to reconcile, so its bootstrap
+        // gap is closed by the removal. Leaving the entry would keep
+        // rearming a deadline for a receipt that can never bootstrap again
+        // and, for a blind gap, would suppress worker reconciliation forever.
+        self.lane_bootstrap_retries.remove(&id);
         for relay in &pending.lane_projection.persisted {
             if let Some(receipts) = self.receipts_by_lane_relay.get_mut(relay) {
                 receipts.remove(&id);
@@ -750,7 +755,9 @@ impl<S: EventStore> EngineCore<S> {
             Ok(recovered) => recovered,
             Err(error) => {
                 self.lane_relay_index_degraded = true;
-                self.lane_worker_projection_available = false;
+                // Nothing was rebuilt, so there is no intent to retry a
+                // bootstrap for: this gap is closable only by another boot.
+                self.lane_projection_unprovable = true;
                 self.degrade_store(error, &mut effects);
                 return effects;
             }
@@ -761,7 +768,12 @@ impl<S: EventStore> EngineCore<S> {
         // moment `receipts_by_lane_relay` can be trusted again regardless of
         // what happened in a prior process (epic #507 finding E5).
         self.lane_relay_index_degraded = false;
-        self.lane_worker_projection_available = true;
+        self.lane_projection_unprovable = false;
+        // Every gap recorded against the previous `pending` set refers to
+        // receipt ids this rebuild is about to re-derive from the store.
+        // Carrying them across would retry on behalf of a projection that no
+        // longer exists; the rebuild below re-registers whatever still fails.
+        self.lane_bootstrap_retries.clear();
 
         for intent in recovered {
             if intent.frozen.kind == nostr::Kind::Authentication {
@@ -837,7 +849,13 @@ impl<S: EventStore> EngineCore<S> {
                     // those lanes -- an unprovable gap, so degrade rather
                     // than silently under-index (epic #507 finding E5).
                     self.lane_relay_index_degraded = true;
-                    self.lane_worker_projection_available = false;
+                    // The durable route set is exactly what could not be
+                    // read, so nothing can be held as `uncertain` and the
+                    // projection reports unavailable. Register the gap so a
+                    // later tick can bootstrap this intent for real instead
+                    // of disabling worker reconciliation for the whole
+                    // process (#1000).
+                    self.schedule_lane_bootstrap_retry(intent.intent_id, None);
                     continue;
                 }
             };
@@ -870,102 +888,29 @@ impl<S: EventStore> EngineCore<S> {
                 }
             }
 
-            let lanes = match self.bootstrap_projected_lanes(intent.intent_id, &durable_relays) {
-                Ok(lanes) => lanes,
-                Err(_) => {
-                    // Same reasoning as the `recover_route_revisions` error
-                    // above: this is the sole call that teaches the reverse
-                    // index this intent's lanes, so a failure here is an
-                    // audit hole, not a "no lanes" fact -- degrade rather
-                    // than guess (epic #507 finding E5).
-                    self.lane_relay_index_degraded = true;
-                    continue;
-                }
-            };
-            for lane in lanes {
-                // The recovered write lane's worker demand is the intent's
-                // identity-scoped authenticated session (#8 U2); recovery
-                // redials exactly the session the lane will publish on. The
-                // signing identity was frozen at acceptance
-                // (`intent.expected_pubkey`), never re-read from the mutable
-                // active account.
-                let session = RelaySessionKey::new(
-                    lane.key.relay.clone(),
-                    AccessContext::Nip42(intent.expected_pubkey),
-                );
-                match lane.state {
-                    LaneState::InFlight {
-                        ordinal,
-                        phase: InFlightPhase::AwaitingHandoff,
-                    } => match durability {
-                        Durability::Durable => {
-                            let eligible_at = self.clock;
-                            let _ = self.commit_lane_transient(
-                                &lane.key,
-                                lane.revision,
-                                ordinal,
-                                eligible_at,
-                                TransientCause::Interrupted,
-                                Some("process restarted before handoff resolved".to_string()),
-                            );
-                        }
-                        Durability::AtMostOnce => {
-                            if self
-                                .commit_lane_attempt_finish(
-                                    &lane.key,
-                                    lane.revision,
-                                    ordinal,
-                                    AttemptOutcome::OutcomeUnknown,
-                                    self.clock,
-                                )
-                                .is_ok()
-                            {
-                                effects.push(Effect::EmitReceipt(
-                                    id,
-                                    WriteStatus::OutcomeUnknown(lane.key.relay),
-                                ));
-                            }
-                        }
-                        Durability::Ephemeral => unreachable!(),
-                    },
-                    LaneState::WaitingConnection
-                    | LaneState::Eligible { .. }
-                    | LaneState::Transient { .. } => {
-                        effects.push(Effect::EnsureWriteRelay(session));
+            let lanes =
+                match self.bootstrap_projected_lanes(intent.intent_id, Some(&durable_relays)) {
+                    Ok(lanes) => lanes,
+                    Err(_) => {
+                        // Same reasoning as the `recover_route_revisions`
+                        // error above: this is the sole call that teaches the
+                        // reverse index this intent's lanes, so a failure
+                        // here is an audit hole, not a "no lanes" fact --
+                        // degrade rather than guess (epic #507 finding E5).
+                        // The projection door has already recorded the
+                        // retryable gap that gets this intent out of its
+                        // conservative retention (#1000).
+                        self.lane_relay_index_degraded = true;
+                        continue;
                     }
-                    LaneState::InFlight {
-                        phase: InFlightPhase::AwaitingAck { .. },
-                        ..
-                    } => {
-                        effects.push(Effect::EnsureWriteRelay(session));
-                    }
-                    LaneState::WaitingAuth => {
-                        // A `WaitingAuth` park never survives a restart: its
-                        // authenticated grant was generation-scoped to a socket
-                        // this process no longer holds. Recover it as
-                        // `WaitingConnection` so the post-connect
-                        // `wake_relay_lanes(.., auth_only=false)` re-drives it;
-                        // leaving it `WaitingAuth` would strand it forever
-                        // (its only wake, `finish_auth_ok`, needs a fresh
-                        // client-provoked challenge that boot alone can't cause).
-                        // Fail-safe like the disconnect arm: a swallowed reset
-                        // failure would silently re-strand the lane — exactly
-                        // the missed-wakeup class this guards — so on error mark
-                        // recovery degraded (this function's own untrustworthy-
-                        // recovery signal) rather than warm a connection that
-                        // cannot wake a still-`WaitingAuth` lane.
-                        if self
-                            .commit_lane_waiting(&lane.key, lane.revision, false)
-                            .is_ok()
-                        {
-                            effects.push(Effect::EnsureWriteRelay(session));
-                        } else {
-                            self.lane_relay_index_degraded = true;
-                        }
-                    }
-                    LaneState::Terminal { .. } => {}
-                }
-            }
+                };
+            self.open_bootstrapped_lanes(
+                id,
+                durability,
+                intent.expected_pubkey,
+                lanes,
+                &mut effects,
+            );
         }
 
         self.retry_scheduler_blocked = false;
@@ -975,6 +920,176 @@ impl<S: EventStore> EngineCore<S> {
         }
         effects
     }
+
+    /// Drive one intent's freshly established lane set back into ordinary
+    /// write-plane work.
+    ///
+    /// Shared by boot recovery and the bootstrap retry below, because a lane
+    /// set established late is indistinguishable from one established at
+    /// boot: both may hold an attempt interrupted by a previous process, a
+    /// generation-scoped AUTH park that cannot survive, or a lane simply
+    /// waiting for its session. Only `Eligible` and `Transient` lanes are
+    /// left to the ordinary scheduler and deadline sweep.
+    fn open_bootstrapped_lanes(
+        &mut self,
+        id: ReceiptId,
+        durability: Durability,
+        signing_pubkey: PublicKey,
+        lanes: Vec<RecoveredLane>,
+        effects: &mut Vec<Effect>,
+    ) {
+        for lane in lanes {
+            // The recovered write lane's worker demand is the intent's
+            // identity-scoped authenticated session (#8 U2); recovery
+            // redials exactly the session the lane will publish on. The
+            // signing identity was frozen at acceptance, never re-read from
+            // the mutable active account.
+            let session =
+                RelaySessionKey::new(lane.key.relay.clone(), AccessContext::Nip42(signing_pubkey));
+            match lane.state {
+                LaneState::InFlight {
+                    ordinal,
+                    phase: InFlightPhase::AwaitingHandoff,
+                } => match durability {
+                    Durability::Durable => {
+                        let eligible_at = self.clock;
+                        let _ = self.commit_lane_transient(
+                            &lane.key,
+                            lane.revision,
+                            ordinal,
+                            eligible_at,
+                            TransientCause::Interrupted,
+                            Some("process restarted before handoff resolved".to_string()),
+                        );
+                    }
+                    Durability::AtMostOnce => {
+                        if self
+                            .commit_lane_attempt_finish(
+                                &lane.key,
+                                lane.revision,
+                                ordinal,
+                                AttemptOutcome::OutcomeUnknown,
+                                self.clock,
+                            )
+                            .is_ok()
+                        {
+                            effects.push(Effect::EmitReceipt(
+                                id,
+                                WriteStatus::OutcomeUnknown(lane.key.relay),
+                            ));
+                        }
+                    }
+                    Durability::Ephemeral => unreachable!(),
+                },
+                LaneState::WaitingConnection
+                | LaneState::Eligible { .. }
+                | LaneState::Transient { .. } => {
+                    effects.push(Effect::EnsureWriteRelay(session));
+                }
+                LaneState::InFlight {
+                    phase: InFlightPhase::AwaitingAck { .. },
+                    ..
+                } => {
+                    effects.push(Effect::EnsureWriteRelay(session));
+                }
+                LaneState::WaitingAuth => {
+                    // A `WaitingAuth` park never survives a restart: its
+                    // authenticated grant was generation-scoped to a socket
+                    // this process no longer holds. Recover it as
+                    // `WaitingConnection` so the post-connect
+                    // `wake_relay_lanes(.., auth_only=false)` re-drives it;
+                    // leaving it `WaitingAuth` would strand it forever
+                    // (its only wake, `finish_auth_ok`, needs a fresh
+                    // client-provoked challenge that boot alone can't cause).
+                    // Fail-safe like the disconnect arm: a swallowed reset
+                    // failure would silently re-strand the lane — exactly
+                    // the missed-wakeup class this guards — so on error mark
+                    // recovery degraded (this function's own untrustworthy-
+                    // recovery signal) rather than warm a connection that
+                    // cannot wake a still-`WaitingAuth` lane.
+                    if self
+                        .commit_lane_waiting(&lane.key, lane.revision, false)
+                        .is_ok()
+                    {
+                        effects.push(Effect::EnsureWriteRelay(session));
+                    } else {
+                        self.lane_relay_index_degraded = true;
+                    }
+                }
+                LaneState::Terminal { .. } => {}
+            }
+        }
+    }
+
+    /// Re-run every due lane bootstrap that previously failed to commit.
+    ///
+    /// This is the whole way OUT of the conservative retention a failed
+    /// bootstrap takes (#1000). `uncertain` is cleared only by a committed
+    /// `RecoveredLane` for that exact relay, and an intent whose bootstrap
+    /// failed owns NO lane rows — so `schedule_ready`, the deadline sweep and
+    /// the wake index all find nothing for it and no committed lane fact can
+    /// ever arrive on its own. Without this door a single transient store
+    /// error pins the intent's relay workers and parks its receipt in
+    /// `pending` for the life of the process.
+    ///
+    /// It is emphatically not a scan: `lane_bootstrap_retries` is empty in
+    /// steady state, so the ordinary tick pays one empty-map probe and
+    /// worker demand keeps reading zero lanes (#985).
+    pub(super) fn retry_lane_bootstraps(&mut self, now: Timestamp) -> Vec<Effect> {
+        let due: Vec<ReceiptId> = self
+            .lane_bootstrap_retries
+            .iter()
+            .filter(|(_, retry)| retry.due <= now)
+            .map(|(id, _)| *id)
+            .collect();
+        let mut effects = Vec::new();
+        for id in due {
+            self.retry_lane_bootstrap(id, &mut effects);
+        }
+        effects
+    }
+
+    fn retry_lane_bootstrap(&mut self, id: ReceiptId, effects: &mut Vec<Effect>) {
+        let Some((intent_id, signing_pubkey, durability)) = self.pending.get(&id).and_then(|p| {
+            p.intent_id
+                .map(|intent_id| (intent_id, p.signing_pubkey, p.durability))
+        }) else {
+            // The write left `pending` (closed, cancelled or compensated)
+            // while its gap was outstanding, so there is no projection left
+            // to reconcile and nothing retains a worker on its behalf.
+            self.lane_bootstrap_retries.remove(&id);
+            return;
+        };
+        let candidates = self
+            .lane_bootstrap_retries
+            .get(&id)
+            .and_then(|retry| retry.candidates.clone());
+        // On failure the projection door re-arms this entry with the next
+        // backoff, so the gap stays owned and retention stays conservative.
+        let Ok(lanes) = self.bootstrap_projected_lanes(intent_id, candidates.as_ref()) else {
+            return;
+        };
+        // Committed: the exact rebuild has replaced every conservative guess
+        // and the door has dropped the retry entry.
+        let connected: BTreeSet<RelaySessionKey> = lanes
+            .iter()
+            .map(|lane| {
+                RelaySessionKey::new(lane.key.relay.clone(), AccessContext::Nip42(signing_pubkey))
+            })
+            .filter(|session| self.connected_relays.contains(session))
+            .collect();
+        self.open_bootstrapped_lanes(id, durability, signing_pubkey, lanes, effects);
+        // Boot can assume nothing is connected yet, but a retry runs
+        // mid-process: a lane whose session is ALREADY live would sit in
+        // `WaitingConnection` forever waiting for a `RelayConnected` that
+        // has already happened. Replay the exact wake that connection would
+        // have delivered.
+        for session in connected {
+            let woken = self.wake_relay_lanes(&session, false);
+            effects.extend(woken);
+        }
+    }
+
     /// its retained facts. Unknown ids do not create state.
     pub(super) fn retained_receipt_status(receipt: &nmp_store::RecoveredReceipt) -> WriteStatus {
         match receipt.state {
@@ -2266,14 +2381,17 @@ impl<S: EventStore> EngineCore<S> {
             return;
         }
 
-        let lanes = match self.bootstrap_projected_lanes(intent_id, &relays) {
+        let lanes = match self.bootstrap_projected_lanes(intent_id, Some(&relays)) {
             Ok(lanes) => lanes,
             Err(_) => {
                 // This is the sole call that teaches the reverse index this
                 // freshly-signed intent's lanes; a failure here means the
                 // index cannot learn whatever lanes may (or may not) exist,
                 // so degrade rather than assume "no lanes" (epic #507
-                // finding E5).
+                // finding E5). The projection door has recorded the retryable
+                // gap: without it these route candidates would stay
+                // `uncertain` -- pinning their workers and this receipt --
+                // for the life of the process (#1000).
                 self.lane_relay_index_degraded = true;
                 for relay in relays {
                     self.emit_write_status(id, WriteStatus::PersistenceBlocked(relay), effects);
