@@ -16,7 +16,7 @@
 //! #115 Fable ruling (Fork 3): `Durability`/`WritePayload`/`WriteIntent`/
 //! `WriteRouting`/`NarrowOnly`/`PrivateRoute` relocated to `nmp-grammar` so a
 //! protocol module composing a `WriteIntent` does not gain an engine
-//! dependency. `WriteStatus`/`Receipt`/`ReceiptSink` stay here: they reference
+//! dependency. `WriteStatus`/`Receipt` stay here: they reference
 //! [`crate::core::ReceiptId`] and are runtime EVIDENCE an app only ever
 //! reads back, never intent vocab it constructs.
 
@@ -179,16 +179,8 @@ impl std::fmt::Display for CancelWriteError {
 
 impl std::error::Error for CancelWriteError {}
 
-/// What `Handle::publish` returns: an id correlating to the status stream
-/// delivered on the caller's `ReceiptSink` — never a `bool`/`()`.
+/// What `Handle::publish` returns: an id correlating to the runtime-delivered
+/// status stream — never a `bool`/`()`.
 pub struct Receipt {
     pub id: ReceiptId,
-}
-
-/// Sink the app-facing `Handle` registers for a `Publish`'s status stream.
-pub trait ReceiptSink: Send {
-    /// Deliver one live fact. `false` means this observer has cancelled or
-    /// crossed its finite live-delivery bound and must no longer be retained.
-    /// Durable receipt ownership is unaffected; the caller can reattach.
-    fn on_status(&self, status: WriteStatus) -> bool;
 }

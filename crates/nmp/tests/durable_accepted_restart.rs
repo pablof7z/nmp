@@ -3,13 +3,12 @@
 //! reducer/store and opening the database again.
 
 use std::borrow::Cow;
-use std::sync::{Arc, Mutex};
 
 use nmp::mechanism::core::{
     AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome, AuthSendCompletion,
     AuthSendOutcome, AuthSignerOutcome, Effect, EngineCore, EngineMsg, ReattachOutcome, ReceiptId,
 };
-use nmp::mechanism::outbox::{ReceiptSink, WriteStatus};
+use nmp::mechanism::outbox::WriteStatus;
 use nmp_grammar::{
     AccessContext, Durability, RelayListBootstrapAuthority, RelaySessionKey, WriteIntent,
     WritePayload, WriteRouting,
@@ -24,16 +23,6 @@ use nostr::{
     EventBuilder, Keys, Kind, PublicKey, RelayMessage, RelayUrl, Timestamp, UnsignedEvent,
 };
 use redb::{Database, ReadableTable, TableDefinition};
-
-#[derive(Clone, Default)]
-struct Sink(Arc<Mutex<Vec<WriteStatus>>>);
-
-impl ReceiptSink for Sink {
-    fn on_status(&self, status: WriteStatus) -> bool {
-        self.0.lock().unwrap().push(status);
-        true
-    }
-}
 
 fn receipt_id(effects: &[Effect]) -> ReceiptId {
     effects
@@ -175,16 +164,13 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
         };
         core.handle(EngineMsg::RelayConnected(handle, relay_session.clone()));
         authenticate(&mut core, handle, &relay_session, &keys);
-        let effects = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Signed(event.clone()),
-                durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(Sink::default()),
-        ));
+        let effects = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Signed(event.clone()),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+            correlation: None,
+        }));
         assert!(effects.iter().any(|effect| matches!(effect,
             Effect::PublishEvent(r, e, _) if r == &relay_session && e == &event
         )));
@@ -224,23 +210,14 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
         "boot recovery must not accept the write a second time"
     );
 
-    let first = Sink::default();
-    let second = Sink::default();
-    assert!(core
-        .reattach_receipt(id, Box::new(first.clone()))
-        .is_attached());
-    assert!(core
-        .reattach_receipt(id, Box::new(second.clone()))
-        .is_attached());
-    assert_eq!(
-        first.0.lock().unwrap().len(),
-        second.0.lock().unwrap().len()
-    );
+    let first = core.reattach_receipt(id);
+    let second = core.reattach_receipt(id);
+    assert!(first.is_attached());
+    assert!(second.is_attached());
+    assert_eq!(first.facts.len(), second.facts.len());
     assert!(
         !first
-            .0
-            .lock()
-            .unwrap()
+            .facts
             .iter()
             .any(|s| matches!(s, WriteStatus::Sent { relay: r, .. } if r == &relay)),
         "a recovered Started attempt predates transport Written and cannot replay as Sent"
@@ -342,16 +319,13 @@ fn at_most_once_started_attempt_becomes_outcome_unknown_and_is_never_resent() {
         };
         core.handle(EngineMsg::RelayConnected(handle, session.clone()));
         authenticate(&mut core, handle, &session, &keys);
-        let effects = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Signed(event),
-                durability: Durability::AtMostOnce,
-                routing: WriteRouting::AuthorOutbox,
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(Sink::default()),
-        ));
+        let effects = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Signed(event),
+            durability: Durability::AtMostOnce,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+            correlation: None,
+        }));
         let id = receipt_id(&effects);
         // Resolve the stable receipt to its intent after the reducer drops.
         drop(core);
@@ -411,16 +385,13 @@ fn pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates() {
             10,
         );
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
-        let effects = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Unsigned(unsigned),
-                durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(Sink::default()),
-        ));
+        let effects = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+            correlation: None,
+        }));
         receipt_id(&effects)
     };
 
@@ -433,12 +404,10 @@ fn pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates() {
     );
     let mut core = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
     assert!(core.recover_on_boot().is_empty());
-    let reattached = Sink::default();
-    assert!(core
-        .reattach_receipt(id, Box::new(reattached.clone()))
-        .is_attached());
+    let reattached = core.reattach_receipt(id);
+    assert!(reattached.is_attached());
     assert_eq!(
-        *reattached.0.lock().unwrap(),
+        reattached.facts,
         vec![
             WriteStatus::Accepted,
             WriteStatus::AwaitingCapability {
@@ -503,16 +472,13 @@ fn overridden_unsigned_intent_replays_and_resumes_pinned_to_override_after_reope
         );
         // A is the active account; the override alone authorizes B's draft.
         core.handle(EngineMsg::SetActivePubkey(Some(active.public_key())));
-        let effects = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Unsigned(unsigned),
-                durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
-                identity_override: Some(override_keys.public_key()),
-                correlation: None,
-            },
-            Box::new(Sink::default()),
-        ));
+        let effects = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: Some(override_keys.public_key()),
+            correlation: None,
+        }));
         receipt_id(&effects)
     };
 
@@ -531,12 +497,10 @@ fn overridden_unsigned_intent_replays_and_resumes_pinned_to_override_after_reope
         10,
     );
     assert!(core.recover_on_boot().is_empty());
-    let reattached = Sink::default();
-    assert!(core
-        .reattach_receipt(id, Box::new(reattached.clone()))
-        .is_attached());
+    let reattached = core.reattach_receipt(id);
+    assert!(reattached.is_attached());
     assert_eq!(
-        *reattached.0.lock().unwrap(),
+        reattached.facts,
         vec![
             WriteStatus::Accepted,
             WriteStatus::AwaitingCapability {
@@ -582,17 +546,11 @@ fn overridden_unsigned_intent_replays_and_resumes_pinned_to_override_after_reope
         )),
         "completion must promote the original receipt to Signed as the override identity"
     );
-    assert!(
-        reattached.0.lock().unwrap().starts_with(&[
-            WriteStatus::Accepted,
-            WriteStatus::AwaitingCapability {
-                pubkey: override_keys.public_key()
-            },
-            WriteStatus::Signed(frozen_id)
-        ]),
-        "the reattached stream is the SAME receipt, extended in place \
-         (routing facts may follow Signed) -- never a new one"
-    );
+    let replay = core.reattach_receipt(id).facts;
+    assert_eq!(replay.first(), Some(&WriteStatus::Signed(frozen_id)));
+    assert!(replay
+        .iter()
+        .any(|status| matches!(status, WriteStatus::AwaitingRelay { .. })));
     drop(core);
     let store = RedbStore::open(&path).unwrap();
     let rows = store.query(&nostr::Filter::new().id(frozen_id)).unwrap();
@@ -634,16 +592,13 @@ fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
         authenticate(&mut core, h1, &s1, &keys);
         authenticate(&mut core, h2, &s2, &keys);
         let publish = |core: &mut EngineCore<RedbStore>| {
-            core.handle(EngineMsg::Publish(
-                WriteIntent {
-                    payload: WritePayload::Signed(event.clone()),
-                    durability: Durability::Durable,
-                    routing: WriteRouting::AuthorOutbox,
-                    identity_override: None,
-                    correlation: None,
-                },
-                Box::new(Sink::default()),
-            ))
+            core.handle(EngineMsg::Publish(WriteIntent {
+                payload: WritePayload::Signed(event.clone()),
+                durability: Durability::Durable,
+                routing: WriteRouting::AuthorOutbox,
+                identity_override: None,
+                correlation: None,
+            }))
         };
         let a = receipt_id(&publish(&mut core));
         let b = receipt_id(&publish(&mut core));
@@ -695,12 +650,8 @@ fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
         replays, 2,
         "both relays make progress while the one-per-relay cap retains the other two lanes"
     );
-    assert!(core
-        .reattach_receipt(a, Box::new(Sink::default()))
-        .is_attached());
-    assert!(core
-        .reattach_receipt(b, Box::new(Sink::default()))
-        .is_attached());
+    assert!(core.reattach_receipt(a).is_attached());
+    assert!(core.reattach_receipt(b).is_attached());
 }
 
 fn assert_persisted_routing_fails_closed_without_dropping(
@@ -748,13 +699,10 @@ fn assert_persisted_routing_fails_closed_without_dropping(
     assert!(!effects
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
-    let unreadable = Sink::default();
-    assert_eq!(
-        core.reattach_receipt(receipt_id, Box::new(unreadable.clone())),
-        ReattachOutcome::RetainedButUnreadable
-    );
+    let unreadable = core.reattach_receipt(receipt_id);
+    assert_eq!(unreadable.outcome, ReattachOutcome::RetainedButUnreadable);
     assert!(
-        unreadable.0.lock().unwrap().is_empty(),
+        unreadable.facts.is_empty(),
         "unreadable routing must replay no receipt prefix"
     );
 
@@ -793,16 +741,9 @@ fn assert_persisted_routing_fails_closed_without_dropping(
     assert!(!completed
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
-    assert!(
-        unreadable.0.lock().unwrap().is_empty(),
-        "an unreadable reattach must not register for later signer facts"
-    );
-    let second = Sink::default();
-    assert_eq!(
-        core.reattach_receipt(receipt_id, Box::new(second.clone())),
-        ReattachOutcome::RetainedButUnreadable
-    );
-    assert!(second.0.lock().unwrap().is_empty());
+    let second = core.reattach_receipt(receipt_id);
+    assert_eq!(second.outcome, ReattachOutcome::RetainedButUnreadable);
+    assert!(second.facts.is_empty());
     drop(core);
     let store = RedbStore::open(&path).unwrap();
     assert!(store
@@ -879,7 +820,7 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
             | Effect::RequestSign(..)
     )));
     assert_eq!(
-        core.reattach_receipt(receipt, Box::new(Sink::default())),
+        core.reattach_receipt(receipt).outcome,
         ReattachOutcome::RetainedButUnreadable
     );
 
@@ -922,11 +863,9 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
     assert!(store.recover_outbox().expect("recover outbox").is_empty());
     let mut reopened = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
     assert!(reopened.recover_on_boot().is_empty());
-    let replay = Sink::default();
-    assert!(reopened
-        .reattach_receipt(receipt, Box::new(replay.clone()))
-        .is_attached());
-    assert_eq!(*replay.0.lock().unwrap(), vec![WriteStatus::Cancelled]);
+    let replay = reopened.reattach_receipt(receipt);
+    assert!(replay.is_attached());
+    assert_eq!(replay.facts, vec![WriteStatus::Cancelled]);
 }
 
 #[test]
@@ -944,16 +883,13 @@ fn signed_ephemeral_receipt_replays_signed_and_refuses_cancellation_after_reopen
             10,
         );
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
-        let effects = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Signed(event.clone()),
-                durability: Durability::Ephemeral,
-                routing: WriteRouting::AuthorOutbox,
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(Sink::default()),
-        ));
+        let effects = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Signed(event.clone()),
+            durability: Durability::Ephemeral,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+            correlation: None,
+        }));
         assert!(effects.iter().any(
             |effect| matches!(effect, Effect::EmitReceipt(_, WriteStatus::Signed(id)) if *id == event.id)
         ));
@@ -964,14 +900,9 @@ fn signed_ephemeral_receipt_replays_signed_and_refuses_cancellation_after_reopen
     assert!(store.recover_outbox().expect("recover outbox").is_empty());
     let mut reopened = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
     assert!(reopened.recover_on_boot().is_empty());
-    let replay = Sink::default();
-    assert!(reopened
-        .reattach_receipt(receipt, Box::new(replay.clone()))
-        .is_attached());
-    assert_eq!(
-        *replay.0.lock().unwrap(),
-        vec![WriteStatus::Signed(event.id)]
-    );
+    let replay = reopened.reattach_receipt(receipt);
+    assert!(replay.is_attached());
+    assert_eq!(replay.facts, vec![WriteStatus::Signed(event.id)]);
 
     let (refused, effects) = reopened.cancel_write(receipt);
     assert!(matches!(
@@ -983,7 +914,7 @@ fn signed_ephemeral_receipt_replays_signed_and_refuses_cancellation_after_reopen
     ));
     assert!(effects.is_empty());
     assert_eq!(
-        *replay.0.lock().unwrap(),
+        reopened.reattach_receipt(receipt).facts,
         vec![WriteStatus::Signed(event.id)]
     );
 }
@@ -1009,16 +940,13 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
         };
         core.handle(EngineMsg::RelayConnected(handle, session.clone()));
         authenticate(&mut core, handle, &session, &keys);
-        let effects = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Signed(event),
-                durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(Sink::default()),
-        ));
+        let effects = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Signed(event),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+            correlation: None,
+        }));
         let receipt_id = receipt_id(&effects);
         drop(core);
         let store = RedbStore::open(&path).unwrap();
@@ -1061,12 +989,9 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
     let store = RedbStore::open(&path).unwrap();
     let mut core = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
     assert!(core.recover_on_boot().is_empty());
-    let unreadable_sink = Sink::default();
-    assert_eq!(
-        core.reattach_receipt(receipt_id, Box::new(unreadable_sink.clone())),
-        ReattachOutcome::RetainedButUnreadable
-    );
-    assert!(unreadable_sink.0.lock().unwrap().is_empty());
+    let unreadable = core.reattach_receipt(receipt_id);
+    assert_eq!(unreadable.outcome, ReattachOutcome::RetainedButUnreadable);
+    assert!(unreadable.facts.is_empty());
     drop(core);
     assert!(RedbStore::open(&path)
         .unwrap()
@@ -1083,31 +1008,25 @@ fn retained_terminal_receipt_is_attached_and_replays_terminal_fact() {
     let store = nmp_store::MemoryStore::new();
     let mut core = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
     core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
-    let effects = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(UnsignedEvent::new(
-                keys.public_key(),
-                Timestamp::from(500),
-                Kind::TextNote,
-                vec![],
-                "terminal retained",
-            )),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(Sink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(UnsignedEvent::new(
+            keys.public_key(),
+            Timestamp::from(500),
+            Kind::TextNote,
+            vec![],
+            "terminal retained",
+        )),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     let receipt = receipt_id(&effects);
     core.handle(EngineMsg::CancelWrite(receipt));
 
-    let replay = Sink::default();
-    assert_eq!(
-        core.reattach_receipt(receipt, Box::new(replay.clone())),
-        ReattachOutcome::Attached
-    );
-    assert_eq!(*replay.0.lock().unwrap(), vec![WriteStatus::Cancelled]);
+    let replay = core.reattach_receipt(receipt);
+    assert_eq!(replay.outcome, ReattachOutcome::Attached);
+    assert_eq!(replay.facts, vec![WriteStatus::Cancelled]);
 }
 
 #[test]
@@ -1120,22 +1039,19 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
         let store = RedbStore::open(&path).unwrap();
         let mut core = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
-        let effects = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Unsigned(UnsignedEvent::new(
-                    keys.public_key(),
-                    Timestamp::from(501),
-                    Kind::TextNote,
-                    vec![],
-                    "corrupt receipt",
-                )),
-                durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(Sink::default()),
-        ));
+        let effects = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Unsigned(UnsignedEvent::new(
+                keys.public_key(),
+                Timestamp::from(501),
+                Kind::TextNote,
+                vec![],
+                "corrupt receipt",
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+            correlation: None,
+        }));
         let receipt_id = receipt_id(&effects);
         drop(core);
         let store = RedbStore::open(&path).unwrap();
@@ -1163,12 +1079,9 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
     let store = RedbStore::open(&path).unwrap();
     let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
     assert!(core.recover_on_boot().is_empty());
-    let replay = Sink::default();
-    assert_eq!(
-        core.reattach_receipt(receipt_id, Box::new(replay.clone())),
-        ReattachOutcome::RetainedButUnreadable
-    );
-    assert!(replay.0.lock().unwrap().is_empty());
+    let replay = core.reattach_receipt(receipt_id);
+    assert_eq!(replay.outcome, ReattachOutcome::RetainedButUnreadable);
+    assert!(replay.facts.is_empty());
 
     let (refused, effects) = core.cancel_write(receipt_id);
     assert!(matches!(
@@ -1182,7 +1095,6 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
         effects.is_empty(),
         "corruption must not fabricate cancellation"
     );
-    assert!(replay.0.lock().unwrap().is_empty());
 
     drop(core);
     let store = RedbStore::open(&path).unwrap();
@@ -1220,21 +1132,18 @@ fn relay_list_bootstrap_routing_round_trips_across_a_restart() {
     let id = {
         let store = RedbStore::open(&path).unwrap();
         let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
-        let effects = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Signed(event),
-                durability: Durability::Durable,
-                routing: WriteRouting::RelayListBootstrap(
-                    RelayListBootstrapAuthority::from_validated_relays([
-                        relay_b.clone(),
-                        relay_a.clone(),
-                    ]),
-                ),
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(Sink::default()),
-        ));
+        let effects = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Signed(event),
+            durability: Durability::Durable,
+            routing: WriteRouting::RelayListBootstrap(
+                RelayListBootstrapAuthority::from_validated_relays([
+                    relay_b.clone(),
+                    relay_a.clone(),
+                ]),
+            ),
+            identity_override: None,
+            correlation: None,
+        }));
         let ensured = effects
             .iter()
             .filter_map(|effect| match effect {
@@ -1270,9 +1179,7 @@ fn relay_list_bootstrap_routing_round_trips_across_a_restart() {
             .any(|effect| matches!(effect, Effect::EmitReceipt(_, WriteStatus::Accepted))),
         "boot recovery must not accept the bootstrap a second time"
     );
-    assert!(core
-        .reattach_receipt(id, Box::new(Sink::default()))
-        .is_attached());
+    assert!(core.reattach_receipt(id).is_attached());
 }
 
 #[test]
@@ -1284,16 +1191,13 @@ fn corrupt_route_lane_evidence_is_unreadable_not_absent() {
     let (intent_id, receipt_id) = {
         let store = RedbStore::open(&path).unwrap();
         let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
-        let effects = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Signed(event),
-                durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(Sink::default()),
-        ));
+        let effects = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Signed(event),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+            correlation: None,
+        }));
         let receipt_id = receipt_id(&effects);
         drop(core);
         let store = RedbStore::open(&path).unwrap();
@@ -1321,12 +1225,9 @@ fn corrupt_route_lane_evidence_is_unreadable_not_absent() {
     let store = RedbStore::open(&path).unwrap();
     let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
     assert!(core.recover_on_boot().is_empty());
-    let replay = Sink::default();
-    assert_eq!(
-        core.reattach_receipt(receipt_id, Box::new(replay.clone())),
-        ReattachOutcome::RetainedButUnreadable
-    );
-    assert!(replay.0.lock().unwrap().is_empty());
+    let replay = core.reattach_receipt(receipt_id);
+    assert_eq!(replay.outcome, ReattachOutcome::RetainedButUnreadable);
+    assert!(replay.facts.is_empty());
     drop(core);
     assert!(RedbStore::open(&path)
         .unwrap()

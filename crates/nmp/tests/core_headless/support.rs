@@ -10,16 +10,14 @@
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nmp::mechanism::core::{
     AcquisitionEvidence, AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome,
     AuthSendCompletion, AuthSendOutcome, AuthSignerOutcome, Effect, EngineCore, EngineMsg,
-    ReceiptId, RowDelta, RowSink, ShortfallFact, SourceEvidence, SourceStatus,
+    ReceiptId, RowDelta, ShortfallFact, SourceEvidence, SourceStatus,
 };
-use nmp::mechanism::outbox::{ReceiptSink, WriteStatus};
+use nmp::mechanism::outbox::WriteStatus;
 use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Durability, Filter, NarrowOnly,
     PrivateRoute, RelaySessionKey, SourceAuthority, WriteIntent, WritePayload, WriteRouting,
@@ -38,41 +36,14 @@ use nostr::{Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, Unsig
 
 use std::collections::BTreeSet;
 
-/// A `RowSink` that just records every batch it is handed, for assertions.
-#[derive(Clone, Default)]
-struct CapturingSink(Arc<Mutex<Vec<Vec<RowDelta>>>>);
-
-impl RowSink for CapturingSink {
-    fn on_rows(&self, rows: Vec<RowDelta>) {
-        self.0.lock().unwrap().push(rows);
-    }
-}
-
-/// A `ReceiptSink` that just records every status it is handed, for
-/// assertions (mirrors `CapturingSink` on the write side).
-#[derive(Clone, Default)]
-struct CapturingReceiptSink(Arc<Mutex<Vec<WriteStatus>>>);
-
-impl ReceiptSink for CapturingReceiptSink {
-    fn on_status(&self, status: WriteStatus) -> bool {
-        self.0.lock().unwrap().push(status);
-        true
-    }
-}
-
-/// A real finite live-delivery sink used by the durable-retry pressure
-/// falsifier. `calls` proves the reducer prunes the observer on the first
-/// rejected send instead of retaining a permanently lagged sink forever.
-struct BoundedReceiptSink {
-    sender: nmp::mechanism::runtime::FifoSender<WriteStatus>,
-    calls: Arc<AtomicUsize>,
-}
-
-impl ReceiptSink for BoundedReceiptSink {
-    fn on_status(&self, status: WriteStatus) -> bool {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.sender.send(status)
-    }
+fn effect_row_delta_count(effects: &[Effect]) -> usize {
+    effects
+        .iter()
+        .map(|effect| match effect {
+            Effect::EmitRows(_, deltas, _) => deltas.len(),
+            _ => 0,
+        })
+        .sum()
 }
 
 fn unsigned(author: &Keys, seq: u64, content: &str) -> UnsignedEvent {
@@ -1041,21 +1012,17 @@ fn publish_private<S: EventStore>(
     core: &mut EngineCore<S>,
     author: &Keys,
     relays: impl IntoIterator<Item = RelayUrl>,
-    sink: impl ReceiptSink + 'static,
 ) -> (ReceiptId, nostr::Event, Vec<Effect>) {
     activate(core, author);
-    let accepted = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(author, 85, "attempt-start failure")),
-            durability: Durability::Durable,
-            routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                relays: NarrowOnly::new(relays),
-            }),
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(sink),
-    ));
+    let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(author, 85, "attempt-start failure")),
+        durability: Durability::Durable,
+        routing: WriteRouting::PrivateNarrow(PrivateRoute {
+            relays: NarrowOnly::new(relays),
+        }),
+        identity_override: None,
+        correlation: None,
+    }));
     let (id, generation, unsigned) = find_sign_request(&accepted);
     let signed = unsigned.sign_with_keys(author).expect("sign fixture event");
     let effects = core.handle(EngineMsg::SignerCompleted(
@@ -1064,6 +1031,16 @@ fn publish_private<S: EventStore>(
         Ok(signed.clone()),
     ));
     (id, signed, effects)
+}
+
+fn receipt_statuses(effects: &[Effect]) -> Vec<WriteStatus> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::EmitReceipt(_, status) => Some(status.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn event_frame(sub: &str, event: nostr::Event) -> RelayFrame {

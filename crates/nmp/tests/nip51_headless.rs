@@ -4,23 +4,12 @@
 //! reconstructs it correctly. This is a cross-crate integration proof
 //! `nmp-nip51` itself cannot make (it is deliberately engine-free).
 
-use std::sync::{Arc, Mutex};
-
-use nmp::mechanism::core::{EngineCore, EngineMsg, RowDelta, RowSink};
+use nmp::mechanism::core::{EngineCore, EngineMsg};
 use nmp_grammar::ContextualAtom;
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
 use nmp_store::MemoryStore;
 use nostr::{Keys, RelayUrl};
-
-#[derive(Clone, Default)]
-struct CapturingSink(Arc<Mutex<Vec<Vec<RowDelta>>>>);
-
-impl RowSink for CapturingSink {
-    fn on_rows(&self, rows: Vec<RowDelta>) {
-        self.0.lock().unwrap().push(rows);
-    }
-}
 
 fn new_core(dir: FixtureDirectory) -> EngineCore<MemoryStore> {
     EngineCore::new(MemoryStore::new(), Box::new(dir), 10)
@@ -36,10 +25,9 @@ fn kind_10009_atoms(atoms: &std::collections::BTreeSet<ContextualAtom>) -> usize
 #[test]
 fn signed_out_active_account_demand_resolves_to_zero_atoms() {
     let mut core = new_core(FixtureDirectory::new());
-    let _ = core.handle(EngineMsg::Subscribe(
-        LiveQuery(nmp_nip51::active_account_demand()),
-        Box::new(CapturingSink::default()),
-    ));
+    let _ = core.handle(EngineMsg::Subscribe(LiveQuery(
+        nmp_nip51::active_account_demand(),
+    )));
     assert_eq!(
         kind_10009_atoms(&core.active_demand()),
         0,
@@ -55,10 +43,9 @@ fn signing_in_reconstructs_the_active_account_kind_10009_demand() {
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay]);
     let mut core = new_core(dir);
 
-    let _ = core.handle(EngineMsg::Subscribe(
-        LiveQuery(nmp_nip51::active_account_demand()),
-        Box::new(CapturingSink::default()),
-    ));
+    let _ = core.handle(EngineMsg::Subscribe(LiveQuery(
+        nmp_nip51::active_account_demand(),
+    )));
     assert_eq!(kind_10009_atoms(&core.active_demand()), 0);
 
     let _ = core.handle(EngineMsg::SetActivePubkey(Some(a.public_key())));
@@ -79,10 +66,9 @@ fn rerooting_to_a_different_account_replaces_the_kind_10009_atom_not_adds_a_seco
         .with_write(b.public_key().to_hex(), [relay]);
     let mut core = new_core(dir);
 
-    let _ = core.handle(EngineMsg::Subscribe(
-        LiveQuery(nmp_nip51::active_account_demand()),
-        Box::new(CapturingSink::default()),
-    ));
+    let _ = core.handle(EngineMsg::Subscribe(LiveQuery(
+        nmp_nip51::active_account_demand(),
+    )));
     let _ = core.handle(EngineMsg::SetActivePubkey(Some(a.public_key())));
     assert_eq!(kind_10009_atoms(&core.active_demand()), 1);
 

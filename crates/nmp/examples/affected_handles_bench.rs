@@ -5,7 +5,7 @@ use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use nmp::mechanism::core::{EngineCore, EngineMsg, RowDelta, RowSink};
+use nmp::mechanism::core::{EngineCore, EngineMsg};
 use nmp_grammar::{Binding, Filter, IndexedTagName, RelaySessionKey};
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
@@ -15,12 +15,6 @@ use nostr::{
     Event, EventBuilder, JsonUtil, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Tag,
     Timestamp,
 };
-
-struct NullSink;
-
-impl RowSink for NullSink {
-    fn on_rows(&self, _rows: Vec<RowDelta>) {}
-}
 
 fn database_path(handles: usize) -> PathBuf {
     let nonce = SystemTime::now()
@@ -105,7 +99,7 @@ fn run_case(label: &str, events: &[Event], rooms: &[String], max_created_at: u64
     let session = RelaySessionKey::public(relay.clone());
     black_box(core.handle(EngineMsg::RelayConnected(relay_handle, session.clone())));
     for room in rooms.iter().take(handles) {
-        black_box(core.handle(EngineMsg::Subscribe(room_query(room), Box::new(NullSink))));
+        black_box(core.handle(EngineMsg::Subscribe(room_query(room))));
     }
 
     let keys = Keys::generate();

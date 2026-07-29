@@ -9,10 +9,11 @@ fn fresh_protected_read_ensures_one_worker_and_replays_only_current_demand_after
     let session = signer_session(&relay, signer.public_key());
     let mut core = new_core(FixtureDirectory::new());
 
-    let first = core.handle(EngineMsg::Subscribe(
-        protected_pinned_query(&relay, signer.public_key(), 1),
-        Box::new(CapturingSink::default()),
-    ));
+    let first = core.handle(EngineMsg::Subscribe(protected_pinned_query(
+        &relay,
+        signer.public_key(),
+        1,
+    )));
     let first_id = subscribed_handle(&first);
     assert_eq!(
         first
@@ -33,10 +34,11 @@ fn fresh_protected_read_ensures_one_worker_and_replays_only_current_demand_after
     let connected = core.handle(EngineMsg::RelayConnected(generation_one, session.clone()));
     assert_no_protected_req(&connected, &session);
 
-    let second = core.handle(EngineMsg::Subscribe(
-        protected_pinned_query(&relay, signer.public_key(), 2),
-        Box::new(CapturingSink::default()),
-    ));
+    let second = core.handle(EngineMsg::Subscribe(protected_pinned_query(
+        &relay,
+        signer.public_key(),
+        2,
+    )));
     let second_id = subscribed_handle(&second);
     assert_eq!(
         second

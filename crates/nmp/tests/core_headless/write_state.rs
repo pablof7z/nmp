@@ -9,32 +9,24 @@ fn durable_pending_row_is_visible_before_signer_and_tamper_compensates() {
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay]);
     let mut core = new_core(dir);
     activate(&mut core, &a);
-    let row_sink = CapturingSink::default();
-    core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(row_sink),
-    ));
+    core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
 
-    let receipt_sink = CapturingReceiptSink::default();
-    let effects = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&a, 10, "accepted body")),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(receipt_sink.clone()),
-    ));
+    let effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(&a, 10, "accepted body")),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     let (id, generation, accepted_template) = find_sign_request(&effects);
     let accepted_id = accepted_template.clone().sign_with_keys(&a).unwrap().id;
     assert!(all_row_deltas(&effects)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == accepted_id)));
-    assert!(matches!(
-        receipt_sink.0.lock().unwrap().as_slice(),
-        [WriteStatus::Accepted]
-    ));
+    assert_eq!(receipt_statuses(&effects), [WriteStatus::Accepted]);
 
     let tampered = unsigned(&a, 10, "different signer output")
         .sign_with_keys(&a)
@@ -47,7 +39,7 @@ fn durable_pending_row_is_visible_before_signer_and_tamper_compensates() {
         .iter()
         .any(|delta| matches!(delta, RowDelta::Removed(event_id) if *event_id == accepted_id)));
     assert!(matches!(
-        receipt_sink.0.lock().unwrap().last(),
+        receipt_statuses(&effects).last(),
         Some(WriteStatus::Failed(_))
     ));
 }
@@ -59,10 +51,10 @@ fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay]);
     let mut core = new_core(dir);
     activate(&mut core, &a);
-    core.handle(EngineMsg::Subscribe(
-        literal_query(&[0], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    core.handle(EngineMsg::Subscribe(literal_query(
+        &[0],
+        &a.public_key().to_hex(),
+    )));
 
     let older_unsigned = UnsignedEvent::new(
         a.public_key(),
@@ -72,16 +64,13 @@ fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
         "older",
     );
     let older = older_unsigned.sign_with_keys(&a).unwrap();
-    core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Signed(older.clone()),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(CapturingReceiptSink::default()),
-    ));
+    core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Signed(older.clone()),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
 
     let newer_unsigned = UnsignedEvent::new(
         a.public_key(),
@@ -91,17 +80,13 @@ fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
         "newer",
     );
     let newer_id = newer_unsigned.clone().sign_with_keys(&a).unwrap().id;
-    let cancel_sink = CapturingReceiptSink::default();
-    let effects = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(newer_unsigned),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(cancel_sink.clone()),
-    ));
+    let effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(newer_unsigned),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     let (newer_receipt, _, _) = find_sign_request(&effects);
     assert!(all_row_deltas(&effects)
         .iter()
@@ -116,7 +101,7 @@ fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
         Ok(nmp::mechanism::outbox::CancelWriteOutcome::Cancelled)
     );
     assert_eq!(
-        cancel_sink.0.lock().unwrap().last(),
+        receipt_statuses(&effects).last(),
         Some(&WriteStatus::Cancelled)
     );
     assert!(all_row_deltas(&effects)
@@ -135,22 +120,19 @@ fn cancellation_outcomes_are_typed_idempotent_and_late_signers_are_inert() {
         new_core(FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]));
     activate(&mut core, &a);
 
-    let sink = CapturingReceiptSink::default();
-    let published = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&a, 10, "cancel typed")),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(sink.clone()),
-    ));
+    let published = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(&a, 10, "cancel typed")),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     let (receipt, generation, template) = find_sign_request(&published);
     let signed = template.sign_with_keys(&a).unwrap();
 
+    let (first_outcome, first_cancelled) = core.cancel_write(receipt);
     assert_eq!(
-        core.cancel_write(receipt).0,
+        first_outcome,
         Ok(nmp::mechanism::outbox::CancelWriteOutcome::Cancelled)
     );
     assert_eq!(
@@ -160,29 +142,24 @@ fn cancellation_outcomes_are_typed_idempotent_and_late_signers_are_inert() {
     assert!(core
         .handle(EngineMsg::SignerCompleted(receipt, generation, Ok(signed)))
         .is_empty());
-    assert_eq!(
-        sink.0.lock().unwrap().as_slice(),
-        [WriteStatus::Accepted, WriteStatus::Cancelled]
-    );
+    let mut statuses = receipt_statuses(&published);
+    statuses.extend(receipt_statuses(&first_cancelled));
+    assert_eq!(statuses, [WriteStatus::Accepted, WriteStatus::Cancelled]);
     assert!(matches!(
         core.cancel_write(ReceiptId(u64::MAX)).0,
         Err(nmp::mechanism::outbox::CancelWriteError::UnknownReceipt { .. })
     ));
 
-    let signed_sink = CapturingReceiptSink::default();
     let signed_event = unsigned(&a, 11, "already signed")
         .sign_with_keys(&a)
         .unwrap();
-    let signed_publish = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Signed(signed_event.clone()),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(signed_sink),
-    ));
+    let signed_publish = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Signed(signed_event.clone()),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     let signed_receipt = signed_publish
         .iter()
         .find_map(|effect| match effect {
@@ -204,21 +181,17 @@ fn signer_unavailable_keeps_accepted_row_visible() {
     let a = Keys::generate();
     let mut core = new_core(FixtureDirectory::new());
     activate(&mut core, &a);
-    core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
-    let sink = CapturingReceiptSink::default();
-    let effects = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&a, 1, "awaiting signer")),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(sink.clone()),
-    ));
+    core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
+    let effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(&a, 1, "awaiting signer")),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     let (id, generation, template) = find_sign_request(&effects);
     let expected_id = template.sign_with_keys(&a).unwrap().id;
     let effects = core.handle(EngineMsg::SignerUnavailable(id, generation));
@@ -227,10 +200,10 @@ fn signer_unavailable_keeps_accepted_row_visible() {
         Effect::EmitReceipt(rid, WriteStatus::AwaitingCapability { pubkey })
             if *rid == id && *pubkey == a.public_key()
     )));
-    let fresh = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let fresh = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     assert!(all_row_deltas(&fresh)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == expected_id)));
@@ -251,17 +224,13 @@ fn identity_override_accepts_secondary_author_and_pins_it_through_signing() {
     activate(&mut core, &a);
 
     let draft = unsigned(&b, 47, "published as b while a is active");
-    let sink = CapturingReceiptSink::default();
-    let effects = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(draft.clone()),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: Some(b.public_key()),
-            correlation: None,
-        },
-        Box::new(sink.clone()),
-    ));
+    let effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(draft.clone()),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: Some(b.public_key()),
+        correlation: None,
+    }));
     assert!(matches!(
         effects.first(),
         Some(Effect::EmitReceipt(_, WriteStatus::Accepted))
@@ -287,25 +256,17 @@ fn identity_override_accepts_secondary_author_and_pins_it_through_signing() {
 
     // The override never moved the engine's identity root: a default
     // (no-override) publish authored by A is still accepted.
-    let default_sink = CapturingReceiptSink::default();
-    let effects = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&a, 48, "default path still roots on a")),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(default_sink.clone()),
-    ));
+    let effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(&a, 48, "default path still roots on a")),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     assert!(matches!(
         effects.first(),
         Some(Effect::EmitReceipt(_, WriteStatus::Accepted))
     ));
-    assert_eq!(
-        default_sink.0.lock().unwrap().first(),
-        Some(&WriteStatus::Accepted)
-    );
 }
 
 /// #47 falsifier (b): the DEFAULT arm is byte-for-byte unchanged -- a
@@ -318,19 +279,15 @@ fn default_publish_without_override_still_fails_closed_for_non_active_author() {
     let mut core = new_core(FixtureDirectory::new());
     activate(&mut core, &a);
 
-    let sink = CapturingReceiptSink::default();
-    let effects = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&b, 1, "no consent given")),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(sink.clone()),
-    ));
+    let effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(&b, 1, "no consent given")),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     assert_eq!(
-        sink.0.lock().unwrap().as_slice(),
+        receipt_statuses(&effects),
         [WriteStatus::Failed(
             "unsigned draft author does not match current active account".to_string()
         )],
@@ -341,19 +298,15 @@ fn default_publish_without_override_still_fails_closed_for_non_active_author() {
         .any(|effect| matches!(effect, Effect::RequestSign(..))));
 
     core.handle(EngineMsg::SetActivePubkey(None));
-    let logged_out = CapturingReceiptSink::default();
-    let effects = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&b, 2, "logged out, no override")),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(logged_out.clone()),
-    ));
+    let effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(&b, 2, "logged out, no override")),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     assert_eq!(
-        logged_out.0.lock().unwrap().as_slice(),
+        receipt_statuses(&effects),
         [WriteStatus::Failed(
             "unsigned publish requires an active account".to_string()
         )]
@@ -375,19 +328,15 @@ fn identity_override_author_mismatch_fails_closed_for_unsigned_and_signed() {
     activate(&mut core, &a);
 
     // Unsigned draft authored by A, override naming B: mismatch.
-    let sink = CapturingReceiptSink::default();
-    let effects = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&a, 1, "authored by a")),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: Some(b.public_key()),
-            correlation: None,
-        },
-        Box::new(sink.clone()),
-    ));
+    let effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(&a, 1, "authored by a")),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: Some(b.public_key()),
+        correlation: None,
+    }));
     assert_eq!(
-        sink.0.lock().unwrap().as_slice(),
+        receipt_statuses(&effects),
         [WriteStatus::Failed(format!(
             "identity override {} does not match the unsigned draft author {}",
             b.public_key(),
@@ -401,19 +350,15 @@ fn identity_override_author_mismatch_fails_closed_for_unsigned_and_signed() {
 
     // Signed event authored by A, override naming B: same contradiction.
     let signed = unsigned(&a, 2, "signed by a").sign_with_keys(&a).unwrap();
-    let signed_sink = CapturingReceiptSink::default();
-    let effects = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Signed(signed),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: Some(b.public_key()),
-            correlation: None,
-        },
-        Box::new(signed_sink.clone()),
-    ));
+    let effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Signed(signed),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: Some(b.public_key()),
+        correlation: None,
+    }));
     assert_eq!(
-        signed_sink.0.lock().unwrap().as_slice(),
+        receipt_statuses(&effects),
         [WriteStatus::Failed(format!(
             "identity override {} does not match the signed event author {}",
             b.public_key(),
@@ -432,30 +377,26 @@ fn ephemeral_is_receipt_only_and_never_creates_a_pending_row() {
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay]);
     let mut core = new_core(dir);
     activate(&mut core, &a);
-    core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
-    let sink = CapturingReceiptSink::default();
-    let effects = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&a, 1, "ephemeral")),
-            durability: Durability::Ephemeral,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(sink.clone()),
-    ));
+    core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
+    let effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(&a, 1, "ephemeral")),
+        durability: Durability::Ephemeral,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     assert!(matches!(
         effects.first(),
         Some(Effect::EmitReceipt(_, WriteStatus::Accepted))
     ));
     assert!(all_row_deltas(&effects).is_empty());
-    let fresh = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let fresh = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     assert!(all_row_deltas(&fresh).is_empty());
 }
 
@@ -475,16 +416,13 @@ fn relay_rejection_after_promotion_does_not_retract_the_signed_row() {
     let signed = unsigned(&a, 1, "signed cache truth")
         .sign_with_keys(&a)
         .unwrap();
-    core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Signed(signed.clone()),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(CapturingReceiptSink::default()),
-    ));
+    core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Signed(signed.clone()),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     let rejected = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
@@ -496,10 +434,10 @@ fn relay_rejection_after_promotion_does_not_retract_the_signed_row() {
     assert!(!all_row_deltas(&rejected)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == signed.id)));
-    let fresh = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let fresh = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     assert!(all_row_deltas(&fresh)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == signed.id)));
@@ -510,10 +448,10 @@ fn cancelling_displaced_pending_then_newest_never_resurrects_cancelled_row() {
     let a = Keys::generate();
     let mut core = new_core(FixtureDirectory::new());
     activate(&mut core, &a);
-    core.handle(EngineMsg::Subscribe(
-        literal_query(&[0], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    core.handle(EngineMsg::Subscribe(literal_query(
+        &[0],
+        &a.public_key().to_hex(),
+    )));
 
     let base = UnsignedEvent::new(
         a.public_key(),
@@ -524,16 +462,13 @@ fn cancelling_displaced_pending_then_newest_never_resurrects_cancelled_row() {
     )
     .sign_with_keys(&a)
     .unwrap();
-    core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Signed(base.clone()),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(CapturingReceiptSink::default()),
-    ));
+    core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Signed(base.clone()),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
 
     let middle = UnsignedEvent::new(
         a.public_key(),
@@ -543,16 +478,13 @@ fn cancelling_displaced_pending_then_newest_never_resurrects_cancelled_row() {
         "middle",
     );
     let middle_id = middle.clone().sign_with_keys(&a).unwrap().id;
-    let middle_effects = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(middle),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(CapturingReceiptSink::default()),
-    ));
+    let middle_effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(middle),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     let (middle_receipt, _, _) = find_sign_request(&middle_effects);
 
     let newest = UnsignedEvent::new(
@@ -563,16 +495,13 @@ fn cancelling_displaced_pending_then_newest_never_resurrects_cancelled_row() {
         "newest",
     );
     let newest_id = newest.clone().sign_with_keys(&a).unwrap().id;
-    let newest_effects = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(newest),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(CapturingReceiptSink::default()),
-    ));
+    let newest_effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(newest),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     let (newest_receipt, _, _) = find_sign_request(&newest_effects);
 
     let older_cancel = core.handle(EngineMsg::CancelWrite(middle_receipt));
@@ -588,10 +517,10 @@ fn cancelling_displaced_pending_then_newest_never_resurrects_cancelled_row() {
     assert!(!all_row_deltas(&newest_cancel)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == middle_id)));
-    let fresh = core.handle(EngineMsg::Subscribe(
-        literal_query(&[0], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let fresh = core.handle(EngineMsg::Subscribe(literal_query(
+        &[0],
+        &a.public_key().to_hex(),
+    )));
     assert!(all_row_deltas(&fresh).is_empty());
 }
 
@@ -601,30 +530,22 @@ fn expired_local_acceptance_is_first_and_only_failed_with_no_side_effects() {
     let relay = RelayUrl::parse("wss://write.example.com").unwrap();
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay]);
     let mut core = new_core(dir);
-    core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     core.handle(EngineMsg::Tick(Timestamp::from(200)));
     let expired = nmp_resolver::testkit::expiring_kind1(&a, "expired", 100, 150);
-    let sink = CapturingReceiptSink::default();
-    let effects = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Signed(expired),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(sink.clone()),
-    ));
+    let effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Signed(expired),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     assert!(matches!(
         effects.as_slice(),
         [Effect::EmitReceipt(_, WriteStatus::Failed(_))]
-    ));
-    assert!(matches!(
-        sink.0.lock().unwrap().as_slice(),
-        [WriteStatus::Failed(_)]
     ));
 }
 
@@ -637,27 +558,21 @@ fn exact_duplicate_intents_get_distinct_store_ids_and_one_promotion_advances_bot
     activate(&mut core, &a);
     let template = unsigned(&a, 1, "same body");
 
-    let first = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(template.clone()),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(CapturingReceiptSink::default()),
-    ));
+    let first = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(template.clone()),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     let (first_id, first_generation, first_template) = find_sign_request(&first);
-    let second = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(template),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(CapturingReceiptSink::default()),
-    ));
+    let second = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(template),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     let (second_id, second_generation, second_template) = find_sign_request(&second);
     assert_ne!(
         first_id, second_id,
@@ -707,34 +622,26 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
     authenticate_signer(&mut core, 1, &nack, &a);
     authenticate_signer(&mut core, 2, &drop_relay, &a);
     let template = unsigned(&a, 1, "same bytes, separate obligations");
-    let sink_a = CapturingReceiptSink::default();
-    let sink_b = CapturingReceiptSink::default();
 
-    let first = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(template.clone()),
-            durability: Durability::Durable,
-            routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                relays: NarrowOnly::new([ack.clone(), drop_relay.clone()]),
-            }),
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(sink_a.clone()),
-    ));
+    let first = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(template.clone()),
+        durability: Durability::Durable,
+        routing: WriteRouting::PrivateNarrow(PrivateRoute {
+            relays: NarrowOnly::new([ack.clone(), drop_relay.clone()]),
+        }),
+        identity_override: None,
+        correlation: None,
+    }));
     let (id_a, generation_a, to_sign) = find_sign_request(&first);
-    let second = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(template),
-            durability: Durability::Durable,
-            routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                relays: NarrowOnly::new([nack.clone()]),
-            }),
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(sink_b.clone()),
-    ));
+    let second = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(template),
+        durability: Durability::Durable,
+        routing: WriteRouting::PrivateNarrow(PrivateRoute {
+            relays: NarrowOnly::new([nack.clone()]),
+        }),
+        identity_override: None,
+        correlation: None,
+    }));
     let (id_b, _, _) = find_sign_request(&second);
     let signed = to_sign.sign_with_keys(&a).unwrap();
     let routed = core.handle(EngineMsg::SignerCompleted(
@@ -817,29 +724,21 @@ fn relay_signature_satisfies_all_pending_coowners_and_late_signers_are_ignored()
     authenticate_signer(&mut core, 0, &source, &a);
     authenticate_signer(&mut core, 1, &out, &a);
     let template = unsigned(&a, 1, "relay wins signing race");
-    let sink_a = CapturingReceiptSink::default();
-    let sink_b = CapturingReceiptSink::default();
-    let first = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(template.clone()),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(sink_a.clone()),
-    ));
+    let first = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(template.clone()),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     let (id_a, generation_a, signer_a) = find_sign_request(&first);
-    let second = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(template),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(sink_b.clone()),
-    ));
+    let second = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(template),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     let (id_b, generation_b, signer_b) = find_sign_request(&second);
     let signed = signer_a.clone().sign_with_keys(&a).unwrap();
     let effects = core.handle(EngineMsg::RelayFrame(
@@ -909,17 +808,13 @@ fn repeated_signer_notifications_never_start_concurrent_operations() {
     let a = Keys::generate();
     let mut core = new_core(FixtureDirectory::new());
     activate(&mut core, &a);
-    let sink = CapturingReceiptSink::default();
-    let published = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&a, 1, "one operation")),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(sink.clone()),
-    ));
+    let published = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(&a, 1, "one operation")),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     let (id, generation, template) = find_sign_request(&published);
     assert!(core
         .handle(EngineMsg::SignerAttached(a.public_key()))
@@ -967,17 +862,13 @@ fn retryable_signer_errors_retain_and_rearm_the_exact_write() {
         let a = Keys::generate();
         let mut core = new_core(FixtureDirectory::new());
         activate(&mut core, &a);
-        let sink = CapturingReceiptSink::default();
-        let published = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Unsigned(unsigned(&a, 1, "survives signer loss")),
-                durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(sink.clone()),
-        ));
+        let published = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&a, 1, "survives signer loss")),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+            correlation: None,
+        }));
         let (id, generation, frozen) = find_sign_request(&published);
 
         let waiting = core.handle(EngineMsg::SignerCompleted(id, generation, Err(error)));
@@ -991,7 +882,7 @@ fn retryable_signer_errors_retain_and_rearm_the_exact_write() {
             Effect::RearmSignerIfAvailable(pubkey) if *pubkey == a.public_key()
         )));
         assert_eq!(
-            sink.0.lock().unwrap().last(),
+            receipt_statuses(&waiting).last(),
             Some(&WriteStatus::AwaitingCapability {
                 pubkey: a.public_key()
             })
@@ -1023,17 +914,13 @@ fn terminal_signer_errors_compensate_the_write() {
         let a = Keys::generate();
         let mut core = new_core(FixtureDirectory::new());
         activate(&mut core, &a);
-        let sink = CapturingReceiptSink::default();
-        let published = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Unsigned(unsigned(&a, 1, "terminal signer answer")),
-                durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(sink.clone()),
-        ));
+        let published = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(&a, 1, "terminal signer answer")),
+            durability: Durability::Durable,
+            routing: WriteRouting::AuthorOutbox,
+            identity_override: None,
+            correlation: None,
+        }));
         let (id, generation, _) = find_sign_request(&published);
 
         let failed = core.handle(EngineMsg::SignerCompleted(id, generation, Err(error)));
@@ -1057,21 +944,17 @@ fn compensation_persistence_failure_is_nonterminal_and_retryable() {
         10,
     );
     activate(&mut core, &a);
-    core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
-    let sink = CapturingReceiptSink::default();
-    let published = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&a, 1, "must remain pending")),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(sink.clone()),
-    ));
+    core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
+    let published = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(&a, 1, "must remain pending")),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     let (id, generation, template) = find_sign_request(&published);
     let event_id = template.sign_with_keys(&a).unwrap().id;
 
@@ -1083,11 +966,11 @@ fn compensation_persistence_failure_is_nonterminal_and_retryable() {
         )),
     ));
     assert!(failed_compensation.is_empty(), "no terminal fact committed");
-    assert_eq!(sink.0.lock().unwrap().as_slice(), [WriteStatus::Accepted]);
-    let fresh = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    assert_eq!(receipt_statuses(&published), [WriteStatus::Accepted]);
+    let fresh = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     assert!(all_row_deltas(&fresh)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event_id)));
@@ -1114,21 +997,17 @@ fn explicit_cancellation_persistence_failure_keeps_the_obligation_live_until_ret
         10,
     );
     activate(&mut core, &a);
-    core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
-    let sink = CapturingReceiptSink::default();
-    let published = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&a, 2, "cancel must commit first")),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(sink.clone()),
-    ));
+    core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
+    let published = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(&a, 2, "cancel must commit first")),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     let (id, _, template) = find_sign_request(&published);
     let event_id = template.sign_with_keys(&a).unwrap().id;
 
@@ -1144,12 +1023,12 @@ fn explicit_cancellation_persistence_failure_keeps_the_obligation_live_until_ret
         effects.is_empty(),
         "a refused cancel must emit no terminal fact"
     );
-    assert_eq!(sink.0.lock().unwrap().as_slice(), [WriteStatus::Accepted]);
+    assert_eq!(receipt_statuses(&published), [WriteStatus::Accepted]);
 
-    let fresh = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(CapturingSink::default()),
-    ));
+    let fresh = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     assert!(all_row_deltas(&fresh)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event_id)));
@@ -1165,10 +1044,9 @@ fn explicit_cancellation_persistence_failure_keeps_the_obligation_live_until_ret
     assert!(all_row_deltas(&effects)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Removed(removed) if *removed == event_id)));
-    assert_eq!(
-        sink.0.lock().unwrap().as_slice(),
-        [WriteStatus::Accepted, WriteStatus::Cancelled]
-    );
+    let mut statuses = receipt_statuses(&published);
+    statuses.extend(receipt_statuses(&effects));
+    assert_eq!(statuses, [WriteStatus::Accepted, WriteStatus::Cancelled]);
 }
 
 /// #52 Q2 smoking gun: `EngineCore::on_publish` is the ONE place every
@@ -1207,17 +1085,13 @@ fn direct_publish_of_forged_signed_event_is_rejected_before_acceptance() {
         "test fixture sanity: the forged event must not verify"
     );
 
-    let sink = CapturingReceiptSink::default();
-    let effects = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Signed(forged),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(sink.clone()),
-    ));
+    let effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Signed(forged),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
 
     assert!(
         matches!(
@@ -1232,7 +1106,7 @@ fn direct_publish_of_forged_signed_event_is_rejected_before_acceptance() {
             .any(|e| matches!(e, Effect::PublishEvent(..))),
         "a forged Signed publish must never produce Effect::PublishEvent"
     );
-    let statuses = sink.0.lock().unwrap();
+    let statuses = receipt_statuses(&effects);
     assert!(
         matches!(statuses.as_slice(), [WriteStatus::Failed(_)]),
         "the sink must see Failed and nothing else -- never Accepted -- got {statuses:?}"
@@ -1256,17 +1130,13 @@ fn direct_publish_of_valid_signed_event_still_publishes() {
         .sign_with_keys(&a)
         .unwrap();
 
-    let sink = CapturingReceiptSink::default();
-    let effects = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Signed(genuine.clone()),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(sink.clone()),
-    ));
+    let effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Signed(genuine.clone()),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
 
     assert!(
         matches!(

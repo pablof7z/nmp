@@ -185,11 +185,10 @@ fn ingest_io_failure_degrades_read_only_without_panicking() {
     // proving the degrade is specific to the failing ingest door.
     let mut core = EngineCore::new(FailIngestStore::armed(), Box::new(dir), 10);
 
-    let sink = CapturingSink::default();
-    let _ = core.handle(EngineMsg::Subscribe(
-        literal_query(&[1], &a.public_key().to_hex()),
-        Box::new(sink.clone()),
-    ));
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
     let _ = core.handle(EngineMsg::RelayConnected(
         RelayHandle {
             slot: 0,
@@ -524,23 +523,19 @@ fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
     // N distinct durable writes, each routed to its OWN distinct relay, none
     // connected yet -- every one lands in `WaitingConnection`.
     for (i, relay) in relays.iter().enumerate() {
-        let sink = CapturingReceiptSink::default();
-        let accepted = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Unsigned(unsigned(
-                    &author,
-                    100 + i as u64,
-                    &format!("falsifier {i}"),
-                )),
-                durability: Durability::Durable,
-                routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                    relays: NarrowOnly::new([relay.clone()]),
-                }),
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(sink),
-        ));
+        let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(
+                &author,
+                100 + i as u64,
+                &format!("falsifier {i}"),
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                relays: NarrowOnly::new([relay.clone()]),
+            }),
+            identity_override: None,
+            correlation: None,
+        }));
         let (id, generation, u) = find_sign_request(&accepted);
         let signed = u.sign_with_keys(&author).unwrap();
         let _ = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
@@ -610,22 +605,19 @@ fn unchanged_worker_demand_reads_zero_outbox_lanes() {
     activate(&mut core, &author);
 
     for (i, relay) in relays.iter().enumerate() {
-        let accepted = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Unsigned(unsigned(
-                    &author,
-                    300 + i as u64,
-                    &format!("worker projection {i}"),
-                )),
-                durability: Durability::Durable,
-                routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                    relays: NarrowOnly::new([relay.clone()]),
-                }),
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(CapturingReceiptSink::default()),
-        ));
+        let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(
+                &author,
+                300 + i as u64,
+                &format!("worker projection {i}"),
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                relays: NarrowOnly::new([relay.clone()]),
+            }),
+            identity_override: None,
+            correlation: None,
+        }));
         let (id, generation, unsigned) = find_sign_request(&accepted);
         let signed = unsigned.sign_with_keys(&author).unwrap();
         let signed_effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
@@ -689,22 +681,19 @@ fn relay_worker_projection_redb_benchmark() {
     activate(&mut core, &author);
 
     for (i, relay) in relays.iter().enumerate() {
-        let accepted = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Unsigned(unsigned(
-                    &author,
-                    10_000 + i as u64,
-                    &format!("worker benchmark {i}"),
-                )),
-                durability: Durability::Durable,
-                routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                    relays: NarrowOnly::new([relay.clone()]),
-                }),
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(CapturingReceiptSink::default()),
-        ));
+        let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(
+                &author,
+                10_000 + i as u64,
+                &format!("worker benchmark {i}"),
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                relays: NarrowOnly::new([relay.clone()]),
+            }),
+            identity_override: None,
+            correlation: None,
+        }));
         let (id, generation, unsigned) = find_sign_request(&accepted);
         let signed = unsigned.sign_with_keys(&author).unwrap();
         let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
@@ -761,19 +750,15 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
 
     // Intent #1: its `bootstrap_outbox_lanes` call is the injected failure
     // -- the reducer must degrade rather than pretend it has no lanes.
-    let sink1 = CapturingReceiptSink::default();
-    let accepted1 = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&author, 200, "degraded 1")),
-            durability: Durability::Durable,
-            routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                relays: NarrowOnly::new([relay.clone()]),
-            }),
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(sink1),
-    ));
+    let accepted1 = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(&author, 200, "degraded 1")),
+        durability: Durability::Durable,
+        routing: WriteRouting::PrivateNarrow(PrivateRoute {
+            relays: NarrowOnly::new([relay.clone()]),
+        }),
+        identity_override: None,
+        correlation: None,
+    }));
     let (id1, gen1, u1) = find_sign_request(&accepted1);
     let signed1 = u1.sign_with_keys(&author).unwrap();
     let signed_effects1 = core.handle(EngineMsg::SignerCompleted(id1, gen1, Ok(signed1)));
@@ -789,19 +774,15 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
     // Intent #2: an ordinary write to the SAME relay accepted right after --
     // `fail_next_bootstrap` is one-shot, so this one bootstraps normally and
     // the index DOES learn its lane.
-    let sink2 = CapturingReceiptSink::default();
-    let accepted2 = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&author, 201, "degraded 2")),
-            durability: Durability::Durable,
-            routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                relays: NarrowOnly::new([relay.clone()]),
-            }),
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(sink2),
-    ));
+    let accepted2 = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(&author, 201, "degraded 2")),
+        durability: Durability::Durable,
+        routing: WriteRouting::PrivateNarrow(PrivateRoute {
+            relays: NarrowOnly::new([relay.clone()]),
+        }),
+        identity_override: None,
+        correlation: None,
+    }));
     let (id2, gen2, u2) = find_sign_request(&accepted2);
     let signed2 = u2.sign_with_keys(&author).unwrap();
     let signed_effects2 = core.handle(EngineMsg::SignerCompleted(id2, gen2, Ok(signed2)));
@@ -905,15 +886,13 @@ fn receipt_for_intent_resolves_correctly_after_boot_recovery() {
         );
 
         let _ = core.handle(EngineMsg::Tick(Timestamp::from(10)));
-        let sink_a = CapturingReceiptSink::default();
         let (receipt_a, _event_a, scheduled_a) =
-            publish_private(&mut core, &author_a, [relay_a.clone()], sink_a);
+            publish_private(&mut core, &author_a, [relay_a.clone()]);
         mark_written(&mut core, &scheduled_a, &relay_a); // AckTimeout deadline = 10 + 30
 
         let _ = core.handle(EngineMsg::Tick(Timestamp::from(20)));
-        let sink_b = CapturingReceiptSink::default();
         let (receipt_b, _event_b, scheduled_b) =
-            publish_private(&mut core, &author_b, [relay_b.clone()], sink_b);
+            publish_private(&mut core, &author_b, [relay_b.clone()]);
         mark_written(&mut core, &scheduled_b, &relay_b); // AckTimeout deadline = 20 + 30
 
         (receipt_a, receipt_b)
@@ -998,8 +977,7 @@ fn receipt_for_intent_unaffected_by_an_earlier_pending_removal() {
 
     // Write #1: drive it all the way to a real, permanent `pending` removal
     // -- a successful ACK closes the intent once its one lane is terminal.
-    let sink1 = CapturingReceiptSink::default();
-    let (_receipt1, event1, first1) = publish_private(&mut core, &author1, [relay1.clone()], sink1);
+    let (_receipt1, event1, first1) = publish_private(&mut core, &author1, [relay1.clone()]);
     mark_written(&mut core, &first1, &relay1);
     let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -1012,8 +990,7 @@ fn receipt_for_intent_unaffected_by_an_earlier_pending_removal() {
 
     // Write #2: a completely separate, still-open intent.
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(5)));
-    let sink2 = CapturingReceiptSink::default();
-    let (receipt2, _event2, first2) = publish_private(&mut core, &author2, [relay2.clone()], sink2);
+    let (receipt2, _event2, first2) = publish_private(&mut core, &author2, [relay2.clone()]);
     mark_written(&mut core, &first2, &relay2); // AckTimeout deadline = 5 + 30 = 35
 
     let effects = core.handle(EngineMsg::Tick(Timestamp::from(35)));

@@ -4,8 +4,6 @@ use super::*;
 
 #[cfg(test)]
 mod affected_handle_invalidation_tests {
-    use std::sync::{Arc, Mutex};
-
     use nmp_grammar::IndexedTagName;
     use nmp_router::FixtureDirectory;
     use nmp_store::MemoryStore;
@@ -15,25 +13,6 @@ mod affected_handle_invalidation_tests {
 
     const HANDLE_COUNT: usize = 64;
     const ROWS_PER_HANDLE: usize = 4;
-
-    #[derive(Clone, Default)]
-    struct CapturingSink(Arc<Mutex<Vec<Vec<RowDelta>>>>);
-
-    impl RowSink for CapturingSink {
-        fn on_rows(&self, rows: Vec<RowDelta>) {
-            self.0.lock().unwrap().push(rows);
-        }
-    }
-
-    #[derive(Clone, Default)]
-    struct CapturingReceiptSink(Arc<Mutex<Vec<WriteStatus>>>);
-
-    impl ReceiptSink for CapturingReceiptSink {
-        fn on_status(&self, status: WriteStatus) -> bool {
-            self.0.lock().unwrap().push(status);
-            true
-        }
-    }
 
     fn room_event(keys: &Keys, room: usize, ordinal: usize, created_at: u64) -> SignedEvent {
         EventBuilder::new(Kind::from(9u16), format!("room-{room}-event-{ordinal}"))
@@ -91,6 +70,16 @@ mod affected_handle_invalidation_tests {
             .expect("subscribe emits the initial row/evidence snapshot")
     }
 
+    fn row_batches(effects: &[Effect]) -> Vec<&[RowDelta]> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::EmitRows(_, deltas, _) if !deltas.is_empty() => Some(deltas.as_slice()),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn assert_remembered_rows_match_oracle(core: &EngineCore<MemoryStore>, id: HandleId) {
         let (oracle, _) = core.rows_and_evidence_for(id).unwrap();
         let oracle: BTreeMap<_, _> = oracle
@@ -122,21 +111,13 @@ mod affected_handle_invalidation_tests {
                 RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
             )
             .unwrap();
-        let rows = CapturingSink::default();
-        let subscribe = core.handle(EngineMsg::Subscribe(
-            unlimited_room_query(7),
-            Box::new(rows.clone()),
-        ));
+        let subscribe = core.handle(EngineMsg::Subscribe(unlimited_room_query(7)));
         let handle = subscribed_handle(&subscribe);
-        rows.0.lock().unwrap().clear();
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
 
         let arriving = room_event(&keys, 7, 1, 12);
-        let effects = core.on_publish(
-            exact_signed_intent(arriving.clone(), &relay),
-            Box::new(CapturingReceiptSink::default()),
-        );
+        let effects = core.on_publish(exact_signed_intent(arriving.clone(), &relay));
 
         assert_eq!(core.projection_store_queries.get(), 0);
         assert_eq!(core.router_compiles.get(), 0);
@@ -147,14 +128,6 @@ mod affected_handle_invalidation_tests {
             }
             _ => false,
         }));
-        let batches = rows.0.lock().unwrap();
-        assert_eq!(batches.len(), 1);
-        assert!(matches!(
-            batches[0].as_slice(),
-            [RowDelta::Added(row)]
-                if row.event.id == arriving.id && row.sources.is_empty()
-        ));
-        drop(batches);
         assert_remembered_rows_match_oracle(&core, handle);
     }
 
@@ -186,18 +159,13 @@ mod affected_handle_invalidation_tests {
             }))),
             ..Filter::default()
         });
-        let rows = CapturingSink::default();
-        let subscribe = core.handle(EngineMsg::Subscribe(follows_query, Box::new(rows.clone())));
+        let subscribe = core.handle(EngineMsg::Subscribe(follows_query));
         let handle = subscribed_handle(&subscribe);
-        rows.0.lock().unwrap().clear();
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
 
         let contact_list = nmp_resolver::testkit::kind3(&author, &[followed.public_key()], 20);
-        let effects = core.on_publish(
-            exact_signed_intent(contact_list, &relay),
-            Box::new(CapturingReceiptSink::default()),
-        );
+        let effects = core.on_publish(exact_signed_intent(contact_list, &relay));
 
         assert_eq!(core.router_compiles.get(), 1);
         assert_eq!(core.projection_store_queries.get(), 1);
@@ -217,13 +185,8 @@ mod affected_handle_invalidation_tests {
         let relay = RelayUrl::parse("wss://local-compensation.example").unwrap();
         let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
         core.active_pubkey = Some(keys.public_key());
-        let rows = CapturingSink::default();
-        let subscribe = core.handle(EngineMsg::Subscribe(
-            unlimited_room_query(9),
-            Box::new(rows.clone()),
-        ));
+        let subscribe = core.handle(EngineMsg::Subscribe(unlimited_room_query(9)));
         let handle = subscribed_handle(&subscribe);
-        rows.0.lock().unwrap().clear();
 
         let unsigned = UnsignedEvent::new(
             keys.public_key(),
@@ -234,18 +197,15 @@ mod affected_handle_invalidation_tests {
         );
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
-        let accepted = core.on_publish(
-            WriteIntent {
-                payload: WritePayload::Unsigned(unsigned),
-                durability: Durability::Durable,
-                routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                    relays: NarrowOnly::new([relay]),
-                }),
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(CapturingReceiptSink::default()),
-        );
+        let accepted = core.on_publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned),
+            durability: Durability::Durable,
+            routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                relays: NarrowOnly::new([relay]),
+            }),
+            identity_override: None,
+            correlation: None,
+        });
         let receipt = accepted
             .iter()
             .find_map(|effect| match effect {
@@ -253,7 +213,7 @@ mod affected_handle_invalidation_tests {
                 _ => None,
             })
             .expect("local acceptance emits its receipt");
-        let pending_id = rows.0.lock().unwrap()[0]
+        let pending_id = row_batches(&accepted)[0]
             .iter()
             .find_map(|delta| match delta {
                 RowDelta::Added(row) => Some(row.event.id),
@@ -263,7 +223,6 @@ mod affected_handle_invalidation_tests {
         assert_eq!(core.projection_store_queries.get(), 0);
         assert_eq!(core.router_compiles.get(), 0);
 
-        rows.0.lock().unwrap().clear();
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
         let cancelled = core.cancel_write(receipt).1;
@@ -277,13 +236,6 @@ mod affected_handle_invalidation_tests {
             }
             _ => false,
         }));
-        let batches = rows.0.lock().unwrap();
-        assert_eq!(batches.len(), 1);
-        assert!(matches!(
-            batches[0].as_slice(),
-            [RowDelta::Removed(event_id)] if *event_id == pending_id
-        ));
-        drop(batches);
         assert_remembered_rows_match_oracle(&core, handle);
     }
 
@@ -309,34 +261,26 @@ mod affected_handle_invalidation_tests {
             .unwrap();
         let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 21);
         core.active_pubkey = Some(keys.public_key());
-        let rows = CapturingSink::default();
-        let subscribe = core.handle(EngineMsg::Subscribe(
-            room_query_for_kind(10, 9, 2),
-            Box::new(rows.clone()),
-        ));
+        let subscribe = core.handle(EngineMsg::Subscribe(room_query_for_kind(10, 9, 2)));
         let handle = subscribed_handle(&subscribe);
-        rows.0.lock().unwrap().clear();
 
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
-        let accepted = core.on_publish(
-            WriteIntent {
-                payload: WritePayload::Unsigned(UnsignedEvent::new(
-                    keys.public_key(),
-                    Timestamp::from(30u64),
-                    Kind::from(9u16),
-                    vec![Tag::parse(["h".to_owned(), "room-10".to_owned()]).unwrap()],
-                    "newest pending",
-                )),
-                durability: Durability::Durable,
-                routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                    relays: NarrowOnly::new([relay.clone()]),
-                }),
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(CapturingReceiptSink::default()),
-        );
+        let accepted = core.on_publish(WriteIntent {
+            payload: WritePayload::Unsigned(UnsignedEvent::new(
+                keys.public_key(),
+                Timestamp::from(30u64),
+                Kind::from(9u16),
+                vec![Tag::parse(["h".to_owned(), "room-10".to_owned()]).unwrap()],
+                "newest pending",
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                relays: NarrowOnly::new([relay.clone()]),
+            }),
+            identity_override: None,
+            correlation: None,
+        });
         let receipt = accepted
             .iter()
             .find_map(|effect| match effect {
@@ -344,7 +288,8 @@ mod affected_handle_invalidation_tests {
                 _ => None,
             })
             .expect("local acceptance emits its receipt");
-        let pending_id = rows.0.lock().unwrap()[0]
+        let accepted_batches = row_batches(&accepted);
+        let pending_id = accepted_batches[0]
             .iter()
             .find_map(|delta| match delta {
                 RowDelta::Added(row) => Some(row.event.id),
@@ -353,19 +298,18 @@ mod affected_handle_invalidation_tests {
             .expect("new pending row is visible");
         assert_eq!(core.projection_store_queries.get(), 0);
         assert_eq!(core.router_compiles.get(), 0);
-        assert!(rows.0.lock().unwrap()[0]
+        assert!(accepted_batches[0]
             .iter()
             .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == oldest.id)));
         assert_remembered_rows_match_oracle(&core, handle);
 
-        rows.0.lock().unwrap().clear();
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
-        let _ = core.cancel_write(receipt);
+        let cancelled = core.cancel_write(receipt).1;
 
         assert_eq!(core.projection_store_queries.get(), 1);
         assert_eq!(core.router_compiles.get(), 0);
-        let batches = rows.0.lock().unwrap();
+        let batches = row_batches(&cancelled);
         assert_eq!(batches.len(), 1);
         assert!(batches[0]
             .iter()
@@ -373,7 +317,6 @@ mod affected_handle_invalidation_tests {
         assert!(batches[0]
             .iter()
             .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == oldest.id)));
-        drop(batches);
         assert_remembered_rows_match_oracle(&core, handle);
     }
 
@@ -395,37 +338,31 @@ mod affected_handle_invalidation_tests {
             .unwrap();
         let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
         core.active_pubkey = Some(keys.public_key());
-        let rows = CapturingSink::default();
-        let subscribe = core.handle(EngineMsg::Subscribe(
-            LiveQuery::from_filter(Filter::default()),
-            Box::new(rows.clone()),
-        ));
+        let subscribe = core.handle(EngineMsg::Subscribe(LiveQuery::from_filter(
+            Filter::default(),
+        )));
         let handle = subscribed_handle(&subscribe);
-        rows.0.lock().unwrap().clear();
 
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
-        let accepted = core.on_publish(
-            WriteIntent {
-                payload: WritePayload::UnsignedReplaceableEdit {
-                    unsigned: UnsignedEvent::new(
-                        keys.public_key(),
-                        Timestamp::from(20u64),
-                        Kind::ContactList,
-                        vec![Tag::public_key(Keys::generate().public_key())],
-                        "new",
-                    ),
-                    expected_base: Some(predecessor.id),
-                },
-                durability: Durability::Durable,
-                routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                    relays: NarrowOnly::new([relay]),
-                }),
-                identity_override: None,
-                correlation: None,
+        let accepted = core.on_publish(WriteIntent {
+            payload: WritePayload::UnsignedReplaceableEdit {
+                unsigned: UnsignedEvent::new(
+                    keys.public_key(),
+                    Timestamp::from(20u64),
+                    Kind::ContactList,
+                    vec![Tag::public_key(Keys::generate().public_key())],
+                    "new",
+                ),
+                expected_base: Some(predecessor.id),
             },
-            Box::new(CapturingReceiptSink::default()),
-        );
+            durability: Durability::Durable,
+            routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                relays: NarrowOnly::new([relay]),
+            }),
+            identity_override: None,
+            correlation: None,
+        });
         let receipt = accepted
             .iter()
             .find_map(|effect| match effect {
@@ -435,7 +372,7 @@ mod affected_handle_invalidation_tests {
             .expect("replaceable acceptance emits its receipt");
         assert_eq!(core.projection_store_queries.get(), 0);
         assert_eq!(core.router_compiles.get(), 0);
-        let accepted_batches = rows.0.lock().unwrap();
+        let accepted_batches = row_batches(&accepted);
         assert_eq!(accepted_batches.len(), 1);
         let pending_id = accepted_batches[0]
             .iter()
@@ -447,17 +384,15 @@ mod affected_handle_invalidation_tests {
         assert!(accepted_batches[0]
             .iter()
             .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == predecessor.id)));
-        drop(accepted_batches);
         assert_remembered_rows_match_oracle(&core, handle);
 
-        rows.0.lock().unwrap().clear();
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
-        let _ = core.cancel_write(receipt);
+        let cancelled = core.cancel_write(receipt).1;
 
         assert_eq!(core.projection_store_queries.get(), 0);
         assert_eq!(core.router_compiles.get(), 0);
-        let cancelled_batches = rows.0.lock().unwrap();
+        let cancelled_batches = row_batches(&cancelled);
         assert_eq!(cancelled_batches.len(), 1);
         assert!(cancelled_batches[0]
             .iter()
@@ -465,7 +400,6 @@ mod affected_handle_invalidation_tests {
         assert!(cancelled_batches[0]
             .iter()
             .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == pending_id)));
-        drop(cancelled_batches);
         assert_remembered_rows_match_oracle(&core, handle);
     }
 
@@ -483,34 +417,26 @@ mod affected_handle_invalidation_tests {
             .unwrap();
         let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
         core.active_pubkey = Some(keys.public_key());
-        let rows = CapturingSink::default();
-        let subscribe = core.handle(EngineMsg::Subscribe(
-            unlimited_room_query(13),
-            Box::new(rows.clone()),
-        ));
+        let subscribe = core.handle(EngineMsg::Subscribe(unlimited_room_query(13)));
         let handle = subscribed_handle(&subscribe);
-        rows.0.lock().unwrap().clear();
 
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
-        let accepted = core.on_publish(
-            WriteIntent {
-                payload: WritePayload::Unsigned(UnsignedEvent::new(
-                    keys.public_key(),
-                    Timestamp::from(20u64),
-                    Kind::EventDeletion,
-                    vec![Tag::event(target.id)],
-                    "",
-                )),
-                durability: Durability::Durable,
-                routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                    relays: NarrowOnly::new([relay]),
-                }),
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(CapturingReceiptSink::default()),
-        );
+        let accepted = core.on_publish(WriteIntent {
+            payload: WritePayload::Unsigned(UnsignedEvent::new(
+                keys.public_key(),
+                Timestamp::from(20u64),
+                Kind::EventDeletion,
+                vec![Tag::event(target.id)],
+                "",
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                relays: NarrowOnly::new([relay]),
+            }),
+            identity_override: None,
+            correlation: None,
+        });
         let receipt = accepted
             .iter()
             .find_map(|effect| match effect {
@@ -521,23 +447,22 @@ mod affected_handle_invalidation_tests {
         assert_eq!(core.projection_store_queries.get(), 0);
         assert_eq!(core.router_compiles.get(), 0);
         assert!(matches!(
-            rows.0.lock().unwrap().as_slice(),
+            row_batches(&accepted).as_slice(),
             [batch]
-                if matches!(batch.as_slice(), [RowDelta::Removed(id)] if *id == target.id)
+                if matches!(*batch, [RowDelta::Removed(id)] if *id == target.id)
         ));
         assert_remembered_rows_match_oracle(&core, handle);
 
-        rows.0.lock().unwrap().clear();
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
-        let _ = core.cancel_write(receipt);
+        let cancelled = core.cancel_write(receipt).1;
 
         assert_eq!(core.projection_store_queries.get(), 0);
         assert_eq!(core.router_compiles.get(), 0);
         assert!(matches!(
-            rows.0.lock().unwrap().as_slice(),
+            row_batches(&cancelled).as_slice(),
             [batch]
-                if matches!(batch.as_slice(), [RowDelta::Added(row)] if row.event.id == target.id)
+                if matches!(*batch, [RowDelta::Added(row)] if row.event.id == target.id)
         ));
         assert_remembered_rows_match_oracle(&core, handle);
     }
@@ -560,13 +485,8 @@ mod affected_handle_invalidation_tests {
             )
             .unwrap();
         let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 51);
-        let rows = CapturingSink::default();
-        let subscribe = core.handle(EngineMsg::Subscribe(
-            unlimited_room_query(11),
-            Box::new(rows.clone()),
-        ));
+        let subscribe = core.handle(EngineMsg::Subscribe(unlimited_room_query(11)));
         let handle = subscribed_handle(&subscribe);
-        rows.0.lock().unwrap().clear();
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
 
@@ -581,13 +501,6 @@ mod affected_handle_invalidation_tests {
             }
             _ => false,
         }));
-        let batches = rows.0.lock().unwrap();
-        assert_eq!(batches.len(), 1);
-        assert!(matches!(
-            batches[0].as_slice(),
-            [RowDelta::Removed(event_id)] if *event_id == expiring.id
-        ));
-        drop(batches);
         assert_remembered_rows_match_oracle(&core, handle);
     }
 
@@ -692,10 +605,9 @@ mod affected_handle_invalidation_tests {
                 )
                 .unwrap();
             let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 13);
-            let subscribed = core.handle(EngineMsg::Subscribe(
-                LiveQuery::from_filter(Filter::default()),
-                Box::new(CapturingSink::default()),
-            ));
+            let subscribed = core.handle(EngineMsg::Subscribe(LiveQuery::from_filter(
+                Filter::default(),
+            )));
             let handle = subscribed_handle(&subscribed);
             (core, handle)
         };
@@ -797,22 +709,12 @@ mod affected_handle_invalidation_tests {
         }
         core.resolver.store_mut().insert_batch(seed).unwrap();
 
-        let sinks: Vec<_> = (0..HANDLE_COUNT)
-            .map(|room| {
-                let sink = CapturingSink::default();
-                core.handle(EngineMsg::Subscribe(
-                    room_query(room),
-                    Box::new(sink.clone()),
-                ));
-                sink
-            })
-            .collect();
+        for room in 0..HANDLE_COUNT {
+            core.handle(EngineMsg::Subscribe(room_query(room)));
+        }
 
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
-        for sink in &sinks {
-            sink.0.lock().unwrap().clear();
-        }
 
         let arriving = room_event(&keys, 17, 99, 50_000);
         let mut effects = Vec::new();
@@ -826,18 +728,12 @@ mod affected_handle_invalidation_tests {
 
         assert_eq!(core.projection_store_queries.get(), 0);
         assert_eq!(core.router_compiles.get(), 0);
-        for (room, sink) in sinks.iter().enumerate() {
-            let batches = sink.0.lock().unwrap();
-            if room == 17 {
-                assert_eq!(batches.len(), 1);
-                assert!(matches!(
-                    batches[0].as_slice(),
-                    [RowDelta::Added(row)] if row.event.id == arriving.id
-                ));
-            } else {
-                assert!(batches.is_empty(), "unrelated room {room} was refreshed");
-            }
-        }
+        let batches = row_batches(&effects);
+        assert_eq!(batches.len(), 1);
+        assert!(matches!(
+            batches[0],
+            [RowDelta::Added(row)] if row.event.id == arriving.id
+        ));
 
         // A byte-for-byte duplicate observation is a true no-op: no handle
         // query and no router compile merely to rediscover that fact.
@@ -861,9 +757,6 @@ mod affected_handle_invalidation_tests {
         // The committed provenance fact is already exact: emit SourcesGrew
         // without re-querying prior room history, unrelated handles, or the
         // router.
-        for sink in &sinks {
-            sink.0.lock().unwrap().clear();
-        }
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
         let second_relay = RelayUrl::parse("wss://second-room-source.example").unwrap();
@@ -877,20 +770,14 @@ mod affected_handle_invalidation_tests {
         );
         assert_eq!(core.projection_store_queries.get(), 0);
         assert_eq!(core.router_compiles.get(), 0);
-        for (room, sink) in sinks.iter().enumerate() {
-            let batches = sink.0.lock().unwrap();
-            if room == 17 {
-                assert_eq!(batches.len(), 1);
-                assert!(matches!(
-                    batches[0].as_slice(),
-                    [RowDelta::SourcesGrew { id, sources }]
-                        if *id == arriving.id
-                            && *sources == BTreeSet::from([relay.clone(), second_relay.clone()])
-                ));
-            } else {
-                assert!(batches.is_empty(), "unrelated room {room} was refreshed");
-            }
-        }
+        let batches = row_batches(&provenance_effects);
+        assert_eq!(batches.len(), 1);
+        assert!(matches!(
+            batches[0],
+            [RowDelta::SourcesGrew { id, sources }]
+                if *id == arriving.id
+                    && *sources == BTreeSet::from([relay.clone(), second_relay.clone()])
+        ));
     }
 
     #[test]
@@ -916,18 +803,8 @@ mod affected_handle_invalidation_tests {
             )
             .unwrap();
 
-        let affected = CapturingSink::default();
-        let other = CapturingSink::default();
-        core.handle(EngineMsg::Subscribe(
-            room_query_for_kind(7, 9, 2),
-            Box::new(affected.clone()),
-        ));
-        core.handle(EngineMsg::Subscribe(
-            room_query_for_kind(8, 9, 2),
-            Box::new(other.clone()),
-        ));
-        affected.0.lock().unwrap().clear();
-        other.0.lock().unwrap().clear();
+        core.handle(EngineMsg::Subscribe(room_query_for_kind(7, 9, 2)));
+        core.handle(EngineMsg::Subscribe(room_query_for_kind(8, 9, 2)));
         core.projection_store_queries.set(0);
 
         let newest = room_event(&keys, 7, 2, 40);
@@ -941,7 +818,7 @@ mod affected_handle_invalidation_tests {
         );
 
         assert_eq!(core.projection_store_queries.get(), 0);
-        let batches = affected.0.lock().unwrap();
+        let batches = row_batches(&effects);
         assert_eq!(batches.len(), 1);
         assert!(batches[0]
             .iter()
@@ -949,7 +826,6 @@ mod affected_handle_invalidation_tests {
         assert!(batches[0]
             .iter()
             .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == oldest.id)));
-        assert!(other.0.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -975,12 +851,7 @@ mod affected_handle_invalidation_tests {
             )
             .unwrap();
 
-        let sink = CapturingSink::default();
-        core.handle(EngineMsg::Subscribe(
-            room_query_for_kind(21, 9, 2),
-            Box::new(sink.clone()),
-        ));
-        sink.0.lock().unwrap().clear();
+        core.handle(EngineMsg::Subscribe(room_query_for_kind(21, 9, 2)));
         core.projection_store_queries.set(0);
 
         let deletion = EventBuilder::new(Kind::EventDeletion, "")
@@ -995,7 +866,7 @@ mod affected_handle_invalidation_tests {
         );
 
         assert_eq!(core.projection_store_queries.get(), 1);
-        let batches = sink.0.lock().unwrap();
+        let batches = row_batches(&effects);
         assert_eq!(batches.len(), 1);
         assert!(batches[0]
             .iter()
@@ -1029,12 +900,7 @@ mod affected_handle_invalidation_tests {
             )
             .unwrap();
 
-        let sink = CapturingSink::default();
-        core.handle(EngineMsg::Subscribe(
-            room_query_for_kind(22, 9, 1),
-            Box::new(sink.clone()),
-        ));
-        sink.0.lock().unwrap().clear();
+        core.handle(EngineMsg::Subscribe(room_query_for_kind(22, 9, 1)));
         core.projection_store_queries.set(0);
 
         let mut effects = Vec::new();
@@ -1047,7 +913,7 @@ mod affected_handle_invalidation_tests {
         );
 
         assert_eq!(core.projection_store_queries.get(), 0);
-        let batches = sink.0.lock().unwrap();
+        let batches = row_batches(&effects);
         assert_eq!(batches.len(), 1);
         assert!(batches[0]
             .iter()
@@ -1068,9 +934,7 @@ mod affected_handle_invalidation_tests {
             .sign_with_keys(&keys)
             .unwrap();
         let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
-        let sink = CapturingSink::default();
-        core.handle(EngineMsg::Subscribe(room_query(23), Box::new(sink.clone())));
-        sink.0.lock().unwrap().clear();
+        core.handle(EngineMsg::Subscribe(room_query(23)));
         core.projection_store_queries.set(0);
 
         let mut effects = Vec::new();
@@ -1086,7 +950,6 @@ mod affected_handle_invalidation_tests {
         );
 
         assert_eq!(core.projection_store_queries.get(), 0);
-        assert!(sink.0.lock().unwrap().is_empty());
         assert!(effects
             .iter()
             .all(|effect| !matches!(effect, Effect::EmitRows(..))));
@@ -1099,9 +962,7 @@ mod affected_handle_invalidation_tests {
         let second = RelayUrl::parse("wss://batch-source-b.example").unwrap();
         let event = room_event(&keys, 24, 0, 10);
         let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
-        let sink = CapturingSink::default();
-        core.handle(EngineMsg::Subscribe(room_query(24), Box::new(sink.clone())));
-        sink.0.lock().unwrap().clear();
+        core.handle(EngineMsg::Subscribe(room_query(24)));
         core.projection_store_queries.set(0);
 
         let mut effects = Vec::new();
@@ -1121,9 +982,9 @@ mod affected_handle_invalidation_tests {
 
         assert_eq!(core.projection_store_queries.get(), 0);
         assert!(matches!(
-            sink.0.lock().unwrap().as_slice(),
+            row_batches(&effects).as_slice(),
             [batch] if matches!(
-                batch.as_slice(),
+                *batch,
                 [RowDelta::Added(row)]
                     if row.event.id == event.id
                         && row.sources == BTreeSet::from([first, second])
@@ -1152,19 +1013,8 @@ mod affected_handle_invalidation_tests {
             )])
             .unwrap();
 
-        let old_sink = CapturingSink::default();
-        let new_sink = CapturingSink::default();
-        let unrelated_sink = CapturingSink::default();
-        for (room, sink) in [
-            (3, old_sink.clone()),
-            (4, new_sink.clone()),
-            (5, unrelated_sink.clone()),
-        ] {
-            core.handle(EngineMsg::Subscribe(
-                room_query_for_kind(room, 10_000, 10),
-                Box::new(sink.clone()),
-            ));
-            sink.0.lock().unwrap().clear();
+        for room in [3, 4, 5] {
+            core.handle(EngineMsg::Subscribe(room_query_for_kind(room, 10_000, 10)));
         }
         core.projection_store_queries.set(0);
 
@@ -1181,15 +1031,14 @@ mod affected_handle_invalidation_tests {
         // Both windows were known incomplete (one row under limit 10), so
         // neither removal nor insertion can expose an unknown backfill.
         assert_eq!(core.projection_store_queries.get(), 0);
-        assert!(matches!(
-            old_sink.0.lock().unwrap().as_slice(),
-            [batch] if matches!(batch.as_slice(), [RowDelta::Removed(id)] if *id == old.id)
-        ));
-        assert!(matches!(
-            new_sink.0.lock().unwrap().as_slice(),
-            [batch] if matches!(batch.as_slice(), [RowDelta::Added(row)] if row.event.id == new.id)
-        ));
-        assert!(unrelated_sink.0.lock().unwrap().is_empty());
+        let batches = row_batches(&effects);
+        assert_eq!(batches.len(), 2);
+        assert!(batches
+            .iter()
+            .any(|batch| matches!(*batch, [RowDelta::Removed(id)] if *id == old.id)));
+        assert!(batches
+            .iter()
+            .any(|batch| matches!(*batch, [RowDelta::Added(row)] if row.event.id == new.id)));
     }
 
     #[test]
@@ -1206,18 +1055,8 @@ mod affected_handle_invalidation_tests {
             )])
             .unwrap();
 
-        let affected = CapturingSink::default();
-        let unrelated = CapturingSink::default();
-        core.handle(EngineMsg::Subscribe(
-            room_query(12),
-            Box::new(affected.clone()),
-        ));
-        core.handle(EngineMsg::Subscribe(
-            room_query(13),
-            Box::new(unrelated.clone()),
-        ));
-        affected.0.lock().unwrap().clear();
-        unrelated.0.lock().unwrap().clear();
+        core.handle(EngineMsg::Subscribe(room_query(12)));
+        core.handle(EngineMsg::Subscribe(room_query(13)));
         core.projection_store_queries.set(0);
 
         let deletion = EventBuilder::new(Kind::EventDeletion, "")
@@ -1235,10 +1074,9 @@ mod affected_handle_invalidation_tests {
         // backfill candidate existed; the committed removal is exact.
         assert_eq!(core.projection_store_queries.get(), 0);
         assert!(matches!(
-            affected.0.lock().unwrap().as_slice(),
-            [batch] if matches!(batch.as_slice(), [RowDelta::Removed(id)] if *id == target.id)
+            row_batches(&effects).as_slice(),
+            [batch] if matches!(*batch, [RowDelta::Removed(id)] if *id == target.id)
         ));
-        assert!(unrelated.0.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1251,12 +1089,7 @@ mod affected_handle_invalidation_tests {
         demand.cache = CacheMode::Strict;
 
         let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
-        let sink = CapturingSink::default();
-        core.handle(EngineMsg::Subscribe(
-            LiveQuery(demand),
-            Box::new(sink.clone()),
-        ));
-        sink.0.lock().unwrap().clear();
+        core.handle(EngineMsg::Subscribe(LiveQuery(demand)));
 
         let event = room_event(&keys, 25, 0, 10);
         core.projection_store_queries.set(0);
@@ -1269,9 +1102,10 @@ mod affected_handle_invalidation_tests {
             &mut effects,
         );
         assert_eq!(core.projection_store_queries.get(), 1);
-        assert!(sink.0.lock().unwrap().is_empty());
+        assert!(row_batches(&effects).is_empty());
 
         core.projection_store_queries.set(0);
+        let mut effects = Vec::new();
         core.ingest_relay_events(
             vec![(
                 event.clone(),
@@ -1281,9 +1115,9 @@ mod affected_handle_invalidation_tests {
         );
         assert_eq!(core.projection_store_queries.get(), 1);
         assert!(matches!(
-            sink.0.lock().unwrap().as_slice(),
+            row_batches(&effects).as_slice(),
             [batch] if matches!(
-                batch.as_slice(),
+                *batch,
                 [RowDelta::Added(row)]
                     if row.event.id == event.id
                         && row.sources == BTreeSet::from([other, pinned])
@@ -1323,9 +1157,7 @@ mod affected_handle_invalidation_tests {
             }))),
             ..Filter::default()
         });
-        let sink = CapturingSink::default();
-        core.handle(EngineMsg::Subscribe(query, Box::new(sink.clone())));
-        sink.0.lock().unwrap().clear();
+        core.handle(EngineMsg::Subscribe(query));
 
         let post = EventBuilder::new(Kind::from(9u16), "followed post")
             .custom_created_at(Timestamp::from(20u64))
@@ -1343,8 +1175,8 @@ mod affected_handle_invalidation_tests {
 
         assert_eq!(core.projection_store_queries.get(), 1);
         assert!(matches!(
-            sink.0.lock().unwrap().as_slice(),
-            [batch] if matches!(batch.as_slice(), [RowDelta::Added(row)] if row.event.id == post.id)
+            row_batches(&effects).as_slice(),
+            [batch] if matches!(*batch, [RowDelta::Added(row)] if row.event.id == post.id)
         ));
     }
 
@@ -1353,13 +1185,8 @@ mod affected_handle_invalidation_tests {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://projection-recovery.example").unwrap();
         let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
-        let sink = CapturingSink::default();
-        let subscribed = core.handle(EngineMsg::Subscribe(
-            unlimited_room_query(28),
-            Box::new(sink.clone()),
-        ));
+        let subscribed = core.handle(EngineMsg::Subscribe(unlimited_room_query(28)));
         let handle = subscribed_handle(&subscribed);
-        sink.0.lock().unwrap().clear();
         core.handles.get_mut(&handle).unwrap().projection_complete = false;
 
         let first = room_event(&keys, 28, 0, 10);
@@ -1375,9 +1202,9 @@ mod affected_handle_invalidation_tests {
         assert_eq!(core.projection_store_queries.get(), 1);
         assert!(core.handles[&handle].projection_complete);
 
-        sink.0.lock().unwrap().clear();
         let second = room_event(&keys, 28, 1, 20);
         core.projection_store_queries.set(0);
+        effects.clear();
         core.ingest_relay_events(
             vec![(
                 second.clone(),
@@ -1387,8 +1214,8 @@ mod affected_handle_invalidation_tests {
         );
         assert_eq!(core.projection_store_queries.get(), 0);
         assert!(matches!(
-            sink.0.lock().unwrap().as_slice(),
-            [batch] if matches!(batch.as_slice(), [RowDelta::Added(row)] if row.event.id == second.id)
+            row_batches(&effects).as_slice(),
+            [batch] if matches!(*batch, [RowDelta::Added(row)] if row.event.id == second.id)
         ));
     }
 
@@ -1398,13 +1225,8 @@ mod affected_handle_invalidation_tests {
         let first = RelayUrl::parse("wss://differential-a.example").unwrap();
         let second = RelayUrl::parse("wss://differential-b.example").unwrap();
         let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
-        let sink = CapturingSink::default();
-        let subscribe = core.handle(EngineMsg::Subscribe(
-            unlimited_room_query(26),
-            Box::new(sink.clone()),
-        ));
+        let subscribe = core.handle(EngineMsg::Subscribe(unlimited_room_query(26)));
         let handle = subscribed_handle(&subscribe);
-        sink.0.lock().unwrap().clear();
         let mut app_rows = BTreeMap::<EventId, Row>::new();
         let mut candidates = Vec::<SignedEvent>::new();
         let mut seed = 0x4d59_5df4_d0f3_3173u64;
@@ -1459,20 +1281,19 @@ mod affected_handle_invalidation_tests {
                 "unlimited ordinary handle re-read history at step {step}"
             );
 
-            let emitted = std::mem::take(&mut *sink.0.lock().unwrap());
-            for delta in emitted.into_iter().flatten() {
+            for delta in row_batches(&effects).into_iter().flatten() {
                 match delta {
                     RowDelta::Added(row) => {
-                        app_rows.insert(row.event.id, row);
+                        app_rows.insert(row.event.id, row.clone());
                     }
                     RowDelta::SourcesGrew { id, sources } => {
                         app_rows
-                            .get_mut(&id)
+                            .get_mut(id)
                             .expect("source growth follows add")
-                            .sources = sources;
+                            .sources = sources.clone();
                     }
                     RowDelta::Removed(id) => {
-                        app_rows.remove(&id);
+                        app_rows.remove(id);
                     }
                 }
             }
@@ -1550,31 +1371,13 @@ mod affected_handle_invalidation_tests {
 
 #[cfg(test)]
 mod coverage_evidence_refresh_tests {
-    use std::{borrow::Cow, sync::Arc};
+    use std::borrow::Cow;
 
     use nmp_router::FixtureDirectory;
     use nmp_store::MemoryStore;
     use nostr::{Kind, SubscriptionId};
 
     use super::*;
-
-    #[derive(Clone, Default)]
-    struct CapturingRows(Arc<std::sync::Mutex<Vec<Vec<RowDelta>>>>);
-
-    impl RowSink for CapturingRows {
-        fn on_rows(&self, rows: Vec<RowDelta>) {
-            self.0.lock().unwrap().push(rows);
-        }
-    }
-
-    #[derive(Clone, Default)]
-    struct CapturingHistory(Arc<std::sync::Mutex<Vec<HistoryBatch>>>);
-
-    impl HistorySink for CapturingHistory {
-        fn on_history(&self, batch: HistoryBatch) {
-            self.0.lock().unwrap().push(batch);
-        }
-    }
 
     fn pinned_query(relay: &RelayUrl) -> LiveQuery {
         LiveQuery(
@@ -1644,11 +1447,7 @@ mod coverage_evidence_refresh_tests {
     fn eose_refreshes_live_evidence_without_event_index_query() {
         let relay = RelayUrl::parse("wss://evidence-only-live.example").unwrap();
         let (mut core, transport, session) = connected_core(&relay);
-        let sink = CapturingRows::default();
-        let opened = core.handle(EngineMsg::Subscribe(
-            pinned_query(&relay),
-            Box::new(sink.clone()),
-        ));
+        let opened = core.handle(EngineMsg::Subscribe(pinned_query(&relay)));
         let id = opened
             .iter()
             .find_map(|effect| match effect {
@@ -1657,7 +1456,6 @@ mod coverage_evidence_refresh_tests {
             })
             .unwrap();
         let wire = wire_id(&opened);
-        sink.0.lock().unwrap().clear();
         core.projection_store_queries.set(0);
 
         let effects = eose(&mut core, transport, session, wire);
@@ -1677,18 +1475,17 @@ mod coverage_evidence_refresh_tests {
             evidence.sources[0].reconciled_through,
             Some(Timestamp::from(101u64))
         );
-        assert!(matches!(sink.0.lock().unwrap().as_slice(), [rows] if rows.is_empty()));
     }
 
     #[test]
     fn eose_does_not_requery_a_complete_history_projection() {
         let relay = RelayUrl::parse("wss://evidence-only-history.example").unwrap();
         let (mut core, transport, session) = connected_core(&relay);
-        let sink = CapturingHistory::default();
-        let opened = core.handle(EngineMsg::SubscribeHistory(
-            HistoryQuery::new(pinned_query(&relay), 3, 6),
-            Box::new(sink),
-        ));
+        let opened = core.handle(EngineMsg::SubscribeHistory(HistoryQuery::new(
+            pinned_query(&relay),
+            3,
+            6,
+        )));
         let id = opened
             .iter()
             .find_map(|effect| match effect {
@@ -1710,10 +1507,7 @@ mod coverage_evidence_refresh_tests {
     fn evidence_only_refresh_falls_back_for_incomplete_projections() {
         let relay = RelayUrl::parse("wss://evidence-recovery.example").unwrap();
         let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
-        let live = core.handle(EngineMsg::Subscribe(
-            pinned_query(&relay),
-            Box::new(CapturingRows::default()),
-        ));
+        let live = core.handle(EngineMsg::Subscribe(pinned_query(&relay)));
         let live_id = live
             .iter()
             .find_map(|effect| match effect {
@@ -1721,10 +1515,11 @@ mod coverage_evidence_refresh_tests {
                 _ => None,
             })
             .unwrap();
-        let history = core.handle(EngineMsg::SubscribeHistory(
-            HistoryQuery::new(pinned_query(&relay), 3, 6),
-            Box::new(CapturingHistory::default()),
-        ));
+        let history = core.handle(EngineMsg::SubscribeHistory(HistoryQuery::new(
+            pinned_query(&relay),
+            3,
+            6,
+        )));
         let history_id = history
             .iter()
             .find_map(|effect| match effect {

@@ -4,42 +4,12 @@ use super::*;
 
 #[cfg(test)]
 mod history_mutation_tests {
-    use std::sync::{Arc, Mutex};
-
     use nmp_grammar::{Derived, IdentityField, IndexedTagName, Selector};
     use nmp_router::FixtureDirectory;
     use nmp_store::MemoryStore;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
     use super::*;
-
-    #[derive(Clone, Default)]
-    struct CapturingHistorySink(Arc<Mutex<Vec<HistoryBatch>>>);
-
-    impl HistorySink for CapturingHistorySink {
-        fn on_history(&self, batch: HistoryBatch) {
-            self.0.lock().unwrap().push(batch);
-        }
-    }
-
-    #[derive(Clone, Default)]
-    struct CapturingRowSink(Arc<Mutex<Vec<Vec<RowDelta>>>>);
-
-    impl RowSink for CapturingRowSink {
-        fn on_rows(&self, rows: Vec<RowDelta>) {
-            self.0.lock().unwrap().push(rows);
-        }
-    }
-
-    #[derive(Clone, Default)]
-    struct CapturingReceiptSink(Arc<Mutex<Vec<WriteStatus>>>);
-
-    impl ReceiptSink for CapturingReceiptSink {
-        fn on_status(&self, status: WriteStatus) -> bool {
-            self.0.lock().unwrap().push(status);
-            true
-        }
-    }
 
     fn room_tag(room: usize) -> Tag {
         Tag::parse(["h".to_owned(), format!("room-{room}")]).unwrap()
@@ -72,11 +42,7 @@ mod history_mutation_tests {
         events: &[SignedEvent],
         kinds: BTreeSet<u16>,
         relay: &RelayUrl,
-    ) -> (
-        EngineCore<MemoryStore>,
-        HistorySessionId,
-        CapturingHistorySink,
-    ) {
+    ) -> (EngineCore<MemoryStore>, HistorySessionId) {
         let mut store = MemoryStore::new();
         store
             .insert_batch(
@@ -92,12 +58,8 @@ mod history_mutation_tests {
                     .collect(),
             )
             .unwrap();
-        let sink = CapturingHistorySink::default();
         let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
-        let opened = core.handle(EngineMsg::SubscribeHistory(
-            history_query(47, kinds),
-            Box::new(sink.clone()),
-        ));
+        let opened = core.handle(EngineMsg::SubscribeHistory(history_query(47, kinds)));
         let id = opened
             .iter()
             .find_map(|effect| match effect {
@@ -112,10 +74,9 @@ mod history_mutation_tests {
         )));
         core.handle(EngineMsg::CommitHistoryLoad(id));
         assert_eq!(core.histories[&id].last_rows.len(), 6);
-        sink.0.lock().unwrap().clear();
         core.history_store_queries.set(0);
         core.history_rows_examined.set(0);
-        (core, id, sink)
+        (core, id)
     }
 
     fn ordered_ids<S: EventStore>(core: &EngineCore<S>, id: HistorySessionId) -> Vec<EventId> {
@@ -131,7 +92,7 @@ mod history_mutation_tests {
         event: SignedEvent,
         relay: RelayUrl,
         observed_at: u64,
-    ) {
+    ) -> Vec<Effect> {
         let mut effects = Vec::new();
         core.ingest_relay_events(
             vec![(
@@ -140,10 +101,19 @@ mod history_mutation_tests {
             )],
             &mut effects,
         );
+        effects
     }
 
-    fn assert_one_atomic_batch(sink: &CapturingHistorySink) -> HistoryBatch {
-        let batches = sink.0.lock().unwrap();
+    fn assert_one_atomic_batch(effects: &[Effect], history_id: HistorySessionId) -> HistoryBatch {
+        let batches: Vec<_> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::EmitHistory(candidate, batch) if *candidate == history_id => {
+                    Some(batch.clone())
+                }
+                _ => None,
+            })
+            .collect();
         assert_eq!(
             batches.len(),
             1,
@@ -163,10 +133,10 @@ mod history_mutation_tests {
 
         // First boundary insertion is old-window + inserted -> top-N: no
         // store read, and Added+Removed travel in one atomic batch.
-        let (mut core, id, sink) = open_six(&base, BTreeSet::from([9]), &relay);
+        let (mut core, id) = open_six(&base, BTreeSet::from([9]), &relay);
         let inserted = room_event(&keys, 47, 99, 1_000);
-        ingest(&mut core, inserted.clone(), relay.clone(), 2_000);
-        let batch = assert_one_atomic_batch(&sink);
+        let effects = ingest(&mut core, inserted.clone(), relay.clone(), 2_000);
+        let batch = assert_one_atomic_batch(&effects, id);
         assert_eq!(core.history_store_queries.get(), 0);
         assert_eq!(core.history_rows_examined.get(), 0);
         assert!(batch
@@ -189,11 +159,10 @@ mod history_mutation_tests {
             .pop()
             .unwrap()
             .event;
-        sink.0.lock().unwrap().clear();
         core.history_store_queries.set(0);
         core.history_rows_examined.set(0);
-        ingest(&mut core, middle_event, second.clone(), 2_001);
-        let batch = assert_one_atomic_batch(&sink);
+        let effects = ingest(&mut core, middle_event, second.clone(), 2_001);
+        let batch = assert_one_atomic_batch(&effects, id);
         assert_eq!(
             (
                 core.history_store_queries.get(),
@@ -215,11 +184,10 @@ mod history_mutation_tests {
             .custom_created_at(Timestamp::from(3_000u64))
             .sign_with_keys(&keys)
             .unwrap();
-        sink.0.lock().unwrap().clear();
         core.history_store_queries.set(0);
         core.history_rows_examined.set(0);
-        ingest(&mut core, deletion, relay.clone(), 3_001);
-        let batch = assert_one_atomic_batch(&sink);
+        let effects = ingest(&mut core, deletion, relay.clone(), 3_001);
+        let batch = assert_one_atomic_batch(&effects, id);
         assert_eq!(
             (
                 core.history_store_queries.get(),
@@ -244,11 +212,10 @@ mod history_mutation_tests {
             .custom_created_at(Timestamp::from(3_100u64))
             .sign_with_keys(&keys)
             .unwrap();
-        sink.0.lock().unwrap().clear();
         core.history_store_queries.set(0);
         core.history_rows_examined.set(0);
-        ingest(&mut core, deletion, relay.clone(), 3_101);
-        assert_one_atomic_batch(&sink);
+        let effects = ingest(&mut core, deletion, relay.clone(), 3_101);
+        assert_one_atomic_batch(&effects, id);
         assert_eq!(
             (
                 core.history_store_queries.get(),
@@ -295,9 +262,8 @@ mod history_mutation_tests {
             2,
             4,
         );
-        let sink = CapturingHistorySink::default();
         let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
-        let opened = core.handle(EngineMsg::SubscribeHistory(query, Box::new(sink.clone())));
+        let opened = core.handle(EngineMsg::SubscribeHistory(query));
         let id = opened
             .iter()
             .find_map(|effect| match effect {
@@ -375,14 +341,9 @@ mod history_mutation_tests {
             3,
             3,
         );
-        let strict_sink = CapturingHistorySink::default();
-        let agnostic_sink = CapturingHistorySink::default();
         let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
         let strict_id = core
-            .handle(EngineMsg::SubscribeHistory(
-                strict_query,
-                Box::new(strict_sink.clone()),
-            ))
+            .handle(EngineMsg::SubscribeHistory(strict_query))
             .iter()
             .find_map(|effect| match effect {
                 Effect::EmitHistory(id, _) => Some(*id),
@@ -390,10 +351,7 @@ mod history_mutation_tests {
             })
             .unwrap();
         let agnostic_id = core
-            .handle(EngineMsg::SubscribeHistory(
-                agnostic_query,
-                Box::new(agnostic_sink.clone()),
-            ))
+            .handle(EngineMsg::SubscribeHistory(agnostic_query))
             .iter()
             .find_map(|effect| match effect {
                 Effect::EmitHistory(id, _) => Some(*id),
@@ -408,12 +366,12 @@ mod history_mutation_tests {
             ordered_ids(&core, agnostic_id),
             vec![other_newest.id, wanted_a.id, wanted_b.id]
         );
-        strict_sink.0.lock().unwrap().clear();
-        agnostic_sink.0.lock().unwrap().clear();
 
         let new = room_event(&keys, 47, 99, 500);
-        ingest(&mut core, new.clone(), other.clone(), 2_000);
-        assert!(strict_sink.0.lock().unwrap().is_empty());
+        let effects = ingest(&mut core, new.clone(), other.clone(), 2_000);
+        assert!(!effects.iter().any(
+            |effect| matches!(effect, Effect::EmitHistory(candidate, _) if *candidate == strict_id)
+        ));
         assert_eq!(ordered_ids(&core, strict_id)[0], wanted_a.id);
         assert_eq!(ordered_ids(&core, agnostic_id)[0], new.id);
 
@@ -437,15 +395,25 @@ mod history_mutation_tests {
             .custom_created_at(Timestamp::from(3_000u64))
             .sign_with_keys(&keys)
             .unwrap();
-        strict_sink.0.lock().unwrap().clear();
-        agnostic_sink.0.lock().unwrap().clear();
         core.history_store_queries.set(0);
         core.history_rows_examined.set(0);
-        ingest(&mut core, deletion, wanted, 3_001);
+        let effects = ingest(&mut core, deletion, wanted, 3_001);
         assert_eq!(core.history_store_queries.get(), 2);
         assert_eq!(core.history_rows_examined.get(), 2);
-        assert_eq!(strict_sink.0.lock().unwrap().len(), 1);
-        assert_eq!(agnostic_sink.0.lock().unwrap().len(), 1);
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| matches!(effect, Effect::EmitHistory(candidate, _) if *candidate == strict_id))
+                .count(),
+            1
+        );
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| matches!(effect, Effect::EmitHistory(candidate, _) if *candidate == agnostic_id))
+                .count(),
+            1
+        );
 
         for history_id in [strict_id, agnostic_id] {
             let (oracle, _) = core.history_rows_and_evidence_for(history_id).unwrap();
@@ -466,15 +434,15 @@ mod history_mutation_tests {
             .sign_with_keys(&keys)
             .unwrap();
         base.push(replaceable.clone());
-        let (mut core, id, sink) = open_six(&base, BTreeSet::from([9, 10_000]), &relay);
+        let (mut core, id) = open_six(&base, BTreeSet::from([9, 10_000]), &relay);
         assert!(core.histories[&id].last_rows.contains_key(&replaceable.id));
         let replacement = EventBuilder::new(Kind::from(10_000u16), "new")
             .tag(room_tag(47))
             .custom_created_at(Timestamp::from(1_000u64))
             .sign_with_keys(&keys)
             .unwrap();
-        ingest(&mut core, replacement.clone(), relay.clone(), 2_000);
-        let batch = assert_one_atomic_batch(&sink);
+        let effects = ingest(&mut core, replacement.clone(), relay.clone(), 2_000);
+        let batch = assert_one_atomic_batch(&effects, id);
         assert_eq!(
             (
                 core.history_store_queries.get(),
@@ -497,13 +465,11 @@ mod history_mutation_tests {
             .custom_created_at(Timestamp::from(900u64))
             .sign_with_keys(&keys)
             .unwrap();
-        sink.0.lock().unwrap().clear();
         ingest(&mut core, expiring.clone(), relay, 2_001);
-        sink.0.lock().unwrap().clear();
         core.history_store_queries.set(0);
         core.history_rows_examined.set(0);
-        core.tick(Timestamp::from(5_000u64));
-        let batch = assert_one_atomic_batch(&sink);
+        let effects = core.tick(Timestamp::from(5_000u64));
+        let batch = assert_one_atomic_batch(&effects, id);
         assert_eq!(
             (
                 core.history_store_queries.get(),
@@ -543,13 +509,12 @@ mod history_mutation_tests {
                     .collect(),
             )
             .unwrap();
-        let sink = CapturingHistorySink::default();
         let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
         core.active_pubkey = Some(keys.public_key());
-        let opened = core.handle(EngineMsg::SubscribeHistory(
-            history_query(47, BTreeSet::from([9, 10_000])),
-            Box::new(sink.clone()),
-        ));
+        let opened = core.handle(EngineMsg::SubscribeHistory(history_query(
+            47,
+            BTreeSet::from([9, 10_000]),
+        )));
         let id = opened
             .iter()
             .find_map(|effect| match effect {
@@ -558,29 +523,25 @@ mod history_mutation_tests {
             })
             .unwrap();
         assert_eq!(ordered_ids(&core, id), vec![x.id, y.id, z.id]);
-        sink.0.lock().unwrap().clear();
 
-        let accepted = core.on_publish(
-            WriteIntent {
-                payload: WritePayload::UnsignedReplaceableEdit {
-                    unsigned: UnsignedEvent::new(
-                        keys.public_key(),
-                        Timestamp::from(1_000u64),
-                        Kind::from(10_000u16),
-                        vec![room_tag(47)],
-                        "pending replacement",
-                    ),
-                    expected_base: Some(predecessor.id),
-                },
-                durability: Durability::Durable,
-                routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                    relays: NarrowOnly::new([relay]),
-                }),
-                identity_override: None,
-                correlation: None,
+        let accepted = core.on_publish(WriteIntent {
+            payload: WritePayload::UnsignedReplaceableEdit {
+                unsigned: UnsignedEvent::new(
+                    keys.public_key(),
+                    Timestamp::from(1_000u64),
+                    Kind::from(10_000u16),
+                    vec![room_tag(47)],
+                    "pending replacement",
+                ),
+                expected_base: Some(predecessor.id),
             },
-            Box::new(CapturingReceiptSink::default()),
-        );
+            durability: Durability::Durable,
+            routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                relays: NarrowOnly::new([relay]),
+            }),
+            identity_override: None,
+            correlation: None,
+        });
         let receipt = accepted
             .iter()
             .find_map(|effect| match effect {
@@ -591,12 +552,11 @@ mod history_mutation_tests {
         let pending = *ordered_ids(&core, id).first().unwrap();
         assert_eq!(ordered_ids(&core, id)[1..], [x.id, y.id]);
 
-        sink.0.lock().unwrap().clear();
         core.history_store_queries.set(0);
         core.history_rows_examined.set(0);
-        let _ = core.cancel_write(receipt);
+        let effects = core.cancel_write(receipt).1;
 
-        let batch = assert_one_atomic_batch(&sink);
+        let batch = assert_one_atomic_batch(&effects, id);
         assert_eq!(
             (
                 core.history_store_queries.get(),
@@ -628,7 +588,7 @@ mod history_mutation_tests {
         let base: Vec<_> = (0..30)
             .map(|index| room_event(&keys, 47, index, 100 + index as u64))
             .collect();
-        let (mut core, id, sink) = open_six(&base, BTreeSet::from([9]), &relay);
+        let (mut core, id) = open_six(&base, BTreeSet::from([9]), &relay);
         let mut seed = 0x6a09_e667_f3bc_c909u64;
 
         for step in 0..64usize {
@@ -669,14 +629,12 @@ mod history_mutation_tests {
                 provenance_grew: Vec::new(),
             };
 
-            sink.0.lock().unwrap().clear();
             core.history_store_queries.set(0);
             core.history_rows_examined.set(0);
             let mut effects = Vec::new();
             assert!(core.try_apply_committed_history_row_changes(id, &changes, &mut effects));
             assert!(core.history_store_queries.get() <= 1);
             assert!(core.history_rows_examined.get() <= 1);
-            assert!(sink.0.lock().unwrap().len() <= 1);
 
             let (oracle, _) = core.history_rows_and_evidence_for(id).unwrap();
             assert_eq!(
@@ -726,10 +684,9 @@ mod history_mutation_tests {
             ..nmp_grammar::Filter::default()
         };
         let query = HistoryQuery::new(LiveQuery::from_filter(selection), 3, 6);
-        let sink = CapturingHistorySink::default();
         let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
-        let opened = core.handle(EngineMsg::SubscribeHistory(query, Box::new(sink.clone())));
+        let opened = core.handle(EngineMsg::SubscribeHistory(query));
         let id = opened
             .iter()
             .find_map(|effect| match effect {
@@ -744,13 +701,12 @@ mod history_mutation_tests {
         assert_eq!(core.resolver.root_atoms(primary).len(), 8);
         assert!(core.resolver.subtree_atoms(primary).len() > 8);
 
-        sink.0.lock().unwrap().clear();
         core.history_store_queries.set(0);
         core.history_rows_examined.set(0);
         let replacement = addressable("g7", 1_000, "replacement");
-        ingest(&mut core, replacement.clone(), relay, 2_000);
+        let effects = ingest(&mut core, replacement.clone(), relay, 2_000);
 
-        let batch = assert_one_atomic_batch(&sink);
+        let batch = assert_one_atomic_batch(&effects, id);
         assert_eq!(core.history_store_queries.get(), 1);
         assert!(core.history_rows_examined.get() <= 1);
         assert!(batch
@@ -771,18 +727,17 @@ mod history_mutation_tests {
             .map(|(index, created_at)| room_event(&keys, 47, index, created_at))
             .collect();
         let old_boundary = base.last().unwrap().clone();
-        let (mut core, id, sink) = open_six(&base, BTreeSet::from([9]), &relay);
+        let (mut core, id) = open_six(&base, BTreeSet::from([9]), &relay);
         let late = (0..1_000usize)
             .map(|ordinal| room_event(&keys, 47, 20_000 + ordinal, 100))
             .find(|event| event.id < old_boundary.id)
             .expect("deterministically find an id that sorts before the old tie boundary");
 
-        sink.0.lock().unwrap().clear();
         core.history_store_queries.set(0);
         core.history_rows_examined.set(0);
-        ingest(&mut core, late.clone(), relay, 2_000);
+        let effects = ingest(&mut core, late.clone(), relay, 2_000);
 
-        let batch = assert_one_atomic_batch(&sink);
+        let batch = assert_one_atomic_batch(&effects, id);
         assert_eq!(core.history_store_queries.get(), 0);
         assert_eq!(core.history_rows_examined.get(), 0);
         assert!(core.histories[&id].last_rows.contains_key(&late.id));
@@ -820,12 +775,11 @@ mod history_mutation_tests {
                     .collect(),
             )
             .unwrap();
-        let sink = CapturingHistorySink::default();
         let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
-        let opened = core.handle(EngineMsg::SubscribeHistory(
-            history_query(47, BTreeSet::from([9])),
-            Box::new(sink.clone()),
-        ));
+        let opened = core.handle(EngineMsg::SubscribeHistory(history_query(
+            47,
+            BTreeSet::from([9]),
+        )));
         let id = opened
             .iter()
             .find_map(|effect| match effect {
@@ -835,11 +789,9 @@ mod history_mutation_tests {
             .unwrap();
         core.handle(EngineMsg::RequestRows(id, 6));
         core.handle(EngineMsg::CommitHistoryLoad(id));
-        sink.0.lock().unwrap().clear();
 
         let inserted = room_event(&keys, 47, 99, 1_000);
         ingest(&mut core, inserted, relay.clone(), 2_000);
-        sink.0.lock().unwrap().clear();
         let removed = ordered_ids(&core, id)[2];
         let deletion = EventBuilder::new(Kind::EventDeletion, "")
             .tag(Tag::event(removed))
@@ -848,9 +800,9 @@ mod history_mutation_tests {
             .unwrap();
         core.history_store_queries.set(0);
         core.history_rows_examined.set(0);
-        ingest(&mut core, deletion, relay, 3_001);
+        let effects = ingest(&mut core, deletion, relay, 3_001);
 
-        assert_one_atomic_batch(&sink);
+        assert_one_atomic_batch(&effects, id);
         assert_eq!(core.history_store_queries.get(), 1);
         assert_eq!(core.history_rows_examined.get(), 1);
         let (oracle, _) = core.history_rows_and_evidence_for(id).unwrap();
@@ -879,12 +831,11 @@ mod history_mutation_tests {
                     .collect(),
             )
             .unwrap();
-        let sink = CapturingHistorySink::default();
         let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
-        let opened = core.handle(EngineMsg::SubscribeHistory(
-            history_query(47, BTreeSet::from([9])),
-            Box::new(sink.clone()),
-        ));
+        let opened = core.handle(EngineMsg::SubscribeHistory(history_query(
+            47,
+            BTreeSet::from([9]),
+        )));
         let id = opened
             .iter()
             .find_map(|effect| match effect {
@@ -892,10 +843,8 @@ mod history_mutation_tests {
                 _ => None,
             })
             .unwrap();
-        let row_sink = CapturingRowSink::default();
         let ordinary = core.handle(EngineMsg::Subscribe(
             history_query(47, BTreeSet::from([9])).live_query().clone(),
-            Box::new(row_sink.clone()),
         ));
         let ordinary_id = ordinary
             .iter()
@@ -904,11 +853,10 @@ mod history_mutation_tests {
                 _ => None,
             })
             .unwrap();
-        let second_sink = CapturingHistorySink::default();
-        let second_open = core.handle(EngineMsg::SubscribeHistory(
-            history_query(47, BTreeSet::from([9])),
-            Box::new(second_sink.clone()),
-        ));
+        let second_open = core.handle(EngineMsg::SubscribeHistory(history_query(
+            47,
+            BTreeSet::from([9]),
+        )));
         let second_id = second_open
             .iter()
             .find_map(|effect| match effect {
@@ -916,9 +864,6 @@ mod history_mutation_tests {
                 _ => None,
             })
             .unwrap();
-        sink.0.lock().unwrap().clear();
-        row_sink.0.lock().unwrap().clear();
-        second_sink.0.lock().unwrap().clear();
 
         let prior_rows = core.histories[&id].last_rows.clone();
         let prior_order = core.histories[&id].order.clone();
@@ -931,7 +876,7 @@ mod history_mutation_tests {
         let second_prior_handles = core.histories[&second_id].handle_ids.clone();
 
         // A staged advance mutates only this session's retained projection
-        // and is observable on NO sink until commit; every other projection
+        // and emits no delivery fact until commit; every other projection
         // is untouched.
         let staged = core.handle(EngineMsg::RequestRows(id, 6));
         assert!(staged.iter().any(|effect| matches!(
@@ -940,12 +885,9 @@ mod history_mutation_tests {
         )));
         assert!(core.histories[&id].pending_load.is_some());
         assert_eq!(core.histories[&id].last_rows.len(), 6);
-        assert!(
-            sink.0.lock().unwrap().is_empty(),
-            "staged rows are not observable"
-        );
-        assert!(row_sink.0.lock().unwrap().is_empty());
-        assert!(second_sink.0.lock().unwrap().is_empty());
+        assert!(!staged
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitHistory(..) | Effect::EmitRows(..))));
         assert_eq!(core.handles[&ordinary_id].last_rows, ordinary_prior_rows);
         assert_eq!(
             core.handles[&ordinary_id].last_evidence,
@@ -958,7 +900,7 @@ mod history_mutation_tests {
         );
         assert_eq!(core.histories[&second_id].handle_ids, second_prior_handles);
 
-        core.handle(EngineMsg::RollbackHistoryLoad(id));
+        let rolled_back = core.handle(EngineMsg::RollbackHistoryLoad(id));
         let state = &core.histories[&id];
         assert_eq!(state.last_rows, prior_rows);
         assert_eq!(state.order, prior_order);
@@ -966,8 +908,9 @@ mod history_mutation_tests {
         assert_eq!(state.target_rows, 3);
         assert_eq!(state.handle_ids, prior_handles);
         assert!(state.pending_load.is_none());
-        assert!(row_sink.0.lock().unwrap().is_empty());
-        assert!(second_sink.0.lock().unwrap().is_empty());
+        assert!(!rolled_back
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitHistory(..) | Effect::EmitRows(..))));
 
         // The identical declarative request retries cleanly after rollback.
         let retried = core.handle(EngineMsg::RequestRows(id, 6));
@@ -975,9 +918,16 @@ mod history_mutation_tests {
             effect,
             Effect::HistoryLoadResult(session, Ok(())) if *session == id
         )));
-        core.handle(EngineMsg::CommitHistoryLoad(id));
+        let committed = core.handle(EngineMsg::CommitHistoryLoad(id));
         assert_eq!(core.histories[&id].last_rows.len(), 6);
-        let delivered = sink.0.lock().unwrap();
+        let delivered: Vec<_> = retried
+            .iter()
+            .chain(committed.iter())
+            .filter_map(|effect| match effect {
+                Effect::EmitHistory(candidate, batch) if *candidate == id => Some(batch.clone()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(delivered.len(), 2);
         assert_eq!(delivered[0].load, WindowLoad::Requesting);
         assert_eq!(delivered[1].load, WindowLoad::Returned { added: 3 });
@@ -991,8 +941,6 @@ mod history_mutation_tests {
             3,
             "initial, exact tie-second, and older handles all contribute evidence"
         );
-        drop(delivered);
-
         let owned_handles = core.histories[&id].handle_ids.clone();
         core.handle(EngineMsg::UnsubscribeHistory(id));
         assert!(!core.histories.contains_key(&id));
@@ -1001,11 +949,10 @@ mod history_mutation_tests {
             assert!(core.resolver.root_atoms(handle).is_empty());
         }
 
-        let active_sink = CapturingHistorySink::default();
-        let reopened = core.handle(EngineMsg::SubscribeHistory(
-            history_query(47, BTreeSet::from([9])),
-            Box::new(active_sink),
-        ));
+        let reopened = core.handle(EngineMsg::SubscribeHistory(history_query(
+            47,
+            BTreeSet::from([9]),
+        )));
         let active_id = reopened
             .iter()
             .find_map(|effect| match effect {

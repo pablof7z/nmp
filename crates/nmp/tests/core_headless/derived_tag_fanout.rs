@@ -266,10 +266,9 @@ impl Study {
     }
 
     fn subscribe(&mut self, relays: &[RelayUrl], label: &str) -> StepCount {
-        let effects = self.core.handle(EngineMsg::Subscribe(
-            group_state_of_my_admin_groups(relays),
-            Box::new(CapturingSink::default()),
-        ));
+        let effects = self
+            .core
+            .handle(EngineMsg::Subscribe(group_state_of_my_admin_groups(relays)));
         self.ledger.record(label, &effects)
     }
 
@@ -802,10 +801,9 @@ fn g_a_derived_set_collapses_the_same_way_in_the_authors_slot_and_a_tag_slot() {
     let me = Keys::generate();
     core.handle(EngineMsg::SetActivePubkey(Some(me.public_key())));
     let mut authors_ledger = WireLedger::for_kinds(&[1]);
-    let effects = core.handle(EngineMsg::Subscribe(
-        posts_by_my_follows(std::slice::from_ref(&r0)),
-        Box::new(CapturingSink::default()),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(posts_by_my_follows(
+        std::slice::from_ref(&r0),
+    )));
     authors_ledger.record("subscribe", &effects);
 
     let follows: Vec<Keys> = (0..5).map(|_| Keys::generate()).collect();
@@ -910,11 +908,10 @@ fn i_re_served_events_after_a_replacement_cost_bandwidth_but_never_rows() {
     let me = Keys::generate();
     core.handle(EngineMsg::SetActivePubkey(Some(me.public_key())));
 
-    let sink = CapturingSink::default();
-    core.handle(EngineMsg::Subscribe(
-        posts_by_my_follows(std::slice::from_ref(&r0)),
-        Box::new(sink.clone()),
-    ));
+    core.handle(EngineMsg::Subscribe(posts_by_my_follows(
+        std::slice::from_ref(&r0),
+    )));
+    let mut delivered_rows = 0usize;
 
     let follows: Vec<Keys> = (0..3).map(|_| Keys::generate()).collect();
     let mut posts = Vec::new();
@@ -922,7 +919,7 @@ fn i_re_served_events_after_a_replacement_cost_bandwidth_but_never_rows() {
         // Follow one more author — this REPLACES the live sub's filter in
         // place, which is exactly when a real relay re-serves.
         let list: Vec<nostr::PublicKey> = follows[..=n].iter().map(|k| k.public_key()).collect();
-        core.handle(EngineMsg::RelayFrame(
+        let effects = core.handle(EngineMsg::RelayFrame(
             RelayHandle {
                 slot: 0,
                 generation: 1,
@@ -933,9 +930,10 @@ fn i_re_served_events_after_a_replacement_cost_bandwidth_but_never_rows() {
                 nmp_resolver::testkit::kind3(&me, &list, 200 + n as u64),
             ),
         ));
+        delivered_rows += effect_row_delta_count(&effects);
         let post = nmp_resolver::testkit::kind1(author, "post", 300 + n as u64);
         posts.push(post.clone());
-        core.handle(EngineMsg::RelayFrame(
+        let effects = core.handle(EngineMsg::RelayFrame(
             RelayHandle {
                 slot: 0,
                 generation: 1,
@@ -943,14 +941,15 @@ fn i_re_served_events_after_a_replacement_cost_bandwidth_but_never_rows() {
             public_session(&r0),
             event_frame("s", post),
         ));
+        delivered_rows += effect_row_delta_count(&effects);
     }
 
-    let rows_before: usize = sink.0.lock().unwrap().iter().map(|b| b.len()).sum();
+    let rows_before = delivered_rows;
 
     // The relay re-serves everything the widened filter now matches — the
     // full stored set, every previously delivered post included.
     for post in &posts {
-        core.handle(EngineMsg::RelayFrame(
+        let effects = core.handle(EngineMsg::RelayFrame(
             RelayHandle {
                 slot: 0,
                 generation: 1,
@@ -958,9 +957,10 @@ fn i_re_served_events_after_a_replacement_cost_bandwidth_but_never_rows() {
             public_session(&r0),
             event_frame("s", post.clone()),
         ));
+        delivered_rows += effect_row_delta_count(&effects);
     }
 
-    let rows_after: usize = sink.0.lock().unwrap().iter().map(|b| b.len()).sum();
+    let rows_after = delivered_rows;
 
     println!("\n=== I. cost of a re-serve after filter replacement ===");
     println!("distinct posts:              {}", posts.len());

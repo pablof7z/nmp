@@ -164,9 +164,9 @@ pub struct LocalKeySigner { keys: nostr::Keys }   // impls both; sufficient for 
 
 ```rust
 pub enum EngineMsg {
-    Subscribe(LiveQuery, RowSink), Unsubscribe(HandleId),   // read noun
+    Subscribe(LiveQuery), Unsubscribe(HandleId),            // read noun
     SetActivePubkey(Option<Pubkey>),                        // identity = pure input (P3)
-    Publish(WriteIntent, ReceiptSink),                      // write noun
+    Publish(WriteIntent),                                   // write noun
     RelayConnected(RelayHandle, RelayUrl), RelayDisconnected(u32),
     RelayFrame(RelayHandle, RelayFrame),                   // EVENT/EOSE/OK/CLOSED/NEG-* parsed here
     SignerCompleted(ReceiptId, Result<SignedEvent, SignerError>),
@@ -195,7 +195,7 @@ pub enum WriteStatus {                   // the receipt STREAM (never bool/void 
     Accepted, AwaitingCapability, Signed(EventId), Routed(BTreeSet<RelayUrl>),
     Sent(RelayUrl), Acked(RelayUrl), Rejected(RelayUrl, String), GaveUp(RelayUrl),
 }
-pub struct Receipt { pub id: ReceiptId /* status arrives on the ReceiptSink */ }
+pub struct Receipt { pub id: ReceiptId /* statuses use the runtime-owned FIFO */ }
 
 // ---- negentropy prober (module) (HARVEST nmp-nip77) ----
 pub enum ProbeState { Unknown, Probing, Supported, Unsupported }   // = RelayNegentropyState

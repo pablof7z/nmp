@@ -259,14 +259,6 @@ mod tests {
     use nmp_store::{MemoryStore, PersistenceFault, RedbStore};
     use nostr::{Keys, Kind};
 
-    struct Sink;
-
-    impl ReceiptSink for Sink {
-        fn on_status(&self, _status: WriteStatus) -> bool {
-            true
-        }
-    }
-
     fn publish_waiting<S: EventStore>(
         core: &mut EngineCore<S>,
         author: &Keys,
@@ -274,24 +266,21 @@ mod tests {
         created_at: u64,
     ) -> (ReceiptId, SignedEvent) {
         core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
-        let accepted = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Unsigned(UnsignedEvent::new(
-                    author.public_key(),
-                    Timestamp::from(created_at),
-                    Kind::TextNote,
-                    Vec::new(),
-                    format!("worker projection {created_at}"),
-                )),
-                durability: Durability::Durable,
-                routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                    relays: NarrowOnly::new([relay.clone()]),
-                }),
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(Sink),
-        ));
+        let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Unsigned(UnsignedEvent::new(
+                author.public_key(),
+                Timestamp::from(created_at),
+                Kind::TextNote,
+                Vec::new(),
+                format!("worker projection {created_at}"),
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                relays: NarrowOnly::new([relay.clone()]),
+            }),
+            identity_override: None,
+            correlation: None,
+        }));
         let (id, generation, unsigned) = accepted
             .iter()
             .find_map(|effect| match effect {

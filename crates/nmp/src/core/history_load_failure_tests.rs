@@ -246,15 +246,6 @@ fn production_runtime_projection_failure_is_the_observation_refusal() {
     engine.join();
 }
 
-#[derive(Clone, Default)]
-struct CapturingHistorySink(Arc<Mutex<Vec<HistoryBatch>>>);
-
-impl HistorySink for CapturingHistorySink {
-    fn on_history(&self, batch: HistoryBatch) {
-        self.0.lock().unwrap().push(batch);
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct HistorySnapshot {
     target_rows: usize,
@@ -355,11 +346,7 @@ fn open_history(
     control: ReadFailureControl,
     query: HistoryQuery,
     active_pubkey: Option<PublicKey>,
-) -> (
-    EngineCore<FailingReadStore>,
-    HistorySessionId,
-    CapturingHistorySink,
-) {
+) -> (EngineCore<FailingReadStore>, HistorySessionId) {
     let mut core = EngineCore::new(
         FailingReadStore::new(store, control),
         Box::new(FixtureDirectory::new()),
@@ -368,8 +355,7 @@ fn open_history(
     if let Some(active_pubkey) = active_pubkey {
         core.handle(EngineMsg::SetActivePubkey(Some(active_pubkey)));
     }
-    let sink = CapturingHistorySink::default();
-    let effects = core.handle(EngineMsg::SubscribeHistory(query, Box::new(sink.clone())));
+    let effects = core.handle(EngineMsg::SubscribeHistory(query));
     let id = effects
         .iter()
         .find_map(|effect| match effect {
@@ -377,14 +363,12 @@ fn open_history(
             _ => None,
         })
         .expect("fixture must open a history frame");
-    sink.0.lock().unwrap().clear();
-    (core, id, sink)
+    (core, id)
 }
 
 fn assert_failed_load(
     core: &EngineCore<FailingReadStore>,
     id: HistorySessionId,
-    sink: &CapturingHistorySink,
     before: &HistorySnapshot,
     effects: &[Effect],
     first_error: &str,
@@ -408,17 +392,12 @@ fn assert_failed_load(
     assert!(!effects
         .iter()
         .any(|effect| matches!(effect, Effect::EmitHistory(session, _) if *session == id)));
-    assert!(
-        sink.0.lock().unwrap().is_empty(),
-        "last frame must not change"
-    );
     assert_eq!(&snapshot(core, id), before, "rollback must be exact");
 }
 
 fn derived_fixture() -> (
     EngineCore<FailingReadStore>,
     HistorySessionId,
-    CapturingHistorySink,
     ReadFailureControl,
 ) {
     let me = Keys::generate();
@@ -432,18 +411,18 @@ fn derived_fixture() -> (
     let rows = (100..106).map(|created_at| event(&followed, 1, created_at));
     let store = seeded_store(std::iter::once(contact_list).chain(rows), &relay);
     let control = ReadFailureControl::default();
-    let (core, id, sink) = open_history(
+    let (core, id) = open_history(
         store,
         control.clone(),
         derived_history_query(),
         Some(me.public_key()),
     );
-    (core, id, sink, control)
+    (core, id, control)
 }
 
 #[test]
 fn tie_second_read_failure_dispatches_diagnostics_and_exact_rollback() {
-    let (mut core, id, sink, control) = derived_fixture();
+    let (mut core, id, control) = derived_fixture();
     let before = snapshot(&core, id);
     control.fail_query("tie-second read failed");
 
@@ -452,7 +431,6 @@ fn tie_second_read_failure_dispatches_diagnostics_and_exact_rollback() {
     assert_failed_load(
         &core,
         id,
-        &sink,
         &before,
         &effects,
         "durable-store persistence failure: tie-second read failed",
@@ -463,7 +441,6 @@ fn tie_second_read_failure_dispatches_diagnostics_and_exact_rollback() {
     assert_failed_load(
         &core,
         id,
-        &sink,
         &before,
         &repeated,
         "durable-store persistence failure: tie-second read failed",
@@ -472,7 +449,7 @@ fn tie_second_read_failure_dispatches_diagnostics_and_exact_rollback() {
 
 #[test]
 fn older_window_read_failure_dispatches_diagnostics_and_exact_rollback() {
-    let (mut core, id, sink, control) = derived_fixture();
+    let (mut core, id, control) = derived_fixture();
     let boundary_secs = boundary_second(&core, id);
     core.histories
         .get_mut(&id)
@@ -487,7 +464,6 @@ fn older_window_read_failure_dispatches_diagnostics_and_exact_rollback() {
     assert_failed_load(
         &core,
         id,
-        &sink,
         &before,
         &effects,
         "durable-store persistence failure: older-window read failed",
@@ -503,7 +479,7 @@ fn projection_advance_read_failure_dispatches_diagnostics_and_exact_rollback() {
         &relay,
     );
     let control = ReadFailureControl::default();
-    let (mut core, id, sink) = open_history(store, control.clone(), literal_history_query(), None);
+    let (mut core, id) = open_history(store, control.clone(), literal_history_query(), None);
     let before = snapshot(&core, id);
     control.fail_newest_before("projection advance read failed");
 
@@ -512,7 +488,6 @@ fn projection_advance_read_failure_dispatches_diagnostics_and_exact_rollback() {
     assert_failed_load(
         &core,
         id,
-        &sink,
         &before,
         &effects,
         "durable-store persistence failure: projection advance read failed",
@@ -546,8 +521,7 @@ fn under_return_keeps_limit_and_disconnect_evidence_without_false_end() {
         Box::new(directory),
         1,
     );
-    let sink = CapturingHistorySink::default();
-    let opened = core.handle(EngineMsg::SubscribeHistory(query, Box::new(sink.clone())));
+    let opened = core.handle(EngineMsg::SubscribeHistory(query));
     let id = opened
         .iter()
         .find_map(|effect| match effect {
@@ -572,8 +546,6 @@ fn under_return_keeps_limit_and_disconnect_evidence_without_false_end() {
             .any(|effect| matches!(effect, Effect::EmitHistory(session, _) if *session == id)),
         "disconnect evidence refresh must issue a current frame"
     );
-    sink.0.lock().unwrap().clear();
-
     let staged = core.handle(EngineMsg::RequestRows(id, 4));
     assert!(staged.iter().any(|effect| {
         matches!(effect, Effect::HistoryLoadResult(session, Ok(())) if *session == id)

@@ -47,13 +47,10 @@ mod write;
 #[cfg(test)]
 mod write_tests;
 
-use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::rc::Rc;
-use std::sync::Arc;
-
 #[cfg(test)]
 use std::cell::Cell;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use nostr::{
     filter::MatchEventOptions, Event as SignedEvent, EventBuilder, EventId, PublicKey,
@@ -88,7 +85,7 @@ use nmp_transport::{
 };
 
 use crate::negentropy::{NegStep, ProbedRelay, Prober, Reconciler};
-use crate::outbox::{CancelWriteError, CancelWriteOutcome, ReceiptSink, WriteStatus};
+use crate::outbox::{CancelWriteError, CancelWriteOutcome, WriteStatus};
 use crate::relay_information_service::RelayInformationCapabilityEvidence;
 
 /// The liveness deadline (plan §4/harvest `nmp-nip77`) past which an open
@@ -293,7 +290,7 @@ enum ReceiptAttemptReplayPhase {
 }
 
 impl ReceiptReplayCursor {
-    fn new(receipt_id: ReceiptId) -> Self {
+    pub(crate) fn new(receipt_id: ReceiptId) -> Self {
         Self {
             state: Box::new(ReceiptReplayCursorState {
                 receipt_id,
@@ -335,8 +332,7 @@ impl std::error::Error for PublishError {}
 /// Truthful result of trying to attach a receipt observer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReattachOutcome {
-    /// The retained receipt and all replay evidence were readable; the sink
-    /// was primed and, for live work, registered for subsequent facts.
+    /// The retained receipt and all replay evidence were readable.
     Attached,
     /// This store has no retained receipt with the requested id.
     NotFound,
@@ -351,16 +347,42 @@ impl ReattachOutcome {
     }
 }
 
-/// Sink an app-facing `Handle` registers for row deltas on a subscription.
-pub trait RowSink: Send {
-    fn on_rows(&self, rows: Vec<RowDelta>);
+/// One pure, finite durable-receipt replay result. Core calculates facts and
+/// its identity-stable continuation; runtime alone decides whether and where
+/// to deliver them or register a live mailbox.
+#[derive(Debug)]
+pub struct ReceiptReplayPage {
+    pub outcome: ReattachOutcome,
+    pub facts: Vec<WriteStatus>,
+    /// `Some` means another finite replay call is required before joining
+    /// live delivery. `None` means this page reached current durable truth.
+    pub next_cursor: Option<ReceiptReplayCursor>,
+    /// Final cursor after every fact in this page. Runtime retains this only
+    /// when the whole page entered the consumer mailbox.
+    pub(crate) end_cursor: Option<ReceiptReplayCursor>,
+    /// #961: each entry advances only the matching fact over the page's input
+    /// cursor. Runtime uses this to checkpoint one accepted live effect
+    /// without accidentally acknowledging another effect returned by the
+    /// same reducer mutation.
+    pub(crate) isolated_fact_cursors: Vec<ReceiptReplayCursor>,
 }
 
-/// Reducer-side observer for one coordinated history session. Runtime
-/// delivery still travels through [`Effect::EmitHistory`]; this sink keeps
-/// the pure headless reducer directly falsifiable like [`RowSink`].
-pub trait HistorySink: Send {
-    fn on_history(&self, batch: HistoryBatch);
+impl ReceiptReplayPage {
+    /// Whether replay reached a live receipt that can continue producing facts.
+    pub fn is_attached(&self) -> bool {
+        self.outcome.is_attached()
+    }
+
+    fn unavailable(outcome: ReattachOutcome) -> Self {
+        debug_assert!(outcome != ReattachOutcome::Attached);
+        Self {
+            outcome,
+            facts: Vec::new(),
+            next_cursor: None,
+            end_cursor: None,
+            isolated_fact_cursors: Vec::new(),
+        }
+    }
 }
 
 /// The canonical row value (#105): the event plus its sorted, deduplicated
@@ -377,7 +399,7 @@ pub struct Row {
 
 /// A row-set delta (plan §7 non-goal: no ordering/windowing in M3 — raw
 /// deltas + coverage only). This is the standard reactive-query contract:
-/// `Effect::EmitRows`/`RowSink::on_rows` NEVER re-sends the query's full
+/// `Effect::EmitRows` NEVER re-sends the query's full
 /// current row set -- only the rows ADDED and REMOVED since that handle's
 /// LAST emit (`refresh_handle`'s job). The FIRST emit for a fresh subscribe
 /// is "every currently-matching row, as `Added`" (there is nothing to diff
@@ -570,9 +592,9 @@ pub enum AuthEffect {
 
 /// The read/write/frame vocabulary the reducer consumes (plan §3.4).
 pub enum EngineMsg {
-    Subscribe(LiveQuery, Box<dyn RowSink>),
+    Subscribe(LiveQuery),
     Unsubscribe(HandleId),
-    SubscribeHistory(HistoryQuery, Box<dyn HistorySink>),
+    SubscribeHistory(HistoryQuery),
     /// Declaratively raise this window's row target to at least `usize`,
     /// clamped to the declared `max_rows` (#485). Monotonic and idempotent:
     /// a value at or below the current target is a no-op (or, at the bound, a
@@ -586,7 +608,7 @@ pub enum EngineMsg {
     RollbackHistoryLoad(HistorySessionId),
     UnsubscribeHistory(HistorySessionId),
     SetActivePubkey(Option<PublicKey>),
-    Publish(WriteIntent, Box<dyn ReceiptSink>),
+    Publish(WriteIntent),
     RelayConnected(TransportRelayHandle, RelaySessionKey),
     /// Transport completed this exact protected generation's initial socket
     /// observation. Any observed frame was ordered before this edge on the
@@ -723,6 +745,12 @@ pub enum Effect {
     /// buffered/replayed).
     EmitDiagnostics(DiagnosticsSnapshot),
     EmitReceipt(ReceiptId, WriteStatus),
+    /// A correlation-idempotent publish resolved to an existing receipt.
+    /// These retained facts are not new live transitions: runtime must prime
+    /// only that publish caller's fresh mailbox, then join it to live delivery
+    /// at the page's final cursor. Existing observers must never receive this
+    /// replay.
+    ReplayReceipt(ReceiptId, ReceiptReplayPage),
     /// The publish could not even allocate a non-durable correlation id,
     /// so no `EmitReceipt` can truthfully accompany this failure.
     PublishFailed(PublishError),
@@ -779,8 +807,8 @@ pub(crate) struct RelayWorkerRequirements {
 
 /// Per-handle bookkeeping `EngineCore` must retain across `handle()` calls:
 /// the `QueryHandle` itself (dropping it would withdraw the subscription —
-/// see `nmp_resolver::QueryHandle`'s `Drop` impl), the app-facing sink, and
-/// the last-emitted row/evidence state (so `EmitRows` fires only when
+/// see `nmp_resolver::QueryHandle`'s `Drop` impl) and the last-emitted
+/// row/evidence state (so `EmitRows` fires only when
 /// something actually changed, not on every unrelated recompile).
 /// `AcquisitionEvidence` derives `PartialEq` precisely so this
 /// change-detection compare stays a plain value comparison, as the former
@@ -792,7 +820,6 @@ pub(crate) struct RelayWorkerRequirements {
 struct HandleState {
     _handle: QueryHandle,
     acquisition: HandleAcquisition,
-    sink: Box<dyn RowSink>,
     last_rows: BTreeMap<EventId, RememberedRow>,
     last_evidence: Option<AcquisitionEvidence>,
     /// False after any failed full refresh. Direct deltas cannot repair a
@@ -850,7 +877,6 @@ struct HistoryState {
     /// second fully materialized as an interior region and its REQ redundant,
     /// so retiring it can never drop an un-projected same-second row.
     acquisitions: BTreeMap<HandleId, Option<u64>>,
-    sink: Box<dyn HistorySink>,
     target_rows: usize,
     acquired_tie_seconds: BTreeSet<u64>,
     /// The bounded canonical payload set. History delivery is latest-wins,
@@ -955,9 +981,6 @@ struct PendingWrite {
     /// False only when a persisted routing snapshot cannot be decoded.
     /// Recovery keeps owning the obligation but fails closed on wire output.
     routing_valid: bool,
-    /// Zero or more observers. Recovery owns the obligation even before an
-    /// app reattaches, and multiple observers may follow the same receipt.
-    sinks: Vec<RegisteredReceiptSink>,
     /// Store-allocated durable intent id. `None` only for Ephemeral's
     /// receipt-only path, which never owns a pending row.
     intent_id: Option<IntentId>,
@@ -999,27 +1022,6 @@ struct PendingWrite {
     /// All mutation results enter through `core::lane_projection`; ordinary
     /// worker-demand calculation never re-reads the store.
     lane_projection: LaneWorkerProjection,
-}
-
-/// Runtime-private identity for one live receipt observer. Pointer identity
-/// avoids a counter, capacity, or wraparound policy for a mechanism the app
-/// never sees.
-#[derive(Clone)]
-pub(crate) struct ReceiptSinkRegistration(Arc<()>);
-
-impl ReceiptSinkRegistration {
-    pub(crate) fn new() -> Self {
-        Self(Arc::new(()))
-    }
-
-    fn is_same(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-struct RegisteredReceiptSink {
-    registration: Option<ReceiptSinkRegistration>,
-    sink: Rc<dyn ReceiptSink>,
 }
 
 /// A live, EngineCore-owned negentropy reconciliation in progress for
@@ -1169,7 +1171,7 @@ pub struct EngineCore<S: EventStore> {
     next_auth_operation: Option<u64>,
     /// Persisted ordinary-write rows of reserved kind:22242 discovered at
     /// boot. They remain durably inspectable but never regain reducer
-    /// ownership, attempt correlations, or a reattachable live sink.
+    /// ownership, attempt correlations, or a reattachable live delivery.
     quarantined_auth_receipts: HashMap<ReceiptId, QuarantinedWrite>,
     clock: Timestamp,
     active_pubkey: Option<PublicKey>,
@@ -1897,15 +1899,15 @@ impl<S: EventStore> EngineCore<S> {
         // on the failed transition or suppressing retry forever.
         self.retry_scheduler_blocked = false;
         let mut effects = match msg {
-            EngineMsg::Subscribe(query, sink) => self.on_subscribe(query, sink),
+            EngineMsg::Subscribe(query) => self.on_subscribe(query),
             EngineMsg::Unsubscribe(id) => self.on_unsubscribe(id),
-            EngineMsg::SubscribeHistory(query, sink) => self.on_subscribe_history(query, sink),
+            EngineMsg::SubscribeHistory(query) => self.on_subscribe_history(query),
             EngineMsg::RequestRows(id, at_least) => self.on_request_rows(id, at_least),
             EngineMsg::CommitHistoryLoad(id) => self.on_commit_history_load(id),
             EngineMsg::RollbackHistoryLoad(id) => self.on_rollback_history_load(id),
             EngineMsg::UnsubscribeHistory(id) => self.on_unsubscribe_history(id),
             EngineMsg::SetActivePubkey(pk) => self.on_set_active_pubkey(pk),
-            EngineMsg::Publish(intent, sink) => self.on_publish(intent, sink),
+            EngineMsg::Publish(intent) => self.on_publish(intent),
             EngineMsg::RelayConnected(handle, session) => self.on_relay_connected(handle, session),
             EngineMsg::AuthProbeReleased(handle, session) => {
                 self.on_auth_probe_released(handle, session)
