@@ -461,6 +461,18 @@ pub struct NmpWorld {
     last_receipt: Option<ReceiptState>,
     diag: Option<DiagFeed>,
     contact_snapshot: HashMap<String, u64>,
+    /// Taken alongside [`Self::contact_snapshot`]: how many REQ/CLOSE frames
+    /// each relay's wire log already held at that moment, so an "untouched"
+    /// failure can name the frames that arrived AFTER the snapshot instead
+    /// of just reporting that a counter moved.
+    wire_snapshot: HashMap<String, (usize, usize)>,
+    /// Also taken alongside it: how many client connections each relay had
+    /// accepted. A REQ that arrives together with a NEW connection is a
+    /// reconnect replay, not a recompile.
+    connection_snapshot: HashMap<String, u64>,
+    /// And how many EVENTs each relay had already admitted, so an
+    /// unexplained contact-count move can name the KINDS that landed.
+    admitted_snapshot: HashMap<String, usize>,
 }
 
 impl std::fmt::Debug for NmpWorld {
@@ -793,6 +805,20 @@ impl NmpWorld {
     /// `When I publish a new follow list with <people>`.
     pub async fn publish_new_follow_list(&mut self, people: &[String]) {
         self.ensure_started().await;
+        // The BEFORE half of "untouched since here" is itself a read of a
+        // moving wire, and it is the half that was racing (#949). Opening a
+        // feed leaves traffic in flight -- notably `apply_replay`'s
+        // documented duplicate REQ at connect ("never more than two sends of
+        // one filter", `docs/internals/subscriptions/
+        // identity-grouping-and-limits.md` §5.4) -- and a contact count
+        // sampled mid-flight is one short. The `Then` then attributes that
+        // still-arriving startup frame to THIS publish and fails, which is
+        // why the flake was load-sensitive: only a slow enough machine let
+        // the duplicate cross the snapshot boundary. Settling here makes the
+        // baseline the steady state it claims to be. Settling in the `Then`
+        // instead cannot help: the counter only grows, so reading it later
+        // can only add touches, never remove them.
+        self.wire_settled().await;
         self.snapshot_relay_contacts();
         let me = self
             .active_person
@@ -1314,6 +1340,104 @@ impl NmpWorld {
             .iter()
             .map(|(name, r)| (name.clone(), r.contact_count()))
             .collect();
+        self.wire_snapshot = self
+            .relays
+            .iter()
+            .map(|(name, r)| {
+                let record = r.wire_record();
+                (name.clone(), (record.reqs.len(), record.closes.len()))
+            })
+            .collect();
+        self.connection_snapshot = self
+            .relays
+            .iter()
+            .map(|(name, r)| (name.clone(), r.connection_count()))
+            .collect();
+        self.admitted_snapshot = self
+            .relays
+            .iter()
+            .map(|(name, r)| (name.clone(), r.admitted_event_kinds().len()))
+            .collect();
+    }
+
+    /// The two numbers [`Self::relay_untouched_since_snapshot`] compares.
+    pub fn contact_counts_since_snapshot(&self, name: &str) -> (u64, u64) {
+        let before = self.contact_snapshot.get(name).copied().unwrap_or(0);
+        let after = self
+            .relays
+            .get(name)
+            .map(ScriptedRelay::contact_count)
+            .unwrap_or(0);
+        (before, after)
+    }
+
+    /// Every REQ/CLOSE `name` received AFTER the last contact snapshot,
+    /// rendered for a failure message: which subscription id, whether it
+    /// replaced a live one, and the filters verbatim.
+    ///
+    /// Plus the two things a bare contact count cannot distinguish: how many
+    /// times a client CONNECTED (a reconnect replays the whole live req list
+    /// -- `apply_replay`), and which EVENT kinds were admitted (the contact
+    /// log counts REQ and EVENT alike). A move with no new frame, no new
+    /// connection and no new EVENT is the third case: the write/query policy
+    /// hook for traffic the tap already saw ran after the snapshot did.
+    pub fn touch_report_since_snapshot(&self, name: &str) -> String {
+        let (req_base, close_base) = self.wire_snapshot.get(name).copied().unwrap_or((0, 0));
+        let conn_before = self.connection_snapshot.get(name).copied().unwrap_or(0);
+        let conn_after = self
+            .relays
+            .get(name)
+            .map(ScriptedRelay::connection_count)
+            .unwrap_or(0);
+        let record = self.wire_record(name);
+        // Walk the WHOLE record so a frame after the snapshot can be told
+        // apart from the one it repeats: byte-identical filters under the
+        // same subscription id is the known redundant-REQ gap, a different
+        // filter is a genuine re-scoping of that subscription.
+        let mut latest = BTreeMap::new();
+        let mut new_reqs: Vec<String> = Vec::new();
+        for (i, r) in record.reqs.iter().enumerate() {
+            let previous = latest.insert(r.sub_id.as_str(), &r.filters);
+            if i < req_base {
+                continue;
+            }
+            let filters: Vec<String> = r.filters.iter().map(ToString::to_string).collect();
+            new_reqs.push(format!(
+                "REQ {id:?} (replaces_live={replaces}, byte_identical_repeat={same}) {filters}",
+                id = r.sub_id,
+                replaces = r.replaces,
+                same = previous == Some(&r.filters),
+                filters = filters.join(" ")
+            ));
+        }
+        let new_closes: Vec<String> = record
+            .closes
+            .iter()
+            .skip(close_base)
+            .map(|id| format!("CLOSE {id:?}"))
+            .collect();
+        let frames = if new_reqs.is_empty() && new_closes.is_empty() {
+            "no new REQ/CLOSE".to_string()
+        } else {
+            new_reqs
+                .into_iter()
+                .chain(new_closes)
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+        let admitted_base = self.admitted_snapshot.get(name).copied().unwrap_or(0);
+        let new_events: Vec<u16> = self
+            .relays
+            .get(name)
+            .map(ScriptedRelay::admitted_event_kinds)
+            .unwrap_or_default()
+            .into_iter()
+            .skip(admitted_base)
+            .collect();
+        format!(
+            "connections {conn_before} -> {conn_after}; frames: {frames}; \
+             EVENT kinds admitted since: {new_events:?}"
+        )
     }
 
     /// True iff `name`'s contact-count is EXACTLY what it was at the last

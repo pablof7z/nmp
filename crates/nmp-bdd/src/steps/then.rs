@@ -171,9 +171,13 @@ async fn subscriptions_untouched(w: &mut NmpWorld, list: String) {
             "{person} has no declared write relay to check for untouched-ness"
         );
         for relay in relays {
+            let (before, after) = w.contact_counts_since_snapshot(&relay);
             assert!(
                 w.relay_untouched_since_snapshot(&relay),
-                "expected {person}'s relay {relay:?} to receive no new REQ/EVENT"
+                "expected {person}'s relay {relay:?} to receive no new REQ/EVENT, \
+                 but its contact count moved {before} -> {after}; since the \
+                 snapshot: {report}",
+                report = w.touch_report_since_snapshot(&relay)
             );
         }
     }
