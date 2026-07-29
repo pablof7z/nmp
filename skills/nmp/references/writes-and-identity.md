@@ -4,7 +4,7 @@
 
 A `WriteIntent` combines payload, durability, and routing.
 
-- Direct Rust payload: unsigned template, compare-and-swap unsigned replaceable edit, or already signed event. Swift/Kotlin ergonomic payloads expose only unsigned and signed; native replaceable edits are reached through governed protocol actions such as following, not a raw payload constructor.
+- Direct Rust payload: an `EventBuilder`, a compare-and-swap replaceable edit built from one, or an already signed event. The builder demands only a kind; `created_at`, the author, the id and the signature are filled in at acceptance when you did not say them, and stating a `created_at` keeps it verbatim. It has no field for an author at all -- the write's identity decides that -- so "publish as me" is a kind and a content. Swift/Kotlin ergonomic payloads expose the builder and signed; native replaceable edits are reached through governed protocol actions such as following, not a raw payload constructor.
 - Durability: durable, ephemeral, or at-most-once.
 - Consumer-constructible routing is author outbox or recipient inboxes. Fail-closed private routes and pinned hosts are withheld from the default facade and reached only through trusted protocol composition where implemented.
 
@@ -28,7 +28,7 @@ There is no public cancel-write or app-controlled retry method. Do not invent re
 
 ## Identity
 
-Adding a local account and activating it are separate operations. Changing the active account re-roots reactive identity bindings and unsigned writes. Read-only browsing may activate a public key for which no signer is installed; publishing then fails through receipt evidence.
+Adding a local account and activating it are separate operations. Changing the active account re-roots reactive identity bindings and every builder write not yet accepted -- a builder carries no author, so the account active AT ACCEPTANCE is the one it publishes as, and acceptance pins it so a later switch cannot retarget an accepted write. Read-only browsing may activate a public key for which no signer is installed; publishing then fails through receipt evidence.
 
 Direct Rust can register an arbitrary `SigningCapability`. Swift/Kotlin expose local-key account import and NIP-46 connection helpers, not arbitrary Rust trait implementations.
 
