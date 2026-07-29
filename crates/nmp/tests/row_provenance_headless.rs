@@ -9,9 +9,8 @@
 //! state), never a second bespoke mechanism.
 
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
 
-use nmp::mechanism::core::{Effect, EngineCore, EngineMsg, RowDelta, RowSink};
+use nmp::mechanism::core::{Effect, EngineCore, EngineMsg, RowDelta};
 use nmp_grammar::{Binding, Filter, RelaySessionKey};
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
@@ -19,39 +18,11 @@ use nmp_store::{EventStore, MemoryStore, RedbStore};
 use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::{Keys, RelayMessage, RelayUrl, SubscriptionId, Timestamp};
 
-#[derive(Clone, Default)]
-struct CapturingSink(Arc<Mutex<Vec<Vec<RowDelta>>>>);
-
-impl RowSink for CapturingSink {
-    fn on_rows(&self, rows: Vec<RowDelta>) {
-        self.0.lock().unwrap().push(rows);
-    }
-}
-
-impl CapturingSink {
-    /// Every `RowDelta::SourcesGrew` this sink has ever been handed for
-    /// `id`, in delivery order -- empty means it was never emitted.
-    fn sources_grew_for(&self, id: nostr::EventId) -> Vec<BTreeSet<RelayUrl>> {
-        self.0
-            .lock()
-            .unwrap()
-            .iter()
-            .flatten()
-            .filter_map(|delta| match delta {
-                RowDelta::SourcesGrew { id: got, sources } if *got == id => Some(sources.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn added_count_for(&self, id: nostr::EventId) -> usize {
-        self.0
-            .lock()
-            .unwrap()
-            .iter()
-            .flatten()
-            .filter(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == id))
-            .count()
+fn append_row_deltas(effects: &[Effect], delivered: &mut Vec<RowDelta>) {
+    for effect in effects {
+        if let Effect::EmitRows(_, deltas, _) = effect {
+            delivered.extend(deltas.iter().cloned());
+        }
     }
 }
 
@@ -106,16 +77,17 @@ fn same_event_id_from_two_relays_unions_into_one_row_with_both_sources() {
     connect(&mut core, 0, &relay0);
     connect(&mut core, 1, &relay1);
 
-    let sink = CapturingSink::default();
-    core.handle(EngineMsg::Subscribe(
-        literal_kind_query(1, &author.public_key().to_hex()),
-        Box::new(sink.clone()),
-    ));
+    core.handle(EngineMsg::Subscribe(literal_kind_query(
+        1,
+        &author.public_key().to_hex(),
+    )));
+    let mut delivered = Vec::new();
 
     let event = nmp_resolver::testkit::kind1(&author, "provenance falsifier", 100);
 
     // Arrives from relay0 first: a brand-new row, sources == {relay0}.
     let effects = deliver(&mut core, 0, &relay0, &event);
+    append_row_deltas(&effects, &mut delivered);
     let added = effects
         .iter()
         .find_map(|effect| match effect {
@@ -128,12 +100,17 @@ fn same_event_id_from_two_relays_unions_into_one_row_with_both_sources() {
         .expect("relay0's delivery must be a fresh Added row");
     assert_eq!(added, BTreeSet::from([relay0.clone()]));
     assert_eq!(
-        sink.added_count_for(event.id),
+        delivered
+            .iter()
+            .filter(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event.id))
+            .count(),
         1,
         "exactly one Added for this id so far"
     );
     assert!(
-        sink.sources_grew_for(event.id).is_empty(),
+        !delivered
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::SourcesGrew { id, .. } if *id == event.id)),
         "no SourcesGrew before a second relay has ever delivered it"
     );
 
@@ -141,19 +118,30 @@ fn same_event_id_from_two_relays_unions_into_one_row_with_both_sources() {
     // observation) -- the store-layer merge no-ops this; no delta at all,
     // and certainly no second Added or a spurious SourcesGrew.
     let effects = deliver(&mut core, 0, &relay0, &event);
+    append_row_deltas(&effects, &mut delivered);
     assert!(
         !effects
             .iter()
             .any(|e| matches!(e, Effect::EmitRows(_, rows, _) if !rows.is_empty())),
         "an identical redelivery from an already-known relay must emit nothing"
     );
-    assert_eq!(sink.added_count_for(event.id), 1, "still exactly one Added");
-    assert!(sink.sources_grew_for(event.id).is_empty());
+    assert_eq!(
+        delivered
+            .iter()
+            .filter(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event.id))
+            .count(),
+        1,
+        "still exactly one Added"
+    );
+    assert!(!delivered
+        .iter()
+        .any(|delta| matches!(delta, RowDelta::SourcesGrew { id, .. } if *id == event.id)));
 
     // Now relay1 delivers the SAME event id: the row's provenance genuinely
     // grows. This must be `SourcesGrew`, never a second `Added` (that would
     // falsely claim the row "newly matches" a second time).
     let effects = deliver(&mut core, 1, &relay1, &event);
+    append_row_deltas(&effects, &mut delivered);
     let grown = effects
         .iter()
         .find_map(|effect| match effect {
@@ -170,11 +158,20 @@ fn same_event_id_from_two_relays_unions_into_one_row_with_both_sources() {
         "SourcesGrew must carry the FULL current source set, not just the new relay"
     );
     assert_eq!(
-        sink.added_count_for(event.id),
+        delivered
+            .iter()
+            .filter(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event.id))
+            .count(),
         1,
         "still exactly one Added ever -- growth is never a second Added"
     );
-    assert_eq!(sink.sources_grew_for(event.id).len(), 1);
+    assert_eq!(
+        delivered
+            .iter()
+            .filter(|delta| matches!(delta, RowDelta::SourcesGrew { id, .. } if *id == event.id))
+            .count(),
+        1
+    );
 }
 
 /// The load-bearing falsifier (post-#77): `refresh_all_handles` now fires on
@@ -198,29 +195,23 @@ fn unrelated_handle_lifecycle_never_spuriously_emits_sources_grew() {
     connect(&mut core, 0, &relay0);
     connect(&mut core, 1, &relay1);
 
-    let sink = CapturingSink::default();
-    core.handle(EngineMsg::Subscribe(
-        literal_kind_query(1, &author.public_key().to_hex()),
-        Box::new(sink.clone()),
-    ));
+    core.handle(EngineMsg::Subscribe(literal_kind_query(
+        1,
+        &author.public_key().to_hex(),
+    )));
+    let mut delivered = Vec::new();
 
     let event = nmp_resolver::testkit::kind1(&author, "lifecycle falsifier", 200);
-    deliver(&mut core, 0, &relay0, &event);
-    assert_eq!(sink.added_count_for(event.id), 1);
-    assert!(sink.sources_grew_for(event.id).is_empty());
+    append_row_deltas(&deliver(&mut core, 0, &relay0, &event), &mut delivered);
 
     // An UNRELATED second query (different kind, matches nobody this store
     // holds) opens and closes -- this forces `refresh_all_handles`, which
     // recomputes and refreshes EVERY surviving handle, including the one
     // above, even though nothing about relay0/relay1/this event changed.
-    let other_sink = CapturingSink::default();
-    let subscribe_effects = core.handle(EngineMsg::Subscribe(
-        literal_kind_query(
-            9999,
-            "0000000000000000000000000000000000000000000000000000000000000000",
-        ),
-        Box::new(other_sink),
-    ));
+    let subscribe_effects = core.handle(EngineMsg::Subscribe(literal_kind_query(
+        9999,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    )));
     let other_handle = subscribe_effects
         .iter()
         .find_map(|effect| match effect {
@@ -228,20 +219,37 @@ fn unrelated_handle_lifecycle_never_spuriously_emits_sources_grew() {
             _ => None,
         })
         .expect("the unrelated subscribe must itself emit at least one EmitRows (its own, empty, initial batch)");
-    core.handle(EngineMsg::Unsubscribe(other_handle));
+    let unsubscribe_effects = core.handle(EngineMsg::Unsubscribe(other_handle));
+    append_row_deltas(&subscribe_effects, &mut delivered);
+    append_row_deltas(&unsubscribe_effects, &mut delivered);
 
     assert!(
-        sink.sources_grew_for(event.id).is_empty(),
+        !delivered
+            .iter()
+            .any(|delta| matches!(delta, RowDelta::SourcesGrew { id, .. } if *id == event.id)),
         "an unrelated handle's own subscribe/unsubscribe lifecycle must never spuriously grow \
          this row's provenance -- the suppression must be keyed on this handle's own \
          remembered source set, not on whether the store-layer merge happened to no-op"
     );
-    assert_eq!(sink.added_count_for(event.id), 1, "still exactly one Added");
+    assert_eq!(
+        delivered
+            .iter()
+            .filter(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event.id))
+            .count(),
+        1,
+        "still exactly one Added"
+    );
 
     // Only a REAL second-relay observation may grow it, and it must still
     // do so correctly after all that unrelated lifecycle churn.
-    deliver(&mut core, 1, &relay1, &event);
-    let grown = sink.sources_grew_for(event.id);
+    append_row_deltas(&deliver(&mut core, 1, &relay1, &event), &mut delivered);
+    let grown: Vec<_> = delivered
+        .iter()
+        .filter_map(|delta| match delta {
+            RowDelta::SourcesGrew { id, sources } if *id == event.id => Some(sources.clone()),
+            _ => None,
+        })
+        .collect();
     assert_eq!(
         grown,
         vec![BTreeSet::from([relay0.clone(), relay1.clone()])],
@@ -287,11 +295,10 @@ fn projected_sources_survive_a_real_redb_reopen() {
     let mut core = EngineCore::new(store, Box::new(dir), 10);
     assert!(core.recover_on_boot().is_empty());
 
-    let sink = CapturingSink::default();
-    let effects = core.handle(EngineMsg::Subscribe(
-        literal_kind_query(1, &author.public_key().to_hex()),
-        Box::new(sink),
-    ));
+    let effects = core.handle(EngineMsg::Subscribe(literal_kind_query(
+        1,
+        &author.public_key().to_hex(),
+    )));
     let sources = effects
         .iter()
         .find_map(|effect| match effect {

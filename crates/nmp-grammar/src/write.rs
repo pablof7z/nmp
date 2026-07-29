@@ -5,9 +5,9 @@
 //! `WriteIntent` must not gain an engine dependency to do so, and this crate
 //! is already the read noun's home (`Demand`/`SourceAuthority`). The former
 //! NIP-29-only single-host route was deleted by #838 once its unsupported
-//! composer disappeared. `WriteStatus`/`Receipt`/`ReceiptSink` stay in
-//! `nmp-engine` (they reference `core::ReceiptId` and are runtime evidence,
-//! not intent vocab -- an app never constructs one).
+//! composer disappeared. `WriteStatus` and `Receipt` stay in `nmp` because
+//! they are runtime evidence rather than intent vocabulary; live delivery
+//! capabilities are runtime-private and never enter the reducer.
 //!
 //! Hard break, no compatibility alias: every caller in the workspace moved
 //! to `nmp_grammar::{Durability, WriteIntent, ...}` in the same change.

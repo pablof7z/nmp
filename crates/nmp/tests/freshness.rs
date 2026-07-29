@@ -1,8 +1,7 @@
 use std::{borrow::Cow, collections::BTreeSet};
 
 use nmp::mechanism::core::{
-    AcquisitionEvidence, Effect, EngineCore, EngineMsg, HistoryBatch, HistoryQuery, HistorySink,
-    RowDelta, RowSink,
+    AcquisitionEvidence, Effect, EngineCore, EngineMsg, HistoryQuery, RowDelta,
 };
 use nmp_grammar::{
     AccessContext, Binding, CacheMode, ConcreteFilter, ContextualAtom, Demand, Filter, Freshness,
@@ -13,16 +12,6 @@ use nmp_router::{FixtureDirectory, WireOp};
 use nmp_store::{CoverageInterval, EventStore, MemoryStore, RelayObserved};
 use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::{Event, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent};
-
-struct Sink;
-impl RowSink for Sink {
-    fn on_rows(&self, _: Vec<RowDelta>) {}
-}
-
-struct WindowSink;
-impl HistorySink for WindowSink {
-    fn on_history(&self, _: HistoryBatch) {}
-}
 
 fn event(keys: &Keys, at: u64) -> Event {
     UnsignedEvent::new(
@@ -90,7 +79,7 @@ fn core_with_relays(
 }
 
 fn subscribe(core: &mut EngineCore<MemoryStore>, query: LiveQuery) -> Vec<Effect> {
-    core.handle(EngineMsg::Subscribe(query, Box::new(Sink)))
+    core.handle(EngineMsg::Subscribe(query))
 }
 
 fn reqs(effects: &[Effect]) -> usize {
@@ -541,10 +530,11 @@ fn satisfied_max_age_window_growth_stays_store_only() {
     );
     let mut core = core(store, &keys, &relay);
     tick(&mut core, 100_000);
-    let opened = core.handle(EngineMsg::SubscribeHistory(
-        HistoryQuery::new(query(&keys, Freshness::MaxAge { seconds: 3_600 }), 1, 2),
-        Box::new(WindowSink),
-    ));
+    let opened = core.handle(EngineMsg::SubscribeHistory(HistoryQuery::new(
+        query(&keys, Freshness::MaxAge { seconds: 3_600 }),
+        1,
+        2,
+    )));
     assert_eq!(reqs(&opened), 0);
     let id = opened
         .iter()

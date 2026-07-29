@@ -27,7 +27,7 @@ impl<S: EventStore> EngineCore<S> {
 
     // ---- subscribe / unsubscribe / re-root ------------------------------
 
-    pub(super) fn on_subscribe(&mut self, query: LiveQuery, sink: Box<dyn RowSink>) -> Vec<Effect> {
+    pub(super) fn on_subscribe(&mut self, query: LiveQuery) -> Vec<Effect> {
         let mut effects = Vec::new();
         // Graph construction can read the store (a `Derived` binding resolves
         // its inner query). On a persistence failure (issue #122) degrade to
@@ -47,7 +47,6 @@ impl<S: EventStore> EngineCore<S> {
             HandleState {
                 _handle: qh,
                 acquisition,
-                sink,
                 last_rows: BTreeMap::new(),
                 last_evidence: None,
                 projection_complete: false,
@@ -1424,13 +1423,6 @@ impl<S: EventStore> EngineCore<S> {
             if delta.is_empty() {
                 return true;
             }
-            #[cfg(feature = "bench-instrumentation")]
-            let sink_started = std::time::Instant::now();
-            #[cfg(feature = "bench-instrumentation")]
-            let sink_delta_count = delta.len();
-            state.sink.on_rows(delta.clone());
-            #[cfg(feature = "bench-instrumentation")]
-            crate::ingest_attribution::row_sink_delivery(sink_started.elapsed(), sink_delta_count);
             effects.push(Effect::EmitRows(id, delta, evidence));
             return true;
         }
@@ -1532,19 +1524,12 @@ impl<S: EventStore> EngineCore<S> {
             .get_mut(&id)
             .expect("handle remained live during synchronous projection");
         state.last_rows = current;
-        #[cfg(feature = "bench-instrumentation")]
-        let sink_started = std::time::Instant::now();
-        #[cfg(feature = "bench-instrumentation")]
-        let sink_delta_count = delta.len();
-        state.sink.on_rows(delta.clone());
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::row_sink_delivery(sink_started.elapsed(), sink_delta_count);
         effects.push(Effect::EmitRows(id, delta, evidence));
         true
     }
 
-    /// Recompute `id`'s current row set + acquisition evidence; emit (and
-    /// synchronously deliver to its sink) `Effect::EmitRows` only if either
+    /// Recompute `id`'s current row set + acquisition evidence; emit
+    /// `Effect::EmitRows` only if either
     /// changed since the last refresh -- and, when something DID change, the
     /// row payload is ALWAYS just the incremental added/sources-grew/removed
     /// delta against `state.last_rows`, never the full current set (see
@@ -1613,13 +1598,6 @@ impl<S: EventStore> EngineCore<S> {
         }
         state.last_rows = current_rows;
         state.last_evidence = Some(evidence.clone());
-        #[cfg(feature = "bench-instrumentation")]
-        let sink_started = std::time::Instant::now();
-        #[cfg(feature = "bench-instrumentation")]
-        let sink_delta_count = delta.len();
-        state.sink.on_rows(delta.clone());
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::row_sink_delivery(sink_started.elapsed(), sink_delta_count);
         effects.push(Effect::EmitRows(id, delta, evidence));
     }
 
@@ -1640,7 +1618,6 @@ impl<S: EventStore> EngineCore<S> {
             return;
         }
         state.last_evidence = Some(evidence.clone());
-        state.sink.on_rows(Vec::new());
         effects.push(Effect::EmitRows(id, Vec::new(), evidence));
     }
 

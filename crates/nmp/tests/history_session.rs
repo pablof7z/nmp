@@ -1,21 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp::mechanism::core::{
-    Effect, EngineCore, EngineMsg, HistoryBatch, HistoryQuery, HistorySessionId, HistorySink,
-    RowDelta, WindowLoad,
+    Effect, EngineCore, EngineMsg, HistoryBatch, HistoryQuery, HistorySessionId, RowDelta,
+    WindowLoad,
 };
 use nmp_grammar::{Binding, Filter};
 use nmp_resolver::LiveQuery;
 use nmp_router::{FixtureDirectory, SubId, WireOp};
 use nmp_store::{EventStore, MemoryStore, RelayObserved};
 use nostr::{Event, Keys, Kind, RelayUrl, Timestamp, UnsignedEvent};
-
-#[derive(Default)]
-struct NullHistorySink;
-
-impl HistorySink for NullHistorySink {
-    fn on_history(&self, _batch: HistoryBatch) {}
-}
 
 fn signed(keys: &Keys, created_at: u64, content: &str) -> Event {
     UnsignedEvent::new(
@@ -132,10 +125,7 @@ fn assert_canonical_snapshot(batch: &HistoryBatch, max_rows: usize) {
 #[test]
 fn coordinated_session_walks_three_same_second_pages_without_gap_or_duplicate() {
     let (mut core, keys, relay, events) = seeded(13);
-    let opened = core.handle(EngineMsg::SubscribeHistory(
-        query(&keys, 5, 13),
-        Box::new(NullHistorySink),
-    ));
+    let opened = core.handle(EngineMsg::SubscribeHistory(query(&keys, 5, 13)));
     let (id, first) = returned(&opened);
     assert_eq!(first.deltas.len(), 5);
     assert_eq!(first.rows.len(), 5);
@@ -222,10 +212,7 @@ fn coordinated_session_walks_three_same_second_pages_without_gap_or_duplicate() 
 fn at_bound_is_a_delivered_frame_fact_not_an_error() {
     let (mut core, keys, _relay, _events) = seeded(4);
     // initial == max == 4: the window opens already at its ceiling.
-    let opened = core.handle(EngineMsg::SubscribeHistory(
-        query(&keys, 4, 4),
-        Box::new(NullHistorySink),
-    ));
+    let opened = core.handle(EngineMsg::SubscribeHistory(query(&keys, 4, 4)));
     let id = open(&opened);
 
     let at_bound = core.handle(EngineMsg::RequestRows(id, 10));
@@ -259,10 +246,7 @@ fn at_bound_is_a_delivered_frame_fact_not_an_error() {
 #[test]
 fn request_rows_during_in_flight_advance_converges_after_commit() {
     let (mut core, keys, _relay, _events) = seeded(13);
-    let opened = core.handle(EngineMsg::SubscribeHistory(
-        query(&keys, 5, 13),
-        Box::new(NullHistorySink),
-    ));
+    let opened = core.handle(EngineMsg::SubscribeHistory(query(&keys, 5, 13)));
     let id = open(&opened);
 
     // Stage an advance toward 10, but do NOT commit yet.
@@ -305,10 +289,7 @@ fn request_rows_during_in_flight_advance_converges_after_commit() {
 #[test]
 fn unsubscribe_releases_every_session_subscription() {
     let (mut core, keys, relay, _events) = seeded(13);
-    let opened = core.handle(EngineMsg::SubscribeHistory(
-        query(&keys, 5, 13),
-        Box::new(NullHistorySink),
-    ));
+    let opened = core.handle(EngineMsg::SubscribeHistory(query(&keys, 5, 13)));
     let id = open(&opened);
     core.handle(EngineMsg::RequestRows(id, 10));
     core.handle(EngineMsg::CommitHistoryLoad(id));
@@ -397,10 +378,7 @@ fn deep_scroll_holds_bounded_live_subscriptions_per_relay() {
     let directory = FixtureDirectory::new().with_write(keys.public_key().to_hex(), [relay.clone()]);
     let mut core = EngineCore::new(store, Box::new(directory), 10);
 
-    let opened = core.handle(EngineMsg::SubscribeHistory(
-        query(&keys, 5, 1000),
-        Box::new(NullHistorySink),
-    ));
+    let opened = core.handle(EngineMsg::SubscribeHistory(query(&keys, 5, 1000)));
     let id = open(&opened);
 
     let mut live_subs = BTreeSet::new();
@@ -459,10 +437,7 @@ fn deep_scroll_holds_bounded_live_subscriptions_per_relay() {
 fn dense_boundary_tie_subscription_survives_same_second_advances() {
     // 13 rows all at second 100: every advance keeps second 100 the boundary.
     let (mut core, keys, relay, _events) = seeded(13);
-    let opened = core.handle(EngineMsg::SubscribeHistory(
-        query(&keys, 5, 13),
-        Box::new(NullHistorySink),
-    ));
+    let opened = core.handle(EngineMsg::SubscribeHistory(query(&keys, 5, 13)));
     let id = open(&opened);
 
     // First advance opens the tie-second REQ for second 100 (since==until==100,

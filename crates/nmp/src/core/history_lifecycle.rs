@@ -6,11 +6,7 @@
 use super::*;
 
 impl<S: EventStore> EngineCore<S> {
-    pub(super) fn on_subscribe_history(
-        &mut self,
-        query: HistoryQuery,
-        sink: Box<dyn HistorySink>,
-    ) -> Vec<Effect> {
+    pub(super) fn on_subscribe_history(&mut self, query: HistoryQuery) -> Vec<Effect> {
         let mut effects = Vec::new();
         let (handle, _) = match self.resolver.subscribe(query.initial_demand()) {
             Ok(value) => value,
@@ -34,7 +30,6 @@ impl<S: EventStore> EngineCore<S> {
                 handle_ids: BTreeSet::from([handle_id]),
                 live_handle_id: handle_id,
                 acquisitions: BTreeMap::new(),
-                sink,
                 acquired_tie_seconds: BTreeSet::new(),
                 last_rows: BTreeMap::new(),
                 order: BTreeSet::new(),
@@ -285,7 +280,7 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         // Build the prospective plan without touching live router,
-        // attribution, diagnostics, other projections, or any sink.
+        // attribution, diagnostics, other projections, or delivery.
         let shadow_plan = self.history_shadow_plan(id);
         let requesting = self.history_batch(id, Vec::new(), WindowLoad::Requesting);
         let added = match self.advance_history_projection(id, boundary, old_len, &shadow_plan) {
@@ -457,7 +452,6 @@ impl<S: EventStore> EngineCore<S> {
                 .expect("commit checked the staged history load");
             let made_progress = !pending.added_row_ids.is_empty();
             for batch in pending.staged_batches {
-                state.sink.on_history(batch.clone());
                 effects.push(Effect::EmitHistory(id, batch));
             }
             (
@@ -645,9 +639,6 @@ impl<S: EventStore> EngineCore<S> {
         let len = state.last_rows.len();
         if changed {
             let batch = self.history_batch(id, deltas, load);
-            if let Some(state) = self.histories.get(&id) {
-                state.sink.on_history(batch.clone());
-            }
             effects.push(Effect::EmitHistory(id, batch));
         }
         Some(len)
@@ -671,9 +662,6 @@ impl<S: EventStore> EngineCore<S> {
         }
         state.last_evidence = Some(evidence);
         let batch = self.history_batch(id, Vec::new(), WindowLoad::Idle);
-        if let Some(state) = self.histories.get(&id) {
-            state.sink.on_history(batch.clone());
-        }
         effects.push(Effect::EmitHistory(id, batch));
     }
 
@@ -1213,13 +1201,6 @@ impl<S: EventStore> EngineCore<S> {
             delta_count,
             batch.rows.len(),
         );
-        if let Some(state) = self.histories.get(&id) {
-            #[cfg(feature = "bench-instrumentation")]
-            let sink_started = std::time::Instant::now();
-            state.sink.on_history(batch.clone());
-            #[cfg(feature = "bench-instrumentation")]
-            crate::ingest_attribution::history_sink_delivery(sink_started.elapsed());
-        }
         effects.push(Effect::EmitHistory(id, batch));
         true
     }

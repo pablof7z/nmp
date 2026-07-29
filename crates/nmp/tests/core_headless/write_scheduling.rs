@@ -19,17 +19,13 @@ fn enqueue_is_not_converged() {
     let session = signer_session(&relay0, a.public_key());
 
     // -- Durable: first status is Accepted, never a bool/terminal. --
-    let sink = CapturingReceiptSink::default();
-    let effects = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&a, 1, "durable write")),
-            durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(sink.clone()),
-    ));
+    let effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(&a, 1, "durable write")),
+        durability: Durability::Durable,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     assert!(
         matches!(
             effects.first(),
@@ -37,28 +33,19 @@ fn enqueue_is_not_converged() {
         ),
         "the first emitted status for a durable publish must be Accepted, never a terminal"
     );
-    assert_eq!(sink.0.lock().unwrap().first(), Some(&WriteStatus::Accepted));
 
     // -- Ephemeral: receipt-only, no durable delivery obligation. --
-    let eph_sink = CapturingReceiptSink::default();
-    let effects = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&a, 2, "ephemeral write")),
-            durability: Durability::Ephemeral,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(eph_sink.clone()),
-    ));
+    let effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(&a, 2, "ephemeral write")),
+        durability: Durability::Ephemeral,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     assert!(matches!(
         effects.first(),
         Some(Effect::EmitReceipt(_, WriteStatus::Accepted))
     ));
-    assert_eq!(
-        eph_sink.0.lock().unwrap().as_slice(),
-        [WriteStatus::Accepted]
-    );
     let (eph_id, eph_generation, eph_unsigned) = find_sign_request(&effects);
     let eph_signed = eph_unsigned.sign_with_keys(&a).unwrap();
     let effects = core.handle(EngineMsg::SignerCompleted(
@@ -77,17 +64,13 @@ fn enqueue_is_not_converged() {
         .any(|e| matches!(e, Effect::EmitReceipt(_, WriteStatus::Signed(_)))));
 
     // -- AtMostOnce: sends exactly once; a dropped relay never retries. --
-    let amo_sink = CapturingReceiptSink::default();
-    let effects = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&a, 3, "at most once write")),
-            durability: Durability::AtMostOnce,
-            routing: WriteRouting::AuthorOutbox,
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(amo_sink.clone()),
-    ));
+    let effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(unsigned(&a, 3, "at most once write")),
+        durability: Durability::AtMostOnce,
+        routing: WriteRouting::AuthorOutbox,
+        identity_override: None,
+        correlation: None,
+    }));
     let (amo_id, amo_generation, amo_unsigned) = find_sign_request(&effects);
     let amo_signed = amo_unsigned.sign_with_keys(&a).unwrap();
     let effects = core.handle(EngineMsg::SignerCompleted(
@@ -135,9 +118,7 @@ fn ordinary_author_relay_without_auth_challenge_publishes_and_acks() {
         generation: 1,
     };
     let mut core = new_core(FixtureDirectory::new());
-    let sink = CapturingReceiptSink::default();
-    let (receipt, event, offline) =
-        publish_private(&mut core, &author, [relay.clone()], sink.clone());
+    let (receipt, event, offline) = publish_private(&mut core, &author, [relay.clone()]);
     assert!(!offline
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
@@ -166,7 +147,6 @@ fn ordinary_author_relay_without_auth_challenge_publishes_and_acks() {
         Effect::EmitReceipt(id, WriteStatus::Acked(candidate))
             if *id == receipt && candidate == &relay
     )));
-    assert!(sink.0.lock().unwrap().contains(&WriteStatus::Acked(relay)));
 }
 
 #[test]
@@ -179,10 +159,11 @@ fn challenged_author_relay_suppresses_event_until_exact_auth_ready() {
         generation: 1,
     };
     let mut core = new_core(FixtureDirectory::new());
-    let owned = core.handle(EngineMsg::Subscribe(
-        protected_pinned_query(&relay, author.public_key(), 1),
-        Box::new(CapturingSink::default()),
-    ));
+    let owned = core.handle(EngineMsg::Subscribe(protected_pinned_query(
+        &relay,
+        author.public_key(),
+        1,
+    )));
     let subscription = subscribed_handle(&owned);
     connect_signer(&mut core, 0, &relay, author.public_key());
     let challenge = core.handle(EngineMsg::RelayFrame(
@@ -208,16 +189,11 @@ fn challenged_author_relay_suppresses_event_until_exact_auth_ready() {
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
 
-    let sink = CapturingReceiptSink::default();
-    let (_, event, scheduled) = publish_private(&mut core, &author, [relay.clone()], sink.clone());
+    let (_, event, scheduled) = publish_private(&mut core, &author, [relay.clone()]);
     assert!(!scheduled
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
-    assert!(sink
-        .0
-        .lock()
-        .unwrap()
-        .contains(&WriteStatus::AwaitingAuth { relay }));
+    assert!(receipt_statuses(&scheduled).contains(&WriteStatus::AwaitingAuth { relay }));
     let ready = finish_authentication(&mut core, handle, session.clone(), &author, policy_token);
     assert_eq!(
         ready
@@ -248,10 +224,11 @@ fn auth_required_session_reconnect_cannot_publish_before_fresh_generation_auth()
         generation: 2,
     };
     let mut core = new_core(FixtureDirectory::new());
-    let subscribed = core.handle(EngineMsg::Subscribe(
-        protected_pinned_query(&relay, author.public_key(), 1),
-        Box::new(CapturingSink::default()),
-    ));
+    let subscribed = core.handle(EngineMsg::Subscribe(protected_pinned_query(
+        &relay,
+        author.public_key(),
+        1,
+    )));
     let subscription = subscribed_handle(&subscribed);
     core.handle(EngineMsg::RelayConnected(generation_one, session.clone()));
     authenticate_signer_generation(&mut core, generation_one, &relay, &author);
@@ -266,14 +243,15 @@ fn auth_required_session_reconnect_cannot_publish_before_fresh_generation_auth()
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
 
-    let sink = CapturingReceiptSink::default();
-    let (_, event, parked) = publish_private(&mut core, &author, [relay.clone()], sink.clone());
+    let (_, event, parked) = publish_private(&mut core, &author, [relay.clone()]);
     assert!(!parked
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
-    assert!(sink.0.lock().unwrap().contains(&WriteStatus::AwaitingAuth {
-        relay: relay.clone(),
-    }));
+    assert!(
+        receipt_statuses(&parked).contains(&WriteStatus::AwaitingAuth {
+            relay: relay.clone(),
+        })
+    );
 
     let ready = authenticate_signer_generation(&mut core, generation_two, &relay, &author);
     assert_eq!(
@@ -305,10 +283,11 @@ fn stale_auth_probe_release_after_reconnect_cannot_wake_current_generation() {
         generation: 2,
     };
     let mut core = new_core(FixtureDirectory::new());
-    let subscribed = core.handle(EngineMsg::Subscribe(
-        protected_pinned_query(&relay, author.public_key(), 1),
-        Box::new(CapturingSink::default()),
-    ));
+    let subscribed = core.handle(EngineMsg::Subscribe(protected_pinned_query(
+        &relay,
+        author.public_key(),
+        1,
+    )));
     let subscription = subscribed_handle(&subscribed);
     core.handle(EngineMsg::RelayConnected(generation_one, session.clone()));
     core.handle(EngineMsg::RelayDisconnected(
@@ -317,8 +296,7 @@ fn stale_auth_probe_release_after_reconnect_cannot_wake_current_generation() {
         nmp_transport::DisconnectReason::Error,
     ));
     core.handle(EngineMsg::RelayConnected(generation_two, session.clone()));
-    let sink = CapturingReceiptSink::default();
-    let (_, event, parked) = publish_private(&mut core, &author, [relay.clone()], sink);
+    let (_, event, parked) = publish_private(&mut core, &author, [relay.clone()]);
     assert!(!parked
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
@@ -355,17 +333,13 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
             Box::new(FixtureDirectory::new()),
             10,
         );
-        let sink = CapturingReceiptSink::default();
-        let (receipt, event, offline) =
-            publish_private(&mut core, &author, [relay.clone()], sink.clone());
+        let (receipt, event, offline) = publish_private(&mut core, &author, [relay.clone()]);
         let session = signer_session(&relay, event.pubkey);
-        assert!(sink
-            .0
-            .lock()
-            .unwrap()
-            .contains(&WriteStatus::AwaitingRelay {
+        assert!(
+            receipt_statuses(&offline).contains(&WriteStatus::AwaitingRelay {
                 relay: relay.clone(),
-            }));
+            })
+        );
         assert!(offline
             .iter()
             .any(|effect| matches!(effect, Effect::EnsureWriteRelay(r) if r == &session)));
@@ -385,17 +359,11 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
             10,
         );
         core.recover_on_boot();
-        let recovered = CapturingReceiptSink::default();
-        assert!(core
-            .reattach_receipt(receipt, Box::new(recovered.clone()))
-            .is_attached());
-        assert!(recovered
-            .0
-            .lock()
-            .unwrap()
-            .contains(&WriteStatus::AwaitingRelay {
-                relay: relay.clone(),
-            }));
+        let recovered = core.reattach_receipt(receipt);
+        assert!(recovered.is_attached());
+        assert!(recovered.facts.contains(&WriteStatus::AwaitingRelay {
+            relay: relay.clone(),
+        }));
         connect_signer(&mut core, 0, &relay, event.pubkey);
         let first = release_author_probe(
             &mut core,
@@ -427,11 +395,9 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
             Effect::EmitReceipt(_, WriteStatus::AwaitingAuth { relay: waiting })
                 if waiting == &relay
         )));
-        let auth_replay = CapturingReceiptSink::default();
-        assert!(core
-            .reattach_receipt(receipt, Box::new(auth_replay.clone()))
-            .is_attached());
-        let auth_replay = auth_replay.0.lock().unwrap();
+        let auth_replay = core.reattach_receipt(receipt);
+        assert!(auth_replay.is_attached());
+        let auth_replay = auth_replay.facts;
         assert!(auth_replay.contains(&WriteStatus::Sent {
             relay: relay.clone(),
             attempt: 1,
@@ -563,8 +529,7 @@ fn parked_auth_write_is_redriven_across_reconnect_not_wedged() {
     let session = signer_session(&relay, author.public_key());
 
     let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 10);
-    let sink = CapturingReceiptSink::default();
-    let (_receipt, event, _) = publish_private(&mut core, &author, [relay.clone()], sink.clone());
+    let (_receipt, event, _) = publish_private(&mut core, &author, [relay.clone()]);
 
     // First generation: connect, release the bounded AUTH-discovery probe,
     // hand off, and let the relay demand auth via an `OK false
@@ -670,12 +635,7 @@ fn boot_recovers_parked_auth_write_as_redrivable_not_wedged() {
             Box::new(FixtureDirectory::new()),
             10,
         );
-        let (_receipt, event, _) = publish_private(
-            &mut core,
-            &author,
-            [relay.clone()],
-            CapturingReceiptSink::default(),
-        );
+        let (_receipt, event, _) = publish_private(&mut core, &author, [relay.clone()]);
         connect_signer(&mut core, 0, &relay, author.public_key());
         let connected = release_author_probe(
             &mut core,
@@ -766,7 +726,6 @@ fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
         authenticate_signer(&mut core, 0, &auth, &author);
         authenticate_signer(&mut core, 1, &retry, &author);
         authenticate_signer(&mut core, 2, &ambiguous, &author);
-        let sink = CapturingReceiptSink::default();
         let (receipt, event, scheduled) = publish_private(
             &mut core,
             &author,
@@ -776,7 +735,6 @@ fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
                 retry.clone(),
                 ambiguous.clone(),
             ],
-            sink,
         );
 
         let _ = core.handle(EngineMsg::Tick(Timestamp::from(11)));
@@ -859,11 +817,9 @@ fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
         10,
     );
     recovered.recover_on_boot();
-    let replay = CapturingReceiptSink::default();
-    assert!(recovered
-        .reattach_receipt(receipt, Box::new(replay.clone()))
-        .is_attached());
-    let replay = replay.0.lock().unwrap();
+    let replay = recovered.reattach_receipt(receipt);
+    assert!(replay.is_attached());
+    let replay = replay.facts;
 
     assert!(replay.contains(&WriteStatus::AwaitingRelay {
         relay: offline.clone(),
@@ -903,9 +859,7 @@ fn transient_deadline_is_consumed_once_without_polling_or_duplicate_queue() {
     let mut core = new_core(FixtureDirectory::new());
     connect_signer(&mut core, 0, &relay, author.public_key());
     authenticate_signer(&mut core, 0, &relay, &author);
-    let sink = CapturingReceiptSink::default();
-    let (receipt, event, first) =
-        publish_private(&mut core, &author, [relay.clone()], sink.clone());
+    let (receipt, event, first) = publish_private(&mut core, &author, [relay.clone()]);
     mark_written(&mut core, &first, &relay);
     let classified = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -922,28 +876,20 @@ fn transient_deadline_is_consumed_once_without_polling_or_duplicate_queue() {
         .next_deadline()
         .expect("transient retry must arm one deadline");
     assert!((3..8).contains(&due.as_secs()));
-    assert!(sink
-        .0
-        .lock()
-        .unwrap()
-        .contains(&WriteStatus::RetryEligible {
+    assert!(
+        receipt_statuses(&classified).contains(&WriteStatus::RetryEligible {
             relay: relay.clone(),
             attempt: 1,
             eligible_at: due,
-        }));
-    let replay = CapturingReceiptSink::default();
-    assert!(core
-        .reattach_receipt(receipt, Box::new(replay.clone()))
-        .is_attached());
-    assert!(replay
-        .0
-        .lock()
-        .unwrap()
-        .contains(&WriteStatus::RetryEligible {
-            relay: relay.clone(),
-            attempt: 1,
-            eligible_at: due,
-        }));
+        })
+    );
+    let replay = core.reattach_receipt(receipt);
+    assert!(replay.is_attached());
+    assert!(replay.facts.contains(&WriteStatus::RetryEligible {
+        relay: relay.clone(),
+        attempt: 1,
+        eligible_at: due,
+    }));
 
     assert!(!core
         .handle(EngineMsg::Tick(Timestamp::from(due.as_secs() - 1)))
@@ -971,11 +917,9 @@ fn transient_deadline_is_consumed_once_without_polling_or_duplicate_queue() {
     );
 }
 
-/// #680 / #46: a PAUSED receipt consumer spanning many real, persisted
-/// durable retry ordinals retains one finite live prefix. The retry scheduler
-/// keeps advancing independently; the 33rd queued fact marks the stream
-/// lagged, the reducer prunes that observer immediately, and the receiver gets
-/// an explicit replay boundary after draining the retained prefix.
+/// #680 / #845: durable retry history is exposed as finite pages of reducer
+/// facts. Delivery pressure belongs to the runtime, so the headless reducer
+/// test asserts only the replay vocabulary and cursor boundary.
 #[test]
 fn paused_receipt_across_repeated_durable_retries_is_bounded_and_loud() {
     let author = Keys::generate();
@@ -984,14 +928,7 @@ fn paused_receipt_across_repeated_durable_retries_is_bounded_and_loud() {
     connect_signer(&mut core, 0, &relay, author.public_key());
     authenticate_signer(&mut core, 0, &relay, &author);
 
-    let (sender, receiver) = nmp::mechanism::runtime::fifo_channel();
-    let calls = Arc::new(AtomicUsize::new(0));
-    let sink = BoundedReceiptSink {
-        sender,
-        calls: calls.clone(),
-    };
-    let (receipt, event, mut scheduled) =
-        publish_private(&mut core, &author, [relay.clone()], sink);
+    let (receipt, event, mut scheduled) = publish_private(&mut core, &author, [relay.clone()]);
 
     for attempt in 1..=40 {
         mark_written(&mut core, &scheduled, &relay);
@@ -1027,49 +964,23 @@ fn paused_receipt_across_repeated_durable_retries_is_bounded_and_loud() {
             .any(|effect| matches!(effect, Effect::PublishEvent(..))));
     }
 
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        nmp::mechanism::runtime::FACT_CHANNEL_CAPACITY + 1,
-        "the first rejected fact prunes the lagged sink; later retries never revisit it"
-    );
-    for _ in 0..nmp::mechanism::runtime::FACT_CHANNEL_CAPACITY {
-        receiver.recv().expect("the retained bounded prefix drains");
-    }
-    assert_eq!(
-        receiver.recv(),
-        Err(nmp::mechanism::runtime::FifoRecvError::Lagged),
-        "the missing suffix is explicit and requires durable replay"
-    );
-
     let mut cursor = None;
     let mut replayed = Vec::new();
     loop {
-        let (page_sender, page_receiver) = nmp::mechanism::runtime::fifo_channel();
-        let (outcome, next_cursor) = core.reattach_receipt_page(
+        let page = core.reattach_receipt_page(
             receipt,
-            Box::new(BoundedReceiptSink {
-                sender: page_sender,
-                calls: Arc::new(AtomicUsize::new(0)),
-            }),
             cursor,
             nmp::mechanism::runtime::FACT_CHANNEL_CAPACITY,
         );
-        assert!(outcome.is_attached());
-        let mut page = Vec::new();
-        while let Ok(status) = page_receiver.try_recv() {
-            page.push(status);
-        }
+        assert!(page.outcome.is_attached());
         assert!(
-            page.len() <= nmp::mechanism::runtime::FACT_CHANNEL_CAPACITY,
+            page.facts.len() <= nmp::mechanism::runtime::FACT_CHANNEL_CAPACITY,
             "each durable replay page obeys the same finite delivery bound"
         );
-        replayed.extend(page);
-        match next_cursor {
+        replayed.extend(page.facts);
+        match page.next_cursor {
             Some(next) => cursor = Some(next),
-            None => {
-                page_receiver.close();
-                break;
-            }
+            None => break,
         }
     }
     assert!(
@@ -1079,25 +990,6 @@ fn paused_receipt_across_repeated_durable_retries_is_bounded_and_loud() {
     assert!(replayed
         .iter()
         .any(|status| matches!(status, WriteStatus::RetryEligible { attempt: 40, .. })));
-
-    let (full_sender, _full_receiver) = nmp::mechanism::runtime::fifo_channel();
-    for _ in 0..nmp::mechanism::runtime::FACT_CHANNEL_CAPACITY {
-        assert!(full_sender.send(WriteStatus::Accepted));
-    }
-    let (outcome, refused_cursor) = core.reattach_receipt_page(
-        receipt,
-        Box::new(BoundedReceiptSink {
-            sender: full_sender,
-            calls: Arc::new(AtomicUsize::new(0)),
-        }),
-        None,
-        nmp::mechanism::runtime::FACT_CHANNEL_CAPACITY,
-    );
-    assert!(outcome.is_attached());
-    assert!(
-        refused_cursor.is_some(),
-        "a sink refusal cannot acknowledge or skip the first undelivered durable fact"
-    );
 }
 
 /// #680: a continuation is per durable fact identity, never a count into a
@@ -1115,9 +1007,8 @@ fn live_receipt_mutation_between_pages_is_exactly_once() {
         authenticate_signer(&mut core, slot as u32, relay, &author);
     }
 
-    let live = CapturingReceiptSink::default();
     let (receipt, event, mut scheduled) =
-        publish_private(&mut core, &author, [early.clone(), late.clone()], live);
+        publish_private(&mut core, &author, [early.clone(), late.clone()]);
     let early_correlation = scheduled
         .iter()
         .find_map(|effect| match effect {
@@ -1163,21 +1054,14 @@ fn live_receipt_mutation_between_pages_is_exactly_once() {
 
     let mut cursor = None;
     let mut replayed = Vec::new();
-    let (first_sender, first_receiver) = nmp::mechanism::runtime::fifo_channel();
-    let (outcome, next_cursor) = core.reattach_receipt_page(
+    let first_page = core.reattach_receipt_page(
         receipt,
-        Box::new(BoundedReceiptSink {
-            sender: first_sender,
-            calls: Arc::new(AtomicUsize::new(0)),
-        }),
         cursor,
         nmp::mechanism::runtime::FACT_CHANNEL_CAPACITY,
     );
-    assert!(outcome.is_attached());
-    cursor = next_cursor;
-    while let Ok(status) = first_receiver.try_recv() {
-        replayed.push(status);
-    }
+    assert!(first_page.outcome.is_attached());
+    cursor = first_page.next_cursor;
+    replayed.extend(first_page.facts);
     assert_eq!(
         replayed.len(),
         nmp::mechanism::runtime::FACT_CHANNEL_CAPACITY,
@@ -1193,24 +1077,14 @@ fn live_receipt_mutation_between_pages_is_exactly_once() {
     ));
 
     while let Some(page_cursor) = cursor {
-        let (page_sender, page_receiver) = nmp::mechanism::runtime::fifo_channel();
-        let (outcome, next_cursor) = core.reattach_receipt_page(
+        let page = core.reattach_receipt_page(
             receipt,
-            Box::new(BoundedReceiptSink {
-                sender: page_sender,
-                calls: Arc::new(AtomicUsize::new(0)),
-            }),
             Some(page_cursor),
             nmp::mechanism::runtime::FACT_CHANNEL_CAPACITY,
         );
-        assert!(outcome.is_attached());
-        while let Ok(status) = page_receiver.try_recv() {
-            replayed.push(status);
-        }
-        cursor = next_cursor;
-        if cursor.is_none() {
-            page_receiver.close();
-        }
+        assert!(page.outcome.is_attached());
+        replayed.extend(page.facts);
+        cursor = page.next_cursor;
     }
 
     assert_eq!(
@@ -1279,12 +1153,7 @@ fn scheduler_has_stable_order_and_enforces_global_and_per_relay_caps() {
         connect_signer(&mut core, slot as u32, relay, author.public_key());
         authenticate_signer(&mut core, slot as u32, relay, &author);
     }
-    let (_, event, first_wave) = publish_private(
-        &mut core,
-        &author,
-        relays.clone(),
-        CapturingReceiptSink::default(),
-    );
+    let (_, event, first_wave) = publish_private(&mut core, &author, relays.clone());
     let published = first_wave
         .iter()
         .filter_map(|effect| match effect {

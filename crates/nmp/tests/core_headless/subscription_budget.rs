@@ -90,10 +90,7 @@ fn core_watching(count: u16) -> (EngineCore<MemoryStore>, LiveWire) {
     let mut core = new_core(FixtureDirectory::new());
     let mut wire = LiveWire::default();
     for index in 0..count {
-        let effects = core.handle(EngineMsg::Subscribe(
-            limited_pinned_query(30_000 + index),
-            Box::new(CapturingSink::default()),
-        ));
+        let effects = core.handle(EngineMsg::Subscribe(limited_pinned_query(30_000 + index)));
         wire.apply(&effects);
     }
     let effects = core.handle(EngineMsg::RelayConnected(

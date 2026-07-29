@@ -15,18 +15,13 @@
 
 use std::collections::BTreeSet;
 
-use nmp::mechanism::core::{Effect, EngineCore, EngineMsg, RowDelta, RowSink};
+use nmp::mechanism::core::{Effect, EngineCore, EngineMsg};
 use nmp_grammar::{Binding, Demand, Derived, Filter, IdentityField, RelaySessionKey, Selector};
 use nmp_resolver::LiveQuery;
 use nmp_router::{LiveDirectory, WireOp};
 use nmp_store::MemoryStore;
 use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::{EventBuilder, JsonUtil, Keys, Kind, RelayMessage, RelayUrl, Tag, Tags, Timestamp};
-
-struct NullSink;
-impl RowSink for NullSink {
-    fn on_rows(&self, _rows: Vec<RowDelta>) {}
-}
 
 fn connect(core: &mut EngineCore<MemoryStore>, slot: u32, url: &RelayUrl) -> Vec<Effect> {
     core.handle(EngineMsg::RelayConnected(
@@ -170,10 +165,7 @@ fn resolving_39_authors_one_at_a_time_does_not_churn_the_discovery_sub() {
 
     log.observe(&connect(&mut core, 0, &indexer));
     log.observe(&core.handle(EngineMsg::SetActivePubkey(Some(me.public_key()))));
-    log.observe(&core.handle(EngineMsg::Subscribe(
-        follow_feed_query(),
-        Box::new(NullSink),
-    )));
+    log.observe(&core.handle(EngineMsg::Subscribe(follow_feed_query())));
 
     // `me` follows all 39 synthetic authors in one shot (one kind:3, exactly
     // like a real contact list).
@@ -280,10 +272,7 @@ fn known_empty_write_relays_lets_discovery_close_instead_of_running_forever() {
 
     let _ = connect(&mut core, 0, &indexer);
     let _ = core.handle(EngineMsg::SetActivePubkey(Some(me.public_key())));
-    let _ = core.handle(EngineMsg::Subscribe(
-        follow_feed_query(),
-        Box::new(NullSink),
-    ));
+    let _ = core.handle(EngineMsg::Subscribe(follow_feed_query()));
 
     let follows = vec![a.public_key(), b.public_key()];
     let _ = core.handle(EngineMsg::RelayFrame(
