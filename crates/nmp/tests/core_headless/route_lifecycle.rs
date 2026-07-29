@@ -118,7 +118,7 @@ fn publish_and_sign<S: EventStore>(
         payload: WritePayload::Event(builder),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
-        identity_override: None,
+        identity: Identity::Active,
         correlation: None,
     }));
     let (id, generation, unsigned) = find_sign_request(&accepted);

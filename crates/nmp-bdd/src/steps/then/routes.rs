@@ -147,7 +147,10 @@ async fn parked_awaiting_person(w: &mut NmpWorld, person: String) {
     );
 }
 
-#[then(regex = r#"^the (?:note|write) is not reported as failed$"#)]
+/// "is not" and "is never" are the same claim here — the negative form costs
+/// its full budget either way — and both spellings appear in the catalog, so
+/// one step owns both rather than letting the unmatched one skip silently.
+#[then(regex = r#"^the (?:note|write) is (?:not|never) reported as failed$"#)]
 async fn not_reported_failed(w: &mut NmpWorld) {
     nothing_to_observe!(
         w.receipt_eventually(|seen| !seen.is_empty()),

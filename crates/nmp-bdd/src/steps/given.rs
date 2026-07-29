@@ -220,13 +220,28 @@ async fn my_relay_list_never_fetched(w: &mut NmpWorld) {
     w.assert_relay_list_never_fetched(ME);
 }
 
+/// Every spelling of "we have nothing for them", including the plural form
+/// the three-mention case needs. It takes a LIST rather than one name because
+/// a scenario that names two unresolved people in one clause and silently
+/// matched no step at all would skip — and a skipped `Given` leaves the
+/// scenario reading exactly like one that proved something.
 #[given(
-    regex = r#"^(?:(\S+)'s relay list has never been fetched|no relay list for (\S+) has ever been ingested)$"#
+    regex = r#"^(?:(\S+)'s relay list has never been fetched|no relay list for (.+?) (?:has ever been ingested|exists))$"#
 )]
-async fn person_relay_list_never_fetched(w: &mut NmpWorld, a: String, b: String) {
-    let person = if a.is_empty() { b } else { a };
-    w.person(&person);
-    w.assert_relay_list_never_fetched(&person);
+async fn person_relay_list_never_fetched(w: &mut NmpWorld, single: String, list: String) {
+    let people = if single.is_empty() {
+        parse_people(&list)
+    } else {
+        vec![single]
+    };
+    assert!(
+        !people.is_empty(),
+        "expected at least one person in this step"
+    );
+    for person in people {
+        w.person(&person);
+        w.assert_relay_list_never_fetched(&person);
+    }
 }
 
 #[given(regex = r#"^(\S+)'s relay list names "([^"]+)" as (?:her|his|their) read relay$"#)]
