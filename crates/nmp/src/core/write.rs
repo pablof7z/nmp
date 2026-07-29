@@ -2818,9 +2818,7 @@ impl<S: EventStore> EngineCore<S> {
 
         // 2. app relays: every kind, every author, always, additive, and
         //    never counted toward the coverage minimum.
-        answer
-            .relays
-            .extend(self.directory.app_relays());
+        answer.relays.extend(self.directory.app_relays());
 
         // 3. each p-tagged recipient's INBOX (read relays, never write).
         let recipients = p_tagged_authors(event);
@@ -2836,9 +2834,7 @@ impl<S: EventStore> EngineCore<S> {
         // this closes is a reply to someone whose kind:10002 lists exactly
         // one relay reaching nowhere else when that relay is down.
         if thin_contributor && self.directory.app_relays().is_empty() {
-            answer
-                .relays
-                .extend(self.directory.fallback_relays());
+            answer.relays.extend(self.directory.fallback_relays());
         }
 
         if answer.relays.is_empty() {
