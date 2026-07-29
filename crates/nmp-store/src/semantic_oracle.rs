@@ -481,6 +481,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
     let mut context = OracleContext {
         coverage: vec![
             (atom.clone(), primary.clone()),
+            (atom.clone(), secondary.clone()),
             (max_atom.clone(), primary.clone()),
         ],
         ..OracleContext::default()
@@ -685,11 +686,18 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
     );
     harness
         .store()
-        .record_coverage(
-            &atom,
-            &primary,
-            CoverageInterval::new(Timestamp::from(0), Timestamp::from(300)),
-        )
+        .record_coverage(&[
+            (
+                atom.clone(),
+                primary.clone(),
+                CoverageInterval::new(Timestamp::from(0), Timestamp::from(300)),
+            ),
+            (
+                atom.clone(),
+                secondary.clone(),
+                CoverageInterval::new(Timestamp::from(0), Timestamp::from(300)),
+            ),
+        ])
         .unwrap();
     record(
         &mut harness,
@@ -704,7 +712,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
         .gc(&ClaimSet::new(vec![protect_author(&alice)]))
         .unwrap();
     assert_eq!(report.events_evicted, 1);
-    assert_eq!(report.coverage_rows_shrunk, 1);
+    assert_eq!(report.coverage_rows_shrunk, 2);
     record(
         &mut harness,
         &context,
@@ -720,11 +728,11 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
         .unwrap();
     harness
         .store()
-        .record_coverage(
-            &max_atom,
-            &primary,
+        .record_coverage(&[(
+            max_atom.clone(),
+            primary.clone(),
             CoverageInterval::new(Timestamp::from(u64::MAX), Timestamp::from(u64::MAX)),
-        )
+        )])
         .unwrap();
     record(
         &mut harness,

@@ -1635,22 +1635,22 @@ impl EventStore for MemoryStore {
 
     fn record_coverage(
         &mut self,
-        atom: &ContextualAtom,
-        relay: &RelayUrl,
-        proven: CoverageInterval,
+        claims: &[(ContextualAtom, RelayUrl, CoverageInterval)],
     ) -> Result<(), PersistenceError> {
-        let key = coverage_key(atom);
-        let shape = window_erase(&atom.filter);
-        let entry_key = (key, relay.clone());
-        let existing = self.coverage.get(&entry_key).map(|row| row.interval);
-        let merged = merge_interval(existing, proven);
-        self.coverage.insert(
-            entry_key,
-            CoverageRow {
-                shape,
-                interval: merged,
-            },
-        );
+        for (atom, relay, proven) in claims {
+            let key = coverage_key(atom);
+            let shape = window_erase(&atom.filter);
+            let entry_key = (key, relay.clone());
+            let existing = self.coverage.get(&entry_key).map(|row| row.interval);
+            let merged = merge_interval(existing, *proven);
+            self.coverage.insert(
+                entry_key,
+                CoverageRow {
+                    shape,
+                    interval: merged,
+                },
+            );
+        }
         Ok(())
     }
 

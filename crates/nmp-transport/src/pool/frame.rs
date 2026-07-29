@@ -477,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_observation_ignores_subscription_id_and_retains_exact_fallback() {
+    fn committed_observation_preserves_subscription_id_and_exact_fallback() {
         let relay = RelayUrl::parse("wss://relay.example").unwrap();
         let relay_scope = RelayScope::new(&relay);
         let cache = CommittedObservationCache::new(8);
@@ -488,7 +488,9 @@ mod tests {
             RelayMessage::event(nostr::SubscriptionId::new("first"), event.clone()).as_json();
         let first = classify_message(Message::Text(first_raw.into()), relay_scope, &cache)
             .expect("first EVENT");
-        let (parsed, candidate) = first.into_observed_event().expect("ordinary EVENT");
+        let (subscription_id, parsed, candidate) =
+            first.into_observed_event().expect("ordinary EVENT");
+        assert_eq!(subscription_id.as_str(), "first");
         let candidate = candidate.expect("raw EVENT locator candidate");
         assert_eq!(parsed, event);
         cache.apply_update(
@@ -517,11 +519,12 @@ mod tests {
         let hit = classify_message(Message::Text(second_raw.into()), relay_scope, &cache)
             .expect("cached EVENT");
         assert!(matches!(hit, RelayFrame::CommittedObservation(_)));
-        let (fallback, fallback_candidate) = hit
+        let (fallback_subscription_id, fallback, fallback_candidate) = hit
             .into_ordinary_fallback()
             .expect("valid fallback frame")
             .into_observed_event()
             .expect("exact fallback EVENT");
+        assert_eq!(fallback_subscription_id.as_str(), "second");
         assert_eq!(fallback, event);
         assert_eq!(fallback_candidate, Some(candidate));
     }

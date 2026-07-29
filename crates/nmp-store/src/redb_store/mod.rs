@@ -227,11 +227,9 @@ impl EventStore for RedbStore {
 
     fn record_coverage(
         &mut self,
-        atom: &ContextualAtom,
-        relay: &RelayUrl,
-        proven: CoverageInterval,
+        claims: &[(ContextualAtom, RelayUrl, CoverageInterval)],
     ) -> Result<(), PersistenceError> {
-        event_ops::record_coverage(self, atom, relay, proven)
+        event_ops::record_coverage(self, claims)
     }
 
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {

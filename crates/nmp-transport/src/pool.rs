@@ -360,7 +360,7 @@ impl RelayFrame {
     // fail-closed cache fallback. Boxing it would allocate on every hit.
     #[allow(clippy::result_large_err)]
     pub fn into_event(self) -> Result<Event, Self> {
-        self.into_observed_event().map(|(event, _)| event)
+        self.into_observed_event().map(|(_, event, _)| event)
     }
 
     pub(crate) fn from_observed_event(
@@ -381,13 +381,14 @@ impl RelayFrame {
     #[allow(clippy::result_large_err)]
     pub fn into_observed_event(
         self,
-    ) -> Result<(Event, Option<CommittedObservationCandidate>), Self> {
+    ) -> Result<(SubscriptionId, Event, Option<CommittedObservationCandidate>), Self> {
         match self {
             Self::Event {
+                subscription_id,
                 event,
                 observation_candidate,
-                ..
             } => Ok((
+                subscription_id,
                 Arc::try_unwrap(event).unwrap_or_else(|event| {
                     #[cfg(feature = "bench-instrumentation")]
                     crate::ingest_attribution::event_fallback_clone();

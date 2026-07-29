@@ -40,6 +40,25 @@ pub struct RelayIngestResult {
     pub current_after_commit: Vec<bool>,
 }
 
+/// Which phase of detailed relay ingest failed.
+///
+/// The event batch is already durable before projection recomputation begins,
+/// so callers that own facts-before-claims policy must distinguish failure of
+/// the event transaction from failure of the post-commit read/projection step.
+#[derive(Debug)]
+pub enum RelayIngestError {
+    EventCommit(PersistenceError),
+    PostCommitProjection(PersistenceError),
+}
+
+impl RelayIngestError {
+    fn into_persistence_error(self) -> PersistenceError {
+        match self {
+            Self::EventCommit(error) | Self::PostCommitProjection(error) => error,
+        }
+    }
+}
+
 /// Exact live-query consequences of one already-committed canonical store
 /// mutation. The store door remains the sole authority for what became
 /// current; this value only carries those durable facts across the
@@ -700,13 +719,15 @@ impl<S: EventStore> Engine<S> {
         &mut self,
         events: Vec<(nostr::Event, RelayObserved)>,
     ) -> Result<DemandDelta, PersistenceError> {
-        Ok(self.ingest_observed_detailed(events)?.committed.delta)
+        self.ingest_observed_detailed(events)
+            .map(|result| result.committed.delta)
+            .map_err(RelayIngestError::into_persistence_error)
     }
 
     pub fn ingest_observed_detailed(
         &mut self,
         events: Vec<(nostr::Event, RelayObserved)>,
-    ) -> Result<RelayIngestResult, PersistenceError> {
+    ) -> Result<RelayIngestResult, RelayIngestError> {
         #[cfg(feature = "bench-instrumentation")]
         let total_started = std::time::Instant::now();
         #[cfg(feature = "bench-instrumentation")]
@@ -752,7 +773,10 @@ impl<S: EventStore> Engine<S> {
         let store_started = std::time::Instant::now();
         #[cfg(feature = "bench-instrumentation")]
         let store_cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
-        let outcomes = self.store.insert_batch(events)?;
+        let outcomes = self
+            .store
+            .insert_batch(events)
+            .map_err(RelayIngestError::EventCommit)?;
         #[cfg(feature = "bench-instrumentation")]
         {
             crate::ingest_attribution::store(store_started.elapsed());
@@ -870,7 +894,9 @@ impl<S: EventStore> Engine<S> {
         // by one carrying the enlarged source-relay set.
         let mut inserted_or_provenance_changed = inserted;
         inserted_or_provenance_changed.extend(provenance_grew);
-        let delta = self.react(inserted_or_provenance_changed, removed)?;
+        let delta = self
+            .react(inserted_or_provenance_changed, removed)
+            .map_err(RelayIngestError::PostCommitProjection)?;
         let affected_handles = self.affected_handles(&before_shapes, &changed_events);
         #[cfg(feature = "bench-instrumentation")]
         {

@@ -557,11 +557,11 @@ fn record_coverage_and_gc_report_a_corrupt_coverage_row() {
     {
         let mut store = fixture.open();
         store
-            .record_coverage(
-                &atom,
-                &relay(),
+            .record_coverage(&[(
+                atom.clone(),
+                relay(),
                 CoverageInterval::new(Timestamp::from(10), Timestamp::from(20)),
-            )
+            )])
             .expect("record_coverage");
     }
     let key = first_str_key(&fixture, COVERAGE);
@@ -571,11 +571,11 @@ fn record_coverage_and_gc_report_a_corrupt_coverage_row() {
     {
         let mut store = fixture.open();
         assert_typed_refusal("record_coverage", || {
-            store.record_coverage(
-                &atom,
-                &relay(),
+            store.record_coverage(&[(
+                atom.clone(),
+                relay(),
                 CoverageInterval::new(Timestamp::from(30), Timestamp::from(40)),
-            )
+            )])
         });
     }
     assert_eq!(

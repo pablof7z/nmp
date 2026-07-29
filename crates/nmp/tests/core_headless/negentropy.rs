@@ -1,3 +1,4 @@
+use super::persistence_failures::FailIngestStore;
 use super::*;
 
 // ---- negentropy selection and fallback ---------------------------------
@@ -9,7 +10,7 @@ fn neg_err_frame(sub: &str) -> RelayFrame {
     })
 }
 
-fn connect_and_prove_nip77(core: &mut EngineCore<MemoryStore>, relay: &RelayUrl) {
+fn connect_and_prove_nip77<S: EventStore>(core: &mut EngineCore<S>, relay: &RelayUrl) {
     let effects = connect(core, 0, relay);
     let probe_sub = effects
         .iter()
@@ -26,6 +27,74 @@ fn connect_and_prove_nip77(core: &mut EngineCore<MemoryStore>, relay: &RelayUrl)
         public_session(relay),
         neg_msg_frame(&wire_sub_string(probe_sub), "6100"),
     ));
+}
+
+/// Drive a real server-side negentropy responder until the reducer opens the
+/// id-targeted missing-event REQ. This keeps the failure test below on the
+/// real reconciliation protocol rather than fabricating its internal state.
+fn finish_neg_with_remote_event<S: EventStore>(
+    core: &mut EngineCore<S>,
+    relay: &RelayUrl,
+    neg_sub_id: &SubId,
+    initial_hex: &str,
+    remote: &nostr::Event,
+) -> SubId {
+    let mut storage = ::negentropy::NegentropyStorageVector::new();
+    storage
+        .insert(
+            remote.created_at.as_secs(),
+            ::negentropy::Id::from_byte_array(*remote.id.as_bytes()),
+        )
+        .expect("insert remote negentropy item");
+    storage.seal().expect("seal responder storage");
+    let mut responder =
+        ::negentropy::Negentropy::borrowed(&storage, 0).expect("construct responder");
+    let mut client_hex = initial_hex.to_string();
+
+    loop {
+        let response = responder
+            .reconcile(&hex::decode(&client_hex).expect("decode client negentropy message"))
+            .expect("server-side reconciliation");
+        let effects = core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            public_session(relay),
+            neg_msg_frame(&wire_sub_string(neg_sub_id), &hex::encode(response)),
+        ));
+        if let Some(backfill) = effects.iter().find_map(|effect| match effect {
+            Effect::Wire(delta) => delta.ops.iter().find_map(|(session, ops)| {
+                (session == &public_session(relay))
+                    .then(|| {
+                        ops.iter().find_map(|op| match op {
+                            WireOp::Req(sub_id, filter)
+                                if filter
+                                    .ids
+                                    .as_ref()
+                                    .is_some_and(|ids| ids.contains(&remote.id.to_hex())) =>
+                            {
+                                Some(sub_id.clone())
+                            }
+                            _ => None,
+                        })
+                    })
+                    .flatten()
+            }),
+            _ => None,
+        }) {
+            return backfill;
+        }
+        client_hex = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::NegMsg(url, sub_id, next) if url == relay && sub_id == neg_sub_id => {
+                    Some(next.clone())
+                }
+                _ => None,
+            })
+            .expect("reconciliation either continues or opens missing-id backfill");
+    }
 }
 
 /// Test 3 (ledger #8) first half: an unprobed relay (never even connected,
@@ -417,6 +486,87 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
         !effects.iter().any(|e| matches!(e, Effect::NegOpen(..))),
         "a small/limited exact-result query must stay on REQ even for a Supported relay"
     );
+}
+
+/// #816's missing-id path falsifier. A real NIP-77 exchange proves one event
+/// is absent locally and opens the ordinary id-targeted backfill REQ. If that
+/// EVENT fails its durable commit, the backfill's EOSE must poison the
+/// original NEG completion it was serving rather than minting coverage.
+#[test]
+fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let relay = RelayUrl::parse("wss://neg-failure.example.com").unwrap();
+    let dir = FixtureDirectory::new()
+        .with_write(a.public_key().to_hex(), [relay.clone()])
+        .with_write(b.public_key().to_hex(), [relay.clone()]);
+    let mut core = EngineCore::new(FailIngestStore::armed(), Box::new(dir), 10);
+
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
+    connect_and_prove_nip77(&mut core, &relay);
+
+    let widened = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &b.public_key().to_hex(),
+    )));
+    let candidate = req_for(&widened, &relay).0.clone();
+    let opened = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire_sub_string(&candidate)),
+    ));
+    let (neg_sub_id, initial_hex) = opened
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::NegOpen(_, sub_id, _, initial_hex) => {
+                Some((sub_id.clone(), initial_hex.clone()))
+            }
+            _ => None,
+        })
+        .expect("candidate EOSE opens the real NEG session");
+
+    let missing = nmp_resolver::testkit::kind1(&b, "missing from local store", 100);
+    let backfill =
+        finish_neg_with_remote_event(&mut core, &relay, &neg_sub_id, &initial_hex, &missing);
+    let backfill_wire = wire_sub_string(&backfill);
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(500u64)));
+    let failed = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        event_frame(&backfill_wire, missing),
+    ));
+    assert!(failed
+        .iter()
+        .any(|effect| matches!(effect, Effect::EmitDiagnostics(snapshot)
+            if snapshot.store_degraded.is_some())));
+
+    let completed = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&backfill_wire),
+    ));
+    assert!(
+        !completed
+            .iter()
+            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+        "the backfill EOSE must retire the poisoned NEG owner without coverage: {completed:?}"
+    );
+    let atom_a = ctx_atom(cf(&[1], &[&a.public_key().to_hex()]));
+    let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
+    assert_eq!(core.get_coverage(&atom_a, &relay), None);
+    assert_eq!(core.get_coverage(&atom_b, &relay), None);
 }
 
 /// A relay that answers the capability probe with `NEG-ERR` is classified

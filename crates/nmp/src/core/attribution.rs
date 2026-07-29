@@ -25,22 +25,81 @@ use nostr::Timestamp;
 #[derive(Debug, Clone)]
 struct AttributionSnapshot {
     send_id: AttributionSendId,
+    event_failure_target: AttributionSendId,
     absorbed: BTreeSet<CoverageKey>,
     floor: Option<Timestamp>,
     until: Option<Timestamp>,
-    limited: bool,
+    coverage_authority: CoverageAuthority,
 }
 
 /// Opaque identity of one exact send-time attribution snapshot. Ordinary
 /// EOSE is intentionally ambiguous when a subscription id is overwritten,
 /// so it uses FIFO intersection. A NEG completion is correlated to the
 /// exact NEG session that completed and uses this identity instead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct AttributionSendId(u64);
 
 impl AttributionSendId {
     pub(crate) fn revision(self) -> u64 {
         self.0
+    }
+}
+
+/// Which request loses coverage authority if an EVENT delivered under the
+/// send being recorded fails its event-store transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EventFailureTarget {
+    /// Ordinary REQ, backlog REQ, live REQ, and NEG own their own failure.
+    ThisSend,
+    /// A temporary missing-id REQ is only the ingestion tail of the original
+    /// NEG request, so its EVENT failures poison that retained owner.
+    Correlated(AttributionSendId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoverageAuthority {
+    Eligible,
+    Poisoned(CoveragePoison),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CoveragePoison {
+    LimitedRequest,
+    EventCommitFailed,
+    CoverageCommitFailed,
+    MissingShape,
+}
+
+impl CoverageAuthority {
+    fn poison(&mut self, reason: CoveragePoison) {
+        if matches!(self, Self::Eligible) {
+            *self = Self::Poisoned(reason);
+        }
+    }
+}
+
+/// One removed attribution owner. Completion owns both the exact request
+/// identity and its monotonic coverage authority until the one persistence
+/// door either commits every claim or retires it without a claim.
+#[derive(Debug)]
+pub(crate) struct CompletedAttribution {
+    send_id: AttributionSendId,
+    coverage_authority: CoverageAuthority,
+    claims: Vec<(CoverageKey, CoverageInterval)>,
+}
+
+impl CompletedAttribution {
+    pub(crate) fn send_id(&self) -> AttributionSendId {
+        self.send_id
+    }
+
+    pub(crate) fn eligible_claims(&self) -> Option<&[(CoverageKey, CoverageInterval)]> {
+        matches!(self.coverage_authority, CoverageAuthority::Eligible)
+            .then_some(self.claims.as_slice())
+    }
+
+    pub(crate) fn poison(&mut self, reason: CoveragePoison) {
+        self.coverage_authority.poison(reason);
     }
 }
 
@@ -157,15 +216,24 @@ impl AttributionState {
         sub_id: &SubId,
         filter: &ConcreteFilter,
         absorbed: BTreeSet<CoverageKey>,
+        event_failure_target: EventFailureTarget,
     ) -> AttributionSendId {
         let send_id = AttributionSendId(self.next_send_id);
         self.next_send_id = self.next_send_id.wrapping_add(1);
         let snapshot = AttributionSnapshot {
             send_id,
+            event_failure_target: match event_failure_target {
+                EventFailureTarget::ThisSend => send_id,
+                EventFailureTarget::Correlated(send_id) => send_id,
+            },
             absorbed,
             floor: filter.since.map(Timestamp::from),
             until: filter.until.map(Timestamp::from),
-            limited: filter.limit.is_some(),
+            coverage_authority: if filter.limit.is_some() {
+                CoverageAuthority::Poisoned(CoveragePoison::LimitedRequest)
+            } else {
+                CoverageAuthority::Eligible
+            },
         };
         self.inflight
             .entry(sub_id.clone())
@@ -176,6 +244,42 @@ impl AttributionState {
             sub_id.clone(),
         );
         send_id
+    }
+
+    /// Monotonically poison every request that could have emitted an EVENT
+    /// under this exact physical session and wire subscription FIFO.
+    ///
+    /// An overwritten NIP-01 subscription id cannot identify which outstanding
+    /// revision emitted the EVENT, so the exact honest target is the union of
+    /// the failure targets already present in this FIFO. A later send recorded
+    /// after this call is untouched.
+    pub(crate) fn poison_event_commit_failure(
+        &mut self,
+        session: &RelaySessionKey,
+        wire_sub_id: &str,
+    ) {
+        let Some(sub_id) = self
+            .sub_id_by_wire
+            .get(&(session.clone(), wire_sub_id.to_string()))
+        else {
+            return;
+        };
+        let Some(fifo) = self.inflight.get(sub_id) else {
+            return;
+        };
+        let targets: BTreeSet<_> = fifo
+            .iter()
+            .map(|snapshot| snapshot.event_failure_target)
+            .collect();
+        for snapshots in self.inflight.values_mut() {
+            for snapshot in snapshots {
+                if targets.contains(&snapshot.send_id) {
+                    snapshot
+                        .coverage_authority
+                        .poison(CoveragePoison::EventCommitFailed);
+                }
+            }
+        }
     }
 
     /// Resolve a wire subscription-id string back to the `SubId`
@@ -259,7 +363,7 @@ impl AttributionState {
         eose_time: Timestamp,
     ) -> Vec<(CoverageKey, CoverageInterval)> {
         self.attribute_eose_detailed(session, wire_sub_id, eose_time)
-            .map(|(_, coverage)| coverage)
+            .and_then(|completed| completed.eligible_claims().map(|claims| claims.to_vec()))
             .unwrap_or_default()
     }
 
@@ -268,7 +372,7 @@ impl AttributionState {
         session: &RelaySessionKey,
         wire_sub_id: &str,
         eose_time: Timestamp,
-    ) -> Option<(AttributionSendId, Vec<(CoverageKey, CoverageInterval)>)> {
+    ) -> Option<CompletedAttribution> {
         let sub_id = self
             .sub_id_by_wire
             .get(&(session.clone(), wire_sub_id.to_string()))
@@ -278,35 +382,43 @@ impl AttributionState {
             return None;
         }
 
-        let poisoned = fifo.iter().any(|s| s.limited);
+        let coverage_authority = fifo
+            .iter()
+            .find_map(|snapshot| match snapshot.coverage_authority {
+                CoverageAuthority::Eligible => None,
+                poisoned @ CoverageAuthority::Poisoned(_) => Some(poisoned),
+            })
+            .unwrap_or(CoverageAuthority::Eligible);
         let mut result = Vec::new();
-        if !poisoned {
-            let mut attributed: Option<BTreeSet<CoverageKey>> = None;
-            let mut max_floor = Timestamp::from(0u64);
-            let mut min_until = eose_time;
-            for snap in fifo.iter() {
-                attributed = Some(match attributed {
-                    None => snap.absorbed.clone(),
-                    Some(acc) => acc.intersection(&snap.absorbed).cloned().collect(),
-                });
-                if let Some(f) = snap.floor {
-                    max_floor = max_floor.max(f);
-                }
-                if let Some(u) = snap.until {
-                    min_until = min_until.min(u);
-                }
+        let mut attributed: Option<BTreeSet<CoverageKey>> = None;
+        let mut max_floor = Timestamp::from(0u64);
+        let mut min_until = eose_time;
+        for snap in fifo.iter() {
+            attributed = Some(match attributed {
+                None => snap.absorbed.clone(),
+                Some(acc) => acc.intersection(&snap.absorbed).cloned().collect(),
+            });
+            if let Some(f) = snap.floor {
+                max_floor = max_floor.max(f);
             }
-            let through = eose_time.min(min_until);
-            let interval = CoverageInterval::new(max_floor, through);
-            if let Some(keys) = attributed {
-                result.extend(keys.into_iter().map(|k| (k, interval)));
+            if let Some(u) = snap.until {
+                min_until = min_until.min(u);
             }
+        }
+        let through = eose_time.min(min_until);
+        let interval = CoverageInterval::new(max_floor, through);
+        if let Some(keys) = attributed {
+            result.extend(keys.into_iter().map(|k| (k, interval)));
         }
 
         let completed = fifo
             .pop_front()
             .expect("non-empty attribution FIFO checked above");
-        Some((completed.send_id, result))
+        Some(CompletedAttribution {
+            send_id: completed.send_id,
+            coverage_authority,
+            claims: result,
+        })
     }
 
     /// Attribute a completion that is structurally correlated to one exact
@@ -322,37 +434,38 @@ impl AttributionState {
         wire_sub_id: &str,
         send_id: AttributionSendId,
         completion_time: Timestamp,
-    ) -> Vec<(CoverageKey, CoverageInterval)> {
+    ) -> Option<CompletedAttribution> {
         let Some(sub_id) = self
             .sub_id_by_wire
             .get(&(session.clone(), wire_sub_id.to_string()))
             .cloned()
         else {
-            return Vec::new();
+            return None;
         };
         let Some(fifo) = self.inflight.get_mut(&sub_id) else {
-            return Vec::new();
+            return None;
         };
         let Some(position) = fifo.iter().position(|snapshot| snapshot.send_id == send_id) else {
-            return Vec::new();
+            return None;
         };
         let snapshot = fifo
             .remove(position)
             .expect("position came from this exact attribution FIFO");
-        if snapshot.limited {
-            return Vec::new();
-        }
 
         let from = snapshot.floor.unwrap_or_else(|| Timestamp::from(0u64));
         let through = snapshot
             .until
             .map_or(completion_time, |until| completion_time.min(until));
         let interval = CoverageInterval::new(from, through);
-        snapshot
-            .absorbed
-            .into_iter()
-            .map(|key| (key, interval))
-            .collect()
+        Some(CompletedAttribution {
+            send_id: snapshot.send_id,
+            coverage_authority: snapshot.coverage_authority,
+            claims: snapshot
+                .absorbed
+                .into_iter()
+                .map(|key| (key, interval))
+                .collect(),
+        })
     }
 }
 

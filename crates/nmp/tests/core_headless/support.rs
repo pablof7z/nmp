@@ -8,7 +8,7 @@
 //! `limit` poisoning, and per-query scoped acquisition evidence).
 
 use std::borrow::Cow;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -253,11 +253,9 @@ impl EventStore for FailOnceCompensationStore {
     }
     fn record_coverage(
         &mut self,
-        atom: &nmp_grammar::ContextualAtom,
-        relay: &RelayUrl,
-        proven: CoverageInterval,
+        claims: &[(nmp_grammar::ContextualAtom, RelayUrl, CoverageInterval)],
     ) -> Result<(), PersistenceError> {
-        self.inner.record_coverage(atom, relay, proven)
+        self.inner.record_coverage(claims)
     }
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
         self.inner.get_coverage(key, relay)
@@ -435,11 +433,9 @@ impl EventStore for SharedFailStartStore {
     }
     fn record_coverage(
         &mut self,
-        atom: &nmp_grammar::ContextualAtom,
-        relay: &RelayUrl,
-        proven: CoverageInterval,
+        claims: &[(nmp_grammar::ContextualAtom, RelayUrl, CoverageInterval)],
     ) -> Result<(), PersistenceError> {
-        self.inner.record_coverage(atom, relay, proven)
+        self.inner.record_coverage(claims)
     }
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
         self.inner.get_coverage(key, relay)
@@ -596,11 +592,9 @@ impl EventStore for RedbFailStartStore {
     }
     fn record_coverage(
         &mut self,
-        atom: &nmp_grammar::ContextualAtom,
-        relay: &RelayUrl,
-        proven: CoverageInterval,
+        claims: &[(nmp_grammar::ContextualAtom, RelayUrl, CoverageInterval)],
     ) -> Result<(), PersistenceError> {
-        self.inner.record_coverage(atom, relay, proven)
+        self.inner.record_coverage(claims)
     }
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
         self.inner.get_coverage(key, relay)
