@@ -41,7 +41,7 @@
 
 use nmp::{
     AcquisitionEvidence, AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, CoverageInterval, Demand,
-    Derived, DiagnosticsSnapshot, Durability, EventBuilder, Filter, FilterCoverageEntry,
+    Derived, DiagnosticsSnapshot, Durability, EventBuilder, Filter, FilterCoverageEntry, Identity,
     IdentityField, IndexedTagName, Kind, Lane, LiveQuery, ObservationEvidence, PublicKey,
     RelayDiagnosticsSnapshot, Selector, Tag, Timestamp, WriteIntent, WritePayload, WriteRouting,
 };
@@ -94,9 +94,9 @@ pub fn build_derived_index_query() -> LiveQuery {
 /// kind and content and NOTHING else: no pubkey, no timestamp, no id. That
 /// is the proof -- a direct-Rust app cannot state an author here even if it
 /// wanted to. Composes the default identity contract
-/// (`identity_override: None`, #47), so this intent signs as the active
-/// account; the per-write override field is likewise reachable from `nmp`
-/// alone for callers that need it.
+/// (`Identity::Active`, #47), so this intent signs as the active account;
+/// the per-write `Identity::Explicit` spelling is likewise reachable from
+/// `nmp` alone for callers that need it.
 pub fn build_event_intent(content: &str) -> WriteIntent {
     WriteIntent {
         payload: WritePayload::Event(
@@ -104,7 +104,7 @@ pub fn build_event_intent(content: &str) -> WriteIntent {
         ),
         durability: Durability::Ephemeral,
         routing: WriteRouting::Auto,
-        identity_override: None,
+        identity: Identity::Active,
         correlation: None,
     }
 }
@@ -120,7 +120,7 @@ pub fn build_event_intent_as(identity: PublicKey, content: &str) -> WriteIntent 
         ),
         durability: Durability::Ephemeral,
         routing: WriteRouting::Auto,
-        identity_override: Some(identity),
+        identity: Identity::Explicit(identity),
         correlation: None,
     }
 }
@@ -139,7 +139,7 @@ pub fn build_dated_event_intent(created_at: Timestamp, tag: Tag, content: &str) 
         ),
         durability: Durability::Ephemeral,
         routing: WriteRouting::Auto,
-        identity_override: None,
+        identity: Identity::Active,
         correlation: None,
     }
 }

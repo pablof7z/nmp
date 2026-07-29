@@ -244,7 +244,7 @@ final class NMPSimulatorQualificationTests: XCTestCase {
                 ),
                 durability: .durable,
                 routing: .auto,
-                identityOverride: account.publicKey
+                identity: .explicit(pubkey: account.publicKey)
             )
         )
         let receiptProbe = ReceiptProbe()

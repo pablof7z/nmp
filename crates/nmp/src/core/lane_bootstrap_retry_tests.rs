@@ -41,7 +41,7 @@ fn publish_narrow<S: EventStore>(
         }),
         durability: Durability::Durable,
         routing: WriteRouting::Explicit(Vec::from_iter(relays.to_vec())),
-        identity_override: None,
+        identity: Identity::Active,
         correlation: None,
     }));
     let (id, generation, unsigned) = accepted

@@ -1525,27 +1525,28 @@ impl<S: EventStore> EngineCore<S> {
     ///
     /// Identity resolution (#47): a builder payload carries no author, so
     /// the identity SELECTS one and there is nothing to compare it against
-    /// — `None` resolves the CURRENT active account (fail closed
-    /// pre-acceptance when none is active, since nothing is pinned so
-    /// nothing may park), `Some(pk)` stamps `pk` regardless of the active
-    /// account, including while logged out. A `Signed` payload states its
-    /// author in its own bytes, so there the identity may only RESTATE it:
-    /// `Some(pk)` naming that author is a harmless restatement of consent
-    /// and naming anybody else fails closed with no `Accepted`, while
-    /// `None` means the event's own author and imposes no active-account
-    /// requirement at all. Acceptance pins the resolved key
-    /// (`expected_pubkey` /
+    /// — `Identity::Active` resolves the CURRENT active account (fail
+    /// closed pre-acceptance when none is active, since nothing is pinned
+    /// so nothing may park), `Identity::Explicit(pk)` stamps `pk`
+    /// regardless of the active account, including while logged out. A
+    /// `Signed` payload states its author in its own bytes, so there the
+    /// identity may only RESTATE it: `Explicit(pk)` naming that author is a
+    /// harmless restatement of consent and naming anybody else fails closed
+    /// with no `Accepted`, while `Active` means the event's own author and
+    /// imposes no active-account requirement at all. Acceptance pins the
+    /// resolved key (`expected_pubkey` /
     /// `signing_identity_ref`), so everything downstream — the frozen body,
     /// `RequestSign`, the `SignerAttached` re-arm, restart replay — targets
-    /// the override identity forever; a later `set_active_account` cannot
-    /// retarget it, and an override with no registered capability parks
-    /// durably as `AwaitingCapability` rather than failing or drifting.
+    /// that one identity forever; a later `set_active_account` cannot
+    /// retarget it, and an `Explicit` identity with no registered
+    /// capability parks durably as `AwaitingCapability` rather than failing
+    /// or drifting.
     pub(super) fn on_publish(&mut self, intent: WriteIntent) -> Vec<Effect> {
         let WriteIntent {
             payload,
             durability,
             routing,
-            identity_override,
+            identity,
             correlation,
         } = intent;
 
@@ -1581,7 +1582,7 @@ impl<S: EventStore> EngineCore<S> {
         // #591: a token that already resolves to a previously-accepted
         // receipt REATTACHES that existing obligation -- this call enqueues
         // no second write, and `payload`/`durability`/`routing`/
-        // `identity_override` above are discarded entirely without so much
+        // `identity` above are discarded entirely without so much
         // as a body comparison (a legitimately re-composed draft with a
         // fresh `created_at` is the exact scenario the token exists for).
         // The lookup runs inside this single-threaded reducer step, before
@@ -1661,41 +1662,37 @@ impl<S: EventStore> EngineCore<S> {
             // there is no second source of truth for it to disagree with,
             // and the mismatch class #47 fails closed on is unrepresentable
             // here rather than merely refused.
-            WritePayload::Event(_) | WritePayload::ReplaceableEdit { .. } => {
-                match identity_override {
-                    // #47: explicit per-write consent to publish as `pk`.
-                    // The active account is irrelevant (even logged out):
-                    // acceptance pins `pk` and downstream signing targets it
-                    // forever.
-                    Some(pk) => pk,
-                    // Default single-identity contract: whoever is active at
-                    // acceptance. An instruction that cannot resolve is a
-                    // refusal, not a parked hope — nothing is pinned, so
-                    // nothing may park.
-                    None => match self.active_pubkey {
-                        Some(active) => active,
-                        None => {
-                            return self.fail_unaccepted(
-                                "publishing as the active account requires an active account"
-                                    .to_string(),
-                            );
-                        }
-                    },
-                }
-            }
+            WritePayload::Event(_) | WritePayload::ReplaceableEdit { .. } => match identity {
+                // Explicit per-write consent to publish as `pk`. The active
+                // account is irrelevant (even logged out): acceptance pins
+                // `pk` and downstream signing targets it forever.
+                Identity::Explicit(pk) => pk,
+                // Whoever is active at acceptance. An instruction that
+                // cannot resolve is a refusal, not a parked hope — nothing
+                // is pinned, so nothing may park.
+                Identity::Active => match self.active_pubkey {
+                    Some(active) => active,
+                    None => {
+                        return self.fail_unaccepted(
+                            "publishing as the active account requires an active account"
+                                .to_string(),
+                        );
+                    }
+                },
+            },
             // Already-signed payloads are verified verbatim and never ask a
             // local signer, so their author is intrinsically frozen. An
-            // explicit override may still name that author (a harmless
+            // explicit identity may still name that author (a harmless
             // restatement) — but naming anyone ELSE is a consent/author
             // contradiction and fails closed before acceptance (#47).
-            WritePayload::Signed(event) => match identity_override {
-                Some(pk) if pk != event.pubkey => {
+            WritePayload::Signed(event) => match identity {
+                Identity::Explicit(pk) if pk != event.pubkey => {
                     return self.fail_unaccepted(format!(
-                        "identity override {pk} does not match the signed event author {}",
+                        "explicit identity {pk} does not match the signed event author {}",
                         event.pubkey
                     ));
                 }
-                _ => event.pubkey,
+                Identity::Explicit(_) | Identity::Active => event.pubkey,
             },
         };
 

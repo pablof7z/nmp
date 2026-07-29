@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use cucumber::when;
 
+use nmp_grammar::Identity;
+
 use crate::steps::{parse_people, parse_tag};
 use crate::world::{NmpWorld, WatchShape};
 
@@ -234,4 +236,138 @@ fn parse_relay_targets(raw: &str) -> Vec<String> {
         "expected quoted relay names (or the words \"no relays\") in {raw:?}"
     );
     names
+}
+
+// ---- identity: composing and publishing as somebody ---------------------
+//
+// The subject of `features/identity/`. "Naming no identity" and "naming
+// identity <hex>" are the only two things a scenario may say, because they
+// are the only two things an app may say.
+
+#[when(
+    regex = r#"^I compose an event of kind (\d+) saying "([^"]+)" and publish it naming no identity$"#
+)]
+async fn compose_and_publish_as_active(w: &mut NmpWorld, kind: u16, text: String) {
+    w.publish_composed_event(kind, &text, Identity::Active)
+        .await;
+}
+
+#[when(
+    regex = r#"^I compose an event of kind (\d+) saying "([^"]+)" and publish it naming identity "([0-9a-f]{64})"$"#
+)]
+async fn compose_and_publish_as_identity(
+    w: &mut NmpWorld,
+    kind: u16,
+    text: String,
+    pubkey: String,
+) {
+    let key = w.person(&pubkey).public_key();
+    w.publish_composed_event(kind, &text, Identity::Explicit(key))
+        .await;
+}
+
+/// The intended path for an app that holds a display form: the decode already
+/// happened, at the app's own boundary, and what reaches the write plane is a
+/// key like any other.
+#[when(
+    regex = r#"^I compose an event of kind (\d+) saying "([^"]+)" and publish it naming that identity$"#
+)]
+async fn compose_and_publish_as_decoded_identity(w: &mut NmpWorld, kind: u16, text: String) {
+    let key = w.decoded_identity();
+    w.publish_composed_event(kind, &text, Identity::Explicit(key))
+        .await;
+}
+
+/// The refusal is STRUCTURAL rather than a message the engine sends back:
+/// the identity a write names is a public key, and a bech32 string is not
+/// one. Nothing is published, so there is no receipt for this to fail on.
+#[when(
+    regex = r#"^I compose an event of kind (\d+) saying "([^"]+)" and publish it naming as identity the npub form of "([0-9a-f]{64})"$"#
+)]
+async fn compose_and_publish_naming_an_npub(
+    w: &mut NmpWorld,
+    _kind: u16,
+    _text: String,
+    pubkey: String,
+) {
+    w.ensure_started().await;
+    w.refuse_bech32_identity(&pubkey);
+}
+
+#[when(regex = r#"^I switch the active account to "([0-9a-f]{64})"$"#)]
+async fn switch_active_identity(w: &mut NmpWorld, pubkey: String) {
+    w.switch_active_identity(&pubkey).await;
+}
+
+/// Also a `Then` (see `then::identity`): a scenario may either assert the
+/// acceptance or simply wait for it before doing the next thing.
+#[when(regex = r#"^the write reports accepted$"#)]
+async fn write_reports_accepted_when(w: &mut NmpWorld) {
+    assert!(
+        w.write_reported_accepted(None),
+        "expected the write to report Accepted; saw {:?}",
+        w.identity_receipt_statuses(None)
+    );
+}
+
+#[when(regex = r#"^the receipt reports it awaiting a signer for "([0-9a-f]{64})"$"#)]
+async fn receipt_reports_awaiting_when(w: &mut NmpWorld, pubkey: String) {
+    assert!(
+        w.write_awaiting_signer_for(&pubkey, None),
+        "expected the receipt to park awaiting a signer for {pubkey}; saw {:?}",
+        w.identity_receipt_statuses(None)
+    );
+}
+
+#[when(regex = r#"^the write reports accepted and the process stops immediately$"#)]
+async fn write_accepted_then_process_stops(w: &mut NmpWorld) {
+    assert!(
+        w.write_reported_accepted(None),
+        "expected the write to report Accepted before the process stopped; saw {:?}",
+        w.identity_receipt_statuses(None)
+    );
+}
+
+#[when(regex = r#"^I reconstruct the engine from the same durable store$"#)]
+async fn reconstruct_engine(w: &mut NmpWorld) {
+    let active = w.active_identity_label();
+    w.restart_engine(active).await;
+}
+
+#[when(
+    regex = r#"^I reconstruct the engine from the same durable store with "([0-9a-f]{64})" active$"#
+)]
+async fn reconstruct_engine_with_active(w: &mut NmpWorld, pubkey: String) {
+    w.person(&pubkey);
+    w.restart_engine(Some(pubkey)).await;
+}
+
+#[when(regex = r#"^the podcast identity's signer answers$"#)]
+async fn podcast_signer_answers(w: &mut NmpWorld) {
+    let label = w.podcast_identity();
+    w.release_signer(&label);
+}
+
+#[when(regex = r#"^the first account's signer answers$"#)]
+async fn first_accounts_signer_answers(w: &mut NmpWorld) {
+    let label = w.first_identity();
+    w.release_signer(&label);
+}
+
+/// A signing capability for exactly that key arriving after the write was
+/// accepted and parked. What the park waits on is a capability for one
+/// pubkey; which transport carries it is not something the write observes.
+#[when(regex = r#"^a NIP-46 signer for "([0-9a-f]{64})" attaches(?: \d+ seconds later)?$"#)]
+async fn nip46_signer_attaches(w: &mut NmpWorld, pubkey: String) {
+    w.attach_signer_for(&pubkey).await;
+}
+
+#[when(regex = r#"^I cancel that write$"#)]
+async fn cancel_that_write(w: &mut NmpWorld) {
+    w.cancel_last_write();
+}
+
+#[when(regex = r#"^the app decodes it to a public key$"#)]
+async fn app_decodes_pasted_npub(w: &mut NmpWorld) {
+    w.decode_pasted_npub();
 }

@@ -34,7 +34,7 @@ use nmp_grammar::{
     AccessContext, Binding, Demand, Derived, Filter, IdentityField, Selector, SetAlgebra, SetOp,
     SourceAuthority,
 };
-use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
+use nmp_grammar::{Durability, Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_local_signer::LocalKeySigner;
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
@@ -1058,7 +1058,7 @@ fn write_ack_per_relay_over_real_relays() {
             payload: WritePayload::Event(body_of(&unsigned)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .expect("receipt id allocation");
@@ -1252,7 +1252,7 @@ fn reconnect_requires_a_fresh_real_relay_challenge() {
             }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .expect("receipt id allocation");
@@ -1418,7 +1418,7 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
             payload: WritePayload::Event(body_of(&contact_list)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .expect("receipt id allocation");
@@ -1443,7 +1443,7 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
             payload: WritePayload::Event(body_of(&mute_list)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .expect("receipt id allocation");

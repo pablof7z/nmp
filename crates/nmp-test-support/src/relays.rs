@@ -711,7 +711,7 @@ pub struct ScriptedRelay {
     queries: Arc<QueryLog>,
     wire: Arc<WireLog>,
     connections: Arc<AtomicU64>,
-    admitted: Arc<Mutex<Vec<u16>>>,
+    admitted: Arc<Mutex<Vec<nostr::Event>>>,
 }
 
 impl ScriptedRelay {
@@ -733,7 +733,7 @@ impl ScriptedRelay {
 
     async fn start_on_addr(public_addr: SocketAddr, config: &RelayConfig) -> Self {
         let contacted = Arc::new(ContactLog::default());
-        let admitted: Arc<Mutex<Vec<u16>>> = Arc::new(Mutex::new(Vec::new()));
+        let admitted: Arc<Mutex<Vec<nostr::Event>>> = Arc::new(Mutex::new(Vec::new()));
         let queries = Arc::new(QueryLog::default());
         let wire = Arc::new(WireLog::default());
         let backend_port = free_port();
@@ -803,6 +803,17 @@ impl ScriptedRelay {
     /// order -- the other half of the contacted-log (which counts REQ and
     /// EVENT alike without saying which).
     pub fn admitted_event_kinds(&self) -> Vec<u16> {
+        self.admitted_events()
+            .iter()
+            .map(|event| event.kind.as_u16())
+            .collect()
+    }
+
+    /// Every EVENT this relay's write policy has admitted, whole and in
+    /// arrival order. The kinds above are a projection of this; an
+    /// assertion about WHO published something (the identity plane) needs
+    /// the author, and the author only exists on the event itself.
+    pub fn admitted_events(&self) -> Vec<nostr::Event> {
         self.admitted
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -1004,7 +1015,7 @@ pub fn free_port() -> u16 {
 #[derive(Debug)]
 struct LoggingWritePolicy {
     contacted: Arc<ContactLog>,
-    admitted: Arc<Mutex<Vec<u16>>>,
+    admitted: Arc<Mutex<Vec<nostr::Event>>>,
     reject: bool,
 }
 
@@ -1015,10 +1026,21 @@ impl WritePolicy for LoggingWritePolicy {
         _addr: &'a SocketAddr,
     ) -> nostr_relay_builder::prelude::BoxedFuture<'a, WritePolicyResult> {
         self.contacted.record();
-        self.admitted
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .push(event.kind.as_u16());
+        // Bridged across the two pinned `nostr` versions by JSON round-trip,
+        // exactly as `seed_signed_event` does in the other direction (see
+        // this module's dependency comment). Nothing is re-signed: the
+        // admitted bytes are the bytes the client sent, so an assertion
+        // about WHO published something reads the real author.
+        {
+            let json = serde_json::to_string(event)
+                .expect("nmp-bdd: an admitted event always renders as JSON");
+            let bridged: nostr::Event = serde_json::from_str(&json)
+                .expect("nmp-bdd: bridge an admitted event across nostr crate versions");
+            self.admitted
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(bridged);
+        }
         let reject = self.reject;
         Box::pin(async move {
             if reject {

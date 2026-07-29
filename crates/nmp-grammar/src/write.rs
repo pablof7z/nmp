@@ -231,47 +231,80 @@ impl std::fmt::Display for CorrelationToken {
     }
 }
 
+/// The identity one write publishes under.
+///
+/// Exactly two words, and neither of them is an absence. [`Active`] is a
+/// positive resolution instruction ("whoever is the active account when
+/// this write is accepted"), not the lack of a choice — it can succeed,
+/// fail, and be pinned, and it is what shows up in receipts and
+/// diagnostics where a blank would say nothing.
+///
+/// What either word MEANS depends on whether the payload already states an
+/// author, and the difference is the point: **where an author is absent,
+/// identity SELECTS; where an author is stated, identity may only
+/// RESTATE.** See [`WriteIntent::identity`] for the per-payload contract.
+///
+/// [`Active`]: Identity::Active
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Identity {
+    /// Whoever is the active account at acceptance time. The default, and
+    /// the overwhelming majority of writes: an app that is logged in and
+    /// posting as itself says nothing at all.
+    #[default]
+    Active,
+    /// This key, active or not — including while fully logged out. Naming a
+    /// key is a complete statement of intent on its own and borrows nothing
+    /// from the session, so publishing as one of several held identities
+    /// never requires making it the active one.
+    ///
+    /// Always a [`PublicKey`], never an `npub` or any other bech32 form:
+    /// bech32 is how something is shown to a person or received from one,
+    /// and an app that took an npub from a paste box decodes it at that
+    /// boundary (`docs/internals/conventions/bech32-boundary.md`).
+    Explicit(PublicKey),
+}
+
 /// A caller's publish request.
 pub struct WriteIntent {
     pub payload: WritePayload,
     pub durability: Durability,
     pub routing: WriteRouting,
-    /// Explicit per-write signing-identity override (issue #47).
-    ///
-    /// What it means depends on whether the payload states an author, and
-    /// the difference is the point: **where an author is absent, identity
-    /// SELECTS; where an author is stated, identity may only RESTATE.**
+    /// The identity this ONE write is published under, defaulting to
+    /// [`Identity::Active`] ([`Identity`]'s own `Default`).
     ///
     /// For a builder payload ([`WritePayload::Event`],
     /// [`WritePayload::ReplaceableEdit`]) there is no author to compare
-    /// against, so the identity is the only source of one. `None` resolves
-    /// the CURRENT active account at acceptance and stamps it — failing
-    /// closed pre-acceptance when no account is active, since an
-    /// instruction that cannot resolve is a refusal, not a parked hope.
-    /// `Some(pk)` stamps `pk`.
+    /// against, so the identity SELECTS one and is its only source.
+    /// [`Identity::Active`] resolves the CURRENT active account at
+    /// acceptance and stamps it — failing closed pre-acceptance when no
+    /// account is active, since an instruction that cannot resolve is a
+    /// refusal, not a parked hope (nothing is pinned, so nothing may park).
+    /// [`Identity::Explicit`] stamps its key.
     ///
     /// For [`WritePayload::Signed`] the author is already frozen in the
-    /// bytes and no identity choice can change it. `None` means the event's
-    /// own author, whoever that is — a signed event needs no signer, so it
-    /// imposes no active-account requirement at all. `Some(pk)` must EQUAL
-    /// `Event.pubkey`: naming that author is a harmless restatement of
-    /// consent, and naming anybody else is a contradiction with no correct
-    /// resolution, so it fails closed BEFORE acceptance. (Routing is a
-    /// separate axis and stays independent of all of this — republishing
-    /// somebody else's signed event to your own archive relay is an
-    /// `Explicit` route over a payload signed by a different pubkey.)
+    /// bytes and no identity choice can change it, so there the identity
+    /// may only RESTATE it. [`Identity::Active`] means the event's own
+    /// author, whoever that is — a signed event needs no signer, so it
+    /// imposes no active-account requirement at all. `Explicit(pk)` must
+    /// EQUAL `Event.pubkey`: naming that author is a harmless restatement
+    /// of consent, and naming anybody else is a contradiction with no
+    /// correct resolution, so it fails closed BEFORE acceptance. (Routing
+    /// is a separate axis and stays independent of all of this —
+    /// republishing somebody else's signed event to your own archive relay
+    /// is an `Explicit` route over a payload signed by a different pubkey.)
     ///
-    /// `Some(pk)` is the caller's explicit consent to publish this one
+    /// `Explicit(pk)` is the caller's explicit consent to publish this one
     /// write as `pk` — a registered/secondary identity — WITHOUT changing
-    /// the active account. It works regardless of
-    /// which account is active — including while fully logged out — and
-    /// acceptance pins `pk` into the frozen write (`expected_pubkey` /
-    /// `signing_identity_ref`), so later `set_active_account` calls can
-    /// never retarget the accepted intent. An override naming an identity
-    /// with no registered signing capability still ACCEPTS and parks
-    /// durably (`WriteStatus::AwaitingCapability`) until that exact key's
-    /// signer attaches — never a silent failure, never identity drift.
-    pub identity_override: Option<PublicKey>,
+    /// the active account. Acceptance pins the RESOLVED key into the frozen
+    /// write (`expected_pubkey` / `signing_identity_ref`) either way, so
+    /// later `set_active_account` calls can never retarget an accepted
+    /// intent; under `Active` that pin matters more, not less, since
+    /// acceptance is the only place "whoever is active" becomes somebody.
+    /// An `Explicit` identity with no registered signing capability still
+    /// ACCEPTS and parks durably (`WriteStatus::AwaitingCapability`) until
+    /// that exact key's signer attaches — never a silent failure, never
+    /// identity drift.
+    pub identity: Identity,
     /// Crash-safe client correlation token (#591). `None` -- the default,
     /// unchanged for every existing caller -- opts this write out of
     /// correlation: the acceptance door allocates a fresh receipt exactly
@@ -356,31 +389,32 @@ mod tests {
         }
     }
 
-    /// #47: the override is plain intent vocab — an optional pubkey the
-    /// caller sets explicitly, defaulting to the active-account contract.
-    /// Resolution lives in the reducer (`on_publish`), not here; this pins
-    /// the vocab shape.
+    /// The identity vocabulary is exactly two words, and neither is an
+    /// absence: `Active` is what a caller gets by default (`Identity`'s own
+    /// `Default`) and says something — "whoever is active at acceptance" —
+    /// rather than saying nothing. Resolution lives in the reducer
+    /// (`on_publish`), not here; this pins the vocab shape.
     #[test]
-    fn identity_override_carries_the_callers_explicit_choice() {
+    fn identity_is_two_words_and_active_is_the_default() {
         let keys = nostr::Keys::generate();
-        let builder = EventBuilder::new(nostr::Kind::TextNote).content("override vocab");
+        let builder = EventBuilder::new(nostr::Kind::TextNote).content("identity vocab");
         let default_intent = WriteIntent {
             payload: WritePayload::Event(builder.clone()),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::default(),
             correlation: None,
         };
-        assert!(default_intent.identity_override.is_none());
+        assert_eq!(default_intent.identity, Identity::Active);
 
-        let overridden = WriteIntent {
+        let named = WriteIntent {
             payload: WritePayload::Event(builder),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: Some(keys.public_key()),
+            identity: Identity::Explicit(keys.public_key()),
             correlation: None,
         };
-        assert_eq!(overridden.identity_override, Some(keys.public_key()));
+        assert_eq!(named.identity, Identity::Explicit(keys.public_key()));
     }
 
     /// The kind is the only constructor argument, the combinators are

@@ -10,8 +10,8 @@ use nmp::mechanism::core::{
 };
 use nmp::mechanism::outbox::WriteStatus;
 use nmp_grammar::{
-    AccessContext, Durability, EventBuilder as NmpEventBuilder, RelaySessionKey, WriteIntent,
-    WritePayload, WriteRouting,
+    AccessContext, Durability, EventBuilder as NmpEventBuilder, Identity, RelaySessionKey,
+    WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_router::FixtureDirectory;
 use nmp_store::{
@@ -168,7 +168,7 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
             payload: WritePayload::Signed(event.clone()),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         }));
         assert!(effects.iter().any(|effect| matches!(effect,
@@ -323,7 +323,7 @@ fn at_most_once_started_attempt_becomes_outcome_unknown_and_is_never_resent() {
             payload: WritePayload::Signed(event),
             durability: Durability::AtMostOnce,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         }));
         let id = receipt_id(&effects);
@@ -389,7 +389,7 @@ fn pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates() {
             payload: WritePayload::Event(body_of(&unsigned)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         }));
         receipt_id(&effects)
@@ -435,8 +435,8 @@ fn pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates() {
 
 /// #47 falsifier (f), modeled on
 /// [`pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates`]:
-/// an unsigned intent accepted under an explicit `identity_override`
-/// (authored by B while A was the active account, B's signer absent)
+/// an unsigned intent accepted under an explicit `Identity::Explicit(B)`
+/// (named B while A was the active account, B's signer absent)
 /// survives a genuine close/reopen still pinned to B. Replay shows
 /// `Accepted` + `AwaitingCapability`; re-rooting the reopened core onto A
 /// and attaching A's (wrong) signer produce no sign request; attaching the
@@ -476,7 +476,7 @@ fn overridden_unsigned_intent_replays_and_resumes_pinned_to_override_after_reope
             payload: WritePayload::Event(body_of(&unsigned)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: Some(override_keys.public_key()),
+            identity: Identity::Explicit(override_keys.public_key()),
             correlation: None,
         }));
         receipt_id(&effects)
@@ -596,7 +596,7 @@ fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
                 payload: WritePayload::Signed(event.clone()),
                 durability: Durability::Durable,
                 routing: WriteRouting::Auto,
-                identity_override: None,
+                identity: Identity::Active,
                 correlation: None,
             }))
         };
@@ -889,7 +889,7 @@ fn signed_ephemeral_receipt_replays_signed_and_refuses_cancellation_after_reopen
             payload: WritePayload::Signed(event.clone()),
             durability: Durability::Ephemeral,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         }));
         assert!(effects.iter().any(
@@ -946,7 +946,7 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
             payload: WritePayload::Signed(event),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         }));
         let receipt_id = receipt_id(&effects);
@@ -1019,7 +1019,7 @@ fn retained_terminal_receipt_is_attached_and_replays_terminal_fact() {
         }),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
-        identity_override: None,
+        identity: Identity::Active,
         correlation: None,
     }));
     let receipt = receipt_id(&effects);
@@ -1049,7 +1049,7 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
             }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         }));
         let receipt_id = receipt_id(&effects);
@@ -1136,7 +1136,7 @@ fn relay_list_bootstrap_routing_round_trips_across_a_restart() {
             payload: WritePayload::Signed(event),
             durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay_b.clone(), relay_a.clone()]),
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         }));
         let ensured = effects
@@ -1190,7 +1190,7 @@ fn corrupt_route_lane_evidence_is_unreadable_not_absent() {
             payload: WritePayload::Signed(event),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         }));
         let receipt_id = receipt_id(&effects);

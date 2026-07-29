@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
 import uniffi.nmp_ffi.FfiDurability
 import uniffi.nmp_ffi.FfiEventBuilder
+import uniffi.nmp_ffi.FfiIdentity
 import uniffi.nmp_ffi.FfiWriteIntent
 import uniffi.nmp_ffi.FfiWritePayload
 import uniffi.nmp_ffi.FfiWriteRouting
@@ -22,35 +23,36 @@ class WriteIntentTest {
             createdAt = 1_700_000_000uL,
         )
 
-    /** #47: an [WriteIntent.identityOverride] crosses to `FfiWriteIntent`
+    /** #47: an explicit [Identity] crosses to `FfiWriteIntent`
      * intact -- the per-write identity is data, never rewritten or dropped
      * by the mirror. */
     @Test
-    fun writeIntentConversionCarriesIdentityOverride() {
-        val overridePubkey = "b".repeat(64)
+    fun writeIntentConversionCarriesAnExplicitIdentity() {
+        val named = "b".repeat(64)
         val intent =
             WriteIntent(
                 payload = builderPayload(),
                 durability = Durability.Durable,
                 routing = WriteRouting.Auto,
-                identityOverride = overridePubkey,
+                identity = Identity.Explicit(named),
             )
-        assertEquals(overridePubkey, intent.toFfi().identityOverride)
+        assertEquals(FfiIdentity.Explicit(named), intent.toFfi().identity)
     }
 
-    /** #47: the pre-existing construction shape stays source-compatible AND
-     * semantically identical -- no override means `null`, the
-     * active-account default, all the way through `toFfi()`. */
+    /** #47: naming nobody is not the absence of a choice -- the default
+     * construction means [Identity.Active], "whoever is active at
+     * acceptance", all the way through `toFfi()`. There is no third
+     * "unset" state to observe. */
     @Test
-    fun writeIntentDefaultLeavesIdentityOverrideNull() {
+    fun writeIntentDefaultMeansTheActiveAccount() {
         val intent =
             WriteIntent(
                 payload = builderPayload(),
                 durability = Durability.Durable,
                 routing = WriteRouting.Auto,
             )
-        assertNull(intent.identityOverride)
-        assertNull(intent.toFfi().identityOverride)
+        assertEquals(Identity.Active, intent.identity)
+        assertEquals(FfiIdentity.Active, intent.toFfi().identity)
     }
 
     @Test
@@ -69,7 +71,7 @@ class WriteIntentTest {
                         ),
                     durability = FfiDurability.AT_MOST_ONCE,
                     routing = FfiWriteRouting.Auto,
-                    identityOverride = "a".repeat(64),
+                    identity = FfiIdentity.Explicit("a".repeat(64)),
                     correlation = "correlation-42",
                 ),
             )
@@ -84,7 +86,7 @@ class WriteIntentTest {
         )
         assertEquals(Durability.AtMostOnce, unsigned.durability)
         assertEquals(WriteRouting.Auto, unsigned.routing)
-        assertEquals("a".repeat(64), unsigned.identityOverride)
+        assertEquals(Identity.Explicit("a".repeat(64)), unsigned.identity)
         assertEquals("correlation-42", unsigned.correlation)
 
         val signed =
@@ -102,7 +104,7 @@ class WriteIntentTest {
                         ),
                     durability = FfiDurability.EPHEMERAL,
                     routing = FfiWriteRouting.Auto,
-                    identityOverride = null,
+                    identity = FfiIdentity.Active,
                     correlation = null,
                 ),
             )
@@ -120,7 +122,7 @@ class WriteIntentTest {
         )
         assertEquals(Durability.Ephemeral, signed.durability)
         assertEquals(WriteRouting.Auto, signed.routing)
-        assertNull(signed.identityOverride)
+        assertEquals(Identity.Active, signed.identity)
         assertNull(signed.correlation)
 
         assertEquals(Durability.Durable, Durability.from(FfiDurability.DURABLE))
@@ -154,7 +156,7 @@ class WriteIntentTest {
                         ),
                     durability = FfiDurability.DURABLE,
                     routing = FfiWriteRouting.Explicit(typed),
-                    identityOverride = null,
+                    identity = FfiIdentity.Active,
                     correlation = null,
                 ),
             )

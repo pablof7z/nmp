@@ -28,7 +28,8 @@ use std::time::Duration;
 use nmp_ffi::facade::{NmpDiagnosticsStream, NmpEngine, NmpEngineConfig, NmpRowStream};
 use nmp_ffi::nip02::NmpFollowStream;
 use nmp_ffi::types::{
-    FfiBinding, FfiDurability, FfiFilter, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
+    FfiBinding, FfiDurability, FfiFilter, FfiIdentity, FfiWriteIntent, FfiWritePayload,
+    FfiWriteRouting,
 };
 
 const TEST_SECRET_KEY_HEX: &str =
@@ -209,7 +210,7 @@ async fn the_29er_observer_composition_never_saturates_across_room_switching_and
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
-            identity_override: None,
+            identity: FfiIdentity::Active,
             correlation: None,
         })
         .expect("publish opens a receipt stream alongside the composition");

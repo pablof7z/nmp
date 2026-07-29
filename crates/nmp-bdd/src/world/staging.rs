@@ -13,9 +13,9 @@ use std::time::Duration;
 
 use nostr::{Keys, PublicKey, Timestamp, UnsignedEvent};
 
-use nmp::mechanism::runtime::EngineThread;
+use nmp::mechanism::runtime::{EngineThread, Handle};
 use nmp_router::{Lane, LanedRelay, LiveDirectory, RelayDirectory, RelayUrl};
-use nmp_store::MemoryStore;
+use nmp_store::{EventStore, MemoryStore, RedbStore};
 use nmp_transport::PoolConfig;
 
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
@@ -130,12 +130,20 @@ impl NmpWorld {
 
     /// `Given <person>'s relay list names <relay> as their write relay` /
     /// `Given my relay list names <relay>[s] as my write relay(s)`.
+    ///
+    /// Declaring MINE also declares it for every identity an identity
+    /// scenario registered: `features/identity/` states the relay list once,
+    /// as an app owner would, and then has several identities this one user
+    /// holds publish through it. See `identity::propagate_my_write_relay`.
     pub fn declare_write_relay(&mut self, person: &str, relay: &str) {
         self.person(person);
         self.relay_config_mut(relay);
         let relays = self.write_relay_of.entry(person.to_string()).or_default();
         if !relays.iter().any(|r| r == relay) {
             relays.push(relay.to_string());
+        }
+        if person == super::ME {
+            self.propagate_my_write_relay(relay);
         }
     }
 
@@ -255,21 +263,6 @@ impl NmpWorld {
             self.relays.insert(name, relay);
         }
 
-        let indexer_urls: Vec<RelayUrl> = self
-            .indexer_names
-            .iter()
-            .map(|name| self.relays[name].url.clone())
-            .collect();
-        let mut directory = LiveDirectory::builder().indexers(indexer_urls).build();
-        for (person, relay_names) in self.write_relay_of.clone() {
-            let pk_hex = self.person(&person).public_key().to_hex();
-            let laned: Vec<LanedRelay> = relay_names
-                .iter()
-                .map(|name| LanedRelay::new(self.relays[name].url.clone(), Lane::Nip65Write))
-                .collect();
-            directory.ingest_write_relays(pk_hex, laned);
-        }
-
         for pending in std::mem::take(&mut self.pending_contact_lists) {
             let author_keys = self.person(&pending.author);
             let follow_pks: Vec<PublicKey> = pending
@@ -321,8 +314,71 @@ impl NmpWorld {
             self.seed_group_admins(&group).await;
         }
 
-        let (engine_thread, handle) = EngineThread::spawn(
-            MemoryStore::new(),
+        self.spawn_engine().await;
+    }
+
+    /// Build the directory from the staged relay topology and spawn a REAL
+    /// `EngineThread` over this scenario's durable store.
+    ///
+    /// Its own method, called by `ensure_started` and again by the identity
+    /// plane's restart step, because "reconstruct the engine from the same
+    /// durable store" only means anything if the second engine is built the
+    /// same way the first was -- same directory facts, same relays, same
+    /// admission policy, nothing carried over in memory.
+    pub(super) async fn spawn_engine(&mut self) {
+        let indexer_urls: Vec<RelayUrl> = self
+            .indexer_names
+            .iter()
+            .map(|name| self.relays[name].url.clone())
+            .collect();
+        let mut directory = LiveDirectory::builder().indexers(indexer_urls).build();
+        for (person, relay_names) in self.write_relay_of.clone() {
+            let pk_hex = self.person(&person).public_key().to_hex();
+            let laned: Vec<LanedRelay> = relay_names
+                .iter()
+                .map(|name| LanedRelay::new(self.relays[name].url.clone(), Lane::Nip65Write))
+                .collect();
+            directory.ingest_write_relays(pk_hex, laned);
+        }
+
+        let (engine_thread, handle) = match self.open_store() {
+            BddStore::Memory(store) => self.spawn_over(store, directory),
+            BddStore::Durable(store) => self.spawn_over(store, directory),
+        };
+
+        self.engine = Some(engine_thread);
+        self.handle = Some(handle);
+
+        // Every signer an identity scenario registered, plus the ordinary
+        // signer a logged-in `Given` implies. Both go through the same door
+        // an app would use, AFTER the engine exists, exactly as a real launch
+        // does -- the engine always starts with zero accounts.
+        self.register_identity_signers();
+        if let Some(active) = self.active_person.clone() {
+            let keys = self.person(&active);
+            if !self.identities_with_signers.iter().any(|l| *l == active) {
+                let signer = self.counting_signer(&keys);
+                self.handle()
+                    .add_signer(signer)
+                    .expect("local signer has a public key");
+            }
+            self.handle().set_active_account(Some(keys.public_key()));
+        }
+
+        let (diag_handle, diag_rx) = self.handle().observe_diagnostics();
+        self.diag = Some(DiagFeed::new(diag_handle, diag_rx));
+    }
+
+    /// Spawn over whichever store this scenario chose. Generic so the choice
+    /// above is a value rather than a duplicated call, and so neither store
+    /// type leaks into `NmpWorld` -- `EngineThread` is not generic, and the
+    /// store is moved whole into the engine thread and never comes back.
+    fn spawn_over<S>(&self, store: S, directory: LiveDirectory) -> (EngineThread, Handle)
+    where
+        S: EventStore + Send + 'static,
+    {
+        EngineThread::spawn(
+            store,
             directory,
             20,
             PoolConfig {
@@ -342,20 +398,47 @@ impl NmpWorld {
                 "::1".to_string(),
             ]),
         )
-        .expect("BDD engine thread construction");
-
-        if let Some(active) = self.active_person.clone() {
-            let keys = self.person(&active);
-            handle
-                .add_signer(self.counting_signer(&keys))
-                .expect("local signer has a public key");
-            handle.set_active_account(Some(keys.public_key()));
-        }
-
-        let (diag_handle, diag_rx) = handle.observe_diagnostics();
-        self.diag = Some(DiagFeed::new(diag_handle, diag_rx));
-
-        self.engine = Some(engine_thread);
-        self.handle = Some(handle);
+        .expect("BDD engine thread construction")
     }
+
+    /// The store this scenario runs on.
+    ///
+    /// In memory by default, which is what the whole catalog has always used
+    /// and what keeps its wall clock inside the crate's `timeout 240`
+    /// contract: redb commits real transactions to real files, and a suite
+    /// that ingests a fixture backlog per scenario pays that on every one of
+    /// them.
+    ///
+    /// On disk when the scenario staged an identity by key. A `MemoryStore`
+    /// cannot be reopened, so a world that will be asked to reconstruct its
+    /// engine over the SAME store needs a real one -- and every restart step
+    /// in the catalog belongs to `features/identity/`, whose scenarios all
+    /// name their accounts that way (see `world::identity`). The flag is set
+    /// by those `Given`s rather than inferred later because the store is
+    /// chosen once, at start-up, before any `When` exists to ask.
+    fn open_store(&mut self) -> BddStore {
+        if !self.durable_store {
+            return BddStore::Memory(MemoryStore::new());
+        }
+        let path = match &self.store_path {
+            Some(path) => path.clone(),
+            None => {
+                let dir = tempfile::tempdir().expect("nmp-bdd: a temp dir for the durable store");
+                let path = dir.path().join("bdd-store.redb");
+                self.store_dir = Some(dir);
+                self.store_path = Some(path.clone());
+                path
+            }
+        };
+        BddStore::Durable(
+            RedbStore::open(&path).expect("nmp-bdd: the scenario's durable store must open"),
+        )
+    }
+}
+
+/// Which store a scenario got, so the two spawn arms below stay one decision
+/// made in one place.
+enum BddStore {
+    Memory(MemoryStore),
+    Durable(RedbStore),
 }

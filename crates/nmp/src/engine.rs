@@ -499,18 +499,19 @@ impl Engine {
     /// synchronous [`EngineError::ReceiptCorrelationIdExhausted`], because
     /// no truthful receipt stream can exist without an id.
     ///
-    /// Identity (#47): with `identity_override: None` an unsigned draft
-    /// signs as the CURRENT active account and fails closed pre-acceptance
-    /// when the draft's author is anyone else (or when nobody is active).
-    /// `identity_override: Some(pk)` is explicit per-write consent to
-    /// publish as `pk` — a registered/secondary identity — without touching
-    /// the active account: `pk` must equal the draft's author (the engine
-    /// never restamps; a mismatch is `WriteStatus::Failed` with no
-    /// `Accepted`), it works even while logged out, and acceptance pins
-    /// `pk` so later [`Self::set_active_account`] calls cannot retarget the
-    /// write. An override whose key has no registered signing capability
-    /// parks durably as `WriteStatus::AwaitingCapability` until that exact
-    /// key's signer attaches.
+    /// Identity (#47): with [`Identity::Active`] — the default — a builder
+    /// payload signs as the CURRENT active account, and fails closed
+    /// pre-acceptance when nobody is active (nothing is pinned, so nothing
+    /// may park). [`Identity::Explicit`] is explicit per-write consent to
+    /// publish as that key — a registered/secondary identity — without
+    /// touching the active account: it works even while logged out, and
+    /// acceptance pins the key so later [`Self::set_active_account`] calls
+    /// cannot retarget the write. A named key with no registered signing
+    /// capability parks durably as `WriteStatus::AwaitingCapability` until
+    /// that exact key's signer attaches. On a `Signed` payload the author
+    /// is already frozen in the bytes, so an explicit identity may only
+    /// RESTATE it: naming anybody else is `WriteStatus::Failed` with no
+    /// `Accepted`.
     pub fn publish(&self, intent: WriteIntent) -> Result<FifoReceiver<WriteStatus>, EngineError> {
         self.with_handle(|handle| handle.publish(intent))?
             .map_err(EngineError::from_publish_error)
@@ -520,8 +521,8 @@ impl Engine {
     /// needed for process-later reattachment. Pre-acceptance correlation-id
     /// exhaustion returns a typed error without creating a receipt.
     /// Identity resolution follows [`Self::publish`]'s contract exactly:
-    /// active-account default, or an explicit `identity_override` that must
-    /// equal the draft's author and is pinned at acceptance (#47).
+    /// the [`Identity::Active`] default, or an [`Identity::Explicit`] key,
+    /// either way resolved and pinned at acceptance (#47).
     pub fn publish_tracked(&self, intent: WriteIntent) -> Result<ReceiptStream, EngineError> {
         self.with_handle(|handle| handle.publish_tracked(intent))?
             .map_err(EngineError::from_publish_error)
@@ -738,11 +739,9 @@ impl Engine {
     /// need not have been registered via [`Self::add_account`] -- read-only
     /// browsing of an account this app holds no key for is legal. Publishes
     /// attempted in that keyless-active state resolve truthfully, never a
-    /// panic: an unsigned draft AUTHORED BY the keyless active pubkey is
+    /// panic: a builder payload published as [`Identity::Active`] is
     /// accepted and parks durably as `WriteStatus::AwaitingCapability`
-    /// until a matching signing capability attaches, while a draft authored
-    /// by a DIFFERENT pubkey (and carrying no `identity_override`, #47)
-    /// fails closed pre-acceptance as `WriteStatus::Failed`.
+    /// until a matching signing capability attaches (#47).
     pub fn set_active_account(&self, pubkey: Option<PublicKey>) -> Result<(), EngineError> {
         let mut guard = self
             .inner
@@ -1213,7 +1212,7 @@ mod tests {
                 }),
                 durability: nmp_grammar::Durability::Durable,
                 routing: nmp_grammar::WriteRouting::Auto,
-                identity_override: None,
+                identity: Identity::Active,
                 correlation: None,
             })
             .expect("accept write");
@@ -1275,7 +1274,7 @@ mod tests {
                 }),
                 durability: nmp_grammar::Durability::Durable,
                 routing: nmp_grammar::WriteRouting::Auto,
-                identity_override: None,
+                identity: Identity::Active,
                 correlation: None,
             })
             .expect("accept write");
@@ -1642,7 +1641,7 @@ mod tests {
                     }),
                     durability: nmp_grammar::Durability::Durable,
                     routing: nmp_grammar::WriteRouting::Auto,
-                    identity_override: None,
+                    identity: Identity::Active,
                     correlation: None,
                 })
                 .expect("write must be accepted")
@@ -1836,7 +1835,7 @@ mod tests {
     // it asserted the removed global native-task capacity refusal
     // (`SignEventError::ExecutorSaturated` + `max_native_tasks`). Sign-event
     // admission no longer surfaces a configurable capacity ceiling.
-    use nmp_grammar::{Durability, WritePayload, WriteRouting};
+    use nmp_grammar::{Durability, Identity, WritePayload, WriteRouting};
     use nostr::ToBech32;
 
     /// `EngineConfig::default()` (no `store_path`) must select the
@@ -2147,7 +2146,7 @@ mod tests {
                 payload: WritePayload::Signed(event),
                 durability: Durability::Durable,
                 routing: WriteRouting::Auto,
-                identity_override: None,
+                identity: Identity::Active,
                 correlation: None,
             })
             .expect("engine is open");
@@ -2166,13 +2165,13 @@ mod tests {
 
     /// #47 falsifier (a) through the facade: with account A active and B
     /// merely registered ([`Engine::add_account`], never activated), a
-    /// B-authored draft carrying `identity_override: Some(B)` reaches
+    /// builder carrying `Identity::Explicit(B)` reaches
     /// `WriteStatus::Signed` bearing the exact id of the frozen B-authored
     /// body -- which commits cryptographically to author and content --
-    /// and [`Engine::active_account`] still answers A afterward: the
-    /// override consented to ONE write, it never re-rooted the engine.
+    /// and [`Engine::active_account`] still answers A afterward: naming B
+    /// consented to ONE write, it never re-rooted the engine.
     #[test]
-    fn identity_override_publishes_as_secondary_without_moving_active_account() {
+    fn an_explicit_identity_publishes_as_a_secondary_without_moving_the_active_account() {
         let engine = Engine::new(EngineConfig::default()).expect("engine must build");
         let keys_a = Keys::generate();
         let keys_b = Keys::generate();
@@ -2209,7 +2208,7 @@ mod tests {
                 }),
                 durability: Durability::Durable,
                 routing: WriteRouting::Auto,
-                identity_override: Some(pk_b),
+                identity: Identity::Explicit(pk_b),
                 correlation: None,
             })
             .expect("engine is open");
@@ -2297,7 +2296,7 @@ mod tests {
             }),
             durability: Durability::Ephemeral,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         });
         assert_eq!(publish_result.err(), Some(EngineError::EngineClosed));

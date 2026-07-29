@@ -8,8 +8,8 @@
 use nostr::{EventId, PublicKey};
 
 use crate::convert::{
-    demand_to_ffi, durability_to_ffi, parse_correlation_token, parse_pubkey, write_payload_to_ffi,
-    write_routing_to_ffi, FfiError,
+    demand_to_ffi, durability_to_ffi, identity_to_ffi, parse_correlation_token, parse_pubkey,
+    write_payload_to_ffi, write_routing_to_ffi, FfiError,
 };
 use crate::types::{FfiDemand, FfiRow, FfiWriteIntent};
 
@@ -339,7 +339,7 @@ pub fn comment_intent(
         payload,
         durability,
         routing,
-        identity_override,
+        identity,
         correlation,
     } = intent;
 
@@ -347,7 +347,7 @@ pub fn comment_intent(
         payload: write_payload_to_ffi(payload)?,
         durability: durability_to_ffi(durability),
         routing: write_routing_to_ffi(routing),
-        identity_override: identity_override.map(|pk| pk.to_hex()),
+        identity: identity_to_ffi(identity),
         correlation: correlation.map(|token| token.to_string()),
     })
 }
@@ -355,7 +355,9 @@ pub fn comment_intent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{FfiDurability, FfiSourceAuthority, FfiWritePayload, FfiWriteRouting};
+    use crate::types::{
+        FfiDurability, FfiIdentity, FfiSourceAuthority, FfiWritePayload, FfiWriteRouting,
+    };
 
     fn podcast_root() -> FfiCommentRoot {
         FfiCommentRoot::External {
@@ -453,7 +455,7 @@ mod tests {
         );
         assert_eq!(intent.durability, FfiDurability::Durable);
         assert_eq!(intent.routing, FfiWriteRouting::Auto);
-        assert_eq!(intent.identity_override, None);
+        assert_eq!(intent.identity, FfiIdentity::Active);
         assert_eq!(intent.correlation.as_deref(), Some("comment-correlation"));
     }
 

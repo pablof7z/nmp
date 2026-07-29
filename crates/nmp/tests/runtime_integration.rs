@@ -33,7 +33,9 @@ use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, Derived, Filter, Freshness,
     IdentityField, Selector, SourceAuthority,
 };
-use nmp_grammar::{CorrelationToken, Durability, WriteIntent, WritePayload, WriteRouting};
+use nmp_grammar::{
+    CorrelationToken, Durability, Identity, WriteIntent, WritePayload, WriteRouting,
+};
 use nmp_local_signer::LocalKeySigner;
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
@@ -399,7 +401,7 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
             payload: WritePayload::Event(body_of(&contact_list)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .expect("receipt id allocation");
@@ -1188,7 +1190,7 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
             }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .expect("receipt id allocation");
@@ -1278,7 +1280,7 @@ fn correlation_retry_replays_only_to_its_new_observer_then_joins_live_delivery()
             }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: Some(correlation.clone()),
         })
         .expect("original receipt");
@@ -1300,7 +1302,7 @@ fn correlation_retry_replays_only_to_its_new_observer_then_joins_live_delivery()
             }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: Some(correlation),
         })
         .expect("correlation retry");

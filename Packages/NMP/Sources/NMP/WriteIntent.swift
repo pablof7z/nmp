@@ -62,7 +62,7 @@ public enum WriteRouting: Sendable, Hashable {
 /// event NMP stamps, freezes and signs itself. The kind is the one thing it
 /// cannot invent, so the kind is the one thing it demands; the account it
 /// publishes as comes from the write's identity (see
-/// `NMPEngine.setActiveAccount` and `WriteIntent.identityOverride`), never
+/// `NMPEngine.setActiveAccount` and `WriteIntent.identity`), never
 /// from the payload, and `createdAt` is stamped at acceptance unless you
 /// state one -- state one and it is kept exactly.
 ///
@@ -115,31 +115,59 @@ public enum WritePayload: Sendable, Hashable {
     }
 }
 
+/// The identity one write publishes under (`FfiIdentity` mirror). Exactly
+/// two words, and neither of them is an absence: `.active` is a positive
+/// instruction ("whoever is the active account when this is accepted"),
+/// which is why there is no third "unset" case here or anywhere else.
+///
+/// On an `.event` payload the identity SELECTS the author -- a builder
+/// states none, so there is nothing for it to contradict. On a `.signed`
+/// payload it may only RESTATE the author already frozen in the bytes:
+/// naming that author changes nothing, naming anybody else is a
+/// consent/author contradiction that surfaces as `WriteStatus.failed` on
+/// the receipt stream with no `.accepted` before it.
+///
+/// `.explicit`'s `pubkey` is 64-char HEX and nothing else. A bech32 `npub`
+/// is refused however well-formed it is (`NMPError.invalidPublicKey`,
+/// thrown synchronously from `publish`): bech32 is how something is shown
+/// to a person or received from one, so an app that took an npub from a
+/// paste box decodes it there -- with `decodeNostrEntity` -- and hands NMP
+/// a key. Naming a pubkey with no registered signer is NOT an error: the
+/// write parks as `.awaitingCapability` until that capability attaches.
+/// Acceptance pins the resolved key either way, so a later
+/// `setActiveAccount` cannot retarget the write.
+public enum Identity: Sendable, Hashable {
+    case active
+    case explicit(pubkey: String)
+
+    func toFfi() -> FfiIdentity {
+        switch self {
+        case .active: return .active
+        case let .explicit(pubkey): return .explicit(pubkey: pubkey)
+        }
+    }
+
+    init(_ ffi: FfiIdentity) {
+        switch ffi {
+        case .active: self = .active
+        case let .explicit(pubkey): self = .explicit(pubkey: pubkey)
+        }
+    }
+}
+
 /// A caller's publish request (`FfiWriteIntent` mirror).
 ///
-/// `identityOverride` (#47) is the identity this ONE write is published
-/// under, as 64-char hex or bech32 `npub`. `nil` -- the default every
-/// existing call site keeps -- means the active account at acceptance time
-/// (see `NMPEngine.setActiveAccount`), unchanged. On an `.event` payload
-/// non-`nil` SELECTS the author -- a builder states none, so there is
-/// nothing for it to contradict. On a `.signed` payload it may only RESTATE
-/// the author already frozen in the bytes: naming that author changes
-/// nothing, naming anybody else is a consent/author contradiction. A
-/// malformed string throws synchronously from `publish`
-/// (`NMPError.invalidPublicKey`), while a well-formed contradiction on a
-/// signed event surfaces as `WriteStatus.failed` on the receipt stream with
-/// no `.accepted` before it. An override naming a pubkey with no registered
-/// signer parks as `.awaitingCapability` until that capability attaches;
-/// acceptance pins the override, so a later `setActiveAccount` cannot
-/// retarget the write. `WriteStatus.awaitingCapability`'s associated
-/// `pubkey` (#47 Unit B) is the exact frozen identity parked -- the
-/// override when one was given, else the active account at publish time --
-/// never a different, later-active account.
+/// `identity` (#47) defaults to `.active` -- the overwhelming majority of
+/// writes publish as the logged-in account, and saying so costs nothing.
+/// `WriteStatus.awaitingCapability`'s associated `pubkey` (#47 Unit B) is
+/// the exact frozen identity parked -- the key `.explicit` named, else the
+/// account that was active at publish time -- never a different,
+/// later-active account.
 public struct WriteIntent: Sendable, Hashable {
     public var payload: WritePayload
     public var durability: Durability
     public var routing: WriteRouting
-    public var identityOverride: String?
+    public var identity: Identity
     /// Crash-safe client correlation token (#591). `nil` -- the default --
     /// opts this write out of correlation entirely. A non-`nil` token is
     /// validated by `nmp_grammar::CorrelationToken`'s `TryFrom<&str>` on the way across
@@ -157,13 +185,13 @@ public struct WriteIntent: Sendable, Hashable {
         payload: WritePayload,
         durability: Durability,
         routing: WriteRouting,
-        identityOverride: String? = nil,
+        identity: Identity = .active,
         correlation: String? = nil
     ) {
         self.payload = payload
         self.durability = durability
         self.routing = routing
-        self.identityOverride = identityOverride
+        self.identity = identity
         self.correlation = correlation
     }
 
@@ -174,7 +202,7 @@ public struct WriteIntent: Sendable, Hashable {
         payload = WritePayload(ffi.payload)
         durability = Durability(ffi.durability)
         routing = WriteRouting(ffi.routing)
-        identityOverride = ffi.identityOverride
+        identity = Identity(ffi.identity)
         correlation = ffi.correlation
     }
 
@@ -183,7 +211,7 @@ public struct WriteIntent: Sendable, Hashable {
             payload: payload.toFfi(),
             durability: durability.toFfi(),
             routing: routing.toFfi(),
-            identityOverride: identityOverride,
+            identity: identity.toFfi(),
             correlation: correlation
         )
     }

@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 use nmp::{
     AcquisitionEvidence, AuthPhase, Binding, CancelWriteOutcome, CorrelationToken,
     DiagnosticsSnapshot, Durability, Engine, EngineConfig, FifoReceiver, FifoRecvTimeoutError,
-    Filter, Lane, LiveQuery, ObservationCancel, ReceiptId, ReceiptReattachment, Row, RowDelta,
-    ShortfallFact, SourceStatus, Timestamp, UnsignedEvent, WriteIntent, WritePayload, WriteRouting,
-    WriteStatus,
+    Filter, Identity, Lane, LiveQuery, ObservationCancel, ReceiptId, ReceiptReattachment, Row,
+    RowDelta, ShortfallFact, SourceStatus, Timestamp, UnsignedEvent, WriteIntent, WritePayload,
+    WriteRouting, WriteStatus,
 };
 use nmp_ffi::convert::{write_status_to_ffi, WriteStatusRef};
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
@@ -31,9 +31,9 @@ use nmp_ffi::nip02::{
 use nmp_ffi::nip22::{FfiCommentParent, FfiCommentRoot};
 use nmp_ffi::types::{
     FfiAcquisitionEvidence, FfiAuthPhase, FfiBinding, FfiCancelWriteOutcome,
-    FfiDiagnosticsSnapshot, FfiDurability, FfiFilter, FfiReceiptReattachment, FfiRowDelta,
-    FfiShortfallFact, FfiSourceStatus, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
-    FfiWriteStatus,
+    FfiDiagnosticsSnapshot, FfiDurability, FfiFilter, FfiIdentity, FfiReceiptReattachment,
+    FfiRowDelta, FfiShortfallFact, FfiSourceStatus, FfiWriteIntent, FfiWritePayload,
+    FfiWriteRouting, FfiWriteStatus,
 };
 use nmp_nip02::{
     observe_following, set_following, FollowAction, FollowActionStatus, FollowAvailability,
@@ -139,8 +139,8 @@ fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
     assert_eq!(ffi.durability, FfiDurability::Durable);
     assert!(matches!(direct.routing, WriteRouting::Auto));
     assert_eq!(ffi.routing, FfiWriteRouting::Auto);
-    assert!(direct.identity_override.is_none());
-    assert!(ffi.identity_override.is_none());
+    assert_eq!(direct.identity, Identity::Active);
+    assert_eq!(ffi.identity, FfiIdentity::Active);
     assert_eq!(
         direct.correlation.as_ref().map(ToString::to_string),
         Some(correlation.to_string())
@@ -1763,7 +1763,7 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
             payload: WritePayload::Event(body_of(&unsigned)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .expect("direct publish must enqueue");
@@ -1888,7 +1888,7 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
-            identity_override: None,
+            identity: FfiIdentity::Active,
             correlation: None,
         })
         .expect("FFI publish must enqueue");
@@ -1959,7 +1959,7 @@ async fn run_direct_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<
             payload: WritePayload::Event(body_of(&unsigned)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .expect("direct auth-parked publish must enqueue");
@@ -2019,7 +2019,7 @@ async fn run_ffi_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<Nor
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
-            identity_override: None,
+            identity: FfiIdentity::Active,
             correlation: None,
         })
         .expect("FFI auth-parked publish must enqueue");
@@ -2037,12 +2037,12 @@ async fn run_ffi_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<Nor
     receipts
 }
 
-/// #47 Unit A override publish, direct half. The override pubkey is
+/// #47 explicit-identity publish, direct half. The named pubkey is
 /// registered as a SECONDARY account -- in the engine's signer set but
 /// never active -- while the active account is a different registered
 /// identity. Same seeding/discovery preamble as `run_direct_success`, but
-/// the seeded kind:10002 belongs to the OVERRIDE identity: `Auto`
-/// routes by the intent's author, which #47 pins to the override. A silent
+/// the seeded kind:10002 belongs to the NAMED identity: `Auto`
+/// routes by the intent's author, which #47 pins to that key. A silent
 /// fallback to the active account would sign a DIFFERENT author and change
 /// the deterministic event id the `Signed` receipt names.
 async fn run_direct_override_publish(active: &Keys, override_keys: &Keys) -> Vec<NormStatus> {
@@ -2083,7 +2083,7 @@ async fn run_direct_override_publish(active: &Keys, override_keys: &Keys) -> Vec
             payload: WritePayload::Event(body_of(&unsigned)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: Some(override_pubkey),
+            identity: Identity::Explicit(override_pubkey),
             correlation: None,
         })
         .expect("direct override publish must enqueue");
@@ -2095,7 +2095,7 @@ async fn run_direct_override_publish(active: &Keys, override_keys: &Keys) -> Vec
     receipts
 }
 
-/// FFI half of the override publish -- its own isolated relay instance and
+/// FFI half of the explicit-identity publish -- its own isolated relay instance and
 /// the identical two-account construction as the direct half (active
 /// account registered AND active, override registered but never active),
 /// so the byte-identical receipt comparison is honest.
@@ -2140,7 +2140,9 @@ async fn run_ffi_override_publish(active: &Keys, override_keys: &Keys) -> Vec<No
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
-            identity_override: Some(override_pubkey),
+            identity: FfiIdentity::Explicit {
+                pubkey: override_pubkey,
+            },
             correlation: None,
         })
         .expect("FFI override publish must enqueue");
@@ -2171,7 +2173,7 @@ async fn run_direct_tampered(keys: &Keys) -> TamperedOutcome {
             payload: WritePayload::Signed(event),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .expect("well-formed tampered input is accepted by the direct call boundary");
@@ -2225,7 +2227,7 @@ async fn run_ffi_tampered(keys: &Keys) -> TamperedOutcome {
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
-            identity_override: None,
+            identity: FfiIdentity::Active,
             correlation: None,
         })
         .expect("well-formed tampered input must parse at the FFI call boundary");
@@ -2329,7 +2331,7 @@ async fn run_direct_reattach_live() -> ReattachProof {
             payload: WritePayload::Event(body_of(&unsigned)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .expect("direct publish must enqueue");
@@ -2407,7 +2409,7 @@ async fn run_ffi_reattach_live() -> ReattachProof {
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
-            identity_override: None,
+            identity: FfiIdentity::Active,
             correlation: None,
         })
         .expect("FFI publish must enqueue");
@@ -2508,7 +2510,7 @@ fn run_direct_correlation() -> CorrelationProof {
             }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: token(),
         })
         .expect("direct publish must enqueue");
@@ -2525,7 +2527,7 @@ fn run_direct_correlation() -> CorrelationProof {
             }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: token(),
         })
         .expect("direct re-publish with the same token must reattach, not fail");
@@ -2568,7 +2570,7 @@ fn run_ffi_correlation() -> CorrelationProof {
         },
         durability: FfiDurability::Durable,
         routing: FfiWriteRouting::Auto,
-        identity_override: None,
+        identity: FfiIdentity::Active,
         correlation: Some(CORRELATION_TOKEN.to_string()),
     };
 
@@ -2647,7 +2649,7 @@ fn run_direct_cancellation() -> CancellationProof {
             }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .expect("direct publish must enqueue");
@@ -2708,7 +2710,7 @@ async fn run_ffi_cancellation() -> CancellationProof {
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
-            identity_override: None,
+            identity: FfiIdentity::Active,
             correlation: None,
         })
         .expect("FFI publish must enqueue");
@@ -2775,7 +2777,7 @@ async fn run_direct_reattach_terminal(path: &std::path::Path) -> ReattachProof {
                 payload: WritePayload::Event(body_of(&unsigned)),
                 durability: Durability::Ephemeral,
                 routing: WriteRouting::Auto,
-                identity_override: None,
+                identity: Identity::Active,
                 correlation: None,
             })
             .expect("direct ephemeral publish must enqueue");
@@ -2847,7 +2849,7 @@ async fn run_ffi_reattach_terminal(path: &std::path::Path) -> ReattachProof {
                 },
                 durability: FfiDurability::Ephemeral,
                 routing: FfiWriteRouting::Auto,
-                identity_override: None,
+                identity: FfiIdentity::Active,
                 correlation: None,
             })
             .expect("FFI ephemeral publish must enqueue");
@@ -3009,17 +3011,17 @@ async fn auth_required_relay_parks_write_identically_direct_and_ffi() {
     );
 }
 
-/// #47 Unit A: a per-write `identity_override` naming a registered
+/// #47: a per-write `Identity::Explicit` naming a registered
 /// SECONDARY account (not the active one) must observe the same semantics
 /// through the direct Rust facade and the FFI facade: accepted, signed BY
-/// THE OVERRIDE, routed via the override's own outbox, and acked. The
+/// THAT KEY, routed via its own outbox, and acked. The
 /// `Signed` receipt's event id is the author proof -- an id hashes the
 /// author pubkey, so `expected_success_receipts(&override_keys)` can only
-/// match if `event.pubkey` IS the override; a silent fallback to the active
+/// match if `event.pubkey` IS that key; a silent fallback to the active
 /// account on either surface would mint a different id and fail both
 /// comparisons.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn identity_override_publish_signs_as_the_override_identically_direct_and_ffi() {
+async fn explicit_identity_publish_signs_as_that_key_identically_direct_and_ffi() {
     let active = fixed_keys();
     let override_keys = Keys::generate();
 
@@ -3155,7 +3157,7 @@ async fn run_direct_explicit_route(keys: &Keys, relay: &ScriptedRelay) -> Vec<No
             payload: WritePayload::Event(body_of(&unsigned)),
             durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay.url.clone()]),
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .expect("direct explicit publish must enqueue");
@@ -3197,7 +3199,7 @@ async fn run_ffi_explicit_route(keys: &Keys, relay: &ScriptedRelay) -> Vec<NormS
             routing: FfiWriteRouting::Explicit {
                 relays: vec![relay_url.clone()],
             },
-            identity_override: None,
+            identity: FfiIdentity::Active,
             correlation: None,
         })
         .expect("FFI explicit publish must enqueue");
@@ -3259,7 +3261,7 @@ async fn direct_and_ffi_refuse_an_empty_explicit_route_at_the_door() {
             }),
             durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![]),
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .expect("the refusal arrives on the receipt stream, not as a construction error");
@@ -3293,7 +3295,7 @@ async fn direct_and_ffi_refuse_an_empty_explicit_route_at_the_door() {
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Explicit { relays: vec![] },
-            identity_override: None,
+            identity: FfiIdentity::Active,
             correlation: None,
         })
         .expect("the refusal arrives on the receipt stream, not as a typed FfiError");

@@ -170,3 +170,64 @@ async fn person_posted_signed_note(w: &mut NmpWorld, person: String, text: Strin
 async fn signer_is_registered(w: &mut NmpWorld) {
     w.assert_signer_registered();
 }
+
+// ---- identity: who exists, and who can sign -----------------------------
+//
+// The subject of `features/identity/`. These name accounts by PUBKEY rather
+// than by a person's name, because that feature is written for a reader who
+// cares which key signed. Each hex string is an ordinary fixture-person label
+// (`NmpWorld::person`), so one hex names one keypair for the whole scenario.
+
+#[given(
+    regex = r#"^the account with pubkey "([0-9a-f]{64})" is registered with a working signer$"#
+)]
+async fn account_registered_with_signer(w: &mut NmpWorld, pubkey: String) {
+    w.register_identity_with_signer(&pubkey);
+}
+
+#[given(regex = r#"^my podcast identity "([0-9a-f]{64})" is registered with a working signer$"#)]
+async fn podcast_identity_registered(w: &mut NmpWorld, pubkey: String) {
+    w.register_podcast_identity(&pubkey);
+}
+
+/// The keypair exists and can be named; nothing in the world can sign for it.
+/// That gap is the entire subject of `awaiting-signer.feature`.
+#[given(regex = r#"^no signer is registered for "([0-9a-f]{64})"$"#)]
+async fn no_signer_registered_for(w: &mut NmpWorld, pubkey: String) {
+    w.register_identity_without_signer(&pubkey);
+}
+
+#[given(regex = r#"^"([0-9a-f]{64})" is the active account$"#)]
+async fn identity_is_active(w: &mut NmpWorld, pubkey: String) {
+    w.activate_identity(&pubkey).await;
+}
+
+#[given(regex = r#"^no account is active$"#)]
+async fn no_account_is_active(w: &mut NmpWorld) {
+    w.no_account_is_active();
+}
+
+#[given(regex = r#"^the podcast identity's signer is slow to answer$"#)]
+async fn podcast_signer_is_slow(w: &mut NmpWorld) {
+    let label = w.podcast_identity();
+    w.signer_is_slow(&label);
+}
+
+#[given(regex = r#"^that account's signer is slow to answer$"#)]
+async fn that_accounts_signer_is_slow(w: &mut NmpWorld) {
+    let label = w.current_identity();
+    w.signer_is_slow(&label);
+}
+
+#[given(regex = r#"^that account's signer is offline$"#)]
+async fn that_accounts_signer_is_offline(w: &mut NmpWorld) {
+    let label = w.current_identity();
+    w.signer_is_offline(&label);
+}
+
+/// The display form really is one: the bech32 rendering of the key this world
+/// minted for that label, arriving where display forms actually arrive.
+#[given(regex = r#"^the user pasted the npub form of "([0-9a-f]{64})" into the identity picker$"#)]
+async fn user_pasted_npub(w: &mut NmpWorld, pubkey: String) {
+    w.paste_npub_of(&pubkey);
+}

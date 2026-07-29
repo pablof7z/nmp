@@ -36,7 +36,6 @@ Feature: A named identity with no signer waits; it does not fail
 
   # ---- parking -----------------------------------------------------------
 
-  @designed
   Scenario: Naming an identity with no registered signer parks the write
     # The headline. The write is accepted -- a real, durable acceptance with
     # a frozen body -- and then waits. It is not refused, and it is not
@@ -48,7 +47,6 @@ Feature: A named identity with no signer waits; it does not fail
     And "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90" is never asked to sign it
     And "wss://hub.example" received nothing yet
 
-  @designed
   Scenario: The park is visible, not inferred from silence
     # The failure this rules out is a write that looks live and is actually
     # stuck. The app must be able to render "waiting for your podcast signer"
@@ -60,7 +58,6 @@ Feature: A named identity with no signer waits; it does not fail
 
   # ---- durability --------------------------------------------------------
 
-  @designed
   Scenario: A parked write survives restart still waiting for the same key
     When I compose an event of kind 1 saying "episode 19 is up" and publish it naming identity "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
     And the write reports accepted and the process stops immediately
@@ -70,7 +67,6 @@ Feature: A named identity with no signer waits; it does not fail
 
   # ---- completion --------------------------------------------------------
 
-  @designed
   Scenario: The write completes when that key's signer attaches later
     # The workflow the park exists for. A remote signer finishes pairing well
     # after the app queued the write, and the write picks up exactly where it
@@ -82,7 +78,6 @@ Feature: A named identity with no signer waits; it does not fail
     And the published event is authored by "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
     And "wss://hub.example" received it
 
-  @designed
   Scenario: A parked write survives restart and completes on the far side of it
     # Both halves in one run, because the two properties are only worth
     # having together: surviving a restart is pointless if the reattach no
@@ -95,7 +90,6 @@ Feature: A named identity with no signer waits; it does not fail
     Then the published event is authored by "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
     And "wss://hub.example" received it
 
-  @designed
   Scenario: A signer for a different key does not unpark it
     # The park names one key. Any other signer arriving is not the one it is
     # waiting for, however convenient it would be, and the frozen author is
@@ -105,7 +99,6 @@ Feature: A named identity with no signer waits; it does not fail
     Then the write is still awaiting a signer for "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
     And "wss://hub.example" received nothing
 
-  @designed
   Scenario: Logging out and back in as somebody else leaves the park alone
     # A parked write is not a property of the session. The account switch is
     # exactly the event that would retarget it if the identity were not
@@ -116,7 +109,6 @@ Feature: A named identity with no signer waits; it does not fail
 
   # ---- revoking it -------------------------------------------------------
 
-  @designed
   Scenario: A parked write can be cancelled
     # What makes waiting indefinitely acceptable: the app is never stuck with
     # it. Cancelling is the app's own decision arriving later, the same way

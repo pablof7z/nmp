@@ -451,7 +451,7 @@ fn auth_state_stays_one_entry_per_session_under_churn_and_kind_is_reserved() {
         ),
         durability: Durability::Ephemeral,
         routing: WriteRouting::Auto,
-        identity_override: None,
+        identity: Identity::Active,
         correlation: None,
     }));
     assert!(effects.iter().any(|effect| matches!(
@@ -482,7 +482,7 @@ fn only_exact_ready_wakes_the_current_waiting_auth_write_once() {
         payload: WritePayload::Signed(event.clone()),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
-        identity_override: None,
+        identity: Identity::Active,
         correlation: None,
     }));
     assert!(parked.iter().any(|effect| matches!(
@@ -533,7 +533,7 @@ fn unchallenged_protected_write_parks_only_for_the_bounded_probe_then_proceeds()
         payload: WritePayload::Signed(event.clone()),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
-        identity_override: None,
+        identity: Identity::Active,
         correlation: None,
     }));
     assert!(!parked
