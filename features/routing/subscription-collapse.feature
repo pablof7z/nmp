@@ -27,6 +27,13 @@ Feature: One subscription per relay, not one per thing you asked about
   Background:
     Given I am logged in as my own account
     And relay "hub" is the relay I watch directly
+    # This feature isolates the ordinary NIP-01 router plan. A behaviorally
+    # proven NIP-77 relay deliberately opens a distinct `limit:0` live
+    # candidate, waits for its EOSE, and only then overlap-closes the prior
+    # REQ. Letting that capability probe resolve between two watch mutations
+    # made the old oracle intermittently call a required protocol handoff
+    # router churn.
+    And relay "hub" advertises that NIP-77 is unsupported
 
   # ---- the tag axis ----------------------------------------------------
 
@@ -302,11 +309,11 @@ Feature: One subscription per relay, not one per thing you asked about
     # across eight consecutive suite runs, before and after making the wire
     # assertions poll, and after fixing a genuine ordering race in the fixture
     # (the sixth group used to be able to land before the first outer REQ
-    # existed, making the replacement unobservable). The residue is the same
-    # class as the author-axis flakes recorded in
-    # `docs/internals/subscriptions/identity-grouping-and-limits.md` §8.1c:
-    # a one-shot read of an asynchronous channel, and a recompile boundary the
-    # harness cannot await. Shipping it green would be luck, not proof.
+    # existed, making the replacement unobservable). Unlike the ordinary
+    # author/tag flake closed by #1004, this stimulus is downstream of an
+    # inbound EVENT, whose ingestion/resolution/recompile generation the
+    # harness cannot await. Shipping it green would be luck, not proof; see
+    # `docs/internals/subscriptions/identity-grouping-and-limits.md` §8.1c.
     Given I administer 5 groups
     And the group state of every group I administer is open
     When I am made an admin of one more group
