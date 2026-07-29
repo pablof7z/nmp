@@ -235,9 +235,7 @@ final class NMPSimulatorQualificationTests: XCTestCase {
 
         let receipt = try await engine.publish(
             WriteIntent(
-                payload: .unsigned(
-                    pubkey: account.publicKey,
-                    createdAt: UInt64(Date().timeIntervalSince1970),
+                payload: .event(
                     kind: 1,
                     tags: [],
                     content: "NMP issue 598 simulator qualification"
