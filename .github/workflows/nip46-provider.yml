@@ -18,63 +18,8 @@ jobs:
       - name: Delete NIP-46 and prove core plus an unrelated signer
         run: scripts/test-nip46-provider-removal.sh
 
-  swift-provider:
-    name: Swift NIP-46 component
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install pinned Rust toolchain
-        run: rustup show
-
-      - name: Add Apple simulator targets
-        run: rustup target add aarch64-apple-ios-sim x86_64-apple-ios
-
-      - name: Build core and provider XCFrameworks
-        run: |
-          scripts/build-swift-xcframework.sh --sim-only
-          core_only=$(
-            find Packages/NMP/NMP.xcframework -type f -name libnmp_ffi.a |
-              grep simulator | sort | head -n 1
-          )
-          test -n "$core_only"
-          cp "$core_only" "$RUNNER_TEMP/libnmp_ffi-core-only.a"
-          scripts/build-swift-nip46-xcframework.sh --sim-only
-
-      - name: Prove matched identity and package-set mismatch
-        run: |
-          matched_core=$(
-            find Packages/NMP/NMP.xcframework -type f -name libnmp_ffi.a |
-              grep simulator | sort | head -n 1
-          )
-          matched_provider=$(
-            find Packages/NMPNip46/NMPNip46.xcframework -type f -name libnmp_nip46_ffi.a |
-              grep simulator | sort | head -n 1
-          )
-          scripts/check-nip46-component-identity.sh \
-            "$RUNNER_TEMP/libnmp_ffi-core-only.a" \
-            "$matched_core" \
-            "$matched_provider"
-
-      - name: Prove the provider is absent from the core link/resource maps
-        run: |
-          matched_core=$(
-            find Packages/NMP/NMP.xcframework -type f -name libnmp_ffi.a |
-              grep simulator | sort | head -n 1
-          )
-          matched_provider=$(
-            find Packages/NMPNip46/NMPNip46.xcframework -type f -name libnmp_nip46_ffi.a |
-              grep simulator | sort | head -n 1
-          )
-          scripts/check-nip46-artifact-inventory.sh \
-            "$matched_core" \
-            "$matched_provider" \
-            Packages/NMP/Sources/NMPFFI \
-            Packages/NMPNip46/Sources/NMPNip46FFI
-
-      - name: Test the selectable provider package
-        run: swift test
-        working-directory: Packages/NMPNip46
+  # Swift provider qualification shares the one macOS runner owned by
+  # macos-qualification.yml. The Ubuntu removal and Kotlin proofs stay here.
 
   kotlin-provider:
     name: Kotlin NIP-46 component
