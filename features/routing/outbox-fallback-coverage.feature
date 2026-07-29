@@ -33,7 +33,6 @@ Feature: Fallback relays top up a recipient nobody else can reach
 
   # ---- the motivating case ----------------------------------------------
 
-  @designed
   Scenario: Replying to someone whose relay list names exactly one relay
     # The case the ruling was made on. Bob published a kind:10002 with a
     # single entry. One relay is one point of failure for the entire reply,
@@ -45,7 +44,6 @@ Feature: Fallback relays top up a recipient nobody else can reach
     Then the note is routed to exactly "author-write-1", "author-write-2", "bob-only-inbox", "fallback-1", and "fallback-2"
     And routing is complete
 
-  @designed
   Scenario: A recipient with no reachable inbox at all is topped up the same way
     # Zero is below two. A recipient whose relay list is settled as absent
     # contributes no inbox of its own, and the fallbacks are the only chance
@@ -60,7 +58,6 @@ Feature: Fallback relays top up a recipient nobody else can reach
 
   # ---- suppression ------------------------------------------------------
 
-  @designed
   Scenario: App relays suppress fallback entirely
     # The rule as the read path states it, transplanted verbatim. An operator
     # who configured app relays has already answered "where should things go
@@ -77,7 +74,6 @@ Feature: Fallback relays top up a recipient nobody else can reach
     And the note is never routed to "fallback-1"
     And the note is never routed to "fallback-2"
 
-  @designed
   Scenario: One configured app relay is enough to suppress, however thin it is
     # Suppression is on the PRESENCE of an app relay set, not on its size or
     # on whether it restores coverage. A single app relay leaves Bob served by
@@ -91,7 +87,6 @@ Feature: Fallback relays top up a recipient nobody else can reach
 
   # ---- adequate coverage ------------------------------------------------
 
-  @designed
   Scenario: A recipient already at coverage gets no fallback
     # Two is the minimum, and two is enough. Bob has two inboxes, so the
     # top-up has nothing to fix and adding the fallbacks would be a pure
@@ -104,7 +99,6 @@ Feature: Fallback relays top up a recipient nobody else can reach
     And the note is never routed to "fallback-1"
     And the note is never routed to "fallback-2"
 
-  @designed
   Scenario: The decision is per recipient, and one short recipient is enough to arm it
     # "Per author" is only observable through a pair like this. Carol alone
     # arms nothing; Bob alone arms the top-up; the two of them together still
@@ -118,7 +112,6 @@ Feature: Fallback relays top up a recipient nobody else can reach
     When I publish a note saying "one of you is thin" that p-tags Bob and Carol
     Then the note is routed to exactly "author-write-1", "author-write-2", "bob-only-inbox", "carol-inbox-1", "carol-inbox-2", "fallback-1", and "fallback-2"
 
-  @designed
   Scenario: An amply covered recipient alone never arms the top-up
     # The control for the scenario above, and the guard against buying it by
     # applying fallback whenever any recipient exists at all.
@@ -130,7 +123,6 @@ Feature: Fallback relays top up a recipient nobody else can reach
 
   # ---- what the top-up must NOT become ----------------------------------
 
-  @designed
   Scenario: The author's own thin fan-out is not a coverage problem
     # The line drawn in this feature's preamble, asserted. A write already
     # fans out to EVERY write relay the author has; there is no per-author
@@ -147,7 +139,6 @@ Feature: Fallback relays top up a recipient nobody else can reach
     And the note is never routed to "fallback-1"
     And the note is never routed to "fallback-2"
 
-  @designed
   Scenario: No fallback relays configured and a thin recipient is not an error
     # Nothing about the top-up is required for routing to succeed. With no
     # fallbacks configured the route is simply what the three sources yielded,

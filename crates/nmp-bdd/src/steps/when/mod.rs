@@ -260,6 +260,47 @@ async fn person_relay_list_arrives(w: &mut NmpWorld, person: String, relay: Stri
     w.relay_list_arrives(&person, &[], &[relay]).await;
 }
 
+// ---- routing: the outbox default ----------------------------------------
+//
+// The subject of `features/routing/outbox-*.feature`. "p-tags" rather than
+// "mentioning" because these scenarios are about the TAG: a recipient is
+// reached at the inbox their relay list names, and which tag put them in the
+// event is exactly what decides that.
+
+#[when(regex = r#"^I publish a note saying "([^"]+)" that p-tags (.+)$"#)]
+async fn publish_note_p_tagging(w: &mut NmpWorld, text: String, people: String) {
+    w.publish_note_mentioning(&text, &parse_people(&people))
+        .await;
+}
+
+/// An ordinary kind:0 through the ordinary door, saying nothing about relays
+/// -- the whole point of the app-relay scenarios being that a profile is not
+/// a special case.
+#[when(regex = r#"^I publish my profile$"#)]
+async fn publish_profile(w: &mut NmpWorld) {
+    w.publish_profile().await;
+}
+
+#[when(regex = r#"^I publish a kind (\d+) event$"#)]
+async fn publish_kind(w: &mut NmpWorld, kind: u16) {
+    w.publish_kind(kind).await;
+}
+
+#[when(regex = r#"^my relay list arrives naming (.+) as my write relays$"#)]
+async fn my_relay_list_arrives_plural(w: &mut NmpWorld, list: String) {
+    let names = crate::steps::parse_quoted_list(&list);
+    assert!(!names.is_empty(), "expected quoted relay names in {list:?}");
+    w.relay_list_arrives(ME, &names, &[]).await;
+}
+
+/// The withholding source starts answering. A real relay really does reach
+/// end of stored events, on the subscription the engine already had open, and
+/// the absence settles off that -- nothing is injected into the directory.
+#[when(regex = r#"^the indexers finish their stored events without a relay list for (?:\S+)$"#)]
+async fn indexers_finish_stored_events(w: &mut NmpWorld) {
+    w.indexers_finish_stored_events().await;
+}
+
 #[when(regex = r#"^the indexers deliver (\S+)'s relay list and confirm end of stored events$"#)]
 async fn indexers_deliver_relay_list(w: &mut NmpWorld, person: String) {
     let relays = w.read_relay_names_of(&person);

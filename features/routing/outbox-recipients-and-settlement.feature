@@ -29,7 +29,6 @@ Feature: An outbox can finish -- unknown recipients keep it open, absent ones do
 
   # ---- the worked example ------------------------------------------------
 
-  @designed
   Scenario: Three recipients, one relay list between them, and the outbox is consumed
     # Pablo's example, transcribed step for step. Bob has a kind:10002; Carol
     # and Dave definitively do not, and the indexers finishing their stored
@@ -44,7 +43,6 @@ Feature: An outbox can finish -- unknown recipients keep it open, absent ones do
     Then the note is routed to exactly "author-write-1", "author-write-2", "app-indexer", and "bob-inbox"
     And routing is complete
 
-  @designed
   Scenario: A settled-absent recipient neither adds a relay nor delays anything
     # The unit version of the rule above. "Settled absent" is a resolved
     # input: it contributes nothing to the route AND blocks nothing, which is
@@ -58,7 +56,6 @@ Feature: An outbox can finish -- unknown recipients keep it open, absent ones do
 
   # ---- unknown keeps it live ---------------------------------------------
 
-  @designed
   Scenario: A recipient nobody has looked up yet keeps the routing open
     # The distinction that earns the three-valued model. Carol has not been
     # looked up, so her inbox is unknown -- not empty. Treating that as "she
@@ -74,7 +71,6 @@ Feature: An outbox can finish -- unknown recipients keep it open, absent ones do
     And routing is not complete
     And the publish has not failed
 
-  @designed
   Scenario: When the unknown settles, the route finishes without the app asking again
     # The wake. The app published once and holds one receipt; it never
     # re-submits, never polls, and never learns that a lookup was outstanding.
@@ -87,7 +83,6 @@ Feature: An outbox can finish -- unknown recipients keep it open, absent ones do
     Then the note is routed to exactly "author-write-1", "author-write-2", "app-indexer", "bob-inbox", and "carol-inbox"
     And routing is complete
 
-  @designed
   Scenario: An unknown that settles as absent finishes the route just as well
     # The other settlement outcome, and the one that makes retirement
     # reachable at all. Nothing new is added to the route; what changes is
@@ -101,7 +96,6 @@ Feature: An outbox can finish -- unknown recipients keep it open, absent ones do
     Then the note is routed to exactly "author-write-1", "author-write-2", "app-indexer", and "bob-inbox"
     And routing is complete
 
-  @designed
   Scenario: One unknown among many settled recipients is enough to keep it open
     # Completion is a property of the whole recipient set, not a majority of
     # it. Four of five are answered; the fifth alone holds the obligation
@@ -118,7 +112,6 @@ Feature: An outbox can finish -- unknown recipients keep it open, absent ones do
 
   # ---- the author's own list ---------------------------------------------
 
-  @designed
   Scenario: An author whose relay list declares zero write relays is known, not unknown
     # A published kind:10002 that names no write relays is an ANSWER. The
     # author said, on the record, "I write nowhere in particular" -- and the
@@ -133,7 +126,6 @@ Feature: An outbox can finish -- unknown recipients keep it open, absent ones do
     Then the note is routed to exactly "app-indexer"
     And routing is complete
 
-  @designed
   Scenario: A relay list that is all read-marked is the same known-empty case
     # The shape this actually turns up as in the wild: someone's list has
     # entries, all of them read-marked, so their WRITE set is empty while
@@ -144,7 +136,6 @@ Feature: An outbox can finish -- unknown recipients keep it open, absent ones do
     And the note is never routed to "author-read-only"
     And routing is complete
 
-  @designed
   Scenario: Publishing before my own relay list has ever been fetched waits, and does not die
     # The cold start, and the master defect it is written against: a routing
     # error at `on_signed` removes the pending write and emits
@@ -164,7 +155,6 @@ Feature: An outbox can finish -- unknown recipients keep it open, absent ones do
     And routing is not complete
     And the publish has not failed
 
-  @designed
   Scenario: My own relay list arriving finishes a route that was waiting on it
     # The author arm of the wake. Same one receipt, same event, no
     # re-submission by the app.

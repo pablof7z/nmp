@@ -176,7 +176,15 @@ async fn numbered_receipt_acked(w: &mut NmpWorld, ordinal: String, relay_name: S
 /// routing-plane spelling `... is published to "a"`. One assertion for both:
 /// "published" and "delivered" name the same observable — the relay itself
 /// confirming it took the event.
-#[then(regex = r#"^the (?:note|event|relay list) is (?:delivered|published) to (.+)$"#)]
+///
+/// The target list must END in a quoted name, so this cannot swallow a
+/// sentence that goes on to say something else about the same relay
+/// (`... is published to "a" exactly once`, whose claim is a COUNT and whose
+/// own step owns it). A greedy tail matched both, and the weaker of the two
+/// assertions would have silently won.
+#[then(
+    regex = r#"^the (?:note|event|relay list) is (?:delivered|published) to ((?:[^"]*"[^"]+")+)$"#
+)]
 async fn delivered_to(w: &mut NmpWorld, targets: String) {
     let names = crate::steps::parse_quoted_list(&targets);
     assert!(

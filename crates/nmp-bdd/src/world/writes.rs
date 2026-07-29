@@ -372,6 +372,30 @@ impl NmpWorld {
             .count()
     }
 
+    /// Bounded wait for the FIRST offer -- the precondition of every count
+    /// above, and it has to be a wait rather than a read.
+    ///
+    /// A receipt beat and a socket write are not the same instant. Most
+    /// scenarios here say `the receipt reports the note acked by "<relay>"`
+    /// first, which incidentally guarantees the frame already landed; one
+    /// that asserts on the ROUTE instead ("the receipt reports exactly one
+    /// destination") reaches this while the write is still in flight, and a
+    /// one-shot read then reports zero offers -- truthfully, and about
+    /// nothing. Waiting is also strictly safer for the count that follows: it
+    /// gives a second offer more time to show up, never less.
+    pub async fn wait_for_offer(&mut self, relay: &str, id: EventId) -> bool {
+        let deadline = Instant::now() + EVENTUALLY;
+        loop {
+            if self.offers_of(relay, id) > 0 {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     /// How many DISTINCT copies of that event this relay holds -- the other
     /// half of "offered twice, holds one".
     pub fn copies_held_by(&mut self, relay: &str, id: EventId) -> usize {

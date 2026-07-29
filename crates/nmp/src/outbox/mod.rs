@@ -52,7 +52,22 @@ pub enum WriteStatus {
     },
     Signed(EventId),
     /// Routing has not produced a single relay yet, and `detail` says what it
-    /// is waiting for ("no relay list known yet for <pubkey>").
+    /// is waiting for.
+    ///
+    /// `detail` is a CONTRACT, not decoration: it names every exhausted source
+    /// and keeps the two shapes of nothing apart, because "stuck" and "stuck
+    /// because X" are different messages and only the second one can be acted
+    /// on. Two forms, and the difference between them is the whole point —
+    /// one is worth waiting for and the other never will be:
+    ///
+    /// - `no relay list known yet for <pubkey>` — discovery has not finished
+    ///   for them. Waiting is exactly the right response.
+    /// - `no destination could be determined: no relay list exists for
+    ///   <pubkey>; no app relays are configured; no fallback relays are
+    ///   configured` — every source is exhausted and settled. Waiting will
+    ///   never help; the clauses double as the list of ways to fix it,
+    ///   because configuring any single one of them would have produced a
+    ///   route.
     ///
     /// The routing sibling of [`Self::AwaitingCapability`]'s durable park:
     /// retained, NOT terminal, and re-emitted verbatim on receipt

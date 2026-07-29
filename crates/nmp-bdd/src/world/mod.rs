@@ -32,6 +32,21 @@
 //! - `observe` -- the observation plane: the accumulating channels
 //!   (`FeedState`/`ReceiptState`/`DiagFeed`) and the bounded observers a
 //!   `Then` step reads them through.
+//! - `contacts` -- the OTHER witness: the scripted relay's own log of what
+//!   reached its socket, and what changed since a marked moment. Apart from
+//!   `observe` deliberately -- a "never contacted" claim must not rest solely
+//!   on the engine's own self-report, or a diagnostics bug could make the
+//!   claim un-falsifiable.
+//! - `outbox` -- the world an `Auto` write's DEFAULT route is derived from:
+//!   the two operator relay sets, the two halves of one person's relay list,
+//!   and the three-valued knowledge those scenarios turn on. Distinct from
+//!   `staging` because what it stages is what the engine has been able to
+//!   LEARN, and because the operator sets belong to nobody in particular.
+//! - `routes` -- the other end of that scenario: what the receipt said about
+//!   where the write goes, and what it said when the answer was nothing.
+//!   Apart from `outbox` because a derivation's inputs and its answer are
+//!   separate concerns, and a reader chasing a wrong route wants one or the
+//!   other, never both at once.
 //! - `staging` -- `Given`-time staging (plain data, no I/O) and the single
 //!   lazy `ensure_started` that turns all of it into a running world.
 //! - `actions` -- `When`-time acts: open a feed, publish, switch account,
@@ -82,14 +97,17 @@
 mod actions;
 mod budgets;
 mod clock;
+mod contacts;
 mod group_fixtures;
 mod group_surface;
 mod groups;
 mod identity;
 mod observe;
+mod outbox;
 mod queries;
 mod replaceable;
 mod restart;
+mod routes;
 mod signers;
 mod staging;
 mod stalled;
@@ -202,6 +220,28 @@ pub struct NmpWorld {
     /// not the same as never having published one, and the whole point of
     /// three-valued knowledge is that those two do not collapse.
     declares_no_relays: Vec<String>,
+    /// People whose relay list EXISTS and names no WRITE relay -- the
+    /// half-empty case, which turns up in the wild as a list whose entries
+    /// are all read-marked. Their read half may still name relays, so this
+    /// cannot be folded into `declares_no_relays`.
+    declares_no_write_relays: Vec<String>,
+    /// The operator's two additive relay sets. Neither belongs to any
+    /// person, which is why they are named here rather than in
+    /// `write_relay_of`/`read_relay_of`: `app_relays` reaches every kind of
+    /// every author always, and `fallback_relays` tops up a p-tagged
+    /// recipient below the coverage minimum unless an app relay suppressed
+    /// it.
+    app_relay_names: Vec<String>,
+    fallback_relay_names: Vec<String>,
+    /// Indexers currently withholding their end-of-stored-events. One
+    /// unfinished source is enough to keep every absence unsettled, and
+    /// keeping the OTHER indexer well-behaved is what lets a relay list
+    /// still arrive while nothing settles.
+    withholding_indexers: Vec<String>,
+    /// When the last publish went out, on the same wall clock the engine
+    /// stamps a stalled write with -- the lower bound that makes
+    /// "how long it has been stuck" a recorded fact rather than a number.
+    last_publish_at: Option<nostr::Timestamp>,
 
     pending_contact_lists: Vec<PendingContactList>,
     /// Notes staged as already-signed events, kept verbatim so a later step

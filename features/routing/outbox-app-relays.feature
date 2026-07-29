@@ -34,7 +34,6 @@ Feature: App relays are additive for every kind, every author, always
 
   # ---- the request that falls out for free ------------------------------
 
-  @designed
   Scenario: A profile publish reaches the app's indexer with no route the app ever named
     # The @lima-codex case, as the consumer would state it: "my profile edits
     # should show up in my app's own search". The app publishes a kind:0 the
@@ -44,7 +43,6 @@ Feature: App relays are additive for every kind, every author, always
     Then the profile is routed to exactly "author-write-1", "author-write-2", "app-indexer", and "app-archive"
     And routing is complete
 
-  @designed
   Scenario: A profile publish is not a special case in any way a test can see
     # The guard on the scenario above. A kind:0 must route by exactly the same
     # derivation as a kind:1 -- same sources, same union -- so that "profiles
@@ -57,7 +55,6 @@ Feature: App relays are additive for every kind, every author, always
 
   # ---- every kind ------------------------------------------------------
 
-  @designed
   Scenario Outline: Every kind reaches the app relays
     # "Every kind, every author, always." The rows span the shapes that
     # usually tempt someone into a special case: metadata, contacts, ordinary
@@ -81,7 +78,6 @@ Feature: App relays are additive for every kind, every author, always
 
   # ---- additive, in both directions -------------------------------------
 
-  @designed
   Scenario: App relays are added to a healthy relay list, not held in reserve
     # The anti-fallback assertion. An author with plenty of write relays still
     # gets the app relays; there is no coverage threshold above which they
@@ -92,7 +88,6 @@ Feature: App relays are additive for every kind, every author, always
     Then the note is routed to "app-indexer"
     And the note is routed to "app-archive"
 
-  @designed
   Scenario: App relays are added on top of the recipient fan-out too
     # Composition with source 3. The app's own relays do not replace, narrow,
     # or stand in for a recipient's inbox; all of it lands.
@@ -100,7 +95,6 @@ Feature: App relays are additive for every kind, every author, always
     When I publish a note saying "for Bob, and for the app" that p-tags Bob
     Then the note is routed to exactly "author-write-1", "author-write-2", "app-indexer", "app-archive", and "bob-inbox"
 
-  @designed
   Scenario: An author with nothing of their own still reaches the app relays
     # The other end of "additive": added to nothing is still added. This is
     # also the shape that makes an author with no write relays routable at
@@ -113,7 +107,6 @@ Feature: App relays are additive for every kind, every author, always
 
   # ---- the control -----------------------------------------------------
 
-  @designed
   Scenario: An app that configured no app relays gets none invented for it
     # The resolver holds no built-in relay set of its own. "Always additive"
     # means the operator's set is always added; it never means there is a
