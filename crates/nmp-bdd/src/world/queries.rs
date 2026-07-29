@@ -60,12 +60,29 @@ pub struct WatchShape {
 /// contract under specification is about what reaches a NAMED relay, so the
 /// scenario must not also depend on relay discovery choosing that relay.
 pub fn tagged_note_query(relay: &RelayUrl, tag: char, value: &str, shape: WatchShape) -> LiveQuery {
+    tagged_note_query_values(relay, tag, BTreeSet::from([value.to_string()]), shape)
+}
+
+/// The same shape carrying MORE THAN ONE value of the tag -- one app watch
+/// that already asks for a set, which is what the scale watch in
+/// [`super::watches`] opens instead of one handle per value (#994).
+///
+/// It is the same demand a merged pair would produce, so it does not weaken
+/// what the collapse scenario can falsify: the coalescer's job is to reach one
+/// bounded wire subscription regardless of how the app happened to split its
+/// asks.
+pub(super) fn tagged_note_query_values(
+    relay: &RelayUrl,
+    tag: char,
+    values: BTreeSet<String>,
+    shape: WatchShape,
+) -> LiveQuery {
     let tag = IndexedTagName::new(tag).expect("nmp-bdd: an indexed tag name is one ASCII letter");
     pinned_note_query(
         relay,
         Filter {
             kinds: Some(BTreeSet::from([1u16])),
-            tags: BTreeMap::from([(tag, Binding::Literal(BTreeSet::from([value.to_string()])))]),
+            tags: BTreeMap::from([(tag, Binding::Literal(values))]),
             limit: shape.limit,
             since: shape.since,
             ..Filter::default()

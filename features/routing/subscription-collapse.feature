@@ -122,21 +122,21 @@ Feature: One subscription per relay, not one per thing you asked about
     # The bound is a frame-size limit, not a demand limit: it must chunk and
     # ship the remainder as further subscriptions, exactly as the id-array
     # bound does (`nmp_router::MAX_IDS_PER_FILTER`, which shards rather than
-    # drops). Before the collapse, 1200 values left 2121 LIVE subscriptions
-    # against a relay ceiling of about 20, every filter carrying one value out
-    # of a 500-value budget.
+    # drops). The BDD presents the 1200 values through 21 independent app
+    # watches: without coalescing that is still one subscription over the
+    # relay ceiling of 20, while avoiding 1200 synchronous whole-plan
+    # recompiles in the test harness (#994). The router's direct singleton-
+    # atom falsifier separately feeds all 1200 entries one-by-one.
     #
     # THE COUNT IS DELIBERATELY A BOUND, NOT A NUMBER, and this scenario was
     # revised to say so. It originally asked for exactly 3 -- the arithmetic
     # of 1200 at 500 a filter. The coalescer is a greedy pairwise fixed point,
-    # so mutually-mergeable filters double (1 -> 2 -> 4 -> ...) and chunks
-    # stall at the largest power of two still under the bound: measured, 1200
-    # values produce FOUR filters of 256/256/256/432. What is provable rather
-    # than emergent is a window -- a terminal state has no mergeable pair, so
-    # every pair of chunks sums over the bound and at most one chunk is
-    # half-full. The contract worth stating is the relay's own ceiling, which
-    # is what this now asserts; the wasted headroom is a bin-packing cost, not
-    # a correctness one, and is recorded in
+    # so mutually-mergeable inputs double until their union reaches the cap.
+    # What is provable rather than emergent is a window -- a terminal state
+    # has no mergeable pair, so every pair of chunks sums over the bound and
+    # at most one chunk is half-full. The contract worth stating is the
+    # relay's own ceiling, which is what this now asserts; the wasted headroom
+    # is a bin-packing cost, not a correctness one, and is recorded in
     # `docs/internals/subscriptions/identity-grouping-and-limits.md` §3.3.
     When I watch for notes tagged "p" as 1200 different values
     Then relay "hub" serves every "p" watch with at most 20 subscriptions
