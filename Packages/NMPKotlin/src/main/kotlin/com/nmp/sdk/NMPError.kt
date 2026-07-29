@@ -142,6 +142,17 @@ sealed class NMPError(message: String) : Exception(message) {
     data class InvalidNip73Target(val reason: String) :
         NMPError("invalid NIP-73 target: $reason")
 
+    /** #973: a composer returned a compare-and-swap replaceable edit, which
+     * has no wire form on purpose -- a replaceable precondition crosses this
+     * boundary only inside the semantic method that owns it
+     * (`follow`/`unfollow`), never as a payload a native caller could
+     * reassemble without the guard. */
+    object ReplaceableEditHasNoWireForm :
+        NMPError(
+            "a replaceable edit crosses this boundary only inside the semantic method that owns " +
+                "its precondition, never as a payload",
+        )
+
     companion object {
         fun from(ffi: FfiException): NMPError =
             when (ffi) {
@@ -182,6 +193,7 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.InvalidCorrelationToken ->
                     InvalidCorrelationToken(ffi.got, ffi.reason)
                 is FfiException.InvalidNip73Target -> InvalidNip73Target(ffi.reason)
+                is FfiException.ReplaceableEditHasNoWireForm -> ReplaceableEditHasNoWireForm
             }
     }
 }

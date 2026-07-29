@@ -297,13 +297,7 @@ final class FilterBuilderTests: XCTestCase {
     func testExplicitRoutingCarriesTheAppsExactRelayListBothWays() {
         let typed = ["wss://user-typed-relay.example", "wss://second.example"]
         let intent = WriteIntent(
-            payload: .unsigned(
-                pubkey: String(repeating: "a", count: 64),
-                createdAt: 42,
-                kind: 1,
-                tags: [],
-                content: "for the archive"
-            ),
+            payload: .event(kind: 1, content: "for the archive", createdAt: 42),
             durability: .durable,
             routing: .explicit(relays: typed)
         )
@@ -311,12 +305,9 @@ final class FilterBuilderTests: XCTestCase {
 
         let back = WriteIntent(
             FfiWriteIntent(
-                payload: .unsigned(
-                    pubkey: String(repeating: "a", count: 64),
-                    createdAt: 42,
-                    kind: 1,
-                    tags: [],
-                    content: "for the archive"
+                payload: .event(
+                    builder: FfiEventBuilder(
+                        kind: 1, tags: [], content: "for the archive", createdAt: 42)
                 ),
                 durability: .durable,
                 routing: .explicit(relays: typed),

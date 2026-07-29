@@ -14,7 +14,7 @@ import uniffi.nmp_ffi.FfiWriteRouting
 // only proves the Kotlin-value -> Ffi-value conversion is lossless,
 // including the per-write identity override (#47).
 class WriteIntentTest {
-    private fun unsignedPayload(pubkey: String) =
+    private fun builderPayload() =
         WritePayload.Event(
             kind = 1u,
             tags = emptyList(),
@@ -30,7 +30,7 @@ class WriteIntentTest {
         val overridePubkey = "b".repeat(64)
         val intent =
             WriteIntent(
-                payload = unsignedPayload(overridePubkey),
+                payload = builderPayload(),
                 durability = Durability.Durable,
                 routing = WriteRouting.Auto,
                 identityOverride = overridePubkey,
@@ -45,7 +45,7 @@ class WriteIntentTest {
     fun writeIntentDefaultLeavesIdentityOverrideNull() {
         val intent =
             WriteIntent(
-                payload = unsignedPayload("b".repeat(64)),
+                payload = builderPayload(),
                 durability = Durability.Durable,
                 routing = WriteRouting.Auto,
             )
@@ -134,7 +134,7 @@ class WriteIntentTest {
         val typed = listOf("wss://user-typed-relay.example", "wss://second.example")
         val intent =
             WriteIntent(
-                payload = unsignedPayload("a".repeat(64)),
+                payload = builderPayload(),
                 durability = Durability.Durable,
                 routing = WriteRouting.Explicit(typed),
             )
@@ -144,12 +144,13 @@ class WriteIntentTest {
             WriteIntent.from(
                 FfiWriteIntent(
                     payload =
-                        FfiWritePayload.Unsigned(
-                            pubkey = "a".repeat(64),
-                            createdAt = 42uL,
-                            kind = 1u,
-                            tags = emptyList(),
-                            content = "for the archive",
+                        FfiWritePayload.Event(
+                            FfiEventBuilder(
+                                kind = 1u,
+                                tags = emptyList(),
+                                content = "for the archive",
+                                createdAt = 42uL,
+                            ),
                         ),
                     durability = FfiDurability.DURABLE,
                     routing = FfiWriteRouting.Explicit(typed),
