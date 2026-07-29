@@ -213,6 +213,10 @@ fn named_relays(status: &WriteStatus) -> Vec<nostr::RelayUrl> {
         | WriteStatus::OutcomeUnknown(relay) => vec![relay.clone()],
         WriteStatus::Accepted
         | WriteStatus::Cancelled
+        // A retired obligation names no relay: supersession happens at
+        // acceptance, before any route is resolved, and is precisely the
+        // case where nothing was ever sent anywhere.
+        | WriteStatus::Superseded
         | WriteStatus::AwaitingCapability { .. }
         | WriteStatus::Signed(_)
         | WriteStatus::ReplaceableConflict { .. }

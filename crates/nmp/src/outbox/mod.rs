@@ -35,6 +35,10 @@ pub enum WriteStatus {
     /// signature promotion. Compensation committed atomically and this
     /// terminal fact is retained for receipt reattachment.
     Cancelled,
+    /// A newer accepted write won the same NIP-01 replaceable/addressable
+    /// coordinate before this obligation started any wire attempt. Terminal
+    /// and durably replayable; the older obligation is not retried.
+    Superseded,
     /// No registered signer answers for `pubkey` -- the exact identity
     /// FROZEN at acceptance (`AcceptWrite::expected_pubkey` / an
     /// the resolved `Identity`, #47). Retained, not terminal: re-armed
@@ -137,6 +141,9 @@ pub enum CancelWriteError {
     AlreadyCompensated {
         receipt_id: ReceiptId,
     },
+    AlreadySuperseded {
+        receipt_id: ReceiptId,
+    },
     AlreadyAbandoned {
         receipt_id: ReceiptId,
     },
@@ -163,6 +170,13 @@ impl std::fmt::Display for CancelWriteError {
             ),
             Self::AlreadyCompensated { receipt_id } => {
                 write!(f, "receipt {} is already compensated", receipt_id.0)
+            }
+            Self::AlreadySuperseded { receipt_id } => {
+                write!(
+                    f,
+                    "receipt {} was superseded by a newer write",
+                    receipt_id.0
+                )
             }
             Self::AlreadyAbandoned { receipt_id } => {
                 write!(f, "receipt {} was abandoned after restart", receipt_id.0)

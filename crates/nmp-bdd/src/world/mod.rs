@@ -255,7 +255,11 @@ pub struct NmpWorld {
     engine: Option<Engine>,
     handle: Option<Handle>,
     feed: Option<FeedState>,
-    last_receipt: Option<ReceiptState>,
+    /// Every publish this scenario made, in the order it made them. Most
+    /// scenarios publish once and only ever ask about the last; a scenario
+    /// about one write RETIRING another needs both obligations at the same
+    /// time, so the world keeps the whole list rather than the newest.
+    receipts: Vec<ReceiptState>,
     diag: Option<DiagFeed>,
     contact_snapshot: HashMap<String, u64>,
     /// Taken alongside [`Self::contact_snapshot`]: how many REQ/CLOSE frames

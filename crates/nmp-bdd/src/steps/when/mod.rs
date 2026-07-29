@@ -45,6 +45,11 @@ async fn publish_note(w: &mut NmpWorld, text: String) {
     w.publish_note(&text).await;
 }
 
+#[when(regex = r#"^I publish kind (\d+) with d tag "([^"]*)" saying "([^"]+)"$"#)]
+async fn publish_replaceable(w: &mut NmpWorld, kind: u16, d: String, text: String) {
+    w.publish_replaceable(kind, &d, &text).await;
+}
+
 #[when(regex = r#"^I switch to (\S+)'s account$"#)]
 async fn switch_account(w: &mut NmpWorld, person: String) {
     w.switch_account(&person).await;

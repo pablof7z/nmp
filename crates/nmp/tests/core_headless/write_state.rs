@@ -434,7 +434,7 @@ fn relay_rejection_after_promotion_does_not_retract_the_signed_row() {
 }
 
 #[test]
-fn cancelling_displaced_pending_then_newest_never_resurrects_cancelled_row() {
+fn cancelling_newest_restores_valid_base_but_never_retired_pending_middle() {
     let a = Keys::generate();
     let mut core = new_core(FixtureDirectory::new());
     activate(&mut core, &a);
@@ -452,6 +452,7 @@ fn cancelling_displaced_pending_then_newest_never_resurrects_cancelled_row() {
     )
     .sign_with_keys(&a)
     .unwrap();
+    let base_id = base.id;
     core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(base.clone()),
         durability: Durability::Durable,
@@ -499,11 +500,19 @@ fn cancelling_displaced_pending_then_newest_never_resurrects_cancelled_row() {
     assert!(!all_row_deltas(&newest_cancel)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == middle_id)));
+    assert!(all_row_deltas(&newest_cancel)
+        .iter()
+        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == base_id)));
     let fresh = core.handle(EngineMsg::Subscribe(literal_query(
         &[0],
         &a.public_key().to_hex(),
     )));
-    assert!(all_row_deltas(&fresh).is_empty());
+    assert!(all_row_deltas(&fresh)
+        .iter()
+        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == base_id)));
+    assert!(!all_row_deltas(&fresh)
+        .iter()
+        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == middle_id)));
 }
 
 #[test]

@@ -1208,6 +1208,7 @@ pub fn write_status_to_ffi(s: WriteStatusRef<'_>) -> FfiWriteStatus {
     match s.0 {
         GWriteStatus::Accepted => FfiWriteStatus::Accepted,
         GWriteStatus::Cancelled => FfiWriteStatus::Cancelled,
+        GWriteStatus::Superseded => FfiWriteStatus::Superseded,
         GWriteStatus::AwaitingCapability { pubkey } => FfiWriteStatus::AwaitingCapability {
             pubkey: pubkey.to_hex(),
         },
@@ -1295,6 +1296,11 @@ pub fn cancel_write_error_to_ffi(error: CancelWriteError) -> FfiCancelWriteError
         },
         CancelWriteError::AlreadyCompensated { receipt_id } => {
             FfiCancelWriteError::AlreadyCompensated {
+                receipt_id: receipt_id.0,
+            }
+        }
+        CancelWriteError::AlreadySuperseded { receipt_id } => {
+            FfiCancelWriteError::AlreadySuperseded {
                 receipt_id: receipt_id.0,
             }
         }
@@ -1449,6 +1455,7 @@ mod write_status_tests {
         let cases = vec![
             (GWriteStatus::Accepted, FfiWriteStatus::Accepted),
             (GWriteStatus::Cancelled, FfiWriteStatus::Cancelled),
+            (GWriteStatus::Superseded, FfiWriteStatus::Superseded),
             (
                 GWriteStatus::AwaitingCapability { pubkey },
                 FfiWriteStatus::AwaitingCapability {
@@ -1598,6 +1605,10 @@ mod write_status_tests {
         assert_eq!(
             cancel_write_error_to_ffi(CancelWriteError::AlreadyCompensated { receipt_id: id }),
             FfiCancelWriteError::AlreadyCompensated { receipt_id: 41 }
+        );
+        assert_eq!(
+            cancel_write_error_to_ffi(CancelWriteError::AlreadySuperseded { receipt_id: id }),
+            FfiCancelWriteError::AlreadySuperseded { receipt_id: 41 }
         );
         assert_eq!(
             cancel_write_error_to_ffi(CancelWriteError::AlreadyAbandoned { receipt_id: id }),

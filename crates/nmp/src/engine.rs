@@ -89,6 +89,9 @@ pub enum CancelWriteError {
     AlreadyCompensated {
         receipt_id: ReceiptId,
     },
+    AlreadySuperseded {
+        receipt_id: ReceiptId,
+    },
     AlreadyAbandoned {
         receipt_id: ReceiptId,
     },
@@ -122,6 +125,9 @@ fn cancel_write_error_from_engine(error: crate::outbox::CancelWriteError) -> Can
         crate::outbox::CancelWriteError::AlreadyCompensated { receipt_id } => {
             CancelWriteError::AlreadyCompensated { receipt_id }
         }
+        crate::outbox::CancelWriteError::AlreadySuperseded { receipt_id } => {
+            CancelWriteError::AlreadySuperseded { receipt_id }
+        }
         crate::outbox::CancelWriteError::AlreadyAbandoned { receipt_id } => {
             CancelWriteError::AlreadyAbandoned { receipt_id }
         }
@@ -146,6 +152,13 @@ impl std::fmt::Display for CancelWriteError {
             ),
             Self::AlreadyCompensated { receipt_id } => {
                 write!(f, "receipt {} is already compensated", receipt_id.0)
+            }
+            Self::AlreadySuperseded { receipt_id } => {
+                write!(
+                    f,
+                    "receipt {} was superseded by a newer write",
+                    receipt_id.0
+                )
             }
             Self::AlreadyAbandoned { receipt_id } => {
                 write!(f, "receipt {} was abandoned after restart", receipt_id.0)
@@ -1695,6 +1708,60 @@ mod tests {
 
         let second = publish("a second write cancels the same way");
         assert_eq!(second.statuses.recv().unwrap(), WriteStatus::Accepted);
+        assert_eq!(engine.cancel(second.id), Ok(CancelWriteOutcome::Cancelled));
+        wait_for_cancellations(2);
+        engine.shutdown();
+    }
+
+    #[test]
+    fn superseding_a_replaceable_write_cancels_its_pending_signer() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+        let keys = Keys::generate();
+        let cancellations = Arc::new(AtomicUsize::new(0));
+        engine
+            .add_signer(PendingSigner {
+                public_key: keys.public_key(),
+                cancellations: Arc::clone(&cancellations),
+            })
+            .unwrap();
+        engine.set_active_account(Some(keys.public_key())).unwrap();
+
+        let publish = |created_at| {
+            engine
+                .publish_tracked(WriteIntent {
+                    payload: nmp_grammar::WritePayload::Event(
+                        nmp_grammar::EventBuilder::new(Kind::Metadata)
+                            .content(format!("metadata at {created_at}"))
+                            .created_at(Timestamp::from(created_at)),
+                    ),
+                    durability: nmp_grammar::Durability::Durable,
+                    routing: nmp_grammar::WriteRouting::Auto,
+                    identity: Identity::Active,
+                    correlation: None,
+                })
+                .expect("write must be accepted")
+        };
+
+        let wait_for_cancellations = |target: usize| {
+            for _ in 0..500 {
+                if cancellations.load(Ordering::SeqCst) >= target {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            panic!(
+                "expected {target} signer cancellations, saw {}",
+                cancellations.load(Ordering::SeqCst)
+            );
+        };
+
+        let first = publish(1);
+        assert_eq!(first.statuses.recv().unwrap(), WriteStatus::Accepted);
+        let second = publish(2);
+        assert_eq!(first.statuses.recv().unwrap(), WriteStatus::Superseded);
+        assert_eq!(second.statuses.recv().unwrap(), WriteStatus::Accepted);
+        wait_for_cancellations(1);
+
         assert_eq!(engine.cancel(second.id), Ok(CancelWriteOutcome::Cancelled));
         wait_for_cancellations(2);
         engine.shutdown();

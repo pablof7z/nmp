@@ -326,9 +326,24 @@ impl NmpWorld {
 
     pub fn receipt_eventually(&mut self, pred: impl Fn(&[WriteStatus]) -> bool) -> bool {
         let receipt = self
-            .last_receipt
-            .as_mut()
+            .receipts
+            .last_mut()
             .expect("nmp-bdd: no publish is in flight");
+        receipt.eventually(EVENTUALLY, pred)
+    }
+
+    /// The same bounded wait against a publish named by ORDER rather than by
+    /// recency -- what a scenario needs when one write retires another and
+    /// both obligations must be spoken about in the same breath.
+    pub fn receipt_eventually_at(
+        &mut self,
+        ordinal: usize,
+        pred: impl Fn(&[WriteStatus]) -> bool,
+    ) -> bool {
+        let receipt = self
+            .receipts
+            .get_mut(ordinal)
+            .unwrap_or_else(|| panic!("nmp-bdd: receipt {} does not exist", ordinal + 1));
         receipt.eventually(EVENTUALLY, pred)
     }
 
@@ -337,8 +352,8 @@ impl NmpWorld {
     /// exit from "this did not happen".
     pub fn receipt_never(&mut self, pred: impl Fn(&[WriteStatus]) -> bool) -> bool {
         let receipt = self
-            .last_receipt
-            .as_mut()
+            .receipts
+            .last_mut()
             .expect("nmp-bdd: no publish is in flight");
         !receipt.eventually(NEVER, pred)
     }
@@ -347,7 +362,7 @@ impl NmpWorld {
     /// assertion MESSAGES and for order-sensitive checks ("Failed was
     /// first"), never as a substitute for a bounded wait.
     pub fn receipt_statuses(&mut self) -> Vec<WriteStatus> {
-        let Some(receipt) = self.last_receipt.as_mut() else {
+        let Some(receipt) = self.receipts.last_mut() else {
             return Vec::new();
         };
         receipt.eventually(Duration::from_millis(0), |_| true);
@@ -355,10 +370,10 @@ impl NmpWorld {
     }
 
     /// How many publishes are outstanding. One publish is one obligation and
-    /// one receipt stream; this world keeps only the last, so anything other
-    /// than 1 means a scenario published a second time.
+    /// one receipt stream, so anything other than 1 means a scenario
+    /// published a second time.
     pub fn receipt_count(&self) -> usize {
-        usize::from(self.last_receipt.is_some())
+        self.receipts.len()
     }
 
     /// True when the last publish carried `WriteRouting::Auto` -- i.e. the

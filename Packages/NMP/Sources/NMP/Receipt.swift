@@ -77,6 +77,7 @@ public enum NMPWriteCancellationError: Error, Sendable, Equatable {
     case unknownReceipt(receiptId: UInt64)
     case alreadySigned(receiptId: UInt64, eventId: String)
     case alreadyCompensated(receiptId: UInt64)
+    case alreadySuperseded(receiptId: UInt64)
     case alreadyAbandoned(receiptId: UInt64)
     case persistenceFailed(receiptId: UInt64, reason: String)
     case engineClosed
@@ -89,6 +90,8 @@ public enum NMPWriteCancellationError: Error, Sendable, Equatable {
             self = .alreadySigned(receiptId: receiptId, eventId: eventId)
         case .AlreadyCompensated(let receiptId):
             self = .alreadyCompensated(receiptId: receiptId)
+        case .AlreadySuperseded(let receiptId):
+            self = .alreadySuperseded(receiptId: receiptId)
         case .AlreadyAbandoned(let receiptId):
             self = .alreadyAbandoned(receiptId: receiptId)
         case .PersistenceFailed(let receiptId, let reason):

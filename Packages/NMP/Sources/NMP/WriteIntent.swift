@@ -223,6 +223,7 @@ public struct WriteIntent: Sendable, Hashable {
 public enum WriteStatus: Sendable, Hashable {
     case accepted
     case cancelled
+    case superseded
     /// #47 Unit B: `pubkey` is the exact frozen identity (64-char hex) no
     /// registered signer currently answers for. Retained, not terminal --
     /// re-arrives verbatim on restart replay and resumes only when a
@@ -248,6 +249,7 @@ public enum WriteStatus: Sendable, Hashable {
         switch ffi {
         case .accepted: self = .accepted
         case .cancelled: self = .cancelled
+        case .superseded: self = .superseded
         case .awaitingCapability(let pubkey): self = .awaitingCapability(pubkey: pubkey)
         case .signed(let eventId): self = .signed(eventId: eventId)
         case .routed(let relays): self = .routed(relays: relays)

@@ -32,6 +32,9 @@ sealed class NMPWriteCancellationError(message: String) : Exception(message) {
     data class AlreadyCompensated(val receiptId: ULong) :
         NMPWriteCancellationError("receipt $receiptId is already compensated")
 
+    data class AlreadySuperseded(val receiptId: ULong) :
+        NMPWriteCancellationError("receipt $receiptId was superseded by a newer write")
+
     data class AlreadyAbandoned(val receiptId: ULong) :
         NMPWriteCancellationError("receipt $receiptId was abandoned after restart")
 
@@ -48,6 +51,8 @@ sealed class NMPWriteCancellationError(message: String) : Exception(message) {
                     AlreadySigned(error.receiptId, error.eventId)
                 is FfiCancelWriteException.AlreadyCompensated ->
                     AlreadyCompensated(error.receiptId)
+                is FfiCancelWriteException.AlreadySuperseded ->
+                    AlreadySuperseded(error.receiptId)
                 is FfiCancelWriteException.AlreadyAbandoned ->
                     AlreadyAbandoned(error.receiptId)
                 is FfiCancelWriteException.PersistenceFailed ->
