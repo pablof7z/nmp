@@ -781,13 +781,36 @@ fn promotion_and_displaced_compensation_are_atomic_across_process_death() {
     );
 
     let (_dir, path) = fixture();
-    let (older, _) = pair(Kind::ContactList, "older", 900);
+    let (older, older_signed) = pair(Kind::ContactList, "older", 900);
     let older_id = older.id;
     let (newer, _) = pair(Kind::ContactList, "newer", 1_000);
     let newer_id = newer.id;
     let (intent, receipt) = {
         let mut store = RedbStore::open(&path).expect("open");
-        store.accept_write(accept(older)).expect("accept older");
+        let older_outcome = store.accept_write(accept(older)).expect("accept older");
+        let older_intent = older_outcome.journaled_intent_id().unwrap();
+        store
+            .promote_signed(older_intent, older_signed.sig)
+            .expect("promote older");
+        let relay = RelayUrl::parse(RELAY).expect("relay");
+        store
+            .record_route_revision(older_intent, BTreeSet::from([relay]))
+            .expect("route older");
+        let lane = store
+            .bootstrap_outbox_lanes(older_intent)
+            .expect("bootstrap older lane")
+            .remove(0);
+        let lane = store
+            .set_lane_eligible(&lane.key, lane.revision, Timestamp::from(950u64))
+            .expect("make older lane eligible");
+        store
+            .start_lane_attempt(
+                &lane.key,
+                lane.revision,
+                older_signed,
+                Timestamp::from(951u64),
+            )
+            .expect("start older attempt");
         let outcome = store.accept_write(accept(newer)).expect("accept newer");
         (
             outcome.journaled_intent_id().unwrap(),

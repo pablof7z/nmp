@@ -23,6 +23,7 @@ class EvidenceMappingTest {
     @Test
     fun cancellationFactAndEveryRefusalRemainTyped() {
         assertEquals(WriteStatus.Cancelled, WriteStatus.from(FfiWriteStatus.Cancelled))
+        assertEquals(WriteStatus.Superseded, WriteStatus.from(FfiWriteStatus.Superseded))
         assertEquals(
             NMPWriteCancellationError.UnknownReceipt(42uL),
             NMPWriteCancellationError.from(FfiCancelWriteException.UnknownReceipt(42uL)),
@@ -34,6 +35,10 @@ class EvidenceMappingTest {
         assertEquals(
             NMPWriteCancellationError.AlreadyCompensated(42uL),
             NMPWriteCancellationError.from(FfiCancelWriteException.AlreadyCompensated(42uL)),
+        )
+        assertEquals(
+            NMPWriteCancellationError.AlreadySuperseded(42uL),
+            NMPWriteCancellationError.from(FfiCancelWriteException.AlreadySuperseded(42uL)),
         )
         assertEquals(
             NMPWriteCancellationError.AlreadyAbandoned(42uL),

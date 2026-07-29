@@ -232,6 +232,8 @@ sealed class WriteStatus {
 
     object Cancelled : WriteStatus()
 
+    object Superseded : WriteStatus()
+
     /** #47 Unit B: [pubkey] is the exact frozen identity (64-char hex) no
      * registered signer currently answers for. Retained, not terminal --
      * re-arrives verbatim on restart replay and resumes only when a signer
@@ -273,6 +275,7 @@ sealed class WriteStatus {
             when (ffi) {
                 is FfiWriteStatus.Accepted -> Accepted
                 is FfiWriteStatus.Cancelled -> Cancelled
+                is FfiWriteStatus.Superseded -> Superseded
                 is FfiWriteStatus.AwaitingCapability -> AwaitingCapability(ffi.pubkey)
                 is FfiWriteStatus.Signed -> Signed(ffi.eventId)
                 is FfiWriteStatus.Routed -> Routed(ffi.relays)

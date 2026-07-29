@@ -102,7 +102,7 @@ impl NmpWorld {
                 correlation: None,
             })
             .expect("BDD receipt correlation namespace must be available");
-        self.last_receipt = Some(ReceiptState::new(rx));
+        self.receipts.push(ReceiptState::new(rx));
     }
 
     /// `When I publish a note saying <text>`.
@@ -115,6 +115,35 @@ impl NmpWorld {
         let _ = self.person(&me);
         self.publish_intent(WriteIntent {
             payload: WritePayload::Event(EventBuilder::new(nostr::Kind::TextNote).content(text)),
+            durability: Durability::Durable,
+            routing: WriteRouting::Auto,
+            identity: Identity::Active,
+            correlation: None,
+        });
+    }
+
+    /// `When I publish kind <kind> with d tag <d> saying <text>`.
+    ///
+    /// The explicit monotonically-increasing timestamp makes the second
+    /// publication the NIP-01 winner without relying on wall-clock
+    /// granularity. Only addressable kinds carry the `d` tag; ordinary
+    /// replaceable kinds are keyed by `(pubkey, kind)` regardless of tags.
+    pub async fn publish_replaceable(&mut self, kind: u16, d: &str, text: &str) {
+        self.ensure_started().await;
+        let me = self
+            .active_person
+            .clone()
+            .expect("nmp-bdd: publishing a replaceable event needs a logged-in account");
+        let _ = self.person(&me);
+        let created_at = self.next_created_at();
+        let mut builder = EventBuilder::new(nostr::Kind::from(kind))
+            .content(text)
+            .created_at(nostr::Timestamp::from(created_at));
+        if (30_000..=39_999).contains(&kind) {
+            builder = builder.tag(Tag::identifier(d));
+        }
+        self.publish_intent(WriteIntent {
+            payload: WritePayload::Event(builder),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
@@ -193,14 +222,14 @@ impl NmpWorld {
 
     /// Every publish in this module goes through here: it records whether the
     /// app named relays (for `last_publish_named_no_relay`) and opens the one
-    /// receipt stream the world keeps.
+    /// receipt stream the publish owns.
     fn publish_intent(&mut self, intent: WriteIntent) {
         self.last_publish_was_auto = matches!(intent.routing, WriteRouting::Auto);
         let rx = self
             .handle()
             .publish(intent)
             .expect("BDD receipt correlation namespace must be available");
-        self.last_receipt = Some(ReceiptState::new(rx));
+        self.receipts.push(ReceiptState::new(rx));
     }
 
     /// `When I switch to <person>'s account` (a person already known to the
@@ -268,6 +297,11 @@ impl NmpWorld {
 
     /// `When relay <name> drops the connection`.
     pub async fn drop_relay_connection(&mut self, name: &str) {
+        // A scenario may take the network away BEFORE it ever publishes, so
+        // this is the step that starts the engine. Dropping a relay the
+        // engine has not connected to yet would otherwise leave the first
+        // publish to connect to a live relay.
+        self.ensure_started().await;
         self.relays
             .get_mut(name)
             .unwrap_or_else(|| panic!("nmp-bdd: relay {name:?} must exist before it can drop"))

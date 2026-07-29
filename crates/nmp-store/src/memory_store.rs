@@ -24,7 +24,7 @@ use crate::{
     LaneKey, LaneState, LocalOrigin, PersistenceError, PostHandoffState, PromoteOutcome,
     Provenance, ReceiptState, RecoveredAttempt, RecoveredAttemptDetails, RecoveredIntent,
     RecoveredLane, RecoveredReceipt, RecoveredRouteRevision, RefuseReason, RelayObserved,
-    RetractReason, SigState, StoredEvent, TransientCause, WriteDurability,
+    RetiredIntent, RetractReason, SigState, StoredEvent, TransientCause, WriteDurability,
 };
 
 /// One `OUTBOX_INTENTS` row (M3 durable-outbox unit, crashsafe-accepted-2-3-
@@ -495,6 +495,90 @@ impl MemoryStore {
             self.outbox_correlations
                 .insert(token.as_ref().to_string(), receipt_id);
         }
+    }
+
+    /// Retire older delivery obligations made useless by a newer winner at
+    /// the same NIP-01 address. The wire-handoff boundary is structural:
+    /// any retained attempt (or a lane cursor proving one existed) keeps the
+    /// old obligation alive because the relay may already have observed it.
+    ///
+    /// Returns the predecessor that the new intent must stash. A still-valid
+    /// signed/relay-observed row remains that predecessor even after its
+    /// delivery obligation is retired. A purely pending ownerless draft is
+    /// skipped in favour of its own predecessor, preserving compensation
+    /// chains without making the invalid draft reachable again.
+    fn retire_superseded_owners(
+        &mut self,
+        mut replaced: StoredEvent,
+    ) -> (Option<StoredEvent>, Vec<RetiredIntent>) {
+        let owners = replaced
+            .provenance
+            .local
+            .as_ref()
+            .map(|local| local.owners.clone())
+            .unwrap_or_default();
+        let mut eligible = Vec::new();
+        for owner in owners {
+            let Some(intent) = self.outbox_intents.get(&owner) else {
+                continue;
+            };
+            let has_attempt = self
+                .outbox_attempts
+                .keys()
+                .any(|(candidate, _, _)| *candidate == owner)
+                || self
+                    .outbox_attempt_details
+                    .keys()
+                    .any(|(candidate, _, _)| *candidate == owner)
+                || self
+                    .outbox_lanes
+                    .get(&owner)
+                    .is_some_and(|lanes| lanes.values().any(|lane| lane.last_ordinal != 0));
+            if !has_attempt {
+                eligible.push((owner, intent.receipt_id));
+            }
+        }
+
+        let mut predecessor = None;
+        for (owner, receipt_id) in &eligible {
+            if let Some(local) = replaced.provenance.local.as_mut() {
+                local.owners.remove(owner);
+            }
+            if let Some(displaced) = self.outbox_displaced.remove(owner) {
+                predecessor.get_or_insert(displaced);
+            }
+            self.outbox_intents.remove(owner);
+            self.outbox_lanes.remove(owner);
+            self.outbox_route_revisions
+                .retain(|(candidate, _), _| candidate != owner);
+            if let Some(rows) = self.outbox_deadlines_by_intent.remove(owner) {
+                for (at, relay) in rows {
+                    self.outbox_deadlines.remove(&(at, *owner, relay));
+                }
+            }
+            self.outbox_receipts
+                .get_mut(receipt_id)
+                .expect("open outbox intent must retain its receipt")
+                .state = ReceiptState::Superseded;
+        }
+
+        let remains_valid =
+            replaced.provenance.local.as_ref().is_some_and(|local| {
+                !local.owners.is_empty() || local.sig_state == SigState::Signed
+            }) || !replaced.provenance.seen.is_empty();
+        let displaced = if remains_valid {
+            Some(replaced)
+        } else {
+            predecessor
+        };
+        let retired = eligible
+            .into_iter()
+            .map(|(intent_id, receipt_id)| RetiredIntent {
+                intent_id,
+                receipt_id,
+            })
+            .collect();
+        (displaced, retired)
     }
 
     /// Re-admit a durably-stashed predecessor `se` through the ordinary
@@ -1953,14 +2037,16 @@ impl EventStore for MemoryStore {
                         self.index_event(&stored);
                         self.by_id.insert(new_id, stored.clone());
                         self.addr_index.insert(key, new_id);
+                        let (displaced, retired) = self.retire_superseded_owners(replaced.clone());
                         (
                             AcceptOutcome::Superseded {
                                 intent_id,
                                 receipt_id,
                                 row: stored,
                                 replaced: Box::new(replaced.clone()),
+                                retired,
                             },
-                            Some(replaced),
+                            displaced,
                         )
                     } else {
                         (
@@ -2346,6 +2432,7 @@ impl EventStore for MemoryStore {
             ReceiptState::Cancelled => Ok(crate::CancelEphemeralOutcome::AlreadyCancelled),
             ReceiptState::Abandoned => Ok(crate::CancelEphemeralOutcome::AlreadyAbandoned),
             ReceiptState::Compensated => Ok(crate::CancelEphemeralOutcome::AlreadyCompensated),
+            ReceiptState::Superseded => Ok(crate::CancelEphemeralOutcome::AlreadySuperseded),
         }
     }
 

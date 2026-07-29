@@ -156,6 +156,8 @@ pub nmp::CancelWriteError::AlreadyCompensated::receipt_id: nmp::ReceiptId
 pub nmp::CancelWriteError::AlreadySigned
 pub nmp::CancelWriteError::AlreadySigned::event_id: nostr::event::id::EventId
 pub nmp::CancelWriteError::AlreadySigned::receipt_id: nmp::ReceiptId
+pub nmp::CancelWriteError::AlreadySuperseded
+pub nmp::CancelWriteError::AlreadySuperseded::receipt_id: nmp::ReceiptId
 pub nmp::CancelWriteError::EngineClosed
 pub nmp::CancelWriteError::PersistenceFailed
 pub nmp::CancelWriteError::PersistenceFailed::reason: alloc::string::String
@@ -563,6 +565,7 @@ pub nmp::WriteStatus::Sent::attempt: u64
 pub nmp::WriteStatus::Sent::relay: nostr::types::url::RelayUrl
 pub nmp::WriteStatus::Sent::written_at: nostr::types::time::Timestamp
 pub nmp::WriteStatus::Signed(nostr::event::id::EventId)
+pub nmp::WriteStatus::Superseded
 impl core::clone::Clone for nmp::WriteStatus
 pub fn nmp::WriteStatus::clone(&self) -> nmp::WriteStatus
 impl core::cmp::Eq for nmp::WriteStatus

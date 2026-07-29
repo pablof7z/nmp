@@ -844,6 +844,10 @@ pub enum AcceptOutcome {
         receipt_id: u64,
         row: StoredEvent,
         replaced: Box<StoredEvent>,
+        /// Older open delivery obligations at this exact address that had
+        /// not started a wire attempt and were retired atomically with this
+        /// acceptance. Their retained receipts remain reattachable.
+        retired: Vec<RetiredIntent>,
     },
     /// This intent lost its address race to an existing, newer winner.
     /// The intent is still journaled (still gets signed and delivered —
@@ -878,6 +882,15 @@ pub enum AcceptOutcome {
     /// (correspondingly) no `IntentId`/receipt id is ever allocated for a
     /// refused call, so refusal can never "burn" either.
     Refused(RefuseReason),
+}
+
+/// One older replaceable/addressable obligation atomically retired when a
+/// newer winner was accepted. This is acceptance evidence for the engine,
+/// not another app-facing workload noun.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetiredIntent {
+    pub intent_id: IntentId,
+    pub receipt_id: u64,
 }
 
 impl AcceptOutcome {
@@ -1051,6 +1064,7 @@ pub enum CancelEphemeralOutcome {
     AlreadyCancelled,
     AlreadyAbandoned,
     AlreadyCompensated,
+    AlreadySuperseded,
 }
 
 /// One still-open intent replayed by [`EventStore::recover_outbox`] on
@@ -1103,6 +1117,10 @@ pub enum ReceiptState {
     /// compensation transaction committed, so this is a durable terminal
     /// fact rather than a generic failure string.
     Cancelled,
+    /// A newer accepted event won the same NIP-01 replaceable/addressable
+    /// coordinate before this obligation started any wire attempt. Terminal:
+    /// the receipt is retained, but the old intent is absent from recovery.
+    Superseded,
     /// An `Ephemeral` receipt (see [`EventStore::accept_ephemeral`]) that
     /// was still `Accepted` when the store reopened after a restart.
     /// `Ephemeral` writes are NEVER retried after process loss (R4), and
