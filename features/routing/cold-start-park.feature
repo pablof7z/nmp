@@ -25,7 +25,6 @@ Feature: A write made before we knew anything waits, it does not die
     Given I am logged in as my own account
     And an indexer relay is configured
 
-  @designed
   Scenario: The very first publish of a fresh install parks and then delivers
     # The headline case. Nothing has ever been fetched; the user hits send.
     # Today this write is dropped and never mentioned again.
@@ -37,7 +36,6 @@ Feature: A write made before we knew anything waits, it does not die
     When my relay list arrives naming "outbox-a" as my write relay
     Then the note is delivered to "outbox-a"
 
-  @designed
   Scenario: The park names what it is waiting for
     # A park nobody can see is indistinguishable from data loss, so the detail
     # is the difference between "stuck" and "stuck because X" -- and X is the

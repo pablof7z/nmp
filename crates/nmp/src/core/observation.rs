@@ -243,6 +243,11 @@ impl<S: EventStore> EngineCore<S> {
         absorbed: BTreeSet<nmp_store::CoverageKey>,
         replay: bool,
     ) -> AttributionSendId {
+        // Every outgoing REQ this engine ever places -- planned, replayed,
+        // NIP-77 live candidate, backlog and backfill alike -- passes through
+        // here, which is why the relay-list QUESTION is recorded here too
+        // (#1019) rather than off the plan the answer will outlive.
+        self.note_relay_list_ask(sub_id, filter);
         let send = self
             .attribution
             .record_send(session, sub_id, filter, absorbed.clone());

@@ -11,7 +11,7 @@ async fn routing_is_explicit_over(w: &mut NmpWorld, relay: String) {
     let url = w.relay_url(&relay);
     let routed = w.receipt_eventually(|seen| {
         seen.iter().any(
-            |s| matches!(s, WriteStatus::Routed(relays) if relays.len() == 1 && relays.contains(&url)),
+            |s| matches!(s, WriteStatus::Routed { relays, .. } if relays.len() == 1 && relays.contains(&url)),
         )
     });
     assert!(
@@ -31,7 +31,7 @@ async fn group_minted_the_routing(w: &mut NmpWorld) {
     let url = w.relay_url(&host);
     let routed = w.receipt_eventually(|seen| {
         seen.iter()
-            .any(|s| matches!(s, WriteStatus::Routed(relays) if relays.contains(&url)))
+            .any(|s| matches!(s, WriteStatus::Routed { relays, .. } if relays.contains(&url)))
     });
     assert!(
         routed,
@@ -79,7 +79,7 @@ pub(super) async fn not_rerouted(w: &mut NmpWorld) {
         .receipt_statuses()
         .iter()
         .filter_map(|s| match s {
-            WriteStatus::Routed(relays) => Some(relays.clone()),
+            WriteStatus::Routed { relays, .. } => Some(relays.clone()),
             _ => None,
         })
         .flatten()
@@ -199,7 +199,7 @@ async fn receipt_names_only(w: &mut NmpWorld, relay: String) {
 /// cannot slip past this assertion silently.
 fn named_relays(status: &WriteStatus) -> Vec<nostr::RelayUrl> {
     match status {
-        WriteStatus::Routed(relays) => relays.iter().cloned().collect(),
+        WriteStatus::Routed { relays, .. } => relays.iter().cloned().collect(),
         WriteStatus::AwaitingRelay { relay }
         | WriteStatus::AwaitingAuth { relay }
         | WriteStatus::RetryEligible { relay, .. }
@@ -218,6 +218,9 @@ fn named_relays(status: &WriteStatus) -> Vec<nostr::RelayUrl> {
         // case where nothing was ever sent anywhere.
         | WriteStatus::Superseded
         | WriteStatus::AwaitingCapability { .. }
+        // A routing park names an AUTHOR it is waiting on, never a relay:
+        // the whole point of the state is that no destination exists yet.
+        | WriteStatus::AwaitingRoute { .. }
         | WriteStatus::Signed(_)
         | WriteStatus::ReplaceableConflict { .. }
         | WriteStatus::Failed(_) => Vec::new(),

@@ -221,6 +221,48 @@ emitted on every resolution that changes the picture — new relays, or the
 `complete` flip. Delivery continues to stream through the existing per-relay
 facts, unchanged.
 
+### 7.2.1 The two axes advance independently, so the receipt has no stable total order
+
+Stated because it is a real consequence of §7.2 that is easy to miss, and
+because it was found the expensive way — by a direct/FFI parity oracle going
+red on a loaded CI runner and green on an idle laptop.
+
+Routing completeness advances on **discovery** round-trips; delivery advances
+on **delivery** round-trips. Nothing orders those two against each other. So
+for any write that still has routing unknowns when its first lane opens, the
+`Routed { complete: true }` that retires its routing can arrive before or
+after `Acked` purely according to which socket answered first, and two runs of
+the identical scenario legitimately produce different receipt ORDERS.
+
+A concrete instance, because it is not an exotic one: a kind:3 contact list
+p-tags everyone it names, none of whom need have a known relay list, so an
+ordinary follow is exactly this shape.
+
+The consequence for anything that compares receipt streams:
+
+> **Any total-order comparison over a delivery-terminated prefix is
+> nondeterministic for a write with routing unknowns.** An observer that needs
+> a stable order must terminate on receipt CLOSURE, which is causally after
+> both axes — the engine closes an intent only when routing is complete AND
+> every lane is terminal (§7.1, and `close_if_all_lanes_terminal`).
+
+Measured refinement (#1019): closure stabilises the stream's **content**, not
+its **order**. Both axes have reached a terminal by then, so the set of facts
+is determined — but where the routing retirement lands among the delivery
+beats still is not. Over twelve runs of the identical parity scenario it
+arrived before `awaiting_auth` on one surface and after it on the other, about
+half the time. An observer comparing two surfaces must therefore compare each
+axis's own order, and must not compare the interleaving — which is not a
+weakening, because the interleaving is not a fact about either surface.
+
+Note what this asks of closure in return: an observer that waits for it is
+waiting on settlement, so a settlement that can silently fail to fire turns a
+bounded wait into a hang. Non-completion is reachable by design (zero
+configured indexers means an `Auto` parks forever, `knowledge-and-settlement.md`
+§9), so such an observer needs a bound, and on expiry it must name WHICH axis
+failed to advance — "timed out" alone sends the next reader down the whole
+instrumentation path this rule was found on.
+
 ### 7.3 The app-state mapping
 
 | receipt state | app shows |

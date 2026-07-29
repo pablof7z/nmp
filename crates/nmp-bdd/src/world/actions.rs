@@ -151,6 +151,66 @@ impl NmpWorld {
         });
     }
 
+    /// `When I publish a note saying "..." mentioning <people>` -- an
+    /// ordinary `Auto` note that p-tags one or more recipients, which is what
+    /// makes the outbox fan-out (and therefore its unknowns) reachable from a
+    /// scenario at all.
+    pub async fn publish_note_mentioning(&mut self, text: &str, people: &[String]) {
+        self.ensure_started().await;
+        let me = self
+            .active_person
+            .clone()
+            .expect("nmp-bdd: publishing a note needs a logged-in account");
+        let _ = self.person(&me);
+        let tags: Vec<Tag> = people
+            .iter()
+            .map(|name| Tag::public_key(self.person(name).public_key()))
+            .collect();
+        let mut builder = EventBuilder::new(nostr::Kind::TextNote).content(text);
+        builder.tags = tags;
+        self.publish_intent(WriteIntent {
+            payload: WritePayload::Event(builder),
+            durability: Durability::Durable,
+            routing: WriteRouting::Auto,
+            identity: Identity::Active,
+            correlation: None,
+        });
+    }
+
+    /// `When <person>'s relay list arrives naming <relay> as their read/write
+    /// relay` -- a real kind:10002 landing at the indexers, exactly where the
+    /// engine's own discovery subscription is looking.
+    ///
+    /// Nothing is injected into the directory here: the event goes on a
+    /// relay and comes back through the engine's ordinary ingestion, which is
+    /// the only way this proves that a parked route wakes on knowledge the
+    /// READ path acquired.
+    pub async fn relay_list_arrives(&mut self, person: &str, write: &[String], read: &[String]) {
+        self.ensure_started().await;
+        // A relay list learned at RUNTIME names relays no `Given` could have
+        // staged -- that is the whole situation ("my relay list has never
+        // been fetched"). Start any such relay now, on the same footing as
+        // every other: the engine reaches it only if routing sends it there.
+        for name in write.iter().chain(read) {
+            self.start_relay_late(name).await;
+        }
+        let keys = self.person(person);
+        let write_urls: Vec<String> = write
+            .iter()
+            .map(|name| self.relay_url(name).to_string())
+            .collect();
+        let read_urls: Vec<String> = read
+            .iter()
+            .map(|name| self.relay_url(name).to_string())
+            .collect();
+        let created_at = self.next_created_at();
+        for indexer in self.indexer_names.clone() {
+            self.relays[&indexer]
+                .seed_relay_list(&keys, &write_urls, &read_urls, created_at)
+                .await;
+        }
+    }
+
     /// `When I publish a note saying "..." to exactly <relays>` -- the app
     /// naming its own destinations. `relays` may name relays no `Given`
     /// mentioned (an app publishing to a relay a user typed into a text

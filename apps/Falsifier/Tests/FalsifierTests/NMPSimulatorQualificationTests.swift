@@ -281,7 +281,7 @@ final class NMPSimulatorQualificationTests: XCTestCase {
         )
         XCTAssertTrue(
             statuses.contains { status in
-                if case .routed(let relays) = status {
+                if case .routed(let relays, _) = status {
                     return relays.contains { isSameRelay($0, relay.relayURL) }
                 }
                 return false

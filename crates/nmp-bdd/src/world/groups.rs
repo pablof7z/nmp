@@ -114,7 +114,16 @@ impl NmpWorld {
     /// but nothing in the directory says it is mine. An `Auto` write here
     /// would have nowhere to go; a group write does not care.
     pub fn forget_my_relay_list(&mut self) {
+        // All THREE staging maps, because a relay list is all three: the
+        // outbox half, the inbox half, and the "ingested and declares
+        // nothing" fact. Clearing only the first would leave an author the
+        // directory still answers `Known` for, and a routing scenario that
+        // says "never been fetched" would then be testing `Known`-with-no-
+        // write-relays instead of `Unknown` -- the exact confusion
+        // three-valued knowledge exists to prevent.
         self.write_relay_of.remove(super::ME);
+        self.read_relay_of.remove(super::ME);
+        self.declares_no_relays.retain(|person| person != super::ME);
     }
 
     /// `Given relay "R" cannot connect`. Bound (so it has a URL the group can

@@ -91,6 +91,44 @@ the latter. That bound is acceptable because the same indexer set is what
 discovery would keep querying anyway; a fact those sources don't hold is a
 fact this engine cannot act on regardless of what it calls the state.
 
+### 2.1 "EOSE" names the ruling, not the mechanism — BUILT (#1019)
+
+The ruling is about *finishing*: a source has said everything it has. EOSE is
+what that looks like over NIP-01, and it is what the ruling reaches for
+because it is the only terminal NIP-01 offers. It is not the only terminal
+this engine has, and taking the name literally cost a bug.
+
+Two facts, both measured rather than argued:
+
+- **On a NIP-77 relay the discovery filter never rides an ordinary REQ at
+  all.** The live-first handoff (#563) sends a `limit:0` barrier — which
+  attests nothing, the relay sends no events by construction — and asks the
+  real question inside a negentropy session. `NEG-DONE` with nothing left to
+  fetch is that source finishing, and it is the *only* finishing signal that
+  path ever produces. Settling only on EOSE meant a NIP-77-capable indexer
+  could never settle an absence, deterministically, on every run.
+- **Coalescing means the request that carries the question is usually not
+  shaped like the question.** The first discovery pass really is sent as
+  `kinds:{3,10002}`, because the contact list and the relay list are wanted
+  for the same person at the same moment. "Is this the relay-list request?"
+  is therefore a containment test, never an equality test on `kinds`.
+
+So the settlement event is: **the terminal signal of the request that actually
+asked** — EOSE for an ordinary REQ, negentropy completion for a reconciled
+one (deferred to the backfill's own EOSE when reconciliation proved ids were
+missing, since one of them may be the kind:10002 in question).
+
+The corollary is the shape of the state. What must be durable is the
+*question*, recorded from the filter that went on the wire and keyed by the
+subscription id it went out under — never re-derived from the router plan.
+The plan describes what the engine is asking *now*; a question is about what
+it asked *then*, and coalescing rewrites the former constantly while the
+latter is still in flight. A question is discharged by exactly one terminal
+signal and forgotten when its request is abandoned or its session drops.
+Forgetting settles nothing: an abandoned question has been answered by
+nobody, and crediting it would be the same fail-open as treating "nowhere to
+ask" as "asked, nothing there" (§9).
+
 ## 3. What exists today, and the precise gap — BUILT
 
 Master already distinguishes *half* of this.

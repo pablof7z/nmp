@@ -37,7 +37,6 @@ Feature: With nowhere to ask, nothing settles and writes park forever
     Then no relay-list request is sent to "wss://mine.example"
     And routing for the note is not complete
 
-  @designed
   Scenario: Only writes with missing knowledge park
     Given Bob's relay list names "wss://bob-relay.example" as his read relay
     When I publish a note mentioning Bob

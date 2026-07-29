@@ -83,7 +83,6 @@ Feature: An Auto ends when there is nothing left to learn
     And the receipt reports "outbox-a" as a destination
     And the note is not delivered anywhere
 
-  @designed
   Scenario: An explicit route retires at its first resolution
     # The fixed point: verbatim execution has no inputs, therefore no unknowns,
     # ever. It is complete the instant it is resolved, before any relay has
