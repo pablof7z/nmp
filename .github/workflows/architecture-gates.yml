@@ -67,6 +67,11 @@ jobs:
       - name: Select the repository Rust toolchain
         run: rustup show
 
+      - name: Install the content-boundary checker's search tool
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
+
       - name: Forbid acquisition policy and engine dependencies in locator parsing
         run: bash scripts/check-content-parser-boundary.sh
 
