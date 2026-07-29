@@ -2589,7 +2589,24 @@ impl EventStore for MemoryStore {
                 "attempt detail row has no base attempt row",
             ));
         }
+        if let Some(existing_lanes) = self.outbox_lanes.get(&intent_id) {
+            for (stored_relay, lane) in existing_lanes {
+                if lane.key.intent_id != intent_id || &lane.key.relay != stored_relay {
+                    return Err(PersistenceError::invariant(
+                        "outbox lane storage key does not match value",
+                    ));
+                }
+                if !relays.contains(stored_relay) {
+                    return Err(PersistenceError::invariant(
+                        "lane relay is absent from every route revision",
+                    ));
+                }
+            }
+        }
+
         let all_attempts = self.recover_attempts(intent_id)?;
+        let mut prepared_inserts = Vec::new();
+        let mut prepared_return = Vec::with_capacity(relays.len());
         for relay in relays {
             let key = LaneKey { intent_id, relay };
             let attempts: Vec<_> = all_attempts
@@ -2654,6 +2671,7 @@ impl EventStore for MemoryStore {
                     }
                     _ => {}
                 }
+                prepared_return.push(existing.clone());
                 continue;
             }
             if !attempts.is_empty() {
@@ -2661,15 +2679,24 @@ impl EventStore for MemoryStore {
                     "attempt history exists without its lane row",
                 ));
             }
-            self.insert_lane(RecoveredLane {
+            let lane = RecoveredLane {
                 version: 1,
                 key,
                 revision: 1,
                 last_ordinal: 0,
                 state: LaneState::WaitingConnection,
-            });
+            };
+            prepared_inserts.push(lane.clone());
+            prepared_return.push(lane);
         }
-        self.recover_outbox_lanes(intent_id)
+
+        // Every fallible check and every returned value is complete before
+        // the first mutation. Applying the prepared inserts is intentionally
+        // infallible, so an `Invariant` can never leave a partial relay set.
+        for lane in prepared_inserts {
+            self.insert_lane(lane);
+        }
+        Ok(prepared_return)
     }
 
     fn recover_outbox_lanes(
@@ -3133,7 +3160,7 @@ impl EventStore for MemoryStore {
 #[cfg(test)]
 mod lane_atomicity_tests {
     use super::*;
-    use crate::{sentinel_signature, AcceptWrite};
+    use crate::{sentinel_signature, AcceptWrite, DurabilityOutcome, PersistenceFault};
     use nostr::{EventBuilder, Keys};
 
     fn setup(content: &str) -> (MemoryStore, IntentId, RelayUrl, Event, RecoveredLane) {
@@ -3286,6 +3313,64 @@ mod lane_atomicity_tests {
             .unwrap_err()
             .to_string()
             .contains("terminal lane lacks"));
+    }
+
+    /// #909: validation of a later relay cannot leave an earlier relay's
+    /// prepared lane installed. The same fixture used to return
+    /// `Invariant/Absent` after partially mutating `outbox_lanes`.
+    #[test]
+    fn bootstrap_invariant_applies_no_partial_memory_lane_set() {
+        let (mut store, intent, _, _, _) = setup("bootstrap-two-phase");
+        let early = RelayUrl::parse("wss://a.bootstrap-atomic.example").unwrap();
+        let late = RelayUrl::parse("wss://z.bootstrap-atomic.example").unwrap();
+        store
+            .record_route_revision(intent, BTreeSet::from([early.clone(), late.clone()]))
+            .unwrap();
+
+        // Rebuild the fixture as "early lane missing, later lane invalid".
+        // With no attempts, a cursor of one is contradictory. The old
+        // relay-at-a-time loop inserted `early` before discovering this.
+        store.outbox_lanes.remove(&intent);
+        store.insert_lane(RecoveredLane {
+            version: 1,
+            key: LaneKey {
+                intent_id: intent,
+                relay: late.clone(),
+            },
+            revision: 1,
+            last_ordinal: 1,
+            state: LaneState::WaitingConnection,
+        });
+        let before = store.outbox_lanes.clone();
+
+        let error = store
+            .bootstrap_outbox_lanes(intent)
+            .expect_err("late invariant must refuse bootstrap");
+        assert_eq!(error.fault(), PersistenceFault::Invariant);
+        assert_eq!(error.durability(), DurabilityOutcome::Absent);
+        assert_eq!(
+            store.outbox_lanes, before,
+            "an Absent result must leave every relay exactly at prestate"
+        );
+        assert!(
+            store
+                .get_lane(&LaneKey {
+                    intent_id: intent,
+                    relay: early,
+                })
+                .is_none(),
+            "the earlier missing lane must not be partially inserted"
+        );
+
+        store.outbox_lanes.get_mut(&intent).unwrap().remove(&late);
+        let recovered = store
+            .bootstrap_outbox_lanes(intent)
+            .expect("removing the bad row permits one complete apply");
+        assert_eq!(
+            recovered,
+            store.recover_outbox_lanes(intent).unwrap(),
+            "prepared return and applied lane set must be identical"
+        );
     }
 
     /// #867: `MemoryStore` models only current states, so it must refuse the

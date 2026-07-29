@@ -1,4 +1,5 @@
 use super::canonical::{fold_seen_at, observation_key, observation_range, observation_relay_key};
+use super::commit::commit_prepared;
 use super::outbox::{
     is_suppressed_in_txn, reconcile_ephemeral_receipts_in_txn, replace_lane_in_txn,
     OUTBOX_KIND5_CLAIMS, OUTBOX_SUPPRESS_BY_ADDR, OUTBOX_SUPPRESS_BY_ID,
@@ -148,8 +149,7 @@ impl RedbStore {
         };
         #[cfg(test)]
         self.crash_if(RedbCrashPoint::LaneTransitionBeforeCommit);
-        write_txn.commit().map_err(persist_err)?;
-        Ok(lane)
+        commit_prepared(write_txn, lane)
     }
 
     /// Open (creating if absent) a `redb` database file at `path`.
