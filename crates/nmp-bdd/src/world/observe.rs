@@ -358,6 +358,37 @@ impl NmpWorld {
         !receipt.eventually(NEVER, pred)
     }
 
+    /// The same, for a publish named by ORDER -- what a scenario that
+    /// published twice and compares the two answers has to read.
+    pub fn receipt_statuses_at(&mut self, ordinal: usize) -> Vec<WriteStatus> {
+        let Some(receipt) = self.receipts.get_mut(ordinal) else {
+            return Vec::new();
+        };
+        receipt.eventually(Duration::from_millis(0), |_| true);
+        receipt.seen.clone()
+    }
+
+    /// The bounded wait against the stream REATTACHED after a restart. On the
+    /// far side of a process boundary that is the only stream that exists,
+    /// and reading the dead one would report what the previous process
+    /// happened to have said.
+    pub fn restarted_receipt_eventually(&mut self, pred: impl Fn(&[WriteStatus]) -> bool) -> bool {
+        let receipt = self
+            .restarted_receipt
+            .as_mut()
+            .expect("nmp-bdd: no receipt was reattached after a restart");
+        receipt.eventually(EVENTUALLY, pred)
+    }
+
+    /// Everything the reattached stream has replayed so far.
+    pub fn restarted_receipt_statuses(&mut self) -> Vec<WriteStatus> {
+        let Some(receipt) = self.restarted_receipt.as_mut() else {
+            return Vec::new();
+        };
+        receipt.eventually(Duration::from_millis(0), |_| true);
+        receipt.seen.clone()
+    }
+
     /// Everything the last publish's receipt has reported so far -- for
     /// assertion MESSAGES and for order-sensitive checks ("Failed was
     /// first"), never as a substitute for a bounded wait.

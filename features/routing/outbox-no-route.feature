@@ -35,7 +35,6 @@ Feature: When there is nowhere to publish, say so
 
   # ---- the refusal ------------------------------------------------------
 
-  @designed
   Scenario: Nothing to work with is a stated refusal, not a silent drop
     # The floor. Three empty sources and a settled answer, so the publish is
     # told, in the same terms it would be told about a rejecting relay, that
@@ -45,7 +44,6 @@ Feature: When there is nowhere to publish, say so
     And the publish reports that no destination could be determined
     And the note is never reported as sent
 
-  @designed
   Scenario: The reason names what was missing, not merely that something was
     # "Stuck" and "stuck because X" are different messages, and only the
     # second one an app or an operator can act on. All three exhausted sources
@@ -56,7 +54,6 @@ Feature: When there is nowhere to publish, say so
     And the reason names that my own relay list is absent
     And the reason names that no app relays are configured
 
-  @designed
   Scenario: Recipients with no inbox between them do not rescue the route
     # The same refusal with the p-tag source exercised rather than empty.
     # Bob and Carol are settled as having no relay list, which is a resolved
@@ -70,7 +67,6 @@ Feature: When there is nowhere to publish, say so
 
   # ---- what must never be substituted -----------------------------------
 
-  @designed
   Scenario: No public relay is ever substituted for an empty answer
     # The engine carries no built-in, hardcoded, or bootstrap relay set, and
     # this is the scenario that would catch one being introduced as a
@@ -81,7 +77,6 @@ Feature: When there is nowhere to publish, say so
     Then no relay is ever contacted for the note
     And no relay outside the ones configured is ever contacted
 
-  @designed
   Scenario: The indexers are not a publishing destination of last resort
     # The specific guess most available to an implementation: the discovery
     # indexers are configured, connected, and right there. They are where the
@@ -94,7 +89,6 @@ Feature: When there is nowhere to publish, say so
 
   # ---- the controls -----------------------------------------------------
 
-  @designed
   Scenario: One configured app relay is the difference between refusal and a route
     # The refusal is about having nothing, not about a policy that forbids
     # thin routes. Configure a single app relay and the same publish, with the
@@ -105,7 +99,6 @@ Feature: When there is nowhere to publish, say so
     And routing is complete
     And the publish reports no routing problem
 
-  @designed
   Scenario: One reachable recipient is enough, even with nothing else
     # The other single-source control. The author has no relay list and the
     # operator configured nothing, but Bob has an inbox -- so the note has
@@ -118,7 +111,6 @@ Feature: When there is nowhere to publish, say so
 
   # ---- staying visible --------------------------------------------------
 
-  @designed
   Scenario: The refusal is still legible after a restart
     # A message the app was not holding a receipt for when it arrived is a
     # message nobody received. The reason has to survive the process that
@@ -129,7 +121,6 @@ Feature: When there is nowhere to publish, say so
     Then the publish still reports that no destination could be determined
     And the reason still names that my own relay list is absent
 
-  @designed
   Scenario: A publish with no destination shows up as a stalled write
     # Per-receipt reporting answers "what happened to THIS note" and needs
     # someone to be asking. The global question -- "is anything quietly stuck"

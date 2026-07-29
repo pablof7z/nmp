@@ -2960,12 +2960,14 @@ impl<S: EventStore> EngineCore<S> {
     /// registered strategy claims the kind (`docs/internals/routing/outbox.md`).
     fn resolve_outbox(&self, event: &SignedEvent) -> RouteAnswer {
         let mut answer = RouteAnswer::default();
-        let mut thin_contributor = false;
+        let mut thin_recipient = false;
 
-        // 1. the author's own outbox.
+        // 1. the author's own outbox. A write fans out to EVERY write relay
+        //    its author has, and one relay of my own is a fact about where I
+        //    publish rather than a deficit to repair — so the author's own
+        //    thinness never arms the top-up below.
         let author = event.pubkey.to_hex();
-        let author_relays = self.contribute(&author, RelayRole::Write, &mut answer);
-        thin_contributor |= author_relays < COVERAGE_MIN;
+        self.contribute(&author, RelayRole::Write, &mut answer);
 
         // 2. app relays: every kind, every author, always, additive, and
         //    never counted toward the coverage minimum.
@@ -2974,17 +2976,25 @@ impl<S: EventStore> EngineCore<S> {
         // 3. each p-tagged recipient's INBOX (read relays, never write).
         let recipients = p_tagged_authors(event);
         for recipient in &recipients {
-            let known = self.contribute(recipient, RelayRole::Read, &mut answer);
-            thin_contributor |= known < COVERAGE_MIN;
+            // Only a SETTLED answer can be short: until a recipient's list is
+            // looked up to completion nobody knows what their coverage is, and
+            // topping up on ignorance would widen every route the first time
+            // it runs and then never narrow it. An unknown keeps the
+            // resolution open, and the top-up is decided again when it lands.
+            if let Some(reach) = self.contribute(recipient, RelayRole::Read, &mut answer) {
+                thin_recipient |= reach < COVERAGE_MIN;
+            }
         }
 
         // Operator fallback, adopted from the read path with the read path's
-        // own suppression rule: applied only when a contributing author's
+        // own suppression rule: applied only when a p-tagged RECIPIENT's
         // coverage falls under the 2-relay minimum AND no app relay is
-        // configured (`app_relays` suppresses fallback entirely). The failure
-        // this closes is a reply to someone whose kind:10002 lists exactly
-        // one relay reaching nowhere else when that relay is down.
-        if thin_contributor && self.directory.app_relays().is_empty() {
+        // configured (`app_relays` suppresses fallback entirely, without
+        // itself counting as coverage). The failure this closes is a reply to
+        // someone whose kind:10002 lists exactly one relay reaching nowhere
+        // else when that relay is down; the addressee is who the minimum is
+        // about.
+        if thin_recipient && self.directory.app_relays().is_empty() {
             answer.relays.extend(self.directory.fallback_relays());
         }
 
@@ -3003,10 +3013,10 @@ impl<S: EventStore> EngineCore<S> {
             // that can unpark this write, so discovery must keep covering
             // them rather than tearing down on a settlement that produced no
             // destination. Nothing auto-abandons.
+            answer.detail = Some(self.no_destination_detail(&author, &recipients));
             answer.unknown_authors.insert(author);
             answer.unknown_authors.extend(recipients);
             answer.complete = false;
-            answer.detail = Some(unresolved_detail(&answer.unknown_authors));
             return answer;
         }
 
@@ -3017,32 +3027,81 @@ impl<S: EventStore> EngineCore<S> {
         answer
     }
 
-    /// Fold one contributing author's three-valued answer into `answer`,
-    /// returning how many relays they contributed (`0` for both settled
-    /// absence and ignorance — the caller only uses it for the coverage
-    /// minimum, which an unknown author cannot satisfy either way).
-    fn contribute(&self, author: &PubkeyHex, role: RelayRole, answer: &mut RouteAnswer) -> usize {
+    /// Fold one contributing author's three-valued answer into `answer`.
+    ///
+    /// `Some(n)` is a SETTLED answer reaching `n` relays (`Some(0)` for a
+    /// definitive absence, and for a list that names nothing on the half this
+    /// role wants); `None` is ignorance, which has also declared the need.
+    /// The caller may only judge coverage against a settled answer — an
+    /// unknown recipient has no coverage to be short of yet.
+    fn contribute(
+        &self,
+        author: &PubkeyHex,
+        role: RelayRole,
+        answer: &mut RouteAnswer,
+    ) -> Option<usize> {
         match self.directory.relay_list_knowledge(author) {
             RelayListKnowledge::Known => {
                 let laned = match role {
                     RelayRole::Write => self.directory.write_relays(author),
                     RelayRole::Read => self.directory.read_relays(author),
                 };
-                let before = answer.relays.len();
                 answer.relays.extend(laned.iter().map(|lr| lr.url.clone()));
-                let _ = before;
-                laned.len()
+                Some(laned.len())
             }
             // Settled: this input is RESOLVED, contributing nothing. It does
             // not block retirement -- that is exactly what makes the owner's
             // three-p-tag example reachable.
-            RelayListKnowledge::KnownAbsent => 0,
+            RelayListKnowledge::KnownAbsent => Some(0),
             // Not looked up to completion. Declare the need and keep the
             // obligation alive; the engine folds it into `sync_discovery`.
             RelayListKnowledge::Unknown => {
                 answer.unknown_authors.insert(author.clone());
-                0
+                None
             }
+        }
+    }
+
+    /// Why a resolution named no destination at all, in the terms that make it
+    /// actionable: every exhausted source, and the operator sets that were
+    /// empty.
+    ///
+    /// "Stuck" and "stuck because X" are different messages and only the
+    /// second one can be acted on — and here every clause doubles as a way to
+    /// fix it, because configuring any single one of them would have produced
+    /// a route. It also keeps the two shapes of nothing apart: a relay list
+    /// that discovery settled as ABSENT is a final answer, while one nobody
+    /// has finished looking up is merely young, and an operator reading
+    /// "absent" knows waiting will not help.
+    fn no_destination_detail(
+        &self,
+        author: &PubkeyHex,
+        recipients: &BTreeSet<PubkeyHex>,
+    ) -> String {
+        let mut parts = vec![self.exhausted_source(author, RelayRole::Write)];
+        parts.extend(
+            recipients
+                .iter()
+                .map(|recipient| self.exhausted_source(recipient, RelayRole::Read)),
+        );
+        if self.directory.app_relays().is_empty() {
+            parts.push("no app relays are configured".to_string());
+        }
+        if self.directory.fallback_relays().is_empty() {
+            parts.push("no fallback relays are configured".to_string());
+        }
+        format!("no destination could be determined: {}", parts.join("; "))
+    }
+
+    /// One contributing author's clause of [`Self::no_destination_detail`].
+    fn exhausted_source(&self, author: &PubkeyHex, role: RelayRole) -> String {
+        match self.directory.relay_list_knowledge(author) {
+            RelayListKnowledge::Known => match role {
+                RelayRole::Write => format!("the relay list for {author} names no write relay"),
+                RelayRole::Read => format!("the relay list for {author} names no read relay"),
+            },
+            RelayListKnowledge::KnownAbsent => format!("no relay list exists for {author}"),
+            RelayListKnowledge::Unknown => format!("no relay list known yet for {author}"),
         }
     }
 

@@ -194,7 +194,8 @@ impl NmpWorld {
         assert!(
             !self.write_relay_of.contains_key(person)
                 && !self.read_relay_of.contains_key(person)
-                && !self.declares_no_relays.iter().any(|p| p == person),
+                && !self.declares_no_relays.iter().any(|p| p == person)
+                && !self.declares_no_write_relays.iter().any(|p| p == person),
             "nmp-bdd: {person}'s relay list is staged, so it HAS been fetched"
         );
     }
@@ -334,13 +335,17 @@ impl NmpWorld {
         );
     }
 
-    /// This world configures no app relays anywhere -- the `Given` that says
-    /// so out loud is checking the harness, not the engine.
-    pub fn assert_no_app_relays(&self) {
+    /// `Given no app relays are configured` -- a statement about the world's
+    /// final topology, so it CLEARS whatever a Background configured rather
+    /// than merely asserting. A feature whose Background gives every scenario
+    /// an app relay still needs one scenario without: "always additive" is
+    /// only falsifiable against the empty set.
+    pub fn no_app_relays(&mut self) {
         assert!(
             !self.started,
             "nmp-bdd: state the app-relay topology before anything runs"
         );
+        self.app_relay_names.clear();
     }
 
     /// Logging in registers a real signer (see `ensure_started`), so a
@@ -432,7 +437,18 @@ impl NmpWorld {
             .iter()
             .map(|name| self.relays[name].url.clone())
             .collect();
-        let mut directory = LiveDirectory::builder().indexers(indexer_urls).build();
+        // The operator's own sets, alongside the indexers and on the same
+        // footing: configured facts the engine is handed, never anything it
+        // discovered. `app_relays` is additive for every write and
+        // `fallback_relays` tops up a short recipient unless an app relay
+        // suppressed it.
+        let app_urls = self.app_relay_urls();
+        let fallback_urls = self.fallback_relay_urls();
+        let mut directory = LiveDirectory::builder()
+            .indexers(indexer_urls)
+            .app_relays(app_urls)
+            .fallback_relays(fallback_urls)
+            .build();
         for (person, relay_names) in self.write_relay_of.clone() {
             let pk_hex = self.person(&person).public_key().to_hex();
             let laned: Vec<LanedRelay> = relay_names
@@ -461,6 +477,14 @@ impl NmpWorld {
             let pk_hex = self.person(&person).public_key().to_hex();
             directory.ingest_write_relays(pk_hex.clone(), Vec::new());
             directory.ingest_read_relays(pk_hex, Vec::new());
+        }
+        // The half-empty list: it exists, and its WRITE half names nothing.
+        // Recorded after the two loops above so a person who also declared
+        // read relays keeps them -- a list whose entries are all read-marked
+        // is exactly this shape, and it is still an answer.
+        for person in self.declares_no_write_relays.clone() {
+            let pk_hex = self.person(&person).public_key().to_hex();
+            directory.ingest_write_relays(pk_hex, Vec::new());
         }
 
         // Which store, decided where the decision is: in memory by default,
