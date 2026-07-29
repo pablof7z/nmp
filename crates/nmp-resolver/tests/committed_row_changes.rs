@@ -123,14 +123,20 @@ fn same_batch_supersession_chain_collapses_to_old_removed_and_final_winner_inser
     assert!(changes.provenance_grew.is_empty());
 }
 
+/// The predecessor here is RELAY-OBSERVED, so the newer local winner
+/// displacing it retires no delivery obligation and the stash keeps a row
+/// that is still valid on its own. That is what makes compensation the exact
+/// inverse. The purely-pending predecessor -- which the newer winner retires
+/// outright -- is the separate case below.
 #[test]
 fn local_supersession_and_compensation_carry_exact_inverse_row_changes() {
     let keys = Keys::generate();
     let predecessor = event(&keys, Kind::from(10_000u16), "old", 10);
     let winner = event(&keys, Kind::from(10_000u16), "new", 20);
+    let source = relay("valid-predecessor");
     let mut engine = Engine::new(MemoryStore::new());
     engine
-        .accept_local(accept_write_of(predecessor.clone(), 11))
+        .ingest_observed_detailed(vec![(predecessor.clone(), observed(source.clone(), 11))])
         .unwrap();
 
     let accepted = engine.accept_local(accept_write_of(winner, 21)).unwrap();
@@ -156,9 +162,50 @@ fn local_supersession_and_compensation_carry_exact_inverse_row_changes() {
         .unwrap();
     assert_eq!(compensated.row_changes.inserted.len(), 1);
     assert_eq!(compensated.row_changes.inserted[0].event.id, predecessor.id);
-    assert!(compensated.row_changes.inserted[0]
-        .observed_relays
-        .is_empty());
+    assert_eq!(
+        compensated.row_changes.inserted[0].observed_relays,
+        BTreeSet::from([source])
+    );
+    assert_eq!(compensated.row_changes.removed, vec![pending]);
+}
+
+/// A purely pending predecessor -- accepted locally, never signed, never
+/// attempted -- is RETIRED by the newer same-coordinate winner rather than
+/// stashed. The supersession delta still reports it removed, because it is
+/// genuinely gone from every query; compensating the winner then restores
+/// nothing, because there is no valid row left to restore.
+#[test]
+fn a_retired_pending_predecessor_is_removed_and_never_restored() {
+    let keys = Keys::generate();
+    let predecessor = event(&keys, Kind::from(10_000u16), "old", 10);
+    let winner = event(&keys, Kind::from(10_000u16), "new", 20);
+    let mut engine = Engine::new(MemoryStore::new());
+    engine
+        .accept_local(accept_write_of(predecessor.clone(), 11))
+        .unwrap();
+
+    let accepted = engine.accept_local(accept_write_of(winner, 21)).unwrap();
+    let (intent_id, pending) = match &accepted.outcome {
+        AcceptOutcome::Superseded {
+            intent_id,
+            row,
+            retired,
+            ..
+        } => {
+            assert_eq!(retired.len(), 1, "the pending predecessor is retired");
+            (*intent_id, row.event.clone())
+        }
+        other => panic!("expected local supersession, got {other:?}"),
+    };
+    assert_eq!(accepted.committed.row_changes.removed.len(), 1);
+    assert_eq!(accepted.committed.row_changes.removed[0].id, predecessor.id);
+
+    let outcome = engine.store_mut().compensate_write(intent_id).unwrap();
+    assert!(matches!(outcome, CompensateOutcome::Compensated { .. }));
+    let compensated = engine
+        .react_to_compensation(pending.clone(), &outcome)
+        .unwrap();
+    assert!(compensated.row_changes.inserted.is_empty());
     assert_eq!(compensated.row_changes.removed, vec![pending]);
 }
 
