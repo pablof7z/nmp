@@ -356,7 +356,14 @@ about current code:
   second owner -- same path, relative alias, existing symlink, dangling final
   symlink, this process or another -- is typed
   `RedbStoreOpenError::StoreAlreadyOpen` / `EngineError::StoreAlreadyOpen`,
-  projected to Swift `storeAlreadyOpen` and Kotlin `StoreAlreadyOpen`. Reset
+  projected to Swift `storeAlreadyOpen` and Kotlin `StoreAlreadyOpen`. Path
+  resolution is coherent when a missing final component appears
+  (#1001): if `canonicalize` first observes `NotFound` but metadata then sees
+  the ordinary file, the resolver restarts within its existing 40-step bound
+  instead of returning stale `ENOENT`. It never retries the whole store open
+  or accepts a third outcome; deterministic resolver and eight-opener
+  falsifiers prove one owner and seven typed refusals.
+  Reset
   acquires the SAME ownership and holds it through removal, returning typed
   `StoreStillOpen { path }` without touching a live store; there is no
   check-then-delete gap. Existing and dangling final symlink paths resolve to
