@@ -24,7 +24,7 @@ use nmp::mechanism::core::RowDelta;
 use nmp::mechanism::outbox::WriteStatus;
 use nmp::mechanism::runtime::{EngineThread, FifoReceiver, FifoRecvTimeoutError, RowsReceiver};
 use nmp_grammar::{Binding, Filter, IdentityField};
-use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
+use nmp_grammar::{Durability, EventBuilder, WriteIntent, WritePayload, WriteRouting};
 use nmp_local_signer::LocalKeySigner;
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
@@ -241,7 +241,7 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
     );
     let receipt_as_b = handle
         .publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned_as_b),
+            payload: WritePayload::Event(body_of(&unsigned_as_b)),
             durability: Durability::AtMostOnce,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -269,7 +269,7 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
     );
     let receipt_wrong = handle
         .publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned_as_a_while_b_active),
+            payload: WritePayload::Event(body_of(&unsigned_as_a_while_b_active)),
             durability: Durability::AtMostOnce,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -295,7 +295,7 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
     );
     let receipt_as_a = handle
         .publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned_as_a),
+            payload: WritePayload::Event(body_of(&unsigned_as_a)),
             durability: Durability::AtMostOnce,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -344,7 +344,7 @@ fn no_active_account_cannot_select_an_arbitrary_registered_signer() {
     );
     let receipt_rx = handle
         .publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned),
+            payload: WritePayload::Event(body_of(&unsigned)),
             durability: Durability::AtMostOnce,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -382,13 +382,12 @@ fn active_a_rejects_b_authored_default_even_when_b_is_registered() {
 
     let receipt = handle
         .publish(WriteIntent {
-            payload: WritePayload::Unsigned(UnsignedEvent::new(
-                b.public_key(),
-                Timestamp::now(),
-                Kind::TextNote,
-                vec![],
-                "unauthorized default author",
-            )),
+            payload: WritePayload::Event(EventBuilder {
+                kind: Kind::TextNote,
+                tags: (vec![]).into_iter().collect(),
+                content: ("unauthorized default author").into(),
+                created_at: Some(Timestamp::now()),
+            }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -447,7 +446,7 @@ fn stale_a_draft_after_switch_to_b_invokes_neither_signer() {
 
     let receipt = handle
         .publish(WriteIntent {
-            payload: WritePayload::Unsigned(composed_as_a),
+            payload: WritePayload::Event(body_of(&composed_as_a)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -492,13 +491,12 @@ fn attaching_matching_signer_rearms_awaiting_intent() {
     handle.set_active_account(Some(a.public_key()));
     let receipt = handle
         .publish(WriteIntent {
-            payload: WritePayload::Unsigned(UnsignedEvent::new(
-                a.public_key(),
-                Timestamp::now(),
-                Kind::TextNote,
-                vec![],
-                "reattach me",
-            )),
+            payload: WritePayload::Event(EventBuilder {
+                kind: Kind::TextNote,
+                tags: (vec![]).into_iter().collect(),
+                content: ("reattach me").into(),
+                created_at: Some(Timestamp::now()),
+            }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -549,13 +547,12 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
 
     let receipt = handle
         .publish(WriteIntent {
-            payload: WritePayload::Unsigned(UnsignedEvent::new(
-                b.public_key(),
-                Timestamp::now(),
-                Kind::TextNote,
-                vec![],
-                "authored by b",
-            )),
+            payload: WritePayload::Event(EventBuilder {
+                kind: Kind::TextNote,
+                tags: (vec![]).into_iter().collect(),
+                content: ("authored by b").into(),
+                created_at: Some(Timestamp::now()),
+            }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -617,13 +614,12 @@ fn stale_registration_cannot_detach_replacement_for_same_pubkey() {
     handle.set_active_account(Some(keys.public_key()));
     let receipt = handle
         .publish(WriteIntent {
-            payload: WritePayload::Unsigned(UnsignedEvent::new(
-                keys.public_key(),
-                Timestamp::now(),
-                Kind::TextNote,
-                vec![],
-                "replacement remains usable",
-            )),
+            payload: WritePayload::Event(EventBuilder {
+                kind: Kind::TextNote,
+                tags: (vec![]).into_iter().collect(),
+                content: ("replacement remains usable").into(),
+                created_at: Some(Timestamp::now()),
+            }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -713,7 +709,7 @@ fn identity_override_signs_as_registered_secondary_without_rerooting_active() {
     let expected = draft.clone().sign_with_keys(&b).expect("derive frozen id");
     let receipt = handle
         .publish(WriteIntent {
-            payload: WritePayload::Unsigned(draft),
+            payload: WritePayload::Event(body_of(&draft)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: Some(b.public_key()),
@@ -773,7 +769,7 @@ fn identity_override_signs_as_registered_secondary_without_rerooting_active() {
     );
     let receipt_default = handle
         .publish(WriteIntent {
-            payload: WritePayload::Unsigned(a_draft),
+            payload: WritePayload::Event(body_of(&a_draft)),
             durability: Durability::AtMostOnce,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -824,7 +820,7 @@ fn unregistered_override_parks_durably_and_never_retargets_on_account_switch() {
     let expected = draft.clone().sign_with_keys(&b).expect("derive frozen id");
     let receipt = handle
         .publish(WriteIntent {
-            payload: WritePayload::Unsigned(draft),
+            payload: WritePayload::Event(body_of(&draft)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: Some(b.public_key()),
@@ -896,7 +892,7 @@ fn identity_override_signs_while_logged_out() {
     let expected = draft.clone().sign_with_keys(&b).expect("derive frozen id");
     let receipt = handle
         .publish(WriteIntent {
-            payload: WritePayload::Unsigned(draft),
+            payload: WritePayload::Event(body_of(&draft)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: Some(b.public_key()),
@@ -930,4 +926,17 @@ fn pubkeyless_capability_is_a_typed_registration_error() {
     );
     handle.shutdown();
     engine_thread.join();
+}
+
+/// The same body these fixtures already build, said the way an app says it:
+/// a builder states the kind, the tags, the content and (here, so the
+/// assertions can name exact ids) the timestamp. The author is not part of
+/// it -- the write's identity decides that at acceptance.
+fn body_of(unsigned: &nostr::UnsignedEvent) -> nmp_grammar::EventBuilder {
+    nmp_grammar::EventBuilder {
+        kind: unsigned.kind,
+        tags: unsigned.tags.iter().cloned().collect(),
+        content: unsigned.content.clone(),
+        created_at: Some(unsigned.created_at),
+    }
 }

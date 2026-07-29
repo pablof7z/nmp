@@ -199,12 +199,13 @@ async fn the_29er_observer_composition_never_saturates_across_room_switching_and
     // Active receipt tracking alongside the whole composition.
     let receipt = engine
         .publish(FfiWriteIntent {
-            payload: FfiWritePayload::Unsigned {
-                pubkey: author.clone(),
-                created_at: 1_700_000_000,
-                kind: 1,
-                tags: Vec::new(),
-                content: "29er composition".to_string(),
+            payload: FfiWritePayload::Event {
+                builder: nmp_ffi::types::FfiEventBuilder {
+                    kind: 1,
+                    tags: Vec::new(),
+                    content: "29er composition".to_string(),
+                    created_at: Some(1_700_000_000),
+                },
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,

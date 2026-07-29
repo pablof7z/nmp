@@ -1647,12 +1647,13 @@ mod tests {
             .expect("active account must activate");
 
         let intent = FfiWriteIntent {
-            payload: FfiWritePayload::Unsigned {
-                pubkey: overridden.public_key().to_hex(),
-                created_at: nostr::Timestamp::now().as_secs(),
-                kind: 9999,
-                tags: vec![],
-                content: "override park".to_string(),
+            payload: FfiWritePayload::Event {
+                builder: crate::types::FfiEventBuilder {
+                    kind: 9999,
+                    tags: vec![],
+                    content: "override park".to_string(),
+                    created_at: Some(nostr::Timestamp::now().as_secs()),
+                },
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
@@ -1699,12 +1700,13 @@ mod tests {
             .set_active_account(Some(keys.public_key().to_hex()))
             .unwrap();
         let intent = FfiWriteIntent {
-            payload: FfiWritePayload::Unsigned {
-                pubkey: keys.public_key().to_hex(),
-                created_at: 10,
-                kind: 1,
-                tags: Vec::new(),
-                content: "cancel through ffi".to_string(),
+            payload: FfiWritePayload::Event {
+                builder: crate::types::FfiEventBuilder {
+                    kind: 1,
+                    tags: Vec::new(),
+                    content: "cancel through ffi".to_string(),
+                    created_at: Some(10),
+                },
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
@@ -1782,12 +1784,13 @@ mod tests {
             .expect("account must activate");
 
         let intent = FfiWriteIntent {
-            payload: FfiWritePayload::Unsigned {
-                pubkey: keys.public_key().to_hex(),
-                created_at: nostr::Timestamp::now().as_secs(),
-                kind: 9999,
-                tags: vec![],
-                content: "reattach e2e".to_string(),
+            payload: FfiWritePayload::Event {
+                builder: crate::types::FfiEventBuilder {
+                    kind: 9999,
+                    tags: vec![],
+                    content: "reattach e2e".to_string(),
+                    created_at: Some(nostr::Timestamp::now().as_secs()),
+                },
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
@@ -1872,12 +1875,13 @@ mod tests {
                 .set_active_account(Some(keys.public_key().to_hex()))
                 .expect("account must activate");
             let intent = FfiWriteIntent {
-                payload: FfiWritePayload::Unsigned {
-                    pubkey: keys.public_key().to_hex(),
-                    created_at: nostr::Timestamp::now().as_secs(),
-                    kind: 9999,
-                    tags: vec![],
-                    content: "corrupt-receipt".to_string(),
+                payload: FfiWritePayload::Event {
+                    builder: crate::types::FfiEventBuilder {
+                        kind: 9999,
+                        tags: vec![],
+                        content: "corrupt-receipt".to_string(),
+                        created_at: Some(nostr::Timestamp::now().as_secs()),
+                    },
                 },
                 durability: FfiDurability::Durable,
                 routing: FfiWriteRouting::Auto,
@@ -2019,7 +2023,12 @@ mod tests {
             let receipt = engine
                 .engine
                 .publish_tracked(nmp::WriteIntent {
-                    payload: nmp::WritePayload::Unsigned(unsigned),
+                    payload: nmp::WritePayload::Event(nmp::EventBuilder {
+                        kind: unsigned.kind,
+                        tags: unsigned.tags.iter().cloned().collect(),
+                        content: unsigned.content.clone(),
+                        created_at: Some(unsigned.created_at),
+                    }),
                     durability: nmp::Durability::Durable,
                     routing: nmp::WriteRouting::Auto,
                     identity_override: None,

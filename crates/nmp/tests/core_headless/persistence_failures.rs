@@ -524,11 +524,7 @@ fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
     // connected yet -- every one lands in `WaitingConnection`.
     for (i, relay) in relays.iter().enumerate() {
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(
-                &author,
-                100 + i as u64,
-                &format!("falsifier {i}"),
-            )),
+            payload: WritePayload::Event(draft(100 + i as u64, &format!("falsifier {i}"))),
             durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity_override: None,
@@ -604,11 +600,7 @@ fn unchanged_worker_demand_reads_zero_outbox_lanes() {
 
     for (i, relay) in relays.iter().enumerate() {
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(
-                &author,
-                300 + i as u64,
-                &format!("worker projection {i}"),
-            )),
+            payload: WritePayload::Event(draft(300 + i as u64, &format!("worker projection {i}"))),
             durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity_override: None,
@@ -684,7 +676,7 @@ fn route_parked_intents_add_no_worker_demand_and_no_store_reads() {
     // One ordinary routed write, so the assertions below distinguish "parked
     // writes contribute nothing" from "this core computes nothing at all".
     let accepted = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&author, 400, "parked control")),
+        payload: WritePayload::Event(draft(400, "parked control")),
         durability: Durability::Durable,
         routing: WriteRouting::Explicit(vec![routed_relay.clone()]),
         identity_override: None,
@@ -704,11 +696,7 @@ fn route_parked_intents_add_no_worker_demand_and_no_store_reads() {
 
     for i in 0..PARKED {
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(
-                &author,
-                500 + i as u64,
-                &format!("parked {i}"),
-            )),
+            payload: WritePayload::Event(draft(500 + i as u64, &format!("parked {i}"))),
             durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![parked_relay.clone()]),
             identity_override: None,
@@ -792,7 +780,7 @@ fn an_unknown_lane_creation_failure_retains_every_candidate_worker() {
     activate(&mut core, &author);
 
     let accepted = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&author, 600, "unproven lane creation")),
+        payload: WritePayload::Event(draft(600, "unproven lane creation")),
         durability: Durability::Durable,
         routing: WriteRouting::Explicit(relays.to_vec()),
         identity_override: None,
@@ -865,8 +853,7 @@ fn relay_worker_projection_redb_benchmark() {
 
     for (i, relay) in relays.iter().enumerate() {
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(
-                &author,
+            payload: WritePayload::Event(draft(
                 10_000 + i as u64,
                 &format!("worker benchmark {i}"),
             )),
@@ -932,7 +919,7 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
     // Intent #1: its `bootstrap_outbox_lanes` call is the injected failure
     // -- the reducer must degrade rather than pretend it has no lanes.
     let accepted1 = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&author, 200, "degraded 1")),
+        payload: WritePayload::Event(draft(200, "degraded 1")),
         durability: Durability::Durable,
         routing: WriteRouting::Explicit(vec![relay.clone()]),
         identity_override: None,
@@ -954,7 +941,7 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
     // `fail_next_bootstrap` is one-shot, so this one bootstraps normally and
     // the index DOES learn its lane.
     let accepted2 = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&author, 201, "degraded 2")),
+        payload: WritePayload::Event(draft(201, "degraded 2")),
         durability: Durability::Durable,
         routing: WriteRouting::Explicit(vec![relay.clone()]),
         identity_override: None,

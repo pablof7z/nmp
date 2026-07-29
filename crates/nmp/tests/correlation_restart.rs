@@ -108,11 +108,11 @@ fn kill_after_durable_acceptance_reattaches_by_token_alone_after_restart() {
         );
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned_draft(
+            payload: WritePayload::Event(body_of(&unsigned_draft(
                 keys.public_key(),
                 100,
                 "kill-after-accept",
-            )),
+            ))),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -172,11 +172,11 @@ fn terminal_convergence_survives_restart_and_replays_by_token() {
         );
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned_draft(
+            payload: WritePayload::Event(body_of(&unsigned_draft(
                 keys.public_key(),
                 200,
                 "terminal correlation",
-            )),
+            ))),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -216,7 +216,11 @@ fn double_submit_same_token_across_a_restart_mints_no_second_obligation() {
         );
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned_draft(keys.public_key(), 300, "first body")),
+            payload: WritePayload::Event(body_of(&unsigned_draft(
+                keys.public_key(),
+                300,
+                "first body",
+            ))),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -232,11 +236,11 @@ fn double_submit_same_token_across_a_restart_mints_no_second_obligation() {
     core.recover_on_boot();
     core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned_draft(
+        payload: WritePayload::Event(body_of(&unsigned_draft(
             keys.public_key(),
             301,
             "second, different body",
-        )),
+        ))),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -555,4 +559,17 @@ fn partial_relay_reject_survives_restart_and_replays_by_token() {
         )),
         "the token must replay the SAME partial per-relay REJECT evidence after restart, got {statuses:?}"
     );
+}
+
+/// The same body these fixtures already build, said the way an app says it:
+/// a builder states the kind, the tags, the content and (here, so the
+/// assertions can name exact ids) the timestamp. The author is not part of
+/// it -- the write's identity decides that at acceptance.
+fn body_of(unsigned: &nostr::UnsignedEvent) -> nmp_grammar::EventBuilder {
+    nmp_grammar::EventBuilder {
+        kind: unsigned.kind,
+        tags: unsigned.tags.iter().cloned().collect(),
+        content: unsigned.content.clone(),
+        created_at: Some(unsigned.created_at),
+    }
 }

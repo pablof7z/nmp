@@ -567,15 +567,50 @@ pub enum FfiWriteRouting {
     Explicit { relays: Vec<String> },
 }
 
+/// `nmp::EventBuilder` mirror: the kind is demanded, everything else is
+/// optional, and there is no author field because a builder has no author
+/// until the engine resolves the write's identity at acceptance.
+///
+/// A UniFFI **Record with defaulted fields**, not an Object: Swift and
+/// Kotlin's native idiom for "a record with defaults" IS a labeled-argument
+/// initializer, so a Swift caller writes
+/// `FfiEventBuilder(kind: 1, content: "hello")` and a Kotlin caller
+/// `FfiEventBuilder(kind = 1u, content = "hello")`. A fluent object builder
+/// would cross as an `Arc` handle whose combinators cannot consume `self`,
+/// buying interior mutability and a round-trip per field for a type that is
+/// four fields of data with no identity and no lifetime.
+///
+/// `created_at` absent means "stamp it at acceptance"; present means
+/// exactly this timestamp, kept verbatim -- including one that loses a
+/// replaceable race. Nothing here is validated: unrecognised tags cross
+/// unchanged and a kind no module knows is published rather than refused.
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiEventBuilder {
+    pub kind: u16,
+    #[uniffi(default = [])]
+    pub tags: Vec<Vec<String>>,
+    #[uniffi(default = "")]
+    pub content: String,
+    #[uniffi(default = None)]
+    pub created_at: Option<u64>,
+}
+
 /// The event payload of a write intent (`nmp::WritePayload` mirror). VISION
-/// P: signing and publishing are ORTHOGONAL stages -- `Unsigned` is a
-/// template the engine signs internally ("the key lives in the engine",
-/// ledger #12); `Signed` (#32, the M5 unlock) is a caller that already
-/// holds a validly-signed event -- an external signer provider, or a
-/// verbatim republish -- and hands its fields across as-is. `Signed`'s
+/// P: signing and publishing are ORTHOGONAL stages -- `Event` describes an
+/// event the engine stamps, freezes and signs internally ("the key lives in
+/// the engine", ledger #12); `Signed` (#32, the M5 unlock) is a caller that
+/// already holds a validly-signed event -- an external signer provider, or
+/// a verbatim republish of somebody else's note to an archive relay -- and
+/// hands its fields across as-is. `Signed`'s
 /// fields are field-for-field [`FfiRow`] (the read-side mirror of a signed
 /// `nostr::Event`) plus `sig`, deliberately: the write side stays symmetric
 /// with the read side rather than introducing a JSON-blob shape.
+///
+/// There is no `ReplaceableEdit` mirror and never was: a CAS-guarded
+/// replacement crosses this boundary only as a fused semantic method
+/// (`NmpEngine::follow`/`unfollow`), which owns the evidence policy, the
+/// precondition and the routing together. The native surface learns
+/// `follow(target)`, not the pieces it would otherwise have to reassemble.
 ///
 /// `Signed`'s fields are PARSED at this FFI boundary (typed hex/signature-
 /// shape errors, see `convert::signed_event_from_ffi`) but NOT verified
@@ -588,12 +623,8 @@ pub enum FfiWriteRouting {
 /// re-signs, mutates a tag, or recomputes an id for this variant.
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiWritePayload {
-    Unsigned {
-        pubkey: String,
-        created_at: u64,
-        kind: u16,
-        tags: Vec<Vec<String>>,
-        content: String,
+    Event {
+        builder: FfiEventBuilder,
     },
     Signed {
         id: String,
@@ -619,11 +650,14 @@ pub struct FfiWriteIntent {
     /// most plausibly holds in display form). `None` -- the default, and
     /// what every existing caller gets -- means "the active account at
     /// acceptance time", unchanged.
-    /// `Some` must name exactly the payload's own author; misuse fails
-    /// closed, never silently retargets: a MALFORMED string is a typed
+    /// On an `Event` payload `Some` SELECTS the author -- a builder states
+    /// none, so there is nothing for it to contradict. On a `Signed`
+    /// payload it may only RESTATE the author already frozen in the bytes:
+    /// naming that author changes nothing, and naming anybody else is a
+    /// consent/author contradiction. A MALFORMED string is a typed
     /// synchronous [`crate::convert::FfiError::InvalidPublicKey`] before any
-    /// engine call, while a well-formed-but-MISMATCHED override (not the
-    /// draft/event author) is rejected at the engine's acceptance boundary
+    /// engine call, while a well-formed-but-contradictory override on a
+    /// signed event is rejected at the engine's acceptance boundary
     /// as `FfiWriteStatus::Failed` on the receipt stream -- no `Accepted`
     /// ever precedes it. An override naming a pubkey with no registered
     /// signer parks as `FfiWriteStatus::AwaitingCapability` (retained, not

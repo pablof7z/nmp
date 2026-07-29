@@ -91,6 +91,7 @@ fn accept(frozen: Event, expected_pubkey: nostr::PublicKey, accepted_at: u64) ->
     AcceptWrite {
         frozen,
         replaceable_base: None,
+        monotonic_stamp: false,
         expected_pubkey,
         signing_identity_ref: "local".to_string(),
         durability: WriteDurability::Durable,

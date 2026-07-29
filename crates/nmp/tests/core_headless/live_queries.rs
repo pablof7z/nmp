@@ -669,9 +669,15 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
     )));
     let (outbox_sub, _f) = req_for(&outbox_effects, &relay_other);
     let outbox_wire = wire_sub_string(outbox_sub);
-    let event = unsigned(&a, 1, "seeded via relay_other")
-        .sign_with_keys(&a)
-        .expect("sign fixture event");
+    let event = nostr::UnsignedEvent::new(
+        a.public_key(),
+        Timestamp::from(1u64),
+        Kind::TextNote,
+        Vec::new(),
+        "seeded via relay_other",
+    )
+    .sign_with_keys(&a)
+    .expect("sign fixture event");
     let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,

@@ -46,14 +46,29 @@ fn effect_row_delta_count(effects: &[Effect]) -> usize {
         .sum()
 }
 
-fn unsigned(author: &Keys, seq: u64, content: &str) -> UnsignedEvent {
-    UnsignedEvent::new(
-        author.public_key(),
-        Timestamp::from(seq),
-        Kind::TextNote,
-        Vec::new(),
-        content,
+/// A minimal note whose `created_at` is stated so the assertions below can
+/// name exact ids and orderings. It takes no author: a builder has none, and
+/// the write's identity decides it at acceptance.
+fn draft(seq: u64, content: &str) -> nmp_grammar::EventBuilder {
+    nmp_grammar::EventBuilder::new(Kind::TextNote)
+        .content(content)
+        .created_at(Timestamp::from(seq))
+}
+
+/// The event `draft` describes once acceptance has resolved `keys` as its
+/// author -- i.e. exactly what a signer is handed and hands back.
+fn signed_draft(builder: &nmp_grammar::EventBuilder, keys: &Keys) -> nostr::Event {
+    nostr::UnsignedEvent::new(
+        keys.public_key(),
+        builder
+            .created_at
+            .expect("fixture drafts state their timestamp"),
+        builder.kind,
+        builder.tags.clone(),
+        builder.content.clone(),
     )
+    .sign_with_keys(keys)
+    .expect("fixture signing never fails")
 }
 
 fn cf(kinds: &[u16], authors: &[&str]) -> ConcreteFilter {
@@ -1015,7 +1030,7 @@ fn publish_explicit<S: EventStore>(
 ) -> (ReceiptId, nostr::Event, Vec<Effect>) {
     activate(core, author);
     let accepted = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(author, 85, "attempt-start failure")),
+        payload: WritePayload::Event(draft(85, "attempt-start failure")),
         durability: Durability::Durable,
         routing: WriteRouting::Explicit(Vec::from_iter(relays)),
         identity_override: None,

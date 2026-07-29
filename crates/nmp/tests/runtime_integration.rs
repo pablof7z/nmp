@@ -396,7 +396,7 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
     );
     let receipt_rx = handle
         .publish(WriteIntent {
-            payload: WritePayload::Unsigned(contact_list),
+            payload: WritePayload::Event(body_of(&contact_list)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -1180,13 +1180,12 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
     handle.set_active_account(Some(keys.public_key()));
     let tracked = handle
         .publish_tracked(WriteIntent {
-            payload: WritePayload::Unsigned(UnsignedEvent::new(
-                keys.public_key(),
-                Timestamp::now(),
-                Kind::TextNote,
-                vec![],
-                "tracked",
-            )),
+            payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: Kind::TextNote,
+                tags: (vec![]).into_iter().collect(),
+                content: ("tracked").into(),
+                created_at: Some(Timestamp::now()),
+            }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -1271,13 +1270,12 @@ fn correlation_retry_replays_only_to_its_new_observer_then_joins_live_delivery()
 
     let original = handle
         .publish_tracked(WriteIntent {
-            payload: WritePayload::Unsigned(UnsignedEvent::new(
-                keys.public_key(),
-                Timestamp::from(100),
-                Kind::TextNote,
-                vec![],
-                "original correlation body",
-            )),
+            payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: Kind::TextNote,
+                tags: (vec![]).into_iter().collect(),
+                content: ("original correlation body").into(),
+                created_at: Some(Timestamp::from(100)),
+            }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -1294,13 +1292,12 @@ fn correlation_retry_replays_only_to_its_new_observer_then_joins_live_delivery()
 
     let retry = handle
         .publish_tracked(WriteIntent {
-            payload: WritePayload::Unsigned(UnsignedEvent::new(
-                keys.public_key(),
-                Timestamp::from(101),
-                Kind::TextNote,
-                vec![],
-                "different retry body must not be accepted",
-            )),
+            payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: Kind::TextNote,
+                tags: (vec![]).into_iter().collect(),
+                content: ("different retry body must not be accepted").into(),
+                created_at: Some(Timestamp::from(101)),
+            }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -1372,6 +1369,7 @@ fn runtime_boot_recovery_precedes_first_reattach_command() {
                     sentinel_signature(),
                 ),
                 replaceable_base: None,
+                monotonic_stamp: false,
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: keys.public_key().to_hex(),
                 durability: WriteDurability::Durable,
@@ -1413,4 +1411,17 @@ fn runtime_boot_recovery_precedes_first_reattach_command() {
     ));
     handle.shutdown();
     thread.join();
+}
+
+/// The same body these fixtures already build, said the way an app says it:
+/// a builder states the kind, the tags, the content and (here, so the
+/// assertions can name exact ids) the timestamp. The author is not part of
+/// it -- the write's identity decides that at acceptance.
+fn body_of(unsigned: &nostr::UnsignedEvent) -> nmp_grammar::EventBuilder {
+    nmp_grammar::EventBuilder {
+        kind: unsigned.kind,
+        tags: unsigned.tags.iter().cloned().collect(),
+        content: unsigned.content.clone(),
+        created_at: Some(unsigned.created_at),
+    }
 }

@@ -8,7 +8,7 @@ use std::time::Duration;
 use nmp::{
     fifo_channel, AcquisitionEvidence, AsyncFifoReceiver, Engine, Event, EventId, FifoReceiver,
     FifoRecvError, FifoRecvTimeoutError, FifoSender, ObservationCancel, PublicKey, RowDelta,
-    ShortfallFact, SourceStatus, Timestamp, WriteStatus,
+    ShortfallFact, SourceStatus, WriteStatus,
 };
 
 use crate::demand::active_account_demand;
@@ -586,16 +586,15 @@ fn prepare_set_following_with_timeout(
                 }
             };
 
-            let composed =
-                match compose_follow_change(author, &base, target, change, Timestamp::now()) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        tx.send(FollowActionStatus::Failed(FollowActionFailure::Compose(
-                            error,
-                        )));
-                        return;
-                    }
-                };
+            let composed = match compose_follow_change(&base, target, change) {
+                Ok(value) => value,
+                Err(error) => {
+                    tx.send(FollowActionStatus::Failed(FollowActionFailure::Compose(
+                        error,
+                    )));
+                    return;
+                }
+            };
             let intent = match composed {
                 ComposeFollowResult::NoChange => {
                     tx.send(FollowActionStatus::NoChange {
@@ -703,7 +702,7 @@ mod tests {
             sources: vec![SourceEvidence {
                 relay: RelayUrl::parse("wss://relay.example").unwrap(),
                 access: AccessContext::Public,
-                reconciled_through: Some(Timestamp::from_secs(10)),
+                reconciled_through: Some(nostr::Timestamp::from_secs(10)),
                 status: SourceStatus::Requesting,
             }],
             shortfall: vec![],

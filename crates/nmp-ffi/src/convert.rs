@@ -16,27 +16,27 @@ use nmp::{
     AuthDiagnosticsSnapshot, AuthPhase, Binding as GBinding, CacheMode as GCacheMode,
     CancelWriteError, CancelWriteOutcome, CorrelationToken, CoverageInterval, Demand as GDemand,
     DemandError as GDemandError, Derived as GDerived, DiagnosticsSnapshot,
-    Durability as GDurability, Filter as GFilter, FilterCoverageEntry, Frame,
-    Freshness as GFreshness, IdentityField as GIdentityField, IndexedTagName, Lane,
-    RelayDiagnosticsSnapshot, RequestRowsError, Row, RowDelta, Selector as GSelector,
-    SetAlgebra as GSetAlgebra, SetOp as GSetOp, ShortfallFact, SourceAuthority as GSourceAuthority,
-    SourceEvidence, SourceStatus, Window, WindowLoad, WriteIntent as GWriteIntent,
-    WritePayload as GWritePayload, WriteRouting as GWriteRouting, WriteStatus as GWriteStatus,
+    Durability as GDurability, EventBuilder as GEventBuilder, Filter as GFilter,
+    FilterCoverageEntry, Frame, Freshness as GFreshness, IdentityField as GIdentityField,
+    IndexedTagName, Lane, RelayDiagnosticsSnapshot, RequestRowsError, Row, RowDelta,
+    Selector as GSelector, SetAlgebra as GSetAlgebra, SetOp as GSetOp, ShortfallFact,
+    SourceAuthority as GSourceAuthority, SourceEvidence, SourceStatus, Window, WindowLoad,
+    WriteIntent as GWriteIntent, WritePayload as GWritePayload, WriteRouting as GWriteRouting,
+    WriteStatus as GWriteStatus,
 };
 use nostr::secp256k1::schnorr::Signature;
-use nostr::{
-    Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayUrl, Tag, Timestamp, UnsignedEvent,
-};
+use nostr::{Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayUrl, Tag, Timestamp};
 
 use crate::types::{
     FfiAccessContext, FfiAcquisitionEvidence, FfiAuthDiagnostics, FfiAuthPhase, FfiBinding,
     FfiCacheMode, FfiCancelWriteError, FfiCancelWriteOutcome, FfiCoverageInterval, FfiDemand,
-    FfiDerived, FfiDiagnosticsSnapshot, FfiDurability, FfiFilter, FfiFilterCoverage, FfiFrame,
-    FfiFreshness, FfiIdentityField, FfiKindCount, FfiLaneCount, FfiRelayDiagnostics,
-    FfiRelayInformationErrorKind, FfiRow, FfiRowDelta, FfiSelector, FfiSetAlgebra, FfiSetOp,
-    FfiShortfallFact, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiSourceAuthority,
-    FfiSourceEvidence, FfiSourceStatus, FfiWindow, FfiWindowContents, FfiWindowLoad,
-    FfiWriteIntent, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
+    FfiDerived, FfiDiagnosticsSnapshot, FfiDurability, FfiEventBuilder, FfiFilter,
+    FfiFilterCoverage, FfiFrame, FfiFreshness, FfiIdentityField, FfiKindCount, FfiLaneCount,
+    FfiRelayDiagnostics, FfiRelayInformationErrorKind, FfiRow, FfiRowDelta, FfiSelector,
+    FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSignEventFailure, FfiSignEventRequest,
+    FfiSignedEvent, FfiSourceAuthority, FfiSourceEvidence, FfiSourceStatus, FfiWindow,
+    FfiWindowContents, FfiWindowLoad, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
+    FfiWriteStatus,
 };
 
 /// Every typed failure crossing this boundary -- parse, lifecycle, storage,
@@ -218,6 +218,15 @@ pub enum FfiError {
     /// validation (empty, or over `CorrelationToken::MAX_LEN` bytes). Synchronous,
     /// before any engine call -- same discipline as `InvalidPublicKey`/
     /// `InvalidTag` above.
+    /// A composer returned a CAS-guarded replaceable edit, which has no
+    /// wire form on purpose: a replaceable precondition crosses this
+    /// boundary only inside a fused semantic method that owns its policy
+    /// (`NmpEngine::follow`/`unfollow`), never as a payload a native caller
+    /// could reassemble without the guard
+    /// (`docs/internals/writes/payload-and-replaceable-edits.md` §5). This
+    /// is the payload axis of #951's bug class: a projection door refuses
+    /// as a VALUE instead of panicking on an exported path.
+    ReplaceableEditHasNoWireForm,
     InvalidCorrelationToken {
         got: String,
         reason: String,
@@ -296,6 +305,11 @@ impl std::fmt::Display for FfiError {
             Self::InvalidEventId { got } => write!(f, "invalid event id hex: {got:?}"),
             Self::InvalidRelayUrl { got } => write!(f, "invalid relay url: {got:?}"),
             Self::InvalidTag { got } => write!(f, "invalid tag: {got:?}"),
+            Self::ReplaceableEditHasNoWireForm => write!(
+                f,
+                "a replaceable edit crosses this boundary only inside the semantic method that \
+                 owns its precondition, never as a payload"
+            ),
             Self::InvalidSecretKey => write!(f, "invalid secret key"),
             Self::InvalidSigner { reason } => write!(f, "invalid signer: {reason}"),
             Self::AuthCapabilityRegistryFull { limit } => {
@@ -1661,6 +1675,60 @@ pub(crate) fn write_routing_to_ffi(routing: nmp::WriteRouting) -> FfiWriteRoutin
     }
 }
 
+/// Project a payload a protocol module composed back out to the FFI
+/// boundary. Total over every shape that HAS a wire form, so a protocol
+/// crate that changes which payload it mints projects that change
+/// faithfully instead of tripping a closed-contract assertion on an
+/// exported path (#951's bug class, on the payload axis). The one shape
+/// with no wire form refuses as a typed value -- see
+/// [`FfiError::ReplaceableEditHasNoWireForm`].
+pub(crate) fn write_payload_to_ffi(payload: GWritePayload) -> Result<FfiWritePayload, FfiError> {
+    match payload {
+        GWritePayload::Event(builder) => Ok(FfiWritePayload::Event {
+            builder: event_builder_to_ffi(builder),
+        }),
+        GWritePayload::Signed(event) => Ok(FfiWritePayload::Signed {
+            id: event.id.to_hex(),
+            pubkey: event.pubkey.to_hex(),
+            created_at: event.created_at.as_secs(),
+            kind: event.kind.as_u16(),
+            tags: event
+                .tags
+                .iter()
+                .map(|tag| tag.as_slice().to_vec())
+                .collect(),
+            content: event.content.clone(),
+            sig: event.sig.to_string(),
+        }),
+        GWritePayload::ReplaceableEdit { .. } => Err(FfiError::ReplaceableEditHasNoWireForm),
+    }
+}
+
+/// `nmp::EventBuilder -> FfiEventBuilder`. Infallible in this direction:
+/// every field already is what the record carries.
+pub(crate) fn event_builder_to_ffi(builder: GEventBuilder) -> FfiEventBuilder {
+    FfiEventBuilder {
+        kind: builder.kind.as_u16(),
+        tags: builder
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect(),
+        content: builder.content,
+        created_at: builder.created_at.map(|ts| ts.as_secs()),
+    }
+}
+
+/// The durability a protocol module chose, projected totally for the same
+/// reason routing and payload are.
+pub(crate) fn durability_to_ffi(durability: GDurability) -> FfiDurability {
+    match durability {
+        GDurability::Durable => FfiDurability::Durable,
+        GDurability::Ephemeral => FfiDurability::Ephemeral,
+        GDurability::AtMostOnce => FfiDurability::AtMostOnce,
+    }
+}
+
 /// A malformed raw tag array (empty, or otherwise unparseable) REJECTS the
 /// whole intent rather than being silently dropped: a signer that drops one
 /// tag from a template can sign a DIFFERENT event than the app composed
@@ -1672,6 +1740,18 @@ fn tags_from_ffi(tags: Vec<Vec<String>>) -> Result<Vec<Tag>, FfiError> {
     tags.into_iter()
         .map(|t| Tag::parse(t.clone()).map_err(|_| FfiError::InvalidTag { got: t }))
         .collect()
+}
+
+/// `FfiEventBuilder -> nmp::EventBuilder`. The only thing that can fail is
+/// a tag row that is not a tag; there is deliberately no author to parse,
+/// no kind whitelist to check, and no timestamp to invent.
+fn event_builder_from_ffi(builder: FfiEventBuilder) -> Result<GEventBuilder, FfiError> {
+    Ok(GEventBuilder {
+        kind: nostr::Kind::from(builder.kind),
+        tags: tags_from_ffi(builder.tags)?,
+        content: builder.content,
+        created_at: builder.created_at.map(Timestamp::from),
+    })
 }
 
 /// A `FfiWritePayload::Signed`'s fields -> a `nostr::Event`, PARSE ONLY --
@@ -1711,8 +1791,8 @@ fn signed_event_from_ffi(
     ))
 }
 
-/// `FfiWriteIntent -> nmp::WriteIntent`. `Unsigned` builds an
-/// `UnsignedEvent` template the engine signs internally; `Signed` (#32)
+/// `FfiWriteIntent -> nmp::WriteIntent`. `Event` builds the `EventBuilder`
+/// the engine stamps, freezes and signs internally; `Signed` (#32)
 /// parses the caller-supplied event's fields and passes it through
 /// verbatim -- see `signed_event_from_ffi`'s doc for where the verify now
 /// happens. `identity_override` (#47 Unit A) parses first, so a malformed
@@ -1732,22 +1812,8 @@ pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, Ffi
         .transpose()?;
 
     let payload = match intent.payload {
-        FfiWritePayload::Unsigned {
-            pubkey,
-            created_at,
-            kind,
-            tags,
-            content,
-        } => {
-            let pubkey = parse_pubkey(&pubkey)?;
-            let unsigned = UnsignedEvent::new(
-                pubkey,
-                Timestamp::from(created_at),
-                nostr::Kind::from(kind),
-                tags_from_ffi(tags)?,
-                content,
-            );
-            GWritePayload::Unsigned(unsigned)
+        FfiWritePayload::Event { builder } => {
+            GWritePayload::Event(event_builder_from_ffi(builder)?)
         }
         FfiWritePayload::Signed {
             id,
@@ -2376,12 +2442,13 @@ mod tests {
 
     fn valid_write_intent() -> FfiWriteIntent {
         FfiWriteIntent {
-            payload: FfiWritePayload::Unsigned {
-                pubkey: pk_hex(),
-                created_at: 100,
-                kind: 1,
-                tags: vec![vec!["e".to_string(), "e".repeat(64)]],
-                content: "hello".to_string(),
+            payload: FfiWritePayload::Event {
+                builder: FfiEventBuilder {
+                    kind: 1,
+                    tags: vec![vec!["e".to_string(), "e".repeat(64)]],
+                    content: "hello".to_string(),
+                    created_at: Some(100),
+                },
             },
             durability: FfiDurability::Ephemeral,
             routing: FfiWriteRouting::Auto,
@@ -2464,12 +2531,12 @@ mod tests {
         let intent = valid_write_intent();
         let parsed = write_intent_from_ffi(intent).expect("well-formed intent must parse");
         match parsed.payload {
-            GWritePayload::Unsigned(u) => assert_eq!(u.tags.len(), 1),
-            GWritePayload::UnsignedReplaceableEdit { .. } => {
+            GWritePayload::Event(builder) => assert_eq!(builder.tags.len(), 1),
+            GWritePayload::ReplaceableEdit { .. } => {
                 panic!("the raw FFI write surface must not mint guarded replaceable edits")
             }
             GWritePayload::Signed(_) => {
-                panic!("an Unsigned FfiWritePayload must build an Unsigned GWritePayload")
+                panic!("an Event FfiWritePayload must build an Event GWritePayload")
             }
         }
     }
@@ -2485,9 +2552,10 @@ mod tests {
     #[test]
     fn arbitrary_event_tags_survive_write_intent_from_ffi_unchanged() {
         let mut intent = valid_write_intent();
-        let FfiWritePayload::Unsigned { tags, .. } = &mut intent.payload else {
-            unreachable!("valid_write_intent always builds Unsigned")
+        let FfiWritePayload::Event { builder } = &mut intent.payload else {
+            unreachable!("valid_write_intent always builds an Event payload")
         };
+        let tags = &mut builder.tags;
         *tags = vec![
             vec!["-".to_string()],
             vec!["poop".to_string(), "value".to_string()],
@@ -2497,11 +2565,11 @@ mod tests {
 
         let parsed = write_intent_from_ffi(intent)
             .expect("multi-character/punctuation event-tag names must not be rejected");
-        let GWritePayload::Unsigned(unsigned) = parsed.payload else {
-            unreachable!("valid_write_intent always builds Unsigned")
+        let GWritePayload::Event(builder) = parsed.payload else {
+            unreachable!("valid_write_intent always builds an Event payload")
         };
         let round_tripped: Vec<Vec<String>> =
-            unsigned.tags.iter().map(|t| t.clone().to_vec()).collect();
+            builder.tags.iter().map(|t| t.clone().to_vec()).collect();
         assert_eq!(
             round_tripped, expected,
             "raw tag arrays must survive write_intent_from_ffi byte-for-byte, \
@@ -2518,10 +2586,10 @@ mod tests {
     #[test]
     fn malformed_tag_rejects_whole_write_intent_not_silently_dropped() {
         let mut intent = valid_write_intent();
-        let FfiWritePayload::Unsigned { tags, .. } = &mut intent.payload else {
-            unreachable!("valid_write_intent always builds Unsigned")
+        let FfiWritePayload::Event { builder } = &mut intent.payload else {
+            unreachable!("valid_write_intent always builds an Event payload")
         };
-        tags.push(Vec::new()); // empty tag array: Tag::parse rejects this
+        builder.tags.push(Vec::new()); // empty tag array: Tag::parse rejects this
         match write_intent_from_ffi(intent) {
             Err(err) => assert_eq!(err, FfiError::InvalidTag { got: Vec::new() }),
             Ok(_) => panic!("a malformed tag must fail closed, not silently drop"),
@@ -2530,8 +2598,9 @@ mod tests {
 
     /// #47 Unit A round-trip, hex form: a well-formed hex override lands in
     /// `nmp::WriteIntent::identity_override` as the parsed `PublicKey`,
-    /// never dropped or rewritten. The override here names the payload
-    /// author, exactly the contract the acceptance boundary later enforces.
+    /// never dropped or rewritten. On a builder payload the override is the
+    /// only source of the author, so there is nothing beside it to agree
+    /// with.
     #[test]
     fn identity_override_hex_round_trips_to_the_parsed_pubkey() {
         let mut intent = valid_write_intent();
@@ -2552,10 +2621,6 @@ mod tests {
         let npub = "npub14f8usejl26twx0dhuxjh9cas7keav9vr0v8nvtwtrjqx3vycc76qqh9nsy";
         let hex = "aa4fc8665f5696e33db7e1a572e3b0f5b3d615837b0f362dcb1c8068b098c7b4";
         let mut intent = valid_write_intent();
-        let FfiWritePayload::Unsigned { pubkey, .. } = &mut intent.payload else {
-            unreachable!("valid_write_intent always builds Unsigned")
-        };
-        *pubkey = hex.to_string();
         intent.identity_override = Some(npub.to_string());
         let parsed = write_intent_from_ffi(intent).expect("an npub override must parse");
         assert_eq!(
@@ -2639,10 +2704,10 @@ mod tests {
                 assert_eq!(event.pubkey, original.pubkey);
                 assert_eq!(event.content, original.content);
             }
-            GWritePayload::Unsigned(_) => {
+            GWritePayload::Event(_) => {
                 panic!("a Signed FfiWritePayload must build a Signed GWritePayload")
             }
-            GWritePayload::UnsignedReplaceableEdit { .. } => {
+            GWritePayload::ReplaceableEdit { .. } => {
                 panic!("the raw FFI write surface must not mint guarded replaceable edits")
             }
         }

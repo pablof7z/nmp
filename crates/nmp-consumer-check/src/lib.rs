@@ -16,9 +16,10 @@
 //!
 //! Exercises, from `nmp` alone:
 //! - the grammar a `LiveQuery` is built from ([`build_derived_index_query`]);
-//! - the advertised unsigned-write path ([`build_unsigned_intent`]) --
-//!   `UnsignedEvent`/`Kind`/`Tag`/`Timestamp` were the exact re-exports a
-//!   prior review found missing;
+//! - the advertised write path ([`build_event_intent`]) -- `EventBuilder`
+//!   plus `Kind`/`Tag`/`Timestamp`, the exact re-exports a prior review
+//!   found missing, and now also the proof that publishing as the active
+//!   account takes a kind and content and nothing else;
 //! - naming every `DiagnosticsSnapshot` output type, not just some of them
 //!   ([`describe_snapshot`]/[`describe_relay`]/[`describe_coverage_entry`]) --
 //!   `DiagnosticsSnapshot`, `RelayDiagnosticsSnapshot`, `FilterCoverageEntry`,
@@ -40,10 +41,9 @@
 
 use nmp::{
     AcquisitionEvidence, AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, CoverageInterval, Demand,
-    Derived, DiagnosticsSnapshot, Durability, Filter, FilterCoverageEntry, IdentityField,
-    IndexedTagName, Kind, Lane, LiveQuery, ObservationEvidence, PublicKey,
-    RelayDiagnosticsSnapshot, Selector, Tag, Timestamp, UnsignedEvent, WriteIntent, WritePayload,
-    WriteRouting,
+    Derived, DiagnosticsSnapshot, Durability, EventBuilder, Filter, FilterCoverageEntry,
+    IdentityField, IndexedTagName, Kind, Lane, LiveQuery, ObservationEvidence, PublicKey,
+    RelayDiagnosticsSnapshot, Selector, Tag, Timestamp, WriteIntent, WritePayload, WriteRouting,
 };
 
 /// The reactive index kind an app might declare its own membership list
@@ -87,23 +87,56 @@ pub fn build_derived_index_query() -> LiveQuery {
     })
 }
 
-/// Proves an unsigned `WriteIntent` is fully constructible from `nmp` alone
-/// -- the advertised unsigned-write path (`UnsignedEvent`/`Kind`/`Tag`/
-/// `Timestamp`). Uses the same arbitrary caller-owned content kind as
-/// [`build_derived_index_query`], never a NIP-01 core kind. Composes the
-/// default identity contract (`identity_override: None`, #47): this intent
-/// signs as the active account, and the per-write override field is
-/// likewise reachable from `nmp` alone for callers that need it.
-pub fn build_unsigned_intent(author: PublicKey, content: &str) -> WriteIntent {
-    let unsigned = UnsignedEvent::new(
-        author,
-        Timestamp::now(),
-        Kind::Custom(CALLER_CONTENT_KIND),
-        Vec::<Tag>::new(),
-        content,
-    );
+/// Proves a builder `WriteIntent` is fully constructible from `nmp` alone
+/// -- the advertised write path (`EventBuilder`/`Kind`/`Tag`). Uses the
+/// same arbitrary caller-owned content kind as
+/// [`build_derived_index_query`], never a NIP-01 core kind. It supplies a
+/// kind and content and NOTHING else: no pubkey, no timestamp, no id. That
+/// is the proof -- a direct-Rust app cannot state an author here even if it
+/// wanted to. Composes the default identity contract
+/// (`identity_override: None`, #47), so this intent signs as the active
+/// account; the per-write override field is likewise reachable from `nmp`
+/// alone for callers that need it.
+pub fn build_event_intent(content: &str) -> WriteIntent {
     WriteIntent {
-        payload: WritePayload::Unsigned(unsigned),
+        payload: WritePayload::Event(
+            EventBuilder::new(Kind::Custom(CALLER_CONTENT_KIND)).content(content),
+        ),
+        durability: Durability::Ephemeral,
+        routing: WriteRouting::Auto,
+        identity_override: None,
+        correlation: None,
+    }
+}
+
+/// The explicit-identity half of the write path (#47): publishing as a
+/// specific non-active account takes an `Identity` and nothing else -- there
+/// is still no pubkey anywhere inside the payload, because a builder has no
+/// field for one.
+pub fn build_event_intent_as(identity: PublicKey, content: &str) -> WriteIntent {
+    WriteIntent {
+        payload: WritePayload::Event(
+            EventBuilder::new(Kind::Custom(CALLER_CONTENT_KIND)).content(content),
+        ),
+        durability: Durability::Ephemeral,
+        routing: WriteRouting::Auto,
+        identity_override: Some(identity),
+        correlation: None,
+    }
+}
+
+/// The other half of the builder proof: "NMP fills what you left unsaid" is
+/// not "you cannot say it". This one states an arbitrary `Tag` and an
+/// explicit `Timestamp` -- both reachable from `nmp` alone -- and NMP keeps
+/// the timestamp verbatim rather than restamping it.
+pub fn build_dated_event_intent(created_at: Timestamp, tag: Tag, content: &str) -> WriteIntent {
+    WriteIntent {
+        payload: WritePayload::Event(
+            EventBuilder::new(Kind::Custom(CALLER_CONTENT_KIND))
+                .content(content)
+                .tag(tag)
+                .created_at(created_at),
+        ),
         durability: Durability::Ephemeral,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -145,12 +178,11 @@ pub fn describe_evidence(evidence: &AcquisitionEvidence) -> String {
 /// neither needs an `nmp-nip22` line of its own. What comes back is an
 /// ordinary [`WriteIntent`] (#907), published through the same
 /// `Engine::publish` lifecycle as any other write. Uses an external NIP-73
-/// target so no NIP-01 core kind is baked into this proof, and takes its
-/// author and event time explicitly -- the vocabulary is engine-free, and
-/// this proof reads no ambient clock or active account.
+/// target so no NIP-01 core kind is baked into this proof. The vocabulary is
+/// engine-free and still reads no ambient clock or active account -- it no
+/// longer needs an author or an event time to say so, because the engine
+/// resolves both at acceptance.
 pub fn build_comment_intent(
-    author: PublicKey,
-    created_at: Timestamp,
     guid: &str,
     content: &str,
 ) -> Result<WriteIntent, nmp::nip22::Nip73TargetError> {
@@ -159,8 +191,6 @@ pub fn build_comment_intent(
     Ok(nmp::nip22::comment_intent(
         &root,
         nmp::nip22::CommentParent::Root,
-        author,
-        created_at,
         content.to_string(),
         None,
     ))
@@ -292,7 +322,6 @@ mod tests {
         let account = engine
             .add_account(TEST_SECRET_KEY_HEX)
             .expect("fixed test secret key must parse");
-        let author = account.public_key();
 
         let subscription = engine
             .observe(build_derived_index_query(), None)
@@ -300,10 +329,7 @@ mod tests {
         drop(subscription); // explicit early withdraw, exercised via Drop
 
         let receipts = engine
-            .publish(build_unsigned_intent(
-                author,
-                "hello from an nmp-only consumer",
-            ))
+            .publish(build_event_intent("hello from an nmp-only consumer"))
             .expect("engine is open");
         drop(receipts);
 

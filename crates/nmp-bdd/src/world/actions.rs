@@ -10,9 +10,9 @@
 //! [`super::watches`] because they drive the FEED, the app-visible channel,
 //! rather than the direct-to-one-relay socket observations.
 
-use nostr::{PublicKey, Tag, Timestamp, UnsignedEvent};
+use nostr::{PublicKey, Tag};
 
-use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
+use nmp_grammar::{Durability, EventBuilder, WriteIntent, WritePayload, WriteRouting};
 
 use nmp_test_support::relays::ScriptedRelay;
 
@@ -86,17 +86,16 @@ impl NmpWorld {
             .map(|name| self.person(name).public_key())
             .collect();
         let tags: Vec<Tag> = follow_pks.into_iter().map(Tag::public_key).collect();
-        let unsigned = UnsignedEvent::new(
-            me_keys.public_key(),
-            Timestamp::now(),
-            nostr::Kind::ContactList,
-            tags,
-            "",
-        );
+        let _ = me_keys;
         let rx = self
             .handle()
             .publish(WriteIntent {
-                payload: WritePayload::Unsigned(unsigned),
+                payload: WritePayload::Event(EventBuilder {
+                    kind: nostr::Kind::ContactList,
+                    tags,
+                    content: String::new(),
+                    created_at: None,
+                }),
                 durability: Durability::Durable,
                 routing: WriteRouting::Auto,
                 identity_override: None,
@@ -113,16 +112,9 @@ impl NmpWorld {
             .active_person
             .clone()
             .expect("nmp-bdd: publishing a note needs a logged-in account");
-        let me_keys = self.person(&me);
-        let unsigned = UnsignedEvent::new(
-            me_keys.public_key(),
-            Timestamp::now(),
-            nostr::Kind::TextNote,
-            vec![],
-            text,
-        );
+        let _ = self.person(&me);
         self.publish_intent(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned),
+            payload: WritePayload::Event(EventBuilder::new(nostr::Kind::TextNote).content(text)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -150,18 +142,11 @@ impl NmpWorld {
             .active_person
             .clone()
             .expect("nmp-bdd: publishing a note needs a logged-in account");
-        let me_keys = self.person(&me);
-        let unsigned = UnsignedEvent::new(
-            me_keys.public_key(),
-            Timestamp::now(),
-            nostr::Kind::TextNote,
-            vec![],
-            text,
-        );
+        let _ = self.person(&me);
         let routing = self.explicit_routing(relay_names);
         self.snapshot_relay_contacts();
         self.publish_intent(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned),
+            payload: WritePayload::Event(EventBuilder::new(nostr::Kind::TextNote).content(text)),
             durability: Durability::Durable,
             routing,
             identity_override: None,

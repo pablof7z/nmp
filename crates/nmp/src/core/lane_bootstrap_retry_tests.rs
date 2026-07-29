@@ -33,13 +33,12 @@ fn publish_narrow<S: EventStore>(
 ) -> (ReceiptId, SignedEvent, Vec<Effect>) {
     core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
     let accepted = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(UnsignedEvent::new(
-            author.public_key(),
-            Timestamp::from(created_at),
-            Kind::TextNote,
-            Vec::new(),
-            format!("bootstrap retry {created_at}"),
-        )),
+        payload: WritePayload::Event(nmp_grammar::EventBuilder {
+            kind: Kind::TextNote,
+            tags: (Vec::new()).into_iter().collect(),
+            content: format!("bootstrap retry {created_at}"),
+            created_at: Some(Timestamp::from(created_at)),
+        }),
         durability: Durability::Durable,
         routing: WriteRouting::Explicit(Vec::from_iter(relays.to_vec())),
         identity_override: None,

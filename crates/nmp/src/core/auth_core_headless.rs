@@ -444,10 +444,11 @@ fn auth_state_stays_one_entry_per_session_under_churn_and_kind_is_reserved() {
         assert!(fixture.core.auth_ready_sessions.len() <= 1);
     }
 
-    let unsigned = EventBuilder::new(Kind::Authentication, "ordinary publish forbidden")
-        .build(fixture.keys.public_key());
     let effects = fixture.core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned),
+        payload: WritePayload::Event(
+            nmp_grammar::EventBuilder::new(Kind::Authentication)
+                .content("ordinary publish forbidden"),
+        ),
         durability: Durability::Ephemeral,
         routing: WriteRouting::Auto,
         identity_override: None,

@@ -20,7 +20,7 @@ fn enqueue_is_not_converged() {
 
     // -- Durable: first status is Accepted, never a bool/terminal. --
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&a, 1, "durable write")),
+        payload: WritePayload::Event(draft(1, "durable write")),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -36,7 +36,7 @@ fn enqueue_is_not_converged() {
 
     // -- Ephemeral: receipt-only, no durable delivery obligation. --
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&a, 2, "ephemeral write")),
+        payload: WritePayload::Event(draft(2, "ephemeral write")),
         durability: Durability::Ephemeral,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -65,7 +65,7 @@ fn enqueue_is_not_converged() {
 
     // -- AtMostOnce: sends exactly once; a dropped relay never retries. --
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&a, 3, "at most once write")),
+        payload: WritePayload::Event(draft(3, "at most once write")),
         durability: Durability::AtMostOnce,
         routing: WriteRouting::Auto,
         identity_override: None,

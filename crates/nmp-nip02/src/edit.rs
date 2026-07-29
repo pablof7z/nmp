@@ -1,5 +1,5 @@
-use nmp::{Durability, WriteIntent, WritePayload, WriteRouting};
-use nostr::{Event, EventId, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
+use nmp::{Durability, EventBuilder, WriteIntent, WritePayload, WriteRouting};
+use nostr::{Event, EventId, Kind, PublicKey, Tag};
 
 /// The requested relationship after a NIP-02 edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,9 +17,7 @@ pub enum ComposeFollowResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComposeFollowError {
-    BaseHasWrongAuthor,
     BaseHasWrongKind,
-    TimestampExhausted,
     InvalidGeneratedTag,
 }
 
@@ -45,16 +43,20 @@ pub fn follows(event: &Event, target: PublicKey) -> bool {
 /// before any write is journaled. This ordinary edit requires an established
 /// base. Creating a first contact list needs a separately named policy and
 /// cannot masquerade as `follow`.
+///
+/// It takes neither an author nor a clock. A base somebody else authored
+/// needs no error of its own: the precondition is checked at the editing
+/// identity's own coordinate, where a foreign event is never the winner, so
+/// it reports through the same conflict door as every other stale base. And
+/// the timestamp is decided inside the acceptance transaction as
+/// `max(clock, winner + 1)` -- against the row the precondition is holding,
+/// which is the only place monotonicity can actually be guaranteed, so
+/// there is no arithmetic here left to exhaust.
 pub fn compose_follow_change(
-    author: PublicKey,
     base: &Event,
     target: PublicKey,
     change: FollowChange,
-    now: Timestamp,
 ) -> Result<ComposeFollowResult, ComposeFollowError> {
-    if base.pubkey != author {
-        return Err(ComposeFollowError::BaseHasWrongAuthor);
-    }
     if base.kind != Kind::ContactList {
         return Err(ComposeFollowError::BaseHasWrongKind);
     }
@@ -79,26 +81,14 @@ pub fn compose_follow_change(
         });
     }
 
-    let created_at = if now <= base.created_at {
-        Timestamp::from_secs(
-            base.created_at
-                .as_secs()
-                .checked_add(1)
-                .ok_or(ComposeFollowError::TimestampExhausted)?,
-        )
-    } else {
-        now
-    };
-    let unsigned = UnsignedEvent::new(
-        author,
-        created_at,
-        Kind::ContactList,
-        tags,
-        base.content.clone(),
-    );
     Ok(ComposeFollowResult::Publish(Box::new(WriteIntent {
-        payload: WritePayload::UnsignedReplaceableEdit {
-            unsigned,
+        payload: WritePayload::ReplaceableEdit {
+            builder: EventBuilder {
+                kind: Kind::ContactList,
+                tags,
+                content: base.content.clone(),
+                created_at: None,
+            },
             expected_base: Some(base.id),
         },
         durability: Durability::Durable,
@@ -112,8 +102,8 @@ pub fn compose_follow_change(
 /// mutable registry or protocol projection.
 pub fn expected_base(intent: &WriteIntent) -> Option<Option<EventId>> {
     match &intent.payload {
-        WritePayload::UnsignedReplaceableEdit { expected_base, .. } => Some(*expected_base),
-        WritePayload::Unsigned(_) | WritePayload::Signed(_) => None,
+        WritePayload::ReplaceableEdit { expected_base, .. } => Some(*expected_base),
+        WritePayload::Event(_) | WritePayload::Signed(_) => None,
     }
 }
 
@@ -129,9 +119,9 @@ mod tests {
                 Tag::parse(values.into_iter().map(str::to_string).collect::<Vec<_>>()).unwrap()
             })
             .collect::<Vec<_>>();
-        UnsignedEvent::new(
+        nostr::UnsignedEvent::new(
             author.public_key(),
-            Timestamp::from_secs(at),
+            nostr::Timestamp::from_secs(at),
             Kind::ContactList,
             tags,
             content,
@@ -140,11 +130,11 @@ mod tests {
         .unwrap()
     }
 
-    fn unsigned(intent: &WriteIntent) -> &UnsignedEvent {
-        let WritePayload::UnsignedReplaceableEdit { unsigned, .. } = &intent.payload else {
+    fn composed(intent: &WriteIntent) -> &EventBuilder {
+        let WritePayload::ReplaceableEdit { builder, .. } = &intent.payload else {
             panic!("expected replaceable edit")
         };
-        unsigned
+        builder
     }
 
     #[test]
@@ -168,19 +158,17 @@ mod tests {
             "legacy content must survive",
         );
 
-        let ComposeFollowResult::Publish(intent) = compose_follow_change(
-            author.public_key(),
-            &base,
-            target.public_key(),
-            FollowChange::Follow,
-            Timestamp::from_secs(9),
-        )
-        .unwrap() else {
+        let ComposeFollowResult::Publish(intent) =
+            compose_follow_change(&base, target.public_key(), FollowChange::Follow).unwrap()
+        else {
             panic!("must publish")
         };
 
-        let draft = unsigned(&intent);
-        assert_eq!(draft.created_at, Timestamp::from_secs(11));
+        let draft = composed(&intent);
+        // Unstated on purpose: the acceptance transaction stamps
+        // `max(clock, winner + 1)` against the row it is CAS-ing, which is
+        // the only place the winner is actually known.
+        assert_eq!(draft.created_at, None);
         assert_eq!(draft.content, base.content);
         let actual: Vec<Vec<String>> = draft.tags.iter().map(|t| t.as_slice().to_vec()).collect();
         let mut expected: Vec<Vec<String>> =
@@ -208,17 +196,12 @@ mod tests {
             ],
             "",
         );
-        let ComposeFollowResult::Publish(intent) = compose_follow_change(
-            author.public_key(),
-            &base,
-            target.public_key(),
-            FollowChange::Unfollow,
-            Timestamp::from_secs(30),
-        )
-        .unwrap() else {
+        let ComposeFollowResult::Publish(intent) =
+            compose_follow_change(&base, target.public_key(), FollowChange::Unfollow).unwrap()
+        else {
             panic!("must publish")
         };
-        let actual: Vec<Vec<String>> = unsigned(&intent)
+        let actual: Vec<Vec<String>> = composed(&intent)
             .tags
             .iter()
             .map(|t| t.as_slice().to_vec())
@@ -239,57 +222,43 @@ mod tests {
         let target_hex = target.public_key().to_hex();
         let base = event(&author, 1, vec![vec!["p", &target_hex]], "");
         assert!(matches!(
-            compose_follow_change(
-                author.public_key(),
-                &base,
-                target.public_key(),
-                FollowChange::Follow,
-                Timestamp::from_secs(2)
-            ),
+            compose_follow_change(&base, target.public_key(), FollowChange::Follow,),
             Ok(ComposeFollowResult::NoChange)
         ));
         let empty = event(&author, 1, vec![], "");
         assert!(matches!(
-            compose_follow_change(
-                author.public_key(),
-                &empty,
-                target.public_key(),
-                FollowChange::Unfollow,
-                Timestamp::from_secs(2)
-            ),
+            compose_follow_change(&empty, target.public_key(), FollowChange::Unfollow,),
             Ok(ComposeFollowResult::NoChange)
         ));
+    }
+
+    /// A base somebody else authored is composed without complaint and gets
+    /// no error of its own: the precondition is checked at the editing
+    /// identity's own coordinate, where a foreign event is never the winner,
+    /// so it is unsatisfiable and reports through the ordinary conflict door
+    /// at acceptance instead of a compose-time author comparison.
+    #[test]
+    fn a_foreign_base_composes_and_is_left_to_the_precondition() {
+        let wrong = Keys::generate();
+        let target = Keys::generate();
+        let wrong_author = event(&wrong, 1, vec![], "");
+        let ComposeFollowResult::Publish(intent) =
+            compose_follow_change(&wrong_author, target.public_key(), FollowChange::Follow)
+                .unwrap()
+        else {
+            panic!("must publish")
+        };
+        assert_eq!(expected_base(&intent), Some(Some(wrong_author.id)));
     }
 
     #[test]
     fn base_validation_fails_closed() {
         let author = Keys::generate();
-        let wrong = Keys::generate();
         let target = Keys::generate();
-        let wrong_author = event(&wrong, 1, vec![], "");
-        assert_eq!(
-            compose_follow_change(
-                author.public_key(),
-                &wrong_author,
-                target.public_key(),
-                FollowChange::Follow,
-                Timestamp::from_secs(2)
-            )
-            .err(),
-            Some(ComposeFollowError::BaseHasWrongAuthor)
-        );
-
         let mut wrong_kind = event(&author, 1, vec![], "");
         wrong_kind.kind = Kind::TextNote;
         assert_eq!(
-            compose_follow_change(
-                author.public_key(),
-                &wrong_kind,
-                target.public_key(),
-                FollowChange::Follow,
-                Timestamp::from_secs(2)
-            )
-            .err(),
+            compose_follow_change(&wrong_kind, target.public_key(), FollowChange::Follow,).err(),
             Some(ComposeFollowError::BaseHasWrongKind)
         );
     }

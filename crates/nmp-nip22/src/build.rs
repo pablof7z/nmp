@@ -1,11 +1,15 @@
-//! Immutable NIP-22 kind:1111 draft construction (#572). NEVER signs (the
-//! nmp-nip29/nmp-nip68/nmp-blossom discipline): emits an
-//! [`nostr::UnsignedEvent`] for the caller's existing signer machinery.
-//! Deterministic and byte-identical across Rust/Swift/Kotlin for the same
-//! inputs -- `created_at` is caller-supplied (never `Timestamp::now()`
-//! internally), exactly like `nmp_nip68::build_picture`.
+//! Immutable NIP-22 kind:1111 composition (#572). NEVER signs (the
+//! nmp-nip29/nmp-nip68/nmp-blossom discipline) and owns the SCHEMA only, so
+//! it returns an [`EventBuilder`] and leaves durability, routing and
+//! identity to whoever owns the write policy. It reads no clock and queries
+//! no account -- the whole crate keeps its zero engine dependency -- but the
+//! author and the timestamp are no longer caller parameters either: the
+//! engine stamps both at acceptance, and the byte-reproducibility argument
+//! that once justified taking them died with it (nothing needed it, and if
+//! anything had, it could never have been one NIP's concern).
 
-use nostr::{EventBuilder, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
+use nmp_grammar::EventBuilder;
+use nostr::{Kind, PublicKey, Tag};
 
 use crate::root::{CommentParent, CommentRoot, COMMENT_KIND};
 
@@ -104,18 +108,15 @@ fn parent_comment_tags(event_id: &nostr::EventId, author: Option<PublicKey>) -> 
 /// mirror the root tags exactly (lowercased). Tag order: root tags first
 /// (`E`/`A`/`I`, `K`, `P`?), then the mirrored parent tags (`e`/`a`/`i`,
 /// `k`, `p`?).
-pub fn compose_top_level_comment(
-    root: &CommentRoot,
-    author: PublicKey,
-    created_at: Timestamp,
-    content: String,
-) -> UnsignedEvent {
+pub fn compose_top_level_comment(root: &CommentRoot, content: String) -> EventBuilder {
     let mut tags = root_tags(root);
     tags.extend(parent_mirrors_root_tags(root));
-    EventBuilder::new(Kind::from(COMMENT_KIND), content)
-        .tags(tags)
-        .custom_created_at(created_at)
-        .build(author)
+    EventBuilder {
+        kind: Kind::from(COMMENT_KIND),
+        tags,
+        content,
+        created_at: None,
+    }
 }
 
 /// Build an unsigned NIP-22 reply: the root tags stay pinned to the
@@ -125,10 +126,8 @@ pub fn compose_top_level_comment(
 pub fn compose_comment_reply(
     root: &CommentRoot,
     parent: CommentParent,
-    author: PublicKey,
-    created_at: Timestamp,
     content: String,
-) -> UnsignedEvent {
+) -> EventBuilder {
     let mut tags = root_tags(root);
     match parent {
         CommentParent::Root => tags.extend(parent_mirrors_root_tags(root)),
@@ -136,29 +135,26 @@ pub fn compose_comment_reply(
             tags.extend(parent_comment_tags(&event_id, author))
         }
     }
-    EventBuilder::new(Kind::from(COMMENT_KIND), content)
-        .tags(tags)
-        .custom_created_at(created_at)
-        .build(author)
+    EventBuilder {
+        kind: Kind::from(COMMENT_KIND),
+        tags,
+        content,
+        created_at: None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::target::Nip73Target;
-    use nostr::util::JsonUtil;
     use nostr::{EventId, Keys};
 
     fn author() -> PublicKey {
         Keys::generate().public_key()
     }
 
-    fn fixed_time() -> Timestamp {
-        Timestamp::from(1_700_000_000u64)
-    }
-
-    fn tag_rows(event: &UnsignedEvent) -> Vec<Vec<String>> {
-        event
+    fn tag_rows(builder: &EventBuilder) -> Vec<Vec<String>> {
+        builder
             .tags
             .iter()
             .map(|tag| tag.as_slice().to_vec())
@@ -173,12 +169,7 @@ mod tests {
     /// (`i` + `k=podcast:item:guid`).
     #[test]
     fn top_level_podcast_comment_has_exact_required_tags() {
-        let event = compose_top_level_comment(
-            &podcast_root(),
-            author(),
-            fixed_time(),
-            "nice episode".to_string(),
-        );
+        let event = compose_top_level_comment(&podcast_root(), "nice episode".to_string());
         assert_eq!(event.kind, Kind::from(COMMENT_KIND));
         assert_eq!(
             tag_rows(&event),
@@ -204,8 +195,6 @@ mod tests {
                 event_id: parent_id,
                 author: Some(parent_author),
             },
-            author(),
-            fixed_time(),
             "agreed".to_string(),
         );
         assert_eq!(
@@ -231,24 +220,23 @@ mod tests {
                 event_id: parent_id,
                 author: None,
             },
-            author(),
-            fixed_time(),
             "hi".to_string(),
         );
         assert!(!tag_rows(&event).iter().any(|row| row[0] == "p"));
     }
 
-    /// Determinism: identical inputs produce byte-identical unsigned
-    /// bodies (the parity/cross-language contract).
+    /// The schema is a pure function of its inputs -- same root, same
+    /// content, same tags in the same order. Note what is NOT asserted:
+    /// byte identity of the resulting events. Two composes of the same
+    /// comment differ in the time NMP stamped them, and differing is what
+    /// timestamps are for; a reproducible-bytes rule could never have been
+    /// one NIP's concern anyway.
     #[test]
-    fn compose_is_deterministic() {
-        let a = author();
-        let mut first =
-            compose_top_level_comment(&podcast_root(), a, fixed_time(), "x".to_string());
-        let mut second =
-            compose_top_level_comment(&podcast_root(), a, fixed_time(), "x".to_string());
-        assert_eq!(first.id(), second.id());
-        assert_eq!(first.as_json(), second.as_json());
+    fn compose_is_a_pure_function_of_its_inputs() {
+        let first = compose_top_level_comment(&podcast_root(), "x".to_string());
+        let second = compose_top_level_comment(&podcast_root(), "x".to_string());
+        assert_eq!(first, second);
+        assert_eq!(first.created_at, None);
     }
 
     /// A top-level comment on an Event root mirrors it exactly, including
@@ -262,7 +250,7 @@ mod tests {
             kind: 1,
             author: Some(root_author),
         };
-        let event = compose_top_level_comment(&root, author(), fixed_time(), "hi".to_string());
+        let event = compose_top_level_comment(&root, "hi".to_string());
         assert_eq!(
             tag_rows(&event),
             vec![
@@ -288,7 +276,7 @@ mod tests {
             identifier: "my-article".to_string(),
             event_id: None,
         };
-        let event = compose_top_level_comment(&root, author(), fixed_time(), "hi".to_string());
+        let event = compose_top_level_comment(&root, "hi".to_string());
         let coordinate = format!("30023:{}:my-article", root_author.to_hex());
         assert_eq!(
             tag_rows(&event),
@@ -318,7 +306,7 @@ mod tests {
             identifier: "my-article".to_string(),
             event_id: Some(pinned_id),
         };
-        let event = compose_top_level_comment(&root, author(), fixed_time(), "hi".to_string());
+        let event = compose_top_level_comment(&root, "hi".to_string());
         let coordinate = format!("30023:{}:my-article", root_author.to_hex());
         assert_eq!(
             tag_rows(&event),
@@ -336,69 +324,14 @@ mod tests {
     }
 }
 
-/// #572 review finding 4 ("test honesty"): a REAL golden fixture -- a fixed
-/// secret key, timestamp, content, and podcast target -- whose composed
-/// event id and exact NIP-01 JSON body are pinned as literal constants and
-/// asserted identical in Rust (here), Swift (`NIP22Tests.swift`), and
-/// Kotlin (`NIP22Test.kt`). Structural identity (all composition happens in
-/// Rust behind FFI) is a fair argument for why Swift/Kotlin composing the
-/// SAME bytes is likely, but it isn't the demanded proof; this fixture
-/// pins the ACTUAL bytes so all three languages assert the same literal,
-/// not merely "my own two calls agree with each other".
-#[cfg(test)]
-pub(crate) mod golden_fixture {
-    /// A fixed, arbitrary-but-valid secp256k1 secret key (32 bytes of
-    /// `0x01`) -- deterministic across every language/run, never
-    /// `Keys::generate()`.
-    pub(crate) const SECRET_KEY_HEX: &str =
-        "0101010101010101010101010101010101010101010101010101010101010101";
-    pub(crate) const AUTHOR_PUBKEY_HEX: &str =
-        "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f";
-    pub(crate) const CREATED_AT: u64 = 1_700_000_000;
-    pub(crate) const GUID: &str = "golden-guid-572";
-    pub(crate) const CONTENT: &str = "golden fixture content";
-    pub(crate) const EXPECTED_EVENT_ID_HEX: &str =
-        "b1981e70a89150af5ca02548324f3ca2a1fff1b97581d46ab53e11116a553938";
-    pub(crate) const EXPECTED_JSON: &str = concat!(
-        "{\"id\":\"b1981e70a89150af5ca02548324f3ca2a1fff1b97581d46ab53e11116a553938\",",
-        "\"pubkey\":\"1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f\",",
-        "\"created_at\":1700000000,\"kind\":1111,",
-        "\"tags\":[[\"I\",\"podcast:item:guid:golden-guid-572\"],",
-        "[\"K\",\"podcast:item:guid\"],",
-        "[\"i\",\"podcast:item:guid:golden-guid-572\"],",
-        "[\"k\",\"podcast:item:guid\"]],",
-        "\"content\":\"golden fixture content\"}"
-    );
-}
-
-#[cfg(test)]
-mod golden_fixture_tests {
-    use super::golden_fixture::*;
-    use super::*;
-    use crate::target::Nip73Target;
-    use nostr::util::JsonUtil;
-    use nostr::Keys;
-
-    /// #572 review finding 4: pins the ACTUAL composed bytes (event id +
-    /// exact JSON body) for a fixed key/timestamp/content/target -- the
-    /// falsifier the issue's decision comment demands, not merely two
-    /// in-process Rust calls agreeing with each other
-    /// (`compose_is_deterministic`, above, is a DIFFERENT and weaker
-    /// falsifier). Swift's and Kotlin's SDK tests assert these SAME
-    /// literal constants.
-    #[test]
-    fn golden_fixture_pins_the_exact_composed_bytes() {
-        let keys = Keys::parse(SECRET_KEY_HEX).unwrap();
-        let author = keys.public_key();
-        assert_eq!(author.to_hex(), AUTHOR_PUBKEY_HEX);
-        let root = CommentRoot::External(Nip73Target::podcast_episode_guid(GUID).unwrap());
-        let event = compose_top_level_comment(
-            &root,
-            author,
-            Timestamp::from(CREATED_AT),
-            CONTENT.to_string(),
-        );
-        assert_eq!(event.id.unwrap().to_hex(), EXPECTED_EVENT_ID_HEX);
-        assert_eq!(event.as_json(), EXPECTED_JSON);
-    }
-}
+// #572 review finding 4 once pinned a "golden fixture" here: a fixed key,
+// timestamp and content whose composed event id and exact NIP-01 JSON were
+// asserted identical in Rust, Swift and Kotlin. It is gone, deliberately.
+// The composer no longer produces bytes at all -- it produces a schema, and
+// the author and the timestamp that completed those bytes are decided at
+// acceptance. Reproducible bytes were rejected as a requirement outright:
+// if they were genuinely needed they could not be one NIP's concern, they
+// would be every event's, and they are enforced nowhere and wanted
+// nowhere. What all three languages still assert is the thing this crate
+// actually owns -- the exact tag rows, in the exact order, for each root
+// and parent shape.

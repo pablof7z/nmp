@@ -10,7 +10,8 @@ use nmp::mechanism::core::{
 };
 use nmp::mechanism::outbox::WriteStatus;
 use nmp_grammar::{
-    AccessContext, Durability, RelaySessionKey, WriteIntent, WritePayload, WriteRouting,
+    AccessContext, Durability, EventBuilder as NmpEventBuilder, RelaySessionKey, WriteIntent,
+    WritePayload, WriteRouting,
 };
 use nmp_router::FixtureDirectory;
 use nmp_store::{
@@ -385,7 +386,7 @@ fn pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates() {
         );
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned),
+            payload: WritePayload::Event(body_of(&unsigned)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -472,7 +473,7 @@ fn overridden_unsigned_intent_replays_and_resumes_pinned_to_override_after_reope
         // A is the active account; the override alone authorizes B's draft.
         core.handle(EngineMsg::SetActivePubkey(Some(active.public_key())));
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned),
+            payload: WritePayload::Event(body_of(&unsigned)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: Some(override_keys.public_key()),
@@ -677,6 +678,7 @@ fn assert_persisted_routing_fails_closed_without_dropping(
             .accept_write(AcceptWrite {
                 frozen,
                 replaceable_base: None,
+                monotonic_stamp: false,
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: keys.public_key().to_hex(),
                 durability: WriteDurability::Durable,
@@ -787,6 +789,7 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
             .accept_write(AcceptWrite {
                 frozen,
                 replaceable_base: None,
+                monotonic_stamp: false,
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: keys.public_key().to_hex(),
                 durability: WriteDurability::Durable,
@@ -1008,13 +1011,12 @@ fn retained_terminal_receipt_is_attached_and_replays_terminal_fact() {
     let mut core = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
     core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(UnsignedEvent::new(
-            keys.public_key(),
-            Timestamp::from(500),
-            Kind::TextNote,
-            vec![],
-            "terminal retained",
-        )),
+        payload: WritePayload::Event(NmpEventBuilder {
+            kind: Kind::TextNote,
+            tags: (vec![]).into_iter().collect(),
+            content: ("terminal retained").into(),
+            created_at: Some(Timestamp::from(500)),
+        }),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -1039,13 +1041,12 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
         let mut core = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::Unsigned(UnsignedEvent::new(
-                keys.public_key(),
-                Timestamp::from(501),
-                Kind::TextNote,
-                vec![],
-                "corrupt receipt",
-            )),
+            payload: WritePayload::Event(NmpEventBuilder {
+                kind: Kind::TextNote,
+                tags: (vec![]).into_iter().collect(),
+                content: ("corrupt receipt").into(),
+                created_at: Some(Timestamp::from(501)),
+            }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -1265,6 +1266,7 @@ fn boot_degrades_explicitly_when_the_durable_journal_will_not_decode() {
                     sentinel_signature(),
                 ),
                 replaceable_base: None,
+                monotonic_stamp: false,
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: "local".to_string(),
                 durability: WriteDurability::Durable,
@@ -1339,4 +1341,17 @@ fn boot_degrades_explicitly_when_the_durable_journal_will_not_decode() {
         "no receipt, lane wake, publish, or signer request may be fabricated \
          from a journal that could not be read: {effects:?}"
     );
+}
+
+/// The same body these fixtures already build, said the way an app says it:
+/// a builder states the kind, the tags, the content and (here, so the
+/// assertions can name exact ids) the timestamp. The author is not part of
+/// it -- the write's identity decides that at acceptance.
+fn body_of(unsigned: &nostr::UnsignedEvent) -> nmp_grammar::EventBuilder {
+    nmp_grammar::EventBuilder {
+        kind: unsigned.kind,
+        tags: unsigned.tags.iter().cloned().collect(),
+        content: unsigned.content.clone(),
+        created_at: Some(unsigned.created_at),
+    }
 }
