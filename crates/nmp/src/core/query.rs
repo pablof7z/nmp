@@ -550,10 +550,15 @@ impl<S: EventStore> EngineCore<S> {
     ///   engine with no discovery sources CANNOT know, and treating "nowhere
     ///   to ask" as "asked, nothing there" would silently under-route every
     ///   write on a misconfigured app.
+    ///
     /// Returns true iff at least one author actually transitioned to
     /// `KnownAbsent` on this frame, so the caller can wake the routes that
     /// were waiting on exactly that.
-    pub(super) fn settle_relay_list_eose(&mut self, relay: &RelayUrl, atom: &ContextualAtom) -> bool {
+    pub(super) fn settle_relay_list_eose(
+        &mut self,
+        relay: &RelayUrl,
+        atom: &ContextualAtom,
+    ) -> bool {
         // Only a relay-list atom attests anything about a relay list. A
         // content atom EOSE'ing says nothing about whether a kind:10002
         // exists, and indexers are never a content fallback in either

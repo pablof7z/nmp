@@ -54,26 +54,40 @@ fn wait_for_status(
     predicate: impl Fn(&WriteStatus) -> bool,
 ) -> WriteStatus {
     let deadline = Instant::now() + timeout;
+    let mut seen: Vec<WriteStatus> = Vec::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        assert!(!remaining.is_zero(), "timed out waiting for receipt status");
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for receipt status; saw {seen:?}"
+        );
         match statuses.recv_timeout(remaining) {
             Ok(status) if predicate(&status) => return status,
-            Ok(_) => {}
+            Ok(other) => seen.push(other),
             Err(FifoRecvTimeoutError::Lagged) => {
                 panic!("the bounded integration receipt must not lag")
             }
             Err(FifoRecvTimeoutError::Timeout | FifoRecvTimeoutError::Closed) => {
-                panic!("receipt ended before the expected status")
+                panic!("receipt ended before the expected status; saw {seen:?}")
             }
         }
     }
 }
 
+/// An ordinary Auto-routed write, on a REGULAR kind.
+///
+/// It used to be kind:0, which was incidental to what this test proves and
+/// became actively wrong once a routing shortfall started parking instead of
+/// dying (#975): both ordinary writes here survive now, they are stamped
+/// within the same second, and two kind:0 events for one author at the same
+/// `created_at` are competing replaceable versions — a relay is entitled to
+/// keep exactly one, so the second write was refused for a reason that has
+/// nothing to do with routing. A regular kind is never replaced, so the
+/// assertion measures what it names.
 fn ordinary_write(content: &str) -> WriteIntent {
     WriteIntent {
         payload: WritePayload::Event(EventBuilder {
-            kind: Kind::Metadata,
+            kind: Kind::TextNote,
             tags: (vec![]).into_iter().collect(),
             content: content.to_string(),
             created_at: Some(Timestamp::now()),

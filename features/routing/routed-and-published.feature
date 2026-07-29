@@ -17,7 +17,6 @@ Feature: "We don't know where this goes" is not "we know, and it hasn't gone yet
     Given I am logged in as my own account
     And an indexer relay is configured
 
-  @designed
   Scenario: Determining destinations, with nothing known yet
     # The first state. Nothing to show but the fact that the question is open,
     # and the reason it is open.

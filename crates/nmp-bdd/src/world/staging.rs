@@ -157,6 +157,41 @@ impl NmpWorld {
         }
     }
 
+    /// `Given <person>'s relay list names <relay> as their read relay` --
+    /// their INBOX, which is what a p-tag fan-out reaches them at.
+    pub fn declare_read_relay(&mut self, person: &str, relay: &str) {
+        self.person(person);
+        self.relay_config_mut(relay);
+        let relays = self.read_relay_of.entry(person.to_string()).or_default();
+        if !relays.iter().any(|r| r == relay) {
+            relays.push(relay.to_string());
+        }
+    }
+
+    /// `Given <person>'s relay list is ingested and names no relays at all`
+    /// -- a REAL kind:10002 declaring nothing. Settled knowledge, not
+    /// ignorance: a write mentioning them completes routing without ever
+    /// parking on them.
+    pub fn declare_no_relays(&mut self, person: &str) {
+        self.person(person);
+        if !self.declares_no_relays.iter().any(|p| p == person) {
+            self.declares_no_relays.push(person.to_string());
+        }
+    }
+
+    /// `Given <person>'s relay list has never been fetched` / `no relay list
+    /// for <person> has ever been ingested` -- the world states out loud that
+    /// it staged nothing for them, so a scenario cannot pass because a
+    /// `Given` was silently forgotten.
+    pub fn assert_relay_list_never_fetched(&self, person: &str) {
+        assert!(
+            !self.write_relay_of.contains_key(person)
+                && !self.read_relay_of.contains_key(person)
+                && !self.declares_no_relays.iter().any(|p| p == person),
+            "nmp-bdd: {person}'s relay list is staged, so it HAS been fetched"
+        );
+    }
+
     /// The relay `person`'s own content is written to -- their FIRST
     /// declared write relay if `Given` any, otherwise a fresh
     /// `"<person>-relay"` auto-registered on first use (a scenario that
@@ -226,6 +261,70 @@ impl NmpWorld {
         .expect("fixture keys sign cleanly");
         self.signed_notes.insert(text.to_string(), signed.clone());
         self.pending_signed_notes.push((person.to_string(), signed));
+    }
+
+    /// Bring a relay into a world that has ALREADY started.
+    ///
+    /// Ordinarily every relay is staged as a `Given` and started together,
+    /// because a scenario knows its own topology up front. A relay first
+    /// named by a relay list that ARRIVES mid-scenario cannot be: not knowing
+    /// it yet is precisely the situation under test. Idempotent, and it
+    /// leaves an already-running relay exactly as it is.
+    pub(super) async fn start_relay_late(&mut self, name: &str) {
+        if self.relays.contains_key(name) {
+            return;
+        }
+        let config = self.relay_configs.get(name).cloned().unwrap_or_default();
+        if !self.relay_configs.contains_key(name) {
+            self.relay_order.push(name.to_string());
+            self.relay_configs.insert(name.to_string(), config.clone());
+        }
+        let relay = ScriptedRelay::start(&config).await;
+        self.relays.insert(name.to_string(), relay);
+    }
+
+    /// Every configured indexer stops answering end-of-stored-events, which
+    /// is what "we have not finished looking" is on the wire. Nothing can
+    /// settle from here, so every unknown stays `Unknown` and every write
+    /// depending on one stays parked.
+    pub fn indexers_never_confirm_end_of_stored_events(&mut self) {
+        assert!(
+            !self.indexer_names.is_empty(),
+            "nmp-bdd: an indexer must be configured before it can withhold its EOSE"
+        );
+        for name in self.indexer_names.clone() {
+            self.set_reject_queries(&name);
+        }
+    }
+
+    /// The complement: a well-behaved indexer answers end-of-stored-events,
+    /// which is the DEFAULT here. Stated out loud where a scenario turns on
+    /// it, so a settlement that happens cannot be mistaken for one the
+    /// harness arranged behind the engine's back.
+    pub fn assert_indexers_confirm_end_of_stored_events(&self) {
+        assert!(
+            !self.indexer_names.is_empty(),
+            "nmp-bdd: nothing settles without a source; configure an indexer first"
+        );
+        for name in &self.indexer_names {
+            assert!(
+                !self
+                    .relay_configs
+                    .get(name)
+                    .is_some_and(|config| config.reject_queries),
+                "nmp-bdd: indexer {name:?} was staged to withhold its EOSE, so it cannot \
+                 also be the source that settles an absence"
+            );
+        }
+    }
+
+    /// `Given no indexer relays are configured` -- fail-closed by
+    /// construction: with no source to ask, nothing can ever settle.
+    pub fn assert_no_indexers(&self) {
+        assert!(
+            self.indexer_names.is_empty(),
+            "nmp-bdd: state the indexer topology before anything runs"
+        );
     }
 
     /// This world configures no app relays anywhere -- the `Given` that says
@@ -334,6 +433,27 @@ impl NmpWorld {
                 .map(|name| LanedRelay::new(self.relays[name].url.clone(), Lane::Nip65Write))
                 .collect();
             directory.ingest_write_relays(pk_hex, laned);
+        }
+        // The INBOX half, and a distinct one: an outbox fan-out reaches a
+        // p-tagged recipient at their READ relays and never at their write
+        // set, so a world that staged only one of the two would let a
+        // scenario pass for the wrong reason.
+        for (person, relay_names) in self.read_relay_of.clone() {
+            let pk_hex = self.person(&person).public_key().to_hex();
+            let laned: Vec<LanedRelay> = relay_names
+                .iter()
+                .map(|name| LanedRelay::new(self.relays[name].url.clone(), Lane::Nip65Read))
+                .collect();
+            directory.ingest_read_relays(pk_hex, laned);
+        }
+        // A kind:10002 that names nothing is still an ingested FACT: the
+        // directory records the empty set rather than leaving the author
+        // unresolved, which is exactly the distinction `Known` (possibly
+        // zero) versus `Unknown` exists to keep.
+        for person in self.declares_no_relays.clone() {
+            let pk_hex = self.person(&person).public_key().to_hex();
+            directory.ingest_write_relays(pk_hex.clone(), Vec::new());
+            directory.ingest_read_relays(pk_hex, Vec::new());
         }
 
         // Which store, decided where the decision is: in memory by default,

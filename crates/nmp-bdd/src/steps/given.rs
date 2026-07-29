@@ -208,6 +208,70 @@ async fn logged_in_as_pubkey(w: &mut NmpWorld, pubkey: String) {
     w.log_in_as_identity(&pubkey);
 }
 
+// ---- routing: three-valued knowledge ------------------------------------
+//
+// The three values are staged three different ways, and the difference is the
+// whole point: a relay list NAMING relays is `Known`, one declaring NONE is
+// still `Known` (a fact, just an empty one), and one never ingested is
+// `Unknown` -- which, until the indexers finish looking, keeps a write parked.
+
+#[given(regex = r#"^my relay list has never been fetched$"#)]
+async fn my_relay_list_never_fetched(w: &mut NmpWorld) {
+    w.assert_relay_list_never_fetched(ME);
+}
+
+#[given(
+    regex = r#"^(?:(\S+)'s relay list has never been fetched|no relay list for (\S+) has ever been ingested)$"#
+)]
+async fn person_relay_list_never_fetched(w: &mut NmpWorld, a: String, b: String) {
+    let person = if a.is_empty() { b } else { a };
+    w.person(&person);
+    w.assert_relay_list_never_fetched(&person);
+}
+
+#[given(regex = r#"^(\S+)'s relay list names "([^"]+)" as (?:her|his|their) read relay$"#)]
+async fn person_read_relay(w: &mut NmpWorld, person: String, relay: String) {
+    w.declare_read_relay(&person, &relay);
+}
+
+#[given(regex = r#"^(\S+)'s relay list is ingested and names no relays at all$"#)]
+async fn person_declares_no_relays(w: &mut NmpWorld, person: String) {
+    w.declare_no_relays(&person);
+}
+
+/// The indexers have NOT finished looking, so nothing can settle and every
+/// unknown stays unknown. Staged as relay behaviour rather than as an
+/// injected fact: a relay that never says end-of-stored-events is exactly
+/// what "we have not finished looking" IS on the wire.
+#[given(
+    regex = r#"^the indexers have not(?: yet)? confirmed end of stored events for (\S+)'s relay list$"#
+)]
+async fn indexers_have_not_confirmed(w: &mut NmpWorld, person: String) {
+    w.person(&person);
+    w.indexers_never_confirm_end_of_stored_events();
+}
+
+/// The complement, stated out loud where a scenario turns on it: a
+/// well-behaved relay answers end-of-stored-events, which is the ONLY thing
+/// that turns "we have not looked" into "we looked and there is nothing".
+#[given(
+    regex = r#"^the indexers have (?:already )?confirmed end of stored events for (\S+)'s relay list$"#
+)]
+async fn indexers_have_confirmed(w: &mut NmpWorld, person: String) {
+    w.person(&person);
+    w.assert_indexers_confirm_end_of_stored_events();
+}
+
+#[given(regex = r#"^an indexer relay is configured$"#)]
+async fn one_indexer_configured(w: &mut NmpWorld) {
+    w.configure_n_indexers(1);
+}
+
+#[given(regex = r#"^no indexer relays are configured$"#)]
+async fn no_indexers_configured(w: &mut NmpWorld) {
+    w.assert_no_indexers();
+}
+
 /// A signer for the current account already exists in this world (every
 /// scenario that logs in gets one), stated out loud where a scenario's point
 /// is that the signer was NOT asked for anything.

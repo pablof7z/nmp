@@ -130,8 +130,11 @@ async fn numbered_receipt_acked(w: &mut NmpWorld, ordinal: String, relay_name: S
 // mailbox: `WriteStatus::Acked(url)` is the relay itself confirming it took
 // the event, which is the only delivery fact an app ever gets.
 
-/// `Then the note is delivered to "a"` / `... to "a" and "b"`.
-#[then(regex = r#"^the (?:note|event|relay list) is delivered to (.+)$"#)]
+/// `Then the note is delivered to "a"` / `... to "a" and "b"`, and the
+/// routing-plane spelling `... is published to "a"`. One assertion for both:
+/// "published" and "delivered" name the same observable — the relay itself
+/// confirming it took the event.
+#[then(regex = r#"^the (?:note|event|relay list) is (?:delivered|published) to (.+)$"#)]
 async fn delivered_to(w: &mut NmpWorld, targets: String) {
     let names = crate::steps::parse_quoted_list(&targets);
     assert!(

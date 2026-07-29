@@ -185,6 +185,17 @@ pub struct NmpWorld {
     relays: HashMap<String, ScriptedRelay>,
     indexer_names: Vec<String>,
     write_relay_of: HashMap<String, Vec<String>>,
+    /// The INBOX half of a person's relay list -- what an outbox fan-out
+    /// reaches a p-tagged recipient at. Deliberately separate from
+    /// `write_relay_of`: a recipient is reached at their read relays and
+    /// never at their write set, and a scenario that confused the two would
+    /// pass for the wrong reason.
+    read_relay_of: HashMap<String, Vec<String>>,
+    /// People whose relay list is staged as REAL and EMPTY -- a kind:10002
+    /// that declares no relays at all. "Known, zero relays" is a fact; it is
+    /// not the same as never having published one, and the whole point of
+    /// three-valued knowledge is that those two do not collapse.
+    declares_no_relays: Vec<String>,
 
     pending_contact_lists: Vec<PendingContactList>,
     /// Notes staged as already-signed events, kept verbatim so a later step
@@ -419,6 +430,37 @@ impl NmpWorld {
         self.handle
             .as_ref()
             .expect("nmp-bdd: the engine must be started (ensure_started) before use")
+    }
+
+    /// The active account's pubkey in the hex spelling a park's reason uses.
+    /// Internal identity is `PublicKey`/hex everywhere; bech32 is outward
+    /// decoration only and never appears here.
+    pub fn my_pubkey_hex(&mut self) -> String {
+        let me = self
+            .active_person
+            .clone()
+            .expect("nmp-bdd: 'me' needs a logged-in account");
+        self.person(&me).public_key().to_hex()
+    }
+
+    /// Every relay named as `person`'s INBOX -- what an outbox fan-out would
+    /// reach them at, and therefore exactly the set a "nothing was contacted
+    /// on their behalf" assertion has to look at.
+    pub fn read_relay_names_of(&self, person: &str) -> Vec<String> {
+        self.read_relay_of.get(person).cloned().unwrap_or_default()
+    }
+
+    /// The OUTBOX half: every relay `person` declared as their own write
+    /// relay.
+    pub fn write_relay_names_of(&self, person: &str) -> Vec<String> {
+        self.write_relay_of.get(person).cloned().unwrap_or_default()
+    }
+
+    /// The name of the person this world calls "me".
+    pub fn me(&self) -> String {
+        self.active_person
+            .clone()
+            .expect("nmp-bdd: 'me' needs a logged-in account")
     }
 
     /// Wrap `keys` in the counting signer, sharing this world's one counter.

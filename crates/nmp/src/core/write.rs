@@ -102,10 +102,7 @@ fn p_tagged_authors(event: &SignedEvent) -> BTreeSet<PubkeyHex> {
 fn unresolved_detail(unknown: &BTreeSet<PubkeyHex>) -> String {
     let mut names = unknown.iter().cloned().collect::<Vec<_>>();
     names.sort();
-    format!(
-        "no relay list known yet for {}",
-        names.join(", ")
-    )
+    format!("no relay list known yet for {}", names.join(", "))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2523,7 +2520,9 @@ impl<S: EventStore> EngineCore<S> {
             .entry(event.id)
             .or_default()
             .insert(id);
+        let needs_before = self.route_unknown_authors();
         self.apply_route_answer(id, intent_id, answer, effects);
+        self.resync_route_needs(needs_before, effects);
     }
 
     /// Turn one intent's freshly-minted lanes into live delivery work
@@ -2787,7 +2786,11 @@ impl<S: EventStore> EngineCore<S> {
     /// case is unreachable from acceptance (`on_publish` refuses it at the
     /// door); it is spelled out here only so the fail-closed answer is the
     /// one this arm can give.
-    pub(super) fn resolve_routes(&self, routing: &WriteRouting, event: &SignedEvent) -> RouteAnswer {
+    pub(super) fn resolve_routes(
+        &self,
+        routing: &WriteRouting,
+        event: &SignedEvent,
+    ) -> RouteAnswer {
         match routing {
             WriteRouting::Auto => self.resolve_outbox(event),
             WriteRouting::Explicit(relays) => RouteAnswer {
@@ -2797,9 +2800,7 @@ impl<S: EventStore> EngineCore<S> {
                 // it resolves, before any relay is contacted.
                 unknown_authors: BTreeSet::new(),
                 complete: !relays.is_empty(),
-                detail: relays
-                    .is_empty()
-                    .then(|| EMPTY_EXPLICIT_ROUTE.to_string()),
+                detail: relays.is_empty().then(|| EMPTY_EXPLICIT_ROUTE.to_string()),
             },
         }
     }
@@ -2819,11 +2820,12 @@ impl<S: EventStore> EngineCore<S> {
         //    never counted toward the coverage minimum.
         answer
             .relays
-            .extend(self.directory.app_relays().into_iter());
+            .extend(self.directory.app_relays());
 
         // 3. each p-tagged recipient's INBOX (read relays, never write).
-        for recipient in p_tagged_authors(event) {
-            let known = self.contribute(&recipient, RelayRole::Read, &mut answer);
+        let recipients = p_tagged_authors(event);
+        for recipient in &recipients {
+            let known = self.contribute(recipient, RelayRole::Read, &mut answer);
             thin_contributor |= known < COVERAGE_MIN;
         }
 
@@ -2836,7 +2838,29 @@ impl<S: EventStore> EngineCore<S> {
         if thin_contributor && self.directory.app_relays().is_empty() {
             answer
                 .relays
-                .extend(self.directory.fallback_relays().into_iter());
+                .extend(self.directory.fallback_relays());
+        }
+
+        if answer.relays.is_empty() {
+            // A resolution that named NOTHING has not decided anything, so it
+            // cannot retire. Zero destinations is an unroutable park, never a
+            // "we know where this goes" — and the difference is load-bearing:
+            // a retired route is never re-executed, so calling this complete
+            // would strand the write permanently the moment its author's
+            // relay list settled absent, which is the very defect this design
+            // exists to remove.
+            //
+            // Every contributing author is therefore still declared as a
+            // need, settled or not: with nothing else to go on, the author's
+            // (or a recipient's) relay list appearing later is the ONLY thing
+            // that can unpark this write, so discovery must keep covering
+            // them rather than tearing down on a settlement that produced no
+            // destination. Nothing auto-abandons.
+            answer.unknown_authors.insert(author);
+            answer.unknown_authors.extend(recipients);
+            answer.complete = false;
+            answer.detail = Some(unresolved_detail(&answer.unknown_authors));
+            return answer;
         }
 
         answer.complete = answer.unknown_authors.is_empty();
@@ -3068,9 +3092,34 @@ impl<S: EventStore> EngineCore<S> {
             })
             .map(|(id, _)| *id)
             .collect::<Vec<_>>();
+        if open.is_empty() {
+            return;
+        }
+        let before = self.route_unknown_authors();
         for id in open {
             self.rewrite_route(id, effects);
             self.close_if_all_lanes_terminal(id);
+        }
+        self.resync_route_needs(before, effects);
+    }
+
+    /// Put the write plane's declared needs in front of the query system when
+    /// -- and only when -- they actually changed.
+    ///
+    /// A need is not a subscription: it is an entry in the set
+    /// `sync_discovery` already computes, so publishing the change is just a
+    /// recompile. That is the whole of "resolvers declare needs and the
+    /// ENGINE drives the query": there is no other door here for a routing
+    /// strategy to reach the network through, and nothing for one to misuse.
+    /// Recompiling only on a real change keeps a tick that learned nothing
+    /// free.
+    pub(super) fn resync_route_needs(
+        &mut self,
+        before: BTreeSet<PubkeyHex>,
+        effects: &mut Vec<Effect>,
+    ) {
+        if self.route_unknown_authors() != before {
+            self.recompile(effects);
         }
     }
 

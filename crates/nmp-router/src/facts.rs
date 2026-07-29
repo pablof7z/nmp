@@ -721,7 +721,10 @@ mod tests {
         );
 
         // A relay list published after settlement simply replaces it.
-        dir.ingest_read_relays(pk('c'), vec![LanedRelay::new(test_relay(4), Lane::Nip65Read)]);
+        dir.ingest_read_relays(
+            pk('c'),
+            vec![LanedRelay::new(test_relay(4), Lane::Nip65Read)],
+        );
         assert_eq!(
             dir.relay_list_knowledge(&pk('c')),
             RelayListKnowledge::Known,

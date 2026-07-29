@@ -55,6 +55,11 @@
 //!   something, and what an already-signed event's bytes still were on the
 //!   far side. Distinct from `writes` and `identity` for the same reason
 //!   those two are distinct from each other -- same receipt, different claim.
+//! - `routes` -- routing as a LIFECYCLE: whether the strategy is still
+//!   deciding, what it says it is waiting for, and whether it can ever change
+//!   its mind again. Separate from `writes` because routed and published are
+//!   separate axes, and a suite that read one off the other could not tell a
+//!   misconfigured indexer set from a slow relay.
 //! - `routing` -- the READ plane: which relay was asked for what kind, in
 //!   which lane. Distinct from `writes`; both talk about relays, only one is
 //!   about an event this app sent.
@@ -62,7 +67,7 @@
 //! - `budget` -- what a relay says it can hold, and what happened when it
 //!   could not hold it.
 //!
-//! The empty-world rule applies to all five families, so
+//! The empty-world rule applies to every family below, so
 //! [`nothing_to_observe`] is defined HERE, textually BEFORE the module
 //! declarations below: a `macro_rules!` is in scope for every module declared
 //! after it, which is what lets one definition serve every family without
@@ -92,6 +97,7 @@ mod groups;
 mod identity;
 mod payloads;
 mod replaceable;
+mod routes;
 mod routing;
 mod wire;
 mod writes;
