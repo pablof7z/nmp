@@ -4230,6 +4230,44 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiStalledWriteStage",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Unroutable",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "No destination could be computed.",
+            ),
+        },
+        Variant {
+            name: "Unsignable",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "No signer answers for the author this write was FROZEN to -- never\nthe mutable active account.",
+            ),
+        },
+        Variant {
+            name: "Undeliverable",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "Destinations exist and none of them is working.",
+            ),
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "Where a durable write obligation is stuck (`nmp::StalledWriteStage`\nmirror, #756/#968). Three stages, kept apart because an app acts on them\ndifferently and because one rolled-up \"stuck\" tells nobody anything.",
+    ),
+}
+
+enum Enum {
     name: "FfiWindow",
     module_path: "nmp_ffi",
     remote: false,
@@ -5395,6 +5433,30 @@ record Record {
                 "Latest transport acceptance/verifier failure, if any. This is\nobservational diagnostics and never changes routing or trust policy.",
             ),
         },
+        Field {
+            name: "stalled_writes",
+            type_: Sequence {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiStalledWrite",
+                },
+            },
+            default: None,
+            docstring: Some(
+                "Every durable write obligation that cannot progress, bounded to\n`stalled_write_totals.detail_limit` rows in a deterministic display\norder (stage, then acceptance instant, then descriptor).\n\nA receipt answers \"what happened to THIS write\", which needs someone\nstill holding it; this answers \"is anything quietly stuck\" for an app\nholding nothing. Reading it changes nothing.",
+            ),
+        },
+        Field {
+            name: "stalled_write_totals",
+            type_: Record {
+                module_path: "nmp_ffi",
+                name: "FfiStalledWriteTotals",
+            },
+            default: None,
+            docstring: Some(
+                "Exact counts behind that window.",
+            ),
+        },
     ],
     docstring: Some(
         "The engine-global diagnostics snapshot (M5 plan §1.1) -- \"the acceptance\ntest rendered on screen, permanently.\" Pushed reactively via\n`NmpEngine::observe_diagnostics`, never polled; read-only and off the\ndata path (never influences routing/delivery).",
@@ -6505,6 +6567,95 @@ record Record {
         },
     ],
     docstring: None,
+}
+
+record Record {
+    name: "FfiStalledWrite",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "id",
+            type_: String,
+            default: None,
+            docstring: Some(
+                "A stable, restart-reproducible BLAKE3 descriptor of this obligation.\nDeliberately NOT a receipt id and deliberately not parseable back\ninto one: it exists to tell two rows apart and to recognise the same\nrow across snapshots, never to reattach or enumerate receipts.",
+            ),
+        },
+        Field {
+            name: "stage",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiStalledWriteStage",
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "detail",
+            type_: String,
+            default: None,
+            docstring: Some(
+                "What this write is waiting for. For `Unroutable` it is the receipt's\nOWN park reason, verbatim, so an operator holding both never has to\ndecide whether two differently-worded sentences are the same fact.\nNever empty.",
+            ),
+        },
+        Field {
+            name: "stalled_since",
+            type_: UInt64,
+            default: None,
+            docstring: Some(
+                "When the obligation was ACCEPTED, as a Unix timestamp in seconds,\nreplayed verbatim across restarts. The age is `now - stalled_since`;\nNMP reports the instant rather than a duration because a duration\nbaked into a snapshot goes stale exactly while nothing is happening.\n\nKnown imprecision: this is when the OBLIGATION was accepted, not when\nthe stall began. The two coincide for `Unroutable` and `Unsignable`;\nfor `Undeliverable` it is EARLIER, so an app subtracting will\nover-report how long delivery has been failing. The park instant has\nno durable home yet, and an in-memory one would reset on every\nrestart.",
+            ),
+        },
+    ],
+    docstring: Some(
+        "One durable write obligation that cannot currently progress\n(`nmp::StalledWrite` mirror). Read-only evidence: nothing here cancels,\nretries, prunes or acknowledges a write.",
+    ),
+}
+
+record Record {
+    name: "FfiStalledWriteTotals",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "unroutable",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "unsignable",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "undeliverable",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "omitted_details",
+            type_: UInt64,
+            default: None,
+            docstring: Some(
+                "Stalled obligations with no detail row in this snapshot.",
+            ),
+        },
+        Field {
+            name: "detail_limit",
+            type_: UInt64,
+            default: None,
+            docstring: Some(
+                "The detail-window bound this snapshot was built under.",
+            ),
+        },
+    ],
+    docstring: Some(
+        "The exact census behind `FfiDiagnosticsSnapshot.stalled_writes`\n(`nmp::StalledWriteTotals` mirror). Totals count every stalled\nobligation, including the ones no detail row was emitted for.",
+    ),
 }
 
 record Record {

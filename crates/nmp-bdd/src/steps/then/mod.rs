@@ -63,6 +63,10 @@
 //! - `routing` -- the READ plane: which relay was asked for what kind, in
 //!   which lane. Distinct from `writes`; both talk about relays, only one is
 //!   about an event this app sent.
+//! - `stalled` -- the engine-global "is anything quietly stuck" list. A
+//!   different domain from `routes`/`writes` even though all three describe
+//!   the write plane: those read a RECEIPT, and every claim here is made by
+//!   an app holding none.
 //! - `wire` -- the REQ/CLOSE frames NMP actually put on a relay socket.
 //! - `budget` -- what a relay says it can hold, and what happened when it
 //!   could not hold it.
@@ -99,5 +103,6 @@ mod payloads;
 mod replaceable;
 mod routes;
 mod routing;
+mod stalled;
 mod wire;
 mod writes;

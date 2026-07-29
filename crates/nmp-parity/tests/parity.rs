@@ -13,8 +13,8 @@ use nmp::{
     AcquisitionEvidence, AuthPhase, Binding, CancelWriteOutcome, CorrelationToken,
     DiagnosticsSnapshot, Durability, Engine, EngineConfig, FifoReceiver, FifoRecvTimeoutError,
     Filter, Identity, Lane, LiveQuery, ObservationCancel, ReceiptId, ReceiptReattachment, Row,
-    RowDelta, ShortfallFact, SourceStatus, Timestamp, UnsignedEvent, WriteIntent, WritePayload,
-    WriteRouting, WriteStatus,
+    RowDelta, ShortfallFact, SourceStatus, StalledWriteStage, Timestamp, UnsignedEvent,
+    WriteIntent, WritePayload, WriteRouting, WriteStatus,
 };
 use nmp_ffi::convert::{write_status_to_ffi, WriteStatusRef};
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
@@ -32,8 +32,8 @@ use nmp_ffi::nip22::{FfiCommentParent, FfiCommentRoot};
 use nmp_ffi::types::{
     FfiAcquisitionEvidence, FfiAuthPhase, FfiBinding, FfiCancelWriteOutcome,
     FfiDiagnosticsSnapshot, FfiDurability, FfiFilter, FfiIdentity, FfiReceiptReattachment,
-    FfiRowDelta, FfiShortfallFact, FfiSourceStatus, FfiWriteIntent, FfiWritePayload,
-    FfiWriteRouting, FfiWriteStatus,
+    FfiRowDelta, FfiShortfallFact, FfiSourceStatus, FfiStalledWriteStage, FfiWriteIntent,
+    FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
 };
 use nmp_nip02::{
     observe_following, set_following, FollowAction, FollowActionStatus, FollowAvailability,
@@ -293,6 +293,12 @@ struct NormDiagnostics {
     relays: Vec<NormRelayDiagnostics>,
     uncovered_author_count: usize,
     dropped_merge_rules: Vec<String>,
+    /// (stage label, detail, stalled-since instant) per bounded detail row,
+    /// in the order each surface delivered it -- the ORDER is part of the
+    /// contract, so this is deliberately not sorted.
+    stalled_writes: Vec<(String, String, u64)>,
+    /// (unroutable, unsignable, undeliverable, omitted_details, detail_limit)
+    stalled_write_totals: (u64, u64, u64, u64, u64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -740,10 +746,33 @@ fn normalize_direct_diagnostics(snapshot: DiagnosticsSnapshot, relay: &str) -> N
         .map(str::to_string)
         .collect::<Vec<_>>();
     dropped_merge_rules.sort();
+    let totals = snapshot.stalled_write_totals;
     NormDiagnostics {
         relays,
         uncovered_author_count: snapshot.uncovered_author_count,
         dropped_merge_rules,
+        stalled_writes: snapshot
+            .stalled_writes
+            .into_iter()
+            .map(|write| {
+                (
+                    match write.stage {
+                        StalledWriteStage::Unroutable => "unroutable".to_string(),
+                        StalledWriteStage::Unsignable => "unsignable".to_string(),
+                        StalledWriteStage::Undeliverable => "undeliverable".to_string(),
+                    },
+                    write.detail,
+                    write.stalled_since.as_secs(),
+                )
+            })
+            .collect(),
+        stalled_write_totals: (
+            totals.unroutable,
+            totals.unsignable,
+            totals.undeliverable,
+            totals.omitted_details,
+            totals.detail_limit,
+        ),
     }
 }
 
@@ -793,10 +822,33 @@ fn normalize_ffi_diagnostics(snapshot: FfiDiagnosticsSnapshot, relay: &str) -> N
     relays.sort();
     let mut dropped_merge_rules = snapshot.dropped_merge_rules;
     dropped_merge_rules.sort();
+    let totals = snapshot.stalled_write_totals;
     NormDiagnostics {
         relays,
         uncovered_author_count: snapshot.uncovered_author_count as usize,
         dropped_merge_rules,
+        stalled_writes: snapshot
+            .stalled_writes
+            .into_iter()
+            .map(|write| {
+                (
+                    match write.stage {
+                        FfiStalledWriteStage::Unroutable => "unroutable".to_string(),
+                        FfiStalledWriteStage::Unsignable => "unsignable".to_string(),
+                        FfiStalledWriteStage::Undeliverable => "undeliverable".to_string(),
+                    },
+                    write.detail,
+                    write.stalled_since,
+                )
+            })
+            .collect(),
+        stalled_write_totals: (
+            totals.unroutable,
+            totals.unsignable,
+            totals.undeliverable,
+            totals.omitted_details,
+            totals.detail_limit,
+        ),
     }
 }
 

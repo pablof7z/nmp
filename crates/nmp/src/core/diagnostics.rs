@@ -15,7 +15,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use nostr::{EventId, JsonUtil, RelayUrl};
+use nostr::{EventId, JsonUtil, RelayUrl, Timestamp};
 
 use nmp_grammar::{AccessContext, RelaySessionKey};
 use nmp_router::{Diagnostics, Lane, RelayPlan, WireReq};
@@ -133,6 +133,104 @@ pub enum AuthDiagnosticsPhase {
     Error,
 }
 
+/// Where a durable write obligation is stuck (#756/#968). Three stages,
+/// because an app that has to look in three places to answer one question
+/// looks in none of them, and because the three are acted on differently:
+/// nothing an app can do fixes an unroutable write except learning more
+/// about the world, an unsignable one wants a signer, and an undeliverable
+/// one wants a reachable relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StalledWriteStage {
+    /// No destination could be computed. The write is parked in
+    /// [`crate::outbox::WriteStatus::AwaitingRoute`].
+    Unroutable,
+    /// No signer answers for the author this obligation was FROZEN to — the
+    /// [`crate::outbox::WriteStatus::AwaitingCapability`] park. Never the
+    /// mutable active account.
+    Unsignable,
+    /// Destinations exist and none of them is working: every relay this
+    /// intent still owns a live lane at is unreachable, unstarted, or
+    /// route-persistence-blocked, and no attempt is in flight.
+    Undeliverable,
+}
+
+/// One durable write obligation that cannot currently progress.
+///
+/// Read-only evidence, never a workload noun: there is no cancel, retry, or
+/// prune verb here and no round-trippable receipt identity. Cancellation
+/// remains the typed receipt door (`Handle::cancel_write`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StalledWrite {
+    /// A stable, restart-reproducible BLAKE3 descriptor of this exact
+    /// obligation — deliberately NOT a [`super::ReceiptId`] and deliberately
+    /// not parseable back into one.
+    ///
+    /// Its only job is correlation: telling two rows of one snapshot apart,
+    /// and recognising the same row across snapshots so an app can see a
+    /// write leave the list. Making it round-trippable would turn this
+    /// bounded active-obligation view into a receipt-discovery door, whose
+    /// completeness, retention and access semantics nothing has decided
+    /// (#756's identity question; #903 owns the reverse link).
+    pub id: String,
+    pub stage: StalledWriteStage,
+    /// What this write is waiting for.
+    ///
+    /// For [`StalledWriteStage::Unroutable`] this is the receipt's OWN park
+    /// reason, projected verbatim: an operator comparing a diagnostics row
+    /// with the receipt beside it must never have to decide whether two
+    /// differently-worded sentences are the same fact. Never empty — a park
+    /// that says only "stuck" is barely better than losing the write.
+    pub detail: String,
+    /// When this obligation was ACCEPTED — the durable
+    /// `AcceptWrite::accepted_at`, replayed verbatim after a restart.
+    ///
+    /// The age is `now - stalled_since`, and NMP deliberately reports the
+    /// instant rather than the duration: a snapshot is re-emitted only when
+    /// engine state changes, so a duration baked into one would be stale
+    /// exactly while nothing is happening — which is the whole population
+    /// this section exists to describe. NMP draws no conclusion from either
+    /// number; deciding that a write has waited long enough is the app's or
+    /// the person's, never a timer's.
+    ///
+    /// **Known imprecision, stated rather than hidden.** This is when the
+    /// OBLIGATION was accepted, not when the stall began. For
+    /// [`StalledWriteStage::Unroutable`] and
+    /// [`StalledWriteStage::Unsignable`] the two coincide — routing and
+    /// signing are attempted immediately, so a write that is parked has been
+    /// parked since acceptance. For [`StalledWriteStage::Undeliverable`] the
+    /// instant is EARLIER than the stall: a write accepted last week and
+    /// delivering happily until its relay went down an hour ago still reads
+    /// as accepted last week, so an app subtracting will over-report how
+    /// long delivery has been failing.
+    ///
+    /// The alternative — the instant the park itself began — is a fact the
+    /// store has no door for, and keeping it in memory instead is what makes
+    /// a restart reset it to the recovering process's clock. Between a
+    /// durable over-estimate and a process-local number that lies after every
+    /// reopen, this surface takes the durable one, because "stalled since
+    /// before the restart" is a question it has to be able to answer at all.
+    /// Persisting the park instant is tracked as issue #1024.
+    pub stalled_since: Timestamp,
+}
+
+/// The exact census behind [`DiagnosticsSnapshot::stalled_writes`]'s bounded
+/// detail window.
+///
+/// Totals count every stalled obligation the reducer owns, including the
+/// ones no detail row was emitted for, so a bound on memory is never a lie
+/// about how much is stuck. Moving a write into or out of the detail window
+/// changes no total.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StalledWriteTotals {
+    pub unroutable: u64,
+    pub unsignable: u64,
+    pub undeliverable: u64,
+    /// Stalled obligations with no detail row in this snapshot.
+    pub omitted_details: u64,
+    /// The detail-window bound this snapshot was built under.
+    pub detail_limit: u64,
+}
+
 /// The engine-global diagnostics snapshot (M5 plan §1.1) — "the acceptance
 /// test rendered on screen, permanently." One snapshot covers every
 /// currently-planned relay; there is no separate per-query diagnostics (that
@@ -191,6 +289,19 @@ pub struct DiagnosticsSnapshot {
     /// Latest transport acceptance/verifier failure surfaced by the pool.
     /// Observational only; it never changes routing or trust policy.
     pub transport_degraded: Option<String>,
+    /// Every durable write obligation that cannot progress, bounded to
+    /// [`StalledWriteTotals::detail_limit`] rows in a deterministic order
+    /// (stage, then acceptance instant, then id) that no scheduler reads.
+    ///
+    /// A receipt answers "what happened to THIS write", which needs someone
+    /// still holding it; nobody holds the receipt for the DM composed on a
+    /// train three weeks ago, and that is exactly the write worth
+    /// surfacing. Projected from the reducer state that transactionally owns
+    /// the canonical durable facts — never a second retry ledger, and never
+    /// a store scan at snapshot time.
+    pub stalled_writes: Vec<StalledWrite>,
+    /// Exact counts behind that window. See [`StalledWriteTotals`].
+    pub stalled_write_totals: StalledWriteTotals,
 }
 
 /// Combine `diag` (subs/filters/lanes/authors_served — `nmp-router`-owned)
@@ -274,7 +385,35 @@ pub(crate) fn build(
         // facts and has no notion of persistence health.
         store_degraded: None,
         transport_degraded: None,
+        // Filled in by `EngineCore::diagnostics_snapshot` from the reducer's
+        // own pending-obligation set: `build` sees only router/store read
+        // facts and has no notion of the write plane.
+        stalled_writes: Vec::new(),
+        stalled_write_totals: StalledWriteTotals::default(),
     }
+}
+
+/// How many stalled-write detail rows one snapshot may carry.
+///
+/// A bound on bytes, not a scheduler policy: which rows land inside it
+/// changes nothing about retry order, wake deadlines, receipt retention, or
+/// transport/signer lifetime, and [`StalledWriteTotals`] stays exact
+/// regardless of where the cut falls.
+pub(crate) const STALLED_WRITE_DETAIL_LIMIT: usize = 64;
+
+/// The stable, non-round-trippable descriptor of one stalled obligation.
+///
+/// Domain-separated so it can never collide with another BLAKE3 descriptor
+/// on this surface, and derived from two DURABLE facts (the store-allocated
+/// intent id and the frozen body's id) so a crash/reopen reproduces it
+/// exactly. Two receipts accepted for byte-identical events get different
+/// intent ids and therefore different descriptors.
+pub(crate) fn stalled_write_id(intent_id: u64, frozen: &EventId) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"nmp:stalled-write:v1\0");
+    hasher.update(&intent_id.to_be_bytes());
+    hasher.update(frozen.as_bytes());
+    hasher.finalize().to_hex().to_string()
 }
 
 /// The exact common interval proven for a (possibly coalesced) wire request.

@@ -65,6 +65,11 @@
 //!   `Then` reads. Its own module for the same reason `watches` is: a group
 //!   scenario asks what reached ONE host and what the delivered event
 //!   literally was, which needs bookkeeping no feed step wants.
+//! - `stalled` -- the global "is anything quietly stuck" read-out: the
+//!   diagnostics section that describes obligations nobody holds a receipt
+//!   for, and the two acts a scenario about it performs (publishing to a
+//!   destination this world deliberately never starts, and reading the list
+//!   repeatedly to prove that reading is not part of what it describes).
 //! - `watches` -- watching one named relay directly, which is a separate
 //!   concern from the feed: it exists to observe what NMP puts on a SOCKET,
 //!   so it owns the watch bookkeeping, the group fixtures that feed it, and
@@ -87,6 +92,7 @@ mod replaceable;
 mod restart;
 mod signers;
 mod staging;
+mod stalled;
 mod watches;
 mod writes;
 
@@ -390,6 +396,21 @@ pub struct NmpWorld {
     unreachable_relays: BTreeSet<String>,
     /// What `scripts/check-nip29-ownership.sh` said, and whether it passed.
     gate_outcome: Option<(bool, String)>,
+
+    // ---- stalled writes (`world::stalled`) ------------------------------
+    /// The literal relay URLs a scenario TOLD this world to publish to. Kept
+    /// as URLs rather than relay names because the case they exist for is a
+    /// destination this world deliberately never starts.
+    told_route: Vec<nmp_router::RelayUrl>,
+    /// The snapshot the last `I read diagnostics` returned -- "the list"
+    /// every following assertion reads.
+    last_diagnostics: Option<nmp::mechanism::core::DiagnosticsSnapshot>,
+    /// One fingerprint per read of a repeated read, so "reading changed
+    /// nothing" compares every answer instead of only the last.
+    repeated_diagnostics: Vec<Vec<(String, String, u64)>>,
+    /// The descriptor of the row a scenario named, so a later step can prove
+    /// THAT row left rather than merely that the list shrank.
+    named_stalled_write: Option<String>,
 }
 
 impl std::fmt::Debug for NmpWorld {

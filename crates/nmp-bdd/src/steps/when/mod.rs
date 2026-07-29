@@ -409,6 +409,27 @@ async fn nip46_signer_attaches(w: &mut NmpWorld, pubkey: String) {
     w.attach_signer_for(&pubkey).await;
 }
 
+// ---- the global stalled-write list -------------------------------------
+
+#[when(regex = r#"^I publish that note$"#)]
+async fn publish_that_note(w: &mut NmpWorld) {
+    w.publish_told_note().await;
+}
+
+#[when(regex = r#"^I read diagnostics$"#)]
+async fn read_diagnostics(w: &mut NmpWorld) {
+    w.ensure_started().await;
+    w.read_stalled_writes();
+}
+
+/// Reading a mirror, repeatedly and on purpose. If reading retried, an app
+/// that polled would publish differently from one that did not.
+#[when(regex = r#"^I read diagnostics (\d+) times$"#)]
+async fn read_diagnostics_n_times(w: &mut NmpWorld, times: usize) {
+    w.ensure_started().await;
+    w.read_diagnostics_repeatedly(times);
+}
+
 #[when(regex = r#"^I cancel that write$"#)]
 async fn cancel_that_write(w: &mut NmpWorld) {
     w.cancel_last_write();

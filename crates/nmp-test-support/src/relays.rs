@@ -58,7 +58,13 @@ use nostr_relay_builder::prelude::{
 /// order before anything hits a real socket).
 #[derive(Debug, Clone, Default)]
 pub struct RelayConfig {
-    pub reject_writes: bool,
+    /// Refuse EVERY event with this exact NIP-01 `OK` message, prefix
+    /// included, because that is the string an app sees. `None` accepts.
+    ///
+    /// A message rather than a flag: "blocked: not admitted" is actionable
+    /// and "failed" is not, and a scenario about a relay's own words has to
+    /// be able to write them.
+    pub reject_writes: Option<String>,
     /// Approximates "never confirms end of stored events": the relay
     /// refuses the query outright (`CLOSED`, never `EOSE`), which yields the
     /// same app-observable consequence the ledger scenario cares about --
@@ -779,7 +785,7 @@ impl ScriptedRelay {
             .write_policy(LoggingWritePolicy {
                 contacted: contacted.clone(),
                 admitted: admitted.clone(),
-                reject: config.reject_writes,
+                reject: config.reject_writes.clone(),
                 reject_kind: config.reject_kind.clone(),
             })
             .query_policy(LoggingQueryPolicy {
@@ -1108,7 +1114,7 @@ pub fn free_port() -> u16 {
 struct LoggingWritePolicy {
     contacted: Arc<ContactLog>,
     admitted: Arc<Mutex<Vec<nostr::Event>>>,
-    reject: bool,
+    reject: Option<String>,
     reject_kind: Option<(u16, String)>,
 }
 
@@ -1134,22 +1140,16 @@ impl WritePolicy for LoggingWritePolicy {
                 .unwrap_or_else(|p| p.into_inner())
                 .push(bridged);
         }
-        let reject = self.reject;
+        let refused_all = self.reject.as_deref().map(split_ok_message);
         let refused_kind = self
             .reject_kind
             .as_ref()
             .filter(|(kind, _)| *kind == event.kind.as_u16())
             .map(|(_, message)| split_ok_message(message));
         Box::pin(async move {
-            if let Some((prefix, message)) = refused_kind {
-                WritePolicyResult::reject(prefix, message)
-            } else if reject {
-                WritePolicyResult::reject(
-                    MachineReadablePrefix::Blocked,
-                    "nmp-bdd scripted relay: configured to reject every event",
-                )
-            } else {
-                WritePolicyResult::Accept
+            match refused_kind.or(refused_all) {
+                Some((prefix, message)) => WritePolicyResult::reject(prefix, message),
+                None => WritePolicyResult::Accept,
             }
         })
     }

@@ -792,6 +792,64 @@ pub struct FfiAuthDiagnostics {
     pub relay_ok_accepted: bool,
 }
 
+/// Where a durable write obligation is stuck (`nmp::StalledWriteStage`
+/// mirror, #756/#968). Three stages, kept apart because an app acts on them
+/// differently and because one rolled-up "stuck" tells nobody anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub enum FfiStalledWriteStage {
+    /// No destination could be computed.
+    Unroutable,
+    /// No signer answers for the author this write was FROZEN to -- never
+    /// the mutable active account.
+    Unsignable,
+    /// Destinations exist and none of them is working.
+    Undeliverable,
+}
+
+/// One durable write obligation that cannot currently progress
+/// (`nmp::StalledWrite` mirror). Read-only evidence: nothing here cancels,
+/// retries, prunes or acknowledges a write.
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiStalledWrite {
+    /// A stable, restart-reproducible BLAKE3 descriptor of this obligation.
+    /// Deliberately NOT a receipt id and deliberately not parseable back
+    /// into one: it exists to tell two rows apart and to recognise the same
+    /// row across snapshots, never to reattach or enumerate receipts.
+    pub id: String,
+    pub stage: FfiStalledWriteStage,
+    /// What this write is waiting for. For `Unroutable` it is the receipt's
+    /// OWN park reason, verbatim, so an operator holding both never has to
+    /// decide whether two differently-worded sentences are the same fact.
+    /// Never empty.
+    pub detail: String,
+    /// When the obligation was ACCEPTED, as a Unix timestamp in seconds,
+    /// replayed verbatim across restarts. The age is `now - stalled_since`;
+    /// NMP reports the instant rather than a duration because a duration
+    /// baked into a snapshot goes stale exactly while nothing is happening.
+    ///
+    /// Known imprecision: this is when the OBLIGATION was accepted, not when
+    /// the stall began. The two coincide for `Unroutable` and `Unsignable`;
+    /// for `Undeliverable` it is EARLIER, so an app subtracting will
+    /// over-report how long delivery has been failing. The park instant has
+    /// no durable home yet, and an in-memory one would reset on every
+    /// restart.
+    pub stalled_since: u64,
+}
+
+/// The exact census behind `FfiDiagnosticsSnapshot.stalled_writes`
+/// (`nmp::StalledWriteTotals` mirror). Totals count every stalled
+/// obligation, including the ones no detail row was emitted for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Record)]
+pub struct FfiStalledWriteTotals {
+    pub unroutable: u64,
+    pub unsignable: u64,
+    pub undeliverable: u64,
+    /// Stalled obligations with no detail row in this snapshot.
+    pub omitted_details: u64,
+    /// The detail-window bound this snapshot was built under.
+    pub detail_limit: u64,
+}
+
 /// The engine-global diagnostics snapshot (M5 plan §1.1) -- "the acceptance
 /// test rendered on screen, permanently." Pushed reactively via
 /// `NmpEngine::observe_diagnostics`, never polled; read-only and off the
@@ -817,6 +875,16 @@ pub struct FfiDiagnosticsSnapshot {
     /// Latest transport acceptance/verifier failure, if any. This is
     /// observational diagnostics and never changes routing or trust policy.
     pub transport_degraded: Option<String>,
+    /// Every durable write obligation that cannot progress, bounded to
+    /// `stalled_write_totals.detail_limit` rows in a deterministic display
+    /// order (stage, then acceptance instant, then descriptor).
+    ///
+    /// A receipt answers "what happened to THIS write", which needs someone
+    /// still holding it; this answers "is anything quietly stuck" for an app
+    /// holding nothing. Reading it changes nothing.
+    pub stalled_writes: Vec<FfiStalledWrite>,
+    /// Exact counts behind that window.
+    pub stalled_write_totals: FfiStalledWriteTotals,
 }
 
 /// The receipt STREAM (`nmp::WriteStatus` mirror; ledger #9 — enqueue is

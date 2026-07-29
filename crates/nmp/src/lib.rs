@@ -167,7 +167,7 @@ pub use auth::{
 pub use config::EngineConfig;
 pub use diagnostics::{
     AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, DiagnosticsSnapshot, FilterCoverageEntry,
-    RelayDiagnosticsSnapshot,
+    RelayDiagnosticsSnapshot, StalledWrite, StalledWriteStage, StalledWriteTotals,
 };
 pub use engine::RelayInformationRequestError;
 pub use engine::{

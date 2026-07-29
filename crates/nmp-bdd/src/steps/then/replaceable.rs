@@ -16,6 +16,11 @@ use crate::world::{format_stated_time, NmpWorld};
 
 // ---- the precondition ----------------------------------------------------
 
+/// Also read by `features/diagnostics/stalled-writes.feature`, whose subject
+/// is a write nothing can deliver rather than a replacement: "the obligation
+/// was accepted" is the same observable in both, and a `WriteStatus::Accepted`
+/// is what both mean. Narrowing this to something replaceable-specific would
+/// silently break that feature, so it stays the plain acceptance fact.
 #[then(regex = r#"^the write is accepted$"#)]
 async fn the_write_is_accepted(w: &mut NmpWorld) {
     assert!(
