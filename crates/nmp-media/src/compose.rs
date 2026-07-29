@@ -4,10 +4,11 @@
 //! epic #216 T15-C-MEDIA-COMPOSITION).
 //!
 //! This stage NEVER signs and NEVER publishes: it emits an unsigned kind:20
-//! draft. The app signs it with `nmp-signer` and passes it to the existing
-//! `publish()` -> WriteIntent path (DOWNSTREAM of this seam -- relay/publish
-//! failure is a different domain from the [`MediaComposeError`] this stage
-//! returns).
+//! draft. Its public `kind`, `tags`, `content`, and `created_at` fields copy
+//! directly into NMP's public-field `EventBuilder`; selecting this event's
+//! `pubkey` as the `WriteIntent` identity preserves its author while the
+//! engine signs and publishes it through the existing path. Relay/publication
+//! failure remains downstream and separate from [`MediaComposeError`].
 //!
 //! Determinism (the Rust-side half of the cross-surface parity contract):
 //! [`compose_picture`] with identical inputs yields identical tag structure
@@ -154,9 +155,10 @@ impl std::error::Error for MediaComposeError {
 /// [`MediaComposeError::Build`]). Refuses an empty `images` with
 /// [`MediaComposeError::NoImages`].
 ///
-/// The returned [`UnsignedEvent`] is what the app signs and hands to the
-/// EXISTING `publish()` -> WriteIntent path -- publication is NOT performed
-/// here (a different failure domain).
+/// The returned [`UnsignedEvent`]'s public body fields copy directly into
+/// NMP's public-field `EventBuilder`; the app selects its `pubkey` explicitly
+/// on the ordinary `WriteIntent` before publishing. Publication is NOT
+/// performed here and remains a different failure domain.
 ///
 /// `created_at` is explicit (never `now()`) so the composed body is
 /// deterministic and byte-identical across the direct and FFI surfaces --

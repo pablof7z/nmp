@@ -2,7 +2,7 @@
 title: The event builder
 category: writes
 slug: event-builder
-status: designed
+status: built
 date: 2026-07-29
 owns:
   - what replaces `WritePayload::Unsigned`, and why neither "unsigned" nor "draft" survives
@@ -42,12 +42,14 @@ The one-sentence summary: **the builder is a value that demands a kind, can
 express anything else, and structurally cannot carry an author** — and that
 last property is what makes the whole design safe.
 
-`status: designed` — nothing in §3 onward exists on master. §1 describes what
-is BUILT today and is being replaced.
+`status: built` — this document preserves the pre-implementation design record.
+Its §1 source references describe the tree immediately before #1005; the
+current implementation and current-tree anchors are recorded in §8 rather than
+rewriting the alternatives and reasoning that led to it.
 
 ---
 
-## 1. What exists today, and the gap — BUILT
+## 1. What existed immediately before #1005, and the gap — HISTORICAL
 
 `WritePayload::Unsigned(UnsignedEvent)` (`crates/nmp-grammar/src/write.rs:34`)
 is the template path: the engine freezes the body at acceptance and signs it
@@ -299,3 +301,35 @@ Two consequences:
   refusals in the one universal type. The failure mode is well-intentioned
   kind- or tag-shape checks accreting here until hand-rolling a gift wrap
   becomes impossible — the exact outcome Pablo forbade.
+
+---
+
+## 8. Implementation correction — BUILT (#973 / PR #1005)
+
+PR #1005 implemented the design above without retaining a compatibility path:
+`WritePayload::Unsigned`, `UnsignedReplaceableEdit`, and the FFI/native
+`.unsigned` spellings are deleted. The dated `DESIGNED` labels in §§2–7 are
+kept as the decision record; this section is the present-tense correction.
+
+Current source anchors on this revision:
+
+- `crates/nmp-grammar/src/write.rs:49-130` defines the public-field,
+  authorless `EventBuilder` and the exact three `WritePayload` variants.
+- `crates/nmp/src/core/write.rs:1912-1986` keeps a caller-stated timestamp,
+  selects the only author from `Identity::{Active, Explicit}`, and freezes the
+  builder at acceptance. There is no author field to compare or restamp.
+- `crates/nmp-ffi/src/types.rs:570-638` projects `FfiEventBuilder` as the
+  defaulted UniFFI record and `FfiWritePayload::{Event, Signed}` as the whole
+  FFI payload surface.
+- `Packages/NMP/Sources/NMP/WriteIntent.swift:60-104` and
+  `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/WriteIntent.kt:70-120` expose
+  the corresponding native value shapes, with no author on the builder.
+- `crates/nmp-nip22/src/intent.rs:1-39` demonstrates the protocol-module
+  consequence: composition stays engine-free and clock-free while returning a
+  builder-backed ordinary `WriteIntent`; identity and time resolve at the
+  engine acceptance boundary.
+
+The rejected alternative from §1 remains load-bearing: author/time derivation
+must not move into one protocol crate. The universal write plane owns those
+facts, so a future protocol composer returns an `EventBuilder` or a closed
+`WriteIntent` and never recreates the removed author-bearing draft shape.

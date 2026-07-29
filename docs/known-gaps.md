@@ -176,21 +176,28 @@ about current code:
   exact returned event, remains bounded/cancellable, and creates no
   store/outbox/publication residue. NIP-07 origin prompts and browser
   networking remain host policy rather than engine behavior.
-- **Protocol-module composition is unbuilt.** The existing ownership design
-  incorrectly makes kind ownership gate all route authority. Modules must claim
-  only exact NIP-defined schemas while typed contextual operations may add their
-  own tags and route facts to immutable foreign-owned drafts. No kind:1-first
-  core catalog is part of the target.
-- **NIP-29 contextual publication is pure Rust only; engine/native publication
-  remains unbuilt (#838/#824).** `nmp-nip29` accepts a complete foreign-schema
-  unsigned draft, preserves it, adds only `h`, and retains the selected host in
-  one typed `GroupPublication`. It does not yet turn that value into an
-  engine-routable write or project it through FFI/Swift/Kotlin. The obsolete
-  kind:9 composer and `[9,30315]` content catalog were deleted: `nmp-nipc7`
-  independently owns kind:9 and `q` replies, while mention/notification policy
-  remains client-owned. `previous` is omitted until a host-scoped,
-  group-scoped, author-aware live-window capability can mint it without
-  caller tuples, truncation, or transplantation.
+- **Protocol-module composition is built selectively, not universally.**
+  `EventBuilder` is the grammar-level authorless value, and schema/context
+  owners including NIP-22 and NIP-29 now return builders or closed
+  `WriteIntent`s without acquiring an engine dependency. There is still no
+  general protocol-composer catalog: modules claim only exact NIP-defined
+  schemas, while typed contextual operations may add their own tags and route
+  facts to foreign-schema builders. No kind:1-first core catalog exists.
+- **NIP-29 Group publication is built for direct Rust; native publication
+  remains absent ([#1015](https://github.com/pablof7z/nmp/issues/1015)).**
+  `nmp_nip29::Group` owns `(host, group_id)`, mints host-pinned read demands,
+  appends exactly one `h` to an app-selected `EventBuilder`, and returns an
+  engine-routable explicit-host intent. `nmp::GroupOperations` sends that
+  intent through the ordinary `Engine::publish` lifecycle and also exposes
+  NIP-29-owned join/leave/moderation operations. FFI and Swift still expose
+  only read-only `groupDiscoveryDemand`; they must not hand-roll `h`, routing,
+  signing, or receipt behavior while [#1015](https://github.com/pablof7z/nmp/issues/1015)
+  is open. No Kotlin or Android Group projection is claimed. The obsolete
+  kind:9 composer and `[9,30315]` content catalog remain deleted:
+  `nmp-nipc7` independently owns kind:9 and `q` replies, while
+  mention/notification policy remains client-owned. `previous` remains omitted
+  until a host-scoped, group-scoped, author-aware live-window capability can
+  mint it without caller tuples, truncation, or transplantation.
 - **~~Selector-projected values lost their only routable lane~~ CLOSED
   (#11).** `Tag(e/a/p)` now retains a valid tag relay hint or falls back to
   the source row's observed-relay provenance; `AddressCoord` retains source
@@ -501,7 +508,7 @@ about current code:
 
 - **`nmp-nip68` owns the NIP-68 kind:20 picture-first event build + decode with imeta artifact provenance, but not the composition, projection, or richer-tag layers (#558, epic #216 T15-B-NIP68-IMETA).** The opt-in crate exclusively claims kind:20 and, engine-free and signing-free (the `nmp-nip29`/`nmp-blossom` discipline), mints a `PictureImage` artifact reference only from a content-addressed Blossom `BlobDescriptor`/`VerifiedUpload` (`url`/`m`/`x` carried by construction; a descriptor without a mime type cannot mint one), builds an immutable unsigned kind:20 draft (`build_picture`, refusing zero images), and tolerantly decodes a kind:20 event into typed picture facts with recorded diagnostics (`decode_picture`, surfacing a missing `x` as `sha256: None` + `ImetaMissingSha256` rather than trusting it). The first cut carries `title` + `imeta` images + `content-warning` + `t` hashtags only. Deliberately NOT in this unit, tracked as #216 follow-ups: the richer event-level tags (`location`/geohash, annotate-user, `L`/`l` labels); the FFI/Swift/Kotlin projection (a separate later unit); and the T15-C upload → build → sign → publish composition seam (#559).
 
-- **`nmp-media` provides the STANDALONE staged composition seam (prepare → upload → compose) with separated failure domains, but not the durable upload, the FFI projection, or BUD-03 server-list placement (#559, epic #216 T15-C-MEDIA-COMPOSITION).** The opt-in crate wires the app-facing pipeline `Sha256Hash → signed authorization → VerifiedUpload → kind:20 draft` into three witness-typed stages so a skipped/failed stage is unrepresentable: `prepare` (holds the exact bytes it hashed and authorized — uploading those held bytes makes an authorized-hash/uploaded-bytes mismatch structurally impossible), the async standalone `PreparedUpload::upload` (a used-once obligation yielding a verified `UploadedAsset`), and `compose_picture` (the final unsigned kind:20 the app hands to the EXISTING `publish()` → WriteIntent path). It defines no event schema of its own — composition is not schema ownership (`routing-and-ownership.md` §3.2.1) — and it never signs (signing is upstream) or publishes (relay/publish is downstream). The three failure domains are three SEPARATE types (`PrepareError`, `MediaUploadError`, `MediaComposeError`) so an upload failure can never be pattern-matched or `?`-merged as a compose failure; `MediaUploadError::Blossom` preserves the whole separated Blossom `UploadError` taxonomy intact. Deliberately NOT in this unit: the upload half is NOT crash-durable (the engine-integrated durable-upload obligation — persisted intent / reattachable receipt / HTTP-publish Effect / blob persistence — is the ADDITIVE #562, whose witness types are identical to these); the FFI/Swift/Kotlin projection of the seam is a SEPARATE later unit (batched with the nip68 projection, compile-gated); and BUD-03 kind:10063 server-list placement is still deferred.
+- **`nmp-media` provides the STANDALONE staged composition seam (prepare → upload → compose) with separated failure domains, but not the durable upload, the FFI projection, or BUD-03 server-list placement (#559, epic #216 T15-C-MEDIA-COMPOSITION).** The opt-in crate wires the app-facing pipeline `Sha256Hash → signed authorization → VerifiedUpload → kind:20 draft` into three witness-typed stages so a skipped/failed stage is unrepresentable: `prepare` (holds the exact bytes it hashed and authorized — uploading those held bytes makes an authorized-hash/uploaded-bytes mismatch structurally impossible), the async standalone `PreparedUpload::upload` (a used-once obligation yielding a verified `UploadedAsset`), and `compose_picture` (the final unsigned kind:20 whose public `kind`/`tags`/`content`/`created_at` fields copy into the public-field `EventBuilder`; selecting its `pubkey` explicitly on the ordinary `WriteIntent` preserves the author through the EXISTING publish path). It defines no event schema of its own — composition is not schema ownership (`routing-and-ownership.md` §3.2.1) — and it never publishes (relay/publish is downstream). The three failure domains are three SEPARATE types (`PrepareError`, `MediaUploadError`, `MediaComposeError`) so an upload failure can never be pattern-matched or `?`-merged as a compose failure; `MediaUploadError::Blossom` preserves the whole separated Blossom `UploadError` taxonomy intact. Deliberately NOT in this unit: the upload half is NOT crash-durable (the engine-integrated durable-upload obligation — persisted intent / reattachable receipt / HTTP-publish Effect / blob persistence — is the ADDITIVE #562, whose witness types are identical to these); the FFI/Swift/Kotlin projection of the seam is a SEPARATE later unit (batched with the nip68 projection, compile-gated); and BUD-03 kind:10063 server-list placement is still deferred.
 
 ## Process / tooling
 

@@ -7,7 +7,8 @@
 //! ```text
 //! asset   = Blossom.upload(file)     // standalone async HTTP -> VerifiedUpload
 //! photo   = Nip68.buildPhoto(asset)  // kind:20 UnsignedEvent
-//! receipt = publish(photo)           // EXISTING WriteIntent path -- NOT built here
+//! builder = EventBuilder { kind, tags, content, created_at } // public body fields
+//! receipt = publish(builder, explicit(photo.pubkey))         // EXISTING write path
 //! ```
 //!
 //! This crate makes that pipeline witness-typed:
@@ -24,10 +25,13 @@
 //! / HTTP-publish Effect / blob persistence) is a SEPARATE, additive issue
 //! (#562) whose witness types are identical to these. This crate therefore
 //! does NOT touch the engine, the facade, the outbox, or the store, and does
-//! NOT sign or publish -- signing happens UPSTREAM of the seam (the app signs
-//! [`PreparedUpload::authorization_draft`] with `nmp-signer`) and
-//! relay/publish happens DOWNSTREAM (the app hands the composed kind:20
-//! [`nostr::UnsignedEvent`] to the existing `publish()` -> WriteIntent path).
+//! NOT publish. The app signs [`PreparedUpload::authorization_draft`] for the
+//! Blossom HTTP authorization step. For the final Nostr event, the app copies
+//! the composed [`nostr::UnsignedEvent`]'s public body fields (`kind`, `tags`,
+//! `content`, `created_at`) into NMP's public-field `EventBuilder`, selects the
+//! composed `pubkey` explicitly on the ordinary `WriteIntent`, and the engine
+//! signs and publishes it through the existing path. No conversion API or
+//! engine dependency in this composition crate is required.
 //!
 //! # Separated failure domains (§3 doctrine)
 //! "Blossom upload failure and Nostr publication failure remain separate
