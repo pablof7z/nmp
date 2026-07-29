@@ -242,7 +242,20 @@ sealed class WriteStatus {
 
     data class Signed(val eventId: String) : WriteStatus()
 
-    data class Routed(val relays: List<String>) : WriteStatus()
+    /** Routing has not produced a single relay yet, and [detail] says what it
+     * is waiting for. Retained, not terminal, and replayed verbatim on
+     * receipt reattachment -- a route parked for a month is still visible
+     * with its reason. Nothing expires it; explicit cancellation is the one
+     * way out. Show it, with [Routed] whose [Routed.complete] is false, as
+     * "determining destinations". */
+    data class AwaitingRoute(val detail: String) : WriteStatus()
+
+    /** [relays] is what routing has named SO FAR; [complete] says whether
+     * that list can still grow. Both are independent of delivery:
+     * `complete = true` with nothing delivered is "sending 0 of n", and
+     * `complete = false` with some relays already acked is ordinary while
+     * routing is still open. */
+    data class Routed(val relays: List<String>, val complete: Boolean) : WriteStatus()
 
     data class AwaitingRelay(val relay: String) : WriteStatus()
 
@@ -278,7 +291,8 @@ sealed class WriteStatus {
                 is FfiWriteStatus.Superseded -> Superseded
                 is FfiWriteStatus.AwaitingCapability -> AwaitingCapability(ffi.pubkey)
                 is FfiWriteStatus.Signed -> Signed(ffi.eventId)
-                is FfiWriteStatus.Routed -> Routed(ffi.relays)
+                is FfiWriteStatus.AwaitingRoute -> AwaitingRoute(ffi.detail)
+                is FfiWriteStatus.Routed -> Routed(ffi.relays, ffi.complete)
                 is FfiWriteStatus.AwaitingRelay -> AwaitingRelay(ffi.relay)
                 is FfiWriteStatus.AwaitingAuth -> AwaitingAuth(ffi.relay)
                 is FfiWriteStatus.RetryEligible ->

@@ -54,7 +54,7 @@ pub use deliver::deliver;
 pub use diag::{Diagnostics, RelayDiagnostics};
 pub use facts::{
     test_relay, DiscoveryKinds, FixtureDirectory, Lane, LanedRelay, LiveDirectory, PubkeyHex,
-    RelayDirectory, RelayUrl,
+    RelayDirectory, RelayListKnowledge, RelayUrl,
 };
 pub use plan::{diff_plans, BudgetShortfall, RelayPlan, SubId, WireDelta, WireOp, WireReq};
 pub use route::{RouteKind, RouteProvenance, Skeleton};

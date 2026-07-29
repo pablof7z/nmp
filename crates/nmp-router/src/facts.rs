@@ -62,6 +62,27 @@ impl LanedRelay {
     }
 }
 
+/// What a [`RelayDirectory`] knows about one author's NIP-65 relay list —
+/// the three-valued model of
+/// `docs/internals/routing/knowledge-and-settlement.md` §1.
+///
+/// The load-bearing distinction is [`Self::KnownAbsent`] versus
+/// [`Self::Unknown`]: both collapse to an empty relay `Vec`, and a
+/// two-valued model inevitably encodes one as the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayListKnowledge {
+    /// A kind:10002 fact was ingested for this author. The relay accessors
+    /// are the answer — including when they are empty ("known, declares
+    /// zero relays").
+    Known,
+    /// Discovery ran to completion (every source EOSE'd) and no relay list
+    /// exists. A RESOLVED input that contributes nothing and blocks nothing.
+    KnownAbsent,
+    /// Discovery has not completed for this author. Keep the `Auto` alive
+    /// and declare the need.
+    Unknown,
+}
+
 /// The injected mailbox/relay-fact surface. In M2 every method is a fixture
 /// lookup (no network). M3 backs this with live NIP-65 / probing behind the
 /// SAME trait; M5 ([`LiveDirectory`]) is the first REAL live implementation
@@ -116,28 +137,63 @@ pub trait RelayDirectory {
         Vec::new()
     }
 
-    /// True iff this directory has ever recorded a write-relay FACT for
-    /// `author` — "known, possibly zero" vs "never resolved". Distinguishes
-    /// what `write_relays`'s collapsed `Vec` (empty either way) cannot: an
-    /// author whose current kind:10002 declares ZERO write relays is KNOWN
-    /// (this returns `true`), not the same as an author never ingested at
-    /// all (`false`). `EngineCore::sync_discovery` uses this to stop
-    /// discovery for a known-empty author instead of keeping its discovery
-    /// subscription open for the rest of the session — without this, an
-    /// author who genuinely declares no write relays looks IDENTICAL to one
-    /// still awaiting its first kind:10002, and never leaves the "needed"
-    /// set.
+    /// This directory's THREE-VALUED answer about `author`'s NIP-65
+    /// relay list (`docs/internals/routing/knowledge-and-settlement.md` §1).
     ///
-    /// Default: `!self.write_relays(author).is_empty()` — preserves
-    /// today's collapsed behavior for any directory that hasn't opted into
-    /// tracking the distinction (a static/fixture snapshot has no
+    /// `write_relays`/`read_relays` collapse two very different situations
+    /// into the same empty `Vec`: "we asked and this author has no relay
+    /// list" and "we have not finished looking". Collapse them and either
+    /// nothing ever retires (absence read as ignorance) or a cold-start
+    /// write silently under-routes (ignorance read as absence). Three
+    /// values, or wrong.
+    ///
+    /// - [`RelayListKnowledge::Known`] — a kind:10002 fact was ingested for
+    ///   this author. The relay vectors are the answer, *including* when
+    ///   they are empty (an author whose current kind:10002 declares zero
+    ///   relays is KNOWN, not unresolved).
+    /// - [`RelayListKnowledge::KnownAbsent`] — discovery ran to completion
+    ///   (every source EOSE'd) and produced no relay list. A settled,
+    ///   positive fact: a resolver proceeds without this input rather than
+    ///   waiting on it. Session-scoped and never persisted (§7).
+    /// - [`RelayListKnowledge::Unknown`] — nobody has finished looking. A
+    ///   write depending on this author keeps its `Auto` alive and declares
+    ///   the need; `EngineCore::sync_discovery` keeps covering them.
+    ///
+    /// Default: `Known` when a write-relay fact is visible, else `Unknown` —
+    /// preserving today's collapsed behaviour for any directory that has not
+    /// opted into tracking the distinction (a static/fixture snapshot has no
     /// "not yet resolved" state to begin with: everything it will ever know
-    /// is injected upfront). Only [`LiveDirectory`] — the one directory
-    /// that actually ingests facts over time — overrides this with the
-    /// real per-author ingestion record.
-    fn knows_write_relays(&self, author: &PubkeyHex) -> bool {
-        !self.write_relays(author).is_empty()
+    /// is injected upfront). Only [`LiveDirectory`] — the one directory that
+    /// actually ingests facts over time — overrides this with the real
+    /// per-author ingestion record plus the settled-absence set.
+    fn relay_list_knowledge(&self, author: &PubkeyHex) -> RelayListKnowledge {
+        if self.write_relays(author).is_empty() {
+            RelayListKnowledge::Unknown
+        } else {
+            RelayListKnowledge::Known
+        }
     }
+
+    /// Record that discovery's sources all reached end-of-stored-events
+    /// without producing a relay list for `author` — the negative sibling of
+    /// [`RelayDirectory::ingest_write_relays`], and the ONLY transition that
+    /// mints [`RelayListKnowledge::KnownAbsent`].
+    ///
+    /// Derived ONCE, by discovery, at the moment its sources settle; from
+    /// then on it is an ordinary directory answer. Resolvers never see EOSE,
+    /// `SourceStatus`, or `reconciled_through` — they read only
+    /// [`RelayDirectory::relay_list_knowledge`].
+    ///
+    /// The fact is a cache of "nothing existed as of settlement", never a
+    /// tombstone: a later `ingest_write_relays`/`ingest_read_relays` simply
+    /// overwrites it. It is session-scoped and MUST NOT be persisted —
+    /// absence is the one fact expected to change, so a restart re-probes
+    /// rather than betting against the author's own future action, and no
+    /// TTL has to be invented.
+    ///
+    /// Default: a no-op, for the same reason `ingest_write_relays` defaults
+    /// to one — a static/fixture directory has nothing to update.
+    fn settle_relay_list_absent(&mut self, _author: PubkeyHex) {}
 
     /// Feed a freshly-ingested NIP-65 write-relay fact for `author` into
     /// this directory, REPLACING whatever it previously held for them
@@ -391,6 +447,17 @@ pub struct LiveDirectory {
     indexers: Vec<RelayUrl>,
     app: Vec<RelayUrl>,
     fallback: Vec<RelayUrl>,
+    /// Authors whose discovery sources all EOSE'd without ever producing a
+    /// relay list — [`RelayListKnowledge::KnownAbsent`].
+    ///
+    /// SESSION-SCOPED BY CONSTRUCTION: this field lives in the process's
+    /// directory and has no store door, no serialization, and no recovery
+    /// path. A restart re-probes, which is the whole point (§7) — absence is
+    /// the one fact expected to change, so persisting it would be a bet
+    /// against the author's own future action and would force an invented
+    /// TTL. Every positive ingest clears the author from here, so the fact
+    /// is a cache and never a tombstone.
+    absent: BTreeSet<PubkeyHex>,
 }
 
 impl LiveDirectory {
@@ -440,6 +507,7 @@ impl LiveDirectoryBuilder {
             indexers: self.indexers,
             app: self.app,
             fallback: self.fallback,
+            absent: BTreeSet::new(),
         }
     }
 }
@@ -486,21 +554,42 @@ impl RelayDirectory for LiveDirectory {
         // future caller that DOES need to distinguish "known, declares
         // nothing" from "never resolved" (e.g. a `contains_key`-style check)
         // would have silently gotten the wrong answer.
+        // A real relay list overwrites a settled absence: `KnownAbsent` is a
+        // cache of "nothing existed as of settlement", never a tombstone.
+        self.absent.remove(&author);
         self.write.insert(author, relays);
     }
 
     /// The real distinguishing signal `write_relays` alone cannot express:
-    /// key PRESENCE in `self.write`, not emptiness of the value. An author
-    /// whose kind:10002 declared zero write relays has an entry (inserted
-    /// above, even when `relays` is empty); an author never ingested has no
-    /// entry at all.
-    fn knows_write_relays(&self, author: &PubkeyHex) -> bool {
-        self.write.contains_key(author)
+    /// key PRESENCE in `self.write`/`self.read`, not emptiness of the value.
+    /// An author whose kind:10002 declared zero relays has an entry
+    /// (inserted by the ingest doors, even when the vector is empty); an
+    /// author never ingested has no entry at all — and one whose discovery
+    /// sources finished having sent nothing has an `absent` marker instead.
+    fn relay_list_knowledge(&self, author: &PubkeyHex) -> RelayListKnowledge {
+        if self.write.contains_key(author) || self.read.contains_key(author) {
+            RelayListKnowledge::Known
+        } else if self.absent.contains(author) {
+            RelayListKnowledge::KnownAbsent
+        } else {
+            RelayListKnowledge::Unknown
+        }
+    }
+
+    /// Session-scoped: recorded in memory, never written to the store. An
+    /// author already `Known` is left alone — a settlement pass that races a
+    /// just-ingested relay list must never downgrade the real fact.
+    fn settle_relay_list_absent(&mut self, author: PubkeyHex) {
+        if self.write.contains_key(&author) || self.read.contains_key(&author) {
+            return;
+        }
+        self.absent.insert(author);
     }
 
     /// The read-side mirror of `ingest_write_relays` -- REPLACES, never
     /// merges, same kind:10002-is-replaceable contract.
     fn ingest_read_relays(&mut self, author: PubkeyHex, relays: Vec<LanedRelay>) {
+        self.absent.remove(&author);
         self.read.insert(author, relays);
     }
 }
@@ -580,42 +669,92 @@ mod tests {
     /// The load-bearing regression test for the known-empty fix (ledger
     /// #20): `write_relays` alone cannot distinguish "known, declares
     /// zero relays" from "never resolved" (both are an empty `Vec`).
-    /// `knows_write_relays` must -- an author whose kind:10002 explicitly
+    /// `relay_list_knowledge` must -- an author whose kind:10002 explicitly
     /// declared zero write relays is KNOWN, so `EngineCore::sync_discovery`
     /// can stop discovering them; an author never ingested at all is not.
     #[test]
     fn live_directory_distinguishes_known_empty_from_never_resolved() {
         let mut dir = LiveDirectory::builder().build();
-        assert!(
-            !dir.knows_write_relays(&pk('a')),
+        assert_eq!(
+            dir.relay_list_knowledge(&pk('a')),
+            RelayListKnowledge::Unknown,
             "never ingested -- must NOT be considered known"
         );
 
         dir.ingest_write_relays(pk('a'), Vec::new());
-        assert!(
-            dir.knows_write_relays(&pk('a')),
+        assert_eq!(
+            dir.relay_list_knowledge(&pk('a')),
+            RelayListKnowledge::Known,
             "a kind:10002 declaring zero write relays is still a KNOWN fact"
         );
         assert!(
             dir.write_relays(&pk('a')).is_empty(),
-            "write_relays itself still reports empty -- knows_write_relays is the \
+            "write_relays itself still reports empty -- relay_list_knowledge is the \
              distinguishing signal, not a change to write_relays' own contract"
         );
 
         // An author who genuinely never got a fact at all stays unknown,
         // even after some OTHER author has been ingested.
-        assert!(!dir.knows_write_relays(&pk('z')));
+        assert_eq!(
+            dir.relay_list_knowledge(&pk('z')),
+            RelayListKnowledge::Unknown
+        );
     }
 
-    /// `FixtureDirectory`'s default `knows_write_relays` impl (no override)
-    /// collapses back to `!write_relays(..).is_empty()` -- preserving
-    /// today's behavior for a static snapshot, which has no "not yet
-    /// resolved" state to begin with.
+    /// The third value, and the only transition that mints it. Settlement is
+    /// a POSITIVE fact distinct from ignorance, it is overwritten (never
+    /// merely shadowed) by a later real relay list, and it never downgrades
+    /// an author who is already `Known`.
     #[test]
-    fn fixture_directory_default_knows_write_relays_matches_non_empty() {
+    fn settled_absence_is_its_own_value_and_a_cache_not_a_tombstone() {
+        let mut dir = LiveDirectory::builder().build();
+        assert_eq!(
+            dir.relay_list_knowledge(&pk('c')),
+            RelayListKnowledge::Unknown
+        );
+
+        dir.settle_relay_list_absent(pk('c'));
+        assert_eq!(
+            dir.relay_list_knowledge(&pk('c')),
+            RelayListKnowledge::KnownAbsent,
+            "sources finished having sent nothing -- that is knowledge, not ignorance"
+        );
+
+        // A relay list published after settlement simply replaces it.
+        dir.ingest_read_relays(
+            pk('c'),
+            vec![LanedRelay::new(test_relay(4), Lane::Nip65Read)],
+        );
+        assert_eq!(
+            dir.relay_list_knowledge(&pk('c')),
+            RelayListKnowledge::Known,
+            "a later kind:10002 overwrites the absence -- KnownAbsent is a cache"
+        );
+
+        // And a settlement pass racing a fresh ingest cannot undo it.
+        dir.settle_relay_list_absent(pk('c'));
+        assert_eq!(
+            dir.relay_list_knowledge(&pk('c')),
+            RelayListKnowledge::Known,
+            "settlement never downgrades an author who already has a real fact"
+        );
+    }
+
+    /// `FixtureDirectory`'s default `relay_list_knowledge` impl (no
+    /// override) collapses back to `!write_relays(..).is_empty()` --
+    /// preserving today's behavior for a static snapshot, which has no
+    /// "not yet resolved" state to begin with.
+    #[test]
+    fn fixture_directory_default_relay_list_knowledge_matches_non_empty() {
         let dir = FixtureDirectory::new().with_write(pk('a'), [test_relay(0)]);
-        assert!(dir.knows_write_relays(&pk('a')));
-        assert!(!dir.knows_write_relays(&pk('z')));
+        assert_eq!(
+            dir.relay_list_knowledge(&pk('a')),
+            RelayListKnowledge::Known
+        );
+        assert_eq!(
+            dir.relay_list_knowledge(&pk('z')),
+            RelayListKnowledge::Unknown
+        );
     }
 
     #[test]

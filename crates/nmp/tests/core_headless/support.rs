@@ -1106,6 +1106,8 @@ mod negentropy;
 mod persistence_failures;
 #[path = "real_corpus_benchmark.rs"]
 mod real_corpus_benchmark;
+#[path = "route_lifecycle.rs"]
+mod route_lifecycle;
 #[path = "state_maintenance.rs"]
 mod state_maintenance;
 #[path = "subscription_budget.rs"]

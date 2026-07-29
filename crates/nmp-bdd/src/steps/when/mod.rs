@@ -9,7 +9,7 @@ use cucumber::when;
 use nmp_grammar::Identity;
 
 use crate::steps::{parse_people, parse_tag};
-use crate::world::{NmpWorld, WatchShape};
+use crate::world::{NmpWorld, WatchShape, ME};
 
 #[when(regex = r#"^I open a feed of my follows' notes$"#)]
 async fn open_feed(w: &mut NmpWorld) {
@@ -226,6 +226,48 @@ async fn republish_signed_note(w: &mut NmpWorld, _person: String, targets: Strin
         .expect("nmp-bdd: republishing needs exactly one note staged as already-signed");
     w.republish_signed_note_to_exactly(&text, &parse_relay_targets(&targets))
         .await;
+}
+
+// ---- routing as a lifecycle ---------------------------------------------
+//
+// A mention is what makes the outbox fan-out -- and therefore its unknowns --
+// reachable from a scenario at all: an event with no p-tags has exactly one
+// contributing author.
+
+#[when(regex = r#"^I publish a note(?: saying "([^"]*)")? mentioning (.+)$"#)]
+async fn publish_note_mentioning(w: &mut NmpWorld, text: String, people: String) {
+    let text = if text.is_empty() {
+        format!("mentioning {people}")
+    } else {
+        text
+    };
+    w.publish_note_mentioning(&text, &parse_people(&people))
+        .await;
+}
+
+/// A real kind:10002 landing at the indexers, where the engine's own
+/// discovery is already looking. Nothing is injected into the directory: the
+/// event goes on a relay and comes back through ordinary ingestion, which is
+/// the only way this proves a parked route wakes on what the READ path
+/// learned.
+#[when(regex = r#"^my relay list arrives naming "([^"]+)" as my write relay$"#)]
+async fn my_relay_list_arrives(w: &mut NmpWorld, relay: String) {
+    w.relay_list_arrives(ME, &[relay], &[]).await;
+}
+
+#[when(regex = r#"^(\S+)'s relay list arrives naming "([^"]+)" as (?:her|his|their) read relay$"#)]
+async fn person_relay_list_arrives(w: &mut NmpWorld, person: String, relay: String) {
+    w.relay_list_arrives(&person, &[], &[relay]).await;
+}
+
+#[when(regex = r#"^the indexers deliver (\S+)'s relay list and confirm end of stored events$"#)]
+async fn indexers_deliver_relay_list(w: &mut NmpWorld, person: String) {
+    let relays = w.read_relay_names_of(&person);
+    assert!(
+        !relays.is_empty(),
+        "nmp-bdd: {person}'s relay list must name a read relay for the indexers to deliver"
+    );
+    w.relay_list_arrives(&person, &[], &relays).await;
 }
 
 /// `"a"`, `"a" and "b"`, or the literal `no relays`. The empty case is a

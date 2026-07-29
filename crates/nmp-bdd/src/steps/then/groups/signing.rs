@@ -85,7 +85,7 @@ async fn failure_is_a_signing_failure(w: &mut NmpWorld) {
     assert!(
         !w.receipt_statuses()
             .iter()
-            .any(|s| matches!(s, WriteStatus::Routed(relays) if relays.is_empty())),
+            .any(|s| matches!(s, WriteStatus::Routed { relays, .. } if relays.is_empty())),
         "an explicit route resolved fine; the failure is the signer's"
     );
 }

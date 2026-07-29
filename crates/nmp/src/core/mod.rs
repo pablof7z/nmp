@@ -70,7 +70,8 @@ use nmp_resolver::{
 };
 use nmp_router::{
     AdvertisedRelayLimits, CompileBudget, DiscoveryKinds, Lane, LanedRelay, PubkeyHex,
-    RelayDirectory, RelayPlan, Router, RuleRegistry, SubId, WireDelta, WireOp, WireReq,
+    RelayDirectory, RelayListKnowledge, RelayPlan, Router, RuleRegistry, SubId, WireDelta, WireOp,
+    WireReq,
 };
 use nmp_signer::SignerError;
 use nmp_store::{
@@ -272,6 +273,11 @@ struct ReceiptReplayCursorState {
     receipt_id: ReceiptId,
     receipt_status: Option<WriteStatus>,
     awaiting_capability: bool,
+    /// The routing park's reason, retained so reattachment replays it
+    /// VERBATIM — whatever it said on day one it still says on day thirty,
+    /// because it is the recorded reason and not a re-derivation against
+    /// knowledge that has moved on. Bounded: one string per receipt.
+    awaiting_route: Option<String>,
     attempts: BTreeMap<RelayUrl, ReceiptAttemptReplayKey>,
     lane_revisions: BTreeMap<RelayUrl, u64>,
     persistence_blocked: BTreeSet<RelayUrl>,
@@ -298,6 +304,7 @@ impl ReceiptReplayCursor {
                 receipt_id,
                 receipt_status: None,
                 awaiting_capability: false,
+                awaiting_route: None,
                 attempts: BTreeMap::new(),
                 lane_revisions: BTreeMap::new(),
                 persistence_blocked: BTreeSet::new(),
@@ -1076,6 +1083,32 @@ struct PendingWrite {
     /// All mutation results enter through `core::lane_projection`; ordinary
     /// worker-demand calculation never re-reads the store.
     lane_projection: LaneWorkerProjection,
+    /// Every relay this intent has EVER durably resolved to — the union of
+    /// its committed route revisions, held in memory so the queue rewriter
+    /// can diff against it without re-reading the store on every pass.
+    ///
+    /// This is the whole of re-spawn suppression: re-resolution appends only
+    /// what is absent here, so a resolver reporting an already-known relay
+    /// collides with an existing `(intent_id, relay)` lane and mints
+    /// nothing, and an acked lane is terminal and untouched by any later
+    /// resolution.
+    durable_routes: BTreeSet<RelayUrl>,
+    /// False while resolution still holds unknowns. The queue rewriter
+    /// re-executes exactly the intents for which this is false, so a
+    /// retired `Auto` costs nothing at every later moment.
+    ///
+    /// Knowledge exhaustion, never delivery: an intent with every lane acked
+    /// and one recipient still unresolved is `false`, and one that is
+    /// `true` may have delivered nowhere at all.
+    route_complete: bool,
+    /// The park reason last emitted for this intent, so the routing park is
+    /// idempotent across ticks and re-emitted only when it actually changes.
+    route_detail: Option<String>,
+    /// The authors this intent's last resolution was still missing. Unioned
+    /// into `sync_discovery`'s needed set; re-derived on every resolution,
+    /// never persisted and never recovered — a crash simply re-resolves and
+    /// re-declares.
+    route_unknowns: BTreeSet<PubkeyHex>,
 }
 
 /// A live, EngineCore-owned negentropy reconciliation in progress for
@@ -1346,6 +1379,47 @@ pub struct EngineCore<S: EventStore> {
     /// `sync_discovery` call so the subscription is only replaced when the
     /// set actually changes, not on every recompile.
     discovery_authors: BTreeSet<PubkeyHex>,
+    /// Which relays have reached end-of-stored-events on a relay-list atom
+    /// covering each author, this session.
+    ///
+    /// The raw material for the ONE transition that mints
+    /// [`RelayListKnowledge::KnownAbsent`]: when every configured indexer has
+    /// EOSE'd for an author and no kind:10002 ever arrived, the engine holds
+    /// a positive, relay-attested fact -- "these sources have nothing" --
+    /// and caches it as a directory answer. Not a timeout, not a retry
+    /// budget, not a heuristic (`knowledge-and-settlement.md` §2).
+    ///
+    /// Session-scoped and never persisted, exactly like the absence it
+    /// derives: a restart re-probes rather than betting against the author's
+    /// own future publication.
+    relay_list_eose: BTreeMap<PubkeyHex, BTreeSet<RelayUrl>>,
+    /// The outstanding relay-list QUESTIONS: "this exact request, on this
+    /// exact relay, asks whether these authors have a kind:10002, and has not
+    /// been answered yet".
+    ///
+    /// Recorded at SEND time, from the filter that actually went on the wire,
+    /// and deliberately NOT read back off the router plan (#1019). The plan
+    /// describes what this engine is asking *now*; a question is about what it
+    /// asked *then*, and the two diverge constantly:
+    ///
+    /// - widening a discovery filter mints a new descriptor hash, so an
+    ///   in-flight REQ's answer names a [`SubId`] ordinary coalescing has
+    ///   already rewritten away;
+    /// - coalescing merges the discovery atom into a wider req (a
+    ///   `kinds:{3,10002}` req is routine), so "is this the relay-list req?"
+    ///   was never an equality test on `kinds`;
+    /// - on a NIP-77 relay the plan's req is never sent as an ordinary REQ at
+    ///   all — it becomes a `limit:0` barrier plus a negentropy session, and
+    ///   the answer arrives as NEG-DONE rather than as EOSE.
+    ///
+    /// [`SubId`] already embeds `(RelayUrl, hash, AccessContext)`, so this map
+    /// is relay- and session-scoped without a compound key. A question is
+    /// discharged by exactly one terminal signal for that request (EOSE, or
+    /// negentropy completion, deferred to its backfill's EOSE when
+    /// reconciliation proved ids were missing), and forgotten when the request
+    /// leaves the wire unanswered — an abandoned question settles NOTHING,
+    /// because "nowhere to ask" must never read as "asked, nothing there".
+    relay_list_asks: BTreeMap<SubId, BTreeSet<PubkeyHex>>,
     /// The diagnostic surface's own counter (M5 plan §1.2 step 1) — events
     /// actually RECEIVED, per SESSION per kind. Bumped in the
     /// `RelayMessage::Event` arms of `on_relay_frame`/`on_relay_frames`;
@@ -1496,6 +1570,8 @@ impl<S: EventStore> EngineCore<S> {
             pending_backfills: HashMap::new(),
             discovery_handle: None,
             discovery_authors: BTreeSet::new(),
+            relay_list_eose: BTreeMap::new(),
+            relay_list_asks: BTreeMap::new(),
             events_by_session_kind: HashMap::new(),
             next_attempt_correlation: Some(0),
             attempt_correlations: HashMap::new(),
@@ -1882,6 +1958,13 @@ impl<S: EventStore> EngineCore<S> {
         // retrying first lets one tick both close the projection gap and
         // make progress on it.
         effects.extend(self.retry_lane_bootstraps(now));
+        // Resolution moment THREE: every intent whose routing is not yet
+        // complete is re-executed against the directory as it stands NOW.
+        // This is the safety net behind moment four's latency path -- it
+        // needs no wiring to whatever taught the directory something, and
+        // because resolution is diff-and-append it costs an empty diff when
+        // nothing was learned.
+        self.rewrite_open_routes(&mut effects);
         effects.extend(self.consume_due_outbox_deadlines(now));
 
         // NIP-40 expiry (retraction-and-negative-deltas.md §3.2). The

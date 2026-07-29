@@ -216,10 +216,29 @@ mod receipt_allocator_tests {
         let core = EngineCore::new(MemoryStore::new(), Box::new(directory), 10);
         let route = WriteRouting::Explicit(vec![b.clone(), a.clone()]);
 
+        let created_at = Timestamp::from(1_700_000_000);
+        let kind = nostr::Kind::TextNote;
+        let tags = nostr::Tags::new();
+        let content = "explicit route".to_string();
+        let frozen = SignedEvent::new(
+            EventId::new(&author, &created_at, &kind, &tags, &content),
+            author,
+            created_at,
+            kind,
+            tags,
+            content,
+            nmp_store::sentinel_signature(),
+        );
+
+        let answer = core.resolve_routes(&route, &frozen);
         assert_eq!(
-            core.resolve_routes(&route, &author.to_hex()).unwrap(),
+            answer.relays,
             BTreeSet::from([a, b]),
             "an explicit route executes only the caller's set and never unions a directory fact"
+        );
+        assert!(
+            answer.complete && answer.unknown_authors.is_empty(),
+            "verbatim execution reads nothing, so it can never learn anything later: {answer:?}"
         );
     }
 

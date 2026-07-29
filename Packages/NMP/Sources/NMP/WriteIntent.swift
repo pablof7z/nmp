@@ -230,7 +230,19 @@ public enum WriteStatus: Sendable, Hashable {
     /// signer for THIS pubkey attaches, never a different one.
     case awaitingCapability(pubkey: String)
     case signed(eventId: String)
-    case routed(relays: [String])
+    /// Routing has not produced a single relay yet, and `detail` says what it
+    /// is waiting for. Retained, not terminal, and replayed verbatim on
+    /// receipt reattachment -- a route parked for a month is still visible
+    /// with its reason. Nothing expires it; explicit cancellation is the one
+    /// way out. Show it, and `.routed` with `complete == false`, as
+    /// "determining destinations".
+    case awaitingRoute(detail: String)
+    /// `relays` is what routing has named SO FAR; `complete` says whether
+    /// that list can still grow. Both are independent of delivery:
+    /// `complete == true` with nothing delivered is "sending 0 of n", and
+    /// `complete == false` with some relays already acked is ordinary while
+    /// routing is still open.
+    case routed(relays: [String], complete: Bool)
     case awaitingRelay(relay: String)
     case awaitingAuth(relay: String)
     case retryEligible(relay: String, attempt: UInt64, eligibleAt: UInt64)
@@ -252,7 +264,9 @@ public enum WriteStatus: Sendable, Hashable {
         case .superseded: self = .superseded
         case .awaitingCapability(let pubkey): self = .awaitingCapability(pubkey: pubkey)
         case .signed(let eventId): self = .signed(eventId: eventId)
-        case .routed(let relays): self = .routed(relays: relays)
+        case .awaitingRoute(let detail): self = .awaitingRoute(detail: detail)
+        case .routed(let relays, let complete):
+            self = .routed(relays: relays, complete: complete)
         case .awaitingRelay(let relay): self = .awaitingRelay(relay: relay)
         case .awaitingAuth(let relay): self = .awaitingAuth(relay: relay)
         case .retryEligible(let relay, let attempt, let eligibleAt):

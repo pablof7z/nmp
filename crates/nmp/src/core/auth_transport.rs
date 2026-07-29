@@ -136,7 +136,7 @@ impl<S: EventStore> EngineCore<S> {
         effects: &mut Vec<Effect>,
     ) -> Option<AuthSessionState> {
         let was_ready = self.auth_ready_sessions.remove(session).is_some();
-        self.attribution.clear_session(session);
+        self.abandon_session_subs(session);
         if close_wire && was_ready {
             if let Some(close) = self.close_protected_reqs(session) {
                 effects.push(close);
@@ -664,7 +664,7 @@ impl<S: EventStore> EngineCore<S> {
         // broad Public request repeats the same live-first NIP-77 handoff as
         // an ordinary recompile; it must never regress to reconcile-first or
         // silently change strategy on reconnect (#563).
-        self.attribution.clear_session(&session);
+        self.abandon_session_subs(&session);
         // ONLY a Public session replays its planned REQs at connect time. A
         // protected session's REQs park until the AUTH reducer's ready
         // transition (`finish_auth_ok`) proves THIS generation completed
@@ -887,7 +887,7 @@ impl<S: EventStore> EngineCore<S> {
             // for every disconnect reason: the epoch is cancelled, protected
             // lanes park, and readiness is revoked.
             self.invalidate_auth_epoch(&session, false, &mut effects);
-            self.attribution.clear_session(&session);
+            self.abandon_session_subs(&session);
             self.suspend_disconnected_lanes(&session, &mut effects);
             // Negentropy (probe, live reconciliations, one-shot backfills)
             // is PUBLIC-session-only work (#8), so its teardown fires only
@@ -919,7 +919,7 @@ impl<S: EventStore> EngineCore<S> {
                     .collect();
                 for sub_id in &stale_temporary {
                     self.pending_backfills.remove(sub_id);
-                    self.attribution.discard_sub(sub_id);
+                    self.abandon_sub(sub_id);
                 }
                 if !stale_temporary.is_empty() {
                     effects.push(Effect::Wire(WireDelta {
@@ -1215,6 +1215,16 @@ impl<S: EventStore> EngineCore<S> {
                 for author in relay_list_authors {
                     directory_changed |= self.ingest_relay_list_winner(author, effects);
                 }
+                if directory_changed {
+                    // Resolution moment FOUR: a relay list arriving for ANY
+                    // reason -- someone opened a profile, a feed hydrated, a
+                    // parked write's own declared need finally answered --
+                    // wakes every open route in the SAME ingestion turn,
+                    // rather than waiting for the next tick. There is no
+                    // wiring between the read path and the write path here
+                    // beyond "the directory learned something".
+                    self.rewrite_open_routes(effects);
+                }
 
                 // Ordinary committed rows do not change the active demand or
                 // router plan. Avoid rebuilding it on every EVENT batch; a
@@ -1478,6 +1488,19 @@ impl<S: EventStore> EngineCore<S> {
                     .map_or((None, Vec::new()), |(send, coverage)| {
                         (Some(send), coverage)
                     });
+                // Absence settlement reads the SAME EOSE frame the coverage
+                // watermark does, on the SAME resolved subscription id -- the
+                // discovery subscription is just another entry in
+                // `active_demand()`, so nothing parallel exists here for the
+                // write plane to have opened. It deliberately does NOT ride
+                // the attributed coverage keys: those credit backlog
+                // watermarks and can legitimately be empty for a
+                // subscription this EOSE really does end. What the EOSE
+                // answers is looked up in the send-time question ledger, not
+                // in the current plan (#1019).
+                let settled_any = resolved
+                    .as_ref()
+                    .is_some_and(|sub_id| self.discharge_relay_list_ask(sub_id));
                 for (key, interval) in attributed {
                     if let Some(atom) = self.attribution.shape_of(key) {
                         // Coverage rows stay keyed (context-hashed key,
@@ -1499,6 +1522,14 @@ impl<S: EventStore> EngineCore<S> {
                         }
                         effects.push(Effect::RecordCoverage(key, session.relay.clone(), interval));
                     }
+                }
+                if settled_any {
+                    // Resolution moment FOUR, in its other form: a need
+                    // SETTLING is as much a knowledge change as a fact
+                    // arriving. An outbox whose last unknown recipient just
+                    // turned out to have no relay list retires within this
+                    // same ingestion turn instead of waiting for a tick.
+                    self.rewrite_open_routes(&mut effects);
                 }
                 if let Some(send) = completed_send {
                     self.emit_request_eose(send, self.clock, &mut effects);
@@ -1523,7 +1554,7 @@ impl<S: EventStore> EngineCore<S> {
                     // open, overlap-close its predecessor, and only then
                     // begin Negentropy (#563).
                     if let Some(handoff) = self.pending_neg_handoffs.remove(&resolved) {
-                        self.attribution.discard_sub(&resolved);
+                        self.abandon_sub(&resolved);
                         self.activate_live_and_open_neg(handoff, &mut effects);
                     }
 
@@ -1534,7 +1565,7 @@ impl<S: EventStore> EngineCore<S> {
                         effects.push(Effect::Wire(WireDelta {
                             ops: vec![(session.clone(), vec![WireOp::Close(resolved.clone())])],
                         }));
-                        self.attribution.discard_sub(&resolved);
+                        self.abandon_sub(&resolved);
                         match request {
                             TemporaryReq::MissingIds {
                                 neg_sub_id,
@@ -1549,7 +1580,7 @@ impl<S: EventStore> EngineCore<S> {
                                     &session.relay,
                                     &mut effects,
                                 );
-                                self.attribution.discard_sub(&neg_sub_id);
+                                self.abandon_sub(&neg_sub_id);
                             }
                             TemporaryReq::Backlog { .. } => {}
                             TemporaryReq::BacklogActivatesLive {
@@ -1557,12 +1588,12 @@ impl<S: EventStore> EngineCore<S> {
                                 live_sub_id,
                                 prior_live_sub_id,
                             } => {
-                                self.attribution.discard_sub(&live_sub_id);
+                                self.abandon_sub(&live_sub_id);
                                 self.active_nip77_live
                                     .insert(plan_sub_id, live_sub_id.clone());
                                 if let Some(prior) = prior_live_sub_id {
                                     if prior != live_sub_id {
-                                        self.attribution.discard_sub(&prior);
+                                        self.abandon_sub(&prior);
                                         effects.push(Effect::Wire(WireDelta {
                                             ops: vec![(
                                                 session.clone(),

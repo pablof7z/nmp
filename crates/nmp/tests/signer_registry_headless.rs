@@ -257,15 +257,17 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
          the write half of the coupled switch"
     );
 
-    // ---- write: still active = b, template authored as a -> reject -------
-    // Default publish authority is currentPubkey. An explicit identity
-    // override does not exist on this surface yet.
+    // ---- write: still active = b, a body composed "for a" -> still B -----
+    // A builder structurally cannot carry an author (#1005), so a body
+    // composed while A was active is not "A's draft" -- there is no field in
+    // it that says A. Publishing it while B is active is a write AS B, and
+    // the only signer that ever sees it is B's.
     let unsigned_as_a_while_b_active = UnsignedEvent::new(
         a.public_key(),
         Timestamp::now(),
         Kind::TextNote,
         vec![],
-        "wrongly templated for a while b is active",
+        "composed for a while b is active",
     );
     let receipt_wrong = handle
         .publish(WriteIntent {
@@ -279,9 +281,10 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
     assert!(
         wait_for_status(&receipt_wrong, Duration::from_secs(5), |s| matches!(
             s,
-            WriteStatus::Failed(_)
+            WriteStatus::Signed(_)
         )),
-        "a default A-authored draft while B is active must fail before selecting signer A"
+        "an author-free body published while B is active signs as B, whatever it was \
+         composed alongside"
     );
 
     // ---- switch back: read identity changes; author-pinned signing stays --
@@ -360,8 +363,18 @@ fn no_active_account_cannot_select_an_arbitrary_registered_signer() {
     engine_thread.join();
 }
 
+/// A cold directory is a reason to WAIT, never a reason to destroy a durable
+/// obligation (#975, `docs/internals/routing/resolution-lifecycle.md` §8).
+///
+/// This test used to assert the opposite under the name
+/// `active_a_rejects_b_authored_default_even_when_b_is_registered`. Two
+/// changes hollowed that claim out: a builder structurally cannot carry an
+/// author (#1005), so there was nothing "b-authored" left to reject, and the
+/// only `Failed` it was actually observing came from `AuthorOutbox` erroring
+/// on an empty `FixtureDirectory` — the exact defect this issue fixes. What
+/// the fixture really pins is restated here as the property that replaced it.
 #[test]
-fn active_a_rejects_b_authored_default_even_when_b_is_registered() {
+fn an_auto_write_on_a_cold_directory_parks_instead_of_failing() {
     let a = Keys::generate();
     let b = Keys::generate();
     let (engine_thread, handle) = EngineThread::spawn(
@@ -394,11 +407,19 @@ fn active_a_rejects_b_authored_default_even_when_b_is_registered() {
             correlation: None,
         })
         .expect("receipt id allocation");
-    assert!(wait_for_status(
-        &receipt,
-        Duration::from_secs(5),
-        |status| { matches!(status, WriteStatus::Failed(_)) }
-    ));
+    assert!(
+        wait_for_status(&receipt, Duration::from_secs(5), |status| {
+            matches!(status, WriteStatus::AwaitingRoute { .. })
+        }),
+        "an Auto write with no relay list known yet parks, naming what it waits for"
+    );
+    assert!(
+        !wait_for_status(&receipt, Duration::from_millis(500), |status| {
+            matches!(status, WriteStatus::Failed(_))
+        }),
+        "the park is not a terminal failure -- the event is signed, journaled and durable, \
+         and only the directory was young"
+    );
 
     handle.shutdown();
     engine_thread.join();

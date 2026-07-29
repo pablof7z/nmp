@@ -51,7 +51,39 @@ pub enum WriteStatus {
         pubkey: PublicKey,
     },
     Signed(EventId),
-    Routed(BTreeSet<RelayUrl>),
+    /// Routing has not produced a single relay yet, and `detail` says what it
+    /// is waiting for ("no relay list known yet for <pubkey>").
+    ///
+    /// The routing sibling of [`Self::AwaitingCapability`]'s durable park:
+    /// retained, NOT terminal, and re-emitted verbatim on receipt
+    /// reattachment, so a route parked for a month is still visible with its
+    /// reason a month later and across restarts. Nothing expires it — no
+    /// TTL, no retry cap, no heuristic that decides a relay list will "never"
+    /// arrive; explicit cancellation is the one abandonment door
+    /// (`docs/internals/routing/preview-and-observability.md` §4).
+    ///
+    /// This is what replaced a real defect: a routing shortfall used to
+    /// terminally [`Self::Failed`] the intent at `on_signed`, so publishing
+    /// anything before the author's first relay-list fetch died permanently.
+    /// "The engine had not learned enough yet" is never again a terminal
+    /// verdict.
+    AwaitingRoute {
+        detail: String,
+    },
+    /// The relays this intent's strategy has resolved to SO FAR, and whether
+    /// resolution can ever change its mind again.
+    ///
+    /// The two axes are deliberately separate. `complete` flips on settled
+    /// RESOLUTION — zero remaining unknowns — never on successful delivery,
+    /// which continues to stream through the per-relay facts below. So
+    /// `complete: true` with every relay undelivered is an ordinary state
+    /// ("we know exactly where this goes; it has not gone yet"), and so is
+    /// `complete: false` with some relays already acked. Re-emitted whenever
+    /// resolution changes the picture: new relays, or the `complete` flip.
+    Routed {
+        relays: BTreeSet<RelayUrl>,
+        complete: bool,
+    },
     /// This relay lane has no in-flight EVENT attempt because its connection
     /// is unavailable. Offline time consumes no attempt ordinal.
     AwaitingRelay {
@@ -112,9 +144,14 @@ pub enum WriteStatus {
         actual: Option<EventId>,
     },
     /// Whole-intent terminal reached BEFORE any relay was ever contacted —
-    /// a signer rejection, or an `Auto` route the engine could not resolve
-    /// (no write relays known yet). Distinct from the per-relay `Rejected`:
-    /// no `RelayUrl` exists here because none was ever reached.
+    /// a signer rejection, or a store-level refusal. Distinct from the
+    /// per-relay `Rejected`: no `RelayUrl` exists here because none was ever
+    /// reached.
+    ///
+    /// A routing shortfall is deliberately NOT in this class: it parks as
+    /// [`Self::AwaitingRoute`] instead, because "we have not learned enough
+    /// yet" is a reason to wait rather than a reason to destroy a durable,
+    /// already-journaled obligation.
     Failed(String),
 }
 

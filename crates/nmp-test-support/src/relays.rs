@@ -958,6 +958,51 @@ impl ScriptedRelay {
             .expect("nmp-bdd: seeding a relay-list fixture must succeed");
     }
 
+    /// Seed ANY author's NIP-65 relay list here, with the read/write split
+    /// spelled out — the shape a routing scenario needs, where
+    /// [`Self::seed_own_relay_list`] only ever names THIS relay, unmarked.
+    ///
+    /// A relay named in both lists is written as one UNMARKED `r` tag, which
+    /// is NIP-65's "both read and write"; the marked forms are used only when
+    /// the entry really is one-directional. An empty pair is a real
+    /// kind:10002 declaring NO relays at all — "known, zero", which is a
+    /// FACT and not the same as never having published one.
+    pub async fn seed_relay_list(
+        &self,
+        author: &nostr::Keys,
+        write_relays: &[String],
+        read_relays: &[String],
+        created_at: u64,
+    ) {
+        let mut builder = RelayEventBuilder::new(nostr_relay_builder::prelude::Kind::RelayList, "");
+        let tag_for = |url: &String, marker: Option<&str>| {
+            let mut parts = vec!["r".to_string(), url.clone()];
+            if let Some(marker) = marker {
+                parts.push(marker.to_string());
+            }
+            nostr_relay_builder::prelude::Tag::parse(parts)
+                .expect("nmp-test-support: relay-list fixture tag must parse")
+        };
+        for url in write_relays {
+            let marker = (!read_relays.contains(url)).then_some("write");
+            builder = builder.tag(tag_for(url, marker));
+        }
+        for url in read_relays {
+            if write_relays.contains(url) {
+                continue; // already emitted as the unmarked both-ways entry.
+            }
+            builder = builder.tag(tag_for(url, Some("read")));
+        }
+        let event = builder
+            .custom_created_at(nostr_relay_builder::prelude::Timestamp::from(created_at))
+            .finalize(&mirror_keys(author))
+            .expect("nmp-test-support: relay-list fixture must sign cleanly");
+        self.relay
+            .add_event(event)
+            .await
+            .expect("nmp-test-support: seeding a relay-list fixture must succeed");
+    }
+
     /// True iff this relay's write or query policy has been invoked at
     /// least once -- i.e. some REQ or EVENT actually reached it. The
     /// world-side half of a `must-never` "no relay outside the plan was

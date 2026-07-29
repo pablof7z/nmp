@@ -10,7 +10,6 @@ Feature: Absence is knowledge; ignorance is not
     And I am logged in as my own account
     And my relay list names "wss://mine.example" as my write relay
 
-  @designed
   Scenario: A relay list that declares no relays at all is knowledge
     Given Bob's relay list is ingested and names no relays at all
     When I publish a note mentioning Bob
@@ -19,7 +18,6 @@ Feature: Absence is knowledge; ignorance is not
     And routing for the note is complete
     And the note is never parked waiting on Bob
 
-  @designed
   Scenario: An author never looked up to completion keeps the write parked
     Given no relay list for Carol has ever been ingested
     And the indexers have not confirmed end of stored events for Carol's relay list
@@ -29,7 +27,6 @@ Feature: Absence is knowledge; ignorance is not
     And the note stays parked awaiting Carol's relay list
     And the note is not reported as failed
 
-  @designed
   Scenario: A settled absence retires the write -- the three-mention case
     # Pablo: "an outbox can end too; for example, if the user is p-tagging 3
     # users and only one of them has a 10002 and we know the other two don't
@@ -43,7 +40,6 @@ Feature: Absence is knowledge; ignorance is not
     And routing for the note is complete
     And nothing is left parked on Carol or Dave
 
-  @designed
   Scenario Outline: The same empty relay set means two different things
     Given no relay list for Carol has ever been ingested
     And the indexers have <lookup> confirmed end of stored events for Carol's relay list
