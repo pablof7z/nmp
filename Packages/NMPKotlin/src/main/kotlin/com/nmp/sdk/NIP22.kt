@@ -221,14 +221,13 @@ fun decodeComment(row: Row): DecodedComment {
 }
 
 /** Compose a durable, author-outbox-routed NIP-22 comment as NMP's ordinary
- * [WriteIntent] (#822). Author and time are explicit inputs, so composition
- * owns no engine state or lifecycle. [correlation] passes through unchanged;
- * publish the result through [NMPEngine.publish]. */
+ * [WriteIntent] (#822). It names no author and reads no clock -- the engine
+ * resolves the identity and stamps the time at acceptance -- so composition
+ * still owns no engine state or lifecycle. [correlation] passes through
+ * unchanged; publish the result through [NMPEngine.publish]. */
 fun commentIntent(
     root: CommentRoot,
     parent: CommentParent,
-    authorPubkey: String,
-    createdAt: ULong,
     content: String,
     correlation: String? = null,
 ): WriteIntent =
@@ -237,8 +236,6 @@ fun commentIntent(
             ffiCommentIntent(
                 root.toFfi(),
                 parent.toFfi(),
-                authorPubkey,
-                createdAt,
                 content,
                 correlation,
             )

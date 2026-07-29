@@ -182,8 +182,6 @@ class NIP22Test {
                     commentIntent(
                         root = CommentRoot.External(Nip73Target.PodcastEpisodeGuid("guid-offline")),
                         parent = CommentParent.Root,
-                        authorPubkey = author,
-                        createdAt = 1_723_458_000uL,
                         content = "great show",
                         correlation = token,
                     )
@@ -210,16 +208,15 @@ class NIP22Test {
 
     // #572 review finding 4: test honesty.
 
-    /** A REAL golden fixture -- a fixed secret key, timestamp, content, and
-     * podcast target -- whose composed event id and exact NIP-01 JSON body
-     * are pinned as literal constants and asserted identical in Rust
-     * (`crates/nmp-nip22/src/build.rs::golden_fixture_tests`), Swift
-     * (`NIP22Tests.swift`), and here. Structural identity (all composition
-     * happens in Rust behind FFI) is a fair argument for why Kotlin
-     * composing the SAME bytes is likely, but it isn't the demanded proof --
-     * this asserts the ACTUAL marshalled bytes a Kotlin caller observes,
-     * including the `ULong createdAt` -> `u64` boundary crossing. */
+    /** A "golden fixture" once lived here: a fixed key, timestamp and
+     * content whose composed event id and exact NIP-01 JSON were asserted
+     * identical in Rust, Swift and Kotlin. It is gone, deliberately. The
+     * composer no longer produces bytes -- it produces a schema, and the
+     * author and the timestamp that complete those bytes are decided at
+     * acceptance. What all three languages still assert is the thing NIP-22
+     * actually owns: the exact tag rows, in the exact order. */
     @Test
+<<<<<<< HEAD
     fun goldenFixturePinsTheExactComposedBytes() =
         runBlocking {
             val authorPubkey = "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f"
@@ -270,6 +267,33 @@ class NIP22Test {
                 assertEquals(expectedEventId, row.id)
             }
         }
+=======
+    fun composedCommentPinsTheExactTagRows() {
+        val intent =
+            commentIntent(
+                root = CommentRoot.External(Nip73Target.PodcastEpisodeGuid("golden-guid-572")),
+                parent = CommentParent.Root,
+                content = "golden fixture content",
+            )
+        val payload = intent.payload as WritePayload.Event
+        assertEquals(1111u.toUShort(), payload.kind)
+        assertEquals("golden fixture content", payload.content)
+        assertEquals(null, payload.createdAt)
+        assertEquals(
+            listOf(
+                listOf("I", "podcast:item:guid:golden-guid-572"),
+                listOf("K", "podcast:item:guid"),
+                listOf("i", "podcast:item:guid:golden-guid-572"),
+                listOf("k", "podcast:item:guid"),
+            ),
+            payload.tags,
+        )
+        assertEquals(Durability.Durable, intent.durability)
+        assertEquals(WriteRouting.AuthorOutbox, intent.routing)
+        assertEquals(null, intent.identityOverride)
+        assertEquals(null, intent.correlation)
+    }
+>>>>>>> d30ae57e (Project the builder into the Swift and Kotlin SDK wrappers, regenerate surface snapshots)
 
     /** #572 review finding 4: "durable acceptance makes one canonical
      * pending comment visible through the ordinary query path" was NOT
@@ -293,8 +317,6 @@ class NIP22Test {
                     commentIntent(
                         root = root,
                         parent = CommentParent.Root,
-                        authorPubkey = author,
-                        createdAt = 1_723_459_000uL,
                         content = "visible through the ordinary query path",
                     )
                 val receipt = engine.publish(intent)

@@ -139,24 +139,30 @@ final class FilterBuilderTests: XCTestCase {
 
     func testWriteIntentConversion() {
         let intent = WriteIntent(
-            payload: .unsigned(
-                pubkey: String(repeating: "b", count: 64),
-                createdAt: 1_700_000_000,
+            payload: .event(
                 kind: 1,
                 tags: [["t", "nostr"]],
-                content: "hello from NMP"
+                content: "hello from NMP",
+                createdAt: 1_700_000_000
             ),
             durability: .durable,
             routing: .auto
         )
         let ffi = intent.toFfi()
         XCTAssertEqual(ffi.durability, .durable)
+<<<<<<< HEAD
         XCTAssertEqual(ffi.routing, .auto)
         guard case .unsigned(_, _, _, let tags, let content) = ffi.payload else {
             return XCTFail("expected an unsigned payload")
+=======
+        XCTAssertEqual(ffi.routing, .authorOutbox)
+        guard case .event(let builder) = ffi.payload else {
+            return XCTFail("expected a builder payload")
+>>>>>>> d30ae57e (Project the builder into the Swift and Kotlin SDK wrappers, regenerate surface snapshots)
         }
-        XCTAssertEqual(content, "hello from NMP")
-        XCTAssertEqual(tags, [["t", "nostr"]])
+        XCTAssertEqual(builder.content, "hello from NMP")
+        XCTAssertEqual(builder.tags, [["t", "nostr"]])
+        XCTAssertEqual(builder.createdAt, 1_700_000_000)
     }
 
     /// #32: a `.signed` payload round-trips to `FfiWritePayload.signed`
@@ -192,12 +198,11 @@ final class FilterBuilderTests: XCTestCase {
     func testWriteIntentConversionCarriesIdentityOverride() {
         let overridePubkey = String(repeating: "b", count: 64)
         let intent = WriteIntent(
-            payload: .unsigned(
-                pubkey: overridePubkey,
-                createdAt: 1_700_000_000,
+            payload: .event(
                 kind: 1,
                 tags: [],
-                content: "as the override identity"
+                content: "as the override identity",
+                createdAt: 1_700_000_000
             ),
             durability: .durable,
             routing: .auto,
@@ -211,12 +216,11 @@ final class FilterBuilderTests: XCTestCase {
     /// active-account default, all the way through `toFfi()`.
     func testWriteIntentDefaultInitLeavesIdentityOverrideNil() {
         let intent = WriteIntent(
-            payload: .unsigned(
-                pubkey: String(repeating: "b", count: 64),
-                createdAt: 1_700_000_000,
+            payload: .event(
                 kind: 1,
                 tags: [],
-                content: "active-account default"
+                content: "active-account default",
+                createdAt: 1_700_000_000
             ),
             durability: .durable,
             routing: .auto
@@ -228,12 +232,11 @@ final class FilterBuilderTests: XCTestCase {
     func testWriteIntentReverseProjectionPreservesEveryGenericField() {
         let unsigned = WriteIntent(
             FfiWriteIntent(
-                payload: .unsigned(
-                    pubkey: String(repeating: "a", count: 64),
-                    createdAt: 42,
+                payload: .event(
                     kind: 1111,
                     tags: [["I", "podcast:item:guid:42"]],
-                    content: "unsigned"
+                    content: "unsigned",
+                    createdAt: 42
                 ),
                 durability: .atMostOnce,
                 routing: .auto,
@@ -243,12 +246,11 @@ final class FilterBuilderTests: XCTestCase {
         )
         XCTAssertEqual(
             unsigned.payload,
-            .unsigned(
-                pubkey: String(repeating: "a", count: 64),
-                createdAt: 42,
+            .event(
                 kind: 1111,
                 tags: [["I", "podcast:item:guid:42"]],
-                content: "unsigned"
+                content: "unsigned",
+                createdAt: 42
             )
         )
         XCTAssertEqual(unsigned.durability, .atMostOnce)

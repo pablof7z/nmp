@@ -134,11 +134,7 @@ sealed class FollowActionFailure {
 
     object SourceUnavailable : FollowActionFailure()
 
-    object BaseHasWrongAuthor : FollowActionFailure()
-
     object BaseHasWrongKind : FollowActionFailure()
-
-    object TimestampExhausted : FollowActionFailure()
 
     object InvalidGeneratedTag : FollowActionFailure()
 
@@ -156,9 +152,7 @@ sealed class FollowActionFailure {
                 is FfiFollowActionFailure.NoContactList -> NoContactList
                 is FfiFollowActionFailure.CachedOnly -> CachedOnly
                 is FfiFollowActionFailure.SourceUnavailable -> SourceUnavailable
-                is FfiFollowActionFailure.BaseHasWrongAuthor -> BaseHasWrongAuthor
                 is FfiFollowActionFailure.BaseHasWrongKind -> BaseHasWrongKind
-                is FfiFollowActionFailure.TimestampExhausted -> TimestampExhausted
                 is FfiFollowActionFailure.InvalidGeneratedTag -> InvalidGeneratedTag
                 is FfiFollowActionFailure.EngineClosed -> EngineClosed
                 is FfiFollowActionFailure.ReceiptUnavailable -> ReceiptUnavailable

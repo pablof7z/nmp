@@ -24,12 +24,11 @@ class WriteCancellationTest {
                     engine.publish(
                         WriteIntent(
                             payload =
-                                WritePayload.Unsigned(
-                                    pubkey = author,
-                                    createdAt = 1_723_456_790uL,
+                                WritePayload.Event(
                                     kind = 1u.toUShort(),
                                     tags = emptyList(),
                                     content = "cancel through the public Kotlin SDK",
+                                    createdAt = 1_723_456_790uL,
                                 ),
                             durability = Durability.Durable,
                             routing = WriteRouting.Auto,

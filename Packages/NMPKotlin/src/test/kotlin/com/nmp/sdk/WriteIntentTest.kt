@@ -14,12 +14,11 @@ import uniffi.nmp_ffi.FfiWriteRouting
 // including the per-write identity override (#47).
 class WriteIntentTest {
     private fun unsignedPayload(pubkey: String) =
-        WritePayload.Unsigned(
-            pubkey = pubkey,
-            createdAt = 1_700_000_000uL,
+        WritePayload.Event(
             kind = 1u,
             tags = emptyList(),
             content = "hello from NMP",
+            createdAt = 1_700_000_000uL,
         )
 
     /** #47: an [WriteIntent.identityOverride] crosses to `FfiWriteIntent`
@@ -59,12 +58,13 @@ class WriteIntentTest {
             WriteIntent.from(
                 FfiWriteIntent(
                     payload =
-                        FfiWritePayload.Unsigned(
-                            pubkey = "a".repeat(64),
-                            createdAt = 42uL,
-                            kind = 1111u,
-                            tags = listOf(listOf("I", "podcast:item:guid:42")),
-                            content = "unsigned",
+                        FfiWritePayload.Event(
+                            FfiEventBuilder(
+                                kind = 1111u,
+                                tags = listOf(listOf("I", "podcast:item:guid:42")),
+                                content = "unsigned",
+                                createdAt = 42uL,
+                            ),
                         ),
                     durability = FfiDurability.AT_MOST_ONCE,
                     routing = FfiWriteRouting.Auto,
@@ -73,12 +73,11 @@ class WriteIntentTest {
                 ),
             )
         assertEquals(
-            WritePayload.Unsigned(
-                pubkey = "a".repeat(64),
-                createdAt = 42uL,
+            WritePayload.Event(
                 kind = 1111u,
                 tags = listOf(listOf("I", "podcast:item:guid:42")),
                 content = "unsigned",
+                createdAt = 42uL,
             ),
             unsigned.payload,
         )

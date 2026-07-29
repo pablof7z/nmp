@@ -175,8 +175,6 @@ final class NIP22Tests: XCTestCase {
         let intent = try NMP.commentIntent(
             root: .external(target: .podcastEpisodeGuid(guid: "guid-offline")),
             parent: .root,
-            authorPubkey: author,
-            createdAt: 1_723_458_000,
             content: "great show",
             correlation: token
         )
@@ -199,44 +197,27 @@ final class NIP22Tests: XCTestCase {
 
     // MARK: - #572 review finding 4: test honesty
 
-    /// A REAL golden fixture -- a fixed secret key, timestamp, content, and
-    /// podcast target -- whose composed event id and exact NIP-01 JSON body
-    /// are pinned as literal constants and asserted identical in Rust
-    /// (`crates/nmp-nip22/src/build.rs::golden_fixture_tests`), here, and
-    /// Kotlin (`NIP22Test.kt`). Structural identity (all composition happens
-    /// in Rust behind FFI) is a fair argument for why Swift composing the
-    /// SAME bytes is likely, but it isn't the demanded proof -- this
-    /// asserts the ACTUAL marshalled bytes a Swift caller observes,
-    /// including the `UInt64 createdAt` -> `u64` boundary crossing.
-    func testGoldenFixturePinsTheExactComposedBytes() async throws {
-        let authorPubkey = "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f"
-        let expectedEventID = "b1981e70a89150af5ca02548324f3ca2a1fff1b97581d46ab53e11116a553938"
-
-        let engine = try NMPEngine(config: NMPConfig())
-        defer { engine.shutdown() }
-        try engine.setActiveAccount(authorPubkey)
-
+    /// A "golden fixture" once lived here: a fixed key, timestamp and
+    /// content whose composed event id and exact NIP-01 JSON were asserted
+    /// identical in Rust, Swift and Kotlin. It is gone, deliberately. The
+    /// composer no longer produces bytes -- it produces a schema, and the
+    /// author and the timestamp that complete those bytes are decided at
+    /// acceptance. What all three languages still assert is the thing NIP-22
+    /// actually owns: the exact tag rows, in the exact order.
+    func testComposedCommentPinsTheExactTagRows() throws {
         let intent = try NMP.commentIntent(
             root: .external(target: .podcastEpisodeGuid(guid: "golden-guid-572")),
             parent: .root,
-            authorPubkey: authorPubkey,
-            createdAt: 1_700_000_000,
             content: "golden fixture content"
         )
-        guard case .unsigned(
-            let composedAuthor,
-            let composedAt,
-            let composedKind,
-            let composedTags,
-            let composedContent
-        ) = intent.payload else {
-            return XCTFail("NIP-22 must compose an ordinary unsigned write payload")
+        guard case .event(let kind, let tags, let content, let createdAt) = intent.payload else {
+            return XCTFail("NIP-22 must compose an ordinary builder write payload")
         }
-        XCTAssertEqual(composedAuthor, authorPubkey)
-        XCTAssertEqual(composedAt, 1_700_000_000)
-        XCTAssertEqual(composedKind, 1111)
+        XCTAssertEqual(kind, 1111)
+        XCTAssertEqual(content, "golden fixture content")
+        XCTAssertNil(createdAt, "acceptance stamps it; the composer never invents one")
         XCTAssertEqual(
-            composedTags,
+            tags,
             [
                 ["I", "podcast:item:guid:golden-guid-572"],
                 ["K", "podcast:item:guid"],
@@ -244,42 +225,12 @@ final class NIP22Tests: XCTestCase {
                 ["k", "podcast:item:guid"],
             ]
         )
-        XCTAssertEqual(composedContent, "golden fixture content")
         XCTAssertEqual(intent.durability, .durable)
         XCTAssertEqual(intent.routing, .auto)
         XCTAssertNil(intent.identityOverride)
         XCTAssertNil(intent.correlation)
-
-        let receipt = try await engine.publish(intent)
-        let statuses = try await Self.withTimeout {
-            await Self.collect(receipt.status, count: 2)
-        }
-        // Signed(eventId:) is the second status once the offline signer
-        // parks -- but here there IS no signer, so acceptance alone proves
-        // the deterministic id: the receipt's own id is derived from the
-        // SAME computed event id NMP accepted durably.
-        XCTAssertEqual(statuses.first, .accepted)
-
-        // Cross-check the actual computed event id via the ordinary read
-        // path: the pending row's own `id` field IS the composed event id.
-        let demand = try commentThreadDemand(
-            root: .external(target: Nip73Target.podcastEpisodeGuid(guid: "golden-guid-572"))
-        )
-        let query = try engine.observe(demand)
-        let row = try await Self.withTimeout {
-            await Self.firstRow(from: query, timeoutSeconds: 5)
-        }
-        XCTAssertEqual(row?.id, expectedEventID)
     }
 
-    /// #572 review finding 4: "durable acceptance makes one canonical
-    /// pending comment visible through the ordinary query path" was NOT
-    /// exercised by the original suite -- coverage stopped at receipt
-    /// statuses. This composes, publishes, and OBSERVES the pending row
-    /// through `comment_thread_demand` + `observe`, then decodes it with
-    /// `decodeComment`, proving the whole write -> read -> decode loop
-    /// converges on a coherent typed value while the write remains
-    /// unsigned/pending.
     func testDurableAcceptanceMakesOneCanonicalPendingCommentVisibleThroughTheQueryPath() async throws {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
@@ -292,8 +243,6 @@ final class NIP22Tests: XCTestCase {
         let intent = try NMP.commentIntent(
             root: root,
             parent: .root,
-            authorPubkey: author,
-            createdAt: 1_723_459_000,
             content: "visible through the ordinary query path"
         )
         let receipt = try await engine.publish(intent)

@@ -89,9 +89,7 @@ public enum NMPFollowActionFailure: Sendable, Hashable {
     case noContactList
     case cachedOnly
     case sourceUnavailable
-    case baseHasWrongAuthor
     case baseHasWrongKind
-    case timestampExhausted
     case invalidGeneratedTag
     case engineClosed
     case receiptUnavailable
@@ -105,9 +103,7 @@ public enum NMPFollowActionFailure: Sendable, Hashable {
         case .noContactList: self = .noContactList
         case .cachedOnly: self = .cachedOnly
         case .sourceUnavailable: self = .sourceUnavailable
-        case .baseHasWrongAuthor: self = .baseHasWrongAuthor
         case .baseHasWrongKind: self = .baseHasWrongKind
-        case .timestampExhausted: self = .timestampExhausted
         case .invalidGeneratedTag: self = .invalidGeneratedTag
         case .engineClosed: self = .engineClosed
         case .receiptUnavailable: self = .receiptUnavailable
