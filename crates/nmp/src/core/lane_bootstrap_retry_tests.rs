@@ -19,14 +19,6 @@ use super::*;
 
 // ---- fixtures ----------------------------------------------------------
 
-struct Sink;
-
-impl ReceiptSink for Sink {
-    fn on_status(&self, _status: WriteStatus) -> bool {
-        true
-    }
-}
-
 fn session_for(relay: &RelayUrl, author: &Keys) -> RelaySessionKey {
     RelaySessionKey::new(relay.clone(), AccessContext::Nip42(author.public_key()))
 }
@@ -40,24 +32,21 @@ fn publish_narrow<S: EventStore>(
     created_at: u64,
 ) -> (ReceiptId, SignedEvent, Vec<Effect>) {
     core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
-    let accepted = core.handle(EngineMsg::Publish(
-        WriteIntent {
-            payload: WritePayload::Unsigned(UnsignedEvent::new(
-                author.public_key(),
-                Timestamp::from(created_at),
-                Kind::TextNote,
-                Vec::new(),
-                format!("bootstrap retry {created_at}"),
-            )),
-            durability: Durability::Durable,
-            routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                relays: NarrowOnly::new(relays.to_vec()),
-            }),
-            identity_override: None,
-            correlation: None,
-        },
-        Box::new(Sink),
-    ));
+    let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Unsigned(UnsignedEvent::new(
+            author.public_key(),
+            Timestamp::from(created_at),
+            Kind::TextNote,
+            Vec::new(),
+            format!("bootstrap retry {created_at}"),
+        )),
+        durability: Durability::Durable,
+        routing: WriteRouting::PrivateNarrow(PrivateRoute {
+            relays: NarrowOnly::new(relays.to_vec()),
+        }),
+        identity_override: None,
+        correlation: None,
+    }));
     let (id, generation, unsigned) = accepted
         .iter()
         .find_map(|effect| match effect {
