@@ -1488,8 +1488,15 @@ impl<S: EventStore> EngineCore<S> {
                     .map_or((None, Vec::new()), |(send, coverage)| {
                         (Some(send), coverage)
                     });
+                let mut settled_any = false;
                 for (key, interval) in attributed {
                     if let Some(atom) = self.attribution.shape_of(key) {
+                        // Absence settlement rides the SAME attributed EOSE
+                        // the coverage watermark does: the discovery
+                        // subscription is just another entry in
+                        // `active_demand()`, so nothing parallel exists here
+                        // for the write plane to have opened.
+                        settled_any |= self.settle_relay_list_eose(&session.relay, &atom);
                         // Coverage rows stay keyed (context-hashed key,
                         // relay URL) — the access distinction already lives
                         // inside the key's own hash, so the store door takes
@@ -1509,6 +1516,14 @@ impl<S: EventStore> EngineCore<S> {
                         }
                         effects.push(Effect::RecordCoverage(key, session.relay.clone(), interval));
                     }
+                }
+                if settled_any {
+                    // Resolution moment FOUR, in its other form: a need
+                    // SETTLING is as much a knowledge change as a fact
+                    // arriving. An outbox whose last unknown recipient just
+                    // turned out to have no relay list retires within this
+                    // same ingestion turn instead of waiting for a tick.
+                    self.rewrite_open_routes(&mut effects);
                 }
                 if let Some(send) = completed_send {
                     self.emit_request_eose(send, self.clock, &mut effects);

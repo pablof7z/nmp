@@ -1379,6 +1379,20 @@ pub struct EngineCore<S: EventStore> {
     /// `sync_discovery` call so the subscription is only replaced when the
     /// set actually changes, not on every recompile.
     discovery_authors: BTreeSet<PubkeyHex>,
+    /// Which relays have reached end-of-stored-events on a relay-list atom
+    /// covering each author, this session.
+    ///
+    /// The raw material for the ONE transition that mints
+    /// [`RelayListKnowledge::KnownAbsent`]: when every configured indexer has
+    /// EOSE'd for an author and no kind:10002 ever arrived, the engine holds
+    /// a positive, relay-attested fact -- "these sources have nothing" --
+    /// and caches it as a directory answer. Not a timeout, not a retry
+    /// budget, not a heuristic (`knowledge-and-settlement.md` §2).
+    ///
+    /// Session-scoped and never persisted, exactly like the absence it
+    /// derives: a restart re-probes rather than betting against the author's
+    /// own future publication.
+    relay_list_eose: BTreeMap<PubkeyHex, BTreeSet<RelayUrl>>,
     /// The diagnostic surface's own counter (M5 plan §1.2 step 1) — events
     /// actually RECEIVED, per SESSION per kind. Bumped in the
     /// `RelayMessage::Event` arms of `on_relay_frame`/`on_relay_frames`;
@@ -1529,6 +1543,7 @@ impl<S: EventStore> EngineCore<S> {
             pending_backfills: HashMap::new(),
             discovery_handle: None,
             discovery_authors: BTreeSet::new(),
+            relay_list_eose: BTreeMap::new(),
             events_by_session_kind: HashMap::new(),
             next_attempt_correlation: Some(0),
             attempt_correlations: HashMap::new(),

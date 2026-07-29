@@ -541,6 +541,8 @@ pub nmp::WriteStatus::AwaitingCapability
 pub nmp::WriteStatus::AwaitingCapability::pubkey: nostr::key::public_key::PublicKey
 pub nmp::WriteStatus::AwaitingRelay
 pub nmp::WriteStatus::AwaitingRelay::relay: nostr::types::url::RelayUrl
+pub nmp::WriteStatus::AwaitingRoute
+pub nmp::WriteStatus::AwaitingRoute::detail: alloc::string::String
 pub nmp::WriteStatus::Cancelled
 pub nmp::WriteStatus::Failed(alloc::string::String)
 pub nmp::WriteStatus::GaveUp(nostr::types::url::RelayUrl)
@@ -559,7 +561,9 @@ pub nmp::WriteStatus::RetryEligible::attempt: u64
 pub nmp::WriteStatus::RetryEligible::eligible_at: nostr::types::time::Timestamp
 pub nmp::WriteStatus::RetryEligible::relay: nostr::types::url::RelayUrl
 pub nmp::WriteStatus::RoutePersistenceBlocked(nostr::types::url::RelayUrl)
-pub nmp::WriteStatus::Routed(alloc::collections::btree::set::BTreeSet<nostr::types::url::RelayUrl>)
+pub nmp::WriteStatus::Routed
+pub nmp::WriteStatus::Routed::complete: bool
+pub nmp::WriteStatus::Routed::relays: alloc::collections::btree::set::BTreeSet<nostr::types::url::RelayUrl>
 pub nmp::WriteStatus::Sent
 pub nmp::WriteStatus::Sent::attempt: u64
 pub nmp::WriteStatus::Sent::relay: nostr::types::url::RelayUrl

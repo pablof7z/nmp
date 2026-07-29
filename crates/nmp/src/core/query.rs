@@ -527,6 +527,71 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
+    /// Record that `relay` reached end-of-stored-events on `atom`, and settle
+    /// every absence that completes.
+    ///
+    /// EOSE is NIP-01's "end of stored events": the relay asserts it has sent
+    /// everything matching the subscription's filter. When every indexer the
+    /// engine queries for an author's relay list has said that and no
+    /// kind:10002 arrived, the engine holds a POSITIVE fact — these sources
+    /// have nothing — which is the definition of `KnownAbsent`
+    /// (`docs/internals/routing/knowledge-and-settlement.md` §2).
+    ///
+    /// Two boundaries are deliberate and load-bearing:
+    ///
+    /// - **Absence is derived exactly once, here, and read afterwards as an
+    ///   ordinary directory answer.** Resolvers never see EOSE,
+    ///   `SourceStatus`, or `reconciled_through`; threading read-side
+    ///   acquisition evidence into resolution would make every resolver
+    ///   re-derive the same epistemic judgment and possibly disagree.
+    /// - **Sources that never finish never settle.** With zero indexers
+    ///   configured nothing here can ever fire, so every `Auto` with an
+    ///   unknown input parks forever. That is fail-closed and correct: an
+    ///   engine with no discovery sources CANNOT know, and treating "nowhere
+    ///   to ask" as "asked, nothing there" would silently under-route every
+    ///   write on a misconfigured app.
+    /// Returns true iff at least one author actually transitioned to
+    /// `KnownAbsent` on this frame, so the caller can wake the routes that
+    /// were waiting on exactly that.
+    pub(super) fn settle_relay_list_eose(&mut self, relay: &RelayUrl, atom: &ContextualAtom) -> bool {
+        // Only a relay-list atom attests anything about a relay list. A
+        // content atom EOSE'ing says nothing about whether a kind:10002
+        // exists, and indexers are never a content fallback in either
+        // direction.
+        if atom.filter.kinds != Some(BTreeSet::from([NIP65_RELAY_LIST_KIND])) {
+            return false;
+        }
+        let Some(authors) = atom.filter.authors.clone() else {
+            return false;
+        };
+        // Sources are the CONFIGURED indexers -- the only relays a
+        // discovery-kind atom is ever routed to. Nothing settles without
+        // them, by design.
+        let indexers = self.directory.indexers();
+        if indexers.is_empty() {
+            return false;
+        }
+        let mut newly_settled = false;
+        for author in authors {
+            let seen = self.relay_list_eose.entry(author.clone()).or_default();
+            seen.insert(relay.clone());
+            if !indexers.iter().all(|indexer| seen.contains(indexer)) {
+                // One source still unfinished is not a settlement.
+                continue;
+            }
+            if self.directory.relay_list_knowledge(&author) != RelayListKnowledge::Unknown {
+                continue; // already Known, or already settled absent.
+            }
+            // A settlement pass never downgrades an author whose real
+            // kind:10002 has already been ingested -- the directory door
+            // owns that check too, so an event arriving in the same turn as
+            // the EOSE wins.
+            self.directory.settle_relay_list_absent(author);
+            newly_settled = true;
+        }
+        newly_settled
+    }
+
     /// After ingesting a possible kind:10002 event for `author`, re-read the
     /// store's CURRENT winning relay-list event for them -- never trust the
     /// just-arrived frame directly. `EventStore::query` only ever returns

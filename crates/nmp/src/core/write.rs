@@ -1341,6 +1341,27 @@ impl<S: EventStore> EngineCore<S> {
                 },
             ));
         }
+        // The routing park is retained and replayed the same way the signer
+        // park is. An app that restarts, reattaches to an id it persisted,
+        // and is told nothing has learned nothing -- a park nobody can see
+        // again is indistinguishable from data loss, so the reason travels
+        // with the receipt for as long as the park lasts.
+        //
+        // Boot recovery re-resolved this intent against the directory THIS
+        // process holds, so `route_detail` is the reason as it stands now,
+        // not a string carried over from a session whose knowledge has
+        // moved on.
+        if let Some(detail) = self
+            .pending
+            .get(&id)
+            .filter(|pending| pending.durable_routes.is_empty() && !pending.route_complete)
+            .and_then(|pending| pending.route_detail.clone())
+        {
+            replay.push((
+                ReceiptReplayFactKey::AwaitingRoute(detail.clone()),
+                WriteStatus::AwaitingRoute { detail },
+            ));
+        }
         if receipt.intent_id.is_some() {
             let mut details_by_attempt = details
                 .into_iter()
@@ -2932,6 +2953,7 @@ impl<S: EventStore> EngineCore<S> {
             .cloned()
             .collect::<BTreeSet<_>>();
         let mut union = pending.durable_routes.clone();
+        let mut blocked = BTreeSet::new();
         let mut committed = false;
 
         if !new_relays.is_empty() {
@@ -2942,15 +2964,11 @@ impl<S: EventStore> EngineCore<S> {
                 // The route itself did not persist: these exact URLs are not
                 // claimed to survive a crash, so they are owned only for this
                 // process and no lane is minted for them.
+                blocked = new_relays.clone();
                 if let Some(pending) = self.pending.get_mut(&id) {
-                    pending.route_blocked_relays.extend(new_relays.iter().cloned());
-                }
-                for relay in &new_relays {
-                    self.emit_write_status(
-                        id,
-                        WriteStatus::RoutePersistenceBlocked(relay.clone()),
-                        effects,
-                    );
+                    pending
+                        .route_blocked_relays
+                        .extend(new_relays.iter().cloned());
                 }
             } else {
                 committed = true;
@@ -2970,28 +2988,11 @@ impl<S: EventStore> EngineCore<S> {
             changed
         };
 
-        if committed {
-            match self.bootstrap_projected_lanes(intent_id, Some(&union)) {
-                Ok(lanes) => self.open_fresh_lanes(id, signing_pubkey, lanes, effects),
-                Err(_) => {
-                    // The sole call that teaches the reverse index this
-                    // intent's lanes failed, so the index cannot learn what
-                    // may or may not exist — degrade rather than assume "no
-                    // lanes" (epic #507 finding E5).
-                    self.lane_relay_index_degraded = true;
-                    for relay in &new_relays {
-                        self.emit_write_status(
-                            id,
-                            WriteStatus::PersistenceBlocked(relay.clone()),
-                            effects,
-                        );
-                    }
-                }
-            }
-        }
-
+        // The receipt learns WHERE before it learns what each destination is
+        // doing: the routing picture is emitted ahead of any lane fact, so an
+        // app never sees a relay it was never told about.
         if union.is_empty() {
-            // Nothing routable yet. PARK — retained, visible, and naming what
+            // Nothing routable yet. PARK -- retained, visible, and naming what
             // it waits for. Never a terminal failure: the event is signed,
             // journaled and durable, and the directory was merely young.
             let detail = answer
@@ -3007,21 +3008,44 @@ impl<S: EventStore> EngineCore<S> {
                 }
                 self.emit_write_status(id, WriteStatus::AwaitingRoute { detail }, effects);
             }
-            return;
+        } else {
+            if let Some(pending) = self.pending.get_mut(&id) {
+                pending.route_detail = None;
+            }
+            if picture_changed {
+                self.emit_write_status(
+                    id,
+                    WriteStatus::Routed {
+                        relays: union.clone(),
+                        complete: answer.complete,
+                    },
+                    effects,
+                );
+            }
         }
 
-        if let Some(pending) = self.pending.get_mut(&id) {
-            pending.route_detail = None;
+        for relay in blocked {
+            self.emit_write_status(id, WriteStatus::RoutePersistenceBlocked(relay), effects);
         }
-        if picture_changed {
-            self.emit_write_status(
-                id,
-                WriteStatus::Routed {
-                    relays: union,
-                    complete: answer.complete,
-                },
-                effects,
-            );
+
+        if committed {
+            match self.bootstrap_projected_lanes(intent_id, Some(&union)) {
+                Ok(lanes) => self.open_fresh_lanes(id, signing_pubkey, lanes, effects),
+                Err(_) => {
+                    // The sole call that teaches the reverse index this
+                    // intent's lanes failed, so the index cannot learn what
+                    // may or may not exist -- degrade rather than assume "no
+                    // lanes" (epic #507 finding E5).
+                    self.lane_relay_index_degraded = true;
+                    for relay in &new_relays {
+                        self.emit_write_status(
+                            id,
+                            WriteStatus::PersistenceBlocked(relay.clone()),
+                            effects,
+                        );
+                    }
+                }
+            }
         }
     }
 

@@ -4487,6 +4487,21 @@ enum Enum {
             docstring: None,
         },
         Variant {
+            name: "AwaitingRoute",
+            discr: None,
+            fields: [
+                Field {
+                    name: "detail",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "`nmp::WriteStatus::AwaitingRoute` mirror: routing has not produced a\nsingle relay yet, and `detail` says what it is waiting for. Retained,\nNOT terminal, and replayed verbatim on receipt reattachment, so a\nroute parked for a month is still visible with its reason. Nothing\nexpires it; explicit cancellation is the one way out.\n\nAn app maps this (and `Routed { complete: false }`) to \"determining\ndestinations\".",
+            ),
+        },
+        Variant {
             name: "Routed",
             discr: None,
             fields: [
@@ -4498,8 +4513,16 @@ enum Enum {
                     default: None,
                     docstring: None,
                 },
+                Field {
+                    name: "complete",
+                    type_: Boolean,
+                    default: None,
+                    docstring: None,
+                },
             ],
-            docstring: None,
+            docstring: Some(
+                "`nmp::WriteStatus::Routed` mirror. `relays` is what resolution has\nnamed SO FAR; `complete` says whether it can ever grow again.\n\nThe two are separate axes from delivery: `complete: true` with\nnothing delivered is \"sending 0 of n\", and `complete: false` with\nsome relays already acked is an ordinary state while routing is\nstill open. Only `complete: true` plus every relay terminal means\n\"sent\".",
+            ),
         },
         Variant {
             name: "AwaitingRelay",
