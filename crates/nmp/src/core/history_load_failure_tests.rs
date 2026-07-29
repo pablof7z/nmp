@@ -131,11 +131,9 @@ impl EventStore for FailingReadStore {
 
     fn record_coverage(
         &mut self,
-        atom: &ContextualAtom,
-        relay: &RelayUrl,
-        proven: CoverageInterval,
+        claims: &[(ContextualAtom, RelayUrl, CoverageInterval)],
     ) -> Result<(), PersistenceError> {
-        self.inner.record_coverage(atom, relay, proven)
+        self.inner.record_coverage(claims)
     }
 
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {

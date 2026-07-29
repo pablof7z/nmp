@@ -702,6 +702,7 @@ impl<S: EventStore> EngineCore<S> {
                         &req.filter,
                         req.absorbed.clone(),
                         true,
+                        EventFailureTarget::ThisSend,
                     );
                     plain_reqs.push(req.clone());
                 }
@@ -1026,6 +1027,7 @@ impl<S: EventStore> EngineCore<S> {
                     &req.filter,
                     req.absorbed.clone(),
                     true,
+                    EventFailureTarget::ThisSend,
                 );
             }
             if !reqs.is_empty() {
@@ -1079,6 +1081,7 @@ impl<S: EventStore> EngineCore<S> {
     // ---- inbound relay frame: EVENT/EOSE parsed here (D/E own OK/CLOSED/
     // NOTICE/AUTH/COUNT/NEG-*) --------------------------------------------
 
+    #[cfg(any(test, feature = "bench-instrumentation"))]
     pub(super) fn ingest_relay_events(
         &mut self,
         events: Vec<(SignedEvent, RelayObserved)>,
@@ -1087,7 +1090,7 @@ impl<S: EventStore> EngineCore<S> {
         self.ingest_relay_observations(
             events
                 .into_iter()
-                .map(|(event, observed)| (event, observed, None))
+                .map(|(event, observed)| (event, observed, None, None))
                 .collect(),
             effects,
         );
@@ -1099,6 +1102,7 @@ impl<S: EventStore> EngineCore<S> {
             SignedEvent,
             RelayObserved,
             Option<CommittedObservationCandidate>,
+            Option<(RelaySessionKey, String)>,
         )>,
         effects: &mut Vec<Effect>,
     ) {
@@ -1121,6 +1125,7 @@ impl<S: EventStore> EngineCore<S> {
             SignedEvent,
             RelayObserved,
             Option<CommittedObservationCandidate>,
+            Option<(RelaySessionKey, String)>,
         )>,
         effects: &mut Vec<Effect>,
     ) {
@@ -1133,13 +1138,17 @@ impl<S: EventStore> EngineCore<S> {
         let phase_cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
         let relay_list_authors: Vec<_> = events
             .iter()
-            .filter_map(|(event, _, _)| {
+            .filter_map(|(event, _, _, _)| {
                 (event.kind == nostr::Kind::RelayList).then_some(event.pubkey)
             })
             .collect();
+        let event_failure_attributions: Vec<_> = events
+            .iter()
+            .filter_map(|(_, _, _, attribution)| attribution.clone())
+            .collect();
         let publications: Vec<_> = events
             .iter()
-            .map(|(event, observed, candidate)| {
+            .map(|(event, observed, candidate, _)| {
                 candidate.map(|candidate| {
                     CommittedObservationPublication::new(
                         observed.relay.clone(),
@@ -1152,7 +1161,7 @@ impl<S: EventStore> EngineCore<S> {
             .collect();
         let observed_events = events
             .into_iter()
-            .map(|(event, observed, _)| (event, observed))
+            .map(|(event, observed, _, _)| (event, observed))
             .collect();
         #[cfg(feature = "bench-instrumentation")]
         {
@@ -1178,7 +1187,16 @@ impl<S: EventStore> EngineCore<S> {
             crate::ingest_attribution::thread_cpu_time_ns().saturating_sub(resolver_cpu_started),
         );
         match resolver_result {
-            Err(error) => self.degrade_store(error, effects),
+            Err(RelayIngestError::EventCommit(error)) => {
+                for (session, wire_sub_id) in event_failure_attributions {
+                    self.attribution
+                        .poison_event_commit_failure(&session, &wire_sub_id);
+                }
+                self.degrade_store(error, effects);
+            }
+            Err(RelayIngestError::PostCommitProjection(error)) => {
+                self.degrade_store(error, effects);
+            }
             Ok(ingest) => {
                 #[cfg(feature = "bench-instrumentation")]
                 let phase_started = std::time::Instant::now();
@@ -1382,7 +1400,7 @@ impl<S: EventStore> EngineCore<S> {
             #[cfg(feature = "bench-instrumentation")]
             crate::ingest_attribution::relay_frame_conversion(phase_started.elapsed());
             match observed_event {
-                Ok((event, candidate)) => {
+                Ok((subscription_id, event, candidate)) => {
                     #[cfg(feature = "bench-instrumentation")]
                     let phase_started = std::time::Instant::now();
                     let Some((current, session)) = self.slot_to_relay.get(&handle.slot).cloned()
@@ -1424,8 +1442,9 @@ impl<S: EventStore> EngineCore<S> {
                     let phase_started = std::time::Instant::now();
                     candidates.push((
                         event,
-                        RelayObserved::new(session.relay, self.clock),
+                        RelayObserved::new(session.relay.clone(), self.clock),
                         candidate,
+                        Some((session, subscription_id.as_str().to_string())),
                     ));
                     #[cfg(feature = "bench-instrumentation")]
                     crate::ingest_attribution::relay_frame_candidate_build(phase_started.elapsed());
@@ -1464,7 +1483,10 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         match msg {
-            RelayMessage::Event { event, .. } => {
+            RelayMessage::Event {
+                subscription_id,
+                event,
+            } => {
                 let event = event.into_owned();
                 *self
                     .events_by_session_kind
@@ -1473,7 +1495,15 @@ impl<S: EventStore> EngineCore<S> {
                     .entry(event.kind.as_u16())
                     .or_insert(0) += 1;
                 let observed = RelayObserved::new(session.relay.clone(), self.clock);
-                self.ingest_relay_events(vec![(event, observed)], &mut effects);
+                self.ingest_relay_observations(
+                    vec![(
+                        event,
+                        observed,
+                        None,
+                        Some((session, subscription_id.as_str().to_string())),
+                    )],
+                    &mut effects,
+                );
             }
             RelayMessage::EndOfStoredEvents(sub_id) => {
                 let wire_id = sub_id.as_str();
@@ -1481,13 +1511,10 @@ impl<S: EventStore> EngineCore<S> {
                 // id routes the same EOSE into the NIP-77 handoff/repair
                 // state machine after ordinary coverage attribution.
                 let resolved = self.attribution.sub_id_for_wire(&session, wire_id);
-                let attributed = self
+                let completed = self
                     .attribution
                     .attribute_eose_detailed(&session, wire_id, self.clock);
-                let (completed_send, attributed) = attributed
-                    .map_or((None, Vec::new()), |(send, coverage)| {
-                        (Some(send), coverage)
-                    });
+                let completed_send = completed.as_ref().map(CompletedAttribution::send_id);
                 // Absence settlement reads the SAME EOSE frame the coverage
                 // watermark does, on the SAME resolved subscription id -- the
                 // discovery subscription is just another entry in
@@ -1501,27 +1528,8 @@ impl<S: EventStore> EngineCore<S> {
                 let settled_any = resolved
                     .as_ref()
                     .is_some_and(|sub_id| self.discharge_relay_list_ask(sub_id));
-                for (key, interval) in attributed {
-                    if let Some(atom) = self.attribution.shape_of(key) {
-                        // Coverage rows stay keyed (context-hashed key,
-                        // relay URL) — the access distinction already lives
-                        // inside the key's own hash, so the store door takes
-                        // the session's relay.
-                        if let Err(e) = self.resolver.store_mut().record_coverage(
-                            &atom,
-                            &session.relay,
-                            interval,
-                        ) {
-                            // Persisting a coverage watermark failed (issue
-                            // #122): degrade rather than panic. The
-                            // in-memory `Effect::RecordCoverage` is skipped
-                            // too — no watermark is claimed that did not
-                            // durably land.
-                            self.degrade_store(e, &mut effects);
-                            continue;
-                        }
-                        effects.push(Effect::RecordCoverage(key, session.relay.clone(), interval));
-                    }
+                if let Some(completed) = completed {
+                    self.persist_attributed_completion(completed, &session.relay, &mut effects);
                 }
                 if settled_any {
                     // Resolution moment FOUR, in its other form: a need

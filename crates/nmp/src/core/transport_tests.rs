@@ -6,7 +6,7 @@ use super::*;
 mod relay_session_key_tests {
     use super::*;
     use nmp_router::FixtureDirectory;
-    use nmp_store::{coverage_key, MemoryStore};
+    use nmp_store::{coverage_key, CoverageInterval, MemoryStore};
     use nostr::{Keys, SubscriptionId};
 
     fn relay() -> RelayUrl {
@@ -35,7 +35,13 @@ mod relay_session_key_tests {
         let session_b = RelaySessionKey::new(relay, AccessContext::Nip42(b));
         let mut attribution = AttributionState::new();
         attribution.observe_demand([&atom]);
-        attribution.record_send(&session_a, &sub_id, &filter, BTreeSet::from([key]));
+        attribution.record_send(
+            &session_a,
+            &sub_id,
+            &filter,
+            BTreeSet::from([key]),
+            EventFailureTarget::ThisSend,
+        );
         let wire_id = wire_sub_id_string(&sub_id);
 
         assert!(attribution
@@ -72,8 +78,13 @@ mod relay_session_key_tests {
             AccessContext::Public,
         );
         let mut attribution = AttributionState::new();
-        let completed_send =
-            attribution.record_send(&session, &sub_id, &filter, BTreeSet::from([key]));
+        let completed_send = attribution.record_send(
+            &session,
+            &sub_id,
+            &filter,
+            BTreeSet::from([key]),
+            EventFailureTarget::ThisSend,
+        );
         attribution.record_send(
             &session,
             &sub_id,
@@ -82,19 +93,25 @@ mod relay_session_key_tests {
                 ..filter.clone()
             },
             BTreeSet::from([key]),
+            EventFailureTarget::ThisSend,
         );
 
         assert_eq!(
-            attribution.attribute_correlated_completion(
-                &session,
-                &wire_sub_id_string(&sub_id),
-                completed_send,
-                Timestamp::from(200u64),
-            ),
+            attribution
+                .attribute_correlated_completion(
+                    &session,
+                    &wire_sub_id_string(&sub_id),
+                    completed_send,
+                    Timestamp::from(200u64),
+                )
+                .expect("correlated completion")
+                .eligible_claims()
+                .expect("eligible completion"),
             vec![(
                 key,
                 nmp_store::CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(150u64),),
             )]
+            .as_slice()
         );
         assert_eq!(
             attribution.attribute_eose(
@@ -107,6 +124,198 @@ mod relay_session_key_tests {
                 nmp_store::CoverageInterval::new(Timestamp::from(100u64), Timestamp::from(150u64),),
             )]
         );
+    }
+
+    #[test]
+    fn event_commit_poison_is_fifo_scoped_monotonic_and_retires_with_owners() {
+        let relay = relay();
+        let public_session = RelaySessionKey::public(relay.clone());
+        let protected_session = RelaySessionKey::new(
+            relay.clone(),
+            AccessContext::Nip42(Keys::generate().public_key()),
+        );
+        let filter_a = ConcreteFilter {
+            kinds: Some(BTreeSet::from([1])),
+            ..ConcreteFilter::default()
+        };
+        let filter_b = ConcreteFilter {
+            kinds: Some(BTreeSet::from([2])),
+            ..ConcreteFilter::default()
+        };
+        let atom_a = ContextualAtom {
+            filter: filter_a.clone(),
+            source: SourceAuthority::Public,
+            access: AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
+        };
+        let atom_b = ContextualAtom {
+            filter: filter_b.clone(),
+            source: SourceAuthority::Public,
+            access: protected_session.access,
+            routing_evidence: BTreeSet::new(),
+        };
+        let key_a = coverage_key(&atom_a);
+        let key_b = coverage_key(&atom_b);
+        let sub_a = SubId::for_wire(
+            relay.clone(),
+            &filter_a,
+            &SourceAuthority::Public,
+            AccessContext::Public,
+        );
+        let sub_b = SubId::for_wire(
+            relay,
+            &filter_b,
+            &SourceAuthority::Public,
+            protected_session.access,
+        );
+        let wire_a = wire_sub_id_string(&sub_a);
+        let wire_b = wire_sub_id_string(&sub_b);
+        let mut attribution = AttributionState::new();
+        attribution.observe_demand([&atom_a, &atom_b]);
+
+        for _ in 0..2 {
+            attribution.record_send(
+                &public_session,
+                &sub_a,
+                &filter_a,
+                BTreeSet::from([key_a]),
+                EventFailureTarget::ThisSend,
+            );
+        }
+        attribution.record_send(
+            &protected_session,
+            &sub_b,
+            &filter_b,
+            BTreeSet::from([key_b]),
+            EventFailureTarget::ThisSend,
+        );
+
+        attribution.poison_event_commit_failure(&public_session, &wire_a);
+        attribution.record_send(
+            &public_session,
+            &sub_a,
+            &filter_a,
+            BTreeSet::from([key_a]),
+            EventFailureTarget::ThisSend,
+        );
+
+        for _ in 0..2 {
+            assert!(attribution
+                .attribute_eose_detailed(&public_session, &wire_a, Timestamp::from(10u64))
+                .expect("poisoned completion")
+                .eligible_claims()
+                .is_none());
+        }
+        assert_eq!(
+            attribution
+                .attribute_eose_detailed(&public_session, &wire_a, Timestamp::from(10u64))
+                .expect("later revision")
+                .eligible_claims()
+                .expect("later revision remains eligible"),
+            vec![(
+                key_a,
+                CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(10u64)),
+            )]
+            .as_slice()
+        );
+        assert_eq!(
+            attribution
+                .attribute_eose_detailed(&protected_session, &wire_b, Timestamp::from(10u64))
+                .expect("isolated protected completion")
+                .eligible_claims()
+                .expect("protected request stays eligible"),
+            vec![(
+                key_b,
+                CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(10u64)),
+            )]
+            .as_slice()
+        );
+
+        attribution.record_send(
+            &public_session,
+            &sub_a,
+            &filter_a,
+            BTreeSet::from([key_a]),
+            EventFailureTarget::ThisSend,
+        );
+        attribution.poison_event_commit_failure(&public_session, &wire_a);
+        attribution.clear_session(&public_session);
+        assert!(attribution
+            .attribute_eose_detailed(&public_session, &wire_a, Timestamp::from(10u64))
+            .is_none());
+
+        attribution.record_send(
+            &public_session,
+            &sub_a,
+            &filter_a,
+            BTreeSet::from([key_a]),
+            EventFailureTarget::ThisSend,
+        );
+        attribution.discard_sub(&sub_a);
+        assert!(attribution
+            .attribute_eose_detailed(&public_session, &wire_a, Timestamp::from(10u64))
+            .is_none());
+    }
+
+    #[test]
+    fn missing_id_event_failure_poisons_the_original_neg_send() {
+        let relay = relay();
+        let session = RelaySessionKey::public(relay.clone());
+        let filter = ConcreteFilter {
+            kinds: Some(BTreeSet::from([1])),
+            ..ConcreteFilter::default()
+        };
+        let atom = ContextualAtom {
+            filter: filter.clone(),
+            source: SourceAuthority::Public,
+            access: AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
+        };
+        let key = coverage_key(&atom);
+        let neg_sub = SubId::for_wire(
+            relay.clone(),
+            &filter,
+            &SourceAuthority::Public,
+            AccessContext::Public,
+        );
+        let backfill_filter = ConcreteFilter {
+            ids: Some(BTreeSet::from(["01".repeat(32)])),
+            ..ConcreteFilter::default()
+        };
+        let backfill_sub = SubId::for_wire(
+            relay,
+            &backfill_filter,
+            &SourceAuthority::Public,
+            AccessContext::Public,
+        );
+        let mut attribution = AttributionState::new();
+        let neg_send = attribution.record_send(
+            &session,
+            &neg_sub,
+            &filter,
+            BTreeSet::from([key]),
+            EventFailureTarget::ThisSend,
+        );
+        attribution.record_send(
+            &session,
+            &backfill_sub,
+            &backfill_filter,
+            BTreeSet::new(),
+            EventFailureTarget::Correlated(neg_send),
+        );
+
+        attribution.poison_event_commit_failure(&session, &wire_sub_id_string(&backfill_sub));
+
+        assert!(attribution
+            .attribute_correlated_completion(
+                &session,
+                &wire_sub_id_string(&neg_sub),
+                neg_send,
+                Timestamp::from(10u64),
+            )
+            .expect("original NEG completion")
+            .eligible_claims()
+            .is_none());
     }
 
     #[test]

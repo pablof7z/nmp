@@ -66,7 +66,7 @@ use nmp_grammar::{
 };
 use nmp_resolver::{
     CommittedMutationResult, CommittedRowChanges, Engine as ResolverEngine, HandleId, LiveQuery,
-    LocalAcceptResult, QueryHandle,
+    LocalAcceptResult, QueryHandle, RelayIngestError,
 };
 use nmp_router::{
     AdvertisedRelayLimits, CompileBudget, DiscoveryKinds, Lane, LanedRelay, PubkeyHex,
@@ -230,7 +230,9 @@ fn classify_relay_ack(status: bool, message: &str) -> RelayAckClass {
 const NIP65_RELAY_LIST_KIND: u16 = 10_002;
 
 pub use admission::RelayAdmissionPolicy;
-use attribution::{AttributionSendId, AttributionState};
+use attribution::{
+    AttributionSendId, AttributionState, CompletedAttribution, CoveragePoison, EventFailureTarget,
+};
 use diagnostics::{stalled_write_id, STALLED_WRITE_DETAIL_LIMIT};
 pub use diagnostics::{
     AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, DiagnosticsSnapshot, FilterCoverageEntry,

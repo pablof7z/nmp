@@ -1721,18 +1721,17 @@ pub trait EventStore {
     /// minimum of the same persistent expiration index `expire_due` drains.
     fn next_expiration(&self) -> Option<Timestamp>;
 
-    /// Record that `relay` has proven `proven` for `atom`'s window-erased
-    /// shape UNDER its declared `source`/`access` (ruling §1/§3, #106-
-    /// widened: the coverage identity is now the full [`ContextualAtom`],
-    /// never a bare `ConcreteFilter` alone -- the caller, which knows the
-    /// atom's `Demand` context, must supply it; the store has no notion of
-    /// `SourceAuthority`/`AccessContext` of its own). Merge-only: no public
-    /// lowering path exists outside `gc`.
+    /// Atomically record every coverage claim earned by one completed
+    /// request. Each tuple is `(atom, relay, proven interval)`. The coverage
+    /// identity is the full [`ContextualAtom`], never a bare
+    /// `ConcreteFilter`; the caller that owns request attribution supplies
+    /// the complete batch. A successful return makes every merged claim
+    /// visible, while an error may make none or the entire batch visible but
+    /// never a prefix. Merge-only: no public lowering path exists outside
+    /// `gc`.
     fn record_coverage(
         &mut self,
-        atom: &ContextualAtom,
-        relay: &RelayUrl,
-        proven: CoverageInterval,
+        claims: &[(ContextualAtom, RelayUrl, CoverageInterval)],
     ) -> Result<(), PersistenceError>;
 
     /// The proven interval for `key` at `relay`, or `None` if no row exists.

@@ -32,6 +32,6 @@ pub mod testkit;
 
 pub use engine::{
     CommittedCurrentRow, CommittedMutationResult, CommittedRowChanges, Engine, GraphNodeInfo,
-    GraphSnapshot, HandleId, LiveQuery, LocalAcceptResult, Metrics, QueryHandle, RelayIngestResult,
-    ResolutionNodeKind, ResolutionNodeSnapshot, ResolvedValue,
+    GraphSnapshot, HandleId, LiveQuery, LocalAcceptResult, Metrics, QueryHandle, RelayIngestError,
+    RelayIngestResult, ResolutionNodeKind, ResolutionNodeSnapshot, ResolvedValue,
 };
