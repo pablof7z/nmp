@@ -14,6 +14,7 @@
 //! step is allowed to assert on (approach doc §1.3).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -40,6 +41,37 @@ use nmp_test_support::relays::{RelayConfig, ScriptedRelay, WireRecord};
 fn local_signer(keys: &Keys) -> LocalKeySigner {
     LocalKeySigner::from_secret_bytes(keys.secret_key().as_secret_bytes())
         .expect("fixture keys are valid secp256k1 scalars")
+}
+
+/// A real signer that also counts how many times it was ASKED to sign.
+///
+/// "No signer was asked for anything" is otherwise unobservable from the
+/// receipt stream: `WriteStatus::Signed` is a lifecycle beat the engine
+/// emits for an already-signed payload too, so reading it would make the
+/// assertion mean something other than what it says. Counting the actual
+/// capability call is the fact, and it stays a fact whether the write was
+/// refused at the door or carried its own signature.
+struct CountingSigner {
+    inner: LocalKeySigner,
+    asked: Arc<AtomicUsize>,
+}
+
+impl nmp_signer::SigningCapability for CountingSigner {
+    fn public_key(&self) -> Option<nmp_signer::SignerPublicKey> {
+        self.inner.public_key()
+    }
+
+    fn is_available(&self) -> bool {
+        self.inner.is_available()
+    }
+
+    fn sign(
+        &self,
+        unsigned: nmp_signer::SignerUnsignedEvent,
+    ) -> nmp_signer::SignerOp<nmp_signer::SignerSignedEvent> {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        self.inner.sign(unsigned)
+    }
 }
 
 /// Bounded wait for a positive ("eventually true") assertion.
@@ -442,6 +474,8 @@ pub struct NmpWorld {
     /// Whether the last publish said "figure it out" rather than naming
     /// relays -- what "the app named no relay anywhere" reads.
     last_publish_was_auto: bool,
+    /// How many times a registered signer was asked to sign anything.
+    signer_asked: Arc<AtomicUsize>,
     /// Groups I administer, staged as kind:39001 fixtures at the watched
     /// relay (see [`NmpWorld::stage_administered_groups`]).
     pending_groups: Vec<String>,
@@ -782,7 +816,7 @@ impl NmpWorld {
         if let Some(active) = self.active_person.clone() {
             let keys = self.person(&active);
             handle
-                .add_signer(local_signer(&keys))
+                .add_signer(self.counting_signer(&keys))
                 .expect("local signer has a public key");
             handle.set_active_account(Some(keys.public_key()));
         }
@@ -1035,8 +1069,8 @@ impl NmpWorld {
         );
     }
 
-    /// Logging in registers a real `LocalKeySigner` (see `ensure_started`),
-    /// so a scenario whose point is "the signer was never asked" only means
+    /// Logging in registers a real signer (see `ensure_started`), so a
+    /// scenario whose point is "the signer was never asked" only means
     /// something once one exists to ask.
     pub fn assert_signer_registered(&self) {
         assert!(
@@ -1045,13 +1079,28 @@ impl NmpWorld {
         );
     }
 
+    fn counting_signer(&self, keys: &Keys) -> CountingSigner {
+        CountingSigner {
+            inner: local_signer(keys),
+            asked: Arc::clone(&self.signer_asked),
+        }
+    }
+
+    /// How many times a registered signer was actually asked to sign. Zero
+    /// is the fact behind "no signer was asked for anything" -- and it is a
+    /// real fact rather than a vacuous one, because every scenario that logs
+    /// in registers a signer that would have counted.
+    pub fn signer_ask_count(&self) -> usize {
+        self.signer_asked.load(Ordering::SeqCst)
+    }
+
     /// `When I switch to <person>'s account` (a person already known to the
     /// world, e.g. previously logged in as).
     pub async fn switch_account(&mut self, person: &str) {
         self.ensure_started().await;
         let keys = self.person(person);
         self.handle()
-            .add_signer(local_signer(&keys))
+            .add_signer(self.counting_signer(&keys))
             .expect("BDD local signer always exposes its public key");
         self.handle().set_active_account(Some(keys.public_key()));
         self.active_person = Some(person.to_string());
@@ -1082,7 +1131,7 @@ impl NmpWorld {
                 .await;
         }
         self.handle()
-            .add_signer(local_signer(&keys))
+            .add_signer(self.counting_signer(&keys))
             .expect("BDD local signer always exposes its public key");
         self.handle().set_active_account(Some(keys.public_key()));
         self.active_person = Some(name);

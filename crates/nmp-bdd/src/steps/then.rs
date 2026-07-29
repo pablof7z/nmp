@@ -1180,13 +1180,17 @@ async fn no_relay_is_contacted(w: &mut NmpWorld) {
     );
 }
 
+/// Read off the signer itself, not off the receipt: `WriteStatus::Signed`
+/// is a lifecycle beat the engine emits for an already-signed payload too,
+/// so it says nothing about whether a signer was asked.
 #[then(regex = r#"^no signer was asked for anything$"#)]
 async fn no_signer_was_asked(w: &mut NmpWorld) {
-    let signed = w.receipt_never(|seen| seen.iter().any(|s| matches!(s, WriteStatus::Signed(_))));
-    assert!(
-        signed,
-        "expected the signer never to be asked; the receipt reported Signed: {:?}",
-        w.receipt_statuses()
+    // Let anything the publish was going to do actually happen first.
+    w.receipt_never(|_| false);
+    let asked = w.signer_ask_count();
+    assert_eq!(
+        asked, 0,
+        "expected the signer never to be asked, but it was asked {asked} time(s)"
     );
 }
 
