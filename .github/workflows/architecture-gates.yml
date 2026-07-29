@@ -111,6 +111,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Falsify provider workflow ownership
+        run: bash scripts/test-nip46-provider-workflow.sh
+
       - name: Keep NIP-46 out of core signer and native artifacts
         run: bash scripts/check-nip46-provider-boundary.sh
 
