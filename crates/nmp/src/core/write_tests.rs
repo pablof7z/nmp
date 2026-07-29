@@ -20,7 +20,7 @@ mod receipt_allocator_tests {
             }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         }
     }
@@ -68,7 +68,7 @@ mod receipt_allocator_tests {
             },
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         }));
 
@@ -162,7 +162,7 @@ mod receipt_allocator_tests {
             }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         }));
         let (receipt, generation, unsigned) = accepted

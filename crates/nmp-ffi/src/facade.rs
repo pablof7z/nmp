@@ -893,8 +893,8 @@ mod tests {
     use super::*;
     use crate::types::{
         FfiAccessContext, FfiBinding, FfiCacheMode, FfiDemand, FfiDurability, FfiFilter, FfiFrame,
-        FfiRowDelta, FfiSignEventFailure, FfiSignEventRequest, FfiSourceAuthority, FfiWindow,
-        FfiWindowLoad, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
+        FfiIdentity, FfiRowDelta, FfiSignEventFailure, FfiSignEventRequest, FfiSourceAuthority,
+        FfiWindow, FfiWindowLoad, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
     };
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1606,7 +1606,7 @@ mod tests {
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
-            identity_override: None,
+            identity: FfiIdentity::Active,
             correlation: None,
         };
 
@@ -1633,12 +1633,12 @@ mod tests {
         engine.shutdown();
     }
 
-    /// #47 Unit A through the FFI boundary: an `identity_override` naming a
+    /// #47 through the FFI boundary: an `Identity::Explicit` naming a
     /// pubkey with NO registered signer capability is accepted and PARKED as
     /// `AwaitingCapability`. It must never silently terminate: after
     /// `AwaitingCapability` the stream stays open (a timeout, never `None`).
     #[tokio::test]
-    async fn ffi_override_publish_for_unregistered_pubkey_parks_awaiting_capability() {
+    async fn ffi_explicit_identity_for_unregistered_pubkey_parks_awaiting_capability() {
         let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
         let active = nostr::Keys::generate();
         let overridden = nostr::Keys::generate();
@@ -1657,7 +1657,9 @@ mod tests {
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
-            identity_override: Some(overridden.public_key().to_hex()),
+            identity: FfiIdentity::Explicit {
+                pubkey: overridden.public_key().to_hex(),
+            },
             correlation: None,
         };
 
@@ -1710,7 +1712,7 @@ mod tests {
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
-            identity_override: None,
+            identity: FfiIdentity::Active,
             correlation: None,
         };
         let receipt = engine.publish(intent).unwrap();
@@ -1794,7 +1796,7 @@ mod tests {
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
-            identity_override: None,
+            identity: FfiIdentity::Active,
             correlation: None,
         };
 
@@ -1885,7 +1887,7 @@ mod tests {
                 },
                 durability: FfiDurability::Durable,
                 routing: FfiWriteRouting::Auto,
-                identity_override: None,
+                identity: FfiIdentity::Active,
                 correlation: None,
             };
             let receipt = engine
@@ -2031,7 +2033,7 @@ mod tests {
                     }),
                     durability: nmp::Durability::Durable,
                     routing: nmp::WriteRouting::Auto,
-                    identity_override: None,
+                    identity: nmp::Identity::Active,
                     correlation: None,
                 })
                 .expect("local durable acceptance must succeed");
@@ -2099,7 +2101,7 @@ mod tests {
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
-            identity_override: None,
+            identity: FfiIdentity::Active,
             correlation: None,
         };
 

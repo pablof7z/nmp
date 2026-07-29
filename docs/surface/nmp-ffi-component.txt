@@ -3186,6 +3186,43 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiIdentity",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Active",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "Whoever is the active account at acceptance time.",
+            ),
+        },
+        Variant {
+            name: "Explicit",
+            discr: None,
+            fields: [
+                Field {
+                    name: "pubkey",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "This exact key, active or not -- including while fully logged out.\n\n`pubkey` is 64-char HEX and nothing else: the module-wide\n`convert::parse_pubkey` rule every other pubkey input here follows.\nA bech32 `npub` is REFUSED, however well-formed -- bech32 is\noutward-facing decoration an app decodes at its own boundary (with\n`decode_nostr_entity`) at the moment a human pasted it, not an\nencoding the write plane accepts\n(`docs/internals/conventions/bech32-boundary.md`). A malformed\nstring is a typed synchronous\n[`crate::convert::FfiError::InvalidPublicKey`] before any engine\ncall.\n\nA key with no registered signer parks as\n`FfiWriteStatus::AwaitingCapability` (retained, not terminated)\nuntil that capability attaches. Acceptance PINS the resolved key\neither way, so a later `set_active_account` cannot retarget the\nwrite.",
+            ),
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "The identity one write publishes under (`nmp::Identity` mirror): two\nvariants, mirrored exactly, with no third \"unset\" state on any platform.\n\n[`Active`](FfiIdentity::Active) is a positive instruction (\"whoever is\nthe active account at acceptance\"), not the absence of one -- which is\nwhy this is a closed enum rather than the nullable pubkey string it\nreplaces. On an `Event` payload the identity SELECTS the author (a\nbuilder states none, so there is nothing for it to contradict); on a\n`Signed` payload it may only RESTATE the author already frozen in the\nbytes, and naming anybody else is a consent/author contradiction\nrejected at the engine's acceptance boundary as\n`FfiWriteStatus::Failed` -- no `Accepted` ever precedes it.",
+    ),
+}
+
+enum Enum {
     name: "FfiIdentityField",
     module_path: "nmp_ffi",
     remote: false,
@@ -4414,7 +4451,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "`nmp::WriteStatus::AwaitingCapability` mirror (#47 Unit B): `pubkey`\n(64-char hex, the module-wide convention) is the exact identity\nFROZEN at acceptance that no registered signer currently answers\nfor -- the same pubkey an `identity_override` pinned, or the active\naccount at publish time when no override was given. Retained, not\nterminal: this fact re-arrives verbatim on restart replay, and only\nregistering a signer for THIS exact pubkey resumes the write --\nnever a different (even currently-active) identity.",
+                "`nmp::WriteStatus::AwaitingCapability` mirror (#47 Unit B): `pubkey`\n(64-char hex, the module-wide convention) is the exact identity\nFROZEN at acceptance that no registered signer currently answers\nfor -- the same pubkey [`FfiIdentity::Explicit`] pinned, or the\naccount that was active at publish time under\n[`FfiIdentity::Active`]. Retained, not\nterminal: this fact re-arrives verbatim on restart replay, and only\nregistering a signer for THIS exact pubkey resumes the write --\nnever a different (even currently-active) identity.",
             ),
         },
         Variant {
@@ -6492,15 +6529,14 @@ record Record {
             docstring: None,
         },
         Field {
-            name: "identity_override",
-            type_: Optional {
-                inner_type: String,
+            name: "identity",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiIdentity",
             },
-            default: Some(
-                None,
-            ),
+            default: None,
             docstring: Some(
-                "`nmp::WriteIntent::identity_override` mirror (#47 Unit A): the\nidentity this ONE write is published under, as 64-char hex (the\nmodule-wide `convert::parse_pubkey` rule every other pubkey input\nhere follows) or bech32 `npub` (an identity is the one input an app\nmost plausibly holds in display form). `None` -- the default, and\nwhat every existing caller gets -- means \"the active account at\nacceptance time\", unchanged.\nOn an `Event` payload `Some` SELECTS the author -- a builder states\nnone, so there is nothing for it to contradict. On a `Signed`\npayload it may only RESTATE the author already frozen in the bytes:\nnaming that author changes nothing, and naming anybody else is a\nconsent/author contradiction. A MALFORMED string is a typed\nsynchronous [`crate::convert::FfiError::InvalidPublicKey`] before any\nengine call, while a well-formed-but-contradictory override on a\nsigned event is rejected at the engine's acceptance boundary\nas `FfiWriteStatus::Failed` on the receipt stream -- no `Accepted`\never precedes it. An override naming a pubkey with no registered\nsigner parks as `FfiWriteStatus::AwaitingCapability` (retained, not\nterminated) until that capability attaches; acceptance PINS the\noverride, so a later `set_active_account` cannot retarget the write.",
+                "`nmp::WriteIntent::identity` mirror -- see [`FfiIdentity`].\n\nUnlike its Rust twin this field carries NO `#[uniffi(default = ...)]`\nand must be stated: UniFFI 0.29 record defaults accept only literals\n(`None`/`Some(lit)`/`[]`/int/float/bool/string), so an enum-valued\ndefault is not expressible at this boundary at all. The ergonomic\nnative tiers (`NMP`'s `WriteIntent`, `com.nmp.sdk.WriteIntent`)\ndefault it to `.active` in their own language, which is where app\ncode actually writes it.",
             ),
         },
         Field {

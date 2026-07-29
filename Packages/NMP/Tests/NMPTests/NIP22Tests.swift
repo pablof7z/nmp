@@ -227,7 +227,7 @@ final class NIP22Tests: XCTestCase {
         )
         XCTAssertEqual(intent.durability, .durable)
         XCTAssertEqual(intent.routing, .auto)
-        XCTAssertNil(intent.identityOverride)
+        XCTAssertEqual(intent.identity, .active)
         XCTAssertNil(intent.correlation)
     }
 

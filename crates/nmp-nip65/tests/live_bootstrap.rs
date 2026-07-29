@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use nmp::{
     Binding, Durability, Engine, EngineConfig, EventBuilder, FifoReceiver, FifoRecvTimeoutError,
-    Filter, Kind, LiveQuery, RelayUrl, RowDelta, SourceStatus, Timestamp, WriteIntent,
+    Filter, Identity, Kind, LiveQuery, RelayUrl, RowDelta, SourceStatus, Timestamp, WriteIntent,
     WritePayload, WriteRouting, WriteStatus,
 };
 use nmp_nip65::{publish_relay_list_bootstrap, BootstrapRelayList, RelayListEntry, RelayUsage};
@@ -80,7 +80,7 @@ fn ordinary_write(content: &str) -> WriteIntent {
         }),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
-        identity_override: None,
+        identity: Identity::Active,
         correlation: None,
     }
 }

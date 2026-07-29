@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig};
 use nmp_ffi::types::{
-    FfiDurability, FfiFilter, FfiFrame, FfiRowDelta, FfiWriteIntent, FfiWritePayload,
+    FfiDurability, FfiFilter, FfiFrame, FfiIdentity, FfiRowDelta, FfiWriteIntent, FfiWritePayload,
     FfiWriteRouting,
 };
 
@@ -73,7 +73,7 @@ async fn stalled_consumer_is_bounded_and_does_not_delay_active_consumer_or_engin
                 },
                 durability: FfiDurability::Durable,
                 routing: FfiWriteRouting::Auto,
-                identity_override: None,
+                identity: FfiIdentity::Active,
                 correlation: None,
             })
             .expect("publish accepted");

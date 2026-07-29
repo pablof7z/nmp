@@ -35,8 +35,8 @@ use std::time::{Duration, Instant};
 
 use nmp::{
     Binding, Demand, Derived, DiagnosticsSnapshot, Durability, Engine, EngineConfig, EventBuilder,
-    Filter, Frame, IdentityField, Kind, LiveQuery, PublicKey, RowDelta, Selector, Timestamp,
-    WriteIntent, WritePayload, WriteRouting,
+    Filter, Frame, Identity, IdentityField, Kind, LiveQuery, PublicKey, RowDelta, Selector,
+    Timestamp, WriteIntent, WritePayload, WriteRouting,
 };
 use nostr::Keys;
 
@@ -244,7 +244,7 @@ fn main() {
                     ),
                     durability: Durability::Durable,
                     routing: WriteRouting::Auto,
-                    identity_override: None,
+                    identity: Identity::Active,
                     correlation: None,
                 })
                 .expect("engine is open just after construction"),

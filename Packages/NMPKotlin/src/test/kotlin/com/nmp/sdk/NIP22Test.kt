@@ -238,7 +238,7 @@ class NIP22Test {
         )
         assertEquals(Durability.Durable, intent.durability)
         assertEquals(WriteRouting.Auto, intent.routing)
-        assertEquals(null, intent.identityOverride)
+        assertEquals(Identity.Active, intent.identity)
         assertEquals(null, intent.correlation)
     }
 

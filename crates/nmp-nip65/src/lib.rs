@@ -19,7 +19,7 @@
 use std::collections::BTreeSet;
 
 use nmp::{
-    CorrelationToken, Durability, Engine, EngineError, EventBuilder, Kind, PublicKey,
+    CorrelationToken, Durability, Engine, EngineError, EventBuilder, Identity, Kind, PublicKey,
     ReceiptStream, RelayUrl, Tag, WriteIntent, WritePayload, WriteRouting,
 };
 use nostr::nips::nip65::RelayMetadata;
@@ -267,7 +267,7 @@ fn compose_relay_list_bootstrap(request: BootstrapRelayList) -> WriteIntent {
         // builder has no author of its own, so that name is now what
         // selects the signing identity rather than something the engine
         // has to compare a stamped author against.
-        identity_override: Some(author),
+        identity: Identity::Explicit(author),
         correlation,
     }
 }
@@ -377,7 +377,7 @@ mod tests {
         .unwrap();
 
         let intent = compose_relay_list_bootstrap(request);
-        assert_eq!(intent.identity_override, Some(author));
+        assert_eq!(intent.identity, Identity::Explicit(author));
         let WritePayload::Event(builder) = &intent.payload else {
             panic!("bootstrap must compose one builder")
         };

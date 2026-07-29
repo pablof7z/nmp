@@ -33,6 +33,13 @@
 //!   lazy `ensure_started` that turns all of it into a running world.
 //! - `actions` -- `When`-time acts: open a feed, publish, switch account,
 //!   another user posts, a relay drops or comes back.
+//! - `identity` -- the identity plane: accounts named by pubkey, the write
+//!   that named one, and the restart that proves an accepted write's author
+//!   was decided once.
+//! - `signers` -- the capability plane: which keys this world can sign for,
+//!   when they answer, and who was asked. Distinct from `identity` because
+//!   a capability may arrive minutes after the identity was frozen, and the
+//!   gap between them is what `awaiting-signer.feature` is about.
 //! - `watches` -- watching one named relay directly, which is a separate
 //!   concern from the feed: it exists to observe what NMP puts on a SOCKET,
 //!   so it owns the watch bookkeeping, the group fixtures that feed it, and
@@ -44,16 +51,19 @@
 
 mod actions;
 mod budgets;
+mod identity;
 mod observe;
 mod queries;
+mod signers;
 mod staging;
 mod watches;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use nostr::Keys;
+use nostr::{Keys, PublicKey};
 
 use nmp::mechanism::runtime::{EngineThread, Handle};
 use nmp_local_signer::LocalKeySigner;
@@ -61,6 +71,7 @@ use nmp_local_signer::LocalKeySigner;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 
 use self::observe::{DiagFeed, FeedState, ReceiptState};
+use self::signers::SignerGate;
 use self::staging::{PendingContactList, PendingNote};
 
 pub use self::budgets::{EVENTUALLY, NEVER, RECONNECT, WIRE_QUIET, WIRE_SETTLE};
@@ -91,7 +102,12 @@ fn local_signer(keys: &Keys) -> LocalKeySigner {
 /// refused at the door or carried its own signature.
 struct CountingSigner {
     inner: LocalKeySigner,
+    pubkey: PublicKey,
     asked: Arc<AtomicUsize>,
+    /// The same ask, attributed to the KEY it was asked of. "Neither A nor B
+    /// was asked to sign it" is a claim about which signer was approached,
+    /// and the total above cannot answer it.
+    asked_by: Arc<Mutex<BTreeMap<PublicKey, usize>>>,
 }
 
 impl nmp_signer::SigningCapability for CountingSigner {
@@ -108,6 +124,7 @@ impl nmp_signer::SigningCapability for CountingSigner {
         unsigned: nmp_signer::SignerUnsignedEvent,
     ) -> nmp_signer::SignerOp<nmp_signer::SignerSignedEvent> {
         self.asked.fetch_add(1, Ordering::SeqCst);
+        NmpWorld::count_ask(&self.asked_by, self.pubkey);
         self.inner.sign(unsigned)
     }
 }
@@ -135,6 +152,8 @@ pub struct NmpWorld {
     last_publish_was_auto: bool,
     /// How many times a registered signer was asked to sign anything.
     signer_asked: Arc<AtomicUsize>,
+    /// The same, per key -- see [`CountingSigner::asked_by`].
+    signer_asked_by: Arc<Mutex<BTreeMap<PublicKey, usize>>>,
     /// Groups I administer, staged as kind:39001 fixtures at the watched
     /// relay (see [`NmpWorld::stage_administered_groups`]).
     pending_groups: Vec<String>,
@@ -144,6 +163,52 @@ pub struct NmpWorld {
     ts_counter: u64,
     switch_counter: u64,
     started: bool,
+
+    // ---- the identity plane (`world::identity`) ----------------------
+    /// Every account an identity scenario registered, in the order it did.
+    identity_labels: Vec<String>,
+    /// Of those, the ones a signing capability is attached for. The
+    /// difference between the two lists is the whole subject of
+    /// `features/identity/awaiting-signer.feature`.
+    identities_with_signers: Vec<String>,
+    /// The one a scenario refers back to as "the podcast identity".
+    podcast_identity: Option<String>,
+    /// Signers the scenario said are SLOW to answer -- registered, asked,
+    /// and outstanding until a later step releases them.
+    slow_signers: Vec<String>,
+    signer_gates: HashMap<String, Arc<SignerGate>>,
+    /// One receipt per published text, because an identity scenario may
+    /// publish twice and then ask about each by what it said.
+    receipts_by_text: HashMap<String, ReceiptState>,
+    last_receipt_text: Option<String>,
+    /// Which registered identity the last publish RESOLVED to -- what
+    /// `Active` meant at the moment it was accepted, not what it would
+    /// mean now.
+    last_publish_label: Option<String>,
+    /// The stable id the publish door returned, for cancel and reattach.
+    last_receipt_id: Option<nmp::mechanism::core::ReceiptId>,
+    /// The frozen body's id as it stood before a restart, so the far side
+    /// can be compared against it byte for byte.
+    last_receipt_body: Option<nostr::EventId>,
+    /// The reattached stream on the far side of a restart -- the only
+    /// stream that exists there.
+    restarted_receipt: Option<ReceiptState>,
+    /// The display form a user pasted, and what the app decoded it to.
+    pasted_npub: Option<String>,
+    decoded_identity: Option<PublicKey>,
+    /// The app's own refusal when a step handed a display form where a key
+    /// belongs.
+    identity_refusal: Option<String>,
+    /// Whether this scenario runs on a store that outlives its engine.
+    /// Set by the identity `Given`s; see `staging::open_store` for why that
+    /// is the question, and why it has to be answered before start-up.
+    durable_store: bool,
+    /// Where that store lives, when there is one. A real store on real disk,
+    /// kept for the lifetime of the scenario, is what makes "I reconstruct
+    /// the engine from the same durable store" a genuine process boundary
+    /// rather than a handle swap.
+    store_dir: Option<tempfile::TempDir>,
+    store_path: Option<PathBuf>,
 
     /// The relay every `watch` step pins its demand to -- the subject of the
     /// subscription-collapse scenarios.
@@ -209,7 +274,9 @@ impl NmpWorld {
     ) -> impl nmp_signer::SigningCapability + use<> {
         CountingSigner {
             inner: local_signer(keys),
+            pubkey: keys.public_key(),
             asked: Arc::clone(&self.signer_asked),
+            asked_by: Arc::clone(&self.signer_asked_by),
         }
     }
 }

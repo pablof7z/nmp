@@ -18,8 +18,8 @@ use nmp::mechanism::core::{
 };
 use nmp::mechanism::outbox::WriteStatus;
 use nmp_grammar::{
-    AccessContext, CorrelationToken, Durability, RelaySessionKey, WriteIntent, WritePayload,
-    WriteRouting,
+    AccessContext, CorrelationToken, Durability, Identity, RelaySessionKey, WriteIntent,
+    WritePayload, WriteRouting,
 };
 use nmp_router::FixtureDirectory;
 use nmp_store::{EventStore, RedbStore};
@@ -115,7 +115,7 @@ fn kill_after_durable_acceptance_reattaches_by_token_alone_after_restart() {
             ))),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: Some(token(tok)),
         }));
         let id = receipt_id(&effects);
@@ -179,7 +179,7 @@ fn terminal_convergence_survives_restart_and_replays_by_token() {
             ))),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: Some(token(tok)),
         }));
         let id = receipt_id(&effects);
@@ -223,7 +223,7 @@ fn double_submit_same_token_across_a_restart_mints_no_second_obligation() {
             ))),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: Some(token(tok)),
         }));
         receipt_id(&effects)
@@ -243,7 +243,7 @@ fn double_submit_same_token_across_a_restart_mints_no_second_obligation() {
         ))),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
-        identity_override: None,
+        identity: Identity::Active,
         correlation: Some(token(tok)),
     }));
     let retried_id = receipt_id(&effects);
@@ -426,7 +426,7 @@ fn partial_relay_ack_survives_restart_and_replays_by_token() {
             payload: WritePayload::Signed(event.clone()),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: Some(token(tok)),
         }));
         assert!(effects.iter().any(|effect| matches!(effect,
@@ -510,7 +510,7 @@ fn partial_relay_reject_survives_restart_and_replays_by_token() {
             payload: WritePayload::Signed(event.clone()),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: Some(token(tok)),
         }));
         assert!(effects.iter().any(|effect| matches!(effect,

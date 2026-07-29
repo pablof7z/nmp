@@ -12,7 +12,7 @@
 
 use nostr::{PublicKey, Tag};
 
-use nmp_grammar::{Durability, EventBuilder, WriteIntent, WritePayload, WriteRouting};
+use nmp_grammar::{Durability, EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 
 use nmp_test_support::relays::ScriptedRelay;
 
@@ -98,7 +98,7 @@ impl NmpWorld {
                 }),
                 durability: Durability::Durable,
                 routing: WriteRouting::Auto,
-                identity_override: None,
+                identity: Identity::Active,
                 correlation: None,
             })
             .expect("BDD receipt correlation namespace must be available");
@@ -117,7 +117,7 @@ impl NmpWorld {
             payload: WritePayload::Event(EventBuilder::new(nostr::Kind::TextNote).content(text)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         });
     }
@@ -149,7 +149,7 @@ impl NmpWorld {
             payload: WritePayload::Event(EventBuilder::new(nostr::Kind::TextNote).content(text)),
             durability: Durability::Durable,
             routing,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         });
     }
@@ -177,7 +177,7 @@ impl NmpWorld {
             payload: WritePayload::Signed(event),
             durability: Durability::Durable,
             routing,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         });
     }

@@ -178,6 +178,38 @@ impl ReceiptState {
             }
         }
     }
+
+    /// The same bounded read as [`Self::eventually`], at a CALLER-chosen
+    /// window. `eventually` fixes it at `EVENTUALLY`, which is right for the
+    /// world's single "the publish", but the identity plane needs both that
+    /// and the shorter `NEVER` settle over receipts it keys by the text a
+    /// scenario published.
+    pub(super) fn eventually_within(
+        &mut self,
+        timeout: Duration,
+        pred: impl Fn(&[WriteStatus]) -> bool,
+    ) -> bool {
+        self.drain_available();
+        if pred(&self.seen) {
+            return true;
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            match self.rx.recv_timeout(remaining) {
+                Ok(status) => {
+                    self.seen.push(status);
+                    if pred(&self.seen) {
+                        return true;
+                    }
+                }
+                Err(_) => return false,
+            }
+        }
+    }
 }
 
 /// Forwards the single-slot `LatestReceiver<DiagnosticsSnapshot>` into a

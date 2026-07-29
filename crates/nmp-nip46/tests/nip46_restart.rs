@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use nmp::mechanism::core::{RelayAdmissionPolicy, RowDelta};
 use nmp::mechanism::outbox::WriteStatus;
 use nmp::mechanism::runtime::{EngineThread, FifoReceiver, ReceiptReattachment, RowsReceiver};
-use nmp_grammar::{Binding, Durability, Filter, WriteIntent, WritePayload, WriteRouting};
+use nmp_grammar::{Binding, Durability, Filter, Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_nip46::Nip46Signer;
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
@@ -340,7 +340,7 @@ fn offline_accept_restart_real_bunker_reattach_publish_and_ack() {
                 payload: WritePayload::Event(body_of(&unsigned)),
                 durability: Durability::Durable,
                 routing: WriteRouting::Auto,
-                identity_override: None,
+                identity: Identity::Active,
                 correlation: None,
             })
             .unwrap();
@@ -493,7 +493,7 @@ fn mutated_real_bunker_response_retracts_pending_and_restores_replaceable_predec
             payload: WritePayload::Event(body_of(&replacement)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .unwrap();
@@ -589,7 +589,7 @@ fn checkpoint_restore_reattaches_durable_write_without_repairing() {
                 payload: WritePayload::Event(body_of(&unsigned)),
                 durability: Durability::Durable,
                 routing: WriteRouting::Auto,
-                identity_override: None,
+                identity: Identity::Active,
                 correlation: None,
             })
             .unwrap();

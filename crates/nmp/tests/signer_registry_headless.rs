@@ -24,7 +24,7 @@ use nmp::mechanism::core::RowDelta;
 use nmp::mechanism::outbox::WriteStatus;
 use nmp::mechanism::runtime::{EngineThread, FifoReceiver, FifoRecvTimeoutError, RowsReceiver};
 use nmp_grammar::{Binding, Filter, IdentityField};
-use nmp_grammar::{Durability, EventBuilder, WriteIntent, WritePayload, WriteRouting};
+use nmp_grammar::{Durability, EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_local_signer::LocalKeySigner;
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureDirectory;
@@ -244,7 +244,7 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
             payload: WritePayload::Event(body_of(&unsigned_as_b)),
             durability: Durability::AtMostOnce,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .expect("receipt id allocation");
@@ -272,7 +272,7 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
             payload: WritePayload::Event(body_of(&unsigned_as_a_while_b_active)),
             durability: Durability::AtMostOnce,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .expect("receipt id allocation");
@@ -298,7 +298,7 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
             payload: WritePayload::Event(body_of(&unsigned_as_a)),
             durability: Durability::AtMostOnce,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .expect("receipt id allocation");
@@ -347,7 +347,7 @@ fn no_active_account_cannot_select_an_arbitrary_registered_signer() {
             payload: WritePayload::Event(body_of(&unsigned)),
             durability: Durability::AtMostOnce,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .expect("receipt id allocation");
@@ -390,7 +390,7 @@ fn active_a_rejects_b_authored_default_even_when_b_is_registered() {
             }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .expect("receipt id allocation");
@@ -450,7 +450,7 @@ fn a_builder_composed_before_a_switch_publishes_as_the_account_active_at_accepta
             payload: WritePayload::Event(composed_while_a_was_active),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .expect("the engine is open");
@@ -503,7 +503,7 @@ fn attaching_matching_signer_rearms_awaiting_intent() {
             }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .expect("receipt id allocation");
@@ -559,7 +559,7 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
             }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .expect("receipt id allocation");
@@ -626,7 +626,7 @@ fn stale_registration_cannot_detach_replacement_for_same_pubkey() {
             }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .expect("receipt id allocation");
@@ -645,7 +645,7 @@ fn stale_registration_cannot_detach_replacement_for_same_pubkey() {
     engine_thread.join();
 }
 
-// ---- explicit per-write identity override (#47) --------------------------
+// ---- explicit per-write identity (#47) ------------------------------------
 
 /// Drains `rx` for `window`, panicking if any status matches `forbidden`.
 /// The #47 no-retarget falsifiers need a bounded NEGATIVE observation: after
@@ -675,14 +675,14 @@ fn assert_no_status_within(
 }
 
 /// #47 falsifier (a) at the registry seam: with A active and B merely
-/// REGISTERED, a B-authored draft carrying `identity_override: Some(B)`
+/// REGISTERED, a builder carrying `Identity::Explicit(B)`
 /// signs with B's own key -- `Signed` carries the exact id of the frozen
 /// B-authored body, which commits to both author and content -- and the
 /// stored row's promoted event verifies cryptographically. A default
-/// publish immediately after still signs as A, so the override moved
+/// publish immediately after still signs as A, so naming B moved
 /// nothing but its own write.
 #[test]
-fn identity_override_signs_as_registered_secondary_without_rerooting_active() {
+fn an_explicit_identity_signs_as_a_registered_secondary_without_rerooting_active() {
     let a = Keys::generate();
     let b = Keys::generate();
     let (engine_thread, handle) = EngineThread::spawn(
@@ -716,7 +716,7 @@ fn identity_override_signs_as_registered_secondary_without_rerooting_active() {
             payload: WritePayload::Event(body_of(&draft)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: Some(b.public_key()),
+            identity: Identity::Explicit(b.public_key()),
             correlation: None,
         })
         .expect("receipt id allocation");
@@ -776,7 +776,7 @@ fn identity_override_signs_as_registered_secondary_without_rerooting_active() {
             payload: WritePayload::Event(body_of(&a_draft)),
             durability: Durability::AtMostOnce,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         })
         .expect("receipt id allocation");
@@ -827,7 +827,7 @@ fn unregistered_override_parks_durably_and_never_retargets_on_account_switch() {
             payload: WritePayload::Event(body_of(&draft)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: Some(b.public_key()),
+            identity: Identity::Explicit(b.public_key()),
             correlation: None,
         })
         .expect("receipt id allocation");
@@ -865,13 +865,13 @@ fn unregistered_override_parks_durably_and_never_retargets_on_account_switch() {
     engine_thread.join();
 }
 
-/// #47 falsifier (e): an explicit override needs NO active account at all --
-/// logged fully out, a B-authored draft with `identity_override: Some(B)`
+/// #47 falsifier (e): an explicit identity needs NO active account at all --
+/// logged fully out, a builder with `Identity::Explicit(B)`
 /// and B's registered capability still signs. (Contrast with
 /// [`no_active_account_cannot_select_an_arbitrary_registered_signer`]: the
 /// DEFAULT path in the same state fails closed.)
 #[test]
-fn identity_override_signs_while_logged_out() {
+fn an_explicit_identity_signs_while_logged_out() {
     let b = Keys::generate();
     let (engine_thread, handle) = EngineThread::spawn(
         MemoryStore::new(),
@@ -899,7 +899,7 @@ fn identity_override_signs_while_logged_out() {
             payload: WritePayload::Event(body_of(&draft)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: Some(b.public_key()),
+            identity: Identity::Explicit(b.public_key()),
             correlation: None,
         })
         .expect("receipt id allocation");

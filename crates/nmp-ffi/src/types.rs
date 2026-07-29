@@ -637,34 +637,59 @@ pub enum FfiWritePayload {
     },
 }
 
+/// The identity one write publishes under (`nmp::Identity` mirror): two
+/// variants, mirrored exactly, with no third "unset" state on any platform.
+///
+/// [`Active`](FfiIdentity::Active) is a positive instruction ("whoever is
+/// the active account at acceptance"), not the absence of one -- which is
+/// why this is a closed enum rather than the nullable pubkey string it
+/// replaces. On an `Event` payload the identity SELECTS the author (a
+/// builder states none, so there is nothing for it to contradict); on a
+/// `Signed` payload it may only RESTATE the author already frozen in the
+/// bytes, and naming anybody else is a consent/author contradiction
+/// rejected at the engine's acceptance boundary as
+/// `FfiWriteStatus::Failed` -- no `Accepted` ever precedes it.
+#[derive(Debug, Clone, PartialEq, Eq, Enum)]
+pub enum FfiIdentity {
+    /// Whoever is the active account at acceptance time.
+    Active,
+    /// This exact key, active or not -- including while fully logged out.
+    ///
+    /// `pubkey` is 64-char HEX and nothing else: the module-wide
+    /// `convert::parse_pubkey` rule every other pubkey input here follows.
+    /// A bech32 `npub` is REFUSED, however well-formed -- bech32 is
+    /// outward-facing decoration an app decodes at its own boundary (with
+    /// `decode_nostr_entity`) at the moment a human pasted it, not an
+    /// encoding the write plane accepts
+    /// (`docs/internals/conventions/bech32-boundary.md`). A malformed
+    /// string is a typed synchronous
+    /// [`crate::convert::FfiError::InvalidPublicKey`] before any engine
+    /// call.
+    ///
+    /// A key with no registered signer parks as
+    /// `FfiWriteStatus::AwaitingCapability` (retained, not terminated)
+    /// until that capability attaches. Acceptance PINS the resolved key
+    /// either way, so a later `set_active_account` cannot retarget the
+    /// write.
+    Explicit { pubkey: String },
+}
+
 /// A caller's publish request (`nmp::WriteIntent` mirror).
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiWriteIntent {
     pub payload: FfiWritePayload,
     pub durability: FfiDurability,
     pub routing: FfiWriteRouting,
-    /// `nmp::WriteIntent::identity_override` mirror (#47 Unit A): the
-    /// identity this ONE write is published under, as 64-char hex (the
-    /// module-wide `convert::parse_pubkey` rule every other pubkey input
-    /// here follows) or bech32 `npub` (an identity is the one input an app
-    /// most plausibly holds in display form). `None` -- the default, and
-    /// what every existing caller gets -- means "the active account at
-    /// acceptance time", unchanged.
-    /// On an `Event` payload `Some` SELECTS the author -- a builder states
-    /// none, so there is nothing for it to contradict. On a `Signed`
-    /// payload it may only RESTATE the author already frozen in the bytes:
-    /// naming that author changes nothing, and naming anybody else is a
-    /// consent/author contradiction. A MALFORMED string is a typed
-    /// synchronous [`crate::convert::FfiError::InvalidPublicKey`] before any
-    /// engine call, while a well-formed-but-contradictory override on a
-    /// signed event is rejected at the engine's acceptance boundary
-    /// as `FfiWriteStatus::Failed` on the receipt stream -- no `Accepted`
-    /// ever precedes it. An override naming a pubkey with no registered
-    /// signer parks as `FfiWriteStatus::AwaitingCapability` (retained, not
-    /// terminated) until that capability attaches; acceptance PINS the
-    /// override, so a later `set_active_account` cannot retarget the write.
-    #[uniffi(default = None)]
-    pub identity_override: Option<String>,
+    /// `nmp::WriteIntent::identity` mirror -- see [`FfiIdentity`].
+    ///
+    /// Unlike its Rust twin this field carries NO `#[uniffi(default = ...)]`
+    /// and must be stated: UniFFI 0.29 record defaults accept only literals
+    /// (`None`/`Some(lit)`/`[]`/int/float/bool/string), so an enum-valued
+    /// default is not expressible at this boundary at all. The ergonomic
+    /// native tiers (`NMP`'s `WriteIntent`, `com.nmp.sdk.WriteIntent`)
+    /// default it to `.active` in their own language, which is where app
+    /// code actually writes it.
+    pub identity: FfiIdentity,
     /// `nmp_grammar::WriteIntent::correlation` mirror (#591): a caller-
     /// generated crash-safe correlation/idempotency token. `None` -- the
     /// default -- opts this write out of correlation entirely. `Some`
@@ -804,8 +829,9 @@ pub enum FfiWriteStatus {
     /// `nmp::WriteStatus::AwaitingCapability` mirror (#47 Unit B): `pubkey`
     /// (64-char hex, the module-wide convention) is the exact identity
     /// FROZEN at acceptance that no registered signer currently answers
-    /// for -- the same pubkey an `identity_override` pinned, or the active
-    /// account at publish time when no override was given. Retained, not
+    /// for -- the same pubkey [`FfiIdentity::Explicit`] pinned, or the
+    /// account that was active at publish time under
+    /// [`FfiIdentity::Active`]. Retained, not
     /// terminal: this fact re-arrives verbatim on restart replay, and only
     /// registering a signer for THIS exact pubkey resumes the write --
     /// never a different (even currently-active) identity.

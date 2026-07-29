@@ -26,7 +26,7 @@ fn an_explicit_route_with_no_relays_is_refused_before_acceptance() {
         payload: WritePayload::Event(draft(1, "nowhere")),
         durability: Durability::Durable,
         routing: WriteRouting::Explicit(Vec::new()),
-        identity_override: None,
+        identity: Identity::Active,
         correlation: None,
     }));
 
@@ -70,7 +70,7 @@ fn an_unreachable_explicit_relay_is_accepted_because_the_door_cannot_know() {
         payload: WritePayload::Event(draft(1, "hello")),
         durability: Durability::Durable,
         routing: WriteRouting::Explicit(vec![nowhere.clone()]),
-        identity_override: None,
+        identity: Identity::Active,
         correlation: None,
     }));
     assert!(
@@ -232,7 +232,7 @@ fn ephemeral_written_handoff_cannot_mint_persisted_sent_truth() {
         payload: WritePayload::Event(draft(93, "ephemeral handoff")),
         durability: Durability::Ephemeral,
         routing: WriteRouting::Explicit(vec![relay_a.clone(), relay_b.clone()]),
-        identity_override: None,
+        identity: Identity::Active,
         correlation: None,
     }));
     let (id, generation, unsigned) = find_sign_request(&accepted);
@@ -520,7 +520,7 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
             payload: WritePayload::Event(draft(86, "dynamic author route")),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         }));
         let (id, generation, unsigned) = find_sign_request(&accepted);
@@ -593,7 +593,7 @@ fn author_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vo
             payload: WritePayload::Event(draft(87, "dynamic author route")),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         }));
         let (id, generation, unsigned) = find_sign_request(&accepted);
@@ -723,7 +723,7 @@ fn route_revision_failure_emits_no_attempt_or_wire_and_claims_no_crash_durable_u
             payload: WritePayload::Event(draft(88, "volatile route")),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         }));
         let (id, generation, unsigned) = find_sign_request(&accepted);
@@ -771,7 +771,7 @@ fn write_ack_per_relay() {
         payload: WritePayload::Event(draft(1, "durable ack test")),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
-        identity_override: None,
+        identity: Identity::Active,
         correlation: None,
     }));
     let (id, generation, u) = find_sign_request(&effects);
@@ -850,7 +850,7 @@ fn uncommitted_attempt_terminal_emits_no_receipt_and_keeps_lane_live() {
         payload: WritePayload::Event(draft(2, "finish persistence")),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
-        identity_override: None,
+        identity: Identity::Active,
         correlation: None,
     }));
     let (id, generation, unsigned) = find_sign_request(&effects);
@@ -894,7 +894,7 @@ fn unaccepted_failure_ids_are_distinct_and_disjoint_from_store_receipts() {
             payload: WritePayload::Event(draft(seq, "unaccepted")),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
-            identity_override: None,
+            identity: Identity::Active,
             correlation: None,
         }))
         .into_iter()

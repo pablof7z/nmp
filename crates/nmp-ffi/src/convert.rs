@@ -17,12 +17,12 @@ use nmp::{
     CancelWriteError, CancelWriteOutcome, CorrelationToken, CoverageInterval, Demand as GDemand,
     DemandError as GDemandError, Derived as GDerived, DiagnosticsSnapshot,
     Durability as GDurability, EventBuilder as GEventBuilder, Filter as GFilter,
-    FilterCoverageEntry, Frame, Freshness as GFreshness, IdentityField as GIdentityField,
-    IndexedTagName, Lane, RelayDiagnosticsSnapshot, RequestRowsError, Row, RowDelta,
-    Selector as GSelector, SetAlgebra as GSetAlgebra, SetOp as GSetOp, ShortfallFact,
-    SourceAuthority as GSourceAuthority, SourceEvidence, SourceStatus, Window, WindowLoad,
-    WriteIntent as GWriteIntent, WritePayload as GWritePayload, WriteRouting as GWriteRouting,
-    WriteStatus as GWriteStatus,
+    FilterCoverageEntry, Frame, Freshness as GFreshness, Identity as GIdentity,
+    IdentityField as GIdentityField, IndexedTagName, Lane, RelayDiagnosticsSnapshot,
+    RequestRowsError, Row, RowDelta, Selector as GSelector, SetAlgebra as GSetAlgebra,
+    SetOp as GSetOp, ShortfallFact, SourceAuthority as GSourceAuthority, SourceEvidence,
+    SourceStatus, Window, WindowLoad, WriteIntent as GWriteIntent, WritePayload as GWritePayload,
+    WriteRouting as GWriteRouting, WriteStatus as GWriteStatus,
 };
 use nostr::secp256k1::schnorr::Signature;
 use nostr::{Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayUrl, Tag, Timestamp};
@@ -31,11 +31,11 @@ use crate::types::{
     FfiAccessContext, FfiAcquisitionEvidence, FfiAuthDiagnostics, FfiAuthPhase, FfiBinding,
     FfiCacheMode, FfiCancelWriteError, FfiCancelWriteOutcome, FfiCoverageInterval, FfiDemand,
     FfiDerived, FfiDiagnosticsSnapshot, FfiDurability, FfiEventBuilder, FfiFilter,
-    FfiFilterCoverage, FfiFrame, FfiFreshness, FfiIdentityField, FfiKindCount, FfiLaneCount,
-    FfiRelayDiagnostics, FfiRelayInformationErrorKind, FfiRow, FfiRowDelta, FfiSelector,
-    FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSignEventFailure, FfiSignEventRequest,
-    FfiSignedEvent, FfiSourceAuthority, FfiSourceEvidence, FfiSourceStatus, FfiWindow,
-    FfiWindowContents, FfiWindowLoad, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
+    FfiFilterCoverage, FfiFrame, FfiFreshness, FfiIdentity, FfiIdentityField, FfiKindCount,
+    FfiLaneCount, FfiRelayDiagnostics, FfiRelayInformationErrorKind, FfiRow, FfiRowDelta,
+    FfiSelector, FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSignEventFailure,
+    FfiSignEventRequest, FfiSignedEvent, FfiSourceAuthority, FfiSourceEvidence, FfiSourceStatus,
+    FfiWindow, FfiWindowContents, FfiWindowLoad, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
     FfiWriteStatus,
 };
 
@@ -1626,20 +1626,40 @@ pub fn parse_pubkey(hex: &str) -> Result<PublicKey, FfiError> {
     })
 }
 
-/// #47 Unit A: `FfiWriteIntent.identity_override`'s dedicated parse. Hex
-/// goes through the module-wide [`parse_pubkey`] rule verbatim; bech32
-/// `npub` is ADDITIONALLY accepted for this one field (an identity is the
-/// pubkey an app most plausibly holds in display form -- filter/recipient
-/// inputs stay hex-only). Either way a malformed string is the same typed
-/// [`FfiError::InvalidPublicKey`] naming the offending input, synchronously,
-/// BEFORE any engine call. The override MISMATCH check (`Some` != the
-/// payload author) deliberately does NOT live here: like `Signed`'s verify
-/// (see `signed_event_from_ffi`'s doc), it runs at the engine's acceptance
+/// `FfiIdentity -> nmp::Identity`. `Explicit`'s pubkey goes through the
+/// module-wide [`parse_pubkey`] rule verbatim and nothing else: a bech32
+/// `npub` is REFUSED here, however well-formed, because "which encodings
+/// does this field take" must have one answer for every pubkey-shaped input
+/// rather than one answer per field
+/// (`docs/internals/conventions/bech32-boundary.md`). An app holding a
+/// display form decodes it with `decode_nostr_entity` at the boundary where
+/// the user pasted it. A malformed string is a typed
+/// [`FfiError::InvalidPublicKey`] naming the offending input,
+/// synchronously, BEFORE any engine call.
+///
+/// The RESTATEMENT check (`Explicit` != a signed payload's author)
+/// deliberately does NOT live here: like `Signed`'s verify (see
+/// `signed_event_from_ffi`'s doc), it runs at the engine's acceptance
 /// boundary so the guarantee holds for every entry point, surfacing as
 /// `WriteStatus::Failed` on the receipt stream with no `Accepted` before it.
-fn parse_identity_override(input: &str) -> Result<PublicKey, FfiError> {
-    use nostr::nips::nip19::FromBech32;
-    parse_pubkey(input).or_else(|err| PublicKey::from_bech32(input).map_err(|_| err))
+fn identity_from_ffi(identity: FfiIdentity) -> Result<GIdentity, FfiError> {
+    Ok(match identity {
+        FfiIdentity::Active => GIdentity::Active,
+        FfiIdentity::Explicit { pubkey } => GIdentity::Explicit(parse_pubkey(&pubkey)?),
+    })
+}
+
+/// Project an identity a protocol module chose back out to the FFI
+/// boundary -- total in both directions, so a protocol crate that changes
+/// which identity it names projects that change faithfully instead of
+/// tripping a closed-contract assertion on an exported path.
+pub(crate) fn identity_to_ffi(identity: GIdentity) -> FfiIdentity {
+    match identity {
+        GIdentity::Active => FfiIdentity::Active,
+        GIdentity::Explicit(pk) => FfiIdentity::Explicit {
+            pubkey: pk.to_hex(),
+        },
+    }
 }
 
 /// #591: `FfiWriteIntent.correlation`'s dedicated parse (also used by the
@@ -1795,16 +1815,11 @@ fn signed_event_from_ffi(
 /// the engine stamps, freezes and signs internally; `Signed` (#32)
 /// parses the caller-supplied event's fields and passes it through
 /// verbatim -- see `signed_event_from_ffi`'s doc for where the verify now
-/// happens. `identity_override` (#47 Unit A) parses first, so a malformed
-/// override is a typed synchronous refusal before anything else is even
-/// looked at -- see `parse_identity_override`'s doc for the parse/mismatch
-/// boundary split.
+/// happens. `identity` parses first, so a malformed pubkey is a typed
+/// synchronous refusal before anything else is even looked at -- see
+/// `identity_from_ffi`'s doc for the parse/restatement boundary split.
 pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, FfiError> {
-    let identity_override = intent
-        .identity_override
-        .as_deref()
-        .map(parse_identity_override)
-        .transpose()?;
+    let identity = identity_from_ffi(intent.identity)?;
     let correlation = intent
         .correlation
         .as_deref()
@@ -1856,7 +1871,7 @@ pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, Ffi
         payload,
         durability,
         routing,
-        identity_override,
+        identity,
         correlation,
     })
 }
@@ -2452,7 +2467,7 @@ mod tests {
             },
             durability: FfiDurability::Ephemeral,
             routing: FfiWriteRouting::Auto,
-            identity_override: None,
+            identity: FfiIdentity::Active,
             correlation: None,
         }
     }
@@ -2596,70 +2611,78 @@ mod tests {
         }
     }
 
-    /// #47 Unit A round-trip, hex form: a well-formed hex override lands in
-    /// `nmp::WriteIntent::identity_override` as the parsed `PublicKey`,
-    /// never dropped or rewritten. On a builder payload the override is the
-    /// only source of the author, so there is nothing beside it to agree
-    /// with.
+    /// Round-trip, hex form: a well-formed hex key lands in
+    /// `nmp::WriteIntent::identity` as `Identity::Explicit` carrying the
+    /// parsed `PublicKey`, never dropped or rewritten. On a builder payload
+    /// that key is the only source of the author, so there is nothing
+    /// beside it to agree with.
     #[test]
-    fn identity_override_hex_round_trips_to_the_parsed_pubkey() {
+    fn an_explicit_identity_round_trips_as_the_parsed_pubkey() {
         let mut intent = valid_write_intent();
-        intent.identity_override = Some(pk_hex());
-        let parsed = write_intent_from_ffi(intent).expect("a hex override must parse");
+        intent.identity = FfiIdentity::Explicit { pubkey: pk_hex() };
+        let parsed = write_intent_from_ffi(intent).expect("a hex identity must parse");
         assert_eq!(
-            parsed.identity_override,
-            Some(PublicKey::from_hex(&pk_hex()).expect("fixture hex is a valid pubkey")),
-            "a hex identity_override must cross the boundary as the exact parsed key"
+            parsed.identity,
+            GIdentity::Explicit(PublicKey::from_hex(&pk_hex()).expect("fixture hex is valid")),
+            "an explicit identity must cross the boundary as the exact parsed key"
         );
     }
 
-    /// #47 Unit A round-trip, bech32 form: an `npub` override decodes to the
-    /// IDENTICAL `PublicKey` its hex rendering does (fixture pair borrowed
-    /// from `entity::tests`) -- display-form input, not a second identity.
+    /// The bech32 boundary rule, on the one field that used to break it: a
+    /// perfectly well-formed `npub` for a real identity (fixture pair
+    /// borrowed from `entity::tests`) is REFUSED here, with the same typed
+    /// error every other malformed pubkey input gets. Not a parsing
+    /// accident -- "which encodings does this field take" has one answer,
+    /// and an app holding a display form decodes it at its own boundary
+    /// with `decode_nostr_entity` before it ever reaches the write plane.
     #[test]
-    fn identity_override_npub_round_trips_to_the_same_pubkey_as_its_hex() {
+    fn a_bech32_npub_identity_is_refused_however_well_formed() {
         let npub = "npub14f8usejl26twx0dhuxjh9cas7keav9vr0v8nvtwtrjqx3vycc76qqh9nsy";
-        let hex = "aa4fc8665f5696e33db7e1a572e3b0f5b3d615837b0f362dcb1c8068b098c7b4";
         let mut intent = valid_write_intent();
-        intent.identity_override = Some(npub.to_string());
-        let parsed = write_intent_from_ffi(intent).expect("an npub override must parse");
-        assert_eq!(
-            parsed.identity_override,
-            Some(PublicKey::from_hex(hex).expect("fixture hex is a valid pubkey")),
-            "an npub identity_override must decode to the same key as its hex form"
-        );
+        intent.identity = FfiIdentity::Explicit {
+            pubkey: npub.to_string(),
+        };
+        match write_intent_from_ffi(intent) {
+            Err(FfiError::InvalidPublicKey { got }) => assert_eq!(got, npub),
+            Err(other) => panic!("expected InvalidPublicKey, got: {other:?}"),
+            Ok(_) => panic!("bech32 must not cross the write plane's identity input"),
+        }
     }
 
-    /// #47 Unit A default: an absent override converts to `None` -- the
-    /// active-account default -- so every pre-#47 caller's intent is
-    /// byte-identical in meaning to what it was before the field existed.
+    /// `Active` is a positive instruction, not an absence: it crosses as
+    /// `Identity::Active` and means "whoever is the active account at
+    /// acceptance", which is a resolution the engine performs rather than a
+    /// field it skipped.
     #[test]
-    fn absent_identity_override_converts_to_none() {
+    fn active_crosses_as_active_not_as_an_absence() {
         let parsed = write_intent_from_ffi(valid_write_intent())
-            .expect("a well-formed intent without an override must parse");
+            .expect("a well-formed intent naming no key must parse");
         assert_eq!(
-            parsed.identity_override, None,
-            "no override supplied must mean the active-account default, nothing else"
+            parsed.identity,
+            GIdentity::Active,
+            "the default identity must mean the active account, nothing else"
         );
     }
 
-    /// #47 Unit A fail-closed parse: a string that is neither 64-char hex
-    /// nor a decodable `npub` rejects the WHOLE intent with the same typed
-    /// error every other malformed pubkey input gets, naming the offending
-    /// string -- synchronously, before any engine call, so no receipt stream
-    /// ever exists for it (the well-formed-but-MISMATCHED case is the
+    /// Fail-closed parse: a string that is not 64-char hex rejects the WHOLE
+    /// intent with the same typed error every other malformed pubkey input
+    /// gets, naming the offending string -- synchronously, before any engine
+    /// call, so no receipt stream ever exists for it (the
+    /// well-formed-but-CONTRADICTORY case on a signed payload is the
     /// acceptance boundary's `WriteStatus::Failed`, not this error).
     #[test]
-    fn malformed_identity_override_is_a_typed_error_not_a_panic() {
+    fn a_malformed_identity_is_a_typed_error_not_a_panic() {
         for garbage in ["not-a-pubkey", "npub1notvalidbech32"] {
             let mut intent = valid_write_intent();
-            intent.identity_override = Some(garbage.to_string());
+            intent.identity = FfiIdentity::Explicit {
+                pubkey: garbage.to_string(),
+            };
             match write_intent_from_ffi(intent) {
                 Err(FfiError::InvalidPublicKey { got }) => assert_eq!(got, garbage),
                 Err(other) => {
                     panic!("expected InvalidPublicKey, got a different FfiError: {other:?}")
                 }
-                Ok(_) => panic!("a malformed override must fail closed, not parse"),
+                Ok(_) => panic!("a malformed identity must fail closed, not parse"),
             }
         }
     }
@@ -2732,7 +2755,7 @@ mod tests {
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
-            identity_override: None,
+            identity: FfiIdentity::Active,
             correlation: None,
         };
         (event, intent)

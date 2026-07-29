@@ -43,14 +43,12 @@ Feature: A write publishes as the active account unless it names someone else
 
   # ---- the default -------------------------------------------------------
 
-  @designed
   Scenario: A write that names no identity publishes as the active account
     Given "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90" is the active account
     When I compose an event of kind 1 saying "hello" and publish it naming no identity
     Then the published event is authored by "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90"
     And it was signed by that account's signer
 
-  @designed
   Scenario: The default follows the active account, it does not remember the first one
     # "Whoever is active at acceptance" resolved twice, against two different
     # answers. This is what distinguishes a resolution instruction from a
@@ -64,7 +62,6 @@ Feature: A write publishes as the active account unless it names someone else
 
   # ---- naming an identity ------------------------------------------------
 
-  @designed
   Scenario: A write can name an identity that is not the active account
     # The podcast case. Publishing as one identity must not require making it
     # the active one, because making it active is a change to everything else
@@ -75,7 +72,6 @@ Feature: A write publishes as the active account unless it names someone else
     And it was signed by the podcast identity's signer
     And "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90" is still the active account
 
-  @designed
   Scenario: A named identity publishes while no account is active at all
     # Naming a key is self-sufficient: the author is known, the signer is
     # registered, and nothing about the write needs a session. An app that
@@ -88,7 +84,6 @@ Feature: A write publishes as the active account unless it names someone else
 
   # ---- the pin -----------------------------------------------------------
 
-  @designed
   Scenario: Switching accounts never retargets a write that was already accepted
     # The named-identity half. The switch happens while the write is still in
     # flight, and it changes nothing about it -- not the author, not which
@@ -103,7 +98,6 @@ Feature: A write publishes as the active account unless it names someone else
     When the podcast identity's signer answers
     Then the published event is authored by "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
 
-  @designed
   Scenario: An active-account write is pinned to whoever was active when it was accepted
     # The half that only exists because of this design, and the one most
     # likely to regress. The app never named a key, so nothing in the
@@ -119,7 +113,6 @@ Feature: A write publishes as the active account unless it names someone else
     When the first account's signer answers
     Then the published event is authored by "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90"
 
-  @designed
   Scenario: A restart does not re-resolve an accepted write against the new session
     # The pin has to survive the process, not just the switch. Replay from
     # the journal must reload a decided identity, never re-run the
@@ -134,7 +127,6 @@ Feature: A write publishes as the active account unless it names someone else
 
   # ---- failing closed ----------------------------------------------------
 
-  @designed
   Scenario: No active account and no named identity fails before acceptance
     # Nothing is pinned, so nothing may park. "Whoever is active" with nobody
     # active names no one, and there is no key to wait for -- so this is a
@@ -150,7 +142,6 @@ Feature: A write publishes as the active account unless it names someone else
 
   # ---- bech32 stops at the app's boundary --------------------------------
 
-  @designed
   Scenario: An app that holds an npub decodes it before it reaches the write plane
     # The intended path, and the reason the refusal below costs apps nothing.
     # The decode happens where the display form actually arrived -- the paste
@@ -161,7 +152,6 @@ Feature: A write publishes as the active account unless it names someone else
     And I compose an event of kind 1 saying "episode 15 is up" and publish it naming that identity
     Then the published event is authored by "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
 
-  @designed
   Scenario: An identity given in bech32 is refused, however well-formed it is
     # Not a parsing failure -- a boundary rule. The string is a perfectly
     # valid npub for an identity that really is registered here, and it is
