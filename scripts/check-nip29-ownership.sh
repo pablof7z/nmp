@@ -35,10 +35,17 @@ fi
 # NIP-29 may preserve a C7 `q` row, but it may not define kind:9,
 # chat replies, mention materialization, notification p rows, or a fixed
 # content-kind catalog.
+#
+# NIP-29's OWN kinds (9000-9022 join/leave/moderation) are this crate's, per
+# #989, so the kind ban is exact rather than prefix-shaped: `Kind::from(9)`
+# is refused while `Kind::from(JOIN_REQUEST)` at 9021 is allowed. Because a
+# named constant would otherwise launder kind 9 past an exact match, a
+# constant bound to 9 (`= 9;`) is refused too. Prefer adding a kind here only
+# when NIP-29 itself defines it.
 for source in crates/nmp-nip29/src/*.rs; do
   found=$(
     awk '/^#\[cfg\(test\)\]/{exit} {print}' "$source" |
-      grep -nE 'CHAT_KIND|Kind::from\(9|compose_chat|GroupReply|recipient_pubkeys|group_content_demand|\[9[^0-9]+30315\]' ||
+      grep -nE 'CHAT_KIND|Kind::from\(9\)|=[[:space:]]*9;|compose_chat|GroupReply|recipient_pubkeys|group_content_demand|\[9[^0-9]+30315\]' ||
       true
   )
   if [[ -n $found ]]; then
