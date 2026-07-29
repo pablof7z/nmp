@@ -404,11 +404,16 @@ fn active_a_rejects_b_authored_default_even_when_b_is_registered() {
     engine_thread.join();
 }
 
-/// #156's sole-path account-switch falsifier at the capability seam. A
-/// group-message template composed while A is active cannot reach either
-/// registered signer after the active account switches to B.
+/// #156's account-switch falsifier at the capability seam, restated for a
+/// payload that carries no author. A builder composed while A was active is
+/// not "A's draft" -- there is no field in it that says A -- so publishing
+/// it after switching to B is not a stale write, it is a write as B. The
+/// resolution happens at acceptance, and exactly one signer sees it: B's.
+/// (The account-switch bug #47 exists to prevent is about writes ALREADY
+/// accepted; acceptance pins the resolved key, which the override tests
+/// below still cover.)
 #[test]
-fn stale_a_draft_after_switch_to_b_invokes_neither_signer() {
+fn a_builder_composed_before_a_switch_publishes_as_the_account_active_at_acceptance() {
     let a = Keys::generate();
     let b = Keys::generate();
     let a_calls = Arc::new(AtomicUsize::new(0));
@@ -435,41 +440,40 @@ fn stale_a_draft_after_switch_to_b_invokes_neither_signer() {
         .expect("B signer must register");
 
     handle.set_active_account(Some(a.public_key()));
-    let composed_as_a = UnsignedEvent::new(
-        a.public_key(),
-        Timestamp::now(),
-        Kind::Custom(9),
-        vec![],
-        "composed while A is active",
-    );
+    let composed_while_a_was_active = EventBuilder::new(Kind::Custom(9))
+        .content("composed while A is active")
+        .created_at(Timestamp::now());
     handle.set_active_account(Some(b.public_key()));
 
     let receipt = handle
         .publish(WriteIntent {
-            payload: WritePayload::Event(body_of(&composed_as_a)),
+            payload: WritePayload::Event(composed_while_a_was_active),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
-        .expect("pre-acceptance failure still returns a local status stream");
-    match receipt
-        .recv_timeout(Duration::from_secs(5))
-        .expect("stale author must fail deterministically")
-    {
-        WriteStatus::Failed(reason) => assert_eq!(
-            reason,
-            "unsigned draft author does not match current active account"
-        ),
-        other => panic!("Failed must be first, before Accepted; got {other:?}"),
+        .expect("the engine is open");
+    assert!(matches!(
+        receipt
+            .recv_timeout(Duration::from_secs(5))
+            .expect("acceptance must be deterministic"),
+        WriteStatus::Accepted
+    ));
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline && b_calls.load(Ordering::SeqCst) == 0 {
+        let _ = receipt.recv_timeout(Duration::from_millis(100));
     }
     assert_eq!(
-        receipt.recv_timeout(Duration::from_secs(1)),
-        Err(FifoRecvTimeoutError::Closed),
-        "Failed must be the sole receipt fact"
+        b_calls.load(Ordering::SeqCst),
+        1,
+        "the account active AT ACCEPTANCE is the one asked to sign"
     );
-    assert_eq!(a_calls.load(Ordering::SeqCst), 0, "A signer was invoked");
-    assert_eq!(b_calls.load(Ordering::SeqCst), 0, "B signer was invoked");
+    assert_eq!(
+        a_calls.load(Ordering::SeqCst),
+        0,
+        "the account that merely happened to be active at compose time signs nothing"
+    );
 
     handle.shutdown();
     engine_thread.join();

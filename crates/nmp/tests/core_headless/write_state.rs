@@ -261,17 +261,20 @@ fn identity_override_accepts_secondary_author_and_pins_it_through_signing() {
     ));
 }
 
-/// #47 falsifier (b): the DEFAULT arm is byte-for-byte unchanged -- a
-/// non-active author without an override still fails closed with the exact
-/// pre-#47 messages, no `Accepted`, no sign request.
+/// #47 falsifier (b), restated for a payload that cannot state an author.
+/// The "draft author disagrees with the active account" refusal is gone --
+/// not weakened, DELETED, because a builder has no author field for the
+/// active account to disagree with. What survives is the half that is still
+/// a refusal: `Active` names an account, and an instruction that cannot
+/// resolve is a refusal, not a parked hope.
 #[test]
-fn default_publish_without_override_still_fails_closed_for_non_active_author() {
+fn a_builder_publishes_as_the_active_account_and_refuses_when_there_is_none() {
     let a = Keys::generate();
     let mut core = new_core(FixtureDirectory::new());
     activate(&mut core, &a);
 
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Event(draft(1, "no consent given")),
+        payload: WritePayload::Event(draft(1, "as whoever is active")),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -279,18 +282,19 @@ fn default_publish_without_override_still_fails_closed_for_non_active_author() {
     }));
     assert_eq!(
         receipt_statuses(&effects),
-        [WriteStatus::Failed(
-            "unsigned draft author does not match current active account".to_string()
-        )],
-        "Failed must be the first and only status -- never Accepted"
+        [WriteStatus::Accepted],
+        "a kind and content, published as the active account, is the whole story"
     );
-    assert!(!effects
-        .iter()
-        .any(|effect| matches!(effect, Effect::RequestSign(..))));
+    let (_, _, template) = find_sign_request(&effects);
+    assert_eq!(
+        template.pubkey,
+        a.public_key(),
+        "the author the app never stated is the account it is logged in as"
+    );
 
     core.handle(EngineMsg::SetActivePubkey(None));
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Event(draft(2, "logged out, no override")),
+        payload: WritePayload::Event(draft(2, "logged out, no identity named")),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -299,47 +303,44 @@ fn default_publish_without_override_still_fails_closed_for_non_active_author() {
     assert_eq!(
         receipt_statuses(&effects),
         [WriteStatus::Failed(
-            "unsigned publish requires an active account".to_string()
-        )]
+            "publishing as the active account requires an active account".to_string()
+        )],
+        "nothing is pinned, so nothing may park"
     );
     assert!(!effects
         .iter()
         .any(|effect| matches!(effect, Effect::RequestSign(..))));
 }
 
-/// #47 falsifier (c): an override that CONTRADICTS the draft's author fails
-/// closed pre-acceptance for both payload variants -- the engine never
-/// restamps a draft to satisfy an override, and no `Accepted` is ever
-/// emitted for the contradiction.
+/// #47 falsifier (c), split by where an author can come from. On a builder
+/// the mismatch class is UNREPRESENTABLE -- an override cannot contradict an
+/// author the payload has no field for -- so it simply selects. On a signed
+/// event the author is frozen in the bytes, so the check survives verbatim
+/// as a check: naming anybody else has no resolution that honours both
+/// statements, and fails closed pre-acceptance.
 #[test]
-fn identity_override_author_mismatch_fails_closed_for_unsigned_and_signed() {
+fn identity_selects_on_a_builder_and_may_only_restate_on_a_signed_event() {
     let a = Keys::generate();
     let b = Keys::generate();
     let mut core = new_core(FixtureDirectory::new());
     activate(&mut core, &a);
 
-    // Unsigned draft authored by A, override naming B: mismatch.
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Event(draft(1, "authored by a")),
+        payload: WritePayload::Event(draft(1, "as b, while a is active")),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: Some(b.public_key()),
         correlation: None,
     }));
+    assert_eq!(receipt_statuses(&effects), [WriteStatus::Accepted]);
+    let (_, _, template) = find_sign_request(&effects);
     assert_eq!(
-        receipt_statuses(&effects),
-        [WriteStatus::Failed(format!(
-            "identity override {} does not match the unsigned draft author {}",
-            b.public_key(),
-            a.public_key()
-        ))],
-        "the mismatch must be Failed-first-and-only, never Accepted"
+        template.pubkey,
+        b.public_key(),
+        "the named identity is the only source of a builder's author"
     );
-    assert!(!effects
-        .iter()
-        .any(|effect| matches!(effect, Effect::RequestSign(..))));
 
-    // Signed event authored by A, override naming B: same contradiction.
+    // Signed event authored by A, identity naming B: still a contradiction.
     let signed = signed_draft(&draft(2, "signed by a"), &a);
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(signed),
