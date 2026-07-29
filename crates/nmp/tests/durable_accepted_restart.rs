@@ -708,7 +708,7 @@ fn assert_persisted_routing_fails_closed_without_dropping(
     // Keep the one relay this directory can offer both connected and
     // authenticated. The undecodable routing is therefore the ONLY reason
     // nothing reaches the wire: any decoder that resolved it -- or a silent
-    // substitution of `author-outbox` -- would make signer completion emit
+    // substitution of `auto`, the live default -- would make signer completion emit
     // `PublishEvent` and fail the no-wire assertion below.
     let route_session = signer_session(&route_probe, keys.public_key());
     let route_handle = RelayHandle {
