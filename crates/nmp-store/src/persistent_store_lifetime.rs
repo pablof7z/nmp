@@ -10,14 +10,26 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// How many times resolution may follow a symlink or re-read a component that
+/// changed under it before giving up. It bounds progress, not link depth
+/// alone (#1001).
+const MAX_RESOLUTION_STEPS: usize = 40;
+
 /// Resolve the stable target identity used by both open and reset. Existing
 /// files (and existing final symlinks) canonicalize completely. A missing
 /// ordinary final component canonicalizes its existing parent. A dangling
 /// final symlink follows its target, including relative targets and chains,
 /// so pre-create and post-create identities converge.
+///
+/// Resolution is a sequence of syscalls over a filesystem other threads and
+/// processes are mutating, so each step re-reads what it needs rather than
+/// trusting a previous step's answer. Both outcomes for a final component are
+/// legitimate -- the canonical path of a file that exists, or the
+/// parent-derived path of one that does not -- but a `NotFound` observed
+/// mid-flight is never one of them (#1001).
 fn resolve_store_path(path: &Path) -> io::Result<PathBuf> {
     let mut candidate = path.to_path_buf();
-    for _ in 0..40 {
+    for _ in 0..MAX_RESOLUTION_STEPS {
         match std::fs::canonicalize(&candidate) {
             Ok(path) => return Ok(path),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -34,7 +46,17 @@ fn resolve_store_path(path: &Path) -> io::Result<PathBuf> {
                                 .join(target)
                         };
                     }
-                    Ok(_) => return Err(error),
+                    // #1001: the entry appeared between the two syscalls --
+                    // `canonicalize` saw nothing, and by the time
+                    // `symlink_metadata` ran another opener had created the
+                    // target. This is a plain time-of-check window, not an
+                    // impossible state: a non-symlink that exists now is one
+                    // `canonicalize` away from resolving, so re-resolve
+                    // instead of surfacing the `NotFound` we no longer
+                    // believe. Returning it made a racing `RedbStore::open`
+                    // fail with `ENOENT` rather than the typed
+                    // `StoreAlreadyOpen` it is owed.
+                    Ok(_) => continue,
                     Err(metadata_error) if metadata_error.kind() == io::ErrorKind::NotFound => {
                         let file_name = candidate.file_name().ok_or(error)?;
                         let parent = candidate
@@ -51,7 +73,10 @@ fn resolve_store_path(path: &Path) -> io::Result<PathBuf> {
     }
     Err(io::Error::new(
         io::ErrorKind::InvalidInput,
-        "persistent store symlink chain exceeds 40 links",
+        format!(
+            "persistent store path did not resolve in {MAX_RESOLUTION_STEPS} steps: a symlink \
+             chain that long, or a final component being created and removed without pause"
+        ),
     ))
 }
 
@@ -492,8 +517,56 @@ mod tests {
     use super::*;
     use std::io::{BufRead, Read, Write};
     use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{mpsc, Arc, Barrier};
     use std::thread;
+    use std::time::{Duration, Instant};
+
+    /// #1001 falsifier: resolution of a path whose parent exists must never
+    /// report `ENOENT`, no matter who is creating or removing the final
+    /// component at the same time.
+    ///
+    /// Both answers are legitimate -- the canonical path of the file that now
+    /// exists, or the parent-derived path of the file that does not -- and
+    /// resolution has to pick one of them rather than surface a `NotFound` it
+    /// observed mid-flight. A racing `RedbStore::open` is owed a typed
+    /// `StoreAlreadyOpen`, and it got `ENOENT` instead whenever the winner
+    /// created the database between resolution's two syscalls.
+    ///
+    /// The loop only ever fails on a real observation of that window, so a run
+    /// that never hits it passes rather than flaking red.
+    #[test]
+    fn resolution_never_reports_enoent_while_the_target_is_being_created() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("churn.redb");
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let churn_path = path.clone();
+        let churn_stop = Arc::clone(&stop);
+        let churn = thread::spawn(move || {
+            while !churn_stop.load(Ordering::Relaxed) {
+                let _ = File::create(&churn_path);
+                let _ = std::fs::remove_file(&churn_path);
+            }
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut observed = None;
+        while Instant::now() < deadline {
+            if let Err(error) = resolve_store_path(&path) {
+                observed = Some(error);
+                break;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        churn.join().unwrap();
+
+        assert!(
+            observed.is_none(),
+            "resolving a path whose parent exists must not fail while the final \
+             component is being created: {observed:?}"
+        );
+    }
 
     #[test]
     fn one_owner_refuses_second_open_and_reset_until_drop() {
@@ -761,7 +834,13 @@ mod tests {
                             true
                         }
                         Err(RedbStoreOpenError::StoreAlreadyOpen { .. }) => false,
-                        Err(error) => panic!("unexpected open result: {error}"),
+                        // Deliberately still exactly two outcomes (#1001): a
+                        // loser that sees anything else is reporting a real
+                        // defect, so this arm names it rather than widening
+                        // to accommodate it.
+                        Err(error) => {
+                            panic!("a losing opener must get StoreAlreadyOpen, got: {error}")
+                        }
                     }
                 })
             })
@@ -773,7 +852,19 @@ mod tests {
         release.wait();
         let winners = threads
             .into_iter()
-            .map(|thread| thread.join().unwrap())
+            // #1001: `join().unwrap()` reported a racing thread's panic as
+            // `Any { .. }`, so the run that mattered said nothing about what
+            // the opener actually saw. Carry the child's message up instead.
+            .map(|thread| {
+                thread.join().unwrap_or_else(|payload| {
+                    let detail = payload
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or_else(|| payload.downcast_ref::<&str>().copied())
+                        .unwrap_or("<non-string panic payload>");
+                    panic!("a racing opener panicked: {detail}")
+                })
+            })
             .filter(|won| *won)
             .count();
         assert_eq!(winners, 1);

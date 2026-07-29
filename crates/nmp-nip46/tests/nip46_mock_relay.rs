@@ -1,7 +1,7 @@
 use std::net::TcpListener;
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nmp_nip46::{
     Nip46ClientMetadata, Nip46ConnectionEvent, Nip46Invitation, Nip46Origin, Nip46Signer,
@@ -15,6 +15,75 @@ use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Tag, Timestamp
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tungstenite::Message;
+
+/// The timeout every test here hands to a NIP-46 entry point. The mock relay
+/// answers in microseconds, so this is a liveness backstop for a session that
+/// has genuinely hung -- never a performance assertion. Every NIP-46 session
+/// in the process shares ONE runtime worker thread, so a whole test binary run
+/// in parallel can starve any single flow for a long time; the budget is sized
+/// for that, not for the happy path.
+const REMOTE_OPERATION: Duration = Duration::from_secs(30);
+
+/// The budget for *observing* that a flow happened -- a recorder having seen
+/// the expected calls, a channel having delivered its event.
+///
+/// #1036: this used to be 2s while the operations it summarised each got 5s,
+/// so the deadline for noticing a flow was tighter than the flow itself. It is
+/// now never tighter than [`REMOTE_OPERATION`], and every wait on it reports
+/// what it *did* see on expiry -- an observation that times out must say what
+/// the session actually did, not just that a channel went quiet.
+const OBSERVATION: Duration = Duration::from_secs(60);
+
+/// Wait until the mock signer has recorded `expected` method calls.
+///
+/// The condition is the recorded sequence, not the elapsed time: callers mean
+/// "after the N calls have been recorded", so that is what is waited on. On
+/// expiry the panic names the methods that *were* seen, which is the whole
+/// difference between a diagnosable failure and `unwrap()` on a
+/// `RecvTimeoutError`.
+fn recorded_methods(seen: &mpsc::Receiver<String>, expected: usize) -> Vec<String> {
+    let deadline = Instant::now() + OBSERVATION;
+    let mut methods: Vec<String> = Vec::with_capacity(expected);
+    while methods.len() < expected {
+        match seen.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(method) => methods.push(method),
+            Err(error) => panic!(
+                "expected {expected} methods, saw {} [{}] ({error})",
+                methods.len(),
+                methods.join(", "),
+            ),
+        }
+    }
+    methods
+}
+
+/// Wait for one recorded session's method list (the multi-session relay
+/// reports per CONNECTION, since "how many methods" is not fixed there -- the
+/// best-effort `switch_relays` may or may not land before teardown).
+fn recorded_session(seen: &mpsc::Receiver<Vec<String>>, session: &str) -> Vec<String> {
+    seen.recv_timeout(OBSERVATION).unwrap_or_else(|error| {
+        panic!("the mock relay never recorded the {session} session's methods ({error})")
+    })
+}
+
+/// Wait for the `AuthorizationRequired` notification specifically, rather than
+/// asserting it is the *first* event to arrive: a session may legitimately
+/// interleave availability or relay-authentication notices ahead of it, and
+/// which ones land first is a scheduling detail, not a NIP-46 claim.
+fn authorization_required_url(events: &mpsc::Receiver<Nip46ConnectionEvent>) -> String {
+    let deadline = Instant::now() + OBSERVATION;
+    let mut others = Vec::new();
+    loop {
+        match events.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Nip46ConnectionEvent::AuthorizationRequired(url)) => return url,
+            Ok(other) => others.push(other),
+            Err(error) => panic!(
+                "the session never reported AuthorizationRequired ({error}); \
+                 it reported {others:?}"
+            ),
+        }
+    }
+}
 
 #[derive(Deserialize)]
 struct SignBody {
@@ -89,9 +158,18 @@ fn event_frame(subscription_id: &str, event: Event) -> String {
     json!(["EVENT", subscription_id, event]).to_string()
 }
 
+/// A bunker-style mock that reports each method name as it observes it.
+///
+/// #1036: it used to accumulate the names privately and publish the whole list
+/// once, on `nip44_decrypt`. That made "how far did the flow actually get"
+/// unobservable -- a waiter could only ever see all of it or none of it -- and
+/// it truncated the record at `nip44_decrypt`, so the best-effort
+/// `switch_relays` was silently lost whenever it landed after the last awaited
+/// RPC. Streaming each name lets a waiter block on the condition it means and
+/// name what it saw when the condition is not met.
 fn spawn_mock_remote_signer(
     mutate_sign_event: bool,
-) -> (String, Keys, Keys, mpsc::Receiver<Vec<String>>) {
+) -> (String, Keys, Keys, mpsc::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let relay_url = format!("ws://{address}");
@@ -111,7 +189,6 @@ fn spawn_mock_remote_signer(
             .unwrap();
 
         let mut subscription_id = None;
-        let mut seen_methods = Vec::new();
         let mut saw_auth = false;
         while let Ok(message) = socket.read() {
             let Message::Text(text) = message else {
@@ -151,7 +228,7 @@ fn spawn_mock_remote_signer(
                     let id = request["id"].as_str().unwrap();
                     let method = request["method"].as_str().unwrap();
                     let params = request["params"].as_array().unwrap();
-                    seen_methods.push(method.to_string());
+                    let _ = seen_tx.send(method.to_string());
 
                     let result = match method {
                         "connect" => {
@@ -223,9 +300,15 @@ fn spawn_mock_remote_signer(
                         .unwrap();
                     if method == "nip44_decrypt" {
                         assert!(saw_auth);
-                        let _ = seen_tx.send(seen_methods);
-                        break;
                     }
+                    // #1036: no `break` here. The best-effort `switch_relays`
+                    // is never awaited by the client, so it can legitimately
+                    // arrive after the last awaited RPC -- stopping on
+                    // `nip44_decrypt` would drop it from the record and make
+                    // "was it fired at all?" unanswerable. The thread ends
+                    // when the client disconnects, which also drops the
+                    // recorder and turns any still-blocked waiter into a
+                    // reported failure instead of a hang.
                 }
                 _ => {}
             }
@@ -406,7 +489,7 @@ fn checkpoint_then_from_parts_reconnects_without_repairing_and_signs() {
         remote.public_key().to_hex(),
         url::form_urlencoded::byte_serialize(relay.as_bytes()).collect::<String>()
     );
-    let paired = Nip46Signer::connect_bunker(&uri, Duration::from_secs(5)).unwrap();
+    let paired = Nip46Signer::connect_bunker(&uri, REMOTE_OPERATION).unwrap();
     assert_eq!(paired.user_public_key(), user.public_key());
 
     let checkpoint = paired.checkpoint();
@@ -421,7 +504,7 @@ fn checkpoint_then_from_parts_reconnects_without_repairing_and_signs() {
     // Session 1 ends (its process would exit here); the checkpoint outlives
     // it.
     drop(paired);
-    let first_session_methods = seen.recv_timeout(Duration::from_secs(2)).unwrap();
+    let first_session_methods = recorded_session(&seen, "first");
     assert_eq!(
         first_session_methods
             .iter()
@@ -431,7 +514,7 @@ fn checkpoint_then_from_parts_reconnects_without_repairing_and_signs() {
     );
 
     // Session 2: a fresh process restores from the checkpoint alone.
-    let restored = Nip46Signer::from_parts(checkpoint, Duration::from_secs(5)).unwrap();
+    let restored = Nip46Signer::from_parts(checkpoint, REMOTE_OPERATION).unwrap();
     assert_eq!(restored.user_public_key(), user.public_key());
     assert_eq!(restored.remote_signer_public_key(), remote.public_key());
 
@@ -444,14 +527,14 @@ fn checkpoint_then_from_parts_reconnects_without_repairing_and_signs() {
     );
     let signed = restored
         .sign(signer_unsigned(&unsigned))
-        .wait(Duration::from_secs(5))
+        .wait(REMOTE_OPERATION)
         .unwrap();
     let signed = nostr_signed(signed);
     signed.verify().unwrap();
     assert_eq!(signed.pubkey, user.public_key());
     drop(restored);
 
-    let second_session_methods = seen.recv_timeout(Duration::from_secs(2)).unwrap();
+    let second_session_methods = recorded_session(&seen, "restored");
     assert!(
         !second_session_methods.contains(&"connect".to_string()),
         "restore must never re-send the pairing `connect` RPC: {second_session_methods:?}"
@@ -478,7 +561,7 @@ fn from_parts_fails_closed_on_user_public_key_mismatch() {
         origin: Nip46Origin::ClientInitiated,
     };
 
-    let error = Nip46Signer::from_parts(checkpoint, Duration::from_secs(5)).unwrap_err();
+    let error = Nip46Signer::from_parts(checkpoint, REMOTE_OPERATION).unwrap_err();
     assert_eq!(
         error,
         nmp_nip46::Nip46Error::RestoredIdentityMismatch {
@@ -624,7 +707,7 @@ fn client_initiated_checkpoint_then_from_parts_reconnects_without_repairing() {
         }
     });
 
-    let paired_signer = invitation.connect(Duration::from_secs(5)).unwrap();
+    let paired_signer = invitation.connect(REMOTE_OPERATION).unwrap();
     assert_eq!(paired_signer.user_public_key(), user.public_key());
     assert_eq!(
         paired_signer.remote_signer_public_key(),
@@ -637,7 +720,7 @@ fn client_initiated_checkpoint_then_from_parts_reconnects_without_repairing() {
     assert_eq!(checkpoint.remote_signer_public_key, remote.public_key());
     drop(paired_signer);
 
-    let restored = Nip46Signer::from_parts(checkpoint, Duration::from_secs(5)).unwrap();
+    let restored = Nip46Signer::from_parts(checkpoint, REMOTE_OPERATION).unwrap();
     assert_eq!(restored.user_public_key(), user.public_key());
     assert_eq!(restored.remote_signer_public_key(), remote.public_key());
 
@@ -650,7 +733,7 @@ fn client_initiated_checkpoint_then_from_parts_reconnects_without_repairing() {
     );
     let signed = restored
         .sign(signer_unsigned(&unsigned))
-        .wait(Duration::from_secs(5))
+        .wait(REMOTE_OPERATION)
         .unwrap();
     let signed = nostr_signed(signed);
     signed.verify().unwrap();
@@ -665,7 +748,7 @@ fn real_bunker_flow_auth_sign_and_crypto_round_trip() {
         remote.public_key().to_hex(),
         url::form_urlencoded::byte_serialize(relay.as_bytes()).collect::<String>()
     );
-    let signer = Nip46Signer::connect_bunker(&uri, Duration::from_secs(5)).unwrap();
+    let signer = Nip46Signer::connect_bunker(&uri, REMOTE_OPERATION).unwrap();
     assert_eq!(signer.remote_signer_public_key(), remote.public_key());
     assert_eq!(signer.user_public_key(), user.public_key());
     assert_ne!(signer.remote_signer_public_key(), signer.user_public_key());
@@ -680,17 +763,16 @@ fn real_bunker_flow_auth_sign_and_crypto_round_trip() {
     );
     let signed = signer
         .sign(signer_unsigned(&unsigned))
-        .wait(Duration::from_secs(5))
+        .wait(REMOTE_OPERATION)
         .unwrap();
     let signed = nostr_signed(signed);
     signed.verify().unwrap();
     assert_eq!(signed.pubkey, user.public_key());
     assert_eq!(signed.content, unsigned.content);
-    assert!(matches!(
-        events.recv_timeout(Duration::from_secs(2)).unwrap(),
-        Nip46ConnectionEvent::AuthorizationRequired(url)
-            if url == "https://signer.example/approve"
-    ));
+    assert_eq!(
+        authorization_required_url(&events),
+        "https://signer.example/approve"
+    );
 
     let peer = Keys::generate();
     let ciphertext = signer
@@ -698,28 +780,55 @@ fn real_bunker_flow_auth_sign_and_crypto_round_trip() {
             SignerPublicKey::new(peer.public_key().to_bytes()),
             "secret payload",
         )
-        .wait(Duration::from_secs(5))
+        .wait(REMOTE_OPERATION)
         .unwrap();
     let plaintext = signer
         .nip44_decrypt(
             SignerPublicKey::new(peer.public_key().to_bytes()),
             &ciphertext,
         )
-        .wait(Duration::from_secs(5))
+        .wait(REMOTE_OPERATION)
         .unwrap();
     assert_eq!(plaintext, "secret payload");
 
-    let methods = seen.recv_timeout(Duration::from_secs(2)).unwrap();
-    assert!(methods.starts_with(&[
-        "connect".to_string(),
-        "get_public_key".to_string(),
-        "switch_relays".to_string(),
-    ]));
-    assert!(methods.ends_with(&[
-        "sign_event".to_string(),
-        "nip44_encrypt".to_string(),
-        "nip44_decrypt".to_string(),
-    ]));
+    let methods = recorded_methods(&seen, 6);
+
+    // #1036: the order claim is only over the RPCs the client AWAITS. The
+    // `switch_relays` request is fired best-effort during pairing and never
+    // awaited -- it is handed to the session by a spawned task, so under load
+    // a later awaited RPC can reach the relay first. Pinning its exact
+    // position asserted a scheduling accident, and that -- not any timeout --
+    // is what broke on loaded CI.
+    let awaited: Vec<&str> = methods
+        .iter()
+        .map(String::as_str)
+        .filter(|method| *method != "switch_relays")
+        .collect();
+    assert_eq!(
+        awaited,
+        [
+            "connect",
+            "get_public_key",
+            "sign_event",
+            "nip44_encrypt",
+            "nip44_decrypt",
+        ],
+        "the awaited NIP-46 RPCs ran out of order: {methods:?}"
+    );
+
+    let switch_relays = methods
+        .iter()
+        .position(|method| method == "switch_relays")
+        .unwrap_or_else(|| panic!("the session never fired switch_relays: {methods:?}"));
+    let get_public_key = methods
+        .iter()
+        .position(|method| method == "get_public_key")
+        .expect("the awaited order above already proved get_public_key ran");
+    assert!(
+        switch_relays > get_public_key,
+        "switch_relays is fired once pairing completes, so it cannot precede \
+         get_public_key: {methods:?}"
+    );
 }
 
 #[test]
@@ -730,7 +839,7 @@ fn valid_but_mutated_signer_event_is_terminal_invalid_response() {
         remote.public_key().to_hex(),
         url::form_urlencoded::byte_serialize(relay.as_bytes()).collect::<String>()
     );
-    let signer = Nip46Signer::connect_bunker(&uri, Duration::from_secs(5)).unwrap();
+    let signer = Nip46Signer::connect_bunker(&uri, REMOTE_OPERATION).unwrap();
     let unsigned = UnsignedEvent::new(
         user.public_key(),
         Timestamp::from(1_700_000_001),
@@ -741,7 +850,7 @@ fn valid_but_mutated_signer_event_is_terminal_invalid_response() {
     assert!(matches!(
         signer
             .sign(signer_unsigned(&unsigned))
-            .wait(Duration::from_secs(5)),
+            .wait(REMOTE_OPERATION),
         Err(SignerError::InvalidResponse(reason)) if reason.contains("mutated")
     ));
 }
@@ -838,7 +947,7 @@ fn client_invitation_ignores_forged_secret_then_accepts_valid_signer() {
         }
     });
 
-    let signer = invitation.connect(Duration::from_secs(5)).unwrap();
+    let signer = invitation.connect(REMOTE_OPERATION).unwrap();
     assert_eq!(signer.remote_signer_public_key(), expected_remote);
     assert_eq!(signer.user_public_key(), expected_user);
 }
@@ -869,12 +978,12 @@ fn ignored_switch_relays_cannot_keep_the_session_alive_after_signer_drop() {
         remote.public_key().to_hex(),
         url::form_urlencoded::byte_serialize(relay.as_bytes()).collect::<String>()
     );
-    let signer = Nip46Signer::connect_bunker(&uri, Duration::from_secs(5)).unwrap();
+    let signer = Nip46Signer::connect_bunker(&uri, REMOTE_OPERATION).unwrap();
 
     drop(signer);
 
     closed
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(OBSERVATION)
         .expect("dropping the signer closes the session even when switch_relays never answers");
 }
 
@@ -886,7 +995,7 @@ fn abandoned_remote_operations_release_every_bounded_pending_slot() {
         remote.public_key().to_hex(),
         url::form_urlencoded::byte_serialize(relay.as_bytes()).collect::<String>()
     );
-    let signer = Nip46Signer::connect_bunker(&uri, Duration::from_secs(5)).unwrap();
+    let signer = Nip46Signer::connect_bunker(&uri, REMOTE_OPERATION).unwrap();
     let unsigned = UnsignedEvent::new(
         user.public_key(),
         Timestamp::from(1_700_000_002),
