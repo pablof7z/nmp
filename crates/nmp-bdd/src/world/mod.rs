@@ -330,12 +330,12 @@ impl Drop for NmpWorld {
         // engine, pool, transport, verifier, and adapter threads after every
         // scenario, so a full BDD run accumulated one complete engine graph
         // per scenario until the host exhausted memory and threads.
-        if let Some(handle) = self.handle.take() {
-            handle.shutdown();
-        }
-        if let Some(engine) = self.engine.take() {
-            engine.join();
-        }
+        // #977 moved the world onto `nmp::Engine`, whose `shutdown` is what
+        // asks the thread to stop and then joins it. `staging::stop_engine`
+        // is the single definition of that sequence -- dropping the cloned
+        // handle before anything blocks -- shared with the identity
+        // scenarios' restart so teardown and restart cannot drift apart.
+        self.stop_engine();
     }
 }
 
