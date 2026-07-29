@@ -1,6 +1,9 @@
 //! The closed step-vocabulary catalog (approach doc §2.4). Extending it is a
-//! reviewed change to one of these three files -- scenario `.feature` files
+//! reviewed change to one of these three modules -- scenario `.feature` files
 //! compose from the catalog, they never invent an ad-hoc step inline.
+//!
+//! `given` and `when` are one file each; `then` is a directory, split by the
+//! domain each assertion family addresses (see its own module doc).
 
 pub mod given;
 pub mod then;
