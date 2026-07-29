@@ -1290,6 +1290,12 @@ fn direct_follow_receipt_name(status: &WriteStatus) -> &'static str {
         WriteStatus::AwaitingCapability { .. } => "awaiting_capability",
         WriteStatus::Signed(_) => "signed",
         WriteStatus::AwaitingRoute { .. } => "awaiting_route",
+        // `complete` is the routing AXIS's own terminal, and it is the only
+        // thing that distinguishes "still discovering destinations" from
+        // "this answer can never change again" (`resolution-lifecycle.md`
+        // §7.2.1). Collapsing both into one word would let a retirement that
+        // never happens compare equal to one that did.
+        WriteStatus::Routed { complete: true, .. } => "routed_complete",
         WriteStatus::Routed { .. } => "routed",
         WriteStatus::AwaitingRelay { .. } => "awaiting_relay",
         WriteStatus::AwaitingAuth { .. } => "awaiting_auth",
@@ -1315,6 +1321,7 @@ fn ffi_follow_receipt_name(status: &FfiWriteStatus) -> &'static str {
         FfiWriteStatus::AwaitingCapability { .. } => "awaiting_capability",
         FfiWriteStatus::Signed { .. } => "signed",
         FfiWriteStatus::AwaitingRoute { .. } => "awaiting_route",
+        FfiWriteStatus::Routed { complete: true, .. } => "routed_complete",
         FfiWriteStatus::Routed { .. } => "routed",
         FfiWriteStatus::AwaitingRelay { .. } => "awaiting_relay",
         FfiWriteStatus::AwaitingAuth { .. } => "awaiting_auth",
@@ -1332,15 +1339,120 @@ fn ffi_follow_receipt_name(status: &FfiWriteStatus) -> &'static str {
     }
 }
 
+/// Which axis of a follow action has and has not reached its own terminal.
+///
+/// Only used to make a bounded wait's expiry SAY something. A follow action
+/// that never closes has stalled on exactly one of two independent axes, and
+/// "timed out" alone sends the next reader down the entire instrumentation
+/// path this rule was found on (`resolution-lifecycle.md` §7.2.1).
+fn stalled_axes(seen: &[NormFollowActionStatus]) -> String {
+    let routing = if seen
+        .iter()
+        .any(|s| matches!(s, NormFollowActionStatus::Receipt("routed_complete")))
+    {
+        "routing: RETIRED"
+    } else if seen
+        .iter()
+        .any(|s| matches!(s, NormFollowActionStatus::Receipt("routed")))
+    {
+        "routing: STALLED (routed, never complete -- relay-list absence never settled)"
+    } else {
+        "routing: STALLED (never routed at all)"
+    };
+    let delivery = if seen.iter().any(|s| {
+        matches!(
+            s,
+            NormFollowActionStatus::Receipt(
+                "acked" | "rejected" | "gave_up" | "replaceable_conflict" | "superseded" | "failed"
+            )
+        )
+    }) {
+        "delivery: TERMINAL"
+    } else {
+        "delivery: STALLED"
+    };
+    format!("{routing}; {delivery}; seen={seen:?}")
+}
+
+/// This action's DELIVERY facts, in order, with the routing axis removed.
+fn delivery_axis(seen: &[NormFollowActionStatus]) -> Vec<&'static str> {
+    seen.iter()
+        .filter_map(|status| match status {
+            NormFollowActionStatus::Receipt("routed" | "routed_complete" | "awaiting_route") => {
+                None
+            }
+            NormFollowActionStatus::Receipt(name) => Some(*name),
+            _ => None,
+        })
+        .collect()
+}
+
+/// This action's ROUTING facts, in order. A write with unknowns emits
+/// `routed` at least once and must end on `routed_complete`.
+fn routing_axis(seen: &[NormFollowActionStatus]) -> Vec<&'static str> {
+    seen.iter()
+        .filter_map(|status| match status {
+            NormFollowActionStatus::Receipt(
+                name @ ("routed" | "routed_complete" | "awaiting_route"),
+            ) => Some(*name),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Re-express a drained follow action as its two axes, each in its own order,
+/// routing last.
+///
+/// Closure makes the CONTENT of the stream stable — both axes have reached a
+/// terminal by then — but it does not make the INTERLEAVING stable, and
+/// measurement says so plainly: over twelve runs of this identical scenario
+/// the routing retirement landed before `awaiting_auth` on one surface and
+/// after it on the other, half the time, purely by which socket answered
+/// first. Comparing the raw order therefore compares a race and fails about
+/// every other run for no reason a reader can act on.
+///
+/// This is NOT the oracle tolerating a difference. Every fact is still
+/// compared, and each axis's own order is still compared exactly; what is
+/// dropped is the one degree of freedom `resolution-lifecycle.md` §7.2.1
+/// already pins as unordered by construction — routing advances on discovery
+/// round-trips, delivery on delivery round-trips, and nothing sequences those
+/// two against each other on either surface.
+fn canonical_axes(seen: Vec<NormFollowActionStatus>) -> Vec<NormFollowActionStatus> {
+    let (routing, rest): (Vec<_>, Vec<_>) = seen.into_iter().partition(|status| {
+        matches!(
+            status,
+            NormFollowActionStatus::Receipt("routed" | "routed_complete" | "awaiting_route")
+        )
+    });
+    rest.into_iter().chain(routing).collect()
+}
+
+/// Drain a follow action to CLOSURE, never to the first delivery terminal.
+///
+/// Routing completeness advances on discovery round-trips and delivery
+/// advances on delivery round-trips, and nothing orders those two against
+/// each other — so a prefix cut at `Acked` has no stable total order and two
+/// runs of the identical scenario legitimately produce different vectors
+/// (`resolution-lifecycle.md` §7.2.1). Closure is causally after BOTH, which
+/// is the only cut a direct/FFI comparison can be made over.
+///
+/// Waiting for closure is waiting on settlement, so the wait is bounded and
+/// its expiry names which axis failed to advance.
 fn collect_direct_follow_action(action: FollowAction) -> Vec<NormFollowActionStatus> {
     let deadline = Instant::now() + WAIT;
     let mut result = Vec::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let status = action
-            .recv_timeout(remaining)
-            .expect("direct follow action must settle before the total deadline");
-        let normalized = match status {
+        let status = match action.recv_timeout(remaining) {
+            Ok(status) => status,
+            Err(FifoRecvTimeoutError::Closed) => return canonical_axes(result),
+            Err(error) => panic!(
+                "direct follow action did not close within the total {WAIT:?} bound \
+                 ({error:?}) -- {}",
+                stalled_axes(&result)
+            ),
+        };
+        result.push(match status {
             FollowActionStatus::Acquiring => NormFollowActionStatus::Acquiring,
             FollowActionStatus::NoChange { following } => {
                 NormFollowActionStatus::NoChange(following)
@@ -1351,24 +1463,7 @@ fn collect_direct_follow_action(action: FollowAction) -> Vec<NormFollowActionSta
             FollowActionStatus::Failed(failure) => {
                 NormFollowActionStatus::Failed(format!("{failure:?}"))
             }
-        };
-        let terminal = matches!(
-            normalized,
-            NormFollowActionStatus::NoChange(_)
-                | NormFollowActionStatus::Failed(_)
-                | NormFollowActionStatus::Receipt(
-                    "acked"
-                        | "rejected"
-                        | "gave_up"
-                        | "replaceable_conflict"
-                        | "superseded"
-                        | "failed"
-                )
-        );
-        result.push(normalized);
-        if terminal {
-            return result;
-        }
+        });
     }
 }
 
@@ -1378,8 +1473,17 @@ fn collect_ffi_follow_action(
     let deadline = Instant::now() + WAIT;
     let mut result = Vec::new();
     loop {
-        let status = recv_before(rx, deadline, "FFI follow action");
-        let normalized = match status {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let status = match rx.recv_before_timeout(remaining) {
+            Ok(status) => status,
+            Err(FifoRecvTimeoutError::Closed) => return canonical_axes(result),
+            Err(error) => panic!(
+                "FFI follow action did not close within the total {WAIT:?} bound \
+                 ({error:?}) -- {}",
+                stalled_axes(&result)
+            ),
+        };
+        result.push(match status {
             FfiFollowActionStatus::Acquiring => NormFollowActionStatus::Acquiring,
             FfiFollowActionStatus::NoChange { following } => {
                 NormFollowActionStatus::NoChange(following)
@@ -1390,24 +1494,7 @@ fn collect_ffi_follow_action(
             FfiFollowActionStatus::Failed { failure } => {
                 NormFollowActionStatus::Failed(format!("{failure:?}"))
             }
-        };
-        let terminal = matches!(
-            normalized,
-            NormFollowActionStatus::NoChange(_)
-                | NormFollowActionStatus::Failed(_)
-                | NormFollowActionStatus::Receipt(
-                    "acked"
-                        | "rejected"
-                        | "gave_up"
-                        | "replaceable_conflict"
-                        | "superseded"
-                        | "failed"
-                )
-        );
-        result.push(normalized);
-        if terminal {
-            return result;
-        }
+        });
     }
 }
 
@@ -3111,32 +3198,40 @@ async fn direct_and_ffi_follow_actions_are_identical_over_real_loopback() {
     // `routed` and `sent` (see `expected_send_preamble`) — the unfollow too,
     // because worker reconciliation closed the write session when the
     // follow write acked.
-    assert!(matches!(
-        direct.follow.as_slice(),
-        [
-            NormFollowActionStatus::Acquiring,
-            NormFollowActionStatus::Receipt("accepted"),
-            NormFollowActionStatus::Receipt("signed"),
-            NormFollowActionStatus::Receipt("routed"),
-            NormFollowActionStatus::Receipt("awaiting_relay"),
-            NormFollowActionStatus::Receipt("awaiting_auth"),
-            NormFollowActionStatus::Receipt("sent"),
-            NormFollowActionStatus::Receipt("acked")
-        ]
-    ));
-    assert!(matches!(
-        direct.unfollow.as_slice(),
-        [
-            NormFollowActionStatus::Acquiring,
-            NormFollowActionStatus::Receipt("accepted"),
-            NormFollowActionStatus::Receipt("signed"),
-            NormFollowActionStatus::Receipt("routed"),
-            NormFollowActionStatus::Receipt("awaiting_relay"),
-            NormFollowActionStatus::Receipt("awaiting_auth"),
-            NormFollowActionStatus::Receipt("sent"),
-            NormFollowActionStatus::Receipt("acked")
-        ]
-    ));
+    //
+    // Asserted per AXIS rather than as one total order. Routing completeness
+    // and delivery advance on different sockets and nothing orders them
+    // against each other, so where the routing retirement lands among the
+    // delivery beats is genuinely nondeterministic — pinning it would be
+    // pinning a race (`resolution-lifecycle.md` §7.2.1). What IS determined:
+    // each axis's own order, and that BOTH reach their terminal, which is
+    // what closing the stream at all already proves.
+    for (label, seen) in [("follow", &direct.follow), ("unfollow", &direct.unfollow)] {
+        assert_eq!(
+            delivery_axis(seen),
+            vec![
+                "accepted",
+                "signed",
+                "awaiting_relay",
+                "awaiting_auth",
+                "sent",
+                "acked"
+            ],
+            "{label}: the delivery axis is fully ordered on its own: {seen:?}"
+        );
+        assert_eq!(
+            seen.first(),
+            Some(&NormFollowActionStatus::Acquiring),
+            "{label}: a follow action always opens by acquiring the base list: {seen:?}"
+        );
+        assert_eq!(
+            routing_axis(seen).last(),
+            Some(&"routed_complete"),
+            "{label}: the routing axis must RETIRE, not merely emit a route -- a kind:3 p-tags \
+             everyone it names, and an unsettled relay-list absence leaves it at `routed` \
+             forever: {seen:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

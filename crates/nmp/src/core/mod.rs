@@ -1393,6 +1393,33 @@ pub struct EngineCore<S: EventStore> {
     /// derives: a restart re-probes rather than betting against the author's
     /// own future publication.
     relay_list_eose: BTreeMap<PubkeyHex, BTreeSet<RelayUrl>>,
+    /// The outstanding relay-list QUESTIONS: "this exact request, on this
+    /// exact relay, asks whether these authors have a kind:10002, and has not
+    /// been answered yet".
+    ///
+    /// Recorded at SEND time, from the filter that actually went on the wire,
+    /// and deliberately NOT read back off the router plan (#1019). The plan
+    /// describes what this engine is asking *now*; a question is about what it
+    /// asked *then*, and the two diverge constantly:
+    ///
+    /// - widening a discovery filter mints a new descriptor hash, so an
+    ///   in-flight REQ's answer names a [`SubId`] ordinary coalescing has
+    ///   already rewritten away;
+    /// - coalescing merges the discovery atom into a wider req (a
+    ///   `kinds:{3,10002}` req is routine), so "is this the relay-list req?"
+    ///   was never an equality test on `kinds`;
+    /// - on a NIP-77 relay the plan's req is never sent as an ordinary REQ at
+    ///   all — it becomes a `limit:0` barrier plus a negentropy session, and
+    ///   the answer arrives as NEG-DONE rather than as EOSE.
+    ///
+    /// [`SubId`] already embeds `(RelayUrl, hash, AccessContext)`, so this map
+    /// is relay- and session-scoped without a compound key. A question is
+    /// discharged by exactly one terminal signal for that request (EOSE, or
+    /// negentropy completion, deferred to its backfill's EOSE when
+    /// reconciliation proved ids were missing), and forgotten when the request
+    /// leaves the wire unanswered — an abandoned question settles NOTHING,
+    /// because "nowhere to ask" must never read as "asked, nothing there".
+    relay_list_asks: BTreeMap<SubId, BTreeSet<PubkeyHex>>,
     /// The diagnostic surface's own counter (M5 plan §1.2 step 1) — events
     /// actually RECEIVED, per SESSION per kind. Bumped in the
     /// `RelayMessage::Event` arms of `on_relay_frame`/`on_relay_frames`;
@@ -1544,6 +1571,7 @@ impl<S: EventStore> EngineCore<S> {
             discovery_handle: None,
             discovery_authors: BTreeSet::new(),
             relay_list_eose: BTreeMap::new(),
+            relay_list_asks: BTreeMap::new(),
             events_by_session_kind: HashMap::new(),
             next_attempt_correlation: Some(0),
             attempt_correlations: HashMap::new(),

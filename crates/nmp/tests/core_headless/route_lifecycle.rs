@@ -20,6 +20,24 @@ fn read_lane(url: &RelayUrl) -> Vec<LanedRelay> {
     vec![LanedRelay::new(url.clone(), Lane::Nip65Read)]
 }
 
+/// One reconcile round played by a relay that holds NOTHING for the filter --
+/// a real `negentropy` peer over an empty sealed storage, so the reply is
+/// whatever the protocol actually produces rather than a hand-written payload
+/// that happens to decode. This is the wire fact "I have no such events".
+fn empty_relay_reconcile_reply(initial_hex: &str) -> String {
+    let mut storage = ::negentropy::NegentropyStorageVector::new();
+    storage
+        .seal()
+        .expect("an empty storage always seals cleanly");
+    let mut relay_side = ::negentropy::Negentropy::owned(storage, 0)
+        .expect("frame_size_limit=0 (unlimited) is always valid");
+    let raw = hex::decode(initial_hex).expect("the engine's own hex must round-trip");
+    let reply = relay_side
+        .reconcile(&raw)
+        .expect("a well-formed initiator message must reconcile");
+    hex::encode(reply)
+}
+
 /// The engine's own live directory, shared with the test.
 ///
 /// The whole subject here is a directory that LEARNS between one resolution
@@ -362,5 +380,201 @@ fn a_route_that_names_nothing_never_retires() {
         Some((BTreeSet::from([relay]), true)),
         "the write was held, not abandoned, so it completes on its own: {:?}",
         statuses(&later, id)
+    );
+}
+
+/// #1019's falsifier, first half: **a relay-list question survives the request
+/// that carried it being taken off the wire, and is answered by whatever
+/// terminal signal that request actually gets.**
+///
+/// Against a NIP-77 relay the planned discovery REQ is never sent as an
+/// ordinary REQ at all. It is replaced by a `limit:0` barrier — which attests
+/// NOTHING, the relay sends no events by construction — and the real question
+/// is re-asked inside a negentropy session under a role-derived id that is in
+/// no plan and never EOSEs. Settlement used to be looked up in the router
+/// plan by the EOSE's subscription id, so on every NIP-77-capable relay it
+/// could not fire at all: the indexers finished, the answer arrived, and the
+/// write parked on that recipient's relay list stayed parked forever. Under
+/// durable parking that does not lose the write; it strands it, which is
+/// harder to diagnose and no better to be on the receiving end of.
+///
+/// This is the deterministic instance of the class the issue names. It is not
+/// an unlucky interleaving: it is what a NIP-77 relay does every time.
+#[test]
+fn reconciliation_answers_the_relay_list_question_the_planned_req_never_asked() {
+    let author = Keys::generate();
+    let recipient = Keys::generate();
+    let other = Keys::generate();
+    let outbox = RelayUrl::parse("wss://outbox-a.example").unwrap();
+    // `SharedDirectory`'s single configured indexer, which is what a
+    // discovery-kind atom is routed to and therefore what has to finish
+    // before an absence may settle.
+    let indexer = RelayUrl::parse("wss://indexer.example").unwrap();
+
+    let directory = SharedDirectory::new();
+    directory.learns_write(&author, &outbox);
+    let mut core = EngineCore::new(MemoryStore::new(), Box::new(directory), 10);
+    activate(&mut core, &author);
+
+    // A p-tagged recipient whose relay list is unknown parks the write and
+    // opens discovery on the indexer -- which is what puts that relay in the
+    // plan, and therefore what makes probing it legitimate at all.
+    let mentions = draft(20, "hello you").tag(nostr::Tag::public_key(recipient.public_key()));
+    let (parked, opened) = publish_and_sign(&mut core, &author, mentions);
+    assert_eq!(
+        routed(&opened, parked).map(|(_, complete)| complete),
+        Some(false),
+        "an Unknown recipient keeps the obligation alive: {:?}",
+        statuses(&opened, parked)
+    );
+
+    // Prove NIP-77 support behaviorally, exactly as a live relay does: the
+    // engine probes on connection and any valid NEG-MSG reply classifies it.
+    let connected = connect(&mut core, 0, &indexer);
+    let probe_sub = connected
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::StartProbe(url, sub_id, ..) if url == &indexer => Some(sub_id.clone()),
+            _ => None,
+        })
+        .expect("connecting a planned, never-probed relay must start a capability probe");
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&indexer),
+        neg_msg_frame(&wire_sub_string(&probe_sub), "6100"),
+    ));
+
+    // A second unknown recipient widens the discovery filter, which is what
+    // puts that question back on the wire. The relay is Supported now and the
+    // filter is broad, so what reaches the wire is the handoff's `limit:0`
+    // barrier -- never the planned REQ.
+    let second = draft(21, "hello you too").tag(nostr::Tag::public_key(other.public_key()));
+    let (_, rerouted) = publish_and_sign(&mut core, &author, second);
+    let (live_sub, live_filter) = req_for_kind(&rerouted, &indexer, 10002);
+    let live_sub = live_sub.clone();
+    assert_eq!(
+        live_filter.limit,
+        Some(0),
+        "the discovery question rides a barrier that attests nothing, which is exactly why \
+         its EOSE must not settle anything"
+    );
+
+    // The barrier's EOSE opens reconciliation. It settles NOTHING on its own.
+    let opened_neg = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&indexer),
+        eose_frame(&wire_sub_string(&live_sub)),
+    ));
+    assert!(
+        routed(&opened_neg, parked).is_none_or(|(_, complete)| !complete),
+        "a limit:0 EOSE proves nothing about whether a kind:10002 exists: {:?}",
+        statuses(&opened_neg, parked)
+    );
+    let (neg_sub, initial_hex) = opened_neg
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::NegOpen(_, sub_id, _, hex) => Some((sub_id.clone(), hex.clone())),
+            _ => None,
+        })
+        .expect("the barrier EOSE must open Negentropy");
+
+    // Reconcile against a relay that genuinely holds no kind:10002 for this
+    // recipient -- a real negentropy peer over an empty sealed storage, not a
+    // hand-written payload.
+    let reply = empty_relay_reconcile_reply(&initial_hex);
+    let settled = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&indexer),
+        neg_msg_frame(&wire_sub_string(&neg_sub), &reply),
+    ));
+
+    assert_eq!(
+        routed(&settled, parked),
+        Some((BTreeSet::from([outbox]), true)),
+        "reconciliation finishing with nothing to fetch IS the answer that this indexer has \
+         no relay list for the recipient, so the write retires in the same turn rather than \
+         parking forever: {:?}",
+        statuses(&settled, parked)
+    );
+    assert!(
+        !statuses(&settled, parked)
+            .iter()
+            .any(|status| matches!(status, WriteStatus::Failed(_))),
+        "settling absence is a positive fact, never a failure: {:?}",
+        statuses(&settled, parked)
+    );
+}
+
+/// #1019's falsifier, second half: **a coalesced request answers for every
+/// question it carried.**
+///
+/// Router coalescing folds the discovery atom into whatever else that session
+/// is already asking for, so the first discovery pass really is sent as
+/// `kinds:{3,10002}`. Settlement used to require `kinds == {10002}` exactly,
+/// which no coalesced request can ever satisfy — so the engine asked the
+/// question, got the answer, and declined to read it.
+#[test]
+fn a_coalesced_request_still_answers_the_relay_list_question_it_carried() {
+    let author = Keys::generate();
+    let recipient = Keys::generate();
+    let outbox = RelayUrl::parse("wss://outbox-a.example").unwrap();
+    let indexer = RelayUrl::parse("wss://indexer.example").unwrap();
+
+    let directory = SharedDirectory::new();
+    directory.learns_write(&author, &outbox);
+    let mut core = EngineCore::new(MemoryStore::new(), Box::new(directory), 10);
+    activate(&mut core, &author);
+    connect(&mut core, 0, &indexer);
+
+    let mentions = draft(21, "hello you").tag(nostr::Tag::public_key(recipient.public_key()));
+    let (parked, opened) = publish_and_sign(&mut core, &author, mentions);
+    assert_eq!(
+        routed(&opened, parked).map(|(_, complete)| complete),
+        Some(false),
+        "an Unknown recipient keeps the obligation alive: {:?}",
+        statuses(&opened, parked)
+    );
+
+    // A kind:3 demand for the same author is what coalescing folds the
+    // discovery atom into -- the exact shape a live engine sends on its very
+    // first discovery pass, where the contact list and the relay list are
+    // wanted for the same person at the same moment.
+    let coalesced = core.handle(EngineMsg::Subscribe(literal_query(
+        &[3],
+        &recipient.public_key().to_hex(),
+    )));
+    let (sub, filter) = req_for_kind(&coalesced, &indexer, 10002);
+    let sub = sub.clone();
+    assert_eq!(
+        filter.kinds.clone(),
+        Some(BTreeSet::from([3, 10002])),
+        "coalescing folds discovery into the wider request, which is the shape an equality \
+         test on `kinds` silently refuses to settle off"
+    );
+
+    let settled = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&indexer),
+        eose_frame(&wire_sub_string(&sub)),
+    ));
+
+    assert_eq!(
+        routed(&settled, parked),
+        Some((BTreeSet::from([outbox]), true)),
+        "the request asked about the recipient's kind:10002 among other things, and the EOSE \
+         answers everything it asked: {:?}",
+        statuses(&settled, parked)
     );
 }

@@ -527,14 +527,85 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
-    /// Record that `relay` reached end-of-stored-events on `atom`, and settle
-    /// every absence that completes.
+    /// Record the relay-list QUESTION `filter` asks, if it asks one, so that
+    /// the answer can be recognised however long afterwards it arrives
+    /// (#1019). Called from the single send-time door every outgoing REQ
+    /// passes through, plus [`Self::open_neg_session`] for the negentropy
+    /// namespace, which does not.
     ///
-    /// EOSE is NIP-01's "end of stored events": the relay asserts it has sent
-    /// everything matching the subscription's filter. When every indexer the
-    /// engine queries for an author's relay list has said that and no
-    /// kind:10002 arrived, the engine holds a POSITIVE fact — these sources
-    /// have nothing — which is the definition of `KnownAbsent`
+    /// Three conditions, each of which was a real defect on its own:
+    ///
+    /// - `kinds` must CONTAIN kind:10002, never equal `{10002}`. Coalescing
+    ///   legitimately folds the discovery atom into a wider req -- a
+    ///   `kinds:{3,10002}` req is what the very first discovery pass actually
+    ///   sends -- and an equality test silently declines to settle off it.
+    /// - `authors` must be present, because a question with no subject is not
+    ///   a question about anybody's relay list.
+    /// - `limit` must be absent. A `limit:0` request is the NIP-77 handoff's
+    ///   barrier: the relay sends nothing and then EOSEs, so its EOSE attests
+    ///   NOTHING about whether a kind:10002 exists. Same reasoning that
+    ///   poisons a limited request's coverage attribution (ruling §3), for
+    ///   the same reason.
+    pub(super) fn note_relay_list_ask(&mut self, sub_id: &SubId, filter: &ConcreteFilter) {
+        if filter.limit.is_some() {
+            return;
+        }
+        let asks_relay_list = filter
+            .kinds
+            .as_ref()
+            .is_some_and(|kinds| kinds.contains(&NIP65_RELAY_LIST_KIND));
+        if !asks_relay_list {
+            return;
+        }
+        let Some(authors) = filter.authors.clone() else {
+            return;
+        };
+        self.relay_list_asks.insert(sub_id.clone(), authors);
+    }
+
+    /// Forget an outstanding relay-list question whose request is leaving the
+    /// wire unanswered. Deliberately settles NOTHING: a withdrawn question has
+    /// been answered by nobody, and crediting the relay for it would be the
+    /// exact fail-open ("nowhere to ask" read as "asked, nothing there") that
+    /// [`Self::settle_relay_list_eose`] exists to refuse. The author stays
+    /// `Unknown`, so `sync_discovery` keeps declaring the need and the next
+    /// planned request re-asks it.
+    pub(super) fn forget_relay_list_ask(&mut self, sub_id: &SubId) {
+        self.relay_list_asks.remove(sub_id);
+    }
+
+    /// One exact request is abandoned: it may no longer earn coverage, and it
+    /// may no longer answer a relay-list question. Those are the same fact --
+    /// "nothing this request has left to say can be trusted or awaited" -- so
+    /// they retire together through one door rather than separately at fifteen
+    /// call sites, which is how the settlement half came to be forgotten in
+    /// the first place (#1019).
+    ///
+    /// Note what this is NOT: a plan-level `WireOp::Close` does not come
+    /// through here, and must not. Ordinary coalescing withdraws and re-mints
+    /// discovery reqs constantly while the relay's answer to the old one is
+    /// still in flight; forgetting the question at that point is exactly the
+    /// defect. A question outlives its plan entry and dies only when its
+    /// request is genuinely abandoned or its session drops.
+    pub(super) fn abandon_sub(&mut self, sub_id: &SubId) {
+        self.attribution.discard_sub(sub_id);
+        self.forget_relay_list_ask(sub_id);
+    }
+
+    /// A session dropped (disconnect, or a pool generation bump). Every
+    /// request on it is dead: the reconnect replays the plan and asks again.
+    pub(super) fn abandon_session_subs(&mut self, session: &RelaySessionKey) {
+        self.attribution.clear_session(session);
+        self.relay_list_asks
+            .retain(|sub_id, _| sub_id.0 != session.relay || sub_id.2 != session.access);
+    }
+
+    /// Record that `relay` has finished answering the relay-list question
+    /// `sub_id` asked, and settle every absence that completes.
+    ///
+    /// When every indexer the engine queries for an author's relay list has
+    /// finished and no kind:10002 arrived, the engine holds a POSITIVE fact —
+    /// these sources have nothing — which is the definition of `KnownAbsent`
     /// (`docs/internals/routing/knowledge-and-settlement.md` §2).
     ///
     /// Two boundaries are deliberate and load-bearing:
@@ -552,43 +623,29 @@ impl<S: EventStore> EngineCore<S> {
     ///   write on a misconfigured app.
     ///
     /// Returns true iff at least one author actually transitioned to
-    /// `KnownAbsent` on this frame, so the caller can wake the routes that
-    /// were waiting on exactly that.
-    pub(super) fn settle_relay_list_eose(
-        &mut self,
-        session: &RelaySessionKey,
-        sub_id: Option<&SubId>,
-    ) -> bool {
-        // Which filter this EOSE ends is read off the PLAN -- the reqs this
-        // engine actually sent on this session -- and NOT off coverage
-        // attribution.
+    /// `KnownAbsent`, so the caller can wake the routes that were waiting on
+    /// exactly that.
+    pub(super) fn discharge_relay_list_ask(&mut self, sub_id: &SubId) -> bool {
+        // What this answer answers is read off the QUESTION recorded when the
+        // request was sent, and NOT off the router plan.
         //
-        // That distinction is the whole of this function's correctness, and
-        // it was found the expensive way. Attribution credits BACKLOG
-        // watermarks, and it legitimately credits nothing for a subscription
-        // whose snapshot absorbed no coverage key; hanging settlement off it
-        // meant the indexers EOSE'd, the frames arrived, and the absence
-        // never settled -- silently, and only once a discovery filter
-        // carried more than one author, which is exactly the shape the
-        // three-p-tag retirement case needs. The plan says what was asked;
-        // the EOSE says it has been answered. Nothing else is required.
-        let Some(sub_id) = sub_id else {
+        // The plan describes what this engine is asking NOW, and that is a
+        // different thing from what it asked THEN in three routine ways
+        // (#1019): coalescing rewrites a discovery req's descriptor hash the
+        // moment the filter widens, so an in-flight answer names a `SubId`
+        // the plan no longer holds; coalescing also merges the discovery atom
+        // into a `kinds:{3,10002}` req that no equality test on `kinds` will
+        // ever recognise; and against a NIP-77 relay the plan's req is never
+        // sent as an ordinary REQ at all. Reading the plan therefore declined
+        // to settle in every one of those cases, silently, and a write parked
+        // on that author's relay list stayed parked forever.
+        //
+        // The relay is read off the SubId rather than the delivering session
+        // for the same reason: it is the relay the question was ASKED of.
+        let Some(authors) = self.relay_list_asks.remove(sub_id) else {
             return false;
         };
-        let Some(authors) = self.router.plan().reqs.get(session).and_then(|reqs| {
-            reqs.iter()
-                .find(|req| &req.sub_id == sub_id)
-                // Only a relay-list req attests anything about a relay list.
-                // A content atom EOSE'ing says nothing about whether a
-                // kind:10002 exists, and a kind:0 or kind:3 discovery req
-                // reaches these very same indexers -- so this check is what
-                // keeps absence from being settled off an unrelated answer.
-                .filter(|req| req.filter.kinds == Some(BTreeSet::from([NIP65_RELAY_LIST_KIND])))
-                .and_then(|req| req.filter.authors.clone())
-        }) else {
-            return false;
-        };
-        let relay = &session.relay;
+        let relay = sub_id.0.clone();
         // Sources are the CONFIGURED indexers -- the only relays a
         // discovery-kind atom is ever routed to. Nothing settles without
         // them, by design.
@@ -610,7 +667,7 @@ impl<S: EventStore> EngineCore<S> {
             // A settlement pass never downgrades an author whose real
             // kind:10002 has already been ingested -- the directory door
             // owns that check too, so an event arriving in the same turn as
-            // the EOSE wins.
+            // the answer wins.
             self.directory.settle_relay_list_absent(author);
             newly_settled = true;
         }
@@ -764,7 +821,7 @@ impl<S: EventStore> EngineCore<S> {
             .collect();
         for live_id in pending {
             self.pending_neg_handoffs.remove(&live_id);
-            self.attribution.discard_sub(&live_id);
+            self.abandon_sub(&live_id);
             closes.insert(live_id);
         }
 
@@ -776,7 +833,7 @@ impl<S: EventStore> EngineCore<S> {
             .collect();
         for neg_id in &neg_ids {
             if let Some(session) = self.neg_sessions.remove(neg_id) {
-                self.attribution.discard_sub(neg_id);
+                self.abandon_sub(neg_id);
                 effects.push(Effect::NegClose(session.relay, neg_id.clone()));
             }
         }
@@ -822,7 +879,7 @@ impl<S: EventStore> EngineCore<S> {
                     // snapshot intentionally remained alive while the missing
                     // ids were in flight. Withdrawing/superseding that fetch
                     // must release the deferred snapshot too.
-                    self.attribution.discard_sub(&neg_sub_id);
+                    self.abandon_sub(&neg_sub_id);
                 }
                 Some(TemporaryReq::BacklogActivatesLive {
                     live_sub_id,
@@ -838,7 +895,7 @@ impl<S: EventStore> EngineCore<S> {
                     // late EOSE on its orphaned wire id would otherwise
                     // still resolve through `attribution` and mint
                     // phantom coverage for demand that no longer exists.
-                    self.attribution.discard_sub(&live_sub_id);
+                    self.abandon_sub(&live_sub_id);
                     closes.insert(live_sub_id);
                     // `prior_live_sub_id` is ordinarily still the entry
                     // tracked in `active_nip77_live[plan_sub_id]`, closed
@@ -850,14 +907,14 @@ impl<S: EventStore> EngineCore<S> {
                     // double-closes a subscription another path owns.
                     if let Some(prior) = prior_live_sub_id {
                         if self.active_nip77_live.get(plan_sub_id) != Some(&prior) {
-                            self.attribution.discard_sub(&prior);
+                            self.abandon_sub(&prior);
                             closes.insert(prior);
                         }
                     }
                 }
                 Some(TemporaryReq::Backlog { .. }) | None => {}
             }
-            self.attribution.discard_sub(&sub_id);
+            self.abandon_sub(&sub_id);
             closes.insert(sub_id);
         }
     }
@@ -879,7 +936,7 @@ impl<S: EventStore> EngineCore<S> {
             .active_nip77_live
             .remove(plan_sub_id)
             .unwrap_or_else(|| plan_sub_id.clone());
-        self.attribution.discard_sub(&active);
+        self.abandon_sub(&active);
         closes.insert(active);
         closes.into_iter().map(WireOp::Close).collect()
     }
@@ -896,7 +953,7 @@ impl<S: EventStore> EngineCore<S> {
             .insert(handoff.plan_sub_id.clone(), handoff.live_sub_id.clone());
         if let Some(prior) = handoff.prior_live_sub_id.as_ref() {
             if prior != &handoff.live_sub_id {
-                self.attribution.discard_sub(prior);
+                self.abandon_sub(prior);
                 effects.push(Effect::Wire(WireDelta {
                     ops: vec![(
                         RelaySessionKey::public(handoff.probed.url().clone()),
@@ -958,6 +1015,13 @@ impl<S: EventStore> EngineCore<S> {
 
         let neg_sub_id = self.mint_nip77_role_sub_id(&plan_sub_id, NIP77_NEG_ROLE, &neg_filter);
 
+        // The negentropy namespace is the ONLY door a discovery filter reaches
+        // a NIP-77 relay through -- the plan's ordinary REQ was replaced by a
+        // `limit:0` barrier that attests nothing, so unless the relay-list
+        // question is re-asked here it can never be answered on this path at
+        // all (#1019). `record_send` below is `AttributionState`'s own door,
+        // not `record_observed_request`, so it does not pass the ask ledger.
+        self.note_relay_list_ask(&neg_sub_id, &neg_filter);
         let attribution_send = self.attribution.record_send(
             &RelaySessionKey::public(probed.url().clone()),
             &neg_sub_id,
@@ -1049,7 +1113,21 @@ impl<S: EventStore> EngineCore<S> {
 
         if need_ids.is_empty() {
             self.credit_neg_coverage(&sub_id, attribution_send, completed_at, &relay, effects);
-            self.attribution.discard_sub(&sub_id);
+            // Reconciliation proving there is nothing left to fetch is this
+            // path's ANSWER to the relay-list question, and the only one it
+            // ever gets: against a NIP-77 relay the discovery filter never
+            // rides an ordinary REQ, so no EOSE for it will ever arrive
+            // (#1019). Discharged BEFORE the request is abandoned -- an
+            // answered question and an abandoned one are opposite verdicts
+            // and the order between them is the whole difference.
+            let settled = self.discharge_relay_list_ask(&sub_id);
+            self.abandon_sub(&sub_id);
+            if settled {
+                // Absence settling is as much a knowledge change as a fact
+                // arriving, so the routes waiting on exactly this wake in
+                // this same turn rather than on some later tick.
+                self.rewrite_open_routes(effects);
+            }
         } else {
             let backfill = ConcreteFilter {
                 ids: Some(need_ids.iter().map(|id| id.to_hex()).collect()),
@@ -1064,6 +1142,18 @@ impl<S: EventStore> EngineCore<S> {
             // unlocks `sub_id`'s credit at EOSE).
             let backfill_sub =
                 self.mint_nip77_role_sub_id(&plan_sub_id, NIP77_MISSING_ROLE, &backfill);
+            // Reconciliation proved ids are still missing, and one of them may
+            // BE the kind:10002 this question is about -- so the answer is not
+            // in yet. Move the question onto the backfill request rather than
+            // discharging it here; its own EOSE lands after those events are
+            // ingested (EVENT precedes EOSE, NIP-01), by which point an author
+            // whose list did arrive reads `Known` and only a genuine absence
+            // settles. This mirrors exactly why coverage credit is deferred to
+            // the same EOSE. The backfill filter is ids-only, so
+            // `record_observed_request` below records no question of its own.
+            if let Some(authors) = self.relay_list_asks.remove(&sub_id) {
+                self.relay_list_asks.insert(backfill_sub.clone(), authors);
+            }
             self.pending_backfills.insert(
                 backfill_sub.clone(),
                 TemporaryReq::MissingIds {
@@ -1227,7 +1317,7 @@ impl<S: EventStore> EngineCore<S> {
         effects: &mut Vec<Effect>,
     ) {
         effects.push(Effect::NegClose(session.relay.clone(), sub_id.clone()));
-        self.attribution.discard_sub(&sub_id);
+        self.abandon_sub(&sub_id);
         let owner = session.plan_sub_id.clone();
         self.start_backlog_req(
             session.plan_sub_id,

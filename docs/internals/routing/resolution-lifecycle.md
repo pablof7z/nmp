@@ -246,6 +246,15 @@ The consequence for anything that compares receipt streams:
 > both axes — the engine closes an intent only when routing is complete AND
 > every lane is terminal (§7.1, and `close_if_all_lanes_terminal`).
 
+Measured refinement (#1019): closure stabilises the stream's **content**, not
+its **order**. Both axes have reached a terminal by then, so the set of facts
+is determined — but where the routing retirement lands among the delivery
+beats still is not. Over twelve runs of the identical parity scenario it
+arrived before `awaiting_auth` on one surface and after it on the other, about
+half the time. An observer comparing two surfaces must therefore compare each
+axis's own order, and must not compare the interleaving — which is not a
+weakening, because the interleaving is not a fact about either surface.
+
 Note what this asks of closure in return: an observer that waits for it is
 waiting on settlement, so a settlement that can silently fail to fire turns a
 bounded wait into a hang. Non-completion is reachable by design (zero
