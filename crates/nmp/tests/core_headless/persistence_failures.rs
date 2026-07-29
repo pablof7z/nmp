@@ -605,22 +605,19 @@ fn unchanged_worker_demand_reads_zero_outbox_lanes() {
     activate(&mut core, &author);
 
     for (i, relay) in relays.iter().enumerate() {
-        let accepted = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Unsigned(unsigned(
-                    &author,
-                    300 + i as u64,
-                    &format!("worker projection {i}"),
-                )),
-                durability: Durability::Durable,
-                routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                    relays: NarrowOnly::new([relay.clone()]),
-                }),
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(CapturingReceiptSink::default()),
-        ));
+        let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(
+                &author,
+                300 + i as u64,
+                &format!("worker projection {i}"),
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                relays: NarrowOnly::new([relay.clone()]),
+            }),
+            identity_override: None,
+            correlation: None,
+        }));
         let (id, generation, unsigned) = find_sign_request(&accepted);
         let signed = unsigned.sign_with_keys(&author).unwrap();
         let signed_effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
@@ -684,22 +681,19 @@ fn relay_worker_projection_redb_benchmark() {
     activate(&mut core, &author);
 
     for (i, relay) in relays.iter().enumerate() {
-        let accepted = core.handle(EngineMsg::Publish(
-            WriteIntent {
-                payload: WritePayload::Unsigned(unsigned(
-                    &author,
-                    10_000 + i as u64,
-                    &format!("worker benchmark {i}"),
-                )),
-                durability: Durability::Durable,
-                routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                    relays: NarrowOnly::new([relay.clone()]),
-                }),
-                identity_override: None,
-                correlation: None,
-            },
-            Box::new(CapturingReceiptSink::default()),
-        ));
+        let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned(
+                &author,
+                10_000 + i as u64,
+                &format!("worker benchmark {i}"),
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::PrivateNarrow(PrivateRoute {
+                relays: NarrowOnly::new([relay.clone()]),
+            }),
+            identity_override: None,
+            correlation: None,
+        }));
         let (id, generation, unsigned) = find_sign_request(&accepted);
         let signed = unsigned.sign_with_keys(&author).unwrap();
         let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
