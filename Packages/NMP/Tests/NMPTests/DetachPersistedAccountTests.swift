@@ -188,7 +188,7 @@ final class DetachPersistedAccountTests: XCTestCase {
                     content: "cached before detach"
                 ),
                 durability: .durable,
-                routing: .authorOutbox
+                routing: .auto
             )
         )
         var sawAccepted = false

@@ -1,18 +1,20 @@
 //! Protocol-owned NIP-65 account bootstrap.
 //!
 //! A brand-new author has no kind:10002 in NMP's relay directory, so an
-//! ordinary [`nmp::WriteRouting::AuthorOutbox`] publication correctly fails
-//! closed. [`publish_relay_list_bootstrap`] is the one narrow exception: it
-//! publishes the author's first relay list to an explicit, validated relay set
-//! through the ordinary durable acceptance, signer, outbox, and tracked
-//! receipt pipeline.
+//! ordinary [`nmp::WriteRouting::Auto`] publication correctly fails
+//! closed. [`publish_relay_list_bootstrap`] publishes the author's first
+//! relay list to a validated exact relay set instead — an
+//! [`nmp::WriteRouting::Explicit`] minted by this crate, the same "protocol
+//! crate mints an exact route" pattern any other crate uses, running through
+//! the ordinary durable acceptance, signer, outbox, and tracked receipt
+//! pipeline. No dedicated routing variant is involved, and none is needed.
 //!
 //! The operation never mutates NMP's relay directory and never inserts a
-//! synthetic network row or provenance fact. The new kind:10002 becomes an
-//! author-outbox routing fact only after it returns through an ordinary relay
-//! subscription and the existing network-ingest path selects it as the
-//! canonical replaceable winner. Every later write uses ordinary
-//! `AuthorOutbox`.
+//! synthetic network row or provenance fact. The new kind:10002 becomes a
+//! routing fact only after it returns through an ordinary relay subscription
+//! and the existing network-ingest path selects it as the canonical
+//! replaceable winner. Every later write uses ordinary
+//! [`nmp::WriteRouting::Auto`].
 
 use std::collections::BTreeSet;
 
@@ -20,7 +22,6 @@ use nmp::{
     CorrelationToken, Durability, Engine, EngineError, Kind, PublicKey, ReceiptStream, RelayUrl,
     Tag, Timestamp, UnsignedEvent, WriteIntent, WritePayload, WriteRouting,
 };
-use nmp_grammar::RelayListBootstrapAuthority;
 use nostr::nips::nip65::RelayMetadata;
 
 /// Maximum number of exact relays the bootstrap publication may contact.
@@ -270,9 +271,7 @@ fn compose_relay_list_bootstrap(request: BootstrapRelayList, created_at: Timesta
             "",
         )),
         durability: Durability::Durable,
-        routing: WriteRouting::RelayListBootstrap(
-            RelayListBootstrapAuthority::from_validated_relays(bootstrap_relays),
-        ),
+        routing: WriteRouting::Explicit(bootstrap_relays.into_iter().collect()),
         identity_override: None,
         correlation,
     }
@@ -402,13 +401,10 @@ mod tests {
                 vec!["r".to_string(), write.to_string(), "write".to_string()],
             ]
         );
-        let WriteRouting::RelayListBootstrap(authority) = intent.routing else {
-            panic!("bootstrap must use its dedicated route")
+        let WriteRouting::Explicit(relays) = intent.routing else {
+            panic!("bootstrap mints an exact relay set, like any other protocol crate")
         };
-        assert_eq!(
-            authority.iter().cloned().collect::<Vec<_>>(),
-            vec![bootstrap_a, bootstrap_b]
-        );
+        assert_eq!(relays, vec![bootstrap_a, bootstrap_b]);
     }
 
     #[test]

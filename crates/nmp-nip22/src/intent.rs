@@ -1,6 +1,6 @@
 //! Compose a publishable NIP-22 `WriteIntent` (#572). This is the ONE place
 //! that knows "a NIP-22 comment write is `Unsigned` + `Durable` +
-//! `AuthorOutbox`" -- callers never hand-roll durability or routing.
+//! `Auto`" -- callers never hand-roll durability or routing.
 //! `author` and `created_at` are explicit caller-supplied parameters (this
 //! issue's own design decision): no active-account query, no wall-clock
 //! read, hence zero engine dependency for this whole crate.
@@ -37,7 +37,7 @@ pub fn comment_intent(
     WriteIntent {
         payload: WritePayload::Unsigned(unsigned),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation,
     }
@@ -66,7 +66,7 @@ mod tests {
         );
         assert!(matches!(intent.payload, WritePayload::Unsigned(_)));
         assert_eq!(intent.durability, Durability::Durable);
-        assert!(matches!(intent.routing, WriteRouting::AuthorOutbox));
+        assert!(matches!(intent.routing, WriteRouting::Auto));
         assert!(intent.identity_override.is_none());
         assert!(intent.correlation.is_none());
     }

@@ -1213,7 +1213,7 @@ mod tests {
                     "cancel through facade",
                 )),
                 durability: nmp_grammar::Durability::Durable,
-                routing: nmp_grammar::WriteRouting::AuthorOutbox,
+                routing: nmp_grammar::WriteRouting::Auto,
                 identity_override: None,
                 correlation: None,
             })
@@ -1276,7 +1276,7 @@ mod tests {
                     "observer lifetime is not write ownership",
                 )),
                 durability: nmp_grammar::Durability::Durable,
-                routing: nmp_grammar::WriteRouting::AuthorOutbox,
+                routing: nmp_grammar::WriteRouting::Auto,
                 identity_override: None,
                 correlation: None,
             })
@@ -1644,7 +1644,7 @@ mod tests {
                         content,
                     )),
                     durability: nmp_grammar::Durability::Durable,
-                    routing: nmp_grammar::WriteRouting::AuthorOutbox,
+                    routing: nmp_grammar::WriteRouting::Auto,
                     identity_override: None,
                     correlation: None,
                 })
@@ -2149,7 +2149,7 @@ mod tests {
             .publish(WriteIntent {
                 payload: WritePayload::Signed(event),
                 durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
+                routing: WriteRouting::Auto,
                 identity_override: None,
                 correlation: None,
             })
@@ -2206,7 +2206,7 @@ mod tests {
             .publish(WriteIntent {
                 payload: WritePayload::Unsigned(draft),
                 durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
+                routing: WriteRouting::Auto,
                 identity_override: Some(pk_b),
                 correlation: None,
             })
@@ -2295,7 +2295,7 @@ mod tests {
                 "unreachable",
             )),
             durability: Durability::Ephemeral,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         });

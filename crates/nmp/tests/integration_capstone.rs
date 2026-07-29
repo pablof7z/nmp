@@ -1057,7 +1057,7 @@ fn write_ack_per_relay_over_real_relays() {
         .publish(WriteIntent {
             payload: WritePayload::Unsigned(unsigned),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -1252,7 +1252,7 @@ fn reconnect_requires_a_fresh_real_relay_challenge() {
                 "fresh challenge after reconnect",
             )),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -1418,7 +1418,7 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
         .publish(WriteIntent {
             payload: WritePayload::Unsigned(contact_list),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -1443,7 +1443,7 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
         .publish(WriteIntent {
             payload: WritePayload::Unsigned(mute_list),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })

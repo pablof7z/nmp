@@ -227,13 +227,13 @@ pub use nmp_grammar::{decode_nostr_entity, NostrEntity, NostrEntityError};
 // `Durability`/`WriteIntent`/`WritePayload`/`WriteRouting` moved to
 // `nmp-grammar` (#115 Fable ruling, Fork 3) -- a protocol module composing
 // a `WriteIntent` must not gain an engine dependency to do so.
-// `NarrowOnly`/`PrivateRoute` are deliberately NOT
-// re-exported here even though they are `pub` in `nmp-grammar`: `NarrowOnly`'s
-// constructor validates only that a set can never widen after construction,
-// not that its initial contents are actually private (#22) -- an app must
-// not be able to place arbitrary public relays into a route that looks
-// structurally narrow. A validated, opaque private-route mint belongs in a
-// protocol module, not the default facade surface.
+// `WriteRouting` is the whole routing vocabulary and both of its words are
+// app-constructible here: `Auto` ("figure out how to route whatever I'm
+// publishing") and `Explicit(relays)` ("use these exact relays and that is
+// that"). Publishing to a chosen relay is a first-class general capability,
+// not a protocol-module privilege -- an app offering "publish this event to
+// relay: [user input]" and a crate routing to a group host say the same
+// thing the same way.
 pub use crate::core::ReceiptId;
 pub use crate::outbox::WriteStatus;
 pub use crate::runtime::{

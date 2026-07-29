@@ -339,7 +339,7 @@ fn offline_accept_restart_real_bunker_reattach_publish_and_ack() {
             .publish_tracked(WriteIntent {
                 payload: WritePayload::Unsigned(unsigned.clone()),
                 durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
+                routing: WriteRouting::Auto,
                 identity_override: None,
                 correlation: None,
             })
@@ -492,7 +492,7 @@ fn mutated_real_bunker_response_retracts_pending_and_restores_replaceable_predec
         .publish_tracked(WriteIntent {
             payload: WritePayload::Unsigned(replacement),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -588,7 +588,7 @@ fn checkpoint_restore_reattaches_durable_write_without_repairing() {
             .publish_tracked(WriteIntent {
                 payload: WritePayload::Unsigned(unsigned.clone()),
                 durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
+                routing: WriteRouting::Auto,
                 identity_override: None,
                 correlation: None,
             })

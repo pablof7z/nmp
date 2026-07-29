@@ -147,8 +147,8 @@ fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
 
     assert!(matches!(direct.durability, Durability::Durable));
     assert_eq!(ffi.durability, FfiDurability::Durable);
-    assert!(matches!(direct.routing, WriteRouting::AuthorOutbox));
-    assert_eq!(ffi.routing, FfiWriteRouting::AuthorOutbox);
+    assert!(matches!(direct.routing, WriteRouting::Auto));
+    assert_eq!(ffi.routing, FfiWriteRouting::Auto);
     assert!(direct.identity_override.is_none());
     assert!(ffi.identity_override.is_none());
     assert_eq!(
@@ -1772,7 +1772,7 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
         .publish(WriteIntent {
             payload: WritePayload::Unsigned(unsigned),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -1896,7 +1896,7 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
                 content: "parity-write".to_string(),
             },
             durability: FfiDurability::Durable,
-            routing: FfiWriteRouting::AuthorOutbox,
+            routing: FfiWriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -1967,7 +1967,7 @@ async fn run_direct_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<
         .publish(WriteIntent {
             payload: WritePayload::Unsigned(unsigned),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -2026,7 +2026,7 @@ async fn run_ffi_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<Nor
                 content: "parity-write".to_string(),
             },
             durability: FfiDurability::Durable,
-            routing: FfiWriteRouting::AuthorOutbox,
+            routing: FfiWriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -2049,7 +2049,7 @@ async fn run_ffi_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<Nor
 /// registered as a SECONDARY account -- in the engine's signer set but
 /// never active -- while the active account is a different registered
 /// identity. Same seeding/discovery preamble as `run_direct_success`, but
-/// the seeded kind:10002 belongs to the OVERRIDE identity: `AuthorOutbox`
+/// the seeded kind:10002 belongs to the OVERRIDE identity: `Auto`
 /// routes by the intent's author, which #47 pins to the override. A silent
 /// fallback to the active account would sign a DIFFERENT author and change
 /// the deterministic event id the `Signed` receipt names.
@@ -2090,7 +2090,7 @@ async fn run_direct_override_publish(active: &Keys, override_keys: &Keys) -> Vec
         .publish(WriteIntent {
             payload: WritePayload::Unsigned(unsigned),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: Some(override_pubkey),
             correlation: None,
         })
@@ -2146,7 +2146,7 @@ async fn run_ffi_override_publish(active: &Keys, override_keys: &Keys) -> Vec<No
                 content: "parity-write".to_string(),
             },
             durability: FfiDurability::Durable,
-            routing: FfiWriteRouting::AuthorOutbox,
+            routing: FfiWriteRouting::Auto,
             identity_override: Some(override_pubkey),
             correlation: None,
         })
@@ -2177,7 +2177,7 @@ async fn run_direct_tampered(keys: &Keys) -> TamperedOutcome {
         .publish(WriteIntent {
             payload: WritePayload::Signed(event),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -2231,7 +2231,7 @@ async fn run_ffi_tampered(keys: &Keys) -> TamperedOutcome {
                 sig: event.sig.to_string(),
             },
             durability: FfiDurability::Durable,
-            routing: FfiWriteRouting::AuthorOutbox,
+            routing: FfiWriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -2335,7 +2335,7 @@ async fn run_direct_reattach_live() -> ReattachProof {
         .publish_tracked(WriteIntent {
             payload: WritePayload::Unsigned(unsigned),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -2412,7 +2412,7 @@ async fn run_ffi_reattach_live() -> ReattachProof {
                 content: "reattach-live".to_string(),
             },
             durability: FfiDurability::Durable,
-            routing: FfiWriteRouting::AuthorOutbox,
+            routing: FfiWriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -2514,7 +2514,7 @@ fn run_direct_correlation() -> CorrelationProof {
                 "correlation-first",
             )),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: token(),
         })
@@ -2532,7 +2532,7 @@ fn run_direct_correlation() -> CorrelationProof {
                 "correlation-second-different-body",
             )),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: token(),
         })
@@ -2574,7 +2574,7 @@ fn run_ffi_correlation() -> CorrelationProof {
             content: content.to_string(),
         },
         durability: FfiDurability::Durable,
-        routing: FfiWriteRouting::AuthorOutbox,
+        routing: FfiWriteRouting::Auto,
         identity_override: None,
         correlation: Some(CORRELATION_TOKEN.to_string()),
     };
@@ -2654,7 +2654,7 @@ fn run_direct_cancellation() -> CancellationProof {
                 "cancel-parity",
             )),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -2714,7 +2714,7 @@ async fn run_ffi_cancellation() -> CancellationProof {
                 content: "cancel-parity".to_string(),
             },
             durability: FfiDurability::Durable,
-            routing: FfiWriteRouting::AuthorOutbox,
+            routing: FfiWriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -2781,7 +2781,7 @@ async fn run_direct_reattach_terminal(path: &std::path::Path) -> ReattachProof {
             .publish_tracked(WriteIntent {
                 payload: WritePayload::Unsigned(unsigned),
                 durability: Durability::Ephemeral,
-                routing: WriteRouting::AuthorOutbox,
+                routing: WriteRouting::Auto,
                 identity_override: None,
                 correlation: None,
             })
@@ -2852,7 +2852,7 @@ async fn run_ffi_reattach_terminal(path: &std::path::Path) -> ReattachProof {
                     content: "reattach-terminal".to_string(),
                 },
                 durability: FfiDurability::Ephemeral,
-                routing: FfiWriteRouting::AuthorOutbox,
+                routing: FfiWriteRouting::Auto,
                 identity_override: None,
                 correlation: None,
             })
@@ -3125,5 +3125,193 @@ async fn direct_and_ffi_follow_refuse_a_reconciled_missing_contact_list() {
             NormFollowActionStatus::Failed("NoContactList".to_string())
         ],
         "ordinary follow must publish nothing when there is no established kind:3 base"
+    );
+}
+
+// ---- #972: explicit routing, direct Rust and FFI ------------------------
+
+/// Publish one write to one relay the caller named, with NO relay list
+/// seeded anywhere and NO discovery run first. `Auto` would fail closed
+/// here — the directory knows nothing about this author — so every relay
+/// this write reaches is one the caller chose.
+async fn run_direct_explicit_route(keys: &Keys, relay: &ScriptedRelay) -> Vec<NormStatus> {
+    let relay_url = relay.url.to_string();
+    let engine = Engine::new(EngineConfig {
+        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
+        ..EngineConfig::default()
+    })
+    .expect("direct engine must construct");
+    let pubkey = engine
+        .add_account(&keys.secret_key().to_secret_hex())
+        .expect("direct account must register")
+        .public_key();
+    engine
+        .set_active_account(Some(pubkey))
+        .expect("direct account must activate");
+
+    let unsigned = UnsignedEvent::new(
+        pubkey,
+        Timestamp::from(WRITE_CREATED_AT),
+        Kind::Custom(WRITE_KIND),
+        vec![],
+        "parity-write",
+    );
+    let receipt_rx = engine
+        .publish(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned),
+            durability: Durability::Durable,
+            routing: WriteRouting::Explicit(vec![relay.url.clone()]),
+            identity_override: None,
+            correlation: None,
+        })
+        .expect("direct explicit publish must enqueue");
+    let receipts = collect_direct_receipts(receipt_rx, &relay_url);
+    engine.shutdown();
+    receipts
+}
+
+async fn run_ffi_explicit_route(keys: &Keys, relay: &ScriptedRelay) -> Vec<NormStatus> {
+    let relay_url = relay.url.to_string();
+    let engine = NmpEngine::new(NmpEngineConfig {
+        store_path: None,
+        indexer_relays: vec![],
+        app_relays: vec![],
+        fallback_relays: vec![],
+        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
+        ..NmpEngineConfig::default()
+    })
+    .expect("FFI engine must construct");
+    let registration = engine
+        .add_account(keys.secret_key().to_secret_hex())
+        .expect("FFI account must register");
+    let pubkey = registration.public_key();
+    engine
+        .set_active_account(Some(pubkey.clone()))
+        .expect("FFI account must activate");
+
+    let receipt = engine
+        .publish(FfiWriteIntent {
+            payload: FfiWritePayload::Unsigned {
+                pubkey,
+                created_at: WRITE_CREATED_AT,
+                kind: WRITE_KIND,
+                tags: vec![],
+                content: "parity-write".to_string(),
+            },
+            durability: FfiDurability::Durable,
+            routing: FfiWriteRouting::Explicit {
+                relays: vec![relay_url.clone()],
+            },
+            identity_override: None,
+            correlation: None,
+        })
+        .expect("FFI explicit publish must enqueue");
+    let receipt_rx = bridge_receipts(&receipt);
+    let receipts = collect_ffi_receipts(&receipt_rx, &relay_url);
+    engine.shutdown();
+    receipts
+}
+
+/// #972 falsifier: an app naming one exact relay gets exactly that relay,
+/// identically from direct Rust and across the FFI boundary. Nothing is
+/// seeded and no discovery runs, so the directory has nothing to contribute
+/// and cannot be the reason the write lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn direct_and_ffi_publish_to_one_explicitly_named_relay_identically() {
+    let keys = fixed_keys();
+
+    let direct_relay = ScriptedRelay::start(&RelayConfig::default()).await;
+    let direct = run_direct_explicit_route(&keys, &direct_relay).await;
+    direct_relay.shutdown();
+
+    let ffi_relay = ScriptedRelay::start(&RelayConfig::default()).await;
+    let ffi = run_ffi_explicit_route(&keys, &ffi_relay).await;
+    ffi_relay.shutdown();
+
+    assert_eq!(
+        direct, ffi,
+        "an explicit route must expose identical ordered receipt facts on both surfaces"
+    );
+    assert_eq!(
+        direct,
+        expected_success_receipts(&keys),
+        "the write routes to exactly the one relay the caller named and is acked there"
+    );
+}
+
+/// #972 falsifier: `Explicit` with no relays is refused before anything is
+/// accepted, on BOTH surfaces, and never degrades into `Auto`. The only
+/// status is `Failed`, with no `Accepted` ahead of it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn direct_and_ffi_refuse_an_empty_explicit_route_at_the_door() {
+    let keys = fixed_keys();
+
+    let engine = Engine::new(EngineConfig::default()).expect("direct engine must construct");
+    let pubkey = engine
+        .add_account(&keys.secret_key().to_secret_hex())
+        .expect("direct account must register")
+        .public_key();
+    engine
+        .set_active_account(Some(pubkey))
+        .expect("direct account must activate");
+    let direct_rx = engine
+        .publish(WriteIntent {
+            payload: WritePayload::Unsigned(UnsignedEvent::new(
+                pubkey,
+                Timestamp::from(WRITE_CREATED_AT),
+                Kind::Custom(WRITE_KIND),
+                vec![],
+                "nowhere",
+            )),
+            durability: Durability::Durable,
+            routing: WriteRouting::Explicit(vec![]),
+            identity_override: None,
+            correlation: None,
+        })
+        .expect("the refusal arrives on the receipt stream, not as a construction error");
+    let direct = collect_direct_receipts(direct_rx, "<unused>");
+    engine.shutdown();
+
+    let ffi_engine = NmpEngine::new(NmpEngineConfig {
+        store_path: None,
+        indexer_relays: vec![],
+        app_relays: vec![],
+        fallback_relays: vec![],
+        ..NmpEngineConfig::default()
+    })
+    .expect("FFI engine must construct");
+    let ffi_registration = ffi_engine
+        .add_account(keys.secret_key().to_secret_hex())
+        .expect("FFI account must register");
+    let ffi_pubkey = ffi_registration.public_key();
+    ffi_engine
+        .set_active_account(Some(ffi_pubkey.clone()))
+        .expect("FFI account must activate");
+    let receipt = ffi_engine
+        .publish(FfiWriteIntent {
+            payload: FfiWritePayload::Unsigned {
+                pubkey: ffi_pubkey,
+                created_at: WRITE_CREATED_AT,
+                kind: WRITE_KIND,
+                tags: vec![],
+                content: "nowhere".to_string(),
+            },
+            durability: FfiDurability::Durable,
+            routing: FfiWriteRouting::Explicit { relays: vec![] },
+            identity_override: None,
+            correlation: None,
+        })
+        .expect("the refusal arrives on the receipt stream, not as a typed FfiError");
+    let ffi = collect_ffi_receipts(&bridge_receipts(&receipt), "<unused>");
+    ffi_engine.shutdown();
+
+    assert_eq!(
+        direct, ffi,
+        "both surfaces must refuse an empty explicit route the same way"
+    );
+    assert_eq!(direct.len(), 1, "exactly one status: {direct:?}");
+    assert!(
+        matches!(direct.first(), Some(NormStatus::Failed(_))),
+        "Failed must be the first and only status -- never Accepted: {direct:?}"
     );
 }

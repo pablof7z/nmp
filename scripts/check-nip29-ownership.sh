@@ -101,18 +101,45 @@ fi
 # fails closed without dropping the obligation -- is proved instead by
 # `malformed_persisted_routing_fails_closed_without_dropping_the_obligation`,
 # which uses a generic undecodable string and names no dead vocabulary.
-dead_spellings=$(grep -RInE 'pinned-host-hex|to-inboxes:' \
+#
+# #972 retires three more journal spellings into this same clause:
+# `author-outbox`, `private-narrow-hex:`, and `nip65-bootstrap-hex:`. The
+# durable vocabulary is `auto` and `explicit-hex:`, and a row spelled any
+# other way is unreadable by the generic rule, not by a per-spelling one.
+dead_spellings=$(grep -RInE 'pinned-host-hex|to-inboxes:|author-outbox|private-narrow-hex|nip65-bootstrap-hex' \
   crates/nmp-grammar crates/nmp crates/nmp-ffi || true)
 if [[ -n $dead_spellings ]]; then
   printf '%s\n' "$dead_spellings"
   fail "a removed routing spelling reappeared -- delete it, do not assert it"
 fi
 
-found=$(grep -RInE 'HostAuthority|PinnedHost' \
-  crates/nmp-grammar crates/nmp crates/nmp-ffi || true)
+# #972 revises the clause that used to sit here.
+#
+# It banned `HostAuthority`/`PinnedHost` on #838's premise that "no supported
+# general-purpose or NIP-29 operation can currently route an arbitrary write
+# to one selected relay". That premise is dead: publishing to chosen relays is
+# now a first-class general capability (`WriteRouting::Explicit`),
+# app-constructible on every platform, and NIP-29 is one consumer of it rather
+# than its justification. A grep guarding a capability that should exist is
+# not a tripwire, it is sediment
+# (`docs/internals/routing/removed-routes.md` §3.3).
+#
+# What replaces it is a POSITIVE pin on what the reversal must not have
+# loosened: the routing vocabulary the design deleted must never come back, in
+# any spelling, anywhere an app or SDK can reach. The two dead never-built
+# names ride along, for the same reason as above -- they must simply never
+# return.
+# (`AuthorOutbox` excludes the unrelated read-side `SourceAuthority::
+# AuthorOutboxes`, which this design does not touch.)
+removed_routing_names='AuthorOutbox([^e]|$)|PrivateNarrow|NarrowOnly|PrivateRoute|RelayListBootstrap|HostAuthority|PinnedHost'
+found=$(grep -RInE "$removed_routing_names" \
+  crates/nmp-grammar/src crates/nmp/src crates/nmp-ffi/src \
+  Packages/NMP/Sources Packages/NMPKotlin/src/main || true)
 if [[ -n $found ]]; then
   printf '%s\n' "$found"
-  fail "dead NIP-29-only write authority remains reachable"
+  fail "a deleted routing spelling came back; the vocabulary is Auto and Explicit"
 fi
 
+# The ownership half is untouched by the reversal and still holds: routing
+# policy for a group belongs to nmp-nip29, never to the engine crates.
 echo "nip29-ownership: ok"

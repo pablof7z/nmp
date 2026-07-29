@@ -486,12 +486,13 @@ about current code:
   one semantic `publish_relay_list_bootstrap` operation. Its request separates
   the finite exact bootstrap delivery set from the bounded advertised relay
   policy, requires at least one write-capable advertised relay, samples time
-  inside Rust, and returns the ordinary tracked receipt. The dedicated
-  `RelayListBootstrap` route is persisted across restart but never mutates the
-  relay directory. A real controlled-relay falsifier holds the bootstrap
-  EVENT before relay acceptance and proves an ordinary AuthorOutbox write
-  still fails; after the already-open kind:10002 observation receives real
-  relay provenance, the next AuthorOutbox write routes and ACKs. No synthetic
+  inside Rust, and returns the ordinary tracked receipt. The route it mints is
+  an ordinary `WriteRouting::Explicit`, persisted across restart and executed
+  verbatim, and it never mutates the relay directory. A real controlled-relay
+  falsifier holds the bootstrap EVENT before relay acceptance and proves an
+  ordinary `Auto` write still fails; after the already-open kind:10002
+  observation receives real relay provenance, the next `Auto` write routes
+  and ACKs. No synthetic
   row, local directory injection, app transport, or `nmp-grammar` consumer
   dependency exists. **Gap:** FFI, Swift, and Kotlin do not yet project this
   operation and must not hand-roll it.

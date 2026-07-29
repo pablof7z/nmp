@@ -20,6 +20,29 @@ pub fn parse_people(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// Pull every double-quoted name out of a phrase, whatever joins them
+/// (`"a", and "b"` / `"a" and "b"` / `"a"`). Shared by every step whose
+/// prose names relays rather than people.
+pub fn parse_quoted_list(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = raw.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c == '"' {
+            if let Some(end) = raw[i + 1..].find('"') {
+                out.push(raw[i + 1..i + 1 + end].to_string());
+                // Skip past the closing quote.
+                while let Some((j, _)) = chars.peek() {
+                    if *j > i + 1 + end {
+                        break;
+                    }
+                    chars.next();
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The single ASCII letter a `"p"`/`"d"`/`"e"` step names. Its own helper so
 /// every tag-shaped step rejects a non-letter the same way, with the same
 /// message, instead of each one unwrapping an `Option` inline.

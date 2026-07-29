@@ -246,7 +246,7 @@ final class NIP22Tests: XCTestCase {
         )
         XCTAssertEqual(composedContent, "golden fixture content")
         XCTAssertEqual(intent.durability, .durable)
-        XCTAssertEqual(intent.routing, .authorOutbox)
+        XCTAssertEqual(intent.routing, .auto)
         XCTAssertNil(intent.identityOverride)
         XCTAssertNil(intent.correlation)
 

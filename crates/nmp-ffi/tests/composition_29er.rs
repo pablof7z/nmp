@@ -207,7 +207,7 @@ async fn the_29er_observer_composition_never_saturates_across_room_switching_and
                 content: "29er composition".to_string(),
             },
             durability: FfiDurability::Durable,
-            routing: FfiWriteRouting::AuthorOutbox,
+            routing: FfiWriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })

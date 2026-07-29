@@ -163,7 +163,7 @@ async fn mixed_engine_load_makes_progress_without_capacity_refusal() {
                 content: "mixed-load publish".to_string(),
             },
             durability: FfiDurability::Durable,
-            routing: FfiWriteRouting::AuthorOutbox,
+            routing: FfiWriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })

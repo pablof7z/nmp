@@ -6,28 +6,8 @@
 
 use cucumber::given;
 
-use crate::steps::parse_people;
+use crate::steps::{parse_people, parse_quoted_list};
 use crate::world::{NmpWorld, ME};
-
-fn parse_quoted_list(raw: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut chars = raw.char_indices().peekable();
-    while let Some((i, c)) = chars.next() {
-        if c == '"' {
-            if let Some(end) = raw[i + 1..].find('"') {
-                out.push(raw[i + 1..i + 1 + end].to_string());
-                // Skip past the closing quote.
-                while let Some((j, _)) = chars.peek() {
-                    if *j > i + 1 + end {
-                        break;
-                    }
-                    chars.next();
-                }
-            }
-        }
-    }
-    out
-}
 
 #[given(regex = r#"^only (\d+) indexer relays? (?:is|are) configured$"#)]
 async fn only_n_indexers(w: &mut NmpWorld, n: usize) {
@@ -156,24 +136,37 @@ async fn my_feed_is_open(w: &mut NmpWorld) {
     w.open_my_follows_feed().await;
 }
 
-#[cfg(test)]
-mod tests {
-    use super::parse_quoted_list;
+// ---- routing: the two words --------------------------------------------
 
-    #[test]
-    fn extracts_a_single_quoted_name() {
-        assert_eq!(parse_quoted_list(r#""alice-relay""#), vec!["alice-relay"]);
-    }
+/// The default in this world, stated out loud because the routing scenarios
+/// need it stated: when nothing is delivered to an app relay, it is because
+/// no app relay exists, not because the assertion got lucky.
+#[given(regex = r#"^no app relays are configured$"#)]
+async fn no_app_relays(w: &mut NmpWorld) {
+    w.assert_no_app_relays();
+}
 
-    #[test]
-    fn extracts_several_quoted_names_regardless_of_joiners() {
-        assert_eq!(
-            parse_quoted_list(r#""relay-a", and "relay-b""#),
-            vec!["relay-a", "relay-b"]
-        );
-        assert_eq!(
-            parse_quoted_list(r#""good-relay" and "flaky-relay""#),
-            vec!["good-relay", "flaky-relay"]
-        );
+/// The engine-side twin of `my relay list names ... as my write relays`:
+/// the directory is populated so an explicit route has something it could
+/// wrongly consult.
+#[given(regex = r#"^the directory knows (.+) as my write relays$"#)]
+async fn directory_knows_my_write_relays(w: &mut NmpWorld, list: String) {
+    for relay in parse_quoted_list(&list) {
+        w.declare_write_relay(ME, &relay);
     }
+}
+
+/// A note staged as an ALREADY-SIGNED event, kept verbatim so a later step
+/// can republish exactly the bytes its author signed.
+#[given(regex = r#"^(\S+) has posted a note saying "([^"]+)" signed by \S+$"#)]
+async fn person_posted_signed_note(w: &mut NmpWorld, person: String, text: String) {
+    w.stage_signed_note(&person, &text);
+}
+
+/// A signer for the current account already exists in this world (every
+/// scenario that logs in gets one), stated out loud where a scenario's point
+/// is that the signer was NOT asked for anything.
+#[given(regex = r#"^a signer is registered for the current pubkey$"#)]
+async fn signer_is_registered(w: &mut NmpWorld) {
+    w.assert_signer_registered();
 }

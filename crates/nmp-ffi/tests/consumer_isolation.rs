@@ -71,7 +71,7 @@ async fn stalled_consumer_is_bounded_and_does_not_delay_active_consumer_or_engin
                     content: format!("note-{i}"),
                 },
                 durability: FfiDurability::Durable,
-                routing: FfiWriteRouting::AuthorOutbox,
+                routing: FfiWriteRouting::Auto,
                 identity_override: None,
                 correlation: None,
             })
