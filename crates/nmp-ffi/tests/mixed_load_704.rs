@@ -155,12 +155,13 @@ async fn mixed_engine_load_makes_progress_without_capacity_refusal() {
     // (f) A concurrent durable publish receipt.
     let receipt = engine
         .publish(FfiWriteIntent {
-            payload: FfiWritePayload::Unsigned {
-                pubkey: author.clone(),
-                created_at: 0,
-                kind: 1,
-                tags: Vec::new(),
-                content: "mixed-load publish".to_string(),
+            payload: FfiWritePayload::Event {
+                builder: nmp_ffi::types::FfiEventBuilder {
+                    kind: 1,
+                    tags: Vec::new(),
+                    content: "mixed-load publish".to_string(),
+                    created_at: Some(0),
+                },
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,

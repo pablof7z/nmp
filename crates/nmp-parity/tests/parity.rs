@@ -53,12 +53,10 @@ const SECRET_KEY: &str = "000000000000000000000000000000000000000000000000000000
 
 #[test]
 fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
-    let author = fixed_keys().public_key();
     let root_author = Keys::generate().public_key();
     let root_event_id = nostr::EventId::from_slice(&[0x11; 32]).unwrap();
     let parent_author = Keys::generate().public_key();
     let parent_event_id = nostr::EventId::from_slice(&[0x22; 32]).unwrap();
-    let created_at = 1_700_000_300;
     let content = "closed NIP-22 parity".to_string();
     let correlation = "nip22-parity-correlation";
 
@@ -73,8 +71,6 @@ fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
             event_id: parent_event_id,
             author: Some(parent_author),
         },
-        author,
-        Timestamp::from(created_at),
         content.clone(),
         Some(CorrelationToken::try_from(correlation).unwrap()),
     );
@@ -89,38 +85,32 @@ fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
             event_id: parent_event_id.to_hex(),
             author_pubkey: Some(parent_author.to_hex()),
         },
-        author.to_hex(),
-        created_at,
         content,
         Some(correlation.to_string()),
     )
     .expect("the public FFI composer must accept the same closed inputs");
 
-    let direct_unsigned = match &direct.payload {
-        WritePayload::Unsigned(unsigned) => unsigned,
-        WritePayload::UnsignedReplaceableEdit { .. } | WritePayload::Signed(_) => {
-            panic!("NIP-22 must compose one ordinary unsigned payload")
+    let direct_builder = match &direct.payload {
+        WritePayload::Event(builder) => builder,
+        WritePayload::ReplaceableEdit { .. } | WritePayload::Signed(_) => {
+            panic!("NIP-22 must compose one ordinary builder payload")
         }
     };
     let projected = nmp_ffi::convert::write_intent_from_ffi(ffi.clone())
         .expect("the public FFI result must be accepted by generic publish");
-    let projected_unsigned = match &projected.payload {
-        WritePayload::Unsigned(unsigned) => unsigned,
-        WritePayload::UnsignedReplaceableEdit { .. } | WritePayload::Signed(_) => {
-            panic!("the public FFI result must stay an ordinary unsigned payload")
+    let projected_builder = match &projected.payload {
+        WritePayload::Event(builder) => builder,
+        WritePayload::ReplaceableEdit { .. } | WritePayload::Signed(_) => {
+            panic!("the public FFI result must stay an ordinary builder payload")
         }
     };
-    let mut direct_bytes = direct_unsigned.clone();
-    let mut projected_bytes = projected_unsigned.clone();
     assert_eq!(
-        projected_bytes.id(),
-        direct_bytes.id(),
-        "direct Rust and public FFI must compute the same canonical event id"
+        projected_builder, direct_builder,
+        "direct Rust and public FFI must compose the identical builder"
     );
     assert_eq!(
-        projected_bytes.as_json(),
-        direct_bytes.as_json(),
-        "direct Rust and public FFI must produce byte-identical unsigned payloads"
+        direct_builder.created_at, None,
+        "neither door may invent a timestamp; acceptance stamps it"
     );
 
     let expected_tags = vec![
@@ -136,7 +126,7 @@ fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
         vec!["p".to_string(), parent_author.to_hex()],
     ];
     assert_eq!(
-        direct_unsigned
+        direct_builder
             .tags
             .iter()
             .map(|tag| tag.as_slice().to_vec())
@@ -1770,7 +1760,7 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
     );
     let receipt_rx = engine
         .publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned),
+            payload: WritePayload::Event(body_of(&unsigned)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -1888,12 +1878,13 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
 
     let receipt = engine
         .publish(FfiWriteIntent {
-            payload: FfiWritePayload::Unsigned {
-                pubkey,
-                created_at: WRITE_CREATED_AT,
-                kind: WRITE_KIND,
-                tags: vec![],
-                content: "parity-write".to_string(),
+            payload: FfiWritePayload::Event {
+                builder: nmp_ffi::types::FfiEventBuilder {
+                    kind: WRITE_KIND,
+                    tags: vec![],
+                    content: "parity-write".to_string(),
+                    created_at: Some(WRITE_CREATED_AT),
+                },
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
@@ -1965,7 +1956,7 @@ async fn run_direct_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<
     );
     let receipt_rx = engine
         .publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned),
+            payload: WritePayload::Event(body_of(&unsigned)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -2018,12 +2009,13 @@ async fn run_ffi_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<Nor
 
     let receipt = engine
         .publish(FfiWriteIntent {
-            payload: FfiWritePayload::Unsigned {
-                pubkey,
-                created_at: WRITE_CREATED_AT,
-                kind: WRITE_KIND,
-                tags: vec![],
-                content: "parity-write".to_string(),
+            payload: FfiWritePayload::Event {
+                builder: nmp_ffi::types::FfiEventBuilder {
+                    kind: WRITE_KIND,
+                    tags: vec![],
+                    content: "parity-write".to_string(),
+                    created_at: Some(WRITE_CREATED_AT),
+                },
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
@@ -2088,7 +2080,7 @@ async fn run_direct_override_publish(active: &Keys, override_keys: &Keys) -> Vec
     );
     let receipt_rx = engine
         .publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned),
+            payload: WritePayload::Event(body_of(&unsigned)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: Some(override_pubkey),
@@ -2138,12 +2130,13 @@ async fn run_ffi_override_publish(active: &Keys, override_keys: &Keys) -> Vec<No
 
     let receipt = engine
         .publish(FfiWriteIntent {
-            payload: FfiWritePayload::Unsigned {
-                pubkey: override_pubkey.clone(),
-                created_at: WRITE_CREATED_AT,
-                kind: WRITE_KIND,
-                tags: vec![],
-                content: "parity-write".to_string(),
+            payload: FfiWritePayload::Event {
+                builder: nmp_ffi::types::FfiEventBuilder {
+                    kind: WRITE_KIND,
+                    tags: vec![],
+                    content: "parity-write".to_string(),
+                    created_at: Some(WRITE_CREATED_AT),
+                },
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
@@ -2333,7 +2326,7 @@ async fn run_direct_reattach_live() -> ReattachProof {
     );
     let tracked = engine
         .publish_tracked(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned),
+            payload: WritePayload::Event(body_of(&unsigned)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -2404,12 +2397,13 @@ async fn run_ffi_reattach_live() -> ReattachProof {
 
     let receipt = engine
         .publish(FfiWriteIntent {
-            payload: FfiWritePayload::Unsigned {
-                pubkey: keys.public_key().to_hex(),
-                created_at: WRITE_CREATED_AT,
-                kind: REATTACH_LIVE_KIND,
-                tags: vec![],
-                content: "reattach-live".to_string(),
+            payload: FfiWritePayload::Event {
+                builder: nmp_ffi::types::FfiEventBuilder {
+                    kind: REATTACH_LIVE_KIND,
+                    tags: vec![],
+                    content: "reattach-live".to_string(),
+                    created_at: Some(WRITE_CREATED_AT),
+                },
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
@@ -2506,13 +2500,12 @@ fn run_direct_correlation() -> CorrelationProof {
 
     let first = engine
         .publish_tracked(WriteIntent {
-            payload: WritePayload::Unsigned(UnsignedEvent::new(
-                keys.public_key(),
-                Timestamp::from(WRITE_CREATED_AT),
-                Kind::Custom(CORRELATION_KIND),
-                vec![],
-                "correlation-first",
-            )),
+            payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: Kind::Custom(CORRELATION_KIND),
+                tags: (vec![]).into_iter().collect(),
+                content: ("correlation-first").into(),
+                created_at: Some(Timestamp::from(WRITE_CREATED_AT)),
+            }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -2524,13 +2517,12 @@ fn run_direct_correlation() -> CorrelationProof {
     // must reattach the existing obligation, never enqueue a second write.
     let second = engine
         .publish_tracked(WriteIntent {
-            payload: WritePayload::Unsigned(UnsignedEvent::new(
-                keys.public_key(),
-                Timestamp::from(WRITE_CREATED_AT + 1),
-                Kind::Custom(CORRELATION_KIND),
-                vec![],
-                "correlation-second-different-body",
-            )),
+            payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: Kind::Custom(CORRELATION_KIND),
+                tags: (vec![]).into_iter().collect(),
+                content: ("correlation-second-different-body").into(),
+                created_at: Some(Timestamp::from(WRITE_CREATED_AT + 1)),
+            }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -2566,12 +2558,13 @@ fn run_ffi_correlation() -> CorrelationProof {
         .expect("FFI account must activate");
 
     let intent = |content: &str, created_at: u64| FfiWriteIntent {
-        payload: FfiWritePayload::Unsigned {
-            pubkey: keys.public_key().to_hex(),
-            created_at,
-            kind: CORRELATION_KIND,
-            tags: vec![],
-            content: content.to_string(),
+        payload: FfiWritePayload::Event {
+            builder: nmp_ffi::types::FfiEventBuilder {
+                kind: CORRELATION_KIND,
+                tags: vec![],
+                content: content.to_string(),
+                created_at: Some(created_at),
+            },
         },
         durability: FfiDurability::Durable,
         routing: FfiWriteRouting::Auto,
@@ -2646,13 +2639,12 @@ fn run_direct_cancellation() -> CancellationProof {
         .expect("direct account must activate");
     let tracked = engine
         .publish_tracked(WriteIntent {
-            payload: WritePayload::Unsigned(UnsignedEvent::new(
-                keys.public_key(),
-                Timestamp::from(WRITE_CREATED_AT),
-                Kind::Custom(REATTACH_LIVE_KIND),
-                vec![],
-                "cancel-parity",
-            )),
+            payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: Kind::Custom(REATTACH_LIVE_KIND),
+                tags: (vec![]).into_iter().collect(),
+                content: ("cancel-parity").into(),
+                created_at: Some(Timestamp::from(WRITE_CREATED_AT)),
+            }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -2706,12 +2698,13 @@ async fn run_ffi_cancellation() -> CancellationProof {
         .expect("FFI account must activate");
     let receipt = engine
         .publish(FfiWriteIntent {
-            payload: FfiWritePayload::Unsigned {
-                pubkey: keys.public_key().to_hex(),
-                created_at: WRITE_CREATED_AT,
-                kind: REATTACH_LIVE_KIND,
-                tags: vec![],
-                content: "cancel-parity".to_string(),
+            payload: FfiWritePayload::Event {
+                builder: nmp_ffi::types::FfiEventBuilder {
+                    kind: REATTACH_LIVE_KIND,
+                    tags: vec![],
+                    content: "cancel-parity".to_string(),
+                    created_at: Some(WRITE_CREATED_AT),
+                },
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
@@ -2779,7 +2772,7 @@ async fn run_direct_reattach_terminal(path: &std::path::Path) -> ReattachProof {
         );
         let tracked = engine
             .publish_tracked(WriteIntent {
-                payload: WritePayload::Unsigned(unsigned),
+                payload: WritePayload::Event(body_of(&unsigned)),
                 durability: Durability::Ephemeral,
                 routing: WriteRouting::Auto,
                 identity_override: None,
@@ -2844,12 +2837,13 @@ async fn run_ffi_reattach_terminal(path: &std::path::Path) -> ReattachProof {
             .expect("FFI account must activate");
         let receipt = engine
             .publish(FfiWriteIntent {
-                payload: FfiWritePayload::Unsigned {
-                    pubkey: keys.public_key().to_hex(),
-                    created_at: WRITE_CREATED_AT,
-                    kind: REATTACH_TERMINAL_KIND,
-                    tags: vec![],
-                    content: "reattach-terminal".to_string(),
+                payload: FfiWritePayload::Event {
+                    builder: nmp_ffi::types::FfiEventBuilder {
+                        kind: REATTACH_TERMINAL_KIND,
+                        tags: vec![],
+                        content: "reattach-terminal".to_string(),
+                        created_at: Some(WRITE_CREATED_AT),
+                    },
                 },
                 durability: FfiDurability::Ephemeral,
                 routing: FfiWriteRouting::Auto,
@@ -3158,7 +3152,7 @@ async fn run_direct_explicit_route(keys: &Keys, relay: &ScriptedRelay) -> Vec<No
     );
     let receipt_rx = engine
         .publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned),
+            payload: WritePayload::Event(body_of(&unsigned)),
             durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay.url.clone()]),
             identity_override: None,
@@ -3191,12 +3185,13 @@ async fn run_ffi_explicit_route(keys: &Keys, relay: &ScriptedRelay) -> Vec<NormS
 
     let receipt = engine
         .publish(FfiWriteIntent {
-            payload: FfiWritePayload::Unsigned {
-                pubkey,
-                created_at: WRITE_CREATED_AT,
-                kind: WRITE_KIND,
-                tags: vec![],
-                content: "parity-write".to_string(),
+            payload: FfiWritePayload::Event {
+                builder: nmp_ffi::types::FfiEventBuilder {
+                    kind: WRITE_KIND,
+                    tags: vec![],
+                    content: "parity-write".to_string(),
+                    created_at: Some(WRITE_CREATED_AT),
+                },
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Explicit {
@@ -3256,13 +3251,12 @@ async fn direct_and_ffi_refuse_an_empty_explicit_route_at_the_door() {
         .expect("direct account must activate");
     let direct_rx = engine
         .publish(WriteIntent {
-            payload: WritePayload::Unsigned(UnsignedEvent::new(
-                pubkey,
-                Timestamp::from(WRITE_CREATED_AT),
-                Kind::Custom(WRITE_KIND),
-                vec![],
-                "nowhere",
-            )),
+            payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: Kind::Custom(WRITE_KIND),
+                tags: (vec![]).into_iter().collect(),
+                content: ("nowhere").into(),
+                created_at: Some(Timestamp::from(WRITE_CREATED_AT)),
+            }),
             durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![]),
             identity_override: None,
@@ -3289,12 +3283,13 @@ async fn direct_and_ffi_refuse_an_empty_explicit_route_at_the_door() {
         .expect("FFI account must activate");
     let receipt = ffi_engine
         .publish(FfiWriteIntent {
-            payload: FfiWritePayload::Unsigned {
-                pubkey: ffi_pubkey,
-                created_at: WRITE_CREATED_AT,
-                kind: WRITE_KIND,
-                tags: vec![],
-                content: "nowhere".to_string(),
+            payload: FfiWritePayload::Event {
+                builder: nmp_ffi::types::FfiEventBuilder {
+                    kind: WRITE_KIND,
+                    tags: vec![],
+                    content: "nowhere".to_string(),
+                    created_at: Some(WRITE_CREATED_AT),
+                },
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Explicit { relays: vec![] },
@@ -3314,4 +3309,17 @@ async fn direct_and_ffi_refuse_an_empty_explicit_route_at_the_door() {
         matches!(direct.first(), Some(NormStatus::Failed(_))),
         "Failed must be the first and only status -- never Accepted: {direct:?}"
     );
+}
+
+/// The same body these fixtures already build, said the way an app says it:
+/// a builder states the kind, the tags, the content and (here, so the
+/// assertions can name exact ids) the timestamp. The author is not part of
+/// it -- the write's identity decides that at acceptance.
+fn body_of(unsigned: &nostr::UnsignedEvent) -> nmp_grammar::EventBuilder {
+    nmp_grammar::EventBuilder {
+        kind: unsigned.kind,
+        tags: unsigned.tags.iter().cloned().collect(),
+        content: unsigned.content.clone(),
+        created_at: Some(unsigned.created_at),
+    }
 }

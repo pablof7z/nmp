@@ -185,12 +185,11 @@ class DetachPersistedAccountTest {
 
                 val receipt = seed.publish(
                     WriteIntent(
-                        payload = WritePayload.Unsigned(
-                            pubkey = publicOne,
-                            createdAt = 1_723_456_999uL,
+                        payload = WritePayload.Event(
                             kind = cachedKind,
                             tags = emptyList(),
                             content = "cached before detach",
+                            createdAt = 1_723_456_999uL,
                         ),
                         durability = Durability.Durable,
                         routing = WriteRouting.Auto,

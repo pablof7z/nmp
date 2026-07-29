@@ -337,7 +337,7 @@ fn offline_accept_restart_real_bunker_reattach_publish_and_ack() {
         handle.set_active_account(Some(user.public_key()));
         let receipt = handle
             .publish_tracked(WriteIntent {
-                payload: WritePayload::Unsigned(unsigned.clone()),
+                payload: WritePayload::Event(body_of(&unsigned)),
                 durability: Durability::Durable,
                 routing: WriteRouting::Auto,
                 identity_override: None,
@@ -490,7 +490,7 @@ fn mutated_real_bunker_response_retracts_pending_and_restores_replaceable_predec
 
     let receipt = handle
         .publish_tracked(WriteIntent {
-            payload: WritePayload::Unsigned(replacement),
+            payload: WritePayload::Event(body_of(&replacement)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -586,7 +586,7 @@ fn checkpoint_restore_reattaches_durable_write_without_repairing() {
         handle.set_active_account(Some(user.public_key()));
         let receipt = handle
             .publish_tracked(WriteIntent {
-                payload: WritePayload::Unsigned(unsigned.clone()),
+                payload: WritePayload::Event(body_of(&unsigned)),
                 durability: Durability::Durable,
                 routing: WriteRouting::Auto,
                 identity_override: None,
@@ -669,4 +669,17 @@ fn checkpoint_restore_reattaches_durable_write_without_repairing() {
     );
     assert!(restore_methods.contains(&"get_public_key".to_string()));
     assert!(restore_methods.contains(&"sign_event".to_string()));
+}
+
+/// The same body these fixtures already build, said the way an app says it:
+/// a builder states the kind, the tags, the content and (here, so the
+/// assertions can name exact ids) the timestamp. The author is not part of
+/// it -- the write's identity decides that at acceptance.
+fn body_of(unsigned: &nostr::UnsignedEvent) -> nmp_grammar::EventBuilder {
+    nmp_grammar::EventBuilder {
+        kind: unsigned.kind,
+        tags: unsigned.tags.iter().cloned().collect(),
+        content: unsigned.content.clone(),
+        created_at: Some(unsigned.created_at),
+    }
 }

@@ -1055,7 +1055,7 @@ fn write_ack_per_relay_over_real_relays() {
     );
     let receipt_rx = handle
         .publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned),
+            payload: WritePayload::Event(body_of(&unsigned)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -1244,13 +1244,12 @@ fn reconnect_requires_a_fresh_real_relay_challenge() {
 
     let receipt = handle
         .publish(WriteIntent {
-            payload: WritePayload::Unsigned(UnsignedEvent::new(
-                a.public_key(),
-                Timestamp::now(),
-                Kind::TextNote,
-                vec![],
-                "fresh challenge after reconnect",
-            )),
+            payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: Kind::TextNote,
+                tags: (vec![]).into_iter().collect(),
+                content: ("fresh challenge after reconnect").into(),
+                created_at: Some(Timestamp::now()),
+            }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -1416,7 +1415,7 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
     );
     let contact_receipt_rx = handle
         .publish(WriteIntent {
-            payload: WritePayload::Unsigned(contact_list),
+            payload: WritePayload::Event(body_of(&contact_list)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -1441,7 +1440,7 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
     );
     let mute_receipt_rx = handle
         .publish(WriteIntent {
-            payload: WritePayload::Unsigned(mute_list),
+            payload: WritePayload::Event(body_of(&mute_list)),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -1503,4 +1502,17 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
     handle.shutdown();
     engine_thread.join();
     relay.shutdown();
+}
+
+/// The same body these fixtures already build, said the way an app says it:
+/// a builder states the kind, the tags, the content and (here, so the
+/// assertions can name exact ids) the timestamp. The author is not part of
+/// it -- the write's identity decides that at acceptance.
+fn body_of(unsigned: &nostr::UnsignedEvent) -> nmp_grammar::EventBuilder {
+    nmp_grammar::EventBuilder {
+        kind: unsigned.kind,
+        tags: unsigned.tags.iter().cloned().collect(),
+        content: unsigned.content.clone(),
+        created_at: Some(unsigned.created_at),
+    }
 }

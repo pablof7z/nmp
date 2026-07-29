@@ -15,7 +15,7 @@ fn durable_pending_row_is_visible_before_signer_and_tamper_compensates() {
     )));
 
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&a, 10, "accepted body")),
+        payload: WritePayload::Event(draft(10, "accepted body")),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -28,9 +28,7 @@ fn durable_pending_row_is_visible_before_signer_and_tamper_compensates() {
         .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == accepted_id)));
     assert_eq!(receipt_statuses(&effects), [WriteStatus::Accepted]);
 
-    let tampered = unsigned(&a, 10, "different signer output")
-        .sign_with_keys(&a)
-        .unwrap();
+    let tampered = signed_draft(&draft(10, "different signer output"), &a);
     let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(tampered)));
     assert!(!effects
         .iter()
@@ -72,16 +70,12 @@ fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
         correlation: None,
     }));
 
-    let newer_unsigned = UnsignedEvent::new(
-        a.public_key(),
-        Timestamp::from(2),
-        Kind::Metadata,
-        Vec::new(),
-        "newer",
-    );
-    let newer_id = newer_unsigned.clone().sign_with_keys(&a).unwrap().id;
+    let newer_unsigned = nmp_grammar::EventBuilder::new(Kind::Metadata)
+        .content("newer")
+        .created_at(Timestamp::from(2));
+    let newer_id = signed_draft(&newer_unsigned, &a).id;
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(newer_unsigned),
+        payload: WritePayload::Event(newer_unsigned.clone()),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -121,7 +115,7 @@ fn cancellation_outcomes_are_typed_idempotent_and_late_signers_are_inert() {
     activate(&mut core, &a);
 
     let published = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&a, 10, "cancel typed")),
+        payload: WritePayload::Event(draft(10, "cancel typed")),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -150,9 +144,7 @@ fn cancellation_outcomes_are_typed_idempotent_and_late_signers_are_inert() {
         Err(nmp::mechanism::outbox::CancelWriteError::UnknownReceipt { .. })
     ));
 
-    let signed_event = unsigned(&a, 11, "already signed")
-        .sign_with_keys(&a)
-        .unwrap();
+    let signed_event = signed_draft(&draft(11, "already signed"), &a);
     let signed_publish = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(signed_event.clone()),
         durability: Durability::Durable,
@@ -186,7 +178,7 @@ fn signer_unavailable_keeps_accepted_row_visible() {
         &a.public_key().to_hex(),
     )));
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&a, 1, "awaiting signer")),
+        payload: WritePayload::Event(draft(1, "awaiting signer")),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -223,9 +215,9 @@ fn identity_override_accepts_secondary_author_and_pins_it_through_signing() {
     let mut core = new_core(FixtureDirectory::new());
     activate(&mut core, &a);
 
-    let draft = unsigned(&b, 47, "published as b while a is active");
+    let as_b = draft(47, "published as b while a is active");
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(draft.clone()),
+        payload: WritePayload::Event(as_b),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: Some(b.public_key()),
@@ -257,7 +249,7 @@ fn identity_override_accepts_secondary_author_and_pins_it_through_signing() {
     // The override never moved the engine's identity root: a default
     // (no-override) publish authored by A is still accepted.
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&a, 48, "default path still roots on a")),
+        payload: WritePayload::Event(draft(48, "default path still roots on a")),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -269,18 +261,20 @@ fn identity_override_accepts_secondary_author_and_pins_it_through_signing() {
     ));
 }
 
-/// #47 falsifier (b): the DEFAULT arm is byte-for-byte unchanged -- a
-/// non-active author without an override still fails closed with the exact
-/// pre-#47 messages, no `Accepted`, no sign request.
+/// #47 falsifier (b), restated for a payload that cannot state an author.
+/// The "draft author disagrees with the active account" refusal is gone --
+/// not weakened, DELETED, because a builder has no author field for the
+/// active account to disagree with. What survives is the half that is still
+/// a refusal: `Active` names an account, and an instruction that cannot
+/// resolve is a refusal, not a parked hope.
 #[test]
-fn default_publish_without_override_still_fails_closed_for_non_active_author() {
+fn a_builder_publishes_as_the_active_account_and_refuses_when_there_is_none() {
     let a = Keys::generate();
-    let b = Keys::generate();
     let mut core = new_core(FixtureDirectory::new());
     activate(&mut core, &a);
 
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&b, 1, "no consent given")),
+        payload: WritePayload::Event(draft(1, "as whoever is active")),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -288,18 +282,19 @@ fn default_publish_without_override_still_fails_closed_for_non_active_author() {
     }));
     assert_eq!(
         receipt_statuses(&effects),
-        [WriteStatus::Failed(
-            "unsigned draft author does not match current active account".to_string()
-        )],
-        "Failed must be the first and only status -- never Accepted"
+        [WriteStatus::Accepted],
+        "a kind and content, published as the active account, is the whole story"
     );
-    assert!(!effects
-        .iter()
-        .any(|effect| matches!(effect, Effect::RequestSign(..))));
+    let (_, _, template) = find_sign_request(&effects);
+    assert_eq!(
+        template.pubkey,
+        a.public_key(),
+        "the author the app never stated is the account it is logged in as"
+    );
 
     core.handle(EngineMsg::SetActivePubkey(None));
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&b, 2, "logged out, no override")),
+        payload: WritePayload::Event(draft(2, "logged out, no identity named")),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -308,48 +303,45 @@ fn default_publish_without_override_still_fails_closed_for_non_active_author() {
     assert_eq!(
         receipt_statuses(&effects),
         [WriteStatus::Failed(
-            "unsigned publish requires an active account".to_string()
-        )]
+            "publishing as the active account requires an active account".to_string()
+        )],
+        "nothing is pinned, so nothing may park"
     );
     assert!(!effects
         .iter()
         .any(|effect| matches!(effect, Effect::RequestSign(..))));
 }
 
-/// #47 falsifier (c): an override that CONTRADICTS the draft's author fails
-/// closed pre-acceptance for both payload variants -- the engine never
-/// restamps a draft to satisfy an override, and no `Accepted` is ever
-/// emitted for the contradiction.
+/// #47 falsifier (c), split by where an author can come from. On a builder
+/// the mismatch class is UNREPRESENTABLE -- an override cannot contradict an
+/// author the payload has no field for -- so it simply selects. On a signed
+/// event the author is frozen in the bytes, so the check survives verbatim
+/// as a check: naming anybody else has no resolution that honours both
+/// statements, and fails closed pre-acceptance.
 #[test]
-fn identity_override_author_mismatch_fails_closed_for_unsigned_and_signed() {
+fn identity_selects_on_a_builder_and_may_only_restate_on_a_signed_event() {
     let a = Keys::generate();
     let b = Keys::generate();
     let mut core = new_core(FixtureDirectory::new());
     activate(&mut core, &a);
 
-    // Unsigned draft authored by A, override naming B: mismatch.
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&a, 1, "authored by a")),
+        payload: WritePayload::Event(draft(1, "as b, while a is active")),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: Some(b.public_key()),
         correlation: None,
     }));
+    assert_eq!(receipt_statuses(&effects), [WriteStatus::Accepted]);
+    let (_, _, template) = find_sign_request(&effects);
     assert_eq!(
-        receipt_statuses(&effects),
-        [WriteStatus::Failed(format!(
-            "identity override {} does not match the unsigned draft author {}",
-            b.public_key(),
-            a.public_key()
-        ))],
-        "the mismatch must be Failed-first-and-only, never Accepted"
+        template.pubkey,
+        b.public_key(),
+        "the named identity is the only source of a builder's author"
     );
-    assert!(!effects
-        .iter()
-        .any(|effect| matches!(effect, Effect::RequestSign(..))));
 
-    // Signed event authored by A, override naming B: same contradiction.
-    let signed = unsigned(&a, 2, "signed by a").sign_with_keys(&a).unwrap();
+    // Signed event authored by A, identity naming B: still a contradiction.
+    let signed = signed_draft(&draft(2, "signed by a"), &a);
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(signed),
         durability: Durability::Durable,
@@ -382,7 +374,7 @@ fn ephemeral_is_receipt_only_and_never_creates_a_pending_row() {
         &a.public_key().to_hex(),
     )));
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&a, 1, "ephemeral")),
+        payload: WritePayload::Event(draft(1, "ephemeral")),
         durability: Durability::Ephemeral,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -413,9 +405,7 @@ fn relay_rejection_after_promotion_does_not_retract_the_signed_row() {
         },
         signer_session(&relay, a.public_key()),
     ));
-    let signed = unsigned(&a, 1, "signed cache truth")
-        .sign_with_keys(&a)
-        .unwrap();
+    let signed = signed_draft(&draft(1, "signed cache truth"), &a);
     core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(signed.clone()),
         durability: Durability::Durable,
@@ -470,16 +460,12 @@ fn cancelling_displaced_pending_then_newest_never_resurrects_cancelled_row() {
         correlation: None,
     }));
 
-    let middle = UnsignedEvent::new(
-        a.public_key(),
-        Timestamp::from(2),
-        Kind::Metadata,
-        Vec::new(),
-        "middle",
-    );
-    let middle_id = middle.clone().sign_with_keys(&a).unwrap().id;
+    let middle = nmp_grammar::EventBuilder::new(Kind::Metadata)
+        .content("middle")
+        .created_at(Timestamp::from(2));
+    let middle_id = signed_draft(&middle, &a).id;
     let middle_effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(middle),
+        payload: WritePayload::Event(middle.clone()),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -487,16 +473,12 @@ fn cancelling_displaced_pending_then_newest_never_resurrects_cancelled_row() {
     }));
     let (middle_receipt, _, _) = find_sign_request(&middle_effects);
 
-    let newest = UnsignedEvent::new(
-        a.public_key(),
-        Timestamp::from(3),
-        Kind::Metadata,
-        Vec::new(),
-        "newest",
-    );
-    let newest_id = newest.clone().sign_with_keys(&a).unwrap().id;
+    let newest = nmp_grammar::EventBuilder::new(Kind::Metadata)
+        .content("newest")
+        .created_at(Timestamp::from(3));
+    let newest_id = signed_draft(&newest, &a).id;
     let newest_effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(newest),
+        payload: WritePayload::Event(newest.clone()),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -556,10 +538,10 @@ fn exact_duplicate_intents_get_distinct_store_ids_and_one_promotion_advances_bot
     let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay]);
     let mut core = new_core(dir);
     activate(&mut core, &a);
-    let template = unsigned(&a, 1, "same body");
+    let template = draft(1, "same body");
 
     let first = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(template.clone()),
+        payload: WritePayload::Event(template.clone()),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -567,7 +549,7 @@ fn exact_duplicate_intents_get_distinct_store_ids_and_one_promotion_advances_bot
     }));
     let (first_id, first_generation, first_template) = find_sign_request(&first);
     let second = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(template),
+        payload: WritePayload::Event(template.clone()),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -621,10 +603,10 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
     authenticate_signer(&mut core, 0, &ack, &a);
     authenticate_signer(&mut core, 1, &nack, &a);
     authenticate_signer(&mut core, 2, &drop_relay, &a);
-    let template = unsigned(&a, 1, "same bytes, separate obligations");
+    let template = draft(1, "same bytes, separate obligations");
 
     let first = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(template.clone()),
+        payload: WritePayload::Event(template.clone()),
         durability: Durability::Durable,
         routing: WriteRouting::Explicit(vec![ack.clone(), drop_relay.clone()]),
         identity_override: None,
@@ -632,7 +614,7 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
     }));
     let (id_a, generation_a, to_sign) = find_sign_request(&first);
     let second = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(template),
+        payload: WritePayload::Event(template.clone()),
         durability: Durability::Durable,
         routing: WriteRouting::Explicit(vec![nack.clone()]),
         identity_override: None,
@@ -719,9 +701,9 @@ fn relay_signature_satisfies_all_pending_coowners_and_late_signers_are_ignored()
     connect_signer(&mut core, 1, &out, a.public_key());
     authenticate_signer(&mut core, 0, &source, &a);
     authenticate_signer(&mut core, 1, &out, &a);
-    let template = unsigned(&a, 1, "relay wins signing race");
+    let template = draft(1, "relay wins signing race");
     let first = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(template.clone()),
+        payload: WritePayload::Event(template.clone()),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -729,7 +711,7 @@ fn relay_signature_satisfies_all_pending_coowners_and_late_signers_are_ignored()
     }));
     let (id_a, generation_a, signer_a) = find_sign_request(&first);
     let second = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(template),
+        payload: WritePayload::Event(template.clone()),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -805,7 +787,7 @@ fn repeated_signer_notifications_never_start_concurrent_operations() {
     let mut core = new_core(FixtureDirectory::new());
     activate(&mut core, &a);
     let published = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&a, 1, "one operation")),
+        payload: WritePayload::Event(draft(1, "one operation")),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -859,7 +841,7 @@ fn retryable_signer_errors_retain_and_rearm_the_exact_write() {
         let mut core = new_core(FixtureDirectory::new());
         activate(&mut core, &a);
         let published = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&a, 1, "survives signer loss")),
+            payload: WritePayload::Event(draft(1, "survives signer loss")),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -911,7 +893,7 @@ fn terminal_signer_errors_compensate_the_write() {
         let mut core = new_core(FixtureDirectory::new());
         activate(&mut core, &a);
         let published = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&a, 1, "terminal signer answer")),
+            payload: WritePayload::Event(draft(1, "terminal signer answer")),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -945,7 +927,7 @@ fn compensation_persistence_failure_is_nonterminal_and_retryable() {
         &a.public_key().to_hex(),
     )));
     let published = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&a, 1, "must remain pending")),
+        payload: WritePayload::Event(draft(1, "must remain pending")),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -998,7 +980,7 @@ fn explicit_cancellation_persistence_failure_keeps_the_obligation_live_until_ret
         &a.public_key().to_hex(),
     )));
     let published = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&a, 2, "cancel must commit first")),
+        payload: WritePayload::Event(draft(2, "cancel must commit first")),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -1060,9 +1042,7 @@ fn direct_publish_of_forged_signed_event_is_rejected_before_acceptance() {
     let mut core = new_core(dir);
     connect_signer(&mut core, 0, &relay0, a.public_key());
 
-    let genuine = unsigned(&a, 1, "genuine content")
-        .sign_with_keys(&a)
-        .unwrap();
+    let genuine = signed_draft(&draft(1, "genuine content"), &a);
     // Forge: reuse the genuine id/signature but swap in different content --
     // exactly the "reconstructed from caller-supplied fields verbatim"
     // shape the FFI boundary's own `signed_event_from_ffi` guards against,
@@ -1122,9 +1102,7 @@ fn direct_publish_of_valid_signed_event_still_publishes() {
     connect_signer(&mut core, 0, &relay0, a.public_key());
     authenticate_signer(&mut core, 0, &relay0, &a);
 
-    let genuine = unsigned(&a, 1, "genuine content")
-        .sign_with_keys(&a)
-        .unwrap();
+    let genuine = signed_draft(&draft(1, "genuine content"), &a);
 
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(genuine.clone()),

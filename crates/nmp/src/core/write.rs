@@ -5,6 +5,21 @@
 
 use super::*;
 
+/// The frozen body as a signer sees it. Acceptance decided the author and
+/// the timestamp, so this is the first point at which a complete unsigned
+/// event exists at all — which is exactly why the payload an app hands in
+/// is a builder and not one of these.
+fn unsigned_from_frozen(frozen: &SignedEvent) -> UnsignedEvent {
+    UnsignedEvent {
+        id: Some(frozen.id),
+        pubkey: frozen.pubkey,
+        created_at: frozen.created_at,
+        kind: frozen.kind,
+        tags: frozen.tags.clone(),
+        content: frozen.content.clone(),
+    }
+}
+
 /// The one refusal reason for an explicit route naming no relays.
 ///
 /// Emptiness is a property of the REQUEST, knowable at the door, so it is
@@ -1508,15 +1523,18 @@ impl<S: EventStore> EngineCore<S> {
     /// a whole-intent terminal (`WriteStatus::Failed`): no `Accepted`, no
     /// pending write recorded, no `Effect::PublishEvent`.
     ///
-    /// Identity resolution (#47): with `identity_override: None` the
-    /// single-identity contract holds verbatim — an unsigned draft must be
-    /// authored by the CURRENT active account, else fail closed
-    /// pre-acceptance. With `Some(pk)` the caller explicitly consents to
-    /// publish this one write as `pk`: `pk` must EQUAL the draft's author
-    /// (the reducer never restamps a draft; a mismatch fails closed with no
-    /// `Accepted`), and when it does the write is accepted with
-    /// `signing_pubkey = pk` regardless of the active account — including
-    /// while logged out. Acceptance pins `pk` (`expected_pubkey` /
+    /// Identity resolution (#47): a builder payload carries no author, so
+    /// the identity SELECTS one and there is nothing to compare it against
+    /// — `None` resolves the CURRENT active account (fail closed
+    /// pre-acceptance when none is active, since nothing is pinned so
+    /// nothing may park), `Some(pk)` stamps `pk` regardless of the active
+    /// account, including while logged out. A `Signed` payload states its
+    /// author in its own bytes, so there the identity may only RESTATE it:
+    /// `Some(pk)` naming that author is a harmless restatement of consent
+    /// and naming anybody else fails closed with no `Accepted`, while
+    /// `None` means the event's own author and imposes no active-account
+    /// requirement at all. Acceptance pins the resolved key
+    /// (`expected_pubkey` /
     /// `signing_identity_ref`), so everything downstream — the frozen body,
     /// `RequestSign`, the `SignerAttached` re-arm, restart replay — targets
     /// the override identity forever; a later `set_active_account` cannot
@@ -1606,13 +1624,24 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         let replaceable_base = match &payload {
-            WritePayload::UnsignedReplaceableEdit { expected_base, .. } => Some(*expected_base),
-            WritePayload::Unsigned(_) | WritePayload::Signed(_) => None,
+            WritePayload::ReplaceableEdit { expected_base, .. } => Some(*expected_base),
+            WritePayload::Event(_) | WritePayload::Signed(_) => None,
         };
+        // The store owns this write's timestamp exactly when the app left
+        // it unsaid on an edit that names a base: it is the only component
+        // that can read the winner and the precondition in one breath. A
+        // caller-stated `created_at` is never moved, on any payload —
+        // including one that regresses below the winner and loses the
+        // replacement race, which stays observable rather than forbidden.
+        let monotonic_stamp = matches!(
+            &payload,
+            WritePayload::ReplaceableEdit { builder, .. } if builder.created_at.is_none()
+        );
 
         let payload_kind = match &payload {
-            WritePayload::Unsigned(unsigned)
-            | WritePayload::UnsignedReplaceableEdit { unsigned, .. } => unsigned.kind,
+            WritePayload::Event(builder) | WritePayload::ReplaceableEdit { builder, .. } => {
+                builder.kind
+            }
             WritePayload::Signed(event) => event.kind,
         };
         if payload_kind == nostr::Kind::Authentication {
@@ -1628,38 +1657,32 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         let signing_pubkey = match &payload {
-            WritePayload::Unsigned(unsigned)
-            | WritePayload::UnsignedReplaceableEdit { unsigned, .. } => match identity_override {
-                // #47: explicit per-write consent to publish as `pk`. The
-                // override must equal the draft's author — the reducer never
-                // restamps a draft to match it — and once it does, the
-                // active account is irrelevant (even logged out): acceptance
-                // pins `pk` and downstream signing targets it forever.
-                Some(pk) if pk == unsigned.pubkey => pk,
-                Some(pk) => {
-                    return self.fail_unaccepted(format!(
-                        "identity override {pk} does not match the unsigned draft author {}",
-                        unsigned.pubkey
-                    ));
+            // A builder carries no author, so the identity SELECTS one —
+            // there is no second source of truth for it to disagree with,
+            // and the mismatch class #47 fails closed on is unrepresentable
+            // here rather than merely refused.
+            WritePayload::Event(_) | WritePayload::ReplaceableEdit { .. } => {
+                match identity_override {
+                    // #47: explicit per-write consent to publish as `pk`.
+                    // The active account is irrelevant (even logged out):
+                    // acceptance pins `pk` and downstream signing targets it
+                    // forever.
+                    Some(pk) => pk,
+                    // Default single-identity contract: whoever is active at
+                    // acceptance. An instruction that cannot resolve is a
+                    // refusal, not a parked hope — nothing is pinned, so
+                    // nothing may park.
+                    None => match self.active_pubkey {
+                        Some(active) => active,
+                        None => {
+                            return self.fail_unaccepted(
+                                "publishing as the active account requires an active account"
+                                    .to_string(),
+                            );
+                        }
+                    },
                 }
-                // Default single-identity contract, unchanged: the draft's
-                // author must be the CURRENT active account, fail closed
-                // otherwise.
-                None => match self.active_pubkey {
-                    Some(active) if active == unsigned.pubkey => active,
-                    Some(_) => {
-                        return self.fail_unaccepted(
-                            "unsigned draft author does not match current active account"
-                                .to_string(),
-                        );
-                    }
-                    None => {
-                        return self.fail_unaccepted(
-                            "unsigned publish requires an active account".to_string(),
-                        );
-                    }
-                },
-            },
+            }
             // Already-signed payloads are verified verbatim and never ask a
             // local signer, so their author is intrinsically frozen. An
             // explicit override may still name that author (a harmless
@@ -1682,10 +1705,7 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
 
-        let frozen = match Self::freeze_payload(&payload) {
-            Ok(frozen) => frozen,
-            Err(reason) => return self.fail_unaccepted(reason),
-        };
+        let mut frozen = Self::freeze_payload(&payload, signing_pubkey, self.clock);
 
         let (id, intent_id, already_signed, accepted_signed_event, committed) = if durability
             == Durability::Ephemeral
@@ -1707,6 +1727,7 @@ impl<S: EventStore> EngineCore<S> {
             let accept = AcceptWrite {
                 frozen: frozen.clone(),
                 replaceable_base,
+                monotonic_stamp,
                 expected_pubkey: signing_pubkey,
                 signing_identity_ref: signing_pubkey.to_hex(),
                 durability: store_durability,
@@ -1715,7 +1736,7 @@ impl<S: EventStore> EngineCore<S> {
                 // If a signer is already present the immediate request below
                 // promotes it; if not, restart safely re-requests it.
                 sig_state: match payload {
-                    WritePayload::Unsigned(_) | WritePayload::UnsignedReplaceableEdit { .. } => {
+                    WritePayload::Event(_) | WritePayload::ReplaceableEdit { .. } => {
                         IntentSigState::AwaitingSigner
                     }
                     WritePayload::Signed(_) => IntentSigState::Pending,
@@ -1744,6 +1765,24 @@ impl<S: EventStore> EngineCore<S> {
             let receipt_id = outcome
                 .journaled_receipt_id()
                 .expect("journaled intent always has a receipt id");
+            // The acceptance transaction may have moved a replaceable
+            // edit's `created_at` forward against the row it CAS-ed, which
+            // re-derives the id. The body it actually froze is the one
+            // everything downstream must target — the signer request, the
+            // pending row, the delivered bytes.
+            if let Some(row) = outcome.accepted_row() {
+                if row.event.id != frozen.id {
+                    frozen = SignedEvent::new(
+                        row.event.id,
+                        row.event.pubkey,
+                        row.event.created_at,
+                        row.event.kind,
+                        row.event.tags.clone(),
+                        row.event.content.clone(),
+                        sentinel_signature(),
+                    );
+                }
+            }
             let accepted_signed_event = match &outcome {
                 AcceptOutcome::Duplicate { row, .. } if row.event.sig != sentinel_signature() => {
                     Some(row.event.clone())
@@ -1798,8 +1837,7 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         match payload {
-            WritePayload::Unsigned(unsigned)
-            | WritePayload::UnsignedReplaceableEdit { unsigned, .. } => {
+            WritePayload::Event(_) | WritePayload::ReplaceableEdit { .. } => {
                 if already_signed {
                     self.on_signed(
                         id,
@@ -1812,7 +1850,15 @@ impl<S: EventStore> EngineCore<S> {
                         pending.sign_request_in_flight = true;
                         pending.sign_generation += 1;
                         let generation = pending.sign_generation;
-                        effects.push(Effect::RequestSign(id, generation, unsigned));
+                        // The signer signs the FROZEN body, never the
+                        // builder: the author and the timestamp are decided
+                        // by acceptance, so the builder is not a complete
+                        // event and by construction never was one.
+                        effects.push(Effect::RequestSign(
+                            id,
+                            generation,
+                            unsigned_from_frozen(&pending.frozen),
+                        ));
                     }
                 }
             }
@@ -1888,14 +1934,7 @@ impl<S: EventStore> EngineCore<S> {
                 effects.push(Effect::RequestSign(
                     *id,
                     pending.sign_generation,
-                    UnsignedEvent {
-                        id: Some(pending.frozen.id),
-                        pubkey: pending.frozen.pubkey,
-                        created_at: pending.frozen.created_at,
-                        kind: pending.frozen.kind,
-                        tags: pending.frozen.tags.clone(),
-                        content: pending.frozen.content.clone(),
-                    },
+                    unsigned_from_frozen(&pending.frozen),
                 ));
             }
         }
@@ -2367,35 +2406,39 @@ impl<S: EventStore> EngineCore<S> {
         effects.extend(self.schedule_ready(self.clock));
     }
 
-    pub(super) fn freeze_payload(payload: &WritePayload) -> Result<SignedEvent, String> {
+    /// Freeze the body acceptance is about. This is where the fields the
+    /// app left unsaid get filled in: `author` comes from identity
+    /// resolution (a builder structurally cannot state one), and an unstated
+    /// `created_at` is stamped `clock` — the moment the body is frozen,
+    /// which is the only moment both after the app finished describing the
+    /// event and before anything downstream depends on the bytes. A STATED
+    /// `created_at` is kept verbatim; present-then-changed is impossible.
+    ///
+    /// A replaceable edit's stamp can still move forward from here, but only
+    /// inside the store's acceptance transaction and only against the row
+    /// that transaction is CAS-ing (`AcceptWrite::monotonic_stamp`).
+    pub(super) fn freeze_payload(
+        payload: &WritePayload,
+        author: PublicKey,
+        clock: Timestamp,
+    ) -> SignedEvent {
         match payload {
-            WritePayload::Unsigned(unsigned)
-            | WritePayload::UnsignedReplaceableEdit { unsigned, .. } => {
-                let computed = EventId::new(
-                    &unsigned.pubkey,
-                    &unsigned.created_at,
-                    &unsigned.kind,
-                    &unsigned.tags,
-                    &unsigned.content,
-                );
-                if let Some(declared) = unsigned.id {
-                    if declared != computed {
-                        return Err(
-                            "unsigned event carries an id that does not match its body".into()
-                        );
-                    }
-                }
-                Ok(SignedEvent::new(
-                    computed,
-                    unsigned.pubkey,
-                    unsigned.created_at,
-                    unsigned.kind,
-                    unsigned.tags.clone(),
-                    unsigned.content.clone(),
+            WritePayload::Event(builder) | WritePayload::ReplaceableEdit { builder, .. } => {
+                let created_at = builder.created_at.unwrap_or(clock);
+                // Tags reach the wire in the order the app wrote them:
+                // nothing here reorders, normalises, or filters them.
+                let tags = nostr::Tags::from_list(builder.tags.clone());
+                SignedEvent::new(
+                    EventId::new(&author, &created_at, &builder.kind, &tags, &builder.content),
+                    author,
+                    created_at,
+                    builder.kind,
+                    tags,
+                    builder.content.clone(),
                     sentinel_signature(),
-                ))
+                )
             }
-            WritePayload::Signed(event) => Ok(SignedEvent::new(
+            WritePayload::Signed(event) => SignedEvent::new(
                 event.id,
                 event.pubkey,
                 event.created_at,
@@ -2403,7 +2446,7 @@ impl<S: EventStore> EngineCore<S> {
                 event.tags.clone(),
                 event.content.clone(),
                 sentinel_signature(),
-            )),
+            ),
         }
     }
 

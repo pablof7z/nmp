@@ -180,14 +180,13 @@ public func decodeComment(_ row: Row) throws -> DecodedComment {
 }
 
 /// Compose a durable, author-outbox-routed NIP-22 comment as NMP's ordinary
-/// `WriteIntent` (#822). Author and time are explicit inputs, so composition
-/// owns no engine state or lifecycle. `correlation` passes through unchanged;
-/// publish the result through `NMPEngine.publish(_:)`.
+/// `WriteIntent` (#822). It names no author and reads no clock -- the engine
+/// resolves the identity and stamps the time at acceptance -- so composition
+/// still owns no engine state or lifecycle. `correlation` passes through
+/// unchanged; publish the result through `NMPEngine.publish(_:)`.
 public func commentIntent(
     root: CommentRoot,
     parent: CommentParent,
-    authorPubkey: String,
-    createdAt: UInt64,
     content: String,
     correlation: String? = nil
 ) throws -> WriteIntent {
@@ -196,8 +195,6 @@ public func commentIntent(
             try NMPFFI.commentIntent(
                 root: root.toFfi(),
                 parent: parent.toFfi(),
-                authorPubkey: authorPubkey,
-                createdAt: createdAt,
                 content: content,
                 correlation: correlation
             )

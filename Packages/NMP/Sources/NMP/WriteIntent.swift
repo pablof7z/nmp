@@ -58,24 +58,33 @@ public enum WriteRouting: Sendable, Hashable {
 }
 
 /// The event payload of a write intent (`FfiWritePayload` mirror). VISION
-/// P: signing and publishing are ORTHOGONAL stages -- `.unsigned` is a
-/// template whose `pubkey` names the account being published as (see
-/// `NMPEngine.setActiveAccount`); the key lives engine-side and signs it
-/// there. `.signed` (#32, the M5 unlock) is a caller that already holds a
-/// validly-signed event -- an external signer provider, or a
-/// verbatim republish -- and hands its fields across as-is: the engine
-/// verifies then publishes it exactly as given, never re-signing, mutating
-/// a tag, or recomputing an id.
+/// P: signing and publishing are ORTHOGONAL stages -- `.event` describes an
+/// event NMP stamps, freezes and signs itself. The kind is the one thing it
+/// cannot invent, so the kind is the one thing it demands; the account it
+/// publishes as comes from the write's identity (see
+/// `NMPEngine.setActiveAccount` and `WriteIntent.identityOverride`), never
+/// from the payload, and `createdAt` is stamped at acceptance unless you
+/// state one -- state one and it is kept exactly.
+///
+/// `.signed` (#32, the M5 unlock) is a caller that already holds a
+/// validly-signed event -- an external signer provider, or a verbatim
+/// republish of somebody else's note to an archive relay -- and hands its
+/// fields across as-is: the engine verifies then publishes it exactly as
+/// given, never re-signing, mutating a tag, or recomputing an id.
 public enum WritePayload: Sendable, Hashable {
-    case unsigned(pubkey: String, createdAt: UInt64, kind: UInt16, tags: [[String]], content: String)
+    /// Everything you must say is `kind`. `tags`, `content` and `createdAt`
+    /// default, and there is deliberately no `pubkey`, `id` or `sig`.
+    case event(kind: UInt16, tags: [[String]] = [], content: String = "", createdAt: UInt64? = nil)
     case signed(
         id: String, pubkey: String, createdAt: UInt64, kind: UInt16, tags: [[String]],
         content: String, sig: String)
 
     func toFfi() -> FfiWritePayload {
         switch self {
-        case .unsigned(let pubkey, let createdAt, let kind, let tags, let content):
-            return .unsigned(pubkey: pubkey, createdAt: createdAt, kind: kind, tags: tags, content: content)
+        case .event(let kind, let tags, let content, let createdAt):
+            return .event(
+                builder: FfiEventBuilder(
+                    kind: kind, tags: tags, content: content, createdAt: createdAt))
         case .signed(let id, let pubkey, let createdAt, let kind, let tags, let content, let sig):
             return .signed(
                 id: id, pubkey: pubkey, createdAt: createdAt, kind: kind, tags: tags, content: content,
@@ -85,13 +94,12 @@ public enum WritePayload: Sendable, Hashable {
 
     init(_ ffi: FfiWritePayload) {
         switch ffi {
-        case .unsigned(let pubkey, let createdAt, let kind, let tags, let content):
-            self = .unsigned(
-                pubkey: pubkey,
-                createdAt: createdAt,
-                kind: kind,
-                tags: tags,
-                content: content
+        case .event(let builder):
+            self = .event(
+                kind: builder.kind,
+                tags: builder.tags,
+                content: builder.content,
+                createdAt: builder.createdAt
             )
         case .signed(let id, let pubkey, let createdAt, let kind, let tags, let content, let sig):
             self = .signed(
@@ -112,12 +120,15 @@ public enum WritePayload: Sendable, Hashable {
 /// `identityOverride` (#47) is the identity this ONE write is published
 /// under, as 64-char hex or bech32 `npub`. `nil` -- the default every
 /// existing call site keeps -- means the active account at acceptance time
-/// (see `NMPEngine.setActiveAccount`), unchanged. Non-`nil` must name
-/// exactly the payload's own author; misuse fails closed, never silently
-/// retargets: a malformed string throws synchronously from `publish`
-/// (`NMPError.invalidPublicKey`), while a well-formed-but-mismatched
-/// override surfaces as `WriteStatus.failed` on the receipt stream with no
-/// `.accepted` before it. An override naming a pubkey with no registered
+/// (see `NMPEngine.setActiveAccount`), unchanged. On an `.event` payload
+/// non-`nil` SELECTS the author -- a builder states none, so there is
+/// nothing for it to contradict. On a `.signed` payload it may only RESTATE
+/// the author already frozen in the bytes: naming that author changes
+/// nothing, naming anybody else is a consent/author contradiction. A
+/// malformed string throws synchronously from `publish`
+/// (`NMPError.invalidPublicKey`), while a well-formed contradiction on a
+/// signed event surfaces as `WriteStatus.failed` on the receipt stream with
+/// no `.accepted` before it. An override naming a pubkey with no registered
 /// signer parks as `.awaitingCapability` until that capability attaches;
 /// acceptance pins the override, so a later `setActiveAccount` cannot
 /// retarget the write. `WriteStatus.awaitingCapability`'s associated

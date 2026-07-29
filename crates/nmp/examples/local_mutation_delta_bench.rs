@@ -187,6 +187,7 @@ fn accept_write(signed: &Event, accepted_at: u64) -> AcceptWrite {
     AcceptWrite {
         frozen: frozen_from_signed(signed),
         replaceable_base: None,
+        monotonic_stamp: false,
         expected_pubkey: signed.pubkey,
         signing_identity_ref: "local-mutation-benchmark".to_owned(),
         durability: WriteDurability::Durable,

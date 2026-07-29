@@ -72,6 +72,7 @@ fn accept_of(frozen: Event) -> AcceptWrite {
     AcceptWrite {
         frozen,
         replaceable_base: None,
+        monotonic_stamp: false,
         expected_pubkey,
         signing_identity_ref: "local".to_owned(),
         durability: WriteDurability::Durable,

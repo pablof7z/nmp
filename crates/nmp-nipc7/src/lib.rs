@@ -2,10 +2,14 @@
 //!
 //! C7 owns the event kind and its NIP-18 `q` reply row. It does not own
 //! NIP-29 group context, NIP-27 inline mention materialization, or client
-//! notification policy. The builders return complete unsigned drafts and
-//! never sign, route, publish, or touch engine state.
+//! notification policy, and it owns no write policy either -- so its
+//! composers own SCHEMA ONLY and return an [`EventBuilder`], leaving
+//! durability, routing and identity to whoever does. They name no author
+//! and read no clock: the engine resolves the identity and stamps the time
+//! at acceptance.
 
-use nostr::{EventId, Kind, PublicKey, RelayUrl, Tag, Timestamp, UnsignedEvent};
+use nmp_grammar::EventBuilder;
+use nostr::{EventId, Kind, PublicKey, RelayUrl, Tag};
 
 pub const CHAT_KIND: u16 = 9;
 
@@ -27,35 +31,22 @@ impl ChatReply {
     }
 }
 
-/// Build a complete unsigned kind:9 chat draft with no policy-added tags.
-pub fn compose_chat(author: PublicKey, created_at: Timestamp, content: String) -> UnsignedEvent {
-    UnsignedEvent::new(
-        author,
-        created_at,
-        Kind::from(CHAT_KIND),
-        Vec::new(),
-        content,
-    )
+/// Compose a kind:9 chat with no policy-added tags.
+pub fn compose_chat(content: String) -> EventBuilder {
+    EventBuilder::new(Kind::from(CHAT_KIND)).content(content)
 }
 
-/// Build a complete unsigned kind:9 reply using C7's NIP-18 `q` schema.
-pub fn compose_chat_reply(
-    author: PublicKey,
-    created_at: Timestamp,
-    content: String,
-    reply: ChatReply,
-) -> UnsignedEvent {
+/// Compose a kind:9 reply using C7's NIP-18 `q` schema.
+pub fn compose_chat_reply(content: String, reply: ChatReply) -> EventBuilder {
     let relay = reply.relay.to_string();
     let event_id = reply.event_id.to_hex();
     let reply_author = reply.author.to_hex();
-    UnsignedEvent::new(
-        author,
-        created_at,
-        Kind::from(CHAT_KIND),
-        vec![Tag::parse(["q", &event_id, &relay, &reply_author])
-            .expect("a typed C7 reply always yields a well-formed q row")],
-        content,
-    )
+    EventBuilder::new(Kind::from(CHAT_KIND))
+        .content(content)
+        .tag(
+            Tag::parse(["q", &event_id, &relay, &reply_author])
+                .expect("a typed C7 reply always yields a well-formed q row"),
+        )
 }
 
 #[cfg(test)]
@@ -67,11 +58,7 @@ mod tests {
         Keys::generate().public_key()
     }
 
-    fn time() -> Timestamp {
-        Timestamp::from(1_700_000_000u64)
-    }
-
-    fn rows(event: &UnsignedEvent) -> Vec<Vec<String>> {
+    fn rows(event: &EventBuilder) -> Vec<Vec<String>> {
         event
             .tags
             .iter()
@@ -81,10 +68,14 @@ mod tests {
 
     #[test]
     fn chat_is_kind_9_without_group_or_notification_policy() {
-        let event = compose_chat(author(), time(), "hello".to_string());
+        let event = compose_chat("hello".to_string());
         assert_eq!(event.kind, Kind::from(CHAT_KIND));
         assert_eq!(event.content, "hello");
         assert!(event.tags.is_empty());
+        assert_eq!(
+            event.created_at, None,
+            "a schema-only composer invents no timestamp"
+        );
     }
 
     #[test]
@@ -93,8 +84,6 @@ mod tests {
         let parent_author = author();
         let relay = RelayUrl::parse("wss://chat.example.com").unwrap();
         let event = compose_chat_reply(
-            author(),
-            time(),
             "reply".to_string(),
             ChatReply::new(parent_id, relay.clone(), parent_author),
         );

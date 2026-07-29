@@ -357,13 +357,11 @@ mod tests {
     ) -> (ReceiptId, SignedEvent, Vec<Effect>) {
         core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::Unsigned(UnsignedEvent::new(
-                author.public_key(),
-                Timestamp::from(created_at),
-                Kind::TextNote,
-                Vec::new(),
-                format!("worker projection {created_at}"),
-            )),
+            payload: WritePayload::Event(
+                nmp_grammar::EventBuilder::new(Kind::TextNote)
+                    .content(format!("worker projection {created_at}"))
+                    .created_at(Timestamp::from(created_at)),
+            ),
             durability: Durability::Durable,
             routing: WriteRouting::Explicit(relays.to_vec()),
             identity_override: None,

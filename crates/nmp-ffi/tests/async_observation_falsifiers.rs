@@ -64,12 +64,13 @@ async fn dense_composition_never_refuses_and_delivers_current_state() {
         .expect("follow observation opens");
     let receipt = engine
         .publish(nmp_ffi::types::FfiWriteIntent {
-            payload: nmp_ffi::types::FfiWritePayload::Unsigned {
-                pubkey: author.clone(),
-                created_at: 0,
-                kind: 1,
-                tags: Vec::new(),
-                content: "composition".to_string(),
+            payload: nmp_ffi::types::FfiWritePayload::Event {
+                builder: nmp_ffi::types::FfiEventBuilder {
+                    kind: 1,
+                    tags: Vec::new(),
+                    content: "composition".to_string(),
+                    created_at: Some(0),
+                },
             },
             durability: nmp_ffi::types::FfiDurability::Durable,
             routing: nmp_ffi::types::FfiWriteRouting::Auto,

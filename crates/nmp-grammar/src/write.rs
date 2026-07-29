@@ -1,6 +1,6 @@
 //! The write-intent vocabulary (#115 Fable ruling, Fork 3's dependency
-//! ruling): `Durability`, `WritePayload`, `WriteIntent`, and `WriteRouting`
-//! live here rather than `nmp-engine::outbox`: protocol modules composing a
+//! ruling): `Durability`, `EventBuilder`, `WritePayload`, `WriteIntent`, and
+//! `WriteRouting` live here rather than `nmp-engine::outbox`: protocol modules composing a
 //! `WriteIntent` must not gain an engine dependency to do so, and this crate
 //! is already the read noun's home (`Demand`/`SourceAuthority`).
 //! `WriteStatus` and `Receipt` stay in `nmp` because they are runtime
@@ -10,7 +10,7 @@
 //! Hard break, no compatibility alias: every caller in the workspace moved
 //! to `nmp_grammar::{Durability, WriteIntent, ...}` in the same change.
 
-use nostr::{Event as SignedEvent, EventId, PublicKey, RelayUrl, UnsignedEvent};
+use nostr::{Event as SignedEvent, EventId, Kind, PublicKey, RelayUrl, Tag, Timestamp};
 
 /// A typed property of a write (M0 amendment) — not a routing choice.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -20,28 +20,111 @@ pub enum Durability {
     AtMostOnce,
 }
 
+/// Everything an app must say to publish an event, and everything it MAY
+/// say. The kind is the one thing NMP cannot invent, so the kind is the one
+/// thing this type demands; `created_at`, the author, the id and the
+/// signature are filled in when the app did not say them.
+///
+/// **It is a value, not an object**, and that is load-bearing. It carries no
+/// engine reference, no session and no signer handle: composing one is pure
+/// and infallible, and everything that can fail — no active account, no
+/// registered signer, a stale replaceable base — fails at the one publish
+/// door. More importantly it **structurally cannot carry an author**, so
+/// [`WriteIntent`]'s identity is the only source of a builder's author and
+/// the author/identity mismatch class is unrepresentable rather than
+/// fail-closed.
+///
+/// `id` and `sig` are deliberately absent for the same structural reason:
+/// both are derived from signed bytes, so both only mean anything on a
+/// payload that already went through a signer. A caller who holds them holds
+/// a signed event and hands it over as [`WritePayload::Signed`]; a builder
+/// is by definition the half of the lifecycle before the signature.
+///
+/// "Filled in when absent" is not "not sayable": `created_at` stays settable
+/// and is then kept verbatim, tags are arbitrary and reach the wire
+/// unchanged, and no kind is validated against a whitelist. Nothing here
+/// refuses anything — guardrails belong in composers and diagnostics, not as
+/// refusals in the one universal type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventBuilder {
+    /// The ONE thing a builder cannot exist without.
+    pub kind: Kind,
+    /// Caller-owned and arbitrary: not reordered, not normalised, not
+    /// filtered down to the ones some module claims.
+    pub tags: Vec<Tag>,
+    pub content: String,
+    /// `None` — the ordinary case — is stamped at acceptance, which is the
+    /// only moment both after the app finished describing the event and
+    /// before anything downstream depends on the bytes. `Some(ts)` is kept
+    /// exactly: absent-then-stamped is fine, present-then-changed is
+    /// impossible.
+    pub created_at: Option<Timestamp>,
+}
+
+impl EventBuilder {
+    /// The kind is the only constructor argument. Every other field starts
+    /// empty or unstated and is either filled by NMP or set by a
+    /// combinator; the fields are public, so a caller who prefers struct
+    /// literal syntax can use it directly.
+    pub fn new(kind: Kind) -> Self {
+        Self {
+            kind,
+            tags: Vec::new(),
+            content: String::new(),
+            created_at: None,
+        }
+    }
+
+    pub fn content(mut self, content: impl Into<String>) -> Self {
+        self.content = content.into();
+        self
+    }
+
+    /// Append one tag, in order. Call it repeatedly, or set the public
+    /// `tags` field, to carry a whole list.
+    pub fn tag(mut self, tag: Tag) -> Self {
+        self.tags.push(tag);
+        self
+    }
+
+    /// State the timestamp instead of having it stamped at acceptance —
+    /// what an app importing older content does. NMP keeps it verbatim.
+    pub fn created_at(mut self, created_at: Timestamp) -> Self {
+        self.created_at = Some(created_at);
+        self
+    }
+}
+
 /// The event payload of a write intent. VISION P states signing and
 /// publishing are ORTHOGONAL stages, not one linear lifecycle: a caller
 /// that already holds a validly-signed event (e.g. republishing a
-/// previously-signed private event to a recomputed narrow relay set,
-/// ledger #6) supplies `Signed` and skips `Effect::RequestSign` entirely,
-/// going straight to routing; a caller with a template supplies `Unsigned`
-/// and the reducer requests the signer capability.
+/// previously-signed private event to a recomputed relay set, ledger #6, or
+/// sending a followee's note verbatim to an archive relay) supplies
+/// `Signed` and skips `Effect::RequestSign` entirely, going straight to
+/// routing; a caller describing an event supplies a builder and the reducer
+/// stamps, freezes and requests the signer capability.
+///
+/// The three variants are exactly the three places an author can come from:
+/// `Event` has none until identity resolution stamps one, `ReplaceableEdit`
+/// likewise plus a precondition, and `Signed` carries its author in its
+/// bytes. There is no fourth.
 pub enum WritePayload {
-    Unsigned(UnsignedEvent),
-    /// An unsigned whole-value replacement whose acceptance is conditional
-    /// on the store still holding exactly `expected_base` at the draft's
+    Event(EventBuilder),
+    /// A whole-value replacement whose acceptance is conditional on the
+    /// store still holding exactly `expected_base` at the write's
     /// replaceable/addressable coordinate. `None` means "there is still no
     /// local winner"; it never means that Nostr is globally empty.
     ///
-    /// The precondition travels with the draft so a protocol module can
+    /// The precondition travels with the builder so a protocol module can
     /// compose one closed, race-free write value. It is checked inside the
     /// store's atomic acceptance transaction, before an intent/receipt id is
-    /// allocated or any canonical row is changed. This variant is unsigned
-    /// for the same reason as [`Self::Unsigned`]: NMP freezes and signs the
-    /// exact body after acceptance.
-    UnsignedReplaceableEdit {
-        unsigned: UnsignedEvent,
+    /// allocated or any canonical row is changed — and, when the builder
+    /// states no `created_at`, that same transaction stamps
+    /// `max(clock, winner.created_at + 1)` against the very row it is
+    /// comparing, so monotonicity is decided by the only component that
+    /// knows the winner.
+    ReplaceableEdit {
+        builder: EventBuilder,
         expected_base: Option<EventId>,
     },
     Signed(SignedEvent),
@@ -155,19 +238,32 @@ pub struct WriteIntent {
     pub routing: WriteRouting,
     /// Explicit per-write signing-identity override (issue #47).
     ///
-    /// `None` is the default single-identity contract, unchanged: an
-    /// unsigned draft must be authored by the CURRENT active account and
-    /// the reducer fails closed pre-acceptance on any mismatch (or when no
-    /// account is active at all).
+    /// What it means depends on whether the payload states an author, and
+    /// the difference is the point: **where an author is absent, identity
+    /// SELECTS; where an author is stated, identity may only RESTATE.**
+    ///
+    /// For a builder payload ([`WritePayload::Event`],
+    /// [`WritePayload::ReplaceableEdit`]) there is no author to compare
+    /// against, so the identity is the only source of one. `None` resolves
+    /// the CURRENT active account at acceptance and stamps it — failing
+    /// closed pre-acceptance when no account is active, since an
+    /// instruction that cannot resolve is a refusal, not a parked hope.
+    /// `Some(pk)` stamps `pk`.
+    ///
+    /// For [`WritePayload::Signed`] the author is already frozen in the
+    /// bytes and no identity choice can change it. `None` means the event's
+    /// own author, whoever that is — a signed event needs no signer, so it
+    /// imposes no active-account requirement at all. `Some(pk)` must EQUAL
+    /// `Event.pubkey`: naming that author is a harmless restatement of
+    /// consent, and naming anybody else is a contradiction with no correct
+    /// resolution, so it fails closed BEFORE acceptance. (Routing is a
+    /// separate axis and stays independent of all of this — republishing
+    /// somebody else's signed event to your own archive relay is an
+    /// `Explicit` route over a payload signed by a different pubkey.)
     ///
     /// `Some(pk)` is the caller's explicit consent to publish this one
     /// write as `pk` — a registered/secondary identity — WITHOUT changing
-    /// the active account. It is a consent assertion, not a restamp
-    /// request: `pk` must EQUAL the draft's author (`UnsignedEvent.pubkey`,
-    /// or the signed `Event.pubkey` for an already-signed payload). The
-    /// engine never rewrites a draft's author to match an override; a
-    /// mismatch fails closed BEFORE acceptance, exactly like the
-    /// active-account check it bypasses. An override works regardless of
+    /// the active account. It works regardless of
     /// which account is active — including while fully logged out — and
     /// acceptance pins `pk` into the frozen write (`expected_pubkey` /
     /// `signing_identity_ref`), so later `set_active_account` calls can
@@ -262,20 +358,14 @@ mod tests {
 
     /// #47: the override is plain intent vocab — an optional pubkey the
     /// caller sets explicitly, defaulting to the active-account contract.
-    /// The equality-with-author enforcement lives in the reducer
-    /// (`nmp-engine`'s `on_publish`), not here; this pins the vocab shape.
+    /// Resolution lives in the reducer (`on_publish`), not here; this pins
+    /// the vocab shape.
     #[test]
     fn identity_override_carries_the_callers_explicit_choice() {
         let keys = nostr::Keys::generate();
-        let unsigned = UnsignedEvent::new(
-            keys.public_key(),
-            nostr::Timestamp::from(1),
-            nostr::Kind::TextNote,
-            Vec::new(),
-            "override vocab",
-        );
+        let builder = EventBuilder::new(nostr::Kind::TextNote).content("override vocab");
         let default_intent = WriteIntent {
-            payload: WritePayload::Unsigned(unsigned.clone()),
+            payload: WritePayload::Event(builder.clone()),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -284,13 +374,45 @@ mod tests {
         assert!(default_intent.identity_override.is_none());
 
         let overridden = WriteIntent {
-            payload: WritePayload::Unsigned(unsigned),
+            payload: WritePayload::Event(builder),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: Some(keys.public_key()),
             correlation: None,
         };
         assert_eq!(overridden.identity_override, Some(keys.public_key()));
+    }
+
+    /// The kind is the only constructor argument, the combinators are
+    /// consuming, and an unstated `created_at` stays `None` for the engine
+    /// to stamp. There is no field, and no combinator, for an author.
+    #[test]
+    fn a_kind_alone_is_a_complete_builder() {
+        let bare = EventBuilder::new(nostr::Kind::TextNote);
+        assert_eq!(bare.kind, nostr::Kind::TextNote);
+        assert!(bare.tags.is_empty());
+        assert_eq!(bare.content, "");
+        assert_eq!(bare.created_at, None);
+
+        let stated = EventBuilder::new(nostr::Kind::Custom(31337))
+            .content("hello")
+            .tag(Tag::parse(["client", "nobody-registered"]).unwrap())
+            .tag(Tag::parse(["zzz", "a value with spaces"]).unwrap())
+            .created_at(Timestamp::from(1_551_691_700));
+        assert_eq!(stated.kind, nostr::Kind::Custom(31337));
+        assert_eq!(stated.content, "hello");
+        assert_eq!(stated.created_at, Some(Timestamp::from(1_551_691_700)));
+        assert_eq!(
+            stated
+                .tags
+                .iter()
+                .map(|tag| tag.as_slice().to_vec())
+                .collect::<Vec<_>>(),
+            vec![
+                vec!["client".to_string(), "nobody-registered".to_string()],
+                vec!["zzz".to_string(), "a value with spaces".to_string()],
+            ]
+        );
     }
 
     /// #591: `TryFrom<&str>` refuses empty and over-length tokens with

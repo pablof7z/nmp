@@ -281,7 +281,7 @@ mod history_mailbox_tests {
     use nmp_grammar::{Binding, Filter};
     use nmp_router::FixtureDirectory;
     use nmp_store::{EventStore, MemoryStore, RelayObserved};
-    use nostr::{Keys, Kind, UnsignedEvent};
+    use nostr::{Keys, Kind};
 
     use super::*;
     use crate::core::{ShortfallFact, WindowLoad};
@@ -1750,19 +1750,18 @@ mod receipt_delivery_lifecycle_tests {
     use nmp_grammar::{Durability, WriteIntent, WritePayload, WriteRouting};
     use nmp_router::FixtureDirectory;
     use nmp_store::MemoryStore;
-    use nostr::{Keys, Kind, UnsignedEvent};
+    use nostr::{Keys, Kind};
 
     fn parked_write(handle: &Handle, keys: &Keys) -> ReceiptStream {
         handle.set_active_account(Some(keys.public_key()));
         handle
             .publish_tracked(WriteIntent {
-                payload: WritePayload::Unsigned(UnsignedEvent::new(
-                    keys.public_key(),
-                    Timestamp::now(),
-                    Kind::TextNote,
-                    vec![],
-                    "parked receipt delivery lifecycle",
-                )),
+                payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                    kind: Kind::TextNote,
+                    tags: (vec![]).into_iter().collect(),
+                    content: ("parked receipt delivery lifecycle").into(),
+                    created_at: Some(Timestamp::now()),
+                }),
                 durability: Durability::Durable,
                 routing: WriteRouting::Auto,
                 identity_override: None,
@@ -2739,7 +2738,8 @@ mod relay_worker_reconciliation_tests {
     };
     use nmp_router::FixtureDirectory;
     use nmp_store::MemoryStore;
-    use nostr::{Keys, Kind, UnsignedEvent};
+    use nostr::{Keys, Kind};
+
     fn query(author: &str) -> LiveQuery {
         LiveQuery::from_filter(Filter {
             kinds: Some(BTreeSet::from([1])),
@@ -3237,15 +3237,12 @@ mod relay_worker_reconciliation_tests {
         let mut core = EngineCore::new(MemoryStore::new(), Box::new(directory), 1);
         core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
 
-        let unsigned = UnsignedEvent::new(
-            author.public_key(),
-            Timestamp::from(1),
-            Kind::TextNote,
-            Vec::new(),
-            "write owns its worker",
-        );
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned),
+            payload: WritePayload::Event(
+                nmp_grammar::EventBuilder::new(Kind::TextNote)
+                    .content("write owns its worker")
+                    .created_at(Timestamp::from(1)),
+            ),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,

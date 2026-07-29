@@ -44,12 +44,13 @@ async fn receipt_detached_before_terminal_reattaches_full_durable_prefix_from_th
     // a retained Accepted + AwaitingCapability durable steady state.
     let receipt = engine
         .publish(FfiWriteIntent {
-            payload: FfiWritePayload::Unsigned {
-                pubkey: keys.public_key().to_hex(),
-                created_at: nostr::Timestamp::now().as_secs(),
-                kind: 9999,
-                tags: vec![],
-                content: "detach-before-terminal".to_string(),
+            payload: FfiWritePayload::Event {
+                builder: nmp_ffi::types::FfiEventBuilder {
+                    kind: 9999,
+                    tags: vec![],
+                    content: "detach-before-terminal".to_string(),
+                    created_at: Some(nostr::Timestamp::now().as_secs()),
+                },
             },
             durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
@@ -134,6 +135,7 @@ async fn ffi_reattachment_transparently_traverses_more_than_one_durable_page() {
             .accept_write(AcceptWrite {
                 frozen,
                 replaceable_base: None,
+                monotonic_stamp: false,
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: "ffi-paged-replay".into(),
                 durability: WriteDurability::Durable,

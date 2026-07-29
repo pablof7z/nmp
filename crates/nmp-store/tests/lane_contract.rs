@@ -33,6 +33,7 @@ fn accept(frozen: Event, keys: &Keys, accepted_at: u64) -> AcceptWrite {
     AcceptWrite {
         frozen,
         replaceable_base: None,
+        monotonic_stamp: false,
         expected_pubkey: keys.public_key(),
         signing_identity_ref: "lane-contract".into(),
         durability: WriteDurability::Durable,

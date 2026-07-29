@@ -6,4 +6,5 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+nmp-grammar = { path = "../nmp-grammar" }
 nostr.workspace = true

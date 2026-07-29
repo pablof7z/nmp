@@ -264,6 +264,7 @@ pub fn accept_write_of(signed: nostr::Event, accepted_at: u64) -> AcceptWrite {
         expected_pubkey: signed.pubkey,
         frozen,
         replaceable_base: None,
+        monotonic_stamp: false,
         signing_identity_ref: "local".to_string(),
         durability: WriteDurability::Durable,
         routing: "auto".to_string(),

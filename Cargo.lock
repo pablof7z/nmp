@@ -2281,6 +2281,7 @@ dependencies = [
 name = "nmp-nipc7"
 version = "0.1.0"
 dependencies = [
+ "nmp-grammar",
  "nostr 0.44.4",
 ]
 

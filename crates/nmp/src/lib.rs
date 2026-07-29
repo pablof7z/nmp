@@ -256,8 +256,13 @@ pub use crate::runtime::{
 // surface, so doc-hidden and kept out of the facade snapshot.
 #[doc(hidden)]
 pub use crate::runtime::{fifo_channel, FifoSender};
+// `EventBuilder` collides with `nostr::EventBuilder`, but only INSIDE this
+// crate: the re-export below never carried nostr's, and never will, so an
+// app sees exactly one `EventBuilder` and never writes a disambiguating
+// path. `core` aliases the upstream import where it needs it.
 pub use nmp_grammar::{
-    CorrelationToken, CorrelationTokenError, Durability, WriteIntent, WritePayload, WriteRouting,
+    CorrelationToken, CorrelationTokenError, Durability, EventBuilder, WriteIntent, WritePayload,
+    WriteRouting,
 };
 
 // Read outputs `Subscription`/`DiagnosticsSubscription` deliver -- every
@@ -285,10 +290,11 @@ pub use crate::core::{
 pub use nmp_router::Lane;
 pub use nmp_store::CoverageInterval;
 
-// Value types every verb above is expressed in terms of, including what an
-// app needs to build the `WritePayload::Unsigned` template `Engine::publish`
-// accepts (`UnsignedEvent::new` takes exactly these four plus a `PublicKey`,
-// already re-exported below).
+// Value types every verb above is expressed in terms of, including the
+// `Kind`, `Tag`s and `Timestamp` an app names on an `EventBuilder`.
+// `UnsignedEvent` stays because `Handle::sign_event` (#464) takes one:
+// signing an event without accepting a write is a door of its own, and its
+// argument has to be nameable.
 pub use nostr::{Event, EventId, Kind, PublicKey, RelayUrl, Tag, Timestamp, UnsignedEvent};
 
 // Protocol-neutral signer/provider surface. The engine's promotion boundary

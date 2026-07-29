@@ -345,10 +345,12 @@ impl<S: EventStore> EngineCore<S> {
                     return effects;
                 }
                 let created_at = Timestamp::from(minimum);
-                let unsigned =
-                    EventBuilder::auth(state.challenge.clone(), state.epoch.session.relay.clone())
-                        .custom_created_at(created_at)
-                        .build(expected_pubkey);
+                let unsigned = NostrEventBuilder::auth(
+                    state.challenge.clone(),
+                    state.epoch.session.relay.clone(),
+                )
+                .custom_created_at(created_at)
+                .build(expected_pubkey);
                 let Some(sign_token) = self.mint_auth_operation(&state.epoch) else {
                     state.phase = AuthSessionPhase::Error;
                     self.auth_sessions.insert(session, state);

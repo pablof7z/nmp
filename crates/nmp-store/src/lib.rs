@@ -233,6 +233,30 @@ pub fn sentinel_signature() -> Signature {
         .expect("64 zero bytes is always a structurally valid (length-checked) schnorr signature")
 }
 
+/// Re-freeze `frozen` at `created_at`, re-deriving its NIP-01 id over the
+/// stamped body. Used by the acceptance transaction to apply
+/// [`AcceptWrite::monotonic_stamp`] against the row it is CAS-ing; the
+/// signature stays [`sentinel_signature`] because the body is still
+/// pre-signature at this point (which is precisely why moving the stamp
+/// here is possible at all).
+pub(crate) fn restamped(frozen: &Event, created_at: Timestamp) -> Event {
+    Event::new(
+        EventId::new(
+            &frozen.pubkey,
+            &created_at,
+            &frozen.kind,
+            &frozen.tags,
+            &frozen.content,
+        ),
+        frozen.pubkey,
+        created_at,
+        frozen.kind,
+        frozen.tags.clone(),
+        frozen.content.clone(),
+        frozen.sig,
+    )
+}
+
 /// A durable-persistence failure at the acceptance boundary
 /// (`docs/design/durable-write-signing-and-retry.md` §1: "If that
 /// transaction fails, the caller receives an acceptance error and no
@@ -719,6 +743,21 @@ pub struct AcceptWrite {
     /// new row. `Some(None)` means the caller observed no local base;
     /// `None` means this is an ordinary, unconditional write.
     pub replaceable_base: Option<Option<EventId>>,
+    /// The app stated no `created_at`, so this write's timestamp is NMP's
+    /// to decide and `frozen.created_at` currently holds nothing but the
+    /// caller's clock. Inside the same transaction that compares
+    /// `replaceable_base` — and against the very row it compares — the
+    /// store moves the stamp forward to `winner.created_at + 1` whenever
+    /// the clock is not already ahead (the `max(clock, winner + 1)` rule)
+    /// and re-derives `frozen.id` over the stamped body.
+    ///
+    /// This is why the rule lives here rather than in the engine: a
+    /// timestamp computed outside the transaction is computed against a row
+    /// that may already have moved, which is exactly the seam the
+    /// precondition exists to close. `false` when the app stated its own
+    /// `created_at` — present-then-changed is the one thing a stated field
+    /// may never be, even when the value it stated loses the race.
+    pub monotonic_stamp: bool,
     /// The pinned signing identity (#43 "pins the chosen identity at
     /// acceptance"). Ordinarily equal to `frozen.pubkey`; kept as an
     /// explicit field because it is a distinct journal fact (#2's "expected
@@ -868,6 +907,30 @@ impl AcceptOutcome {
             | AcceptOutcome::Stale { receipt_id, .. }
             | AcceptOutcome::Kind5Processed { receipt_id, .. } => Some(*receipt_id),
             AcceptOutcome::Refused(_) => None,
+        }
+    }
+
+    /// The canonical row this acceptance is about, when it produced one.
+    ///
+    /// Its `event` is the body the store actually froze — which is not
+    /// always the body the caller handed in: an [`AcceptWrite`] with
+    /// `monotonic_stamp` set may have had its `created_at` moved forward
+    /// inside the transaction, re-deriving the id. A caller that needs the
+    /// frozen body (to hand it to a signer, to name it on a receipt) must
+    /// read it from here rather than from what it sent.
+    ///
+    /// `None` for `Stale` — which lost its address race and owns no row —
+    /// and for `Refused`, which journaled nothing. Neither is reachable for
+    /// a `monotonic_stamp` write whose precondition passed: the stamp is
+    /// strictly greater than the winner it was compared against, so the
+    /// candidate cannot then lose to that same winner.
+    pub fn accepted_row(&self) -> Option<&StoredEvent> {
+        match self {
+            AcceptOutcome::Inserted { row, .. }
+            | AcceptOutcome::Duplicate { row, .. }
+            | AcceptOutcome::Superseded { row, .. }
+            | AcceptOutcome::Kind5Processed { row, .. } => Some(row),
+            AcceptOutcome::Stale { .. } | AcceptOutcome::Refused(_) => None,
         }
     }
 }
