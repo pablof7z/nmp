@@ -323,6 +323,81 @@ fn addressable_keyed_by_pubkey_kind_d_distinct_from_replaceable() {
     });
 }
 
+/// The addressable coordinate includes the AUTHOR pubkey
+/// (`AddressKey::Addressable(PublicKey, Kind, String)`), so two different
+/// signers publishing the same kind and the same `d` occupy two different
+/// keys and can never supersede one another.
+///
+/// WHY THIS TEST EXISTS. NIP-29 group metadata (kind 39000) is signed by
+/// each HOST RELAY, not by the group's members. A group id like
+/// "photographers" therefore legitimately exists on two relays with two
+/// different signers and two different contents -- that is divergence, not a
+/// conflict to resolve. NMP's contract is to SURFACE both versions, each
+/// attributable to the relay it came from, and let the application navigate
+/// the disagreement; picking a winner would silently discard one host's
+/// truth. The nearest existing test
+/// (`addressable_keyed_by_pubkey_kind_d_distinct_from_replaceable`) varies
+/// the `d` tag while holding the pubkey fixed, so nothing guarded the pubkey
+/// component of the coordinate until this test. Collapse the coordinate to
+/// (kind, d) and this is the test that fails.
+#[test]
+fn addressable_divergence_across_signers_is_preserved_not_collapsed() {
+    for_each_backend(|store| {
+        let relay_a = keys();
+        let relay_b = keys();
+
+        // Same kind, same `d` -- only the signer and the observing relay differ.
+        let from_a = addressable_event(&relay_a, 39_000, "photographers", 100);
+        let from_b = addressable_event(&relay_b, 39_000, "photographers", 100);
+
+        assert_eq!(
+            store
+                .insert(from_a.clone(), observed("wss://a", 1))
+                .unwrap(),
+            InsertOutcome::Inserted
+        );
+        assert_eq!(
+            store
+                .insert(from_b.clone(), observed("wss://b", 1))
+                .unwrap(),
+            InsertOutcome::Inserted,
+            "relay B's kind-39000 for the same group id must be its own row, \
+             not a candidate to beat or lose to relay A's"
+        );
+
+        let results = store
+            .query(&Filter::new().kind(Kind::from(39_000u16)))
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            2,
+            "both host relays' versions of the group must survive; NMP \
+             surfaces the divergence rather than picking a winner"
+        );
+
+        let sources = |id| {
+            results
+                .iter()
+                .find(|se| se.event.id == id)
+                .unwrap_or_else(|| panic!("row {id} missing from query results"))
+                .provenance
+                .seen
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        };
+        let a_sources = sources(from_a.id);
+        let b_sources = sources(from_b.id);
+
+        assert_eq!(a_sources, BTreeSet::from([relay("wss://a")]));
+        assert_eq!(b_sources, BTreeSet::from([relay("wss://b")]));
+        assert!(
+            a_sources.is_disjoint(&b_sources),
+            "each version is attributable to exactly the relay that served it"
+        );
+    });
+}
+
 #[test]
 fn query_returns_only_current_winners_never_superseded() {
     for_each_backend(|store| {
