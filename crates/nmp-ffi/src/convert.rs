@@ -71,6 +71,28 @@ pub enum FfiError {
     InvalidTag {
         got: Vec<String>,
     },
+    /// An unsigned builder supplied the NIP-29-owned `h` row. Group identity
+    /// is the only source of that row, even when the supplied value happens
+    /// to match.
+    GroupCallerSuppliedContext,
+    /// An unsigned builder supplied the reserved `previous` row. NMP does not
+    /// currently mint timeline authority and refuses caller-minted stand-ins.
+    GroupCallerSuppliedTimeline,
+    /// A pre-signed event carries no `h`. It cannot be repaired without
+    /// changing its bytes and event id.
+    GroupMissingContext {
+        expected: String,
+    },
+    /// A pre-signed event belongs to a different group.
+    GroupMismatchedContext {
+        found: String,
+        expected: String,
+    },
+    /// A pre-signed event carries more than one `h`, so it has no single
+    /// group context.
+    GroupAmbiguousContext {
+        expected: String,
+    },
     /// `add_account`'s secret key did not parse as a valid nostr key (hex or
     /// bech32 `nsec`).
     InvalidSecretKey,
@@ -305,6 +327,24 @@ impl std::fmt::Display for FfiError {
             Self::InvalidEventId { got } => write!(f, "invalid event id hex: {got:?}"),
             Self::InvalidRelayUrl { got } => write!(f, "invalid relay url: {got:?}"),
             Self::InvalidTag { got } => write!(f, "invalid tag: {got:?}"),
+            Self::GroupCallerSuppliedContext => {
+                write!(f, "the group context belongs to NMP, not to the caller")
+            }
+            Self::GroupCallerSuppliedTimeline => {
+                write!(f, "the group timeline context belongs to NMP, not to the caller")
+            }
+            Self::GroupMissingContext { expected } => write!(
+                f,
+                "the signed event has no group context; expected {expected:?}"
+            ),
+            Self::GroupMismatchedContext { found, expected } => write!(
+                f,
+                "the signed event names group {found:?}; expected {expected:?}"
+            ),
+            Self::GroupAmbiguousContext { expected } => write!(
+                f,
+                "the signed event has ambiguous group context; expected {expected:?}"
+            ),
             Self::ReplaceableEditHasNoWireForm => write!(
                 f,
                 "a replaceable edit crosses this boundary only inside the semantic method that \
@@ -1776,7 +1816,7 @@ fn tags_from_ffi(tags: Vec<Vec<String>>) -> Result<Vec<Tag>, FfiError> {
 /// `FfiEventBuilder -> nmp::EventBuilder`. The only thing that can fail is
 /// a tag row that is not a tag; there is deliberately no author to parse,
 /// no kind whitelist to check, and no timestamp to invent.
-fn event_builder_from_ffi(builder: FfiEventBuilder) -> Result<GEventBuilder, FfiError> {
+pub(crate) fn event_builder_from_ffi(builder: FfiEventBuilder) -> Result<GEventBuilder, FfiError> {
     Ok(GEventBuilder {
         kind: nostr::Kind::from(builder.kind),
         tags: tags_from_ffi(builder.tags)?,
@@ -1795,7 +1835,7 @@ fn event_builder_from_ffi(builder: FfiEventBuilder) -> Result<GEventBuilder, Ffi
 /// that happens to verify locally -- a non-verifying (e.g. tampered) event
 /// still parses fine at THIS boundary and is rejected downstream instead,
 /// surfacing as `WriteStatus::Failed` on the receipt stream.
-fn signed_event_from_ffi(
+pub(crate) fn signed_event_from_ffi(
     id: String,
     pubkey: String,
     created_at: u64,

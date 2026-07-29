@@ -26,6 +26,11 @@ public enum NMPError: Error, Sendable, Equatable {
     case invalidEventId(String)
     case invalidRelayUrl(String)
     case invalidTag([String])
+    case groupCallerSuppliedContext
+    case groupCallerSuppliedTimeline
+    case groupMissingContext(expected: String)
+    case groupMismatchedContext(found: String, expected: String)
+    case groupAmbiguousContext(expected: String)
     case invalidSecretKey
     case invalidSigner(String)
     case authCapabilityRegistryFull(limit: UInt64)
@@ -121,6 +126,16 @@ public enum NMPError: Error, Sendable, Equatable {
         case .InvalidEventId(let got): self = .invalidEventId(got)
         case .InvalidRelayUrl(let got): self = .invalidRelayUrl(got)
         case .InvalidTag(let got): self = .invalidTag(got)
+        case .GroupCallerSuppliedContext:
+            self = .groupCallerSuppliedContext
+        case .GroupCallerSuppliedTimeline:
+            self = .groupCallerSuppliedTimeline
+        case .GroupMissingContext(let expected):
+            self = .groupMissingContext(expected: expected)
+        case .GroupMismatchedContext(let found, let expected):
+            self = .groupMismatchedContext(found: found, expected: expected)
+        case .GroupAmbiguousContext(let expected):
+            self = .groupAmbiguousContext(expected: expected)
         case .InvalidSecretKey: self = .invalidSecretKey
         case .InvalidSigner(let reason): self = .invalidSigner(reason)
         case .AuthCapabilityRegistryFull(let limit):
@@ -180,6 +195,16 @@ extension NMPError: LocalizedError {
             "Invalid relay URL: \(got.debugDescription)"
         case .invalidTag(let got):
             "Invalid tag: \(String(reflecting: got))"
+        case .groupCallerSuppliedContext:
+            "Group context is owned by NMP and cannot be supplied by the caller"
+        case .groupCallerSuppliedTimeline:
+            "Group timeline context is owned by NMP and cannot be supplied by the caller"
+        case .groupMissingContext(let expected):
+            "The signed event has no group context; expected \(expected.debugDescription)"
+        case .groupMismatchedContext(let found, let expected):
+            "The signed event names group \(found.debugDescription); expected \(expected.debugDescription)"
+        case .groupAmbiguousContext(let expected):
+            "The signed event has ambiguous group context; expected \(expected.debugDescription)"
         case .invalidSecretKey:
             "Invalid secret key"
         case .invalidSigner(let reason):

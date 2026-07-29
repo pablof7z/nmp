@@ -21,14 +21,14 @@
 //! There is deliberately no read verb here. Reads go through the one read
 //! door: `engine.observe(LiveQuery(group.demand(filter)), None)`.
 
-use nmp_grammar::{EventBuilder, WriteIntent};
+use nmp_grammar::{CorrelationToken, EventBuilder, WriteIntent};
 use nmp_nip29::{Group, GroupContextError};
 use nostr::{Event, EventId, PublicKey};
 
 use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::outbox::WriteStatus;
-use crate::runtime::FifoReceiver;
+use crate::runtime::{FifoReceiver, ReceiptStream};
 
 /// Why a group publication never reached the publish door, or what the door
 /// said when it did.
@@ -97,6 +97,20 @@ pub trait GroupOperations {
         builder: EventBuilder,
     ) -> Result<GroupReceipts, GroupPublishError>;
 
+    /// Publish an unsigned draft through the ordinary TRACKED publish door.
+    ///
+    /// `correlation` is the same crash-safe token understood by
+    /// [`Engine::publish_tracked`]. It is attached only after the group has
+    /// minted the context and route, so it cannot change either authority.
+    /// The result is the ordinary [`ReceiptStream`], not a group-specific
+    /// receipt or lifecycle.
+    fn publish_tracked(
+        &self,
+        engine: &Engine,
+        builder: EventBuilder,
+        correlation: Option<CorrelationToken>,
+    ) -> Result<ReceiptStream, GroupPublishError>;
+
     /// Publish an ALREADY-SIGNED event into the group. The `h` it already
     /// carries is VALIDATED, never appended: appending would change the bytes
     /// and therefore the `EventId` the caller already has. A missing, wrong
@@ -106,6 +120,15 @@ pub trait GroupOperations {
         engine: &Engine,
         event: Event,
     ) -> Result<GroupReceipts, GroupPublishError>;
+
+    /// Publish a pre-signed event through the ordinary tracked door after
+    /// validating its existing group context without changing its bytes.
+    fn publish_signed_tracked(
+        &self,
+        engine: &Engine,
+        event: Event,
+        correlation: Option<CorrelationToken>,
+    ) -> Result<ReceiptStream, GroupPublishError>;
 
     /// kind:9021 -- ask to join. Publishable with no subscription at all:
     /// writing into a group you cannot read yet is the case this door exists
@@ -174,12 +197,30 @@ impl GroupOperations for Group {
         through_the_one_door(engine, self.write_intent(builder)?)
     }
 
+    fn publish_tracked(
+        &self,
+        engine: &Engine,
+        builder: EventBuilder,
+        correlation: Option<CorrelationToken>,
+    ) -> Result<ReceiptStream, GroupPublishError> {
+        through_the_tracked_door(engine, self.write_intent(builder)?, correlation)
+    }
+
     fn publish_signed(
         &self,
         engine: &Engine,
         event: Event,
     ) -> Result<GroupReceipts, GroupPublishError> {
         through_the_one_door(engine, self.signed_write_intent(event)?)
+    }
+
+    fn publish_signed_tracked(
+        &self,
+        engine: &Engine,
+        event: Event,
+        correlation: Option<CorrelationToken>,
+    ) -> Result<ReceiptStream, GroupPublishError> {
+        through_the_tracked_door(engine, self.signed_write_intent(event)?, correlation)
     }
 
     fn join_request(
@@ -253,6 +294,20 @@ fn through_the_one_door(
     intent: WriteIntent,
 ) -> Result<GroupReceipts, GroupPublishError> {
     engine.publish(intent).map_err(GroupPublishError::Engine)
+}
+
+/// The native-facing companion to [`through_the_one_door`]: same intent,
+/// same engine, but retaining the stable receipt id. Correlation is a receipt
+/// property and therefore does not participate in group contextualization.
+fn through_the_tracked_door(
+    engine: &Engine,
+    mut intent: WriteIntent,
+    correlation: Option<CorrelationToken>,
+) -> Result<ReceiptStream, GroupPublishError> {
+    intent.correlation = correlation;
+    engine
+        .publish_tracked(intent)
+        .map_err(GroupPublishError::Engine)
 }
 
 #[cfg(test)]

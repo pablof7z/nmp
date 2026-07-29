@@ -51,6 +51,18 @@ public struct NMPSignedEvent: Sendable, Hashable {
         content = ffi.content
         signature = ffi.sig
     }
+
+    func toFfi() -> FfiSignedEvent {
+        FfiSignedEvent(
+            id: id,
+            pubkey: pubkey,
+            createdAt: createdAt,
+            kind: kind,
+            tags: tags,
+            content: content,
+            sig: signature
+        )
+    }
 }
 
 /// Translate the one-shot sign-only outcome's typed failure (#680). A signer

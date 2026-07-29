@@ -57,6 +57,49 @@ public enum WriteRouting: Sendable, Hashable {
     }
 }
 
+/// An unsigned event body whose author and default timestamp are resolved by
+/// NMP at acceptance. This is the ergonomic Swift projection of Rust's
+/// `EventBuilder`, and the value semantic protocol modules hand to contextual
+/// publication gates such as `NMPGroup`.
+///
+/// The builder does not carry routing or identity. A group accepts the
+/// complete value, contributes only its own context, and refuses
+/// caller-supplied group-owned rows before any receipt exists.
+public struct NMPEventBuilder: Sendable, Hashable {
+    public var kind: UInt16
+    public var tags: [[String]]
+    public var content: String
+    public var createdAt: UInt64?
+
+    public init(
+        kind: UInt16,
+        tags: [[String]] = [],
+        content: String = "",
+        createdAt: UInt64? = nil
+    ) {
+        self.kind = kind
+        self.tags = tags
+        self.content = content
+        self.createdAt = createdAt
+    }
+
+    func toFfi() -> FfiEventBuilder {
+        FfiEventBuilder(
+            kind: kind,
+            tags: tags,
+            content: content,
+            createdAt: createdAt
+        )
+    }
+
+    init(_ ffi: FfiEventBuilder) {
+        kind = ffi.kind
+        tags = ffi.tags
+        content = ffi.content
+        createdAt = ffi.createdAt
+    }
+}
+
 /// The event payload of a write intent (`FfiWritePayload` mirror). VISION
 /// P: signing and publishing are ORTHOGONAL stages -- `.event` describes an
 /// event NMP stamps, freezes and signs itself. The kind is the one thing it
@@ -83,8 +126,9 @@ public enum WritePayload: Sendable, Hashable {
         switch self {
         case .event(let kind, let tags, let content, let createdAt):
             return .event(
-                builder: FfiEventBuilder(
-                    kind: kind, tags: tags, content: content, createdAt: createdAt))
+                builder: NMPEventBuilder(
+                    kind: kind, tags: tags, content: content, createdAt: createdAt
+                ).toFfi())
         case .signed(let id, let pubkey, let createdAt, let kind, let tags, let content, let sig):
             return .signed(
                 id: id, pubkey: pubkey, createdAt: createdAt, kind: kind, tags: tags, content: content,
@@ -95,6 +139,7 @@ public enum WritePayload: Sendable, Hashable {
     init(_ ffi: FfiWritePayload) {
         switch ffi {
         case .event(let builder):
+            let builder = NMPEventBuilder(builder)
             self = .event(
                 kind: builder.kind,
                 tags: builder.tags,

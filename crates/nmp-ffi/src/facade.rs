@@ -682,7 +682,7 @@ enum ReceiptDelivery {
 }
 
 impl NmpReceiptStream {
-    fn new(receipt: nmp::ReceiptStream) -> Arc<Self> {
+    pub(crate) fn new(receipt: nmp::ReceiptStream) -> Arc<Self> {
         Arc::new(Self {
             id: receipt.id,
             engine: None,
