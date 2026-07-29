@@ -128,10 +128,11 @@ jobs:
   # Clean-clone Kotlin/JVM falsifier smoke test (#40): `Packages/NMPKotlin`
   # depends on uniffi-bindgen-generated Kotlin bindings + a compiled native
   # cdylib that are deliberately NOT committed (see
-  # `.gitignore`/`Packages/NMPKotlin/README.md`), same discipline as
-  # `swift-package` above. Desktop JVM only -- this is the #40 falsifier,
-  # not the M6 Android AAR (which needs cargo-ndk cross-compilation and is
-  # gated on the M5 human verdict).
+  # `.gitignore`/`Packages/NMPKotlin/README.md`), the same discipline as the
+  # consolidated Swift suite in `.github/workflows/macos-qualification.yml`.
+  # Desktop JVM only -- this is the #40 falsifier, not the M6 Android AAR
+  # (which needs cargo-ndk cross-compilation and is gated on the M5 human
+  # verdict).
   kotlin-package:
     runs-on: ubuntu-latest
     steps:

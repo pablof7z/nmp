@@ -69,9 +69,10 @@ expect_failure "removed Kotlin inventory proof" \
   "Kotlin provider workflow does not audit packaged component inventory"
 
 reset_fixture
-cat >> "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml" <<'YAML'
-# target/nmp-component-build/debug/release/libnmp_ffi.a
-YAML
+sed -i.bak \
+  's#            "$RUNNER_TEMP/libnmp_ffi-core-only\.a" \\#            target/nmp-component-build/debug/release/libnmp_ffi.a \\#' \
+  "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml"
+rm "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml.bak"
 expect_failure "mutable Cargo-cache Swift audit" \
   "provider workflow still audits mutable Cargo-cache libraries"
 
