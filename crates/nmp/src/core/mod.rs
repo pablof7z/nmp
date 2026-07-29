@@ -36,6 +36,8 @@ mod history;
 mod history_lifecycle;
 #[cfg(test)]
 mod history_lifecycle_tests;
+#[cfg(test)]
+mod lane_bootstrap_retry_tests;
 mod lane_projection;
 mod observation;
 mod query;
@@ -975,6 +977,58 @@ impl LaneWorkerProjection {
     }
 }
 
+/// One intent's outstanding lane-bootstrap gap.
+///
+/// Bootstrap is both the create-if-missing lane mutation and the only
+/// complete read that establishes the projection, so a failure leaves the
+/// reducer unable to name this intent's durable lanes. Retention is handled
+/// conservatively at the moment of failure; this record is what makes that
+/// retention *temporary* rather than permanent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LaneBootstrapRetry {
+    /// The route candidates conservatively held in
+    /// `LaneWorkerProjection::uncertain` until bootstrap commits.
+    ///
+    /// `None` means the intent's durable route set could not itself be read,
+    /// so no per-relay `uncertain` marking can cover the gap and the whole
+    /// projection must report unavailable instead. Unknown is sticky: a
+    /// later failure that does know its candidates cannot upgrade an already
+    /// unknown route set into a covered one.
+    candidates: Option<BTreeSet<RelayUrl>>,
+    /// Wall-clock instant at which `tick` retries. `next_deadline` folds this
+    /// in, so the existing runtime timer drives the retry; nothing scans.
+    due: Timestamp,
+    /// Consecutive bootstrap failures, feeding the same capped exponential
+    /// backoff shape the durable lane retry schedule uses.
+    failures: u32,
+}
+
+impl LaneBootstrapRetry {
+    /// Whether the conservative marking taken at the moment of failure can
+    /// stand in for this intent's unknown durable lane set.
+    ///
+    /// An empty candidate set marks nothing, so it covers nothing: it is
+    /// exactly as blind as an unreadable route set and gets the same
+    /// retain-everything treatment.
+    fn covers_retention(&self) -> bool {
+        self.candidates
+            .as_ref()
+            .is_some_and(|candidates| !candidates.is_empty())
+    }
+}
+
+/// Capped exponential backoff for lane-bootstrap retries.
+///
+/// Deliberately the same shape as [`retry_delay_secs`] without its per-lane
+/// jitter: there is exactly one bootstrap in flight per intent, so there is
+/// no thundering herd across ordinals to spread.
+fn bootstrap_retry_delay_secs(failures: u32) -> u64 {
+    RETRY_INITIAL_SECS
+        .checked_shl(failures.saturating_sub(1).min(63))
+        .unwrap_or(u64::MAX)
+        .min(RETRY_MAX_SECS)
+}
+
 struct PendingWrite {
     durability: Durability,
     routing: WriteRouting,
@@ -1232,12 +1286,24 @@ pub struct EngineCore<S: EventStore> {
     /// finding), so an unprovable index is always treated as untrustworthy
     /// rather than guessed at.
     lane_relay_index_degraded: bool,
-    /// Whether the reducer can prove its lane-worker projection is a
-    /// conservative superset of durable nonterminal lanes. Unlike
-    /// `lane_relay_index_degraded`, false never triggers a fallback scan:
-    /// worker reconciliation returns `None` and the runtime retains existing
-    /// sessions until a reopened store rebuilds the projection at boot.
-    lane_worker_projection_available: bool,
+    /// A lane-worker projection gap that NO in-process reconciliation can
+    /// close: a committed lane fact arrived for an intent this reducer does
+    /// not track, or boot could not read the pending set at all. There is
+    /// nothing to retry, so this stays latched until the next
+    /// `recover_on_boot` rebuilds `pending` from scratch. Unlike
+    /// `lane_relay_index_degraded` it never triggers a fallback scan:
+    /// [`Self::relay_worker_requirements`] returns `None` and the runtime
+    /// retains every existing session.
+    lane_projection_unprovable: bool,
+    /// Intents whose durable lane bootstrap did not commit, keyed by their
+    /// receipt. Each entry is a *retryable* projection gap, and this map is
+    /// the only path out of the conservative retention that gap causes:
+    /// `tick` re-runs `bootstrap_projected_lanes` at `due`, and a committed
+    /// bootstrap removes the entry. Without it a single transient store
+    /// failure would pin the intent's relay workers -- and its receipt --
+    /// for the rest of the process (#1000), because `uncertain` is cleared
+    /// only by a committed lane fact that no other path can ever produce.
+    lane_bootstrap_retries: BTreeMap<ReceiptId, LaneBootstrapRetry>,
     /// The negentropy capability-probe cache (plan §6 E).
     prober: Prober,
     /// Latest provenance-bearing NIP-11 advertisement for relays in the
@@ -1419,7 +1485,8 @@ impl<S: EventStore> EngineCore<S> {
             intent_receipts: HashMap::new(),
             receipts_by_lane_relay: HashMap::new(),
             lane_relay_index_degraded: false,
-            lane_worker_projection_available: true,
+            lane_projection_unprovable: false,
+            lane_bootstrap_retries: BTreeMap::new(),
             prober: Prober::new(),
             nip11_information: HashMap::new(),
             active_nip77_live: HashMap::new(),
@@ -1475,8 +1542,25 @@ impl<S: EventStore> EngineCore<S> {
     /// This is a pure reducer projection: durable lane reads happen only at
     /// bootstrap/recovery and mutation boundaries, never while reconciling
     /// ordinary worker ownership.
+    /// Whether the reducer can prove its lane-worker projection is a
+    /// conservative superset of durable nonterminal lanes.
+    ///
+    /// Derived rather than latched, so every gap that CAN be reconciled
+    /// re-enables exact worker reconciliation the moment it is (#1000). A
+    /// bootstrap gap whose route candidates are known is already covered by
+    /// `LaneWorkerProjection::uncertain` and keeps the projection available;
+    /// one whose candidates are unknown has nothing to mark, so it must fall
+    /// back to retaining everything until its retry commits.
+    fn lane_worker_projection_available(&self) -> bool {
+        !self.lane_projection_unprovable
+            && self
+                .lane_bootstrap_retries
+                .values()
+                .all(LaneBootstrapRetry::covers_retention)
+    }
+
     pub(crate) fn relay_worker_requirements(&self) -> Option<RelayWorkerRequirements> {
-        if !self.lane_worker_projection_available {
+        if !self.lane_worker_projection_available() {
             return None;
         }
         let writes = self.write_relay_workers();
@@ -1793,6 +1877,11 @@ impl<S: EventStore> EngineCore<S> {
         self.clock = now;
         let mut effects = Vec::new();
         self.retry_scheduler_blocked = false;
+        // Before the durable deadline sweep: a committed bootstrap mints the
+        // very lanes the sweep and `schedule_ready` below then act on, so
+        // retrying first lets one tick both close the projection gap and
+        // make progress on it.
+        effects.extend(self.retry_lane_bootstraps(now));
         effects.extend(self.consume_due_outbox_deadlines(now));
 
         // NIP-40 expiry (retraction-and-negative-deltas.md §3.2). The
@@ -1889,7 +1978,20 @@ impl<S: EventStore> EngineCore<S> {
         let outbox = (!self.retry_scheduler_blocked)
             .then(|| self.resolver.store().next_outbox_deadline().ok().flatten())
             .flatten();
-        [expiry, neg_liveness, outbox].into_iter().flatten().min()
+        // Lane-bootstrap retries carry their own capped backoff, so unlike
+        // the outbox deadline they are NOT suppressed by
+        // `retry_scheduler_blocked`: a failed bootstrap has no durable
+        // deadline row to rearm it, and suppressing it here would leave the
+        // intent's conservative retention with no way out (#1000).
+        let bootstrap = self
+            .lane_bootstrap_retries
+            .values()
+            .map(|retry| retry.due)
+            .min();
+        [expiry, neg_liveness, outbox, bootstrap]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     pub fn handle(&mut self, msg: EngineMsg) -> Vec<Effect> {
