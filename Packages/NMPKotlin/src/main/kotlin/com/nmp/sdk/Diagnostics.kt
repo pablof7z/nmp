@@ -163,10 +163,20 @@ enum class StalledWriteStage {
  * receipt id and not parseable back into one. It exists to tell two rows
  * apart and to recognise the same row across snapshots.
  *
+ * `detail` is what this write is waiting for. For UNROUTABLE it is the
+ * receipt's OWN park reason, verbatim, so an operator holding both never has
+ * to decide whether two differently-worded sentences are the same fact.
+ *
  * `stalledSince` is when the obligation was ACCEPTED (Unix seconds),
  * replayed verbatim across restarts. The age is `now - stalledSince`; NMP
  * reports the instant rather than a duration because a duration baked into a
- * snapshot goes stale exactly while nothing is happening. */
+ * snapshot goes stale exactly while nothing is happening.
+ *
+ * Known imprecision: this is when the OBLIGATION was accepted, not when the
+ * stall began. The two coincide for UNROUTABLE and UNSIGNABLE; for
+ * UNDELIVERABLE it is EARLIER, so subtracting over-reports how long delivery
+ * has been failing. The park instant has no durable home yet, and an
+ * in-memory one would reset on restart. */
 data class StalledWrite(
     val id: String,
     val stage: StalledWriteStage,

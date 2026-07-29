@@ -172,13 +172,21 @@ public struct StalledWrite: Sendable, Identifiable, Hashable {
     /// snapshots, never to reattach or enumerate receipts.
     public let id: String
     public let stage: StalledWriteStage
-    /// What this write is waiting for, in the write plane's own recorded
-    /// words. Never empty.
+    /// What this write is waiting for. For `.unroutable` it is the
+    /// receipt's OWN park reason, verbatim, so an operator holding both
+    /// never has to decide whether two differently-worded sentences are the
+    /// same fact. Never empty.
     public let detail: String
     /// When the obligation was ACCEPTED (Unix seconds), replayed verbatim
     /// across restarts. The age is `now - stalledSince`; NMP reports the
     /// instant rather than a duration because a duration baked into a
     /// snapshot goes stale exactly while nothing is happening.
+    ///
+    /// Known imprecision: this is when the OBLIGATION was accepted, not when
+    /// the stall began. The two coincide for `.unroutable` and
+    /// `.unsignable`; for `.undeliverable` it is EARLIER, so subtracting
+    /// over-reports how long delivery has been failing. The park instant has
+    /// no durable home yet, and an in-memory one would reset on restart.
     public let stalledSince: UInt64
 
     init(_ ffi: FfiStalledWrite) {

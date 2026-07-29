@@ -280,8 +280,11 @@ pub struct StalledWrite {
     /// active obligations into an undecided receipt-discovery door.
     pub id: String,
     pub stage: StalledWriteStage,
-    /// What this write is waiting for, in the write plane's own recorded
-    /// words — the same detail its receipt carries. Never empty.
+    /// What this write is waiting for. For
+    /// [`StalledWriteStage::Unroutable`] it is the receipt's OWN park
+    /// reason, verbatim, so an operator holding both never has to decide
+    /// whether two differently-worded sentences are the same fact. Never
+    /// empty.
     pub detail: String,
     /// When this obligation was ACCEPTED, replayed verbatim across
     /// restarts. The age is `now - stalled_since`; NMP reports the instant
@@ -289,6 +292,18 @@ pub struct StalledWrite {
     /// stale exactly while nothing is happening, and NMP draws no
     /// conclusion from either number — deciding a write has waited long
     /// enough is the app's or the person's, never a timer's.
+    ///
+    /// **Known imprecision.** This is when the OBLIGATION was accepted, not
+    /// when the stall began. The two coincide for
+    /// [`StalledWriteStage::Unroutable`] and
+    /// [`StalledWriteStage::Unsignable`], which are attempted immediately;
+    /// for [`StalledWriteStage::Undeliverable`] it is EARLIER, so a write
+    /// that delivered happily for a week before its relay went down an hour
+    /// ago still reads as accepted a week ago and an app subtracting will
+    /// over-report the outage. The park instant itself has no durable home
+    /// yet, and holding it in memory instead is what makes a restart reset
+    /// it — so this field takes the durable over-estimate rather than a
+    /// number that lies after every reopen.
     pub stalled_since: Timestamp,
 }
 

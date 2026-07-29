@@ -6596,7 +6596,7 @@ record Record {
             type_: String,
             default: None,
             docstring: Some(
-                "What this write is waiting for, in the write plane's own recorded\nwords. Never empty.",
+                "What this write is waiting for. For `Unroutable` it is the receipt's\nOWN park reason, verbatim, so an operator holding both never has to\ndecide whether two differently-worded sentences are the same fact.\nNever empty.",
             ),
         },
         Field {
@@ -6604,7 +6604,7 @@ record Record {
             type_: UInt64,
             default: None,
             docstring: Some(
-                "When the obligation was ACCEPTED, as a Unix timestamp in seconds,\nreplayed verbatim across restarts. The age is `now - stalled_since`;\nNMP reports the instant rather than a duration because a duration\nbaked into a snapshot goes stale exactly while nothing is happening.",
+                "When the obligation was ACCEPTED, as a Unix timestamp in seconds,\nreplayed verbatim across restarts. The age is `now - stalled_since`;\nNMP reports the instant rather than a duration because a duration\nbaked into a snapshot goes stale exactly while nothing is happening.\n\nKnown imprecision: this is when the OBLIGATION was accepted, not when\nthe stall began. The two coincide for `Unroutable` and `Unsignable`;\nfor `Undeliverable` it is EARLIER, so an app subtracting will\nover-report how long delivery has been failing. The park instant has\nno durable home yet, and an in-memory one would reset on every\nrestart.",
             ),
         },
     ],

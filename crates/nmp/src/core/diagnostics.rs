@@ -173,8 +173,12 @@ pub struct StalledWrite {
     /// (#756's identity question; #903 owns the reverse link).
     pub id: String,
     pub stage: StalledWriteStage,
-    /// What this write is waiting for, in the words the write plane already
-    /// records — the same `detail` its receipt carries. Never empty: a park
+    /// What this write is waiting for.
+    ///
+    /// For [`StalledWriteStage::Unroutable`] this is the receipt's OWN park
+    /// reason, projected verbatim: an operator comparing a diagnostics row
+    /// with the receipt beside it must never have to decide whether two
+    /// differently-worded sentences are the same fact. Never empty — a park
     /// that says only "stuck" is barely better than losing the write.
     pub detail: String,
     /// When this obligation was ACCEPTED — the durable
@@ -187,6 +191,25 @@ pub struct StalledWrite {
     /// this section exists to describe. NMP draws no conclusion from either
     /// number; deciding that a write has waited long enough is the app's or
     /// the person's, never a timer's.
+    ///
+    /// **Known imprecision, stated rather than hidden.** This is when the
+    /// OBLIGATION was accepted, not when the stall began. For
+    /// [`StalledWriteStage::Unroutable`] and
+    /// [`StalledWriteStage::Unsignable`] the two coincide — routing and
+    /// signing are attempted immediately, so a write that is parked has been
+    /// parked since acceptance. For [`StalledWriteStage::Undeliverable`] the
+    /// instant is EARLIER than the stall: a write accepted last week and
+    /// delivering happily until its relay went down an hour ago still reads
+    /// as accepted last week, so an app subtracting will over-report how
+    /// long delivery has been failing.
+    ///
+    /// The alternative — the instant the park itself began — is a fact the
+    /// store has no door for, and keeping it in memory instead is what makes
+    /// a restart reset it to the recovering process's clock. Between a
+    /// durable over-estimate and a process-local number that lies after every
+    /// reopen, this surface takes the durable one, because "stalled since
+    /// before the restart" is a question it has to be able to answer at all.
+    /// Persisting the park instant is tracked as issue #1024.
     pub stalled_since: Timestamp,
 }
 

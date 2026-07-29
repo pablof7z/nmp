@@ -817,13 +817,22 @@ pub struct FfiStalledWrite {
     /// row across snapshots, never to reattach or enumerate receipts.
     pub id: String,
     pub stage: FfiStalledWriteStage,
-    /// What this write is waiting for, in the write plane's own recorded
-    /// words. Never empty.
+    /// What this write is waiting for. For `Unroutable` it is the receipt's
+    /// OWN park reason, verbatim, so an operator holding both never has to
+    /// decide whether two differently-worded sentences are the same fact.
+    /// Never empty.
     pub detail: String,
     /// When the obligation was ACCEPTED, as a Unix timestamp in seconds,
     /// replayed verbatim across restarts. The age is `now - stalled_since`;
     /// NMP reports the instant rather than a duration because a duration
     /// baked into a snapshot goes stale exactly while nothing is happening.
+    ///
+    /// Known imprecision: this is when the OBLIGATION was accepted, not when
+    /// the stall began. The two coincide for `Unroutable` and `Unsignable`;
+    /// for `Undeliverable` it is EARLIER, so an app subtracting will
+    /// over-report how long delivery has been failing. The park instant has
+    /// no durable home yet, and an in-memory one would reset on every
+    /// restart.
     pub stalled_since: u64,
 }
 
