@@ -43,7 +43,6 @@ Feature: An event builder demands a kind and permits everything else
 
   # ---- what NMP fills in ------------------------------------------------
 
-  @designed
   Scenario: A kind alone is a complete builder
     # The headline, and the whole reason the type exists. Everything an app
     # must say to publish a note is on the first line; the account it
@@ -55,7 +54,6 @@ Feature: An event builder demands a kind and permits everything else
     And the published event carries a created_at, an id and a signature
     And I never stated my own pubkey, created_at, id or signature
 
-  @designed
   Scenario: The stamped created_at is the time acceptance happened
     # Not compose time, not the time the relay finally took it. Acceptance is
     # the moment the body is frozen, which is the only moment that is both
@@ -67,7 +65,6 @@ Feature: An event builder demands a kind and permits everything else
 
   # ---- what the app can still say --------------------------------------
 
-  @designed
   Scenario: An app importing older content states its own created_at and keeps it
     # The import case is the plain one: a note written in 2019 and brought
     # across from somewhere else is not a note written now. If NMP restamped
@@ -78,7 +75,6 @@ Feature: An event builder demands a kind and permits everything else
     Then the published event's created_at is "2019-03-04T09:15:00Z"
     And the published event is authored by "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90"
 
-  @designed
   Scenario: Tags NMP has never seen reach the wire unchanged
     # Arbitrary means arbitrary: not reordered, not normalised, not filtered
     # down to the ones a module claims. NMP has no opinion about "imeta" and
@@ -90,7 +86,6 @@ Feature: An event builder demands a kind and permits everything else
     And I publish it
     Then the published event carries exactly those tags, in that order, unchanged
 
-  @designed
   Scenario: A kind nobody wrote a module for is published, not refused
     # Guardrails, not restrictions. An app hand-rolling its own gift wrap is
     # allowed to shoot itself in the foot; a builder that validated kinds
@@ -103,7 +98,6 @@ Feature: An event builder demands a kind and permits everything else
 
   # ---- the requirement that was killed ----------------------------------
 
-  @designed
   Scenario: The same logical event composed twice is two valid events
     # A deliberately rejected requirement, recorded here so that nobody
     # reinstates it as a bug. Two composes of "the same" note differ only in
@@ -116,7 +110,6 @@ Feature: An event builder demands a kind and permits everything else
     And the two events differ only in their created_at, id and signature
     And nothing reported either one as a duplicate of the other
 
-  @designed
   Scenario: An app that wants identical bytes states the timestamp itself
     # The other half, and the reason the requirement was safe to kill. Byte
     # reproducibility is an app-level property with an app-level means of

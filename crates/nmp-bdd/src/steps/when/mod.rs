@@ -381,3 +381,5 @@ async fn app_decodes_pasted_npub(w: &mut NmpWorld) {
 // this catalog is shared by every feature, and one family's whole vocabulary is
 // readable on its own only when it has a name. See `when::groups`.
 mod groups;
+mod replaceable;
+mod writes;

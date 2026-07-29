@@ -25,8 +25,7 @@ use nmp::mechanism::runtime::ReceiptReattachment;
 use nmp_grammar::{Durability, EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 
 use super::budgets::{EVENTUALLY, NEVER};
-use super::observe::{FeedState, ReceiptState};
-use super::queries::authored_note_query;
+use super::observe::ReceiptState;
 use super::NmpWorld;
 
 impl NmpWorld {
@@ -44,6 +43,16 @@ impl NmpWorld {
     pub fn register_identity_with_signer(&mut self, label: &str) {
         self.register_identity(label);
         self.identities_with_signers.push(label.to_string());
+        // A Background that had to publish something already started the
+        // engine (`features/writes/replaceable-edits` states a stored winner
+        // before it names a second identity), and `spawn_engine`'s
+        // registration pass has therefore already run. Registering an
+        // identity is exactly what an app does at any moment of its life, so
+        // the capability goes in now rather than waiting for a restart that
+        // may never come.
+        if self.started {
+            self.add_signer_for(label);
+        }
     }
 
     /// `Given no signer is registered for "<hex>"` -- the keypair exists (a
@@ -92,6 +101,26 @@ impl NmpWorld {
         for label in self.identity_labels.clone() {
             self.declare_write_relay(&label, relay);
         }
+    }
+
+    /// `Given I am logged in as the account with pubkey "<hex>"` -- every
+    /// `features/writes/` Background.
+    ///
+    /// The same registration [`Self::register_identity`] performs, minus the
+    /// durable store: a scenario that never reconstructs its engine has
+    /// nothing to reopen, and redb transactions per scenario are the one cost
+    /// the suite's wall clock actually notices. What it does share is the
+    /// relay-list inheritance, and that is the load-bearing half -- the
+    /// Background states the write relay as MINE and then publishes as this
+    /// key, so without it the account has no route and `Auto` has nothing to
+    /// resolve.
+    pub fn log_in_as_identity(&mut self, label: &str) {
+        self.person(label);
+        if !self.identity_labels.iter().any(|known| known == label) {
+            self.identity_labels.push(label.to_string());
+        }
+        self.inherit_my_write_relays(label);
+        self.active_person = Some(label.to_string());
     }
 
     /// `Given "<hex>" is the active account`.
@@ -245,78 +274,6 @@ impl NmpWorld {
             .expect("nmp-bdd: an accepted write must be cancellable");
     }
 
-    // ---- When: restart -------------------------------------------------
-
-    /// `When I reconstruct the engine from the same durable store` -- a
-    /// genuine process boundary: the engine thread is stopped and a fresh
-    /// one is built over the SAME on-disk store. Nothing in memory survives,
-    /// so anything the write still knows about itself afterwards came off
-    /// the journal.
-    pub async fn restart_engine(&mut self, active: Option<String>) {
-        self.ensure_started().await;
-        self.last_receipt_body = self.frozen_body_id();
-        // Everything the app was holding open goes first: a feed, a
-        // diagnostics stream and a receipt stream are all things a process
-        // loses when it stops, and none of them may survive into the
-        // reconstructed engine.
-        self.feed = None;
-        self.watches.clear();
-        self.diag = None;
-        self.receipts_by_text.clear();
-        self.restarted_receipt = None;
-        self.last_receipt_text = None;
-        // `Engine::shutdown` is what asks the engine thread to stop and then
-        // joins it; the world's cloned `Handle` goes with it. See
-        // `staging::stop_engine`, which both this restart and teardown share
-        // so the two can never drift.
-        self.stop_engine();
-        self.active_person = active;
-        self.spawn_engine().await;
-        if let Some(id) = self.last_receipt_id {
-            match self.handle().reattach_receipt(id) {
-                ReceiptReattachment::Attached { statuses, .. } => {
-                    self.restarted_receipt = Some(ReceiptState::new(statuses));
-                }
-                _ => panic!(
-                    "nmp-bdd: a durable receipt must still reattach by its stable id after a \
-                     restart -- that is what makes an accepted write survive the process"
-                ),
-            }
-        }
-    }
-
-    /// The id of the body the engine FROZE at acceptance, read off the
-    /// pending row the engine projects into its own local rows before any
-    /// signer answers.
-    ///
-    /// An event id commits to author, content and timestamp together, so
-    /// this one value IS the frozen body: a restart that re-resolved the
-    /// identity, restamped the clock, or recomposed anything would produce a
-    /// different one. Read through an ordinary subscription rather than the
-    /// store, because that is the only body an app can see.
-    fn frozen_body_id(&mut self) -> Option<nostr::EventId> {
-        let label = self.last_publish_label.clone()?;
-        let author = self.person(&label).public_key().to_hex();
-        let relay_name = self.write_relay_of(&label).first().cloned()?;
-        let relay = self.relay_url(&relay_name);
-        let (handle_id, rx) = self
-            .handle()
-            .subscribe(authored_note_query(&relay, &author, None))
-            .expect("BDD subscription construction");
-        let mut feed = FeedState::new(handle_id, rx);
-        let deadline = Instant::now() + EVENTUALLY;
-        loop {
-            feed.drain_available();
-            if let Some(id) = feed.rows.keys().next().copied() {
-                return Some(id);
-            }
-            if Instant::now() >= deadline {
-                return None;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-
     // ---- Then: what the identity plane produced ------------------------
 
     /// The statuses the write for `text` has reported, waiting (bounded)
@@ -344,13 +301,21 @@ impl NmpWorld {
         if let Some(receipt) = self.restarted_receipt.as_mut() {
             return receipt;
         }
-        let key = self
-            .last_receipt_text
-            .clone()
-            .expect("nmp-bdd: no publish is in flight");
-        self.receipts_by_text
-            .get_mut(&key)
-            .expect("the last publish's receipt is always retained")
+        if let Some(key) = self.last_receipt_text.clone() {
+            return self
+                .receipts_by_text
+                .get_mut(&key)
+                .expect("the last publish's receipt is always retained");
+        }
+        // A write the identity plane did not itself issue. `features/writes/`
+        // asks the same questions of another plane's publishes -- "it never
+        // reports accepted", "no journal row was written", "the published
+        // event is authored by X" -- and since #995 every publish this world
+        // makes is one entry in one ordered list, so "the publish" is its
+        // last entry however it got there.
+        self.receipts
+            .last_mut()
+            .expect("nmp-bdd: no publish is in flight")
     }
 
     /// Every status the write under discussion has reported so far, for
@@ -423,16 +388,6 @@ impl NmpWorld {
         self.identity_receipt_eventually(text, EVENTUALLY, |seen| {
             seen.iter().any(|s| matches!(s, WriteStatus::Signed(_)))
         })
-    }
-
-    /// `Then its frozen body is byte-for-byte what it was before the
-    /// restart` -- an event id commits to author, content and timestamp
-    /// together, so an unchanged id IS an unchanged body.
-    pub fn frozen_body_unchanged_across_restart(&mut self) -> bool {
-        let before = self
-            .last_receipt_body
-            .expect("nmp-bdd: nothing was frozen before the restart to compare against");
-        self.frozen_body_id() == Some(before)
     }
 
     /// `Then the published event is authored by "<hex>"` / `Then "<text>" is

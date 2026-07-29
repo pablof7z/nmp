@@ -150,23 +150,32 @@ impl NmpWorld {
     /// `Box<dyn SigningCapability>` is not itself a `SigningCapability`.
     pub(super) fn register_identity_signers(&mut self) {
         for label in self.identities_with_signers.clone() {
-            let keys = self.person(&label);
-            if self.slow_signers.contains(&label) {
-                let gate = Arc::new(SignerGate::new());
-                self.signer_gates.insert(label.clone(), Arc::clone(&gate));
-                self.handle()
-                    .add_signer(GatedSigner {
-                        keys,
-                        asked: Arc::clone(&self.signer_asked_by),
-                        gate,
-                    })
-                    .expect("BDD signers always expose their public key");
-            } else {
-                let signer = self.counting_signer(&keys);
-                self.handle()
-                    .add_signer(signer)
-                    .expect("BDD signers always expose their public key");
-            }
+            self.add_signer_for(&label);
+        }
+    }
+
+    /// One identity's capability, attached through the door an app uses.
+    /// Its own method because an identity may be registered AFTER the engine
+    /// is running (`world::identity::register_identity_with_signer`), and
+    /// re-running the whole pass would re-register every other one.
+    pub(super) fn add_signer_for(&mut self, label: &str) {
+        let keys = self.person(label);
+        if self.slow_signers.iter().any(|slow| slow == label) {
+            let gate = Arc::new(SignerGate::new());
+            self.signer_gates
+                .insert(label.to_string(), Arc::clone(&gate));
+            self.handle()
+                .add_signer(GatedSigner {
+                    keys,
+                    asked: Arc::clone(&self.signer_asked_by),
+                    gate,
+                })
+                .expect("BDD signers always expose their public key");
+        } else {
+            let signer = self.counting_signer(&keys);
+            self.handle()
+                .add_signer(signer)
+                .expect("BDD signers always expose their public key");
         }
     }
 

@@ -36,6 +36,21 @@ async fn main() {
 
     nmp_bdd::NmpWorld::cucumber()
         .max_concurrent_scenarios(1)
+        // A scenario that says it reconstructs its engine gets a store that
+        // survives one. Decided here, from the scenario's own sentences,
+        // because the store is chosen once at start-up -- see
+        // `nmp_bdd::step_crosses_a_process_boundary`.
+        .before(|_feature, _rule, scenario, world| {
+            let restarts = scenario
+                .steps
+                .iter()
+                .any(|step| nmp_bdd::step_crosses_a_process_boundary(&step.value));
+            Box::pin(async move {
+                if restarts {
+                    world.use_durable_store();
+                }
+            })
+        })
         .filter_run_and_exit(features_dir, move |_feature, _rule, scenario| {
             let is_live = scenario.tags.iter().any(|t| t == "live");
             let is_wip = scenario.tags.iter().any(|t| t == "wip");
