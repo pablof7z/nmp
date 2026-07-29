@@ -153,6 +153,21 @@ impl NmpWorld {
         self.relay_config_mut(relay).advertised_limits = None;
     }
 
+    /// `Given relay <name> advertises that NIP-77 is unsupported`.
+    ///
+    /// The scripted NIP-11 document names supported NIPs 1 and 11 only.
+    /// Engine acquisition therefore records an explicit negative
+    /// advertisement and does not start the behavioral NIP-77 probe. This is
+    /// the deterministic relay shape for scenarios whose subject is the
+    /// ordinary NIP-01 router plan: otherwise probe completion can race a
+    /// demand mutation and legitimately overlap-close the prior REQ during a
+    /// NIP-77 live-candidate handoff.
+    pub fn advertise_nip77_unsupported(&mut self, relay: &str) {
+        self.relay_config_mut(relay)
+            .advertised_limits
+            .get_or_insert_with(Default::default);
+    }
+
     /// `Given <person>'s relay list names <relay> as their write relay` /
     /// `Given my relay list names <relay>[s] as my write relay(s)`.
     ///
@@ -534,5 +549,25 @@ impl NmpWorld {
             }
         };
         RedbStore::open(&path).expect("nmp-bdd: the scenario's durable store must open")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nmp_test_support::relays::AdvertisedLimits;
+
+    use super::NmpWorld;
+
+    #[test]
+    fn nip77_unsupported_is_an_explicit_document_not_missing_information() {
+        let mut world = NmpWorld::default();
+
+        world.advertise_nip77_unsupported("hub");
+
+        assert_eq!(
+            world.relay_configs["hub"].advertised_limits,
+            Some(AdvertisedLimits::default()),
+            "unsupported must publish the explicit NIP-11 shape whose supported_nips excludes 77"
+        );
     }
 }
