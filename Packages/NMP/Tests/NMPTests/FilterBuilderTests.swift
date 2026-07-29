@@ -150,15 +150,9 @@ final class FilterBuilderTests: XCTestCase {
         )
         let ffi = intent.toFfi()
         XCTAssertEqual(ffi.durability, .durable)
-<<<<<<< HEAD
         XCTAssertEqual(ffi.routing, .auto)
-        guard case .unsigned(_, _, _, let tags, let content) = ffi.payload else {
-            return XCTFail("expected an unsigned payload")
-=======
-        XCTAssertEqual(ffi.routing, .authorOutbox)
         guard case .event(let builder) = ffi.payload else {
             return XCTFail("expected a builder payload")
->>>>>>> d30ae57e (Project the builder into the Swift and Kotlin SDK wrappers, regenerate surface snapshots)
         }
         XCTAssertEqual(builder.content, "hello from NMP")
         XCTAssertEqual(builder.tags, [["t", "nostr"]])
@@ -230,13 +224,15 @@ final class FilterBuilderTests: XCTestCase {
     }
 
     func testWriteIntentReverseProjectionPreservesEveryGenericField() {
-        let unsigned = WriteIntent(
+        let composed = WriteIntent(
             FfiWriteIntent(
                 payload: .event(
-                    kind: 1111,
-                    tags: [["I", "podcast:item:guid:42"]],
-                    content: "unsigned",
-                    createdAt: 42
+                    builder: FfiEventBuilder(
+                        kind: 1111,
+                        tags: [["I", "podcast:item:guid:42"]],
+                        content: "composed",
+                        createdAt: 42
+                    )
                 ),
                 durability: .atMostOnce,
                 routing: .auto,
@@ -245,18 +241,18 @@ final class FilterBuilderTests: XCTestCase {
             )
         )
         XCTAssertEqual(
-            unsigned.payload,
-            .event(
+            composed.payload,
+            WritePayload.event(
                 kind: 1111,
                 tags: [["I", "podcast:item:guid:42"]],
-                content: "unsigned",
+                content: "composed",
                 createdAt: 42
             )
         )
-        XCTAssertEqual(unsigned.durability, .atMostOnce)
-        XCTAssertEqual(unsigned.routing, .auto)
-        XCTAssertEqual(unsigned.identityOverride, String(repeating: "a", count: 64))
-        XCTAssertEqual(unsigned.correlation, "correlation-42")
+        XCTAssertEqual(composed.durability, .atMostOnce)
+        XCTAssertEqual(composed.routing, .auto)
+        XCTAssertEqual(composed.identityOverride, String(repeating: "a", count: 64))
+        XCTAssertEqual(composed.correlation, "correlation-42")
 
         let signed = WriteIntent(
             FfiWriteIntent(
