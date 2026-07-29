@@ -55,15 +55,14 @@ rather than a privacy claim:
 
 What it does NOT guarantee is that the relays mean anything in particular. A
 module that needs "these relays are this recipient's verified inboxes" owns
-that validation itself and mints the route from verified facts:
-
-```swift
-let receipt = try engine.publish(.init(
-    payload: .unsigned(giftWrapDraft),
-    durability: .durable,
-    routing: try Nip17.recipientRelays(recipients, using: engine)
-))
-```
+that validation itself and returns one ordinary `WriteIntent` containing an
+`EventBuilder` plus the exact route minted from those verified facts. NMP does
+not currently ship a NIP-17 composer, so this document deliberately does not
+invent a Swift call shape for one. The old `.unsigned(giftWrapDraft)` example
+was removed with `WritePayload::Unsigned`; the current generic builder payload
+is `.event(kind:tags:content:createdAt:)`, and a future semantic NIP-17 door
+must own its composition rather than asking presentation code to fill those
+fields.
 
 If inbox facts are missing, that operation fails before it publishes, with
 explicit evidence — the app does not send an empty route and read the

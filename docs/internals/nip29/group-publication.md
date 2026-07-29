@@ -2,13 +2,13 @@
 title: NIP-29 group publication — the Group door
 category: nip29
 slug: group-publication
-status: designed
+status: built
 date: 2026-07-29
 owns:
   - the app-facing surface for reading from and writing into a NIP-29 group
   - who mints the h tag and the host route, and when
   - the pre-signed group publication path and whose requirement it is
-  - where NIP-29's own kinds (9000–9021) live
+  - where NIP-29's own kinds (9000–9022) live
   - tombstones — contextualize_group_event, GroupPublication, GroupHostAuthority
 related:
   - docs/internals/routing/auto-and-explicit.md
@@ -21,6 +21,7 @@ related:
 issues:
   - "#838 deleted group_content_demand, groupMessageIntent, and publishComposed — the precedents this design obeys"
   - "#827 folded nmp-engine into nmp; private composition layer exists"
+  - "#1015 tracks the still-absent FFI/Swift Group publication projection"
   - "previous tags deliberately unimplemented; NIP-42 AUTH for private groups unverified end-to-end"
 ---
 
@@ -32,9 +33,10 @@ session, which also produced the universal routing design
 (`docs/internals/routing/`) — group publication is deliberately a thin
 consumer of that design, not a mechanism of its own.
 
-Everything here is DESIGNED unless marked otherwise. Nothing below is built;
-where the current code contradicts the design, the section says so with a
-citation, and §9 records what dies.
+`status: built` — §§1–9 preserve the dated pre-implementation decision record,
+including its `DESIGNED` labels, rejected alternatives, and then-current source
+citations. The present implementation is recorded in §10 with current-tree
+anchors rather than rewriting the reasoning that selected it.
 
 ---
 
@@ -255,3 +257,38 @@ authority newtype, the dedicated route variant, and the entire "never let a
 route become app-visible" line of argument died with it. The exploratory code
 was never committed. NIP-29 uses the general `Explicit` route like everything
 else; what remains NIP-29-shaped is only *who mints it* (§1, §5).
+
+---
+
+## 10. Implementation correction — BUILT (#977 / PR #1011)
+
+PR #1011 implemented the direct-Rust `Group` door described above. The dated
+`DESIGNED` labels and tombstone analysis in §§1–9 remain the decision record;
+this section is the present-tense correction.
+
+Current source anchors on this revision:
+
+- `crates/nmp-nip29/src/group.rs:47-256` defines the `(host, group_id)`
+  identity, app-selected pinned demand, unsigned `h` contextualization, and
+  pre-signed context validation. It reads no kind and mints no `previous` tag.
+- `crates/nmp/src/group.rs:77-256` defines and implements
+  `GroupOperations`: `publish`, `publish_signed`, and NIP-29-owned
+  operations all compose one ordinary `WriteIntent` and call the existing
+  engine publish door. `crates/nmp/src/lib.rs:159-160` re-exports that trait.
+- `crates/nmp-nip29/src/operations.rs:1-108` owns the typed 9000–9022
+  join/leave/moderation builders. Kind:9 and `q` replies remain in
+  `nmp-nipc7`, not this crate.
+- `scripts/check-nip29-ownership.sh:65-115` bans the deleted
+  `contextualize_group_event` / `GroupPublication` seam, requires both Group
+  intent constructors and their schema/no-`previous` falsifiers, and requires
+  the one read and one write doors.
+- Native projection is still read-only:
+  `crates/nmp-ffi/src/nip29.rs:1-38`,
+  `Packages/NMP/Sources/NMP/NIP29.swift:1-12`, and
+  `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29.kt:1-13` expose only
+  `groupDiscoveryDemand`. Issue #1015 owns a future native Group publication
+  door; this document claims no Swift, Kotlin, or Android write surface.
+
+The abandoned `GroupHostAuthority` reasoning in §9 remains intentionally
+visible. NIP-29 uses the general `Explicit` capability; its semantic boundary
+is that `Group`, not presentation code, mints the host route and `h` context.

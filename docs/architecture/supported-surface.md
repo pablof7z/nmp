@@ -25,6 +25,16 @@ ordinary `WriteIntent`; FFI, Swift, and Kotlin expose matching engine-free
 `publish` door and receipt lifecycle. There is no `Engine.commentIntent`,
 `CommentIntent` wrapper, or NIP-22-specific composed-publication overload.
 
+NIP-29 Group publication is currently a direct-Rust surface.
+`nmp_nip29::Group` mints the host-pinned read demand and the complete
+explicit-host `WriteIntent`; `nmp::GroupOperations` submits that value through
+the ordinary `Engine::publish` lifecycle. No FFI or Swift Group publication
+door exists yet—only read-only `groupDiscoveryDemand`. Issue
+[#1015](https://github.com/pablof7z/nmp/issues/1015) owns that projection, and
+native apps must not reproduce `h`, host routing, signing, or receipt
+choreography while it is absent. This record makes no Kotlin or Android Group
+support claim.
+
 `nmp-ffi` is a projection of that facade. The repository uses UniFFI proc
 macros and extracts component metadata from a compiled library; there is no UDL
 source of truth. Swift and Kotlin add native observation/lifecycle ergonomics
