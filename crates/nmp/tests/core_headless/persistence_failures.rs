@@ -686,9 +686,7 @@ fn route_parked_intents_add_no_worker_demand_and_no_store_reads() {
     let accepted = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(unsigned(&author, 400, "parked control")),
         durability: Durability::Durable,
-        routing: WriteRouting::PrivateNarrow(PrivateRoute {
-            relays: NarrowOnly::new([routed_relay.clone()]),
-        }),
+        routing: WriteRouting::Explicit(vec![routed_relay.clone()]),
         identity_override: None,
         correlation: None,
     }));
@@ -712,9 +710,7 @@ fn route_parked_intents_add_no_worker_demand_and_no_store_reads() {
                 &format!("parked {i}"),
             )),
             durability: Durability::Durable,
-            routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                relays: NarrowOnly::new([parked_relay.clone()]),
-            }),
+            routing: WriteRouting::Explicit(vec![parked_relay.clone()]),
             identity_override: None,
             correlation: None,
         }));
@@ -798,9 +794,7 @@ fn an_unknown_lane_creation_failure_retains_every_candidate_worker() {
     let accepted = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(unsigned(&author, 600, "unproven lane creation")),
         durability: Durability::Durable,
-        routing: WriteRouting::PrivateNarrow(PrivateRoute {
-            relays: NarrowOnly::new(relays.clone()),
-        }),
+        routing: WriteRouting::Explicit(relays.to_vec()),
         identity_override: None,
         correlation: None,
     }));
