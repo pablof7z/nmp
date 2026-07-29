@@ -81,6 +81,41 @@ pub struct RelayConfig {
     /// publishes NO document at all: an HTTP fetch is answered `404`, which
     /// is exactly what relay.nostr.band and relay.snort.social do today.
     pub advertised_limits: Option<AdvertisedLimits>,
+    /// Refuse exactly one kind, with the relay's OWN machine-readable
+    /// message (`"restricted: you are not an admin of this group"`). Narrower
+    /// than [`Self::reject_writes`] on purpose: a moderation action a host
+    /// refuses must be distinguishable from a host that refuses everything,
+    /// and the assertion is about the host's words reaching the receipt
+    /// verbatim rather than about a generic failure.
+    ///
+    /// The string is the WHOLE `OK` message, prefix included, because that is
+    /// what an app sees; the prefix word is split back out here only because
+    /// `nostr-relay-builder` reassembles it (`"{prefix}: {message}"`).
+    pub reject_kind: Option<(u16, String)>,
+}
+
+/// Split `"restricted: you are not an admin"` into the NIP-01
+/// machine-readable prefix and the human tail, so the relay reassembles the
+/// scenario's exact sentence. An unrecognised prefix PANICS rather than
+/// silently becoming `error:`: a scripted relay that says something other
+/// than what the scenario wrote is a broken fixture, not a passing test.
+fn split_ok_message(message: &str) -> (MachineReadablePrefix, String) {
+    let (prefix, rest) = message.split_once(": ").unwrap_or_else(|| {
+        panic!("nmp-bdd: a relay refusal must be \"<prefix>: <reason>\", got {message:?}")
+    });
+    let prefix = match prefix {
+        "duplicate" => MachineReadablePrefix::Duplicate,
+        "pow" => MachineReadablePrefix::Pow,
+        "blocked" => MachineReadablePrefix::Blocked,
+        "rate-limited" => MachineReadablePrefix::RateLimited,
+        "invalid" => MachineReadablePrefix::Invalid,
+        "error" => MachineReadablePrefix::Error,
+        "unsupported" => MachineReadablePrefix::Unsupported,
+        "auth-required" => MachineReadablePrefix::AuthRequired,
+        "restricted" => MachineReadablePrefix::Restricted,
+        other => panic!("nmp-bdd: {other:?} is not a NIP-01 machine-readable prefix"),
+    };
+    (prefix, rest.to_string())
 }
 
 /// The `limitation` fields a scripted relay advertises. Each is optional
@@ -745,6 +780,7 @@ impl ScriptedRelay {
                 contacted: contacted.clone(),
                 admitted: admitted.clone(),
                 reject: config.reject_writes,
+                reject_kind: config.reject_kind.clone(),
             })
             .query_policy(LoggingQueryPolicy {
                 contacted: contacted.clone(),
@@ -818,6 +854,17 @@ impl ScriptedRelay {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
+    }
+
+    /// How many EVENTs this relay has been handed. Its own method rather than
+    /// `admitted_events().len()`: the snapshot taken before every publish
+    /// reads this for every relay in the world, and cloning whole events to
+    /// count them would make that snapshot cost grow with the scenario.
+    pub fn admitted_event_count(&self) -> usize {
+        self.admitted
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .len()
     }
 
     /// How many client connections this address has ACCEPTED, ever --
@@ -1017,6 +1064,7 @@ struct LoggingWritePolicy {
     contacted: Arc<ContactLog>,
     admitted: Arc<Mutex<Vec<nostr::Event>>>,
     reject: bool,
+    reject_kind: Option<(u16, String)>,
 }
 
 impl WritePolicy for LoggingWritePolicy {
@@ -1042,8 +1090,15 @@ impl WritePolicy for LoggingWritePolicy {
                 .push(bridged);
         }
         let reject = self.reject;
+        let refused_kind = self
+            .reject_kind
+            .as_ref()
+            .filter(|(kind, _)| *kind == event.kind.as_u16())
+            .map(|(_, message)| split_ok_message(message));
         Box::pin(async move {
-            if reject {
+            if let Some((prefix, message)) = refused_kind {
+                WritePolicyResult::reject(prefix, message)
+            } else if reject {
                 WritePolicyResult::reject(
                     MachineReadablePrefix::Blocked,
                     "nmp-bdd scripted relay: configured to reject every event",

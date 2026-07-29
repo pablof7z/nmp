@@ -265,13 +265,11 @@ impl NmpWorld {
         self.receipts_by_text.clear();
         self.restarted_receipt = None;
         self.last_receipt_text = None;
-        if let Some(engine) = self.engine.take() {
-            // `join` only returns once a shutdown has actually been observed
-            // by the engine thread, so ask for one before waiting on it.
-            self.handle().shutdown();
-            self.handle = None;
-            engine.join();
-        }
+        // `Engine::shutdown` is what asks the engine thread to stop and then
+        // joins it; the world's cloned `Handle` goes with it. See
+        // `staging::stop_engine`, which both this restart and teardown share
+        // so the two can never drift.
+        self.stop_engine();
         self.active_person = active;
         self.spawn_engine().await;
         if let Some(id) = self.last_receipt_id {

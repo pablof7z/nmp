@@ -449,7 +449,7 @@ impl NmpWorld {
         self.admitted_snapshot = self
             .relays
             .iter()
-            .map(|(name, r)| (name.clone(), r.admitted_event_kinds().len()))
+            .map(|(name, r)| (name.clone(), r.admitted_event_count()))
             .collect();
     }
 

@@ -11,7 +11,7 @@ Feature: The h and previous tags belong to the group, not to the caller
     Given the group "photographers" hosted by relay "wss://relay.groups.example"
     And I am logged in as "a1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1ce"
 
-  @designed @nip29
+  @nip29
   Scenario: An event already carrying this group's own h is still refused
     Given an unsigned event of kind 9 with content "first light"
     And that event already carries an h tag with value "photographers"
@@ -22,7 +22,7 @@ Feature: The h and previous tags belong to the group, not to the caller
     And the signer was never asked to sign
     And no write intent was accepted
 
-  @designed @nip29
+  @nip29
   Scenario: An event carrying another group's h is refused the same way
     Given an unsigned event of kind 9 with content "first light"
     And that event already carries an h tag with value "darkroom"
@@ -31,7 +31,7 @@ Feature: The h and previous tags belong to the group, not to the caller
     And the refusal is the same error as for a matching h
     And relay "wss://relay.groups.example" received no event
 
-  @designed @nip29
+  @nip29
   Scenario: An event carrying a previous tag is refused
     Given an unsigned event of kind 9 with content "first light"
     And that event already carries a previous tag
@@ -41,7 +41,7 @@ Feature: The h and previous tags belong to the group, not to the caller
     And relay "wss://relay.groups.example" received no event
     And the signer was never asked to sign
 
-  @designed @nip29
+  @nip29
   Scenario: An event carrying both is refused on the first one, not silently trimmed
     Given an unsigned event of kind 9 with content "first light"
     And that event already carries an h tag with value "photographers"
@@ -51,13 +51,13 @@ Feature: The h and previous tags belong to the group, not to the caller
     And neither tag was stripped from the event I supplied
     And relay "wss://relay.groups.example" received no event
 
-  @designed @nip29
+  @nip29
   Scenario: The group never mints a previous tag of its own
     When I publish an event of kind 9 with content "first light" through the group
     Then the delivered event carries no previous tag
     And no surface anywhere can mint a previous tag for a group publication
 
-  @designed @nip29
+  @nip29
   Scenario: A refused publication is distinguishable from a rejected one
     Given an unsigned event of kind 9 with content "first light"
     And that event already carries an h tag with value "photographers"

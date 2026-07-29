@@ -7,7 +7,7 @@
 use cucumber::given;
 
 use crate::steps::{parse_people, parse_quoted_list};
-use crate::world::{NmpWorld, ME};
+use crate::world::{parse_kind_list, NmpWorld, ME};
 
 #[given(regex = r#"^only (\d+) indexer relays? (?:is|are) configured$"#)]
 async fn only_n_indexers(w: &mut NmpWorld, n: usize) {
@@ -230,4 +230,167 @@ async fn that_accounts_signer_is_offline(w: &mut NmpWorld) {
 #[given(regex = r#"^the user pasted the npub form of "([0-9a-f]{64})" into the identity picker$"#)]
 async fn user_pasted_npub(w: &mut NmpWorld, pubkey: String) {
     w.paste_npub_of(&pubkey);
+}
+
+// ---- NIP-29 groups (features/groups/) ----------------------------------
+//
+// A group is `(host, group_id)` and nothing else, so every `Given` here is
+// either that identity, the app-supplied read selection the group refuses to
+// invent for it, or the draft/signed event a later `When` hands the door.
+
+/// `Given the group "photographers" hosted by relay "wss://..."` -- and the
+/// `also hosted by` form, which is the same staging said twice about one
+/// relay (two groups on ONE host is the case `#h` scoping has to separate).
+#[given(regex = r#"^the group "([^"]+)" (?:also )?hosted by relay "([^"]+)"$"#)]
+async fn stage_group(w: &mut NmpWorld, group_id: String, relay: String) {
+    w.stage_group(&group_id, &relay);
+}
+
+/// The account named by its own key material. See `NmpWorld::log_in_as_key`
+/// for why the keypair is derived from the hex rather than minted.
+#[given(regex = r#"^I am logged in as "([0-9a-fA-F]{64})"$"#)]
+async fn logged_in_as_key(w: &mut NmpWorld, secret_hex: String) {
+    w.log_in_as_key(&secret_hex);
+}
+
+#[given(regex = r#"^"([0-9a-fA-F]{64})" names "([^"]+)" as their write relay$"#)]
+async fn key_write_relay(w: &mut NmpWorld, secret_hex: String, relay: String) {
+    w.declare_write_relay(&secret_hex, &relay);
+}
+
+#[given(regex = r#"^my relay list has never been fetched$"#)]
+async fn relay_list_never_fetched(w: &mut NmpWorld) {
+    w.forget_my_relay_list();
+}
+
+/// The read half of "I can write into a group whose content I cannot read":
+/// the host answers the query with a refusal, which is what a NIP-29 relay
+/// does to a non-member.
+#[given(regex = r#"^relay "([^"]+)" refuses my reads until I am a member$"#)]
+async fn relay_refuses_my_reads(w: &mut NmpWorld, relay: String) {
+    w.set_reject_queries(&relay);
+}
+
+#[given(regex = r#"^relay "([^"]+)" cannot connect$"#)]
+async fn relay_cannot_connect(w: &mut NmpWorld, relay: String) {
+    w.set_unreachable(&relay);
+}
+
+#[given(regex = r#"^relay "([^"]+)" rejects kind (\d+) with "([^"]+)"$"#)]
+async fn relay_rejects_kind(w: &mut NmpWorld, relay: String, kind: u16, message: String) {
+    w.set_reject_kind(&relay, kind, &message);
+}
+
+#[given(regex = r#"^signing fails for this account$"#)]
+async fn signing_fails(w: &mut NmpWorld) {
+    w.fail_signing();
+}
+
+/// Stated out loud where a scenario's point is that a WRITE needed no read
+/// first. Nothing to stage: it is the world's default, and asserting it here
+/// keeps a later "no subscription existed" from being vacuously true because
+/// an earlier step quietly opened one.
+#[given(regex = r#"^I have never observed anything from this group$"#)]
+async fn never_observed_this_group(w: &mut NmpWorld) {
+    w.assert_no_group_observation();
+}
+
+/// The host decides who may moderate; NMP holds no opinion to state. Nothing
+/// is staged because there is nothing in NMP for this to configure -- which
+/// is exactly the claim the paired `Then` makes.
+#[given(regex = r#"^I am not an admin of "([^"]+)"$"#)]
+async fn not_an_admin(w: &mut NmpWorld, group_id: String) {
+    w.assert_no_permission_claim(&group_id);
+}
+
+/// A relay the engine could plausibly widen a group read to, present so that
+/// "the pinned set was never widened" has something to have been widened to.
+#[given(regex = r#"^the engine later learns of relay "([^"]+)" for this group's members$"#)]
+async fn engine_learns_of_gossip_relay(w: &mut NmpWorld, relay: String) {
+    w.declare_write_relay("group-member", &relay);
+}
+
+/// The APP's own kind selection. The group imposes no catalogue, so every
+/// read scenario has to say which kinds it wants.
+#[given(regex = r#"^an? (?:chat |activity |reactions |membership )?filter selecting (.+)$"#)]
+async fn stage_filter(w: &mut NmpWorld, kinds: String) {
+    w.stage_filter(parse_kind_list(&kinds));
+}
+
+#[given(regex = r#"^an unsigned event of kind (\d+) with content "([^"]+)"$"#)]
+async fn stage_draft(w: &mut NmpWorld, kind: u16, content: String) {
+    w.stage_draft(kind, &content);
+}
+
+#[given(regex = r#"^that event carries the tags "([^"]+)"="([^"]+)" and "([^"]+)"="([^"]+)"$"#)]
+async fn draft_carries_tags(w: &mut NmpWorld, a: String, av: String, b: String, bv: String) {
+    w.draft_add_tag(&a, &av);
+    w.draft_add_tag(&b, &bv);
+}
+
+#[given(regex = r#"^that event carries a created_at the app chose$"#)]
+async fn draft_carries_created_at(w: &mut NmpWorld) {
+    w.draft_chooses_created_at();
+}
+
+#[given(regex = r#"^that event (?:already )?carries an h tag with value "([^"]+)"$"#)]
+async fn draft_carries_h(w: &mut NmpWorld, value: String) {
+    w.draft_add_tag("h", &value);
+}
+
+#[given(regex = r#"^that event (?:already )?carries a previous tag$"#)]
+async fn draft_carries_previous(w: &mut NmpWorld) {
+    w.draft_add_tag("previous", "deadbeef");
+}
+
+#[given(
+    regex = r#"^an event signed earlier by "([0-9a-fA-F]{64})" of kind (\d+) with content "([^"]+)"$"#
+)]
+async fn stage_signed_event(w: &mut NmpWorld, author: String, kind: u16, content: String) {
+    w.stage_signed_event(&author, kind, &content);
+}
+
+#[given(regex = r#"^that signed event carries an h tag with value "([^"]+)"$"#)]
+async fn signed_event_carries_h(w: &mut NmpWorld, value: String) {
+    w.signed_event_add_tag("h", &value);
+}
+
+#[given(regex = r#"^that signed event carries h tags with values "([^"]+)" and "([^"]+)"$"#)]
+async fn signed_event_carries_two_h(w: &mut NmpWorld, first: String, second: String) {
+    w.signed_event_add_tag("h", &first);
+    w.signed_event_add_tag("h", &second);
+}
+
+/// Stated out loud, and staged as nothing: the event is built from the parts
+/// above and no `h` is among them.
+#[given(regex = r#"^that signed event carries no h tag$"#)]
+async fn signed_event_carries_no_h(w: &mut NmpWorld) {
+    w.assert_signed_event_has_no_context();
+}
+
+/// BINDS the scenario's id word to the id the event actually got. See
+/// `NmpWorld::id_labels` for why a real id cannot be written in a `.feature`
+/// and why a binding proves exactly what the scenario claims.
+#[given(regex = r#"^that signed event has id "([^"]+)"$"#)]
+async fn signed_event_has_id(w: &mut NmpWorld, label: String) {
+    w.bind_id_label(&label);
+}
+
+/// The pre-signed path's whole point: the id exists BEFORE publication, so an
+/// observation can already be armed on it.
+#[given(regex = r#"^I am observing a live query for exactly that id$"#)]
+async fn observing_that_id(w: &mut NmpWorld) {
+    let id = w.signed_event().id;
+    w.observe_exact_id(id, None).await;
+}
+
+#[given(regex = r#"^relay "([^"]+)" holds a kind (\d+) event with h "([^"]+)" saying "([^"]+)"$"#)]
+async fn relay_holds_group_event(
+    w: &mut NmpWorld,
+    relay: String,
+    kind: u16,
+    group_id: String,
+    text: String,
+) {
+    w.seed_group_event(&relay, kind, &group_id, &text).await;
 }

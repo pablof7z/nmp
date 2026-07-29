@@ -14,7 +14,7 @@ Feature: Reading a group goes through the one read door
     Given the group "photographers" hosted by relay "wss://relay.groups.example"
     And I am logged in as "a1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1ce"
 
-  @designed @nip29
+  @nip29
   Scenario: The group mints a query and the ordinary subscription door observes it
     Given a filter selecting kind 9
     When I observe a live query built from the group's demand for that filter
@@ -24,14 +24,14 @@ Feature: Reading a group goes through the one read door
     And the request selects exactly kind 9
     And no relay outside "wss://relay.groups.example" was asked
 
-  @designed @nip29
+  @nip29
   Scenario: There is no second way to observe a group
     When I inspect the group's read surface
     Then the group exposes no observe operation of its own
     And the group exposes no stream, channel or callback of its own
     And every group read in the surface passes through the same observe call
 
-  @designed @nip29
+  @nip29
   Scenario Outline: The app chooses the kinds; the group imposes no catalogue
     Given a filter selecting <kinds>
     When I observe a live query built from the group's demand for that filter
@@ -49,7 +49,7 @@ Feature: Reading a group goes through the one read door
       | kind 39002           |
       | kind 31337           |
 
-  @designed @nip29
+  @nip29
   Scenario: One group serving four simultaneous queries is the normal case
     Given a chat filter selecting kinds 9 and 9000 and 9001
     And an activity filter selecting kind 30315
@@ -62,7 +62,7 @@ Feature: Reading a group goes through the one read door
     And the same group instance minted all four
     And no group needed to be reconstructed between them
 
-  @designed @nip29
+  @nip29
   Scenario: Two groups on the same host stay separated by their h scoping
     Given the group "darkroom" also hosted by relay "wss://relay.groups.example"
     And relay "wss://relay.groups.example" holds a kind 9 event with h "photographers" saying "first light"
@@ -71,7 +71,7 @@ Feature: Reading a group goes through the one read door
     When I observe a live query built from the "photographers" group's demand for that filter
     Then the query shows only "first light"
 
-  @designed @nip29
+  @nip29
   Scenario: The host is a query-declared pinning, not a directory fact
     Given a filter selecting kind 9
     When I observe a live query built from the group's demand for that filter
@@ -79,7 +79,7 @@ Feature: Reading a group goes through the one read door
     And diagnostics attribute it to no relay-list or operator-configured fact
     And per-source acquisition evidence is reported for "wss://relay.groups.example"
 
-  @designed @nip29
+  @nip29
   Scenario: An unreachable host does not make the group look empty
     Given relay "wss://relay.groups.example" cannot connect
     And a filter selecting kind 9

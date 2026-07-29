@@ -35,10 +35,13 @@ NIP-22 `publishComposed`, or take-once lifecycle.
 Swift/Kotlin currently project only `groupDiscoveryDemand(host)`. NIP-29 does
 not supply a fixed group-content kind catalog: the app selects the independently
 enabled schema kinds and builds an ordinary `NMPDemand` scoped by `h` and a
-pinned source. Direct Rust additionally has pure
-`contextualize_group_event(host, groupId, completeDraft)`, which preserves the
-foreign schema and returns `GroupPublication`; this is not yet an
-engine-routable or native publication operation.
+pinned source. Direct Rust has the full door: `nip29::Group::new(host, groupId)`
+is an identity that mints both a read `Demand` (`group.demand(filter)`, taken
+through the one `observe` door) and every write
+(`group.publish(&engine, builder)`, plus the named 9000-9022 operations). It
+preserves the draft's kind and schema, appends exactly one `h` before signing,
+and routes explicitly to the host. There is no native/Swift/Kotlin projection
+of group publication yet.
 
 `nmp-nipc7` independently owns pure kind:9 chat and `q` replies. It does not
 materialize mentions, notification `p` rows, NIP-29 `h`, or routing. No
