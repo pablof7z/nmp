@@ -34,8 +34,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use nmp::{
-    Binding, Demand, Derived, DiagnosticsSnapshot, Durability, Engine, EngineConfig, Filter, Frame,
-    IdentityField, Kind, LiveQuery, PublicKey, RowDelta, Selector, Timestamp, UnsignedEvent,
+    Binding, Demand, Derived, DiagnosticsSnapshot, Durability, Engine, EngineConfig, EventBuilder,
+    Filter, Frame, IdentityField, Kind, LiveQuery, PublicKey, RowDelta, Selector, Timestamp,
     WriteIntent, WritePayload, WriteRouting,
 };
 use nostr::Keys;
@@ -233,14 +233,15 @@ fn main() {
     // to route via outbox -- this demo does not fabricate a contact list
     // for an ephemeral key).
     let mut receipt_rx = None;
-    if let Some(pk) = signer_pubkey_if_real(&args.nsec) {
+    if signer_pubkey_if_real(&args.nsec).is_some() {
         let content = format!("nmp-demo end-to-end falsifier run @ {}", Timestamp::now());
-        let unsigned = UnsignedEvent::new(pk, Timestamp::now(), Kind::TextNote, vec![], content);
         println!("-- publishing a demo text note as --nsec's own pubkey --");
         receipt_rx = Some(
             engine
                 .publish(WriteIntent {
-                    payload: WritePayload::Unsigned(unsigned),
+                    payload: WritePayload::Event(
+                        EventBuilder::new(Kind::TextNote).content(content),
+                    ),
                     durability: Durability::Durable,
                     routing: WriteRouting::Auto,
                     identity_override: None,

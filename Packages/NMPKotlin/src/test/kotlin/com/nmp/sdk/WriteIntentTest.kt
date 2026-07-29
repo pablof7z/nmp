@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
 import uniffi.nmp_ffi.FfiDurability
+import uniffi.nmp_ffi.FfiEventBuilder
 import uniffi.nmp_ffi.FfiWriteIntent
 import uniffi.nmp_ffi.FfiWritePayload
 import uniffi.nmp_ffi.FfiWriteRouting
@@ -13,13 +14,12 @@ import uniffi.nmp_ffi.FfiWriteRouting
 // only proves the Kotlin-value -> Ffi-value conversion is lossless,
 // including the per-write identity override (#47).
 class WriteIntentTest {
-    private fun unsignedPayload(pubkey: String) =
-        WritePayload.Unsigned(
-            pubkey = pubkey,
-            createdAt = 1_700_000_000uL,
+    private fun builderPayload() =
+        WritePayload.Event(
             kind = 1u,
             tags = emptyList(),
             content = "hello from NMP",
+            createdAt = 1_700_000_000uL,
         )
 
     /** #47: an [WriteIntent.identityOverride] crosses to `FfiWriteIntent`
@@ -30,7 +30,7 @@ class WriteIntentTest {
         val overridePubkey = "b".repeat(64)
         val intent =
             WriteIntent(
-                payload = unsignedPayload(overridePubkey),
+                payload = builderPayload(),
                 durability = Durability.Durable,
                 routing = WriteRouting.Auto,
                 identityOverride = overridePubkey,
@@ -45,7 +45,7 @@ class WriteIntentTest {
     fun writeIntentDefaultLeavesIdentityOverrideNull() {
         val intent =
             WriteIntent(
-                payload = unsignedPayload("b".repeat(64)),
+                payload = builderPayload(),
                 durability = Durability.Durable,
                 routing = WriteRouting.Auto,
             )
@@ -59,12 +59,13 @@ class WriteIntentTest {
             WriteIntent.from(
                 FfiWriteIntent(
                     payload =
-                        FfiWritePayload.Unsigned(
-                            pubkey = "a".repeat(64),
-                            createdAt = 42uL,
-                            kind = 1111u,
-                            tags = listOf(listOf("I", "podcast:item:guid:42")),
-                            content = "unsigned",
+                        FfiWritePayload.Event(
+                            FfiEventBuilder(
+                                kind = 1111u,
+                                tags = listOf(listOf("I", "podcast:item:guid:42")),
+                                content = "unsigned",
+                                createdAt = 42uL,
+                            ),
                         ),
                     durability = FfiDurability.AT_MOST_ONCE,
                     routing = FfiWriteRouting.Auto,
@@ -73,12 +74,11 @@ class WriteIntentTest {
                 ),
             )
         assertEquals(
-            WritePayload.Unsigned(
-                pubkey = "a".repeat(64),
-                createdAt = 42uL,
+            WritePayload.Event(
                 kind = 1111u,
                 tags = listOf(listOf("I", "podcast:item:guid:42")),
                 content = "unsigned",
+                createdAt = 42uL,
             ),
             unsigned.payload,
         )
@@ -134,7 +134,7 @@ class WriteIntentTest {
         val typed = listOf("wss://user-typed-relay.example", "wss://second.example")
         val intent =
             WriteIntent(
-                payload = unsignedPayload("a".repeat(64)),
+                payload = builderPayload(),
                 durability = Durability.Durable,
                 routing = WriteRouting.Explicit(typed),
             )
@@ -144,12 +144,13 @@ class WriteIntentTest {
             WriteIntent.from(
                 FfiWriteIntent(
                     payload =
-                        FfiWritePayload.Unsigned(
-                            pubkey = "a".repeat(64),
-                            createdAt = 42uL,
-                            kind = 1u,
-                            tags = emptyList(),
-                            content = "for the archive",
+                        FfiWritePayload.Event(
+                            FfiEventBuilder(
+                                kind = 1u,
+                                tags = emptyList(),
+                                content = "for the archive",
+                                createdAt = 42uL,
+                            ),
                         ),
                     durability = FfiDurability.DURABLE,
                     routing = FfiWriteRouting.Explicit(typed),

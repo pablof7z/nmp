@@ -1,11 +1,10 @@
-//! Compose a publishable NIP-22 `WriteIntent` (#572). This is the ONE place
-//! that knows "a NIP-22 comment write is `Unsigned` + `Durable` +
-//! `Auto`" -- callers never hand-roll durability or routing.
-//! `author` and `created_at` are explicit caller-supplied parameters (this
-//! issue's own design decision): no active-account query, no wall-clock
-//! read, hence zero engine dependency for this whole crate.
-
-use nostr::{PublicKey, Timestamp};
+//! Compose a publishable NIP-22 `WriteIntent` (#572). This crate owns the
+//! comment SCHEMA and this one door owns its write POLICY -- "a NIP-22
+//! comment write is `Durable` + `Auto`" lives here and nowhere else, so
+//! callers never hand-roll durability or routing. Still no active-account
+//! query and no wall-clock read: the engine resolves the identity and stamps
+//! the timestamp at acceptance, which is why this whole crate keeps its zero
+//! engine dependency without taking either as a parameter.
 
 use nmp_grammar::{CorrelationToken, Durability, WriteIntent, WritePayload, WriteRouting};
 
@@ -19,23 +18,18 @@ use crate::root::{CommentParent, CommentRoot};
 /// for the exact tag shapes. `correlation` is passed straight through to
 /// [`WriteIntent::correlation`] (#591) -- this crate adds no
 /// comment-specific correlation machinery of its own.
-#[allow(clippy::too_many_arguments)]
 pub fn comment_intent(
     root: &CommentRoot,
     parent: CommentParent,
-    author: PublicKey,
-    created_at: Timestamp,
     content: String,
     correlation: Option<CorrelationToken>,
 ) -> WriteIntent {
-    let unsigned = match parent {
-        CommentParent::Root => compose_top_level_comment(root, author, created_at, content),
-        CommentParent::Comment { .. } => {
-            compose_comment_reply(root, parent, author, created_at, content)
-        }
+    let builder = match parent {
+        CommentParent::Root => compose_top_level_comment(root, content),
+        CommentParent::Comment { .. } => compose_comment_reply(root, parent, content),
     };
     WriteIntent {
-        payload: WritePayload::Unsigned(unsigned),
+        payload: WritePayload::Event(builder),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -47,24 +41,19 @@ pub fn comment_intent(
 mod tests {
     use super::*;
     use crate::target::Nip73Target;
-    use nostr::{EventId, Keys};
+    use nostr::EventId;
 
     fn podcast_root() -> CommentRoot {
         CommentRoot::External(Nip73Target::podcast_episode_guid("guid-1").unwrap())
     }
 
     #[test]
-    fn comment_intent_is_unsigned_durable_author_outbox() {
-        let author = Keys::generate().public_key();
-        let intent = comment_intent(
-            &podcast_root(),
-            CommentParent::Root,
-            author,
-            Timestamp::from(1000u64),
-            "hi".to_string(),
-            None,
-        );
-        assert!(matches!(intent.payload, WritePayload::Unsigned(_)));
+    fn comment_intent_is_a_builder_durable_auto() {
+        let intent = comment_intent(&podcast_root(), CommentParent::Root, "hi".to_string(), None);
+        assert!(matches!(
+            &intent.payload,
+            WritePayload::Event(builder) if builder.created_at.is_none()
+        ));
         assert_eq!(intent.durability, Durability::Durable);
         assert!(matches!(intent.routing, WriteRouting::Auto));
         assert!(intent.identity_override.is_none());
@@ -75,7 +64,6 @@ mod tests {
     /// onto the composed intent with no comment-specific machinery.
     #[test]
     fn comment_intent_passes_through_the_correlation_token() {
-        let author = Keys::generate().public_key();
         let token = CorrelationToken::try_from("nip22-correlation").unwrap();
         let intent = comment_intent(
             &podcast_root(),
@@ -83,8 +71,6 @@ mod tests {
                 event_id: EventId::from_slice(&[1; 32]).unwrap(),
                 author: None,
             },
-            author,
-            Timestamp::from(1000u64),
             "reply".to_string(),
             Some(token.clone()),
         );

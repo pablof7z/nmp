@@ -227,8 +227,19 @@ core uses it (the existing `Event as SignedEvent` on the same import line is
 the established precedent for exactly this move), export NMP's own
 `EventBuilder` from the facade, and **apps see exactly one `EventBuilder`**.
 No app ever has to write a disambiguating path, and the name Pablo chose is
-the name apps get. (`UnsignedEvent` leaves that re-export list when `Unsigned`
-dies — same change, per `conventions/no-backwards-compatibility.md`.)
+the name apps get.
+
+**Correction, recorded while building this (#973/PR #1005).** This section
+originally said `UnsignedEvent` leaves that re-export list when `Unsigned`
+dies. It does not, and the reason it gave — that being `Unsigned`'s argument
+was its only public job — is false on master. `Handle::sign_event(UnsignedEvent)`
+(#464, `crates/nmp/src/runtime/mod.rs`) is a public door: governed sign-only,
+deliberately separate from publication, with no write intent, pending row,
+receipt, or route. Its parameter has to be nameable, so the re-export stays.
+This is not a compatibility alias — nothing forwards to a deleted spelling —
+it is one live public API's argument type. Removing it means giving
+`sign_event` an argument type of its own first, which is a separate decision
+about the signing surface and was out of scope here.
 
 ## 6. The killed requirement: deterministic bytes — DESIGNED
 

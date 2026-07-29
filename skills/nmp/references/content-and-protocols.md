@@ -18,10 +18,13 @@ The current atomic follow/unfollow action is available in direct Rust protocol s
 
 NIP-22 owns typed kind:1111 comments over event, address, and NIP-73 external
 roots. Rust, FFI, Swift, and Kotlin expose root-thread demand, strict decode,
-and deterministic composition.
+and schema composition. Composition names no author and reads no clock: the
+engine resolves the write's identity and stamps `created_at` at acceptance,
+so two composes of the same comment are two valid events, not one repeated
+one.
 
 The native composer is the top-level
-`commentIntent(root:parent:authorPubkey:createdAt:content:correlation:)`.
+`commentIntent(root:parent:content:correlation:)`.
 It returns the ordinary `WriteIntent` with durable author-outbox routing.
 Publish that value through the generic engine `publish` door and observe its
 ordinary receipt. There is no `engine.commentIntent`, `CommentIntent` wrapper,

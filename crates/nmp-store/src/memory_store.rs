@@ -1655,8 +1655,9 @@ impl EventStore for MemoryStore {
 
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
         let AcceptWrite {
-            frozen,
+            mut frozen,
             replaceable_base,
+            monotonic_stamp,
             expected_pubkey,
             signing_identity_ref,
             durability,
@@ -1688,6 +1689,17 @@ impl EventStore for MemoryStore {
                 return Ok(AcceptOutcome::Refused(
                     RefuseReason::ReplaceableBaseChanged { expected, actual },
                 ));
+            }
+            // `max(clock, winner.created_at + 1)` against the row the
+            // comparison just held — see `AcceptWrite::monotonic_stamp`.
+            if monotonic_stamp {
+                if let Some(winner) = actual.and_then(|id| self.by_id.get(&id)) {
+                    if frozen.created_at <= winner.event.created_at {
+                        if let Some(next) = winner.event.created_at.as_secs().checked_add(1) {
+                            frozen = crate::restamped(&frozen, Timestamp::from_secs(next));
+                        }
+                    }
+                }
             }
         }
 
@@ -3058,6 +3070,7 @@ mod lane_atomicity_tests {
             .accept_write(AcceptWrite {
                 frozen,
                 replaceable_base: None,
+                monotonic_stamp: false,
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: "atomic".into(),
                 durability: WriteDurability::Durable,

@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nmp::{
-    Binding, Durability, Engine, EngineConfig, FifoReceiver, FifoRecvTimeoutError, Filter, Kind,
-    LiveQuery, PublicKey, RelayUrl, RowDelta, SourceStatus, Timestamp, UnsignedEvent, WriteIntent,
+    Binding, Durability, Engine, EngineConfig, EventBuilder, FifoReceiver, FifoRecvTimeoutError,
+    Filter, Kind, LiveQuery, RelayUrl, RowDelta, SourceStatus, Timestamp, WriteIntent,
     WritePayload, WriteRouting, WriteStatus,
 };
 use nmp_nip65::{publish_relay_list_bootstrap, BootstrapRelayList, RelayListEntry, RelayUsage};
@@ -70,15 +70,14 @@ fn wait_for_status(
     }
 }
 
-fn ordinary_write(author: PublicKey, content: &str) -> WriteIntent {
+fn ordinary_write(content: &str) -> WriteIntent {
     WriteIntent {
-        payload: WritePayload::Unsigned(UnsignedEvent::new(
-            author,
-            Timestamp::now(),
-            Kind::Metadata,
-            vec![],
-            content,
-        )),
+        payload: WritePayload::Event(EventBuilder {
+            kind: Kind::Metadata,
+            tags: (vec![]).into_iter().collect(),
+            content: content.to_string(),
+            created_at: Some(Timestamp::now()),
+        }),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -186,10 +185,7 @@ async fn relay_echo_is_the_only_transition_from_bootstrap_to_author_outbox() {
     .expect("bootstrap EVENT reached the controlled relay");
 
     let before_echo = engine
-        .publish_tracked(ordinary_write(
-            keys.public_key(),
-            r#"{"name":"before echo"}"#,
-        ))
+        .publish_tracked(ordinary_write(r#"{"name":"before echo"}"#))
         .expect("ordinary tracked write handoff");
     let failed = wait_for_status(&before_echo.statuses, Duration::from_secs(5), |status| {
         matches!(status, WriteStatus::Failed(_))
@@ -227,10 +223,7 @@ async fn relay_echo_is_the_only_transition_from_bootstrap_to_author_outbox() {
     }
 
     let after_echo = engine
-        .publish_tracked(ordinary_write(
-            keys.public_key(),
-            r#"{"name":"after echo"}"#,
-        ))
+        .publish_tracked(ordinary_write(r#"{"name":"after echo"}"#))
         .expect("ordinary tracked write after ingest");
     let routed = wait_for_status(&after_echo.statuses, Duration::from_secs(10), |status| {
         matches!(status, WriteStatus::Routed(_))

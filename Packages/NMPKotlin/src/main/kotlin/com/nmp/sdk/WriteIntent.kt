@@ -3,6 +3,7 @@
 package com.nmp.sdk
 
 import uniffi.nmp_ffi.FfiDurability
+import uniffi.nmp_ffi.FfiEventBuilder
 import uniffi.nmp_ffi.FfiWriteIntent
 import uniffi.nmp_ffi.FfiWritePayload
 import uniffi.nmp_ffi.FfiWriteRouting
@@ -66,21 +67,28 @@ sealed class WriteRouting {
 }
 
 /** The event payload of a write intent (`FfiWritePayload` mirror). VISION
- * P: signing and publishing are ORTHOGONAL stages -- `Unsigned` is a
- * template whose `pubkey` names the account being published as (see
- * `NMPEngine.setActiveAccount`); the key lives engine-side and signs it
- * there. `Signed` (#32, the M5 unlock) is a caller that already holds a
- * validly-signed event -- an external signer provider, or a
- * verbatim republish -- and hands its fields across as-is: the engine
- * verifies then publishes it exactly as given, never re-signing, mutating
- * a tag, or recomputing an id. */
+ * P: signing and publishing are ORTHOGONAL stages -- [Event] describes an
+ * event NMP stamps, freezes and signs itself. The kind is the one thing it
+ * cannot invent, so the kind is the one thing it demands; the account it
+ * publishes as comes from the write's identity (see
+ * [NMPEngine.setActiveAccount] and [WriteIntent.identityOverride]), never
+ * from the payload, and [Event.createdAt] is stamped at acceptance unless
+ * you state one -- state one and it is kept exactly.
+ *
+ * [Signed] (#32, the M5 unlock) is a caller that already holds a
+ * validly-signed event -- an external signer provider, or a verbatim
+ * republish of somebody else's note to an archive relay -- and hands its
+ * fields across as-is: the engine verifies then publishes it exactly as
+ * given, never re-signing, mutating a tag, or recomputing an id. */
 sealed class WritePayload {
-    data class Unsigned(
-        val pubkey: String,
-        val createdAt: ULong,
+    /** Everything you must say is [kind]. [tags], [content] and
+     * [createdAt] default, and there is deliberately no `pubkey`, `id` or
+     * `sig`. */
+    data class Event(
         val kind: UShort,
-        val tags: List<List<String>>,
-        val content: String,
+        val tags: List<List<String>> = emptyList(),
+        val content: String = "",
+        val createdAt: ULong? = null,
     ) : WritePayload()
 
     data class Signed(
@@ -95,15 +103,20 @@ sealed class WritePayload {
 
     fun toFfi(): FfiWritePayload =
         when (this) {
-            is Unsigned -> FfiWritePayload.Unsigned(pubkey, createdAt, kind, tags, content)
+            is Event -> FfiWritePayload.Event(FfiEventBuilder(kind, tags, content, createdAt))
             is Signed -> FfiWritePayload.Signed(id, pubkey, createdAt, kind, tags, content, sig)
         }
 
     companion object {
         internal fun from(ffi: FfiWritePayload): WritePayload =
             when (ffi) {
-                is FfiWritePayload.Unsigned ->
-                    Unsigned(ffi.pubkey, ffi.createdAt, ffi.kind, ffi.tags, ffi.content)
+                is FfiWritePayload.Event ->
+                    Event(
+                        ffi.builder.kind,
+                        ffi.builder.tags,
+                        ffi.builder.content,
+                        ffi.builder.createdAt,
+                    )
                 is FfiWritePayload.Signed ->
                     Signed(
                         ffi.id,
@@ -123,10 +136,13 @@ sealed class WritePayload {
  * [identityOverride] (#47) is the identity this ONE write is published
  * under, as 64-char hex or bech32 `npub`. `null` -- the default every
  * existing call site keeps -- means the active account at acceptance time
- * (see [NMPEngine.setActiveAccount]), unchanged. Non-`null` must name
- * exactly the payload's own author; misuse fails closed, never silently
- * retargets: a malformed string throws synchronously from `publish`
- * ([NMPError.InvalidPublicKey]), while a well-formed-but-mismatched
+ * (see [NMPEngine.setActiveAccount]), unchanged. On a [WritePayload.Event]
+ * payload non-`null` SELECTS the author -- a builder states none, so there
+ * is nothing for it to contradict. On a [WritePayload.Signed] payload it
+ * may only RESTATE the author already frozen in the bytes: naming that
+ * author changes nothing, naming anybody else is a consent/author
+ * contradiction. A malformed string throws synchronously from `publish`
+ * ([NMPError.InvalidPublicKey]), while a well-formed contradiction
  * override surfaces as [WriteStatus.Failed] on the receipt stream with no
  * [WriteStatus.Accepted] before it. An override naming a pubkey with no
  * registered signer parks as [WriteStatus.AwaitingCapability] until that

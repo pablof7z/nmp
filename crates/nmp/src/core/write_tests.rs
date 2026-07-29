@@ -10,15 +10,14 @@ mod receipt_allocator_tests {
     use nmp_store::MemoryStore;
     use nostr::{Keys, Kind};
 
-    fn rejected_intent(keys: &Keys, created_at: u64) -> WriteIntent {
+    fn rejected_intent(created_at: u64) -> WriteIntent {
         WriteIntent {
-            payload: WritePayload::Unsigned(UnsignedEvent::new(
-                keys.public_key(),
-                Timestamp::from(created_at),
-                Kind::TextNote,
-                vec![],
-                "no active account",
-            )),
+            payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: Kind::TextNote,
+                tags: (vec![]).into_iter().collect(),
+                content: ("no active account").into(),
+                created_at: Some(Timestamp::from(created_at)),
+            }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -58,14 +57,13 @@ mod receipt_allocator_tests {
         let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::UnsignedReplaceableEdit {
-                unsigned: UnsignedEvent::new(
-                    keys.public_key(),
-                    Timestamp::from(30u64),
-                    Kind::ContactList,
-                    vec![],
-                    "my edit",
-                ),
+            payload: WritePayload::ReplaceableEdit {
+                builder: nmp_grammar::EventBuilder {
+                    kind: Kind::ContactList,
+                    tags: (vec![]).into_iter().collect(),
+                    content: ("my edit").into(),
+                    created_at: Some(Timestamp::from(30u64)),
+                },
                 expected_base: Some(base.id),
             },
             durability: Durability::Durable,
@@ -93,11 +91,10 @@ mod receipt_allocator_tests {
     #[test]
     fn last_upper_half_id_is_issued_once_then_exhaustion_is_stable_and_typed() {
         const FIRST_UNACCEPTED_ID: u64 = 1u64 << 63;
-        let keys = Keys::generate();
         let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 10);
         core.set_next_unaccepted_receipt_for_test(Some(FIRST_UNACCEPTED_ID));
 
-        let last = core.handle(EngineMsg::Publish(rejected_intent(&keys, 1)));
+        let last = core.handle(EngineMsg::Publish(rejected_intent(1)));
         assert!(last.iter().any(|effect| {
             matches!(
                 effect,
@@ -106,7 +103,7 @@ mod receipt_allocator_tests {
             )
         }));
         for created_at in [2, 3] {
-            let exhausted = core.handle(EngineMsg::Publish(rejected_intent(&keys, created_at)));
+            let exhausted = core.handle(EngineMsg::Publish(rejected_intent(created_at)));
             assert!(matches!(
                 exhausted.as_slice(),
                 [Effect::PublishFailed(
@@ -157,13 +154,12 @@ mod receipt_allocator_tests {
         let mut core = EngineCore::new(MemoryStore::new(), Box::new(directory), 10);
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::Unsigned(UnsignedEvent::new(
-                keys.public_key(),
-                Timestamp::from(93u64),
-                Kind::TextNote,
-                vec![],
-                "correlation boundary",
-            )),
+            payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: Kind::TextNote,
+                tags: (vec![]).into_iter().collect(),
+                content: ("correlation boundary").into(),
+                created_at: Some(Timestamp::from(93u64)),
+            }),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,

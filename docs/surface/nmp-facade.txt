@@ -15,6 +15,7 @@ pub use nmp::DemandError
 pub use nmp::Derived
 pub use nmp::Durability
 pub use nmp::Event
+pub use nmp::EventBuilder
 pub use nmp::EventId
 pub use nmp::Filter
 pub use nmp::Freshness
@@ -21056,6 +21057,402 @@ reexport nmp::Event => nostr::event::Event
   "name": "Event",
   "visibility": "public"
 }
+reexport nmp::EventBuilder => nmp_grammar::write::EventBuilder
+{
+  "attrs": [],
+  "inherent_impls": [
+    {
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "items": [
+        {
+          "attrs": [],
+          "inner": {
+            "function": {
+              "default_unstable": null,
+              "generics": {
+                "params": [],
+                "where_predicates": []
+              },
+              "has_body": true,
+              "header": {
+                "abi": "Rust",
+                "is_async": false,
+                "is_const": false,
+                "is_unsafe": false
+              },
+              "sig": {
+                "inputs": [
+                  [
+                    "kind",
+                    {
+                      "resolved_path": {
+                        "args": null,
+                        "path": "Kind",
+                        "resolved_item": {
+                          "definition": {
+                            "previously_defined": "nostr::event::kind::Kind"
+                          },
+                          "path": "nostr::event::kind::Kind"
+                        }
+                      }
+                    }
+                  ]
+                ],
+                "is_c_variadic": false,
+                "output": {
+                  "generic": "Self"
+                }
+              }
+            }
+          },
+          "name": "new",
+          "visibility": "public"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "function": {
+              "default_unstable": null,
+              "generics": {
+                "params": [
+                  {
+                    "kind": {
+                      "type": {
+                        "bounds": [
+                          {
+                            "trait_bound": {
+                              "generic_params": [],
+                              "modifier": "none",
+                              "trait": {
+                                "args": {
+                                  "angle_bracketed": {
+                                    "args": [
+                                      {
+                                        "type": {
+                                          "resolved_path": {
+                                            "args": null,
+                                            "path": "String",
+                                            "resolved_item": {
+                                              "path": "alloc::string::String"
+                                            }
+                                          }
+                                        }
+                                      }
+                                    ],
+                                    "constraints": []
+                                  }
+                                },
+                                "path": "Into",
+                                "resolved_item": {
+                                  "path": "core::convert::Into"
+                                }
+                              }
+                            }
+                          }
+                        ],
+                        "default": null,
+                        "is_synthetic": true
+                      }
+                    },
+                    "name": "impl Into<String>"
+                  }
+                ],
+                "where_predicates": []
+              },
+              "has_body": true,
+              "header": {
+                "abi": "Rust",
+                "is_async": false,
+                "is_const": false,
+                "is_unsafe": false
+              },
+              "sig": {
+                "inputs": [
+                  [
+                    "self",
+                    {
+                      "generic": "Self"
+                    }
+                  ],
+                  [
+                    "content",
+                    {
+                      "impl_trait": [
+                        {
+                          "trait_bound": {
+                            "generic_params": [],
+                            "modifier": "none",
+                            "trait": {
+                              "args": {
+                                "angle_bracketed": {
+                                  "args": [
+                                    {
+                                      "type": {
+                                        "resolved_path": {
+                                          "args": null,
+                                          "path": "String",
+                                          "resolved_item": {
+                                            "path": "alloc::string::String"
+                                          }
+                                        }
+                                      }
+                                    }
+                                  ],
+                                  "constraints": []
+                                }
+                              },
+                              "path": "Into",
+                              "resolved_item": {
+                                "path": "core::convert::Into"
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                ],
+                "is_c_variadic": false,
+                "output": {
+                  "generic": "Self"
+                }
+              }
+            }
+          },
+          "name": "content",
+          "visibility": "public"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "function": {
+              "default_unstable": null,
+              "generics": {
+                "params": [],
+                "where_predicates": []
+              },
+              "has_body": true,
+              "header": {
+                "abi": "Rust",
+                "is_async": false,
+                "is_const": false,
+                "is_unsafe": false
+              },
+              "sig": {
+                "inputs": [
+                  [
+                    "self",
+                    {
+                      "generic": "Self"
+                    }
+                  ],
+                  [
+                    "tag",
+                    {
+                      "resolved_path": {
+                        "args": null,
+                        "path": "Tag",
+                        "resolved_item": {
+                          "definition": {
+                            "previously_defined": "nostr::event::tag::Tag"
+                          },
+                          "path": "nostr::event::tag::Tag"
+                        }
+                      }
+                    }
+                  ]
+                ],
+                "is_c_variadic": false,
+                "output": {
+                  "generic": "Self"
+                }
+              }
+            }
+          },
+          "name": "tag",
+          "visibility": "public"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "function": {
+              "default_unstable": null,
+              "generics": {
+                "params": [],
+                "where_predicates": []
+              },
+              "has_body": true,
+              "header": {
+                "abi": "Rust",
+                "is_async": false,
+                "is_const": false,
+                "is_unsafe": false
+              },
+              "sig": {
+                "inputs": [
+                  [
+                    "self",
+                    {
+                      "generic": "Self"
+                    }
+                  ],
+                  [
+                    "created_at",
+                    {
+                      "resolved_path": {
+                        "args": null,
+                        "path": "Timestamp",
+                        "resolved_item": {
+                          "definition": {
+                            "previously_defined": "nostr::types::time::Timestamp"
+                          },
+                          "path": "nostr::types::time::Timestamp"
+                        }
+                      }
+                    }
+                  ]
+                ],
+                "is_c_variadic": false,
+                "output": {
+                  "generic": "Self"
+                }
+              }
+            }
+          },
+          "name": "created_at",
+          "visibility": "public"
+        }
+      ]
+    }
+  ],
+  "inner": {
+    "struct": {
+      "generics": {
+        "params": [],
+        "where_predicates": []
+      },
+      "kind": {
+        "plain": {
+          "fields": [
+            {
+              "attrs": [],
+              "inner": {
+                "struct_field": {
+                  "resolved_path": {
+                    "args": null,
+                    "path": "nostr::Kind",
+                    "resolved_item": {
+                      "definition": {
+                        "previously_defined": "nostr::event::kind::Kind"
+                      },
+                      "path": "nostr::event::kind::Kind"
+                    }
+                  }
+                }
+              },
+              "name": "kind",
+              "visibility": "public"
+            },
+            {
+              "attrs": [],
+              "inner": {
+                "struct_field": {
+                  "resolved_path": {
+                    "args": {
+                      "angle_bracketed": {
+                        "args": [
+                          {
+                            "type": {
+                              "resolved_path": {
+                                "args": null,
+                                "path": "nostr::Tag",
+                                "resolved_item": {
+                                  "definition": {
+                                    "previously_defined": "nostr::event::tag::Tag"
+                                  },
+                                  "path": "nostr::event::tag::Tag"
+                                }
+                              }
+                            }
+                          }
+                        ],
+                        "constraints": []
+                      }
+                    },
+                    "path": "Vec",
+                    "resolved_item": {
+                      "path": "alloc::vec::Vec"
+                    }
+                  }
+                }
+              },
+              "name": "tags",
+              "visibility": "public"
+            },
+            {
+              "attrs": [],
+              "inner": {
+                "struct_field": {
+                  "resolved_path": {
+                    "args": null,
+                    "path": "String",
+                    "resolved_item": {
+                      "path": "alloc::string::String"
+                    }
+                  }
+                }
+              },
+              "name": "content",
+              "visibility": "public"
+            },
+            {
+              "attrs": [],
+              "inner": {
+                "struct_field": {
+                  "resolved_path": {
+                    "args": {
+                      "angle_bracketed": {
+                        "args": [
+                          {
+                            "type": {
+                              "resolved_path": {
+                                "args": null,
+                                "path": "nostr::Timestamp",
+                                "resolved_item": {
+                                  "definition": {
+                                    "previously_defined": "nostr::types::time::Timestamp"
+                                  },
+                                  "path": "nostr::types::time::Timestamp"
+                                }
+                              }
+                            }
+                          }
+                        ],
+                        "constraints": []
+                      }
+                    },
+                    "path": "Option",
+                    "resolved_item": {
+                      "path": "core::option::Option"
+                    }
+                  }
+                }
+              },
+              "name": "created_at",
+              "visibility": "public"
+            }
+          ],
+          "has_stripped_fields": false
+        }
+      }
+    }
+  },
+  "name": "EventBuilder",
+  "visibility": "public"
+}
 reexport nmp::EventId => nostr::event::id::EventId
 {
   "previously_defined": "nostr::event::id::EventId"
@@ -25799,12 +26196,12 @@ reexport nmp::WriteIntent => nmp_grammar::write::WriteIntent
                                             "struct_field": {
                                               "resolved_path": {
                                                 "args": null,
-                                                "path": "nostr::UnsignedEvent",
+                                                "path": "EventBuilder",
                                                 "resolved_item": {
                                                   "definition": {
-                                                    "previously_defined": "nostr::event::unsigned::UnsignedEvent"
+                                                    "previously_defined": "nmp_grammar::write::EventBuilder"
                                                   },
-                                                  "path": "nostr::event::unsigned::UnsignedEvent"
+                                                  "path": "nmp_grammar::write::EventBuilder"
                                                 }
                                               }
                                             }
@@ -25816,7 +26213,7 @@ reexport nmp::WriteIntent => nmp_grammar::write::WriteIntent
                                     }
                                   }
                                 },
-                                "name": "Unsigned",
+                                "name": "Event",
                                 "visibility": "default"
                               },
                               {
@@ -25833,17 +26230,17 @@ reexport nmp::WriteIntent => nmp_grammar::write::WriteIntent
                                               "struct_field": {
                                                 "resolved_path": {
                                                   "args": null,
-                                                  "path": "nostr::UnsignedEvent",
+                                                  "path": "EventBuilder",
                                                   "resolved_item": {
                                                     "definition": {
-                                                      "previously_defined": "nostr::event::unsigned::UnsignedEvent"
+                                                      "previously_defined": "nmp_grammar::write::EventBuilder"
                                                     },
-                                                    "path": "nostr::event::unsigned::UnsignedEvent"
+                                                    "path": "nmp_grammar::write::EventBuilder"
                                                   }
                                                 }
                                               }
                                             },
-                                            "name": "unsigned",
+                                            "name": "builder",
                                             "visibility": "default"
                                           },
                                           {
@@ -25888,7 +26285,7 @@ reexport nmp::WriteIntent => nmp_grammar::write::WriteIntent
                                     }
                                   }
                                 },
-                                "name": "UnsignedReplaceableEdit",
+                                "name": "ReplaceableEdit",
                                 "visibility": "default"
                               },
                               {

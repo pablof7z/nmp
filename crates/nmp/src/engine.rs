@@ -1205,13 +1205,12 @@ mod tests {
             .expect("engine open");
         let receipt = engine
             .publish_tracked(WriteIntent {
-                payload: nmp_grammar::WritePayload::Unsigned(UnsignedEvent::new(
-                    keys.public_key(),
-                    Timestamp::from(10),
-                    Kind::TextNote,
-                    Vec::new(),
-                    "cancel through facade",
-                )),
+                payload: nmp_grammar::WritePayload::Event(nmp_grammar::EventBuilder {
+                    kind: Kind::TextNote,
+                    tags: (Vec::new()).into_iter().collect(),
+                    content: ("cancel through facade").into(),
+                    created_at: Some(Timestamp::from(10)),
+                }),
                 durability: nmp_grammar::Durability::Durable,
                 routing: nmp_grammar::WriteRouting::Auto,
                 identity_override: None,
@@ -1268,13 +1267,12 @@ mod tests {
             .expect("engine open");
         let receipt = engine
             .publish_tracked(WriteIntent {
-                payload: nmp_grammar::WritePayload::Unsigned(UnsignedEvent::new(
-                    keys.public_key(),
-                    Timestamp::from(11),
-                    Kind::TextNote,
-                    Vec::new(),
-                    "observer lifetime is not write ownership",
-                )),
+                payload: nmp_grammar::WritePayload::Event(nmp_grammar::EventBuilder {
+                    kind: Kind::TextNote,
+                    tags: (Vec::new()).into_iter().collect(),
+                    content: ("observer lifetime is not write ownership").into(),
+                    created_at: Some(Timestamp::from(11)),
+                }),
                 durability: nmp_grammar::Durability::Durable,
                 routing: nmp_grammar::WriteRouting::Auto,
                 identity_override: None,
@@ -1636,13 +1634,12 @@ mod tests {
         let publish = |content: &str| {
             engine
                 .publish_tracked(WriteIntent {
-                    payload: nmp_grammar::WritePayload::Unsigned(UnsignedEvent::new(
-                        keys.public_key(),
-                        Timestamp::from(10),
-                        Kind::TextNote,
-                        Vec::new(),
-                        content,
-                    )),
+                    payload: nmp_grammar::WritePayload::Event(nmp_grammar::EventBuilder {
+                        kind: Kind::TextNote,
+                        tags: (Vec::new()).into_iter().collect(),
+                        content: content.to_string(),
+                        created_at: Some(Timestamp::from(10)),
+                    }),
                     durability: nmp_grammar::Durability::Durable,
                     routing: nmp_grammar::WriteRouting::Auto,
                     identity_override: None,
@@ -2204,7 +2201,12 @@ mod tests {
             .expect("derive the frozen body's id");
         let rx = engine
             .publish(WriteIntent {
-                payload: WritePayload::Unsigned(draft),
+                payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                    kind: draft.kind,
+                    tags: draft.tags.iter().cloned().collect(),
+                    content: draft.content.clone(),
+                    created_at: Some(draft.created_at),
+                }),
                 durability: Durability::Durable,
                 routing: WriteRouting::Auto,
                 identity_override: Some(pk_b),
@@ -2287,13 +2289,12 @@ mod tests {
             Err(EngineError::EngineClosed)
         );
         let publish_result = engine.publish(WriteIntent {
-            payload: WritePayload::Unsigned(nostr::UnsignedEvent::new(
-                Keys::generate().public_key(),
-                nostr::Timestamp::now(),
-                nostr::Kind::Custom(9999),
-                Vec::new(),
-                "unreachable",
-            )),
+            payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: nostr::Kind::Custom(9999),
+                tags: (Vec::new()).into_iter().collect(),
+                content: ("unreachable").into(),
+                created_at: Some(nostr::Timestamp::now()),
+            }),
             durability: Durability::Ephemeral,
             routing: WriteRouting::Auto,
             identity_override: None,

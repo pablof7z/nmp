@@ -179,6 +179,7 @@ fn attempt_durable_write(store: &mut RedbStore, created_at: u64) -> Result<(), P
         .accept_write(AcceptWrite {
             frozen,
             replaceable_base: None,
+            monotonic_stamp: false,
             expected_pubkey: keys.public_key(),
             signing_identity_ref: "durability-proof".into(),
             durability: WriteDurability::Durable,

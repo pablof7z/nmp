@@ -47,12 +47,11 @@ final class WriteCancellationTests: XCTestCase {
         try engine.setActiveAccount(author)
         let receipt = try await engine.publish(
             WriteIntent(
-                payload: .unsigned(
-                    pubkey: author,
-                    createdAt: 1_723_456_790,
+                payload: .event(
                     kind: 1,
                     tags: [],
-                    content: "cancel through the public Swift SDK"
+                    content: "cancel through the public Swift SDK",
+                    createdAt: 1_723_456_790
                 ),
                 durability: .durable,
                 routing: .auto

@@ -525,14 +525,13 @@ mod history_mutation_tests {
         assert_eq!(ordered_ids(&core, id), vec![x.id, y.id, z.id]);
 
         let accepted = core.on_publish(WriteIntent {
-            payload: WritePayload::UnsignedReplaceableEdit {
-                unsigned: UnsignedEvent::new(
-                    keys.public_key(),
-                    Timestamp::from(1_000u64),
-                    Kind::from(10_000u16),
-                    vec![room_tag(47)],
-                    "pending replacement",
-                ),
+            payload: WritePayload::ReplaceableEdit {
+                builder: nmp_grammar::EventBuilder {
+                    kind: Kind::from(10_000u16),
+                    tags: (vec![room_tag(47)]).into_iter().collect(),
+                    content: ("pending replacement").into(),
+                    created_at: Some(Timestamp::from(1_000u64)),
+                },
                 expected_base: Some(predecessor.id),
             },
             durability: Durability::Durable,

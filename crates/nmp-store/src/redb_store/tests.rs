@@ -312,6 +312,7 @@ fn accepted_signed(
         .accept_write(AcceptWrite {
             frozen,
             replaceable_base: None,
+            monotonic_stamp: false,
             expected_pubkey: keys.public_key(),
             signing_identity_ref: "range-proof".into(),
             durability: WriteDurability::Durable,
@@ -1160,6 +1161,7 @@ fn canonical_integrity_survives_every_governed_event_mutation_class() {
         .accept_write(AcceptWrite {
             frozen,
             replaceable_base: None,
+            monotonic_stamp: false,
             expected_pubkey: keys.public_key(),
             signing_identity_ref: "integrity".into(),
             durability: WriteDurability::Durable,

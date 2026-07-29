@@ -63,12 +63,13 @@ async fn stalled_consumer_is_bounded_and_does_not_delay_active_consumer_or_engin
     for i in 0..CHANGES {
         engine
             .publish(FfiWriteIntent {
-                payload: FfiWritePayload::Unsigned {
-                    pubkey: author.clone(),
-                    created_at: 1_700_000_000 + i as u64,
-                    kind: 1,
-                    tags: Vec::new(),
-                    content: format!("note-{i}"),
+                payload: FfiWritePayload::Event {
+                    builder: nmp_ffi::types::FfiEventBuilder {
+                        kind: 1,
+                        tags: Vec::new(),
+                        content: format!("note-{i}"),
+                        created_at: Some(1_700_000_000 + i as u64),
+                    },
                 },
                 durability: FfiDurability::Durable,
                 routing: FfiWriteRouting::Auto,

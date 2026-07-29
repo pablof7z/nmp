@@ -180,12 +180,11 @@ final class DetachPersistedAccountTests: XCTestCase {
 
         let receipt = try await seed.publish(
             WriteIntent(
-                payload: .unsigned(
-                    pubkey: publicOne,
-                    createdAt: 1_723_456_999,
+                payload: .event(
                     kind: cachedKind,
                     tags: [],
-                    content: "cached before detach"
+                    content: "cached before detach",
+                    createdAt: 1_723_456_999
                 ),
                 durability: .durable,
                 routing: .auto

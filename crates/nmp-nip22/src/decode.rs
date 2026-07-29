@@ -668,21 +668,23 @@ mod tests {
         cells.iter().map(|c| c.to_string()).collect()
     }
 
-    fn decode_unsigned(
-        unsigned: &nostr::UnsignedEvent,
+    /// Decode a composed builder as if it had been stamped and signed --
+    /// the id, author and timestamp the engine would have supplied are
+    /// stated here, since composition no longer produces them.
+    fn decode_composed(
+        builder: &nmp_grammar::EventBuilder,
+        author: nostr::PublicKey,
     ) -> Result<DecodedComment, CommentDecodeError> {
-        let rows: Vec<Vec<String>> = unsigned
-            .tags
-            .iter()
-            .map(|t| t.as_slice().to_vec())
-            .collect();
+        let rows: Vec<Vec<String>> = builder.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        let created_at = builder.created_at.unwrap_or(Timestamp::from(1000u64));
+        let tags = nostr::Tags::from_list(builder.tags.clone());
         decode_comment(
-            unsigned.id.expect("unsigned event has a computed id"),
-            unsigned.pubkey,
-            unsigned.created_at.as_secs(),
-            unsigned.kind.as_u16(),
+            nostr::EventId::new(&author, &created_at, &builder.kind, &tags, &builder.content),
+            author,
+            created_at.as_secs(),
+            builder.kind.as_u16(),
             &rows,
-            &unsigned.content,
+            &builder.content,
         )
     }
 
@@ -691,9 +693,9 @@ mod tests {
     fn valid_top_level_podcast_comment_decodes() {
         let root = CommentRoot::External(Nip73Target::podcast_episode_guid("guid-1").unwrap());
         let author = keys().public_key();
-        let unsigned =
-            compose_top_level_comment(&root, author, Timestamp::from(1000u64), "hi".to_string());
-        let decoded = decode_unsigned(&unsigned).expect("valid top-level comment must decode");
+        let composed = compose_top_level_comment(&root, "hi".to_string());
+        let decoded =
+            decode_composed(&composed, author).expect("valid top-level comment must decode");
         assert_eq!(decoded.root, root);
         assert_eq!(decoded.parent, CommentParent::Root);
         assert_eq!(decoded.author, author);
@@ -708,17 +710,15 @@ mod tests {
         let parent_author = keys().public_key();
         let parent_id = EventId::from_slice(&[1; 32]).unwrap();
         let author = keys().public_key();
-        let unsigned = compose_comment_reply(
+        let composed = compose_comment_reply(
             &root,
             CommentParent::Comment {
                 event_id: parent_id,
                 author: Some(parent_author),
             },
-            author,
-            Timestamp::from(1001u64),
             "reply".to_string(),
         );
-        let decoded = decode_unsigned(&unsigned).expect("valid reply must decode");
+        let decoded = decode_composed(&composed, author).expect("valid reply must decode");
         assert_eq!(decoded.root, root);
         assert_eq!(
             decoded.parent,

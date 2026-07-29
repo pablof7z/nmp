@@ -8,9 +8,10 @@
 use nostr::{EventId, PublicKey};
 
 use crate::convert::{
-    demand_to_ffi, parse_correlation_token, parse_pubkey, write_routing_to_ffi, FfiError,
+    demand_to_ffi, durability_to_ffi, parse_correlation_token, parse_pubkey, write_payload_to_ffi,
+    write_routing_to_ffi, FfiError,
 };
-use crate::types::{FfiDemand, FfiDurability, FfiRow, FfiWriteIntent, FfiWritePayload};
+use crate::types::{FfiDemand, FfiRow, FfiWriteIntent};
 
 /// A validated NIP-73 external-content target (`nmp::nip22::Nip73Target`
 /// mirror).
@@ -301,74 +302,52 @@ pub fn decode_comment(row: FfiRow) -> Result<FfiDecodedComment, FfiCommentDecode
 
 /// Compose an ordinary durable, `Auto`-routed [`FfiWriteIntent`] for a
 /// NIP-22 comment (`nmp::nip22::comment_intent` mirror). This function is
-/// engine-free: author and event time are explicit deterministic composition
-/// inputs. Publish the returned value through
+/// engine-free and stays so: it names no author and reads no clock, because
+/// the engine resolves the identity and stamps the time at acceptance.
+/// Publish the returned value through
 /// [`crate::facade::NmpEngine::publish`], the same generic write lifecycle as
 /// every other ordinary intent. `correlation` (#591) passes straight through
 /// to `WriteIntent.correlation`; NIP-22 owns no separate correlation,
 /// take-once, signing, routing, receipt, or retry machinery.
 #[uniffi::export]
-#[allow(clippy::too_many_arguments)]
 pub fn comment_intent(
     root: FfiCommentRoot,
     parent: FfiCommentParent,
-    author_pubkey: String,
-    created_at: u64,
     content: String,
     correlation: Option<String>,
 ) -> Result<FfiWriteIntent, FfiError> {
     let root = root_from_ffi(root)?;
     let parent = parent_from_ffi(parent)?;
-    let author = parse_pubkey(&author_pubkey)?;
     let correlation = correlation
         .as_deref()
         .map(parse_correlation_token)
         .transpose()?;
-    let intent = nmp::nip22::comment_intent(
-        &root,
-        parent,
-        author,
-        nostr::Timestamp::from(created_at),
-        content,
-        correlation,
-    );
+    let intent = nmp::nip22::comment_intent(&root, parent, content, correlation);
 
-    // NIP-22 owns this complete shape. The FFI layer projects the returned
-    // ordinary intent instead of independently re-stating its payload,
-    // durability, routing, identity, or correlation policy.
+    // NIP-22 owns this complete shape, and the FFI layer projects the
+    // returned ordinary intent rather than independently re-stating its
+    // payload, durability, routing, identity, or correlation policy.
     //
-    // Routing is deliberately NOT part of the closed-contract pattern below:
-    // it is projected totally (`write_routing_to_ffi`), so a protocol module
-    // that changes which route it mints crosses this boundary faithfully
-    // rather than panicking on an exported path. Every routing value has a
-    // wire form now, so there is nothing left for routing to drift into.
+    // #951's bug class is now closed on BOTH axes: every field is projected
+    // TOTALLY, so a protocol module that changes which payload it composes
+    // or which route it mints crosses this boundary faithfully instead of
+    // tripping a closed-contract assertion on an exported path. There is no
+    // `unreachable!` left here to trip. The one payload shape with no wire
+    // form -- a CAS-guarded replaceable edit, which only ever crosses inside
+    // a fused semantic method -- refuses as a typed value.
     let nmp::WriteIntent {
-        payload: nmp::WritePayload::Unsigned(unsigned),
-        durability: nmp::Durability::Durable,
+        payload,
+        durability,
         routing,
-        identity_override: None,
+        identity_override,
         correlation,
-    } = intent
-    else {
-        unreachable!("nmp::nip22::comment_intent violated its closed write contract")
-    };
-    let routing = write_routing_to_ffi(routing);
+    } = intent;
 
     Ok(FfiWriteIntent {
-        payload: FfiWritePayload::Unsigned {
-            pubkey: unsigned.pubkey.to_hex(),
-            created_at: unsigned.created_at.as_secs(),
-            kind: unsigned.kind.as_u16(),
-            tags: unsigned
-                .tags
-                .iter()
-                .map(|tag| tag.as_slice().to_vec())
-                .collect(),
-            content: unsigned.content,
-        },
-        durability: FfiDurability::Durable,
-        routing,
-        identity_override: None,
+        payload: write_payload_to_ffi(payload)?,
+        durability: durability_to_ffi(durability),
+        routing: write_routing_to_ffi(routing),
+        identity_override: identity_override.map(|pk| pk.to_hex()),
         correlation: correlation.map(|token| token.to_string()),
     })
 }
@@ -376,7 +355,7 @@ pub fn comment_intent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{FfiSourceAuthority, FfiWriteRouting};
+    use crate::types::{FfiDurability, FfiSourceAuthority, FfiWritePayload, FfiWriteRouting};
 
     fn podcast_root() -> FfiCommentRoot {
         FfiCommentRoot::External {
@@ -396,23 +375,32 @@ mod tests {
     #[test]
     fn decode_comment_round_trips_a_valid_top_level_comment() {
         let author = nostr::Keys::generate().public_key();
-        let unsigned = nmp::nip22::compose_top_level_comment(
+        let composed = nmp::nip22::compose_top_level_comment(
             &root_from_ffi(podcast_root()).unwrap(),
-            author,
-            nostr::Timestamp::from(1000u64),
             "hi".to_string(),
         );
+        // The id, author and timestamp the engine would have supplied at
+        // acceptance, stated here so a row can exist to decode.
+        let created_at = nostr::Timestamp::from(1000u64);
+        let tags = nostr::Tags::from_list(composed.tags.clone());
         let row = FfiRow {
-            id: unsigned.id.unwrap().to_hex(),
-            pubkey: unsigned.pubkey.to_hex(),
-            created_at: unsigned.created_at.as_secs(),
-            kind: unsigned.kind.as_u16(),
-            tags: unsigned
+            id: nostr::EventId::new(
+                &author,
+                &created_at,
+                &composed.kind,
+                &tags,
+                &composed.content,
+            )
+            .to_hex(),
+            pubkey: author.to_hex(),
+            created_at: created_at.as_secs(),
+            kind: composed.kind.as_u16(),
+            tags: composed
                 .tags
                 .iter()
                 .map(|t| t.as_slice().to_vec())
                 .collect(),
-            content: unsigned.content.clone(),
+            content: composed.content.clone(),
             sig: "".repeat(64),
             sources: vec![],
         };
@@ -439,31 +427,21 @@ mod tests {
 
     #[test]
     fn comment_intent_composes_the_ordinary_exact_write_intent() {
-        let author = nostr::Keys::generate().public_key();
         let intent = comment_intent(
             podcast_root(),
             FfiCommentParent::Root,
-            author.to_hex(),
-            1000,
             "hi".to_string(),
             Some("comment-correlation".to_string()),
         )
         .unwrap();
 
-        let FfiWritePayload::Unsigned {
-            pubkey,
-            created_at,
-            kind,
-            tags,
-            content,
-        } = &intent.payload
-        else {
-            panic!("NIP-22 comments must be ordinary unsigned write intents")
+        let FfiWritePayload::Event { builder } = &intent.payload else {
+            panic!("NIP-22 comments must be ordinary builder write intents")
         };
-        assert_eq!(pubkey, &author.to_hex());
-        assert_eq!(*created_at, 1000);
-        assert_eq!(*kind, 1111);
-        assert_eq!(content, "hi");
+        assert_eq!(builder.created_at, None);
+        assert_eq!(builder.kind, 1111);
+        assert_eq!(builder.content, "hi");
+        let tags = &builder.tags;
         assert_eq!(
             tags,
             &vec![
@@ -481,22 +459,20 @@ mod tests {
 
     #[test]
     fn composed_comment_uses_the_generic_publish_door() {
-        let author = nostr::Keys::generate().public_key();
         let correlation = "comment-generic-publish".to_string();
         let intent = comment_intent(
             podcast_root(),
             FfiCommentParent::Root,
-            author.to_hex(),
-            1000,
             "hi".to_string(),
             Some(correlation.clone()),
         )
         .unwrap();
         let engine = crate::facade::NmpEngine::new(crate::facade::NmpEngineConfig::default())
             .expect("engine must build");
+        let author = nostr::Keys::generate().public_key();
         engine
             .set_active_account(Some(author.to_hex()))
-            .expect("the composed author must be active");
+            .expect("the comment publishes as whoever is active");
 
         let receipt = engine
             .publish(intent)

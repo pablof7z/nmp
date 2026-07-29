@@ -26,12 +26,11 @@ class CorrelationTest {
                     engine.publish(
                         WriteIntent(
                             payload =
-                                WritePayload.Unsigned(
-                                    pubkey = author,
-                                    createdAt = 1_723_456_800uL,
+                                WritePayload.Event(
                                     kind = 1u.toUShort(),
                                     tags = emptyList(),
                                     content = "first draft",
+                                    createdAt = 1_723_456_800uL,
                                 ),
                             durability = Durability.Durable,
                             routing = WriteRouting.Auto,
@@ -51,12 +50,11 @@ class CorrelationTest {
                     engine.publish(
                         WriteIntent(
                             payload =
-                                WritePayload.Unsigned(
-                                    pubkey = author,
-                                    createdAt = 1_723_456_801uL,
+                                WritePayload.Event(
                                     kind = 1u.toUShort(),
                                     tags = emptyList(),
                                     content = "second, different draft",
+                                    createdAt = 1_723_456_801uL,
                                 ),
                             durability = Durability.Durable,
                             routing = WriteRouting.Auto,
@@ -84,12 +82,11 @@ class CorrelationTest {
                     engine.publish(
                         WriteIntent(
                             payload =
-                                WritePayload.Unsigned(
-                                    pubkey = author,
-                                    createdAt = 1_723_456_900uL,
+                                WritePayload.Event(
                                     kind = 1u.toUShort(),
                                     tags = emptyList(),
                                     content = "reattach by correlation",
+                                    createdAt = 1_723_456_900uL,
                                 ),
                             durability = Durability.Durable,
                             routing = WriteRouting.Auto,
@@ -129,12 +126,11 @@ class CorrelationTest {
                         engine.publish(
                             WriteIntent(
                                 payload =
-                                    WritePayload.Unsigned(
-                                        pubkey = author,
-                                        createdAt = 1_723_457_000uL,
+                                    WritePayload.Event(
                                         kind = 1u.toUShort(),
                                         tags = emptyList(),
                                         content = "malformed correlation token",
+                                        createdAt = 1_723_457_000uL,
                                     ),
                                 durability = Durability.Durable,
                                 routing = WriteRouting.Auto,

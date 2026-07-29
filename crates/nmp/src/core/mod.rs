@@ -55,8 +55,8 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use nostr::{
-    filter::MatchEventOptions, Event as SignedEvent, EventBuilder, EventId, PublicKey,
-    RelayMessage, RelayUrl, Timestamp, UnsignedEvent,
+    filter::MatchEventOptions, Event as SignedEvent, EventBuilder as NostrEventBuilder, EventId,
+    PublicKey, RelayMessage, RelayUrl, Timestamp, UnsignedEvent,
 };
 
 use nmp_grammar::{

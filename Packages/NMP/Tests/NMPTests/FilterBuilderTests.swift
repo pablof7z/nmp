@@ -139,12 +139,11 @@ final class FilterBuilderTests: XCTestCase {
 
     func testWriteIntentConversion() {
         let intent = WriteIntent(
-            payload: .unsigned(
-                pubkey: String(repeating: "b", count: 64),
-                createdAt: 1_700_000_000,
+            payload: .event(
                 kind: 1,
                 tags: [["t", "nostr"]],
-                content: "hello from NMP"
+                content: "hello from NMP",
+                createdAt: 1_700_000_000
             ),
             durability: .durable,
             routing: .auto
@@ -152,11 +151,12 @@ final class FilterBuilderTests: XCTestCase {
         let ffi = intent.toFfi()
         XCTAssertEqual(ffi.durability, .durable)
         XCTAssertEqual(ffi.routing, .auto)
-        guard case .unsigned(_, _, _, let tags, let content) = ffi.payload else {
-            return XCTFail("expected an unsigned payload")
+        guard case .event(let builder) = ffi.payload else {
+            return XCTFail("expected a builder payload")
         }
-        XCTAssertEqual(content, "hello from NMP")
-        XCTAssertEqual(tags, [["t", "nostr"]])
+        XCTAssertEqual(builder.content, "hello from NMP")
+        XCTAssertEqual(builder.tags, [["t", "nostr"]])
+        XCTAssertEqual(builder.createdAt, 1_700_000_000)
     }
 
     /// #32: a `.signed` payload round-trips to `FfiWritePayload.signed`
@@ -192,12 +192,11 @@ final class FilterBuilderTests: XCTestCase {
     func testWriteIntentConversionCarriesIdentityOverride() {
         let overridePubkey = String(repeating: "b", count: 64)
         let intent = WriteIntent(
-            payload: .unsigned(
-                pubkey: overridePubkey,
-                createdAt: 1_700_000_000,
+            payload: .event(
                 kind: 1,
                 tags: [],
-                content: "as the override identity"
+                content: "as the override identity",
+                createdAt: 1_700_000_000
             ),
             durability: .durable,
             routing: .auto,
@@ -211,12 +210,11 @@ final class FilterBuilderTests: XCTestCase {
     /// active-account default, all the way through `toFfi()`.
     func testWriteIntentDefaultInitLeavesIdentityOverrideNil() {
         let intent = WriteIntent(
-            payload: .unsigned(
-                pubkey: String(repeating: "b", count: 64),
-                createdAt: 1_700_000_000,
+            payload: .event(
                 kind: 1,
                 tags: [],
-                content: "active-account default"
+                content: "active-account default",
+                createdAt: 1_700_000_000
             ),
             durability: .durable,
             routing: .auto
@@ -226,14 +224,15 @@ final class FilterBuilderTests: XCTestCase {
     }
 
     func testWriteIntentReverseProjectionPreservesEveryGenericField() {
-        let unsigned = WriteIntent(
+        let composed = WriteIntent(
             FfiWriteIntent(
-                payload: .unsigned(
-                    pubkey: String(repeating: "a", count: 64),
-                    createdAt: 42,
-                    kind: 1111,
-                    tags: [["I", "podcast:item:guid:42"]],
-                    content: "unsigned"
+                payload: .event(
+                    builder: FfiEventBuilder(
+                        kind: 1111,
+                        tags: [["I", "podcast:item:guid:42"]],
+                        content: "composed",
+                        createdAt: 42
+                    )
                 ),
                 durability: .atMostOnce,
                 routing: .auto,
@@ -242,19 +241,18 @@ final class FilterBuilderTests: XCTestCase {
             )
         )
         XCTAssertEqual(
-            unsigned.payload,
-            .unsigned(
-                pubkey: String(repeating: "a", count: 64),
-                createdAt: 42,
+            composed.payload,
+            WritePayload.event(
                 kind: 1111,
                 tags: [["I", "podcast:item:guid:42"]],
-                content: "unsigned"
+                content: "composed",
+                createdAt: 42
             )
         )
-        XCTAssertEqual(unsigned.durability, .atMostOnce)
-        XCTAssertEqual(unsigned.routing, .auto)
-        XCTAssertEqual(unsigned.identityOverride, String(repeating: "a", count: 64))
-        XCTAssertEqual(unsigned.correlation, "correlation-42")
+        XCTAssertEqual(composed.durability, .atMostOnce)
+        XCTAssertEqual(composed.routing, .auto)
+        XCTAssertEqual(composed.identityOverride, String(repeating: "a", count: 64))
+        XCTAssertEqual(composed.correlation, "correlation-42")
 
         let signed = WriteIntent(
             FfiWriteIntent(
@@ -299,13 +297,7 @@ final class FilterBuilderTests: XCTestCase {
     func testExplicitRoutingCarriesTheAppsExactRelayListBothWays() {
         let typed = ["wss://user-typed-relay.example", "wss://second.example"]
         let intent = WriteIntent(
-            payload: .unsigned(
-                pubkey: String(repeating: "a", count: 64),
-                createdAt: 42,
-                kind: 1,
-                tags: [],
-                content: "for the archive"
-            ),
+            payload: .event(kind: 1, content: "for the archive", createdAt: 42),
             durability: .durable,
             routing: .explicit(relays: typed)
         )
@@ -313,12 +305,9 @@ final class FilterBuilderTests: XCTestCase {
 
         let back = WriteIntent(
             FfiWriteIntent(
-                payload: .unsigned(
-                    pubkey: String(repeating: "a", count: 64),
-                    createdAt: 42,
-                    kind: 1,
-                    tags: [],
-                    content: "for the archive"
+                payload: .event(
+                    builder: FfiEventBuilder(
+                        kind: 1, tags: [], content: "for the archive", createdAt: 42)
                 ),
                 durability: .durable,
                 routing: .explicit(relays: typed),

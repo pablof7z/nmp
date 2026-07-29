@@ -186,17 +186,15 @@ mod affected_handle_invalidation_tests {
         let subscribe = core.handle(EngineMsg::Subscribe(unlimited_room_query(9)));
         let handle = subscribed_handle(&subscribe);
 
-        let unsigned = UnsignedEvent::new(
-            keys.public_key(),
-            Timestamp::from(21u64),
-            Kind::from(9u16),
-            vec![Tag::parse(["h".to_owned(), "room-9".to_owned()]).unwrap()],
-            "pending local row",
-        );
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
         let accepted = core.on_publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned),
+            payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: Kind::from(9u16),
+                tags: vec![Tag::parse(["h".to_owned(), "room-9".to_owned()]).unwrap()],
+                content: "pending local row".into(),
+                created_at: Some(Timestamp::from(21u64)),
+            }),
             durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay]),
             identity_override: None,
@@ -263,13 +261,14 @@ mod affected_handle_invalidation_tests {
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
         let accepted = core.on_publish(WriteIntent {
-            payload: WritePayload::Unsigned(UnsignedEvent::new(
-                keys.public_key(),
-                Timestamp::from(30u64),
-                Kind::from(9u16),
-                vec![Tag::parse(["h".to_owned(), "room-10".to_owned()]).unwrap()],
-                "newest pending",
-            )),
+            payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: Kind::from(9u16),
+                tags: (vec![Tag::parse(["h".to_owned(), "room-10".to_owned()]).unwrap()])
+                    .into_iter()
+                    .collect(),
+                content: ("newest pending").into(),
+                created_at: Some(Timestamp::from(30u64)),
+            }),
             durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity_override: None,
@@ -340,14 +339,15 @@ mod affected_handle_invalidation_tests {
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
         let accepted = core.on_publish(WriteIntent {
-            payload: WritePayload::UnsignedReplaceableEdit {
-                unsigned: UnsignedEvent::new(
-                    keys.public_key(),
-                    Timestamp::from(20u64),
-                    Kind::ContactList,
-                    vec![Tag::public_key(Keys::generate().public_key())],
-                    "new",
-                ),
+            payload: WritePayload::ReplaceableEdit {
+                builder: nmp_grammar::EventBuilder {
+                    kind: Kind::ContactList,
+                    tags: (vec![Tag::public_key(Keys::generate().public_key())])
+                        .into_iter()
+                        .collect(),
+                    content: ("new").into(),
+                    created_at: Some(Timestamp::from(20u64)),
+                },
                 expected_base: Some(predecessor.id),
             },
             durability: Durability::Durable,
@@ -415,13 +415,12 @@ mod affected_handle_invalidation_tests {
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
         let accepted = core.on_publish(WriteIntent {
-            payload: WritePayload::Unsigned(UnsignedEvent::new(
-                keys.public_key(),
-                Timestamp::from(20u64),
-                Kind::EventDeletion,
-                vec![Tag::event(target.id)],
-                "",
-            )),
+            payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: Kind::EventDeletion,
+                tags: (vec![Tag::event(target.id)]).into_iter().collect(),
+                content: ("").into(),
+                created_at: Some(Timestamp::from(20u64)),
+            }),
             durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay]),
             identity_override: None,

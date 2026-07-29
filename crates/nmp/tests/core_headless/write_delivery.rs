@@ -23,7 +23,7 @@ fn an_explicit_route_with_no_relays_is_refused_before_acceptance() {
     activate(&mut core, &a);
 
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&a, 1, "nowhere")),
+        payload: WritePayload::Event(draft(1, "nowhere")),
         durability: Durability::Durable,
         routing: WriteRouting::Explicit(Vec::new()),
         identity_override: None,
@@ -67,7 +67,7 @@ fn an_unreachable_explicit_relay_is_accepted_because_the_door_cannot_know() {
     activate(&mut core, &a);
 
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&a, 1, "hello")),
+        payload: WritePayload::Event(draft(1, "hello")),
         durability: Durability::Durable,
         routing: WriteRouting::Explicit(vec![nowhere.clone()]),
         identity_override: None,
@@ -229,7 +229,7 @@ fn ephemeral_written_handoff_cannot_mint_persisted_sent_truth() {
     let mut core = new_core(FixtureDirectory::new());
     activate(&mut core, &author);
     let accepted = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&author, 93, "ephemeral handoff")),
+        payload: WritePayload::Event(draft(93, "ephemeral handoff")),
         durability: Durability::Ephemeral,
         routing: WriteRouting::Explicit(vec![relay_a.clone(), relay_b.clone()]),
         identity_override: None,
@@ -517,7 +517,7 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
         authenticate_signer(&mut core, 0, &relay, &author);
         activate(&mut core, &author);
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&author, 86, "dynamic author route")),
+            payload: WritePayload::Event(draft(86, "dynamic author route")),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -590,7 +590,7 @@ fn author_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vo
         connect_signer(&mut core, 0, &old, author.public_key());
         activate(&mut core, &author);
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&author, 87, "dynamic author route")),
+            payload: WritePayload::Event(draft(87, "dynamic author route")),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -720,7 +720,7 @@ fn route_revision_failure_emits_no_attempt_or_wire_and_claims_no_crash_durable_u
         );
         activate(&mut core, &author);
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&author, 88, "volatile route")),
+            payload: WritePayload::Event(draft(88, "volatile route")),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,
@@ -768,7 +768,7 @@ fn write_ack_per_relay() {
     authenticate_signer(&mut core, 1, &relay_bad, &a);
 
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&a, 1, "durable ack test")),
+        payload: WritePayload::Event(draft(1, "durable ack test")),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -847,7 +847,7 @@ fn uncommitted_attempt_terminal_emits_no_receipt_and_keeps_lane_live() {
     ));
     authenticate_signer(&mut core, 0, &relay, &a);
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Unsigned(unsigned(&a, 2, "finish persistence")),
+        payload: WritePayload::Event(draft(2, "finish persistence")),
         durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity_override: None,
@@ -888,11 +888,10 @@ fn uncommitted_attempt_terminal_emits_no_receipt_and_keeps_lane_live() {
 
 #[test]
 fn unaccepted_failure_ids_are_distinct_and_disjoint_from_store_receipts() {
-    let a = Keys::generate();
     let mut core = new_core(FixtureDirectory::new());
     let fail = |core: &mut EngineCore<MemoryStore>, seq| {
         core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::Unsigned(unsigned(&a, seq, "unaccepted")),
+            payload: WritePayload::Event(draft(seq, "unaccepted")),
             durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity_override: None,

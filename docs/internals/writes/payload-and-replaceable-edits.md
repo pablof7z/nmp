@@ -81,10 +81,15 @@ pub enum WritePayload {
 in `writes/event-builder.md` §6: with the deterministic-bytes requirement
 killed ("we don't need that shit at all"), nothing `Unsigned` can express
 remains that the builder or the pre-signed path cannot. The word "unsigned"
-disappears from the payload vocabulary along with the type, and
-`nostr::UnsignedEvent` leaves the facade's re-export list
-(`crates/nmp/src/lib.rs:288`) — its only public job was being `Unsigned`'s
-argument.
+disappears from the payload vocabulary along with the type.
+
+**Correction, recorded while building this (#973/PR #1005).** This section
+originally said `nostr::UnsignedEvent` leaves the facade's re-export list
+because "its only public job was being `Unsigned`'s argument". That was
+wrong: `Handle::sign_event(UnsignedEvent)` (#464) is a separate public door
+whose parameter must be nameable, so the re-export stays and only the payload
+variant dies. See `writes/event-builder.md` §5 for the full note. Nothing
+forwards to a deleted spelling, so no-backwards-compatibility is untouched.
 
 The three variants map exactly onto the three possible author sources
 (`writes/identity.md` §4): `Event` has no author until identity resolution

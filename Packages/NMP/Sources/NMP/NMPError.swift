@@ -107,6 +107,12 @@ public enum NMPError: Error, Sendable, Equatable {
     /// #572: an `Nip73Target` failed its constructor validation (an empty
     /// `I`/`K` cell).
     case invalidNip73Target(reason: String)
+    /// #973: a composer returned a compare-and-swap replaceable edit, which
+    /// has no wire form on purpose -- a replaceable precondition crosses
+    /// this boundary only inside the semantic method that owns it
+    /// (`follow`/`unfollow`), never as a payload a native caller could
+    /// reassemble without the guard.
+    case replaceableEditHasNoWireForm
 
     init(_ ffi: FfiError) {
         switch ffi {
@@ -153,6 +159,7 @@ public enum NMPError: Error, Sendable, Equatable {
             self = .invalidCorrelationToken(got: got, reason: reason)
         case .InvalidNip73Target(let reason):
             self = .invalidNip73Target(reason: reason)
+        case .ReplaceableEditHasNoWireForm: self = .replaceableEditHasNoWireForm
         }
     }
 }
@@ -245,6 +252,8 @@ extension NMPError: LocalizedError {
             "Invalid correlation token \(got.debugDescription): \(reason)"
         case .invalidNip73Target(let reason):
             "Invalid NIP-73 target: \(reason)"
+        case .replaceableEditHasNoWireForm:
+            "A replaceable edit crosses this boundary only inside the semantic method that owns its precondition, never as a payload"
         }
     }
 }

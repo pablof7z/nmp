@@ -19,8 +19,8 @@
 use std::collections::BTreeSet;
 
 use nmp::{
-    CorrelationToken, Durability, Engine, EngineError, Kind, PublicKey, ReceiptStream, RelayUrl,
-    Tag, Timestamp, UnsignedEvent, WriteIntent, WritePayload, WriteRouting,
+    CorrelationToken, Durability, Engine, EngineError, EventBuilder, Kind, PublicKey,
+    ReceiptStream, RelayUrl, Tag, WriteIntent, WritePayload, WriteRouting,
 };
 use nostr::nips::nip65::RelayMetadata;
 
@@ -238,20 +238,12 @@ pub fn publish_relay_list_bootstrap(
     engine: &Engine,
     request: BootstrapRelayList,
 ) -> Result<ReceiptStream, BootstrapRelayListError> {
-    publish_relay_list_bootstrap_at(engine, request, Timestamp::now())
-}
-
-fn publish_relay_list_bootstrap_at(
-    engine: &Engine,
-    request: BootstrapRelayList,
-    created_at: Timestamp,
-) -> Result<ReceiptStream, BootstrapRelayListError> {
     engine
-        .publish_tracked(compose_relay_list_bootstrap(request, created_at))
+        .publish_tracked(compose_relay_list_bootstrap(request))
         .map_err(Into::into)
 }
 
-fn compose_relay_list_bootstrap(request: BootstrapRelayList, created_at: Timestamp) -> WriteIntent {
+fn compose_relay_list_bootstrap(request: BootstrapRelayList) -> WriteIntent {
     let BootstrapRelayList {
         author,
         bootstrap_relays,
@@ -263,16 +255,19 @@ fn compose_relay_list_bootstrap(request: BootstrapRelayList, created_at: Timesta
         .map(|entry| Tag::relay_metadata(entry.relay, entry.usage.metadata()))
         .collect();
     WriteIntent {
-        payload: WritePayload::Unsigned(UnsignedEvent::new(
-            author,
-            created_at,
-            Kind::RelayList,
+        payload: WritePayload::Event(EventBuilder {
+            kind: Kind::RelayList,
             tags,
-            "",
-        )),
+            content: String::new(),
+            created_at: None,
+        }),
         durability: Durability::Durable,
         routing: WriteRouting::Explicit(bootstrap_relays.into_iter().collect()),
-        identity_override: None,
+        // The request names the account this bootstrap is FOR, and a
+        // builder has no author of its own, so that name is now what
+        // selects the signing identity rather than something the engine
+        // has to compare a stamped author against.
+        identity_override: Some(author),
         correlation,
     }
 }
@@ -281,7 +276,7 @@ fn compose_relay_list_bootstrap(request: BootstrapRelayList, created_at: Timesta
 mod tests {
     use std::time::Duration;
 
-    use nmp::{EngineConfig, FifoRecvTimeoutError, WriteStatus};
+    use nmp::{EngineConfig, WriteStatus};
     use nostr::Keys;
 
     use super::*;
@@ -381,16 +376,16 @@ mod tests {
         )
         .unwrap();
 
-        let intent = compose_relay_list_bootstrap(request, Timestamp::from(42u64));
-        let WritePayload::Unsigned(unsigned) = intent.payload else {
-            panic!("bootstrap must compose one unsigned event")
+        let intent = compose_relay_list_bootstrap(request);
+        assert_eq!(intent.identity_override, Some(author));
+        let WritePayload::Event(builder) = &intent.payload else {
+            panic!("bootstrap must compose one builder")
         };
-        assert_eq!(unsigned.pubkey, author);
-        assert_eq!(unsigned.created_at, Timestamp::from(42u64));
-        assert_eq!(unsigned.kind, Kind::RelayList);
-        assert_eq!(unsigned.content, "");
+        assert_eq!(builder.created_at, None);
+        assert_eq!(builder.kind, Kind::RelayList);
+        assert_eq!(builder.content, "");
         assert_eq!(
-            unsigned
+            builder
                 .tags
                 .iter()
                 .map(|tag| tag.as_slice().to_vec())
@@ -407,8 +402,13 @@ mod tests {
         assert_eq!(relays, vec![bootstrap_a, bootstrap_b]);
     }
 
+    /// The request names the account the bootstrap is FOR, and that name is
+    /// now what selects the signing identity -- so bootstrapping a DIFFERENT
+    /// account than the active one is a legitimate write, not a mismatch.
+    /// With no signer registered for it, it parks on that exact key rather
+    /// than failing or drifting onto the active account.
     #[test]
-    fn active_author_mismatch_is_a_normal_pre_acceptance_receipt_failure() {
+    fn a_bootstrap_for_another_account_parks_on_that_exact_key() {
         let active = Keys::generate();
         let different = Keys::generate();
         let engine = Engine::new(EngineConfig::default()).unwrap();
@@ -425,19 +425,20 @@ mod tests {
         )
         .unwrap();
 
-        let receipt =
-            publish_relay_list_bootstrap_at(&engine, request, Timestamp::from(42u64)).unwrap();
-        let status = receipt
-            .statuses
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap();
-        assert!(
-            matches!(status, WriteStatus::Failed(reason) if reason.contains("does not match current active account"))
-        );
-        assert!(matches!(
-            receipt.statuses.recv_timeout(Duration::from_millis(20)),
-            Err(FifoRecvTimeoutError::Closed)
-        ));
+        let receipt = publish_relay_list_bootstrap(&engine, request).unwrap();
+        let mut awaited = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            match receipt.statuses.recv_timeout(Duration::from_millis(100)) {
+                Ok(WriteStatus::AwaitingCapability { pubkey }) => {
+                    awaited = Some(pubkey);
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        assert_eq!(awaited, Some(different.public_key()));
         engine.shutdown();
     }
 
@@ -453,8 +454,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = match publish_relay_list_bootstrap_at(&engine, request, Timestamp::from(42u64))
-        {
+        let error = match publish_relay_list_bootstrap(&engine, request) {
             Ok(_) => panic!("a shut down engine must not return a receipt"),
             Err(error) => error,
         };

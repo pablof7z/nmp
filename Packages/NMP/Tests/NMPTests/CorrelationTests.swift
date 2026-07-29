@@ -50,12 +50,11 @@ final class CorrelationTests: XCTestCase {
         let token = "swift-sdk-correlation-token"
         let first = try await engine.publish(
             WriteIntent(
-                payload: .unsigned(
-                    pubkey: author,
-                    createdAt: 1_723_456_800,
+                payload: .event(
                     kind: 1,
                     tags: [],
-                    content: "first draft"
+                    content: "first draft",
+                    createdAt: 1_723_456_800
                 ),
                 durability: .durable,
                 routing: .auto,
@@ -74,12 +73,11 @@ final class CorrelationTests: XCTestCase {
         // SAME token must resolve to the SAME receipt id, never a new one.
         let second = try await engine.publish(
             WriteIntent(
-                payload: .unsigned(
-                    pubkey: author,
-                    createdAt: 1_723_456_801,
+                payload: .event(
                     kind: 1,
                     tags: [],
-                    content: "second, different draft"
+                    content: "second, different draft",
+                    createdAt: 1_723_456_801
                 ),
                 durability: .durable,
                 routing: .auto,
@@ -105,12 +103,11 @@ final class CorrelationTests: XCTestCase {
         let token = "swift-sdk-reattach-by-correlation"
         let receipt = try await engine.publish(
             WriteIntent(
-                payload: .unsigned(
-                    pubkey: author,
-                    createdAt: 1_723_456_900,
+                payload: .event(
                     kind: 1,
                     tags: [],
-                    content: "reattach by correlation"
+                    content: "reattach by correlation",
+                    createdAt: 1_723_456_900
                 ),
                 durability: .durable,
                 routing: .auto,
@@ -148,12 +145,11 @@ final class CorrelationTests: XCTestCase {
         do {
             _ = try await engine.publish(
                 WriteIntent(
-                    payload: .unsigned(
-                        pubkey: author,
-                        createdAt: 1_723_457_000,
+                    payload: .event(
                         kind: 1,
                         tags: [],
-                        content: "malformed correlation token"
+                        content: "malformed correlation token",
+                        createdAt: 1_723_457_000
                     ),
                     durability: .durable,
                     routing: .auto,
