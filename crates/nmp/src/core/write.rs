@@ -235,6 +235,148 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
+    /// Where one open obligation is stuck, if it is stuck at all (#756/#968).
+    ///
+    /// Read entirely off the reducer state that already owns this intent's
+    /// canonical facts — no store read, no second retry ledger, and no
+    /// re-derivation of anything the write plane did not already commit. The
+    /// three stages are asked in lifecycle order, because a write with no
+    /// signature has no route to be missing and a write with no route has no
+    /// destination to be unreachable.
+    fn stalled_write_stage(&self, pending: &PendingWrite) -> Option<(StalledWriteStage, String)> {
+        // Ephemeral owns no durable obligation: it is never retried, never
+        // recovered, and nothing about it outlives the process, so it cannot
+        // be quietly stuck for anyone to find later.
+        pending.intent_id?;
+
+        if pending.event_id.is_none() && !pending.already_signed {
+            // A signer request still outstanding is work in progress, not a
+            // stall. Only the durable `AwaitingCapability` park -- request
+            // answered "no capability", nothing left running -- is stuck, and
+            // it names the FROZEN author rather than whoever is active now.
+            if pending.sign_request_in_flight {
+                return None;
+            }
+            return Some((
+                StalledWriteStage::Unsignable,
+                format!(
+                    "no signer is registered for {}",
+                    pending.signing_pubkey.to_hex()
+                ),
+            ));
+        }
+
+        if pending.durable_routes.is_empty() && pending.route_blocked_relays.is_empty() {
+            // Parked with nothing resolved. `route_detail` is the exact
+            // reason the receipt was parked with; its absence means routing
+            // has not answered yet, which is not a stall.
+            return pending
+                .route_detail
+                .clone()
+                .map(|detail| (StalledWriteStage::Unroutable, detail));
+        }
+
+        // Destinations exist. Stuck iff nothing is in flight and not one of
+        // them is a relay this process currently holds a session to -- the
+        // `wss://non-existent.example` case, and every ordinary outage.
+        if !pending.pending_relays.is_empty() {
+            return None;
+        }
+        let access = AccessContext::Nip42(pending.signing_pubkey);
+        let live: BTreeSet<&RelayUrl> = pending
+            .lane_projection
+            .required_relays()
+            .chain(&pending.unstarted_relays)
+            .chain(&pending.route_blocked_relays)
+            .collect();
+        if live.is_empty() {
+            return None;
+        }
+        if live.iter().any(|relay| {
+            self.connected_relays
+                .contains(&RelaySessionKey::new((*relay).clone(), access))
+        }) {
+            return None;
+        }
+        let named = live
+            .iter()
+            .map(|relay| relay.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some((
+            StalledWriteStage::Undeliverable,
+            format!("no destination is reachable: {named}"),
+        ))
+    }
+
+    /// Which obligations are stalled, and at which stage — the allocation-
+    /// light half of [`Self::stalled_write_stage`], used to decide whether a
+    /// turn changed anything an observer of this section would notice.
+    ///
+    /// Deliberately not the detail strings or the descriptors: this runs on
+    /// every write-plane turn, and a change detector that formatted a
+    /// sentence and hashed two ids per obligation to decide whether to do
+    /// nothing would cost more than the snapshot it was avoiding.
+    pub(super) fn stalled_write_census(&self) -> Vec<(ReceiptId, StalledWriteStage)> {
+        let mut census: Vec<(ReceiptId, StalledWriteStage)> = self
+            .pending
+            .iter()
+            .filter_map(|(id, pending)| {
+                self.stalled_write_stage(pending)
+                    .map(|(stage, _)| (*id, stage))
+            })
+            .collect();
+        census.sort();
+        census
+    }
+
+    /// The bounded stalled-write section of [`Self::diagnostics_snapshot`].
+    ///
+    /// One pass over the reducer's own open obligations produces both the
+    /// exact totals and the detail window, so a row outside the window still
+    /// counts — a bound on bytes is never allowed to become a lie about how
+    /// much is stuck. Ordering is (stage, acceptance instant, descriptor):
+    /// a documented display order, independent of map iteration and of
+    /// anything the scheduler reads.
+    pub(super) fn stalled_write_projection(&self) -> (Vec<StalledWrite>, StalledWriteTotals) {
+        let mut totals = StalledWriteTotals {
+            detail_limit: u64::try_from(STALLED_WRITE_DETAIL_LIMIT).unwrap_or(u64::MAX),
+            ..StalledWriteTotals::default()
+        };
+        let mut rows = Vec::new();
+        for pending in self.pending.values() {
+            let Some((stage, detail)) = self.stalled_write_stage(pending) else {
+                continue;
+            };
+            let counter = match stage {
+                StalledWriteStage::Unroutable => &mut totals.unroutable,
+                StalledWriteStage::Unsignable => &mut totals.unsignable,
+                StalledWriteStage::Undeliverable => &mut totals.undeliverable,
+            };
+            *counter = counter.saturating_add(1);
+            let intent_id = pending
+                .intent_id
+                .expect("stalled_write_stage refuses an intent-less obligation");
+            rows.push(StalledWrite {
+                id: stalled_write_id(intent_id.0, &pending.frozen.id),
+                stage,
+                detail,
+                stalled_since: pending.accepted_at,
+            });
+        }
+        rows.sort_by(|a, b| {
+            a.stage
+                .cmp(&b.stage)
+                .then(a.stalled_since.cmp(&b.stalled_since))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let total = u64::try_from(rows.len()).unwrap_or(u64::MAX);
+        rows.truncate(STALLED_WRITE_DETAIL_LIMIT);
+        totals.omitted_details =
+            total.saturating_sub(u64::try_from(rows.len()).unwrap_or(u64::MAX));
+        (rows, totals)
+    }
+
     pub(super) fn emit_write_status(
         &mut self,
         id: ReceiptId,
@@ -928,6 +1070,11 @@ impl<S: EventStore> EngineCore<S> {
                     routing,
                     routing_valid,
                     intent_id: Some(intent.intent_id),
+                    // The DURABLE acceptance instant, replayed verbatim. It is
+                    // what makes a stalled-write projection identical either
+                    // side of a restart: nothing here is a process-local
+                    // stopwatch that a reopen would reset to zero.
+                    accepted_at: intent.accepted_at,
                     signing_pubkey: intent.expected_pubkey,
                     frozen: intent.frozen.clone(),
                     already_signed,
@@ -1946,6 +2093,10 @@ impl<S: EventStore> EngineCore<S> {
                 routing,
                 routing_valid: true,
                 intent_id,
+                // Exactly the value handed to `AcceptWrite::accepted_at`
+                // above, so the in-process projection and the one a later
+                // boot rebuilds from `RecoveredIntent` are the same instant.
+                accepted_at: self.clock,
                 signing_pubkey,
                 frozen: frozen.clone(),
                 already_signed,

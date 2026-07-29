@@ -1108,6 +1108,8 @@ mod persistence_failures;
 mod real_corpus_benchmark;
 #[path = "route_lifecycle.rs"]
 mod route_lifecycle;
+#[path = "stalled_writes.rs"]
+mod stalled_writes;
 #[path = "state_maintenance.rs"]
 mod state_maintenance;
 #[path = "subscription_budget.rs"]

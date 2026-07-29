@@ -70,6 +70,48 @@ async fn receipt_rejected_by(w: &mut NmpWorld, relay_name: String) {
     );
 }
 
+/// The refusal, attributed to the relay that made it. Its sibling below
+/// asserts the WORDS; this one asserts only that this destination -- and not
+/// some other -- is the one that said no.
+#[then(regex = r#"^the receipt reports "([^"]+)" rejected the note$"#)]
+async fn receipt_reports_relay_rejected(w: &mut NmpWorld, relay_name: String) {
+    let relay_url = w.relay_url(&relay_name);
+    let rejected = w.receipt_eventually(|seen| {
+        seen.iter()
+            .any(|s| matches!(s, WriteStatus::Rejected(url, _) if *url == relay_url))
+    });
+    assert!(
+        rejected,
+        "expected the receipt to report {relay_name:?} as the destination that refused; saw {:?}",
+        w.receipt_statuses()
+    );
+}
+
+/// Verbatim, prefix included. "blocked: not admitted" is actionable and
+/// "failed" is not, and NMP has no business paraphrasing a message it did
+/// not write.
+#[then(regex = r#"^the reason is the relay's own words "([^"]+)"$"#)]
+async fn reason_is_the_relays_own_words(w: &mut NmpWorld, message: String) {
+    nothing_to_observe!(
+        w.receipt_eventually(|seen| seen
+            .iter()
+            .any(|s| matches!(s, WriteStatus::Rejected(_, _)))),
+        "no destination refused this write at all, so there are no words to have been kept"
+    );
+    let statuses = w.receipt_statuses();
+    let said: Vec<&String> = statuses
+        .iter()
+        .filter_map(|s| match s {
+            WriteStatus::Rejected(_, reason) => Some(reason),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        said.iter().any(|reason| reason.as_str() == message),
+        "expected the relay's own sentence {message:?} to reach the receipt unchanged; saw {said:?}"
+    );
+}
+
 // ---- one publish retiring another ---------------------------------------
 //
 // These are the only steps that name a publish by ORDER instead of by

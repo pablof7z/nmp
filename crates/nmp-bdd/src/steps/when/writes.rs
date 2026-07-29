@@ -136,12 +136,23 @@ async fn publish_signed_naming_identity(
 
 // ---- time passing --------------------------------------------------------
 
-/// `And 30 days pass with nothing learned` -- on the STATED clock, and
-/// delivered: the engine acts on the new instant rather than merely being
-/// told about it. See `world::clock`.
-#[when(regex = r#"^(\d+) days? pass(?: with nothing learned)?$"#)]
-async fn days_pass(w: &mut NmpWorld, days: u64) {
-    w.advance_clock(Duration::from_secs(days * 86_400)).await;
+/// `And 30 days pass with nothing learned`, `When 40 seconds pass` -- on the
+/// STATED clock, and delivered: the engine acts on the new instant rather
+/// than merely being told about it. See `world::clock`.
+///
+/// Both units in one step because `features/diagnostics/stalled-writes.feature`
+/// asks the SAME question at both scales on purpose -- forty seconds is
+/// discovery in flight and forty days is a recipient who never published a
+/// relay list, and NMP is required to treat them identically. Two steps could
+/// drift into treating them differently.
+#[when(regex = r#"^(\d+) (seconds?|days?) pass(?: with nothing learned)?$"#)]
+async fn time_passes(w: &mut NmpWorld, amount: u64, unit: String) {
+    let seconds = match unit.trim_end_matches('s') {
+        "second" => amount,
+        "day" => amount * 86_400,
+        other => panic!("nmp-bdd: unsupported elapsed unit {other:?}"),
+    };
+    w.advance_clock(Duration::from_secs(seconds)).await;
 }
 
 // ---- driving the engine on purpose --------------------------------------

@@ -21,8 +21,9 @@ use nmp::{
     IdentityField as GIdentityField, IndexedTagName, Lane, RelayDiagnosticsSnapshot,
     RequestRowsError, Row, RowDelta, Selector as GSelector, SetAlgebra as GSetAlgebra,
     SetOp as GSetOp, ShortfallFact, SourceAuthority as GSourceAuthority, SourceEvidence,
-    SourceStatus, Window, WindowLoad, WriteIntent as GWriteIntent, WritePayload as GWritePayload,
-    WriteRouting as GWriteRouting, WriteStatus as GWriteStatus,
+    SourceStatus, StalledWrite, StalledWriteStage, StalledWriteTotals, Window, WindowLoad,
+    WriteIntent as GWriteIntent, WritePayload as GWritePayload, WriteRouting as GWriteRouting,
+    WriteStatus as GWriteStatus,
 };
 use nostr::secp256k1::schnorr::Signature;
 use nostr::{Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayUrl, Tag, Timestamp};
@@ -35,8 +36,8 @@ use crate::types::{
     FfiLaneCount, FfiRelayDiagnostics, FfiRelayInformationErrorKind, FfiRow, FfiRowDelta,
     FfiSelector, FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSignEventFailure,
     FfiSignEventRequest, FfiSignedEvent, FfiSourceAuthority, FfiSourceEvidence, FfiSourceStatus,
-    FfiWindow, FfiWindowContents, FfiWindowLoad, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
-    FfiWriteStatus,
+    FfiStalledWrite, FfiStalledWriteStage, FfiStalledWriteTotals, FfiWindow, FfiWindowContents,
+    FfiWindowLoad, FfiWriteIntent, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
 };
 
 /// Every typed failure crossing this boundary -- parse, lifecycle, storage,
@@ -1418,6 +1419,33 @@ fn auth_diagnostics_to_ffi(snapshot: AuthDiagnosticsSnapshot) -> FfiAuthDiagnost
     }
 }
 
+fn stalled_write_stage_to_ffi(stage: StalledWriteStage) -> FfiStalledWriteStage {
+    match stage {
+        StalledWriteStage::Unroutable => FfiStalledWriteStage::Unroutable,
+        StalledWriteStage::Unsignable => FfiStalledWriteStage::Unsignable,
+        StalledWriteStage::Undeliverable => FfiStalledWriteStage::Undeliverable,
+    }
+}
+
+fn stalled_write_to_ffi(write: StalledWrite) -> FfiStalledWrite {
+    FfiStalledWrite {
+        id: write.id,
+        stage: stalled_write_stage_to_ffi(write.stage),
+        detail: write.detail,
+        stalled_since: write.stalled_since.as_secs(),
+    }
+}
+
+fn stalled_write_totals_to_ffi(totals: StalledWriteTotals) -> FfiStalledWriteTotals {
+    FfiStalledWriteTotals {
+        unroutable: totals.unroutable,
+        unsignable: totals.unsignable,
+        undeliverable: totals.undeliverable,
+        omitted_details: totals.omitted_details,
+        detail_limit: totals.detail_limit,
+    }
+}
+
 /// `nmp::DiagnosticsSnapshot -> FfiDiagnosticsSnapshot` (M5 plan §1.2 step
 /// 5) -- the engine-global diagnostics projection, rendered whole for the
 /// FFI boundary. Every number/string here is copied straight off the
@@ -1439,6 +1467,12 @@ pub fn diagnostics_snapshot_to_ffi(s: DiagnosticsSnapshot) -> FfiDiagnosticsSnap
         discovered_private_relays_rejected: s.discovered_private_relays_rejected,
         sessions_rejected_over_cap: s.sessions_rejected_over_cap,
         transport_degraded: s.transport_degraded,
+        stalled_writes: s
+            .stalled_writes
+            .into_iter()
+            .map(stalled_write_to_ffi)
+            .collect(),
+        stalled_write_totals: stalled_write_totals_to_ffi(s.stalled_write_totals),
     }
 }
 
@@ -2088,6 +2122,33 @@ mod tests {
             sessions_refused_by_subscription_budget: 0,
             store_degraded: None,
             transport_degraded: Some("signature verification worker unavailable".to_string()),
+            stalled_writes: vec![
+                StalledWrite {
+                    id: "unroutable-descriptor".to_string(),
+                    stage: StalledWriteStage::Unroutable,
+                    detail: "no DM relay list known yet".to_string(),
+                    stalled_since: Timestamp::from(1_700_000_001u64),
+                },
+                StalledWrite {
+                    id: "unsignable-descriptor".to_string(),
+                    stage: StalledWriteStage::Unsignable,
+                    detail: "no signer is registered".to_string(),
+                    stalled_since: Timestamp::from(1_700_000_002u64),
+                },
+                StalledWrite {
+                    id: "undeliverable-descriptor".to_string(),
+                    stage: StalledWriteStage::Undeliverable,
+                    detail: "no destination is reachable: wss://nowhere.example".to_string(),
+                    stalled_since: Timestamp::from(u64::from(u32::MAX) + 1),
+                },
+            ],
+            stalled_write_totals: StalledWriteTotals {
+                unroutable: 1,
+                unsignable: 2,
+                undeliverable: 3,
+                omitted_details: 4,
+                detail_limit: u64::MAX,
+            },
         });
 
         assert_eq!(ffi.relays[0].relay, relay.to_string());
@@ -2100,6 +2161,45 @@ mod tests {
         );
         assert_eq!(ffi.relays[0].coverage[1].coverage, None);
         assert_eq!(ffi.relays[0].nip77_handoff, "reconciling");
+        // Every stalled-write field crosses whole, in order, with the exact
+        // stage each row was built with and a `u64` instant that survives the
+        // 32-bit boundary a narrower carrier would have silently truncated.
+        assert_eq!(
+            ffi.stalled_writes
+                .iter()
+                .map(|w| (w.id.as_str(), w.stage, w.detail.as_str(), w.stalled_since))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "unroutable-descriptor",
+                    FfiStalledWriteStage::Unroutable,
+                    "no DM relay list known yet",
+                    1_700_000_001u64
+                ),
+                (
+                    "unsignable-descriptor",
+                    FfiStalledWriteStage::Unsignable,
+                    "no signer is registered",
+                    1_700_000_002u64
+                ),
+                (
+                    "undeliverable-descriptor",
+                    FfiStalledWriteStage::Undeliverable,
+                    "no destination is reachable: wss://nowhere.example",
+                    u64::from(u32::MAX) + 1
+                ),
+            ]
+        );
+        assert_eq!(
+            ffi.stalled_write_totals,
+            FfiStalledWriteTotals {
+                unroutable: 1,
+                unsignable: 2,
+                undeliverable: 3,
+                omitted_details: 4,
+                detail_limit: u64::MAX,
+            }
+        );
         assert_eq!(
             ffi.auth_sessions
                 .iter()

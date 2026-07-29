@@ -142,6 +142,96 @@ public struct AuthDiagnostics: Sendable, Hashable {
     }
 }
 
+/// Where a durable write obligation is stuck. Three stages, kept apart
+/// because an app acts on each differently and because one rolled-up
+/// "stuck" tells nobody anything.
+public enum StalledWriteStage: Sendable, Hashable {
+    /// No destination could be computed.
+    case unroutable
+    /// No signer answers for the author this write was FROZEN to -- never
+    /// the mutable active account.
+    case unsignable
+    /// Destinations exist and none of them is working.
+    case undeliverable
+
+    init(_ ffi: FfiStalledWriteStage) {
+        switch ffi {
+        case .unroutable: self = .unroutable
+        case .unsignable: self = .unsignable
+        case .undeliverable: self = .undeliverable
+        }
+    }
+}
+
+/// One durable write obligation that cannot currently progress. Read-only
+/// evidence: nothing here cancels, retries, prunes or acknowledges a write.
+public struct StalledWrite: Sendable, Identifiable, Hashable {
+    /// A stable, restart-reproducible descriptor of this obligation.
+    /// Deliberately NOT a receipt id and not parseable back into one: it
+    /// exists to tell two rows apart and to recognise the same row across
+    /// snapshots, never to reattach or enumerate receipts.
+    public let id: String
+    public let stage: StalledWriteStage
+    /// What this write is waiting for. For `.unroutable` it is the
+    /// receipt's OWN park reason, verbatim, so an operator holding both
+    /// never has to decide whether two differently-worded sentences are the
+    /// same fact. Never empty.
+    public let detail: String
+    /// When the obligation was ACCEPTED (Unix seconds), replayed verbatim
+    /// across restarts. The age is `now - stalledSince`; NMP reports the
+    /// instant rather than a duration because a duration baked into a
+    /// snapshot goes stale exactly while nothing is happening.
+    ///
+    /// Known imprecision: this is when the OBLIGATION was accepted, not when
+    /// the stall began. The two coincide for `.unroutable` and
+    /// `.unsignable`; for `.undeliverable` it is EARLIER, so subtracting
+    /// over-reports how long delivery has been failing. The park instant has
+    /// no durable home yet, and an in-memory one would reset on restart.
+    public let stalledSince: UInt64
+
+    init(_ ffi: FfiStalledWrite) {
+        id = ffi.id
+        stage = StalledWriteStage(ffi.stage)
+        detail = ffi.detail
+        stalledSince = ffi.stalledSince
+    }
+}
+
+/// The exact census behind `DiagnosticsSnapshot.stalledWrites`. Totals count
+/// every stalled obligation, including the ones no detail row was emitted
+/// for: a bound on memory is never a lie about how much is stuck.
+public struct StalledWriteTotals: Sendable, Hashable {
+    public let unroutable: UInt64
+    public let unsignable: UInt64
+    public let undeliverable: UInt64
+    /// Stalled obligations with no detail row in this snapshot.
+    public let omittedDetails: UInt64
+    /// The detail-window bound this snapshot was built under.
+    public let detailLimit: UInt64
+
+    init(_ ffi: FfiStalledWriteTotals) {
+        unroutable = ffi.unroutable
+        unsignable = ffi.unsignable
+        undeliverable = ffi.undeliverable
+        omittedDetails = ffi.omittedDetails
+        detailLimit = ffi.detailLimit
+    }
+
+    public init(
+        unroutable: UInt64 = 0,
+        unsignable: UInt64 = 0,
+        undeliverable: UInt64 = 0,
+        omittedDetails: UInt64 = 0,
+        detailLimit: UInt64 = 0
+    ) {
+        self.unroutable = unroutable
+        self.unsignable = unsignable
+        self.undeliverable = undeliverable
+        self.omittedDetails = omittedDetails
+        self.detailLimit = detailLimit
+    }
+}
+
 /// The engine-global diagnostics snapshot (M5 plan §1.1) -- one snapshot
 /// covers every currently-planned relay. Delivered by `NMPDiagnostics`
 /// (`observeDiagnostics()`), pushed reactively, never polled.
@@ -151,6 +241,14 @@ public struct DiagnosticsSnapshot: Sendable {
     public let uncoveredAuthorCount: UInt32
     public let droppedMergeRules: [String]
     public let transportDegraded: String?
+    /// Every durable write obligation that cannot progress, bounded to
+    /// `stalledWriteTotals.detailLimit` rows in a deterministic display
+    /// order. A receipt answers "what happened to THIS write", which needs
+    /// someone still holding it; this answers "is anything quietly stuck"
+    /// for an app holding nothing. Reading it changes nothing.
+    public let stalledWrites: [StalledWrite]
+    /// Exact counts behind that window.
+    public let stalledWriteTotals: StalledWriteTotals
 
     init(_ ffi: FfiDiagnosticsSnapshot) {
         relays = ffi.relays.map(RelayDiagnostics.init)
@@ -158,6 +256,8 @@ public struct DiagnosticsSnapshot: Sendable {
         uncoveredAuthorCount = ffi.uncoveredAuthorCount
         droppedMergeRules = ffi.droppedMergeRules
         transportDegraded = ffi.transportDegraded
+        stalledWrites = ffi.stalledWrites.map(StalledWrite.init)
+        stalledWriteTotals = StalledWriteTotals(ffi.stalledWriteTotals)
     }
 
     /// A default empty snapshot -- used as the initial value of
@@ -168,12 +268,16 @@ public struct DiagnosticsSnapshot: Sendable {
         authSessions: [AuthDiagnostics] = [],
         uncoveredAuthorCount: UInt32 = 0,
         droppedMergeRules: [String] = [],
-        transportDegraded: String? = nil
+        transportDegraded: String? = nil,
+        stalledWrites: [StalledWrite] = [],
+        stalledWriteTotals: StalledWriteTotals = StalledWriteTotals()
     ) {
         self.relays = relays
         self.authSessions = authSessions
         self.uncoveredAuthorCount = uncoveredAuthorCount
         self.droppedMergeRules = droppedMergeRules
         self.transportDegraded = transportDegraded
+        self.stalledWrites = stalledWrites
+        self.stalledWriteTotals = stalledWriteTotals
     }
 }

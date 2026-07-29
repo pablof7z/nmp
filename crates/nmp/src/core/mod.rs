@@ -231,9 +231,10 @@ const NIP65_RELAY_LIST_KIND: u16 = 10_002;
 
 pub use admission::RelayAdmissionPolicy;
 use attribution::{AttributionSendId, AttributionState};
+use diagnostics::{stalled_write_id, STALLED_WRITE_DETAIL_LIMIT};
 pub use diagnostics::{
     AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, DiagnosticsSnapshot, FilterCoverageEntry,
-    RelayDiagnosticsSnapshot,
+    RelayDiagnosticsSnapshot, StalledWrite, StalledWriteStage, StalledWriteTotals,
 };
 pub use evidence::{AcquisitionEvidence, AuthPhase, ShortfallFact, SourceEvidence, SourceStatus};
 pub use history::{HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, WindowLoad};
@@ -1045,6 +1046,14 @@ struct PendingWrite {
     /// Store-allocated durable intent id. `None` only for Ephemeral's
     /// receipt-only path, which never owns a pending row.
     intent_id: Option<IntentId>,
+    /// The instant this obligation was accepted -- the exact value written
+    /// to `AcceptWrite::accepted_at` and replayed by
+    /// `RecoveredIntent::accepted_at`, so it is one durable fact rather than
+    /// a process-local stopwatch. `stalled_writes` projects it verbatim;
+    /// nothing here ever turns it into a duration, because a duration frozen
+    /// into a snapshot goes stale the moment the snapshot stops being
+    /// re-emitted while the instant never does.
+    accepted_at: Timestamp,
     /// Signer identity selected and frozen at acceptance. Later active-
     /// account changes cannot redirect this obligation.
     signing_pubkey: PublicKey,
@@ -1271,6 +1280,15 @@ pub struct EngineCore<S: EventStore> {
     /// status; `event_to_receipt` lets an inbound `OK` frame (keyed by
     /// `EventId` on the wire) find its receipt.
     pending: HashMap<ReceiptId, PendingWrite>,
+    /// The stalled-obligation census as of the last diagnostics snapshot
+    /// this reducer PUSHED for a write-plane reason.
+    ///
+    /// A change detector for an observer, never a ledger: it holds no retry
+    /// state, no history, and no fact that is not re-derivable from
+    /// `pending` in one pass. Its only job is to keep an ordinary healthy
+    /// publish from rebuilding an engine-global snapshot at every beat of a
+    /// lifecycle in which nothing was ever stuck.
+    last_stalled_write_census: Vec<(ReceiptId, StalledWriteStage)>,
     event_to_receipts: HashMap<EventId, BTreeSet<ReceiptId>>,
     /// O(1) reverse index of `pending`'s own `intent_id` field (epic #507
     /// finding E5): `receipt_for_intent` used to be a full linear scan of
@@ -1555,6 +1573,7 @@ impl<S: EventStore> EngineCore<S> {
             active_pubkey: None,
             next_unaccepted_receipt: Some(u64::MAX),
             pending: HashMap::new(),
+            last_stalled_write_census: Vec::new(),
             event_to_receipts: HashMap::new(),
             intent_receipts: HashMap::new(),
             receipts_by_lane_relay: HashMap::new(),
@@ -1858,6 +1877,9 @@ impl<S: EventStore> EngineCore<S> {
             );
         }
         snapshot.auth_sessions = auth_sessions.into_values().collect();
+        let (stalled_writes, stalled_write_totals) = self.stalled_write_projection();
+        snapshot.stalled_writes = stalled_writes;
+        snapshot.stalled_write_totals = stalled_write_totals;
         for relay in &mut snapshot.relays {
             // NIP-11 advertisement and the NIP-77 behavioral probe are both
             // PUBLIC-session evidence (#8): the one-shot HTTP document and
@@ -2149,6 +2171,30 @@ impl<S: EventStore> EngineCore<S> {
             }
             EngineMsg::Tick(now) => self.tick(now),
         };
+        // A write-plane transition can start or end a STALL, and the
+        // stalled-write section lives on this same snapshot (#756). Without
+        // this, that section would only ever be pushed by unrelated
+        // read-plane traffic: an app that published one obligation into an
+        // outage and then sat still would be told nothing was stuck, which
+        // is exactly the failure the section exists to prevent.
+        //
+        // Gated on the CENSUS changing rather than on the turn having
+        // touched a receipt: an ordinary healthy publish moves through
+        // accepted/signed/routed/sent/acked without ever being stuck, and
+        // pushing a fresh engine-global snapshot at each of those beats
+        // would make every ACK cost a full diagnostics rebuild for no new
+        // fact. The census is cheap by construction (no formatted detail, no
+        // descriptor) precisely so this guard is cheaper than what it skips.
+        if effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitReceipt(..)))
+        {
+            let census = self.stalled_write_census();
+            if census != self.last_stalled_write_census {
+                self.last_stalled_write_census = census;
+                effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+            }
+        }
         if self.prune_unowned_relay_state() {
             effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
         }

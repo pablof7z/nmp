@@ -178,6 +178,23 @@ async fn publish_is_accepted(w: &mut NmpWorld) {
     );
 }
 
+/// The destination is read off `Routed`, which is the routing answer, never
+/// off a delivery fact: "we know exactly where this goes" and "it has gone
+/// there" are separate axes, and this step owns only the first.
+#[then(regex = r#"^the write was routed to "([^"]+)"$"#)]
+async fn write_was_routed_to(w: &mut NmpWorld, url: String) {
+    let url = nmp_router::RelayUrl::parse(&url).expect("nmp-bdd: a scenario names a real URL");
+    let routed = w.receipt_eventually(|seen| {
+        seen.iter()
+            .any(|s| matches!(s, WriteStatus::Routed { relays, .. } if relays.contains(&url)))
+    });
+    assert!(
+        routed,
+        "expected the write to be routed to {url}; saw {:?}",
+        w.receipt_statuses()
+    );
+}
+
 #[then(regex = r#"^the receipt does not report a failure$"#)]
 async fn receipt_reports_no_failure(w: &mut NmpWorld) {
     not_reported_failed(w).await;

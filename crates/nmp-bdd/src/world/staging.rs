@@ -101,8 +101,15 @@ impl NmpWorld {
         }
     }
 
-    pub fn set_reject_writes(&mut self, relay: &str) {
-        self.relay_config_mut(relay).reject_writes = true;
+    /// `Given relay <name> rejects every event` -- with the relay's OWN
+    /// words when the scenario wrote them, because "blocked: not admitted"
+    /// is actionable and a generic refusal is not.
+    pub fn set_reject_writes(&mut self, relay: &str, message: Option<&str>) {
+        self.relay_config_mut(relay).reject_writes = Some(
+            message
+                .unwrap_or("blocked: nmp-bdd scripted relay is configured to reject every event")
+                .to_string(),
+        );
     }
 
     pub fn set_reject_queries(&mut self, relay: &str) {
