@@ -2667,6 +2667,54 @@ mod tests {
     /// A real signed event (`EventBuilder::sign_with_keys`), rendered field-
     /// for-field into a `FfiWritePayload::Signed` the same way an app would
     /// after receiving one from an external signer provider.
+    /// Reachability Gate for [`FfiError::ReplaceableEditHasNoWireForm`],
+    /// and the falsifier for #951's payload axis: the projection door is
+    /// TOTAL, so the one payload shape with no wire form comes back as a
+    /// value instead of panicking on an exported path. A CAS-guarded
+    /// replacement crosses this boundary only inside the semantic method
+    /// that owns its precondition.
+    #[test]
+    fn a_replaceable_edit_refuses_as_a_value_rather_than_panicking() {
+        let edit = GWritePayload::ReplaceableEdit {
+            builder: GEventBuilder::new(nostr::Kind::ContactList).content("guarded"),
+            expected_base: None,
+        };
+        assert_eq!(
+            write_payload_to_ffi(edit),
+            Err(FfiError::ReplaceableEditHasNoWireForm)
+        );
+    }
+
+    /// The other side of that totality: every payload that DOES have a wire
+    /// form projects faithfully, so a composer changing which one it mints
+    /// crosses intact rather than tripping a closed-contract assertion.
+    #[test]
+    fn every_payload_with_a_wire_form_projects_faithfully() {
+        let builder = GEventBuilder::new(nostr::Kind::TextNote)
+            .content("hello")
+            .created_at(Timestamp::from(42u64));
+        assert_eq!(
+            write_payload_to_ffi(GWritePayload::Event(builder)),
+            Ok(FfiWritePayload::Event {
+                builder: FfiEventBuilder {
+                    kind: 1,
+                    tags: Vec::new(),
+                    content: "hello".to_string(),
+                    created_at: Some(42),
+                },
+            })
+        );
+
+        let (event, _) = signed_write_intent();
+        let projected = write_payload_to_ffi(GWritePayload::Signed(event.clone()))
+            .expect("a signed event has a wire form");
+        let FfiWritePayload::Signed { id, sig, .. } = projected else {
+            panic!("a signed payload must project as Signed")
+        };
+        assert_eq!(id, event.id.to_hex());
+        assert_eq!(sig, event.sig.to_string());
+    }
+
     fn signed_write_intent() -> (nostr::Event, FfiWriteIntent) {
         let keys = nostr::Keys::generate();
         let event = nostr::EventBuilder::new(nostr::Kind::TextNote, "presigned")
