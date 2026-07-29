@@ -251,7 +251,7 @@ class NIP22Test {
                 )
                 assertEquals("golden fixture content", payload.content)
                 assertEquals(Durability.Durable, intent.durability)
-                assertEquals(WriteRouting.AuthorOutbox, intent.routing)
+                assertEquals(WriteRouting.Auto, intent.routing)
                 assertEquals(null, intent.identityOverride)
                 assertEquals(null, intent.correlation)
 

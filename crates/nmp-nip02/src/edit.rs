@@ -102,7 +102,7 @@ pub fn compose_follow_change(
             expected_base: Some(base.id),
         },
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     })))

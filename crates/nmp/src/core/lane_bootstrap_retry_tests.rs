@@ -41,9 +41,7 @@ fn publish_narrow<S: EventStore>(
             format!("bootstrap retry {created_at}"),
         )),
         durability: Durability::Durable,
-        routing: WriteRouting::PrivateNarrow(PrivateRoute {
-            relays: NarrowOnly::new(relays.to_vec()),
-        }),
+        routing: WriteRouting::Explicit(Vec::from_iter(relays.to_vec())),
         identity_override: None,
         correlation: None,
     }));

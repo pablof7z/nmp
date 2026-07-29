@@ -25,26 +25,34 @@ public enum Durability: Sendable, Hashable {
     }
 }
 
-/// Where a write is routed. There is deliberately no `.privateNarrow` case
-/// (#22/#52): a private/narrow route must come from a trusted protocol
-/// module's own resolved logic, never a raw relay-URL string an app hands
-/// across this boundary with no way to prove it is actually private --
-/// exactly the "route escape hatch" #22's canonical design rules out. See
-/// `FfiWriteRouting`'s doc. There is also deliberately no raw-recipient
-/// route (#839): recipient meaning must be fixed by the protocol operation
-/// that owns the complete event body.
+/// Where a write is routed. The whole vocabulary is two words: `.auto`
+/// ("figure out how to route whatever I'm publishing") and `.explicit`
+/// ("use these exact relays and that is that"). There is no third case --
+/// no "outbox", no NIP name, no strategy label -- because which strategy
+/// claims a kind is NMP's own business, decided at send time.
+///
+/// `.explicit` is a general capability, not a protocol-module privilege: an
+/// app offering "publish this event to relay: [user input]", a wiki module
+/// publishing to the user's preferred wiki relays, and a user archiving
+/// someone else's signed note to their own relay are all the same
+/// primitive. It executes verbatim -- the relay directory is never
+/// consulted, and nothing learned later widens it -- and an empty `relays`
+/// is refused at the door, never quietly downgraded to `.auto`.
 public enum WriteRouting: Sendable, Hashable {
-    case authorOutbox
+    case auto
+    case explicit(relays: [String])
 
     func toFfi() -> FfiWriteRouting {
         switch self {
-        case .authorOutbox: return .authorOutbox
+        case .auto: return .auto
+        case let .explicit(relays): return .explicit(relays: relays)
         }
     }
 
     init(_ ffi: FfiWriteRouting) {
         switch ffi {
-        case .authorOutbox: self = .authorOutbox
+        case .auto: self = .auto
+        case let .explicit(relays): self = .explicit(relays: relays)
         }
     }
 }

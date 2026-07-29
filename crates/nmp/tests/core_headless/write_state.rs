@@ -17,7 +17,7 @@ fn durable_pending_row_is_visible_before_signer_and_tamper_compensates() {
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(unsigned(&a, 10, "accepted body")),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -67,7 +67,7 @@ fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
     core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(older.clone()),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -83,7 +83,7 @@ fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(newer_unsigned),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -123,7 +123,7 @@ fn cancellation_outcomes_are_typed_idempotent_and_late_signers_are_inert() {
     let published = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(unsigned(&a, 10, "cancel typed")),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -156,7 +156,7 @@ fn cancellation_outcomes_are_typed_idempotent_and_late_signers_are_inert() {
     let signed_publish = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(signed_event.clone()),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -188,7 +188,7 @@ fn signer_unavailable_keeps_accepted_row_visible() {
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(unsigned(&a, 1, "awaiting signer")),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -227,7 +227,7 @@ fn identity_override_accepts_secondary_author_and_pins_it_through_signing() {
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(draft.clone()),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: Some(b.public_key()),
         correlation: None,
     }));
@@ -259,7 +259,7 @@ fn identity_override_accepts_secondary_author_and_pins_it_through_signing() {
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(unsigned(&a, 48, "default path still roots on a")),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -282,7 +282,7 @@ fn default_publish_without_override_still_fails_closed_for_non_active_author() {
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(unsigned(&b, 1, "no consent given")),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -301,7 +301,7 @@ fn default_publish_without_override_still_fails_closed_for_non_active_author() {
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(unsigned(&b, 2, "logged out, no override")),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -331,7 +331,7 @@ fn identity_override_author_mismatch_fails_closed_for_unsigned_and_signed() {
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(unsigned(&a, 1, "authored by a")),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: Some(b.public_key()),
         correlation: None,
     }));
@@ -353,7 +353,7 @@ fn identity_override_author_mismatch_fails_closed_for_unsigned_and_signed() {
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(signed),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: Some(b.public_key()),
         correlation: None,
     }));
@@ -384,7 +384,7 @@ fn ephemeral_is_receipt_only_and_never_creates_a_pending_row() {
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(unsigned(&a, 1, "ephemeral")),
         durability: Durability::Ephemeral,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -419,7 +419,7 @@ fn relay_rejection_after_promotion_does_not_retract_the_signed_row() {
     core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(signed.clone()),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -465,7 +465,7 @@ fn cancelling_displaced_pending_then_newest_never_resurrects_cancelled_row() {
     core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(base.clone()),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -481,7 +481,7 @@ fn cancelling_displaced_pending_then_newest_never_resurrects_cancelled_row() {
     let middle_effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(middle),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -498,7 +498,7 @@ fn cancelling_displaced_pending_then_newest_never_resurrects_cancelled_row() {
     let newest_effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(newest),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -539,7 +539,7 @@ fn expired_local_acceptance_is_first_and_only_failed_with_no_side_effects() {
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(expired),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -561,7 +561,7 @@ fn exact_duplicate_intents_get_distinct_store_ids_and_one_promotion_advances_bot
     let first = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(template.clone()),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -569,7 +569,7 @@ fn exact_duplicate_intents_get_distinct_store_ids_and_one_promotion_advances_bot
     let second = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(template),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -626,9 +626,7 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
     let first = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(template.clone()),
         durability: Durability::Durable,
-        routing: WriteRouting::PrivateNarrow(PrivateRoute {
-            relays: NarrowOnly::new([ack.clone(), drop_relay.clone()]),
-        }),
+        routing: WriteRouting::Explicit(vec![ack.clone(), drop_relay.clone()]),
         identity_override: None,
         correlation: None,
     }));
@@ -636,9 +634,7 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
     let second = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(template),
         durability: Durability::Durable,
-        routing: WriteRouting::PrivateNarrow(PrivateRoute {
-            relays: NarrowOnly::new([nack.clone()]),
-        }),
+        routing: WriteRouting::Explicit(vec![nack.clone()]),
         identity_override: None,
         correlation: None,
     }));
@@ -727,7 +723,7 @@ fn relay_signature_satisfies_all_pending_coowners_and_late_signers_are_ignored()
     let first = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(template.clone()),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -735,7 +731,7 @@ fn relay_signature_satisfies_all_pending_coowners_and_late_signers_are_ignored()
     let second = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(template),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -811,7 +807,7 @@ fn repeated_signer_notifications_never_start_concurrent_operations() {
     let published = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(unsigned(&a, 1, "one operation")),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -865,7 +861,7 @@ fn retryable_signer_errors_retain_and_rearm_the_exact_write() {
         let published = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Unsigned(unsigned(&a, 1, "survives signer loss")),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         }));
@@ -917,7 +913,7 @@ fn terminal_signer_errors_compensate_the_write() {
         let published = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Unsigned(unsigned(&a, 1, "terminal signer answer")),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         }));
@@ -951,7 +947,7 @@ fn compensation_persistence_failure_is_nonterminal_and_retryable() {
     let published = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(unsigned(&a, 1, "must remain pending")),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -1004,7 +1000,7 @@ fn explicit_cancellation_persistence_failure_keeps_the_obligation_live_until_ret
     let published = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Unsigned(unsigned(&a, 2, "cancel must commit first")),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -1088,7 +1084,7 @@ fn direct_publish_of_forged_signed_event_is_rejected_before_acceptance() {
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(forged),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));
@@ -1133,7 +1129,7 @@ fn direct_publish_of_valid_signed_event_still_publishes() {
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(genuine.clone()),
         durability: Durability::Durable,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }));

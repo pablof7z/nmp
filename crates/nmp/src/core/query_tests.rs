@@ -52,9 +52,7 @@ mod affected_handle_invalidation_tests {
         WriteIntent {
             payload: WritePayload::Signed(event),
             durability: Durability::Durable,
-            routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                relays: NarrowOnly::new([relay.clone()]),
-            }),
+            routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity_override: None,
             correlation: None,
         }
@@ -200,9 +198,7 @@ mod affected_handle_invalidation_tests {
         let accepted = core.on_publish(WriteIntent {
             payload: WritePayload::Unsigned(unsigned),
             durability: Durability::Durable,
-            routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                relays: NarrowOnly::new([relay]),
-            }),
+            routing: WriteRouting::Explicit(vec![relay]),
             identity_override: None,
             correlation: None,
         });
@@ -275,9 +271,7 @@ mod affected_handle_invalidation_tests {
                 "newest pending",
             )),
             durability: Durability::Durable,
-            routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                relays: NarrowOnly::new([relay.clone()]),
-            }),
+            routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity_override: None,
             correlation: None,
         });
@@ -357,9 +351,7 @@ mod affected_handle_invalidation_tests {
                 expected_base: Some(predecessor.id),
             },
             durability: Durability::Durable,
-            routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                relays: NarrowOnly::new([relay]),
-            }),
+            routing: WriteRouting::Explicit(vec![relay]),
             identity_override: None,
             correlation: None,
         });
@@ -431,9 +423,7 @@ mod affected_handle_invalidation_tests {
                 "",
             )),
             durability: Durability::Durable,
-            routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                relays: NarrowOnly::new([relay]),
-            }),
+            routing: WriteRouting::Explicit(vec![relay]),
             identity_override: None,
             correlation: None,
         });

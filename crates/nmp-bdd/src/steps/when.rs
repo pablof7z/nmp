@@ -194,3 +194,44 @@ async fn open_group_state(w: &mut NmpWorld) {
 async fn made_admin_of_one_more_group(w: &mut NmpWorld) {
     w.made_admin_of_one_more_group().await;
 }
+
+// ---- routing: the two words --------------------------------------------
+//
+// The subject of `features/routing/auto-and-explicit.feature`. "Let NMP
+// figure out the routing" and "to exactly <relays>" are the only two things
+// a scenario may say, because they are the only two things an app may say.
+
+#[when(regex = r#"^I publish a note saying "([^"]+)" and let NMP figure out the routing$"#)]
+async fn publish_note_auto(w: &mut NmpWorld, text: String) {
+    w.publish_note(&text).await;
+}
+
+#[when(regex = r#"^I publish a note saying "([^"]+)" to exactly (.+)$"#)]
+async fn publish_note_explicit(w: &mut NmpWorld, text: String, targets: String) {
+    w.publish_note_to_exactly(&text, &parse_relay_targets(&targets))
+        .await;
+}
+
+#[when(regex = r#"^I publish (\S+)'s signed note unchanged to exactly (.+)$"#)]
+async fn republish_signed_note(w: &mut NmpWorld, _person: String, targets: String) {
+    let text = w
+        .only_staged_signed_note_text()
+        .expect("nmp-bdd: republishing needs exactly one note staged as already-signed");
+    w.republish_signed_note_to_exactly(&text, &parse_relay_targets(&targets))
+        .await;
+}
+
+/// `"a"`, `"a" and "b"`, or the literal `no relays`. The empty case is a
+/// real request the engine must refuse, not a request the harness declines
+/// to make.
+fn parse_relay_targets(raw: &str) -> Vec<String> {
+    if raw.trim().trim_end_matches('.') == "no relays" {
+        return Vec::new();
+    }
+    let names = crate::steps::parse_quoted_list(raw);
+    assert!(
+        !names.is_empty(),
+        "expected quoted relay names (or the words \"no relays\") in {raw:?}"
+    );
+    names
+}

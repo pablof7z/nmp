@@ -1764,7 +1764,7 @@ mod receipt_delivery_lifecycle_tests {
                     "parked receipt delivery lifecycle",
                 )),
                 durability: Durability::Durable,
-                routing: WriteRouting::AuthorOutbox,
+                routing: WriteRouting::Auto,
                 identity_override: None,
                 correlation: None,
             })
@@ -3247,7 +3247,7 @@ mod relay_worker_reconciliation_tests {
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Unsigned(unsigned),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         }));

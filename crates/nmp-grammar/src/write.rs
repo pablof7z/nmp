@@ -1,18 +1,14 @@
 //! The write-intent vocabulary (#115 Fable ruling, Fork 3's dependency
-//! ruling): `Durability`, `WritePayload`, `WriteIntent`, `WriteRouting`,
-//! `NarrowOnly`, `PrivateRoute`, and [`RelayListBootstrapAuthority`] live
-//! here rather than `nmp-engine::outbox`: protocol modules composing a
+//! ruling): `Durability`, `WritePayload`, `WriteIntent`, and `WriteRouting`
+//! live here rather than `nmp-engine::outbox`: protocol modules composing a
 //! `WriteIntent` must not gain an engine dependency to do so, and this crate
-//! is already the read noun's home (`Demand`/`SourceAuthority`). The former
-//! NIP-29-only single-host route was deleted by #838 once its unsupported
-//! composer disappeared. `WriteStatus` and `Receipt` stay in `nmp` because
-//! they are runtime evidence rather than intent vocabulary; live delivery
-//! capabilities are runtime-private and never enter the reducer.
+//! is already the read noun's home (`Demand`/`SourceAuthority`).
+//! `WriteStatus` and `Receipt` stay in `nmp` because they are runtime
+//! evidence rather than intent vocabulary; live delivery capabilities are
+//! runtime-private and never enter the reducer.
 //!
 //! Hard break, no compatibility alias: every caller in the workspace moved
 //! to `nmp_grammar::{Durability, WriteIntent, ...}` in the same change.
-
-use std::collections::BTreeSet;
 
 use nostr::{Event as SignedEvent, EventId, PublicKey, RelayUrl, UnsignedEvent};
 
@@ -203,109 +199,65 @@ pub struct WriteIntent {
 }
 
 /// Where a `WriteIntent` is routed.
+///
+/// The whole app-facing routing vocabulary is these two words
+/// (`docs/internals/routing/auto-and-explicit.md`). A routing value is a
+/// STRATEGY, not a resolved relay set: it is stored durably and re-executed
+/// at every send opportunity — first attempt, boot recovery, queue drain —
+/// against whatever the engine knows at that moment. Nothing about
+/// resolution logic is ever serialized.
+///
+/// Routing is independent of authorship. Republishing someone else's
+/// already-signed event, unchanged, to your own archive relay is an
+/// `Explicit` route chosen by the publishing user over a payload signed by a
+/// different pubkey; nothing here derives a route from an identity or gates
+/// a route by one.
 #[derive(Clone)]
 pub enum WriteRouting {
-    /// The author's write relays (reuses the M2 router's lanes).
-    AuthorOutbox,
-    /// Ledger #6: narrow-only, fail-closed.
-    PrivateNarrow(PrivateRoute),
-    /// NIP-65 account bootstrap: publish the author's first kind:10002 to
-    /// exactly the finite relay set validated by the NIP-65 protocol module.
+    /// "Figure out how to route whatever I'm publishing." NMP derives the
+    /// route from the event at send time; the caller names no relay and no
+    /// strategy.
+    Auto,
+    /// "Use these exact relays and that is that, no matter what else
+    /// happens."
     ///
-    /// This route is deliberately distinct from [`Self::PrivateNarrow`]:
-    /// bootstrap relays are public delivery targets, not privacy authority.
-    /// NIP-65 permits an explicit relay SET rather than one protocol host.
-    /// The engine executes
-    /// this closed value without interpreting NIP-65, mutating its directory,
-    /// or inserting synthetic relay provenance. Only an ordinary network
-    /// ingest of the resulting kind:10002 can establish later
-    /// [`Self::AuthorOutbox`] routing.
+    /// Ledger #6's fail-closed discipline lives here, structurally:
     ///
-    /// The `nmp` facade deliberately does not re-export
-    /// [`RelayListBootstrapAuthority`]. A normal consumer reaches this route
-    /// only through the validated `nmp-nip65` semantic operation.
-    RelayListBootstrap(RelayListBootstrapAuthority),
-}
-
-/// Fail-closed narrow relay set (ledger #6). By construction this type
-/// exposes no widen/insert-arbitrary operation: `new` is the ONLY way to
-/// populate it (a one-shot, fixed set at construction time — the caller
-/// must already have resolved and narrowed this itself), and no
-/// insert/extend/union method exists afterward. A `PrivateNarrow` intent
-/// whose set is empty is exactly how an unroutable private recipient is
-/// expressed structurally — the reducer fails it CLOSED (`WriteStatus::
-/// Failed`), it never falls back to a public write relay, because there is
-/// no operation that could hand it one.
-#[derive(Debug, Clone, Default)]
-pub struct NarrowOnly<T> {
-    items: BTreeSet<T>,
-}
-
-impl<T: Ord> NarrowOnly<T> {
-    /// Construct a narrow, FIXED relay set. No widen operation exists on
-    /// this type — an empty set is legal and is how "unroutable" is
-    /// expressed.
-    pub fn new(items: impl IntoIterator<Item = T>) -> Self {
-        Self {
-            items: items.into_iter().collect(),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
-    }
-
-    pub fn iter(&self) -> std::collections::btree_set::Iter<'_, T> {
-        self.items.iter()
-    }
-}
-
-#[derive(Clone)]
-pub struct PrivateRoute {
-    pub relays: NarrowOnly<RelayUrl>,
-}
-
-/// Exact relay-set authority for the first NIP-65 kind:10002 publication.
-///
-/// This is public at the trusted direct-Rust grammar tier because a separate
-/// protocol crate must be able to mint it without depending on the engine.
-/// It is intentionally withheld from the `nmp` facade.
-/// [`Self::from_validated_relays`] is therefore a protocol-module assertion:
-/// `nmp-nip65` validates non-emptiness, uniqueness, and its public bound before
-/// constructing this value. No mutation/widening API exists afterward.
-#[derive(Debug, Clone)]
-pub struct RelayListBootstrapAuthority {
-    relays: BTreeSet<RelayUrl>,
-}
-
-impl RelayListBootstrapAuthority {
-    /// Mint the exact relay set already validated by the NIP-65 module.
+    /// - **Verbatim execution.** Resolution yields exactly these relays,
+    ///   every time. The directory is never consulted, so there is nothing
+    ///   for it to contribute, augment, or substitute.
+    /// - **No widen path.** No operation anywhere adds a relay to an
+    ///   accepted `Explicit` route.
+    /// - **Empty is refused before acceptance.** A publish carrying an empty
+    ///   set is rejected at the door — no intent, no journal row, no receipt
+    ///   lifecycle — so an accepted `Explicit` always names at least one
+    ///   relay.
     ///
-    /// This constructor performs only canonical set capture. Semantic
-    /// validation belongs to the protocol owner and is deliberately not
-    /// duplicated in the content-agnostic grammar.
-    pub fn from_validated_relays(relays: impl IntoIterator<Item = RelayUrl>) -> Self {
-        Self {
-            relays: relays.into_iter().collect(),
-        }
-    }
-
-    pub fn iter(&self) -> std::collections::btree_set::Iter<'_, RelayUrl> {
-        self.relays.iter()
-    }
+    /// What deliberately does NOT live here is a privacy claim. Fail-closed
+    /// is a routing property; a group host and an archive relay are public
+    /// targets, and calling an exact route "private" was the category error
+    /// of the route this replaces
+    /// (`docs/internals/routing/removed-routes.md`).
+    Explicit(Vec<RelayUrl>),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The routing vocabulary is exactly two words, and `Explicit` carries
+    /// the caller's relay list verbatim — same order, same entries, nothing
+    /// added. There is no third variant to reach for and no widen operation
+    /// on the value the caller handed over.
     #[test]
-    fn relay_list_bootstrap_authority_is_an_immutable_exact_set() {
+    fn routing_is_two_words_and_explicit_is_verbatim() {
         let a = RelayUrl::parse("wss://a.example.com").unwrap();
         let b = RelayUrl::parse("wss://b.example.com").unwrap();
-        let auth =
-            RelayListBootstrapAuthority::from_validated_relays([b.clone(), a.clone(), b.clone()]);
-        assert_eq!(auth.iter().cloned().collect::<Vec<_>>(), vec![a, b]);
+        let routing = WriteRouting::Explicit(vec![b.clone(), a.clone()]);
+        match routing {
+            WriteRouting::Explicit(relays) => assert_eq!(relays, vec![b, a]),
+            WriteRouting::Auto => panic!("constructed Explicit"),
+        }
     }
 
     /// #47: the override is plain intent vocab — an optional pubkey the
@@ -325,7 +277,7 @@ mod tests {
         let default_intent = WriteIntent {
             payload: WritePayload::Unsigned(unsigned.clone()),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         };
@@ -334,7 +286,7 @@ mod tests {
         let overridden = WriteIntent {
             payload: WritePayload::Unsigned(unsigned),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: Some(keys.public_key()),
             correlation: None,
         };

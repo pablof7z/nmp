@@ -3,8 +3,8 @@
 //! `kernel/publish_engine_terminals.rs` in the old repo — the per-relay
 //! terminal model (`TerminalOutcome`, accepted/failed split) and the
 //! enqueue≠converged discipline are re-justified there (plan §4). The
-//! `Durability` class, `WriteStatus` stream, and `PrivateRoute` narrow-only
-//! type are fresh framing (M0 amendment / ledger #6 as types) — the
+//! `Durability` class and `WriteStatus` stream are fresh framing (M0
+//! amendment / ledger #6 as types) — the
 //! action-ledger/correlation-id machinery from the old repo's app
 //! framework is NOT carried over.
 //!
@@ -14,7 +14,7 @@
 //! vocabulary + the structural mechanisms (§3.4, VISION §7 ledger #6/#9).
 //!
 //! #115 Fable ruling (Fork 3): `Durability`/`WritePayload`/`WriteIntent`/
-//! `WriteRouting`/`NarrowOnly`/`PrivateRoute` relocated to `nmp-grammar` so a
+//! `WriteRouting` relocated to `nmp-grammar` so a
 //! protocol module composing a `WriteIntent` does not gain an engine
 //! dependency. `WriteStatus`/`Receipt` stay here: they reference
 //! [`crate::core::ReceiptId`] and are runtime EVIDENCE an app only ever
@@ -108,9 +108,9 @@ pub enum WriteStatus {
         actual: Option<EventId>,
     },
     /// Whole-intent terminal reached BEFORE any relay was ever contacted —
-    /// a signer rejection, or (ledger #6) an unroutable `PrivateNarrow`
-    /// route. Distinct from the per-relay `Rejected`: no `RelayUrl` exists
-    /// here because none was ever reached.
+    /// a signer rejection, or an `Auto` route the engine could not resolve
+    /// (no write relays known yet). Distinct from the per-relay `Rejected`:
+    /// no `RelayUrl` exists here because none was ever reached.
     Failed(String),
 }
 

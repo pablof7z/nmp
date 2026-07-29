@@ -1647,6 +1647,20 @@ pub fn parse_relay_url(url: &str) -> Result<RelayUrl, FfiError> {
     })
 }
 
+/// Project a routing STRATEGY a protocol module chose back out to the FFI
+/// boundary. Total in both directions, which is the point: a protocol crate
+/// that changes which route it mints projects that change faithfully instead
+/// of tripping a closed-contract assertion on an exported path (#951's bug
+/// class, on the routing axis).
+pub(crate) fn write_routing_to_ffi(routing: nmp::WriteRouting) -> FfiWriteRouting {
+    match routing {
+        nmp::WriteRouting::Auto => FfiWriteRouting::Auto,
+        nmp::WriteRouting::Explicit(relays) => FfiWriteRouting::Explicit {
+            relays: relays.iter().map(|relay| relay.to_string()).collect(),
+        },
+    }
+}
+
 /// A malformed raw tag array (empty, or otherwise unparseable) REJECTS the
 /// whole intent rather than being silently dropped: a signer that drops one
 /// tag from a template can sign a DIFFERENT event than the app composed
@@ -1755,19 +1769,21 @@ pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, Ffi
         FfiDurability::AtMostOnce => GDurability::AtMostOnce,
     };
 
-    // NOTE: there is deliberately no `FfiWriteRouting::PrivateNarrow` arm
-    // here -- see that (deleted) variant's removal note in `types.rs`. A
-    // `WriteRouting::PrivateNarrow` intent is still constructible from
-    // direct Rust (`nmp::WriteRouting::PrivateNarrow`), just not from raw
-    // FFI-supplied relay-URL strings. #838 deletes the former pinned-host
-    // write route rather than projecting it through a generic app-facing
-    // escape hatch. #839 also removes the former raw-recipient arm:
-    // recipient semantics must be fixed by a protocol-owned operation
-    // together with its complete body, never supplied beside an
-    // independently constructed event. This single-variant match is the
-    // enforcement.
+    // Both routing words project, because both are app vocabulary: an app
+    // saying "publish this event to relay: [user input]" is the same
+    // primitive a wiki, DM, or group crate uses, and there is no third word
+    // for either of them to reach for. A malformed URL is a typed
+    // synchronous refusal here, before any engine call; an EMPTY relay list
+    // is refused at the engine's acceptance door (it is a routing rule, not
+    // a parsing rule, so it lives in one place for every surface).
     let routing = match intent.routing {
-        FfiWriteRouting::AuthorOutbox => GWriteRouting::AuthorOutbox,
+        FfiWriteRouting::Auto => GWriteRouting::Auto,
+        FfiWriteRouting::Explicit { relays } => GWriteRouting::Explicit(
+            relays
+                .into_iter()
+                .map(|url| parse_relay_url(&url))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
     };
 
     Ok(GWriteIntent {
@@ -2368,10 +2384,79 @@ mod tests {
                 content: "hello".to_string(),
             },
             durability: FfiDurability::Ephemeral,
-            routing: FfiWriteRouting::AuthorOutbox,
+            routing: FfiWriteRouting::Auto,
             identity_override: None,
             correlation: None,
         }
+    }
+
+    /// #972: an app naming exact relays crosses the boundary verbatim --
+    /// same relays, same order, nothing added by the boundary itself.
+    #[test]
+    fn explicit_routing_crosses_the_boundary_verbatim() {
+        let intent = FfiWriteIntent {
+            routing: FfiWriteRouting::Explicit {
+                relays: vec![
+                    "wss://user-typed-relay.example".to_string(),
+                    "wss://second.example".to_string(),
+                ],
+            },
+            ..valid_write_intent()
+        };
+        let parsed = write_intent_from_ffi(intent).expect("explicit routing must parse");
+        let GWriteRouting::Explicit(relays) = parsed.routing else {
+            panic!("explicit routing must project as explicit routing")
+        };
+        assert_eq!(
+            relays.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            vec![
+                "wss://user-typed-relay.example".to_string(),
+                "wss://second.example".to_string()
+            ]
+        );
+        assert_eq!(
+            write_routing_to_ffi(GWriteRouting::Explicit(relays)),
+            FfiWriteRouting::Explicit {
+                relays: vec![
+                    "wss://user-typed-relay.example".to_string(),
+                    "wss://second.example".to_string()
+                ]
+            },
+            "the projection back out is the exact inverse"
+        );
+    }
+
+    /// A malformed relay URL is a typed synchronous refusal at this
+    /// boundary, before any engine call -- never a silently dropped relay,
+    /// which would publish to a narrower set than the caller asked for.
+    #[test]
+    fn a_malformed_explicit_relay_refuses_the_whole_intent() {
+        let intent = FfiWriteIntent {
+            routing: FfiWriteRouting::Explicit {
+                relays: vec![
+                    "wss://fine.example".to_string(),
+                    "not-a-relay-url".to_string(),
+                ],
+            },
+            ..valid_write_intent()
+        };
+        match write_intent_from_ffi(intent).err() {
+            Some(FfiError::InvalidRelayUrl { got }) => assert_eq!(got, "not-a-relay-url"),
+            other => panic!("expected InvalidRelayUrl, got {other:?}"),
+        }
+    }
+
+    /// Emptiness is NOT rejected here: it is a routing rule, enforced once
+    /// at the engine's acceptance door so every surface gets the identical
+    /// refusal rather than each boundary inventing its own.
+    #[test]
+    fn an_empty_explicit_route_parses_and_is_refused_downstream_instead() {
+        let intent = FfiWriteIntent {
+            routing: FfiWriteRouting::Explicit { relays: vec![] },
+            ..valid_write_intent()
+        };
+        let parsed = write_intent_from_ffi(intent).expect("parsing is not where empty is caught");
+        assert!(matches!(parsed.routing, GWriteRouting::Explicit(ref r) if r.is_empty()));
     }
 
     #[test]
@@ -2533,7 +2618,7 @@ mod tests {
                 sig: event.sig.to_string(),
             },
             durability: FfiDurability::Durable,
-            routing: FfiWriteRouting::AuthorOutbox,
+            routing: FfiWriteRouting::Auto,
             identity_override: None,
             correlation: None,
         };

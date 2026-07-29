@@ -20,7 +20,7 @@ mod receipt_allocator_tests {
                 "no active account",
             )),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         }
@@ -69,7 +69,7 @@ mod receipt_allocator_tests {
                 expected_base: Some(base.id),
             },
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         }));
@@ -165,7 +165,7 @@ mod receipt_allocator_tests {
                 "correlation boundary",
             )),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         }));
@@ -206,43 +206,50 @@ mod receipt_allocator_tests {
         );
     }
 
+    /// Verbatim execution: an explicit route resolves to exactly the relays
+    /// the caller named. The directory is deliberately populated with a
+    /// DIFFERENT write relay for this very author -- if resolution consulted
+    /// it at all, that relay would show up here.
     #[test]
-    fn relay_list_bootstrap_resolves_exactly_without_installing_directory_facts() {
+    fn an_explicit_route_resolves_verbatim_and_never_consults_the_directory() {
         let author = Keys::generate().public_key();
-        let a = RelayUrl::parse("wss://bootstrap-a.example").unwrap();
-        let b = RelayUrl::parse("wss://bootstrap-b.example").unwrap();
+        let a = RelayUrl::parse("wss://chosen-a.example").unwrap();
+        let b = RelayUrl::parse("wss://chosen-b.example").unwrap();
         let unrelated = RelayUrl::parse("wss://unrelated.example").unwrap();
         let directory = FixtureDirectory::new().with_write(author.to_hex(), [unrelated]);
         let core = EngineCore::new(MemoryStore::new(), Box::new(directory), 10);
-        let route =
-            WriteRouting::RelayListBootstrap(RelayListBootstrapAuthority::from_validated_relays([
-                b.clone(),
-                a.clone(),
-            ]));
+        let route = WriteRouting::Explicit(vec![b.clone(), a.clone()]);
 
         assert_eq!(
             core.resolve_routes(&route, &author.to_hex()).unwrap(),
             BTreeSet::from([a, b]),
-            "bootstrap routing executes only its exact closed set and never unions existing author-outbox facts"
+            "an explicit route executes only the caller's set and never unions a directory fact"
         );
     }
 
+    /// The durable value is a STRATEGY. `Auto` journals a bare label with no
+    /// relay in it, so replaying it after a crash re-resolves against
+    /// whatever the engine knows then rather than against a stale answer;
+    /// `Explicit` journals exactly the relays it was given, in order.
     #[test]
-    fn relay_list_bootstrap_route_snapshot_round_trips_exactly() {
-        let a = RelayUrl::parse("wss://bootstrap-a.example").unwrap();
-        let b = RelayUrl::parse("wss://bootstrap-b.example").unwrap();
-        let route =
-            WriteRouting::RelayListBootstrap(RelayListBootstrapAuthority::from_validated_relays([
-                b.clone(),
-                a.clone(),
-            ]));
+    fn routing_snapshots_round_trip_the_strategy_not_a_resolved_relay_set() {
+        let a = RelayUrl::parse("wss://chosen-a.example").unwrap();
+        let b = RelayUrl::parse("wss://chosen-b.example").unwrap();
 
+        let auto = EngineCore::<MemoryStore>::routing_snapshot(&WriteRouting::Auto);
+        assert_eq!(auto, "auto", "Auto stores a label, never a relay set");
+        assert!(matches!(
+            EngineCore::<MemoryStore>::parse_routing_snapshot(&auto),
+            Some(WriteRouting::Auto)
+        ));
+
+        let route = WriteRouting::Explicit(vec![b.clone(), a.clone()]);
         let snapshot = EngineCore::<MemoryStore>::routing_snapshot(&route);
         let restored = EngineCore::<MemoryStore>::parse_routing_snapshot(&snapshot)
-            .expect("a valid NIP-65 bootstrap snapshot must remain readable");
-        let WriteRouting::RelayListBootstrap(authority) = restored else {
+            .expect("a valid explicit snapshot must remain readable");
+        let WriteRouting::Explicit(relays) = restored else {
             panic!("snapshot restored the wrong routing variant")
         };
-        assert_eq!(authority.iter().cloned().collect::<Vec<_>>(), vec![a, b]);
+        assert_eq!(relays, vec![b, a]);
     }
 }

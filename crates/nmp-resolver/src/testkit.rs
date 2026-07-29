@@ -266,7 +266,7 @@ pub fn accept_write_of(signed: nostr::Event, accepted_at: u64) -> AcceptWrite {
         replaceable_base: None,
         signing_identity_ref: "local".to_string(),
         durability: WriteDurability::Durable,
-        routing: "author-outbox".to_string(),
+        routing: "auto".to_string(),
         sig_state: IntentSigState::Pending,
         accepted_at: Timestamp::from(accepted_at),
         correlation: None,

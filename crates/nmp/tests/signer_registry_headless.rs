@@ -243,7 +243,7 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
         .publish(WriteIntent {
             payload: WritePayload::Unsigned(unsigned_as_b),
             durability: Durability::AtMostOnce,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -271,7 +271,7 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
         .publish(WriteIntent {
             payload: WritePayload::Unsigned(unsigned_as_a_while_b_active),
             durability: Durability::AtMostOnce,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -297,7 +297,7 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
         .publish(WriteIntent {
             payload: WritePayload::Unsigned(unsigned_as_a),
             durability: Durability::AtMostOnce,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -346,7 +346,7 @@ fn no_active_account_cannot_select_an_arbitrary_registered_signer() {
         .publish(WriteIntent {
             payload: WritePayload::Unsigned(unsigned),
             durability: Durability::AtMostOnce,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -390,7 +390,7 @@ fn active_a_rejects_b_authored_default_even_when_b_is_registered() {
                 "unauthorized default author",
             )),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -449,7 +449,7 @@ fn stale_a_draft_after_switch_to_b_invokes_neither_signer() {
         .publish(WriteIntent {
             payload: WritePayload::Unsigned(composed_as_a),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -500,7 +500,7 @@ fn attaching_matching_signer_rearms_awaiting_intent() {
                 "reattach me",
             )),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -557,7 +557,7 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
                 "authored by b",
             )),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -625,7 +625,7 @@ fn stale_registration_cannot_detach_replacement_for_same_pubkey() {
                 "replacement remains usable",
             )),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -715,7 +715,7 @@ fn identity_override_signs_as_registered_secondary_without_rerooting_active() {
         .publish(WriteIntent {
             payload: WritePayload::Unsigned(draft),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: Some(b.public_key()),
             correlation: None,
         })
@@ -775,7 +775,7 @@ fn identity_override_signs_as_registered_secondary_without_rerooting_active() {
         .publish(WriteIntent {
             payload: WritePayload::Unsigned(a_draft),
             durability: Durability::AtMostOnce,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: None,
             correlation: None,
         })
@@ -826,7 +826,7 @@ fn unregistered_override_parks_durably_and_never_retargets_on_account_switch() {
         .publish(WriteIntent {
             payload: WritePayload::Unsigned(draft),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: Some(b.public_key()),
             correlation: None,
         })
@@ -898,7 +898,7 @@ fn identity_override_signs_while_logged_out() {
         .publish(WriteIntent {
             payload: WritePayload::Unsigned(draft),
             durability: Durability::Durable,
-            routing: WriteRouting::AuthorOutbox,
+            routing: WriteRouting::Auto,
             identity_override: Some(b.public_key()),
             correlation: None,
         })

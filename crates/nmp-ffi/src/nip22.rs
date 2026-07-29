@@ -7,10 +7,10 @@
 
 use nostr::{EventId, PublicKey};
 
-use crate::convert::{demand_to_ffi, parse_correlation_token, parse_pubkey, FfiError};
-use crate::types::{
-    FfiDemand, FfiDurability, FfiRow, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
+use crate::convert::{
+    demand_to_ffi, parse_correlation_token, parse_pubkey, write_routing_to_ffi, FfiError,
 };
+use crate::types::{FfiDemand, FfiDurability, FfiRow, FfiWriteIntent, FfiWritePayload};
 
 /// A validated NIP-73 external-content target (`nmp::nip22::Nip73Target`
 /// mirror).
@@ -299,7 +299,7 @@ pub fn decode_comment(row: FfiRow) -> Result<FfiDecodedComment, FfiCommentDecode
     })
 }
 
-/// Compose an ordinary durable, author-outbox-routed [`FfiWriteIntent`] for a
+/// Compose an ordinary durable, `Auto`-routed [`FfiWriteIntent`] for a
 /// NIP-22 comment (`nmp::nip22::comment_intent` mirror). This function is
 /// engine-free: author and event time are explicit deterministic composition
 /// inputs. Publish the returned value through
@@ -336,16 +336,23 @@ pub fn comment_intent(
     // NIP-22 owns this complete shape. The FFI layer projects the returned
     // ordinary intent instead of independently re-stating its payload,
     // durability, routing, identity, or correlation policy.
+    //
+    // Routing is deliberately NOT part of the closed-contract pattern below:
+    // it is projected totally (`write_routing_to_ffi`), so a protocol module
+    // that changes which route it mints crosses this boundary faithfully
+    // rather than panicking on an exported path. Every routing value has a
+    // wire form now, so there is nothing left for routing to drift into.
     let nmp::WriteIntent {
         payload: nmp::WritePayload::Unsigned(unsigned),
         durability: nmp::Durability::Durable,
-        routing: nmp::WriteRouting::AuthorOutbox,
+        routing,
         identity_override: None,
         correlation,
     } = intent
     else {
         unreachable!("nmp::nip22::comment_intent violated its closed write contract")
     };
+    let routing = write_routing_to_ffi(routing);
 
     Ok(FfiWriteIntent {
         payload: FfiWritePayload::Unsigned {
@@ -360,7 +367,7 @@ pub fn comment_intent(
             content: unsigned.content,
         },
         durability: FfiDurability::Durable,
-        routing: FfiWriteRouting::AuthorOutbox,
+        routing,
         identity_override: None,
         correlation: correlation.map(|token| token.to_string()),
     })
@@ -369,7 +376,7 @@ pub fn comment_intent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::FfiSourceAuthority;
+    use crate::types::{FfiSourceAuthority, FfiWriteRouting};
 
     fn podcast_root() -> FfiCommentRoot {
         FfiCommentRoot::External {
@@ -467,7 +474,7 @@ mod tests {
             ]
         );
         assert_eq!(intent.durability, FfiDurability::Durable);
-        assert_eq!(intent.routing, FfiWriteRouting::AuthorOutbox);
+        assert_eq!(intent.routing, FfiWriteRouting::Auto);
         assert_eq!(intent.identity_override, None);
         assert_eq!(intent.correlation.as_deref(), Some("comment-correlation"));
     }

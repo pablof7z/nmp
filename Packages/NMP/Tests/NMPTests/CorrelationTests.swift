@@ -58,7 +58,7 @@ final class CorrelationTests: XCTestCase {
                     content: "first draft"
                 ),
                 durability: .durable,
-                routing: .authorOutbox,
+                routing: .auto,
                 correlation: token
             )
         )
@@ -82,7 +82,7 @@ final class CorrelationTests: XCTestCase {
                     content: "second, different draft"
                 ),
                 durability: .durable,
-                routing: .authorOutbox,
+                routing: .auto,
                 correlation: token
             )
         )
@@ -113,7 +113,7 @@ final class CorrelationTests: XCTestCase {
                     content: "reattach by correlation"
                 ),
                 durability: .durable,
-                routing: .authorOutbox,
+                routing: .auto,
                 correlation: token
             )
         )
@@ -156,7 +156,7 @@ final class CorrelationTests: XCTestCase {
                         content: "malformed correlation token"
                     ),
                     durability: .durable,
-                    routing: .authorOutbox,
+                    routing: .auto,
                     correlation: ""
                 )
             )

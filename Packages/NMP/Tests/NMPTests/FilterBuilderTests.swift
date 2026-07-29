@@ -147,11 +147,11 @@ final class FilterBuilderTests: XCTestCase {
                 content: "hello from NMP"
             ),
             durability: .durable,
-            routing: .authorOutbox
+            routing: .auto
         )
         let ffi = intent.toFfi()
         XCTAssertEqual(ffi.durability, .durable)
-        XCTAssertEqual(ffi.routing, .authorOutbox)
+        XCTAssertEqual(ffi.routing, .auto)
         guard case .unsigned(_, _, _, let tags, let content) = ffi.payload else {
             return XCTFail("expected an unsigned payload")
         }
@@ -174,7 +174,7 @@ final class FilterBuilderTests: XCTestCase {
                 sig: String(repeating: "d", count: 128)
             ),
             durability: .durable,
-            routing: .authorOutbox
+            routing: .auto
         )
         let ffi = intent.toFfi()
         guard case .signed(let id, let pubkey, _, _, let tags, let content, let sig) = ffi.payload else {
@@ -200,7 +200,7 @@ final class FilterBuilderTests: XCTestCase {
                 content: "as the override identity"
             ),
             durability: .durable,
-            routing: .authorOutbox,
+            routing: .auto,
             identityOverride: overridePubkey
         )
         XCTAssertEqual(intent.toFfi().identityOverride, overridePubkey)
@@ -219,7 +219,7 @@ final class FilterBuilderTests: XCTestCase {
                 content: "active-account default"
             ),
             durability: .durable,
-            routing: .authorOutbox
+            routing: .auto
         )
         XCTAssertNil(intent.identityOverride)
         XCTAssertNil(intent.toFfi().identityOverride)
@@ -236,7 +236,7 @@ final class FilterBuilderTests: XCTestCase {
                     content: "unsigned"
                 ),
                 durability: .atMostOnce,
-                routing: .authorOutbox,
+                routing: .auto,
                 identityOverride: String(repeating: "a", count: 64),
                 correlation: "correlation-42"
             )
@@ -252,7 +252,7 @@ final class FilterBuilderTests: XCTestCase {
             )
         )
         XCTAssertEqual(unsigned.durability, .atMostOnce)
-        XCTAssertEqual(unsigned.routing, .authorOutbox)
+        XCTAssertEqual(unsigned.routing, .auto)
         XCTAssertEqual(unsigned.identityOverride, String(repeating: "a", count: 64))
         XCTAssertEqual(unsigned.correlation, "correlation-42")
 
@@ -268,7 +268,7 @@ final class FilterBuilderTests: XCTestCase {
                     sig: String(repeating: "e", count: 128)
                 ),
                 durability: .ephemeral,
-                routing: .authorOutbox,
+                routing: .auto,
                 identityOverride: nil,
                 correlation: nil
             )
@@ -286,10 +286,46 @@ final class FilterBuilderTests: XCTestCase {
             )
         )
         XCTAssertEqual(signed.durability, .ephemeral)
-        XCTAssertEqual(signed.routing, .authorOutbox)
+        XCTAssertEqual(signed.routing, .auto)
         XCTAssertNil(signed.identityOverride)
         XCTAssertNil(signed.correlation)
 
         XCTAssertEqual(Durability(FfiDurability.durable), .durable)
+    }
+
+    /// #972: a Swift app can name the exact relays a write goes to -- the
+    /// relay list a user typed into a text field crosses the boundary
+    /// verbatim, in order, and comes back unchanged.
+    func testExplicitRoutingCarriesTheAppsExactRelayListBothWays() {
+        let typed = ["wss://user-typed-relay.example", "wss://second.example"]
+        let intent = WriteIntent(
+            payload: .unsigned(
+                pubkey: String(repeating: "a", count: 64),
+                createdAt: 42,
+                kind: 1,
+                tags: [],
+                content: "for the archive"
+            ),
+            durability: .durable,
+            routing: .explicit(relays: typed)
+        )
+        XCTAssertEqual(intent.toFfi().routing, .explicit(relays: typed))
+
+        let back = WriteIntent(
+            FfiWriteIntent(
+                payload: .unsigned(
+                    pubkey: String(repeating: "a", count: 64),
+                    createdAt: 42,
+                    kind: 1,
+                    tags: [],
+                    content: "for the archive"
+                ),
+                durability: .durable,
+                routing: .explicit(relays: typed),
+                identityOverride: nil,
+                correlation: nil
+            )
+        )
+        XCTAssertEqual(back.routing, .explicit(relays: typed))
     }
 }

@@ -105,7 +105,7 @@ pub fn build_unsigned_intent(author: PublicKey, content: &str) -> WriteIntent {
     WriteIntent {
         payload: WritePayload::Unsigned(unsigned),
         durability: Durability::Ephemeral,
-        routing: WriteRouting::AuthorOutbox,
+        routing: WriteRouting::Auto,
         identity_override: None,
         correlation: None,
     }

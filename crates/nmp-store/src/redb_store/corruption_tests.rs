@@ -75,7 +75,7 @@ fn accept_of(frozen: Event) -> AcceptWrite {
         expected_pubkey,
         signing_identity_ref: "local".to_owned(),
         durability: WriteDurability::Durable,
-        routing: "author-outbox".to_owned(),
+        routing: "auto".to_owned(),
         sig_state: IntentSigState::Pending,
         accepted_at: Timestamp::from(1_000),
         correlation: None,

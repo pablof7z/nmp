@@ -193,7 +193,7 @@ class DetachPersistedAccountTest {
                             content = "cached before detach",
                         ),
                         durability = Durability.Durable,
-                        routing = WriteRouting.AuthorOutbox,
+                        routing = WriteRouting.Auto,
                     ),
                 )
                 val accepted = receipt.status.first { it == WriteStatus.Accepted }

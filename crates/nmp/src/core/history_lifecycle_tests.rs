@@ -536,9 +536,7 @@ mod history_mutation_tests {
                 expected_base: Some(predecessor.id),
             },
             durability: Durability::Durable,
-            routing: WriteRouting::PrivateNarrow(PrivateRoute {
-                relays: NarrowOnly::new([relay]),
-            }),
+            routing: WriteRouting::Explicit(vec![relay]),
             identity_override: None,
             correlation: None,
         });
