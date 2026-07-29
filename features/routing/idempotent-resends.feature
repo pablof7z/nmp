@@ -19,7 +19,6 @@ Feature: Offering the same signed event twice costs bandwidth, not correctness
     Given I am logged in as my own account
     And an indexer relay is configured
 
-  @designed
   Scenario: An acked destination is never offered the event again
     # The core suppression. An acked destination is terminal and untouched by
     # any later resolution, however many times the strategy runs.
@@ -30,7 +29,6 @@ Feature: Offering the same signed event twice costs bandwidth, not correctness
     And the publishing queue drains 3 times with nothing new learned
     Then "outbox-a" was offered the note exactly once
 
-  @designed
   Scenario: A restart after delivery does not resend to relays that already acked
     # The same rule across a process boundary, which is where a design that
     # kept relay sets instead of strategies would resend everything.

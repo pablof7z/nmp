@@ -35,15 +35,6 @@ pub(super) struct PendingContactList {
     created_at: u64,
 }
 
-/// A staged kind:1 note: author, text, when. Seeded at every one of the
-/// author's own declared write relays -- content atoms never route to an
-/// indexer, so a note is never findable anywhere else.
-pub(super) struct PendingNote {
-    author: String,
-    text: String,
-    created_at: u64,
-}
-
 impl NmpWorld {
     // ---- Given-time staging (no I/O yet) -------------------------------
 
@@ -62,6 +53,24 @@ impl NmpWorld {
             self.relay_order.push(name.to_string());
         }
         self.relay_configs.entry(name.to_string()).or_default()
+    }
+
+    /// This scenario will reconstruct its engine, so it needs a store that
+    /// outlives one.
+    ///
+    /// Decided from the scenario's own steps rather than from a `Given`
+    /// (`tests/bdd.rs`'s before-hook), because a `.feature` should not have
+    /// to say which storage engine the harness picked -- it says "I
+    /// reconstruct the engine from the same durable store", and that sentence
+    /// IS the requirement. #974 chose the store at start-up and had to answer
+    /// the question before any `When` existed to ask it; a hook that reads the
+    /// whole scenario answers it from the same words the reader sees.
+    pub fn use_durable_store(&mut self) {
+        assert!(
+            !self.started,
+            "nmp-bdd: the store is chosen once, before anything runs"
+        );
+        self.durable_store = true;
     }
 
     /// `Given a relay <name> exists (that nothing references)` -- registers
@@ -194,23 +203,15 @@ impl NmpWorld {
     }
 
     /// `Given <person> has posted <n> notes` / `a note saying <text>`.
+    ///
+    /// One staging, and it always KEEPS the exact signed event. Routing and
+    /// authorship are separate axes: republishing a note verbatim is the
+    /// standing proof of that, and it only proves anything if the bytes that
+    /// go back out are the bytes their author signed. There used to be a
+    /// second, event-forgetting staging for the notes nobody republished; the
+    /// only difference it made was that `features/writes/pre-signed-events`
+    /// could not point at a note an ordinary `Given` had staged.
     pub fn stage_note(&mut self, person: &str, text: &str) {
-        self.person(person);
-        self.write_relay_for(person);
-        let created_at = self.next_created_at();
-        self.pending_notes.push(PendingNote {
-            author: person.to_string(),
-            text: text.to_string(),
-            created_at,
-        });
-    }
-
-    /// The same staging, but the world KEEPS the exact signed event so a
-    /// later step can republish it verbatim. Routing and authorship are
-    /// separate axes: republishing this event is the standing proof, and it
-    /// only proves anything if the bytes that go back out are the bytes
-    /// their author signed.
-    pub fn stage_signed_note(&mut self, person: &str, text: &str) {
         let keys = self.person(person);
         self.write_relay_for(person);
         let created_at = self.next_created_at();
@@ -293,20 +294,6 @@ impl NmpWorld {
             }
         }
 
-        for pending in std::mem::take(&mut self.pending_notes) {
-            let author_keys = self.person(&pending.author);
-            let relay_names = self
-                .write_relay_of
-                .get(&pending.author)
-                .cloned()
-                .expect("nmp-bdd: a staged note's author must already have a write relay");
-            for relay_name in relay_names {
-                self.relays[&relay_name]
-                    .seed_note(&author_keys, &pending.text, pending.created_at)
-                    .await;
-            }
-        }
-
         for (author, event) in std::mem::take(&mut self.pending_signed_notes) {
             let relay_names = self
                 .write_relay_of
@@ -372,6 +359,12 @@ impl NmpWorld {
 
         self.engine = Some(engine);
         self.handle = Some(handle);
+
+        // Before any signer is registered and before any write exists: a
+        // scenario that stated what time it is means the engine ran at that
+        // time from its first tick, and a restart builds a brand-new engine
+        // whose clock starts unpinned again.
+        self.apply_clock();
 
         // Every signer an identity scenario registered, plus the ordinary
         // signer a logged-in `Given` implies. Both go through the same door

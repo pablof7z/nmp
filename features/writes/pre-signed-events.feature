@@ -28,7 +28,6 @@ Feature: An already-signed event is published exactly as it arrived
 
   # ---- carried, not composed ---------------------------------------------
 
-  @designed
   Scenario: A signed event reaches the relay byte for byte
     # The whole contract in one scenario. Every field the builder path would
     # have filled in is already filled in, and every one of them is left
@@ -41,7 +40,6 @@ Feature: An already-signed event is published exactly as it arrived
     And its created_at, tags and signature are the ones it arrived with
     And no signer was asked for anything
 
-  @designed
   Scenario: Publishing someone else's signed event needs no session at all
     # A signed event needs no signer, so it needs no active account, so being
     # logged out is not a reason to refuse it. This is the archive case in
@@ -51,7 +49,6 @@ Feature: An already-signed event is published exactly as it arrived
     Then "wss://archive.example" received it unchanged
     And nothing was refused for want of an active account
 
-  @designed
   Scenario: An event that does not verify is refused before acceptance
     # Verified verbatim means verified. Carrying bytes without checking them
     # would make the archive path a way to launder a forgery through NMP's
@@ -65,7 +62,6 @@ Feature: An already-signed event is published exactly as it arrived
 
   # ---- what identity may say about it ------------------------------------
 
-  @designed
   Scenario: Naming the signed event's own author is a harmless restatement
     # The app saying out loud what the bytes already say. It agrees, so it
     # changes nothing -- including not turning the write into something that
@@ -75,7 +71,6 @@ Feature: An already-signed event is published exactly as it arrived
     Then "wss://archive.example" received it unchanged
     And no signer was asked for anything
 
-  @designed
   Scenario: Naming an identity the signed event disagrees with is refused
     # The one place a comparison still has two operands, and the one place
     # the fail-closed check survives as a check rather than as structure.
@@ -90,7 +85,6 @@ Feature: An already-signed event is published exactly as it arrived
     And "wss://archive.example" received nothing
     And the event was not re-signed as "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90"
 
-  @designed
   Scenario: Naming no identity does not silently mean the active account
     # The trap this rules out. If "no identity named" resolved to the active
     # account the way it does for a builder, publishing a followee's note

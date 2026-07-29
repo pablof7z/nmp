@@ -50,6 +50,11 @@
 //!   well as from the receipt.
 //! - `writes` -- the write plane: where a publish was routed, what its
 //!   receipt said, and that a republished payload came back out untouched.
+//! - `payloads` -- the EVENT rather than the write: what NMP filled in on a
+//!   builder that said nothing, what it left alone when the app did say
+//!   something, and what an already-signed event's bytes still were on the
+//!   far side. Distinct from `writes` and `identity` for the same reason
+//!   those two are distinct from each other -- same receipt, different claim.
 //! - `routing` -- the READ plane: which relay was asked for what kind, in
 //!   which lane. Distinct from `writes`; both talk about relays, only one is
 //!   about an event this app sent.
@@ -85,6 +90,8 @@ mod budget;
 mod feed;
 mod groups;
 mod identity;
+mod payloads;
+mod replaceable;
 mod routing;
 mod wire;
 mod writes;
