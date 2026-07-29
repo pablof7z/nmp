@@ -143,12 +143,13 @@ async fn published_exactly_once(w: &mut NmpWorld, name: String) {
     );
 }
 
-/// The same count, said the way the idempotency scenarios say it: two inputs
-/// resolving to one host is ONE destination, so the wire sees one offer.
-#[then(regex = r#"^"([^"]+)" was offered the note exactly once$"#)]
-async fn offered_exactly_once(w: &mut NmpWorld, name: String) {
-    published_exactly_once(w, name).await;
-}
+// The idempotency scenarios' spelling of the same count -- `"<relay>" was
+// offered the note exactly once` -- is #1018's, in `then::payloads`, and it
+// counts every ordinal rather than only one. Nothing is defined for it here:
+// two definitions matching one sentence is an AMBIGUOUS match, which cucumber
+// refuses outright, so the weaker of the two would not have quietly won -- but
+// the scenario would still have failed for a harness reason rather than an
+// engine one.
 
 // ---- what must never have been contacted ---------------------------------
 

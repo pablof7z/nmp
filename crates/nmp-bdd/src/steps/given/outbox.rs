@@ -154,20 +154,18 @@ fn subject(who: &str) -> String {
 /// The past-tense form: this write went out during setup, and the scenario is
 /// about what became of it afterwards.
 ///
-/// It also decides the STORE. A scenario that publishes in its `Given` is
-/// staging a world to interrogate later, and "later" is allowed to include a
-/// process boundary -- which a `MemoryStore` cannot survive. The store is
-/// chosen once, before start-up, so this is the last moment anything can
-/// decide it.
+/// Nothing here decides the STORE. #1018's before-hook reads the whole
+/// scenario and gives a durable one to any scenario whose own sentences say it
+/// crosses a process boundary, which is a better answer than any single step
+/// could give: the requirement is stated in the `.feature`, so the hook and
+/// the reader are looking at the same words.
 #[given(regex = r#"^I published a note saying "([^"]+)"$"#)]
 async fn i_published_a_note(w: &mut NmpWorld, text: String) {
-    w.use_durable_store();
     w.publish_note(&text).await;
 }
 
 #[given(regex = r#"^I published a note saying "([^"]+)" that p-tags (.+)$"#)]
 async fn i_published_a_note_p_tagging(w: &mut NmpWorld, text: String, people: String) {
-    w.use_durable_store();
     w.publish_note_mentioning(&text, &parse_people(&people))
         .await;
 }
