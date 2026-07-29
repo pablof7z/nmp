@@ -26,6 +26,7 @@ use nostr::Timestamp;
 
 use nmp_router::RelayUrl;
 
+use nmp::mechanism::core::{DiagnosticsSnapshot, StalledWriteStage};
 use nmp::mechanism::outbox::WriteStatus;
 
 use super::budgets::EVENTUALLY;
@@ -282,15 +283,32 @@ impl NmpWorld {
     /// `Then diagnostics reports the note among the stalled writes` -- the
     /// engine-global answer to "is anything quietly stuck", which no single
     /// receipt can give.
-    pub fn stalled_writes(&mut self) -> Vec<(String, Timestamp)> {
-        let Some(snapshot) = self.diagnostics_matching(|snap| !snap.stalled_writes.is_empty())
-        else {
+    ///
+    /// Narrowed to `Unroutable`, which is the only stage a scenario about the
+    /// OUTBOX can produce: the write is signed and its author can sign, so it
+    /// is neither unsignable nor undeliverable -- it has nowhere to be
+    /// delivered TO. Reading every stage would let this pass on a stall that
+    /// had nothing to do with routing.
+    ///
+    /// A bounded WAIT, and named apart from #1025's own `stalled_writes` for
+    /// exactly that reason: that one reads the snapshot a scenario explicitly
+    /// captured, which is right when the scenario says `When I read the
+    /// diagnostics`. An outbox scenario never says that -- it publishes and
+    /// asks -- so it has to wait for the census to move on its own.
+    pub fn unroutable_writes(&mut self) -> Vec<(String, Timestamp)> {
+        let unroutable = |snap: &DiagnosticsSnapshot| {
+            snap.stalled_writes
+                .iter()
+                .any(|stalled| stalled.stage == StalledWriteStage::Unroutable)
+        };
+        let Some(snapshot) = self.diagnostics_matching(unroutable) else {
             return Vec::new();
         };
         snapshot
             .stalled_writes
             .iter()
-            .map(|stalled| (stalled.reason.clone(), stalled.stalled_since))
+            .filter(|stalled| stalled.stage == StalledWriteStage::Unroutable)
+            .map(|stalled| (stalled.detail.clone(), stalled.stalled_since))
             .collect()
     }
 
