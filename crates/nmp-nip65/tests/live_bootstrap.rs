@@ -169,12 +169,16 @@ async fn relay_echo_is_the_only_transition_from_bootstrap_to_author_outbox() {
         publish_relay_list_bootstrap(&engine, request).expect("tracked publish handoff");
 
     let routed = wait_for_status(&bootstrap.statuses, Duration::from_secs(10), |status| {
-        matches!(status, WriteStatus::Routed(_))
+        matches!(status, WriteStatus::Routed { .. })
     });
     assert_eq!(
         routed,
-        WriteStatus::Routed(BTreeSet::from([relay_url.clone()])),
-        "the bootstrap route must contact exactly the selected relay"
+        WriteStatus::Routed {
+            relays: BTreeSet::from([relay_url.clone()]),
+            complete: true,
+        },
+        "the bootstrap route must contact exactly the selected relay, and an \
+         explicit route reads no inputs so it is complete at its first resolution"
     );
 
     tokio::time::timeout(
@@ -184,15 +188,21 @@ async fn relay_echo_is_the_only_transition_from_bootstrap_to_author_outbox() {
     .await
     .expect("bootstrap EVENT reached the controlled relay");
 
+    // The locally accepted bootstrap row must not become a synthetic routing
+    // fact: an ordinary `Auto` write published before the kind:10002 has come
+    // back through the network still has nothing to route to. Under #975 it
+    // PARKS with its reason rather than dying -- "the engine had not learned
+    // enough yet" is never a terminal verdict, and this write completes on
+    // its own below once the echo lands.
     let before_echo = engine
         .publish_tracked(ordinary_write(r#"{"name":"before echo"}"#))
         .expect("ordinary tracked write handoff");
-    let failed = wait_for_status(&before_echo.statuses, Duration::from_secs(5), |status| {
-        matches!(status, WriteStatus::Failed(_))
+    let parked = wait_for_status(&before_echo.statuses, Duration::from_secs(5), |status| {
+        matches!(status, WriteStatus::AwaitingRoute { .. })
     });
     assert!(
-        matches!(failed, WriteStatus::Failed(ref reason) if reason.contains("no write relays known for author")),
-        "the locally accepted bootstrap row must not become a synthetic routing fact: {failed:?}"
+        matches!(parked, WriteStatus::AwaitingRoute { ref detail } if detail.contains("no relay list known yet")),
+        "the parked route must name what it is waiting for: {parked:?}"
     );
 
     policy.0.release_first_write.notify_one();
@@ -226,11 +236,14 @@ async fn relay_echo_is_the_only_transition_from_bootstrap_to_author_outbox() {
         .publish_tracked(ordinary_write(r#"{"name":"after echo"}"#))
         .expect("ordinary tracked write after ingest");
     let routed = wait_for_status(&after_echo.statuses, Duration::from_secs(10), |status| {
-        matches!(status, WriteStatus::Routed(_))
+        matches!(status, WriteStatus::Routed { .. })
     });
     assert_eq!(
         routed,
-        WriteStatus::Routed(BTreeSet::from([relay_url.clone()])),
+        WriteStatus::Routed {
+            relays: BTreeSet::from([relay_url.clone()]),
+            complete: true,
+        },
         "ordinary Auto routing must now consume the network-ingested NIP-65 fact"
     );
     wait_for_status(

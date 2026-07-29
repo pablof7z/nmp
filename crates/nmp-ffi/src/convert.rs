@@ -1215,8 +1215,12 @@ pub fn write_status_to_ffi(s: WriteStatusRef<'_>) -> FfiWriteStatus {
         GWriteStatus::Signed(id) => FfiWriteStatus::Signed {
             event_id: id.to_hex(),
         },
-        GWriteStatus::Routed(relays) => FfiWriteStatus::Routed {
+        GWriteStatus::AwaitingRoute { detail } => FfiWriteStatus::AwaitingRoute {
+            detail: detail.clone(),
+        },
+        GWriteStatus::Routed { relays, complete } => FfiWriteStatus::Routed {
             relays: relays.iter().map(RelayUrl::to_string).collect(),
+            complete: *complete,
         },
         GWriteStatus::AwaitingRelay { relay } => FfiWriteStatus::AwaitingRelay {
             relay: relay.to_string(),
@@ -1469,9 +1473,31 @@ mod write_status_tests {
                 },
             ),
             (
-                GWriteStatus::Routed(BTreeSet::from([relay.clone()])),
+                GWriteStatus::AwaitingRoute {
+                    detail: "no relay list known yet for beef".to_string(),
+                },
+                FfiWriteStatus::AwaitingRoute {
+                    detail: "no relay list known yet for beef".to_string(),
+                },
+            ),
+            (
+                GWriteStatus::Routed {
+                    relays: BTreeSet::from([relay.clone()]),
+                    complete: false,
+                },
                 FfiWriteStatus::Routed {
                     relays: vec![relay.to_string()],
+                    complete: false,
+                },
+            ),
+            (
+                GWriteStatus::Routed {
+                    relays: BTreeSet::from([relay.clone()]),
+                    complete: true,
+                },
+                FfiWriteStatus::Routed {
+                    relays: vec![relay.to_string()],
+                    complete: true,
                 },
             ),
             (

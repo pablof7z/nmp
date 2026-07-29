@@ -459,18 +459,31 @@ impl<S: EventStore> EngineCore<S> {
         wire_demand: &BTreeSet<ContextualAtom>,
         effects: &mut Vec<Effect>,
     ) {
+        // `needed = f(wire_demand) ∪ route_unknowns`
+        // (`docs/internals/routing/knowledge-and-settlement.md` §5). The
+        // write plane contributes the authors its parked routes are still
+        // missing; it does NOT open anything of its own. Route unknowns are
+        // re-derived from the open intents on every pass, so they are
+        // stateless, survive a crash for free (boot re-resolves every open
+        // intent and re-declares every live need), and N intents wanting the
+        // same author's relay list union down to one entry.
         let needed: BTreeSet<PubkeyHex> = wire_demand
             .iter()
             .cloned()
             .filter_map(|atom| atom.filter.authors)
             .flatten()
+            .chain(self.route_unknown_authors())
             // NOT `write_relays(..).is_empty()`: that collapses "known,
             // declares zero write relays" into the same signal as "never
             // resolved", which kept a discovery subscription open FOREVER
             // for an author who genuinely has no write relays (ledger #20).
-            // `knows_write_relays` distinguishes the two; only a genuinely
-            // unresolved author still needs discovery.
-            .filter(|author| !self.directory.knows_write_relays(author))
+            // `relay_list_knowledge` distinguishes three ways; only a
+            // genuinely `Unknown` author still needs discovery -- a settled
+            // `KnownAbsent` leaves the set exactly as a `Known` one does,
+            // which is what lets the discovery sub tear down (§4).
+            .filter(|author| {
+                self.directory.relay_list_knowledge(author) == RelayListKnowledge::Unknown
+            })
             .collect();
 
         if needed.is_empty() {
@@ -573,14 +586,14 @@ impl<S: EventStore> EngineCore<S> {
             .discovered_private_relays_rejected
             .saturating_add(write_rejected + read_rejected);
         let author = author.to_hex();
-        let before_known = self.directory.knows_write_relays(&author);
+        let before_known = self.directory.relay_list_knowledge(&author);
         let before_write = self.directory.write_relays(&author);
         let before_read = self.directory.read_relays(&author);
         self.directory
             .ingest_write_relays(author.clone(), write_relays);
         self.directory
             .ingest_read_relays(author.clone(), read_relays);
-        before_known != self.directory.knows_write_relays(&author)
+        before_known != self.directory.relay_list_knowledge(&author)
             || before_write != self.directory.write_relays(&author)
             || before_read != self.directory.read_relays(&author)
     }

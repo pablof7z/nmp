@@ -842,8 +842,28 @@ pub enum FfiWriteStatus {
     Signed {
         event_id: String,
     },
+    /// `nmp::WriteStatus::AwaitingRoute` mirror: routing has not produced a
+    /// single relay yet, and `detail` says what it is waiting for. Retained,
+    /// NOT terminal, and replayed verbatim on receipt reattachment, so a
+    /// route parked for a month is still visible with its reason. Nothing
+    /// expires it; explicit cancellation is the one way out.
+    ///
+    /// An app maps this (and `Routed { complete: false }`) to "determining
+    /// destinations".
+    AwaitingRoute {
+        detail: String,
+    },
+    /// `nmp::WriteStatus::Routed` mirror. `relays` is what resolution has
+    /// named SO FAR; `complete` says whether it can ever grow again.
+    ///
+    /// The two are separate axes from delivery: `complete: true` with
+    /// nothing delivered is "sending 0 of n", and `complete: false` with
+    /// some relays already acked is an ordinary state while routing is
+    /// still open. Only `complete: true` plus every relay terminal means
+    /// "sent".
     Routed {
         relays: Vec<String>,
+        complete: bool,
     },
     AwaitingRelay {
         relay: String,

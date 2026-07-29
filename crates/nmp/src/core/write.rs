@@ -31,10 +31,92 @@ pub(super) const EMPTY_EXPLICIT_ROUTE: &str =
     "explicit routing names no relays: a route with nothing in it is refused at the door, never \
      widened to the author's write relays";
 
+/// The read path's 2-relay minimum, reused verbatim on the write side so
+/// `fallback_relays`' trigger means the same thing on both
+/// (`docs/internals/routing/outbox.md` §6.2).
+const COVERAGE_MIN: usize = 2;
+
+/// Which half of a contributing author's NIP-65 list an outbox derivation
+/// wants. The author fans out to their own WRITE relays; a p-tagged
+/// recipient is reached at their INBOX, which is their READ relays and never
+/// their write set (`crates/nmp-router/src/facts.rs`'s `read_relays` doc
+/// states this as the contract).
+#[derive(Debug, Clone, Copy)]
+enum RelayRole {
+    Write,
+    Read,
+}
+
+/// One execution of a routing strategy: what it can reach RIGHT NOW, what it
+/// is still missing, and whether it can ever change its mind again.
+///
+/// `complete` is the retirement flag, and it is a statement about KNOWLEDGE
+/// EXHAUSTION, never about delivery: an intent can be fully routed with every
+/// lane undelivered, and can (transiently) be delivering on some lanes while
+/// its routing is still incomplete
+/// (`docs/internals/routing/resolution-lifecycle.md` §7.1). Nothing in this
+/// struct is ever serialized — the journal stores the strategy label and the
+/// committed relay revisions, never a resolution report.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct RouteAnswer {
+    /// Every relay this execution can name. Diffed against the intent's
+    /// durable revision union by the caller, so re-running a resolution that
+    /// learned nothing costs an empty diff and mints no lane.
+    pub(super) relays: BTreeSet<RelayUrl>,
+    /// The authors whose relay lists are still `Unknown`. These are the
+    /// declared NEEDS: stateless, re-derived every pass, and unioned into
+    /// `sync_discovery`'s needed set so ten parked writes wanting one
+    /// recipient cost one discovery entry.
+    pub(super) unknown_authors: BTreeSet<PubkeyHex>,
+    /// True iff nothing is left to learn, so re-executing is pointless and
+    /// the `Auto` retires.
+    pub(super) complete: bool,
+    /// Why this resolution is not complete, in the words the receipt park
+    /// carries. A park nobody can read is indistinguishable from data loss.
+    pub(super) detail: Option<String>,
+}
+
+/// Every pubkey this signed event `p`-tags, in tag order, deduplicated.
+///
+/// Read off the SIGNED bytes, so the recipient set a resolution is evaluated
+/// against is frozen for the life of the intent — which is the other half of
+/// why retirement is reachable at all (the answer cannot be reopened by a tag
+/// that was never in the event).
+fn p_tagged_authors(event: &SignedEvent) -> BTreeSet<PubkeyHex> {
+    event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let slice = tag.as_slice();
+            let ("p", Some(value)) = (slice.first()?.as_str(), slice.get(1)) else {
+                return None;
+            };
+            PublicKey::parse(value).ok().map(|pk| pk.to_hex())
+        })
+        .collect()
+}
+
+/// The park reason for a resolution still holding unknowns. Names WHO is
+/// missing, because "stuck because X" is the only thing an app or a person
+/// can act on, and a bare "stuck" is barely better than losing the write.
+fn unresolved_detail(unknown: &BTreeSet<PubkeyHex>) -> String {
+    let mut names = unknown.iter().cloned().collect::<Vec<_>>();
+    names.sort();
+    format!(
+        "no relay list known yet for {}",
+        names.join(", ")
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ReceiptReplayFactKey {
     ReceiptStatus,
     AwaitingCapability,
+    /// The routing park, keyed by its own reason: a park whose detail
+    /// CHANGES (a second unknown settled, one recipient still missing) is a
+    /// new fact worth re-emitting, while the same reason repeated on every
+    /// tick is not.
+    AwaitingRoute(String),
     Attempt {
         relay: RelayUrl,
         key: ReceiptAttemptReplayKey,
@@ -54,6 +136,9 @@ impl ReceiptReplayCursor {
                 self.state.receipt_status.as_ref() == Some(status)
             }
             ReceiptReplayFactKey::AwaitingCapability => self.state.awaiting_capability,
+            ReceiptReplayFactKey::AwaitingRoute(detail) => {
+                self.state.awaiting_route.as_ref() == Some(detail)
+            }
             ReceiptReplayFactKey::Attempt { relay, key } => self
                 .state
                 .attempts
@@ -77,6 +162,9 @@ impl ReceiptReplayCursor {
         match key {
             ReceiptReplayFactKey::ReceiptStatus => self.state.receipt_status = Some(status),
             ReceiptReplayFactKey::AwaitingCapability => self.state.awaiting_capability = true,
+            ReceiptReplayFactKey::AwaitingRoute(detail) => {
+                self.state.awaiting_route = Some(detail);
+            }
             ReceiptReplayFactKey::Attempt { relay, key } => {
                 self.state.attempts.insert(relay, key);
             }
@@ -171,7 +259,15 @@ impl<S: EventStore> EngineCore<S> {
             .pending
             .get(&id)
             .filter(|pending| {
-                pending.route_blocked_relays.is_empty() && pending.lane_projection.can_close()
+                // Routing that can still change its mind is the reason a
+                // parked write is HELD rather than dropped: an intent whose
+                // strategy has unknowns left owns no lane at all, so every
+                // lane it has is trivially terminal, and closing on that
+                // would delete the exact obligation the queue rewriter is
+                // waiting to complete. Nothing auto-abandons.
+                pending.route_complete
+                    && pending.route_blocked_relays.is_empty()
+                    && pending.lane_projection.can_close()
             })
             .and_then(|pending| Some((pending.intent_id?, pending.event_id)))
         else {
@@ -846,6 +942,10 @@ impl<S: EventStore> EngineCore<S> {
                     route_blocked_relays: BTreeSet::new(),
                     attempt_ordinals: BTreeMap::new(),
                     lane_projection: LaneWorkerProjection::default(),
+                    durable_routes: BTreeSet::new(),
+                    route_complete: false,
+                    route_detail: None,
+                    route_unknowns: BTreeSet::new(),
                 },
             );
             self.intent_receipts.insert(intent.intent_id, id);
@@ -888,25 +988,40 @@ impl<S: EventStore> EngineCore<S> {
                 .flat_map(|revision| revision.relays.iter().cloned())
                 .collect::<BTreeSet<_>>();
 
+            // Resolution moment TWO: every crash-survivor is re-resolved
+            // against the directory THIS process holds, and the revision log
+            // absorbs only the delta. The strategy, not the answer, is what
+            // survived the crash — so a relay learned while the process was
+            // down gets a lane, and a relay the intent already reached is
+            // left completely alone.
             if routing_valid {
-                let current_routes = self
-                    .resolve_routes(&self.pending[&id].routing, &intent.frozen.pubkey.to_hex())
-                    .unwrap_or_default();
-                let new_routes = current_routes
+                let answer = self.resolve_routes(&self.pending[&id].routing, &intent.frozen);
+                let new_routes = answer
+                    .relays
                     .difference(&durable_relays)
                     .cloned()
                     .collect::<BTreeSet<_>>();
                 if !new_routes.is_empty() {
                     if self
-                        .commit_route_revision(intent.intent_id, current_routes.clone())
+                        .commit_route_revision(intent.intent_id, answer.relays.clone())
                         .is_err()
                     {
                         if let Some(pending) = self.pending.get_mut(&id) {
                             pending.route_blocked_relays.extend(new_routes);
                         }
                     } else {
-                        durable_relays.extend(current_routes);
+                        durable_relays.extend(answer.relays.iter().cloned());
                     }
+                }
+                if let Some(pending) = self.pending.get_mut(&id) {
+                    pending.durable_routes = durable_relays.clone();
+                    pending.route_complete = answer.complete;
+                    // Needs are STATELESS: nothing about them was recovered
+                    // from the journal, they were simply re-derived by the
+                    // resolution above. That is what makes a crash cost a
+                    // declared need nothing.
+                    pending.route_unknowns = answer.unknown_authors;
+                    pending.route_detail = answer.detail;
                 }
             }
 
@@ -1824,6 +1939,10 @@ impl<S: EventStore> EngineCore<S> {
                 route_blocked_relays: BTreeSet::new(),
                 attempt_ordinals: BTreeMap::new(),
                 lane_projection: LaneWorkerProjection::default(),
+                durable_routes: BTreeSet::new(),
+                route_complete: false,
+                route_detail: None,
+                route_unknowns: BTreeSet::new(),
             },
         );
         // `intent_id` is `None` only for Ephemeral, which never owns a
@@ -2309,30 +2428,19 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
 
-        let author_hex = event.pubkey.to_hex();
-        let relays = match self
+        // Resolution moment ONE: the bytes are final, so delivery can begin.
+        // It is only the FIRST opportunity, never the only one — an answer
+        // that comes up short here parks and is re-executed at every later
+        // moment (`resolution-lifecycle.md` §5) rather than killing a
+        // durable, already-journaled obligation.
+        let Some(answer) = self
             .pending
             .get(&id)
-            .map(|pending| self.resolve_routes(&pending.routing, &author_hex))
-        {
-            Some(Ok(relays)) => relays,
-            Some(Err(reason)) => {
-                if let Some(pending) = self.pending.remove(&id) {
-                    // No lanes have been bootstrapped for this intent yet at
-                    // this point in `on_signed` (that only happens further
-                    // below, after routes resolve) -- the lane projection is
-                    // guaranteed empty, but `intent_receipts` was already
-                    // populated at acceptance, so this must still clean it.
-                    self.forget_pending_indexes(id, &pending);
-                    let status = WriteStatus::Failed(reason);
-                    effects.push(Effect::EmitReceipt(id, status));
-                }
-                return;
-            }
-            None => return,
+            .map(|pending| self.resolve_routes(&pending.routing, &event))
+        else {
+            return;
         };
-
-        self.emit_write_status(id, WriteStatus::Routed(relays.clone()), effects);
+        let relays = answer.relays.clone();
 
         if let Some(write_access) = self
             .pending
@@ -2340,6 +2448,17 @@ impl<S: EventStore> EngineCore<S> {
             .filter(|pending| pending.durability == Durability::Ephemeral)
             .map(|pending| AccessContext::Nip42(pending.signing_pubkey))
         {
+            // Ephemeral is dispatched and forgotten in this one turn, so it
+            // has exactly one resolution moment and no later one can change
+            // the picture: report it whole, right here.
+            self.emit_write_status(
+                id,
+                WriteStatus::Routed {
+                    relays: relays.clone(),
+                    complete: answer.complete,
+                },
+                effects,
+            );
             for relay in relays {
                 let Ok(correlation) = self.alloc_attempt_correlation() else {
                     continue;
@@ -2371,48 +2490,37 @@ impl<S: EventStore> EngineCore<S> {
             return;
         }
 
-        let Some((intent_id, write_access)) = self.pending.get(&id).and_then(|pending| {
-            pending
-                .intent_id
-                .map(|intent_id| (intent_id, AccessContext::Nip42(pending.signing_pubkey)))
-        }) else {
+        let Some(intent_id) = self.pending.get(&id).and_then(|pending| pending.intent_id) else {
             return;
         };
-        if self
-            .commit_route_revision(intent_id, relays.clone())
-            .is_err()
-        {
-            if let Some(pending) = self.pending.get_mut(&id) {
-                pending.route_blocked_relays = relays.clone();
-            }
-            for relay in relays {
-                self.emit_write_status(id, WriteStatus::RoutePersistenceBlocked(relay), effects);
-            }
-            return;
-        }
-
-        let lanes = match self.bootstrap_projected_lanes(intent_id, Some(&relays)) {
-            Ok(lanes) => lanes,
-            Err(_) => {
-                // This is the sole call that teaches the reverse index this
-                // freshly-signed intent's lanes; a failure here means the
-                // index cannot learn whatever lanes may (or may not) exist,
-                // so degrade rather than assume "no lanes" (epic #507
-                // finding E5). The projection door has recorded the retryable
-                // gap: without it these route candidates would stay
-                // `uncertain` -- pinning their workers and this receipt --
-                // for the life of the process (#1000).
-                self.lane_relay_index_degraded = true;
-                for relay in relays {
-                    self.emit_write_status(id, WriteStatus::PersistenceBlocked(relay), effects);
-                }
-                return;
-            }
-        };
+        // A signed intent is addressable by event id whether or not routing
+        // could name a single relay yet: an ack can only ever arrive for a
+        // lane, and a parked intent has none, but the index must be complete
+        // the moment the bytes are final so a LATER resolution's lanes need
+        // no second registration step.
         self.event_to_receipts
             .entry(event.id)
             .or_default()
             .insert(id);
+        self.apply_route_answer(id, intent_id, answer, effects);
+    }
+
+    /// Turn one intent's freshly-minted lanes into live delivery work
+    /// mid-process — the counterpart of `open_bootstrapped_lanes`, which
+    /// exists for lanes recovered from a PREVIOUS process and therefore has
+    /// to reason about interrupted attempts this one cannot produce.
+    ///
+    /// A lane minted right now is always `WaitingConnection`: if the session
+    /// is already up it goes straight to eligible, otherwise the receipt says
+    /// so and the worker is asked for.
+    fn open_fresh_lanes(
+        &mut self,
+        id: ReceiptId,
+        signing_pubkey: PublicKey,
+        lanes: Vec<RecoveredLane>,
+        effects: &mut Vec<Effect>,
+    ) {
+        let write_access = AccessContext::Nip42(signing_pubkey);
         for lane in lanes {
             if matches!(lane.state, LaneState::WaitingConnection) {
                 // The freshly-bootstrapped lane's connectivity check is
@@ -2628,52 +2736,317 @@ impl<S: EventStore> EngineCore<S> {
 
     /// Execute a routing STRATEGY against what the engine knows right now.
     ///
-    /// This runs on the SEND path — first attempt, boot recovery, queue
-    /// drain — never at compose time, so a write that parks while offline is
-    /// resolved against the directory as it stands when it finally goes out,
-    /// not as it stood when the app called `publish`.
+    /// This runs on the SEND path — first attempt, boot recovery, engine
+    /// tick, relay-list ingest — never at compose time, so a write that parks
+    /// while offline is resolved against the directory as it stands when it
+    /// finally goes out, not as it stood when the app called `publish`.
     ///
-    /// `Auto` derives the route from the event. Today that is the author's
-    /// NIP-65 write-relay lane (the same fact
-    /// `nmp_router::route::build_candidates` reads for outbox
-    /// coverage-solving, minus the 2-relay-min solver — a write fans out to
-    /// every known write relay, it does not need coverage-solving).
+    /// It is TOTAL: there is no error arm, because "the engine has not
+    /// learned enough yet" is not an error — it is an `Auto` with unknowns,
+    /// which is the normal INITIAL state of the queue rewriter
+    /// (`docs/internals/routing/resolution-lifecycle.md` §8). A resolution
+    /// that yields nothing yields `RouteAnswer::default()`, whose empty
+    /// relay set and `complete == false` park the intent instead of killing
+    /// it.
+    ///
+    /// `Auto` runs the built-in outbox derivation
+    /// (`docs/internals/routing/outbox.md` §4): the author's own NIP-65
+    /// WRITE relays, the operator's app relays (every kind, every author,
+    /// always, additive), and each p-tagged recipient's NIP-65 READ relays —
+    /// their inbox, never their write set. Each contributing author is
+    /// consulted through the directory's three-valued answer, so a settled
+    /// `KnownAbsent` contributes nothing and BLOCKS nothing while an
+    /// `Unknown` keeps the obligation alive and declares the need.
     ///
     /// `Explicit` never consults the directory at all: the answer is exactly
-    /// the relays the caller named, and nothing here adds to them. That is
-    /// ledger #6's fail-closed discipline, kept structurally rather than by
-    /// convention — there is no widen path, and no directory fact,
-    /// active-account change, or newly-learned relay list can reach into an
-    /// accepted explicit route. The empty case is unreachable from
-    /// acceptance (`on_publish` refuses it at the door); it is spelled out
-    /// here only so the fail-closed answer is the one this arm can give.
-    pub(super) fn resolve_routes(
-        &self,
-        routing: &WriteRouting,
-        author_hex: &str,
-    ) -> Result<BTreeSet<RelayUrl>, String> {
+    /// the relays the caller named, nothing here adds to them, and it has no
+    /// inputs and therefore no unknowns — the rewriter's fixed point,
+    /// complete at its first resolution. That is ledger #6's fail-closed
+    /// discipline, kept structurally rather than by convention. The empty
+    /// case is unreachable from acceptance (`on_publish` refuses it at the
+    /// door); it is spelled out here only so the fail-closed answer is the
+    /// one this arm can give.
+    pub(super) fn resolve_routes(&self, routing: &WriteRouting, event: &SignedEvent) -> RouteAnswer {
         match routing {
-            WriteRouting::Auto => {
-                let author = author_hex.to_string();
-                let relays: BTreeSet<RelayUrl> = self
-                    .directory
-                    .write_relays(&author)
-                    .into_iter()
-                    .map(|lr| lr.url)
-                    .collect();
-                if relays.is_empty() {
-                    Err(format!("no write relays known for author {author_hex}"))
-                } else {
-                    Ok(relays)
+            WriteRouting::Auto => self.resolve_outbox(event),
+            WriteRouting::Explicit(relays) => RouteAnswer {
+                relays: relays.iter().cloned().collect(),
+                // Verbatim execution reads nothing, so nothing can still be
+                // unlearned. An accepted `Explicit` is complete the instant
+                // it resolves, before any relay is contacted.
+                unknown_authors: BTreeSet::new(),
+                complete: !relays.is_empty(),
+                detail: relays
+                    .is_empty()
+                    .then(|| EMPTY_EXPLICIT_ROUTE.to_string()),
+            },
+        }
+    }
+
+    /// The built-in outbox resolver — what `Auto` falls back to when no
+    /// registered strategy claims the kind (`docs/internals/routing/outbox.md`).
+    fn resolve_outbox(&self, event: &SignedEvent) -> RouteAnswer {
+        let mut answer = RouteAnswer::default();
+        let mut thin_contributor = false;
+
+        // 1. the author's own outbox.
+        let author = event.pubkey.to_hex();
+        let author_relays = self.contribute(&author, RelayRole::Write, &mut answer);
+        thin_contributor |= author_relays < COVERAGE_MIN;
+
+        // 2. app relays: every kind, every author, always, additive, and
+        //    never counted toward the coverage minimum.
+        answer
+            .relays
+            .extend(self.directory.app_relays().into_iter());
+
+        // 3. each p-tagged recipient's INBOX (read relays, never write).
+        for recipient in p_tagged_authors(event) {
+            let known = self.contribute(&recipient, RelayRole::Read, &mut answer);
+            thin_contributor |= known < COVERAGE_MIN;
+        }
+
+        // Operator fallback, adopted from the read path with the read path's
+        // own suppression rule: applied only when a contributing author's
+        // coverage falls under the 2-relay minimum AND no app relay is
+        // configured (`app_relays` suppresses fallback entirely). The failure
+        // this closes is a reply to someone whose kind:10002 lists exactly
+        // one relay reaching nowhere else when that relay is down.
+        if thin_contributor && self.directory.app_relays().is_empty() {
+            answer
+                .relays
+                .extend(self.directory.fallback_relays().into_iter());
+        }
+
+        answer.complete = answer.unknown_authors.is_empty();
+        if !answer.complete {
+            answer.detail = Some(unresolved_detail(&answer.unknown_authors));
+        }
+        answer
+    }
+
+    /// Fold one contributing author's three-valued answer into `answer`,
+    /// returning how many relays they contributed (`0` for both settled
+    /// absence and ignorance — the caller only uses it for the coverage
+    /// minimum, which an unknown author cannot satisfy either way).
+    fn contribute(&self, author: &PubkeyHex, role: RelayRole, answer: &mut RouteAnswer) -> usize {
+        match self.directory.relay_list_knowledge(author) {
+            RelayListKnowledge::Known => {
+                let laned = match role {
+                    RelayRole::Write => self.directory.write_relays(author),
+                    RelayRole::Read => self.directory.read_relays(author),
+                };
+                let before = answer.relays.len();
+                answer.relays.extend(laned.iter().map(|lr| lr.url.clone()));
+                let _ = before;
+                laned.len()
+            }
+            // Settled: this input is RESOLVED, contributing nothing. It does
+            // not block retirement -- that is exactly what makes the owner's
+            // three-p-tag example reachable.
+            RelayListKnowledge::KnownAbsent => 0,
+            // Not looked up to completion. Declare the need and keep the
+            // obligation alive; the engine folds it into `sync_discovery`.
+            RelayListKnowledge::Unknown => {
+                answer.unknown_authors.insert(author.clone());
+                0
+            }
+        }
+    }
+
+    /// Every author the OPEN intents are still missing a relay list for —
+    /// the write plane's contribution to `sync_discovery`'s needed set.
+    ///
+    /// Read straight off reducer memory (`route_unknowns`, refreshed by the
+    /// last resolution of each intent), so a discovery pass costs no store
+    /// read and N intents wanting the same author collapse to one entry by
+    /// set union. Nothing here is recovered from the journal: a restart
+    /// re-resolves every open intent and re-declares whatever is still
+    /// missing, which is why declared needs have no durability story to lose.
+    pub(super) fn route_unknown_authors(&self) -> BTreeSet<PubkeyHex> {
+        self.pending
+            .values()
+            .filter(|pending| !pending.route_complete)
+            .flat_map(|pending| pending.route_unknowns.iter().cloned())
+            .collect()
+    }
+
+    /// ONE resolution moment for ONE intent: re-execute the strategy against
+    /// what the engine knows right now, diff against everything this intent
+    /// has ever durably resolved to, append a revision for whatever is new,
+    /// and mint lanes from it through the ordinary machinery.
+    ///
+    /// This is the queue rewriter (`resolution-lifecycle.md` §§1-4). It is
+    /// deliberately safe to run at ANY frequency: an execution that learns
+    /// nothing costs a directory read and an empty diff, and the
+    /// `(intent_id, relay)` lane key makes a re-reported relay collide with
+    /// the lane that already exists rather than mint a second delivery
+    /// obligation. Correctness never depends on which moment fired.
+    ///
+    /// Retired intents (`route_complete`) are skipped outright, so an `Auto`
+    /// with nothing left to learn costs nothing forever after.
+    pub(super) fn rewrite_route(&mut self, id: ReceiptId, effects: &mut Vec<Effect>) {
+        let Some(pending) = self.pending.get(&id) else {
+            return;
+        };
+        // Unsigned intents have no frozen recipient set to resolve against
+        // yet, an unreadable routing snapshot is never resolved at all, and a
+        // retired route can never change its answer again.
+        if !pending.routing_valid || pending.event_id.is_none() || pending.route_complete {
+            return;
+        }
+        let Some(intent_id) = pending.intent_id else {
+            // Ephemeral owns no durable lane or revision log; `on_signed`
+            // dispatches it inline and forgets it.
+            return;
+        };
+        let answer = self.resolve_routes(&pending.routing, &pending.frozen);
+        self.apply_route_answer(id, intent_id, answer, effects);
+    }
+
+    /// Commit one [`RouteAnswer`] against an intent's durable route log and
+    /// tell the receipt whatever actually changed.
+    ///
+    /// Emission is picture-driven, not moment-driven: a `Routed` fact is
+    /// pushed only when the relay set or the `complete` flag moved, and a
+    /// park is re-emitted only when its REASON changes. So a tick that
+    /// learns nothing is silent on the receipt stream even though the
+    /// strategy really did re-execute.
+    pub(super) fn apply_route_answer(
+        &mut self,
+        id: ReceiptId,
+        intent_id: IntentId,
+        answer: RouteAnswer,
+        effects: &mut Vec<Effect>,
+    ) {
+        let Some(pending) = self.pending.get(&id) else {
+            return;
+        };
+        let signing_pubkey = pending.signing_pubkey;
+        // Diff-and-append: only relays absent from everything this intent has
+        // ever durably resolved to are new, so an acked lane is never
+        // re-minted and a resolver repeating itself writes nothing.
+        let new_relays = answer
+            .relays
+            .difference(&pending.durable_routes)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut union = pending.durable_routes.clone();
+        let mut committed = false;
+
+        if !new_relays.is_empty() {
+            if self
+                .commit_route_revision(intent_id, answer.relays.clone())
+                .is_err()
+            {
+                // The route itself did not persist: these exact URLs are not
+                // claimed to survive a crash, so they are owned only for this
+                // process and no lane is minted for them.
+                if let Some(pending) = self.pending.get_mut(&id) {
+                    pending.route_blocked_relays.extend(new_relays.iter().cloned());
+                }
+                for relay in &new_relays {
+                    self.emit_write_status(
+                        id,
+                        WriteStatus::RoutePersistenceBlocked(relay.clone()),
+                        effects,
+                    );
+                }
+            } else {
+                committed = true;
+                union.extend(answer.relays.iter().cloned());
+            }
+        }
+
+        let picture_changed = {
+            let Some(pending) = self.pending.get_mut(&id) else {
+                return;
+            };
+            let changed =
+                pending.durable_routes != union || pending.route_complete != answer.complete;
+            pending.durable_routes = union.clone();
+            pending.route_complete = answer.complete;
+            pending.route_unknowns = answer.unknown_authors.clone();
+            changed
+        };
+
+        if committed {
+            match self.bootstrap_projected_lanes(intent_id, Some(&union)) {
+                Ok(lanes) => self.open_fresh_lanes(id, signing_pubkey, lanes, effects),
+                Err(_) => {
+                    // The sole call that teaches the reverse index this
+                    // intent's lanes failed, so the index cannot learn what
+                    // may or may not exist — degrade rather than assume "no
+                    // lanes" (epic #507 finding E5).
+                    self.lane_relay_index_degraded = true;
+                    for relay in &new_relays {
+                        self.emit_write_status(
+                            id,
+                            WriteStatus::PersistenceBlocked(relay.clone()),
+                            effects,
+                        );
+                    }
                 }
             }
-            WriteRouting::Explicit(relays) => {
-                if relays.is_empty() {
-                    Err(EMPTY_EXPLICIT_ROUTE.to_string())
-                } else {
-                    Ok(relays.iter().cloned().collect())
+        }
+
+        if union.is_empty() {
+            // Nothing routable yet. PARK — retained, visible, and naming what
+            // it waits for. Never a terminal failure: the event is signed,
+            // journaled and durable, and the directory was merely young.
+            let detail = answer
+                .detail
+                .unwrap_or_else(|| "routing produced no destinations".to_string());
+            let unchanged = self
+                .pending
+                .get(&id)
+                .is_some_and(|pending| pending.route_detail.as_ref() == Some(&detail));
+            if !unchanged {
+                if let Some(pending) = self.pending.get_mut(&id) {
+                    pending.route_detail = Some(detail.clone());
                 }
+                self.emit_write_status(id, WriteStatus::AwaitingRoute { detail }, effects);
             }
+            return;
+        }
+
+        if let Some(pending) = self.pending.get_mut(&id) {
+            pending.route_detail = None;
+        }
+        if picture_changed {
+            self.emit_write_status(
+                id,
+                WriteStatus::Routed {
+                    relays: union,
+                    complete: answer.complete,
+                },
+                effects,
+            );
+        }
+    }
+
+    /// Moment 3/4 of the lifecycle (`resolution-lifecycle.md` §5): re-execute
+    /// every intent whose routing is not yet complete.
+    ///
+    /// Called from the engine tick (the safety net — a kind:10002 ingested
+    /// for a completely unrelated reason is consulted with no wiring between
+    /// the read path and the write path) and immediately after a relay-list
+    /// ingest or a discovery settlement (the latency path — a parked write
+    /// unparks within the same ingestion turn rather than waiting for a
+    /// tick). The two overlap by design; because resolution is
+    /// diff-and-append, running "too often" is free.
+    pub(super) fn rewrite_open_routes(&mut self, effects: &mut Vec<Effect>) {
+        let open = self
+            .pending
+            .iter()
+            .filter(|(_, pending)| {
+                !pending.route_complete && pending.routing_valid && pending.event_id.is_some()
+            })
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for id in open {
+            self.rewrite_route(id, effects);
+            self.close_if_all_lanes_terminal(id);
         }
     }
 

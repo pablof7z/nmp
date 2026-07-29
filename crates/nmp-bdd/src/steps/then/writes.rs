@@ -219,7 +219,7 @@ async fn exactly_one_receipt(w: &mut NmpWorld) {
 async fn receipt_reports_one_destination(w: &mut NmpWorld) {
     let routed_once = w.receipt_eventually(|seen| {
         seen.iter()
-            .any(|s| matches!(s, WriteStatus::Routed(relays) if relays.len() == 1))
+            .any(|s| matches!(s, WriteStatus::Routed { relays, .. } if relays.len() == 1))
     });
     assert!(
         routed_once,

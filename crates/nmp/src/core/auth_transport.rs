@@ -1215,6 +1215,16 @@ impl<S: EventStore> EngineCore<S> {
                 for author in relay_list_authors {
                     directory_changed |= self.ingest_relay_list_winner(author, effects);
                 }
+                if directory_changed {
+                    // Resolution moment FOUR: a relay list arriving for ANY
+                    // reason -- someone opened a profile, a feed hydrated, a
+                    // parked write's own declared need finally answered --
+                    // wakes every open route in the SAME ingestion turn,
+                    // rather than waiting for the next tick. There is no
+                    // wiring between the read path and the write path here
+                    // beyond "the directory learned something".
+                    self.rewrite_open_routes(effects);
+                }
 
                 // Ordinary committed rows do not change the active demand or
                 // router plan. Avoid rebuilding it on every EVENT batch; a

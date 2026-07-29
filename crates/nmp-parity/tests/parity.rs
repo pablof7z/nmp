@@ -255,7 +255,13 @@ enum NormStatus {
     /// parity proof covers the payload, not just the variant tag.
     AwaitingCapability(String),
     Signed(String),
-    Routed(Vec<String>),
+    /// The routing park's reason, carried whole so the parity proof covers
+    /// the detail an app renders, not just the variant tag.
+    AwaitingRoute(String),
+    /// Both routing axes: the relays named so far AND whether resolution can
+    /// still grow. `complete` is payload, not a tag, so a boundary that
+    /// dropped it would pass a tag-only oracle.
+    Routed(Vec<String>, bool),
     AwaitingRelay(String),
     AwaitingAuth(String),
     RetryEligible(String, u64, u64),
@@ -575,11 +581,13 @@ fn normalize_direct_status(status: WriteStatus, relay: &str) -> NormStatus {
             NormStatus::AwaitingCapability(pubkey.to_hex())
         }
         WriteStatus::Signed(id) => NormStatus::Signed(id.to_hex()),
-        WriteStatus::Routed(relays) => NormStatus::Routed(
+        WriteStatus::AwaitingRoute { detail } => NormStatus::AwaitingRoute(detail),
+        WriteStatus::Routed { relays, complete } => NormStatus::Routed(
             relays
                 .iter()
                 .map(|url| normalize_url(url.as_str(), relay))
                 .collect(),
+            complete,
         ),
         WriteStatus::AwaitingRelay { relay: url } => {
             NormStatus::AwaitingRelay(normalize_url(url.as_str(), relay))
@@ -637,12 +645,16 @@ fn normalize_ffi_status(status: FfiWriteStatus, relay: &str) -> NormStatus {
         FfiWriteStatus::Superseded => NormStatus::Superseded,
         FfiWriteStatus::AwaitingCapability { pubkey } => NormStatus::AwaitingCapability(pubkey),
         FfiWriteStatus::Signed { event_id } => NormStatus::Signed(event_id),
-        FfiWriteStatus::Routed { mut relays } => {
+        FfiWriteStatus::AwaitingRoute { detail } => NormStatus::AwaitingRoute(detail),
+        FfiWriteStatus::Routed {
+            mut relays,
+            complete,
+        } => {
             for url in &mut relays {
                 *url = normalize_url(url, relay);
             }
             relays.sort();
-            NormStatus::Routed(relays)
+            NormStatus::Routed(relays, complete)
         }
         FfiWriteStatus::AwaitingRelay { relay: url } => {
             NormStatus::AwaitingRelay(normalize_url(&url, relay))
@@ -1139,7 +1151,9 @@ fn expected_send_preamble(keys: &Keys) -> Vec<NormStatus> {
     vec![
         NormStatus::Accepted,
         NormStatus::Signed(event.id.to_hex()),
-        NormStatus::Routed(vec![relay.clone()]),
+        // An explicit route reads no directory facts, so it has no unknowns
+        // and is complete at its first resolution.
+        NormStatus::Routed(vec![relay.clone()], true),
         NormStatus::AwaitingRelay(relay.clone()),
         NormStatus::AwaitingAuth(relay.clone()),
         NormStatus::Sent(relay),
@@ -1275,7 +1289,8 @@ fn direct_follow_receipt_name(status: &WriteStatus) -> &'static str {
         WriteStatus::Superseded => "superseded",
         WriteStatus::AwaitingCapability { .. } => "awaiting_capability",
         WriteStatus::Signed(_) => "signed",
-        WriteStatus::Routed(_) => "routed",
+        WriteStatus::AwaitingRoute { .. } => "awaiting_route",
+        WriteStatus::Routed { .. } => "routed",
         WriteStatus::AwaitingRelay { .. } => "awaiting_relay",
         WriteStatus::AwaitingAuth { .. } => "awaiting_auth",
         WriteStatus::RetryEligible { .. } => "retry_eligible",
@@ -1299,6 +1314,7 @@ fn ffi_follow_receipt_name(status: &FfiWriteStatus) -> &'static str {
         FfiWriteStatus::Superseded => "superseded",
         FfiWriteStatus::AwaitingCapability { .. } => "awaiting_capability",
         FfiWriteStatus::Signed { .. } => "signed",
+        FfiWriteStatus::AwaitingRoute { .. } => "awaiting_route",
         FfiWriteStatus::Routed { .. } => "routed",
         FfiWriteStatus::AwaitingRelay { .. } => "awaiting_relay",
         FfiWriteStatus::AwaitingAuth { .. } => "awaiting_auth",
