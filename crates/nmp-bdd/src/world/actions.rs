@@ -281,15 +281,29 @@ impl NmpWorld {
     }
 
     /// Every publish in this module goes through here: it records whether the
-    /// app named relays (for `last_publish_named_no_relay`) and opens the one
-    /// receipt stream the publish owns.
-    fn publish_intent(&mut self, intent: WriteIntent) {
+    /// app named relays (for `last_publish_named_no_relay`), remembers the
+    /// stable receipt id so this obligation can be reattached across a
+    /// restart, and opens the one receipt stream the publish owns.
+    ///
+    /// `publish_tracked` rather than `publish` because the id is the only
+    /// handle a restarted app has: a scenario that stops the process and asks
+    /// what became of a write is asking through exactly that id, and a world
+    /// that threw it away could only answer about a stream that no longer
+    /// exists.
+    pub(super) fn publish_intent(&mut self, intent: WriteIntent) {
         self.last_publish_was_auto = matches!(intent.routing, WriteRouting::Auto);
-        let rx = self
+        // BEFORE the door, not after: this is the lower bound a diagnostics
+        // row's acceptance instant is checked against, and acceptance happens
+        // inside the call. Reading the clock afterwards could land a whole
+        // second later than the instant the engine recorded, which would make
+        // a correct row look fabricated.
+        self.last_publish_at = Some(nostr::Timestamp::now());
+        let stream = self
             .handle()
-            .publish(intent)
+            .publish_tracked(intent)
             .expect("BDD receipt correlation namespace must be available");
-        self.receipts.push(ReceiptState::new(rx));
+        self.last_receipt_id = Some(stream.id);
+        self.receipts.push(ReceiptState::new(stream.statuses));
     }
 
     /// `When I switch to <person>'s account` (a person already known to the

@@ -90,7 +90,6 @@ Feature: Offering the same signed event twice costs bandwidth, not correctness
     And "outbox-a" holds one copy of the note
     And exactly one receipt exists for that publish
 
-  @designed
   Scenario: Two inputs resolving to the same relay make one destination, not two
     # The overlap case, and a reason destinations are keyed by (intent, relay)
     # rather than by whatever produced them. My own write relay and Dave's

@@ -180,7 +180,7 @@ async fn my_feed_is_open(w: &mut NmpWorld) {
 /// no app relay exists, not because the assertion got lucky.
 #[given(regex = r#"^no app relays are configured$"#)]
 async fn no_app_relays(w: &mut NmpWorld) {
-    w.assert_no_app_relays();
+    w.no_app_relays();
 }
 
 /// The engine-side twin of `my relay list names ... as my write relays`:
@@ -552,13 +552,8 @@ async fn observing_that_id(w: &mut NmpWorld) {
     w.observe_exact_id(id, None).await;
 }
 
-#[given(regex = r#"^relay "([^"]+)" holds a kind (\d+) event with h "([^"]+)" saying "([^"]+)"$"#)]
-async fn relay_holds_group_event(
-    w: &mut NmpWorld,
-    relay: String,
-    kind: u16,
-    group_id: String,
-    text: String,
-) {
-    w.seed_group_event(&relay, kind, &group_id, &text).await;
-}
+// The outbox family lives next door for the same reason `then/` is a
+// directory: this catalog is shared by every feature, and one family's whole
+// vocabulary is readable on its own only when it has a name. See
+// `given::outbox`.
+mod outbox;

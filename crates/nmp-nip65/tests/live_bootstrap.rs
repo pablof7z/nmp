@@ -214,9 +214,23 @@ async fn relay_echo_is_the_only_transition_from_bootstrap_to_author_outbox() {
     let parked = wait_for_status(&before_echo.statuses, Duration::from_secs(5), |status| {
         matches!(status, WriteStatus::AwaitingRoute { .. })
     });
+    // Named for WHO and for WHAT, not for one phrasing of it. A park on this
+    // author's own relay list is reported two ways in turn -- "no relay list
+    // known yet for <hex>" while discovery is still running, and "no relay
+    // list exists for <hex>" once the indexer has finished and settled the
+    // absence -- and this test can legitimately observe either, because the
+    // controlled relay is also the indexer and its EOSE races the park. Both
+    // are the same fact for this test's purpose, and pinning either sentence
+    // would make it fail on a timing difference rather than on a defect. What
+    // it is actually named for is that the reason identifies the author whose
+    // relay list is missing: a park that named somebody else, or named nobody,
+    // is the "stuck" message the design exists to replace.
+    let author = keys.public_key().to_hex();
     assert!(
-        matches!(parked, WriteStatus::AwaitingRoute { ref detail } if detail.contains("no relay list known yet")),
-        "the parked route must name what it is waiting for: {parked:?}"
+        matches!(parked, WriteStatus::AwaitingRoute { ref detail }
+            if detail.contains(&author) && detail.contains("relay list")),
+        "the parked route must name what it is waiting for -- this author's own \
+         relay list ({author}): {parked:?}"
     );
 
     policy.0.release_first_write.notify_one();

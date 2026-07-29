@@ -2,13 +2,14 @@
 title: Outbox — the built-in default write resolver
 category: routing
 slug: outbox
-status: designed
+status: built
 date: 2026-07-29
 owns:
   - what "outbox" means for the WRITE side (author + p-tag fan-out + app relays)
-  - what `AuthorOutbox` actually does on master, and how far short it falls
+  - the author-write-relays-only stub this replaced, kept as the defect record
   - the built-in resolver's full derivation, in pseudocode
   - when an outbox obligation SETTLES (retires) and what knowledge that needs
+  - what the engine says when the derivation names nothing at all (§6.3)
 related:
   - docs/internals/routing/auto-and-explicit.md
   - docs/internals/routing/resolution-lifecycle.md
@@ -20,9 +21,9 @@ related:
   - docs/internals/writes/identity.md
   - docs/internals/subscriptions/identity-grouping-and-limits.md
 issues:
-  - "master's AuthorOutbox is author-write-relays-only; the full fan-out is designed, unbuilt"
-  - "publishing before the first relay-list fetch terminally fails today (§2.2)"
-  - "DECIDED: the write side adopts fallback_relays() with the read path's suppression rule (§6.2)"
+  - "BUILT (#975, #976): the full three-source fan-out replaced the author-write-relays-only stub"
+  - "BUILT (#975): publishing before the first relay-list fetch parks instead of failing (§2.2)"
+  - "BUILT (#976): the write side adopts fallback_relays() with the read path's suppression rule, armed by RECIPIENT coverage only (§6.2)"
 ---
 
 # Outbox — the built-in default write resolver
@@ -30,16 +31,19 @@ issues:
 Outbox is what `Auto` routing falls back to when no registered resolver claims
 the event's kind (see `resolvers.md`). It is the answer to "publish this
 ordinary event" — and the settled design makes it a much bigger answer than
-what master implements today. This document records both: the shipped stub,
-and the full model the owner specified, in his words.
+the stub it replaced. This document records both: that stub, and the full model
+the owner specified, in his words.
 
-**Status is marked per section.** BUILT sections describe current master
-(`b99f9d41`); DESIGNED sections are settled design from the 2026-07-28/29
-session, not yet implemented.
+**Status is marked per section.** The design is now BUILT: #975 landed the
+lifecycle and the three-source derivation, and #976 landed the recipient-scoped
+`fallback_relays` trigger and the stated refusal. §2 is kept as the RECORD OF
+THE DEFECT — it describes `b99f9d41`, the shipped stub these two arms replaced,
+and it is retained rather than deleted because the bug-class ledger points at
+it.
 
 ---
 
-## 1. The full model — DESIGNED
+## 1. The full model — BUILT (#975, #976)
 
 Pablo's outbox is not "the author's write relays." It is three additive
 sources:
@@ -64,7 +68,7 @@ itself the incremental case. There is no simple tier below the interesting one.
 
 ---
 
-## 2. What master does today — BUILT, and a stub
+## 2. What master did before this arm — the defect, kept on the record
 
 ### 2.1 Author write relays and NOTHING else
 
@@ -93,7 +97,7 @@ not a hypothetical.
 
 ---
 
-## 3. The striking fact: the trait docs already describe the unbuilt policy — BUILT (the docs), DESIGNED (the behaviour)
+## 3. The striking fact: the trait docs described the unbuilt policy first — BUILT (both halves, #976)
 
 The vocabulary for the full model was designed into `RelayDirectory` and never
 consumed by the write path. Read the shipped doc comments.
@@ -128,7 +132,7 @@ surface; it invents no new fact source.
 
 ---
 
-## 4. The resolver's derivation — DESIGNED
+## 4. The resolver's derivation — BUILT (`EngineCore::resolve_outbox`)
 
 The built-in resolver, in the `RouteResolver` vocabulary of `resolvers.md`
 (three-valued knowledge from `knowledge-and-settlement.md`):
@@ -148,14 +152,23 @@ resolve(subject, ctx):
     relays += ctx.app_relays()
 
     # 3. each p-tagged recipient's INBOX (read relays, never write_relays)
+    thin_recipient = false
     for p in subject.tags.p_tags():
         match ctx.read_relays(p):
             Known(set)  -> relays += set
-            KnownAbsent -> ()                  # settled: skip, do not wait
-            Unknown     -> needs += relay_list(p)
+                           thin_recipient |= set.len() < 2
+            KnownAbsent -> thin_recipient = true  # settled: skip, do not wait
+            Unknown     -> needs += relay_list(p) # no coverage to judge yet
 
-    if needs.is_empty(): Resolved(relays)      # obligation retires
-    else:                Partial { relays, needs }
+    # 4. the operator's per-RECIPIENT top-up, under the read path's own
+    #    suppression rule (§6.2)
+    if thin_recipient and ctx.app_relays().is_empty():
+        relays += ctx.fallback_relays()
+
+    if relays.is_empty():                      # §6.3: nothing decided at all
+        Refused { every exhausted source named }
+    elif needs.is_empty(): Resolved(relays)    # obligation retires
+    else:                  Partial { relays, needs }
 ```
 
 Load-bearing details:
@@ -177,7 +190,7 @@ Load-bearing details:
 
 ---
 
-## 5. When the unknowns settle — DESIGNED
+## 5. When the unknowns settle — BUILT (`EngineCore::settle_relay_list_eose`)
 
 Absence must be knowable or no outbox obligation with a listless recipient
 ever retires. Pablo's ruling on how it becomes knowable:
@@ -198,9 +211,9 @@ transition EOSE supplies.
 
 ---
 
-## 6. Consequences and one open sub-point
+## 6. Consequences
 
-### 6.1 A refused consumer request falls out for free — DESIGNED
+### 6.1 A refused consumer request falls out for free — BUILT
 
 @lima-codex asked for kind:0 profile copies to reach the configured
 app/indexer relays, and was refused at the time as an out-of-scope
@@ -210,7 +223,7 @@ reaches the app relays with no exception, no special case, and no route the
 app ever names. The request is retired by the model, not by an
 accommodation. Recorded so nobody re-adds a kind:0-shaped special path.
 
-### 6.2 DESIGNED — the write side adopts `fallback_relays()`
+### 6.2 BUILT (#976) — the write side adopts `fallback_relays()`
 
 The read path has a third operator set: `fallback_relays`
 (`crates/nmp-router/src/facts.rs:93-103`), applied per-author only when the
@@ -234,3 +247,55 @@ coverage-solving" (`write.rs:2570-2578`), which reads as though the
 about the RECIPIENT's coverage rather than the author's fan-out. Fanning out to
 every known write relay and topping up a recipient below coverage are
 independent, and adopting the second does not weaken the first.
+
+Two clauses of that sentence are the whole of the built trigger, and each was
+briefly implemented the other way:
+
+- **The author's own thinness never arms it.** One write relay of my own is a
+  fact about where I publish, not a deficit to repair; widening on it would put
+  every note from a single-relay setup onto the operator's fallbacks, which is
+  a different policy nobody ruled on
+  (`outbox-fallback-coverage.feature`, "The author's own thin fan-out is not a
+  coverage problem").
+- **Only a SETTLED recipient answer can be short.** Until a recipient's list is
+  looked up to completion nobody knows what their coverage is, so an `Unknown`
+  arms nothing — the resolution stays open and the top-up is decided again when
+  the answer lands. Topping up on ignorance would widen every route on its
+  first pass and then never narrow it, because a relay already committed to an
+  intent's route log is never withdrawn.
+
+### 6.3 BUILT (#976) — an answer of NOTHING is a stated refusal
+
+A resolution that names no destination at all still parks — a retired route is
+never re-executed, so calling zero destinations "complete" would strand the
+write permanently — but its reason names every exhausted source rather than a
+bare "stuck". Each clause doubles as a way to fix it, because configuring any
+single one of them would have produced a route:
+
+```text
+no destination could be determined: no relay list exists for <hex>;
+no app relays are configured; no fallback relays are configured
+```
+
+The load-bearing distinction inside it is between a relay list discovery
+settled as ABSENT ("no relay list exists for …") and one nobody has finished
+looking up ("no relay list known yet for …"). Both look like an empty answer;
+only the second is worth waiting for, and an operator told to wait for a fact
+that will never arrive has been told nothing.
+
+The same fact is also engine-global, as `DiagnosticsSnapshot.stalled_writes`
+(`nmp::StalledWrite { receipt, reason, stalled_since }`). Per-receipt reporting
+answers "what happened to THIS note" and needs somebody to be holding that
+receipt; a misconfigured operator relay set is exactly the case where EVERY
+write lands here and no single receipt says so. `stalled_since` is when the
+CURRENT stall began — a write that parked, routed, and parked again is stuck
+since the second park — and it is never journalled: how long a stall has lasted
+is only knowable from facts the running engine holds, so a recovered write is
+stalled as of the recovering process's clock.
+
+The engine substitutes nothing. It ships no relay list of its own, and a
+well-known public relay picked as a kindness would publish someone's event to a
+host nobody in the chain consented to — and make the misconfiguration invisible,
+because the write would appear to succeed
+(`outbox-no-route.feature`, "No public relay is ever substituted for an empty
+answer", "The indexers are not a publishing destination of last resort").

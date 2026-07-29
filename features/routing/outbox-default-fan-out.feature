@@ -35,7 +35,6 @@ Feature: Where an ordinary event goes when the app says nothing
 
   # ---- the author's own outbox -----------------------------------------
 
-  @designed
   Scenario: An event addressed to nobody still reaches two sources, not one
     # The floor case, and already more than master does: with nobody p-tagged
     # there is no fan-out to compute, and the answer is STILL the union of the
@@ -47,7 +46,6 @@ Feature: Where an ordinary event goes when the app says nothing
     Then the note is routed to exactly "author-write-1", "author-write-2", "app-indexer-1", and "app-indexer-2"
     And routing is complete
 
-  @designed
   Scenario: The author is reached at their write relays, never their read relays
     # The mirror image of the recipient rule below, and the reason both halves
     # have to be stated: NIP-65 is two sets, and outbox reads a DIFFERENT one
@@ -62,7 +60,6 @@ Feature: Where an ordinary event goes when the app says nothing
 
   # ---- the p-tagged recipients' inboxes ---------------------------------
 
-  @designed
   Scenario: A p-tagged recipient adds their inbox, never their outbox
     # THE load-bearing distinction of this file. `read_relays`'s own doc names
     # the policy that does not exist yet: "This is what the p-tag inbox
@@ -77,7 +74,6 @@ Feature: Where an ordinary event goes when the app says nothing
     Then the note is routed to exactly "author-write-1", "author-write-2", and "bob-inbox"
     And the note is never routed to "bob-outbox"
 
-  @designed
   Scenario: Every p-tagged recipient contributes their own inbox
     # The fan-out is per recipient, not "the first one" and not "the union of
     # whoever the directory happened to have warm". Three addressees, three
@@ -89,7 +85,6 @@ Feature: Where an ordinary event goes when the app says nothing
     When I publish a note saying "morning, all three of you" that p-tags Bob, Carol, and Dave
     Then the note is routed to exactly "author-write-1", "author-write-2", "bob-inbox", "carol-inbox", and "dave-inbox"
 
-  @designed
   Scenario: An unmarked relay in a recipient's list is an inbox too
     # NIP-65's marker rule, which `read_relays` states precisely: read-marked
     # entries AND unmarked entries are both read relays; only a `"write"`-
@@ -105,7 +100,6 @@ Feature: Where an ordinary event goes when the app says nothing
 
   # ---- how the three sources combine ------------------------------------
 
-  @designed
   Scenario: All three sources land in one route, not three competing ones
     # The composition case. There is no precedence between the sources and no
     # "most specific wins" -- the resolver's answer is a set UNION, so an
@@ -116,7 +110,6 @@ Feature: Where an ordinary event goes when the app says nothing
     Then the note is routed to exactly "author-write-1", "author-write-2", "app-indexer-1", "app-indexer-2", and "bob-inbox"
     And routing is complete
 
-  @designed
   Scenario: A relay named by two sources is one destination, not two
     # Union, not concatenation. Bob reads from a relay I also write to, which
     # is extremely ordinary; that must cost ONE lane, not two publications of
@@ -128,7 +121,6 @@ Feature: Where an ordinary event goes when the app says nothing
     Then the note is routed to exactly "author-write-1" and "author-write-2"
     And the note is published to "author-write-1" exactly once
 
-  @designed
   Scenario: The app never named a relay and never could have
     # The point of the whole default: nothing in this flow gives the app a
     # place to pass a relay in, and the resolver reads only engine-owned

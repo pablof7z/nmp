@@ -55,6 +55,12 @@
 //!   something, and what an already-signed event's bytes still were on the
 //!   far side. Distinct from `writes` and `identity` for the same reason
 //!   those two are distinct from each other -- same receipt, different claim.
+//! - `outbox` -- the DEFAULT route: which relays an ordinary `Auto` write
+//!   resolved to, and what the engine said when it resolved to none. A third
+//!   question from `writes` ("where was it delivered") and `routes` ("is it
+//!   still deciding"), and the only one of the three that can tell an outbox
+//!   consulting the wrong half of a relay list from one consulting the right
+//!   half and failing to reach it.
 //! - `routes` -- routing as a LIFECYCLE: whether the strategy is still
 //!   deciding, what it says it is waiting for, and whether it can ever change
 //!   its mind again. Separate from `writes` because routed and published are
@@ -99,6 +105,7 @@ mod budget;
 mod feed;
 mod groups;
 mod identity;
+mod outbox;
 mod payloads;
 mod replaceable;
 mod routes;

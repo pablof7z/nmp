@@ -351,7 +351,7 @@ async fn relay_was_offered_exactly(w: &mut NmpWorld, relay: String, count: Strin
         .last_published_id()
         .expect("the note must have been signed to have been offered to anything");
     nothing_to_observe!(
-        w.offers_of(&relay, id) > 0,
+        w.wait_for_offer(&relay, id).await,
         "{relay:?} was never offered this note at all, so counting its offers would pass \
          however many resolutions ran"
     );
