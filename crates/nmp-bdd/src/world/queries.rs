@@ -78,7 +78,7 @@ pub(super) fn tagged_note_query_values(
     shape: WatchShape,
 ) -> LiveQuery {
     let tag = IndexedTagName::new(tag).expect("nmp-bdd: an indexed tag name is one ASCII letter");
-    pinned_note_query(
+    pinned_query(
         relay,
         Filter {
             kinds: Some(BTreeSet::from([1u16])),
@@ -96,7 +96,7 @@ pub(super) fn tagged_note_query_values(
 /// `limit` caps the result COUNT, so the union refuses to widen across
 /// one (see `nmp_router::coalesce::neither_limited`).
 pub fn authored_note_query(relay: &RelayUrl, author_hex: &str, limit: Option<usize>) -> LiveQuery {
-    pinned_note_query(
+    pinned_query(
         relay,
         Filter {
             kinds: Some(BTreeSet::from([1u16])),
@@ -150,7 +150,22 @@ pub fn my_group_state_query(relay: &RelayUrl) -> LiveQuery {
     )
 }
 
-fn pinned_note_query(relay: &RelayUrl, filter: Filter) -> LiveQuery {
+/// One author's contact list -- the replaceable coordinate
+/// `features/writes/replaceable-edits.feature` CAS-es against. Pinned like
+/// every other literal shape: what the scenario reads is the LOCAL winner,
+/// and pinning keeps the read from also depending on relay discovery.
+pub fn contact_list_query(relay: &RelayUrl, author_hex: &str) -> LiveQuery {
+    pinned_query(
+        relay,
+        Filter {
+            kinds: Some(BTreeSet::from([3u16])),
+            authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
+            ..Filter::default()
+        },
+    )
+}
+
+fn pinned_query(relay: &RelayUrl, filter: Filter) -> LiveQuery {
     LiveQuery(
         Demand::new(
             filter,

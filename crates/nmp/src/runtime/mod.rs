@@ -55,9 +55,12 @@
 //! completes, so nothing may auto-replay on it.
 
 mod auth;
+mod clock;
 mod diagnostics_channel;
 mod fifo_channel;
 mod row_channel;
+
+pub use clock::EngineClock;
 
 pub use auth::{
     AddAuthPolicyError, AuthPolicy, AuthPolicyDecision, AuthPolicyError, AuthPolicyOp,
@@ -1397,6 +1400,10 @@ pub struct EngineThread {
     /// (never a worker) after the reducer stops spawning; dropping the last
     /// `Arc` aborts remaining adapter tasks, firing their Drop guards.
     runtime: Arc<tokio::runtime::Runtime>,
+    /// The one value every `Tick` this thread dispatches reads its instant
+    /// from. See [`EngineClock`] for why the runtime reads a clock at all
+    /// instead of calling `Timestamp::now()` at each site.
+    clock: EngineClock,
     #[cfg(test)]
     runtime_threads: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -1633,6 +1640,8 @@ impl EngineThread {
             }
         };
 
+        let clock = EngineClock::wired(cmd_tx.clone());
+        let engine_clock = clock.clone();
         let self_inbox = cmd_tx.clone();
         let engine_pool = pool.clone();
         let engine_stop = pool_stop_tx.clone();
@@ -1659,8 +1668,11 @@ impl EngineThread {
                                 relay_information: engine_relay_information,
                                 max_auth_capabilities: runtime_config.max_auth_capabilities,
                             },
-                            &cmd_rx,
-                            &self_inbox,
+                            EngineWiring {
+                                clock: &engine_clock,
+                                cmd_rx: &cmd_rx,
+                                self_inbox: &self_inbox,
+                            },
                         )
                     })
                 }) {
@@ -1683,6 +1695,7 @@ impl EngineThread {
                 bridge_join: Some(bridge_join),
                 drain_inbox: cmd_tx.clone(),
                 runtime,
+                clock,
                 #[cfg(test)]
                 runtime_threads,
             },
@@ -1702,6 +1715,20 @@ impl EngineThread {
     #[must_use]
     pub fn adapter_runtime(&self) -> tokio::runtime::Handle {
         self.runtime.handle().clone()
+    }
+
+    /// This thread's wall clock, so an owner that has to STATE what time the
+    /// engine is running at can.
+    ///
+    /// Exposed on [`EngineThread`] rather than on the app-facing [`Handle`]
+    /// for the same reason [`Self::adapter_runtime`] is: an app has no
+    /// business deciding what time it is, and a value only the thread's owner
+    /// can reach cannot become an app contract by accident. Unpinned by
+    /// default, so a caller that never touches it gets `Timestamp::now()`
+    /// everywhere, byte for byte what the runtime did before this existed.
+    #[must_use]
+    pub fn clock(&self) -> EngineClock {
+        self.clock.clone()
     }
 
     /// Block until the engine and pool-bridge threads have exited. Only
@@ -3863,6 +3890,21 @@ mod nip11_decision_tests {
     }
 }
 
+/// The three wires the engine thread owns, and the one thing they have in
+/// common: each is a way for something OUTSIDE the reducer to reach it. The
+/// commands an app sends (`cmd_rx`), the ones the runtime posts to itself
+/// (`self_inbox`), and the wall clock its `Tick`s carry -- which is wired to
+/// that same inbox, since stating the time also delivers it (see
+/// [`EngineClock`]).
+///
+/// One struct rather than three parameters because they arrive together, are
+/// destructured immediately, and travel nowhere else.
+struct EngineWiring<'a> {
+    clock: &'a EngineClock,
+    cmd_rx: &'a Receiver<Cmd>,
+    self_inbox: &'a Sender<Cmd>,
+}
+
 /// The engine thread's body: construct `EngineCore` (this is the ONLY place
 /// it is ever built — it never leaves this stack frame), then block on
 /// `cmd_rx` (D8) until `Cmd::Shutdown`.
@@ -3879,12 +3921,16 @@ fn engine_loop<S, D>(
     cap: usize,
     admission: RelayAdmissionPolicy,
     pool_runtime: EnginePoolRuntime,
-    cmd_rx: &Receiver<Cmd>,
-    self_inbox: &Sender<Cmd>,
+    wiring: EngineWiring<'_>,
 ) where
     S: EventStore,
     D: RelayDirectory + 'static,
 {
+    let EngineWiring {
+        clock,
+        cmd_rx,
+        self_inbox,
+    } = wiring;
     let EnginePoolRuntime {
         pool,
         stop: pool_stop_tx,
@@ -3939,7 +3985,7 @@ fn engine_loop<S, D>(
     loop {
         let core_wait = core
             .next_deadline()
-            .map(|deadline| duration_until(deadline, Timestamp::now()));
+            .map(|deadline| duration_until(deadline, clock.now()));
         let nip11_wait = nip11_decisions
             .borrow()
             .next_deadline()
@@ -3977,7 +4023,7 @@ fn engine_loop<S, D>(
                             dispatch_runtime,
                         );
                     }
-                    let wall_now = Timestamp::now();
+                    let wall_now = clock.now();
                     if core
                         .next_deadline()
                         .is_some_and(|deadline| deadline <= wall_now)
@@ -4172,7 +4218,7 @@ fn engine_loop<S, D>(
                     relay_frame_needs_wall_clock(frame)
                         && core.is_current_transport_session(*handle, session)
                 }) {
-                    let tick_effects = core.handle(EngineMsg::Tick(Timestamp::now()));
+                    let tick_effects = core.handle(EngineMsg::Tick(clock.now()));
                     dispatch_core_effects(
                         &mut core,
                         tick_effects,
@@ -4684,7 +4730,7 @@ fn engine_loop<S, D>(
                 // would already include that transition, then registering
                 // its fresh observer before dispatching the Tick effect would
                 // deliver the same fact to it a second time.
-                let tick_effects = core.handle(EngineMsg::Tick(Timestamp::now()));
+                let tick_effects = core.handle(EngineMsg::Tick(clock.now()));
                 dispatch_core_effects(
                     &mut core,
                     tick_effects,
@@ -4741,7 +4787,7 @@ fn engine_loop<S, D>(
                 );
             }
             Cmd::Subscribe { query, reply } => {
-                let mut effects = core.handle(EngineMsg::Tick(Timestamp::now()));
+                let mut effects = core.handle(EngineMsg::Tick(clock.now()));
                 effects.extend(core.handle(EngineMsg::Subscribe(query)));
                 // `on_subscribe` always emits exactly one `Effect::EmitRows`
                 // for the handle it just created (its `last_evidence` starts
@@ -4788,7 +4834,7 @@ fn engine_loop<S, D>(
                 );
             }
             Cmd::SubscribeHistory { query, reply } => {
-                let mut effects = core.handle(EngineMsg::Tick(Timestamp::now()));
+                let mut effects = core.handle(EngineMsg::Tick(clock.now()));
                 effects.extend(core.handle(EngineMsg::SubscribeHistory(query)));
                 let Some(id) = effects.iter().find_map(|effect| match effect {
                     Effect::EmitHistory(id, _) if !history_channels.contains_key(id) => Some(*id),
@@ -4941,7 +4987,7 @@ fn engine_loop<S, D>(
                 if relay_frame_needs_wall_clock(&frame)
                     && core.is_current_transport_session(handle, &session)
                 {
-                    let tick_effects = core.handle(EngineMsg::Tick(Timestamp::now()));
+                    let tick_effects = core.handle(EngineMsg::Tick(clock.now()));
                     dispatch_core_effects(
                         &mut core,
                         tick_effects,

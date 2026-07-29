@@ -36,9 +36,22 @@
 //!   lazy `ensure_started` that turns all of it into a running world.
 //! - `actions` -- `When`-time acts: open a feed, publish, switch account,
 //!   another user posts, a relay drops or comes back.
-//! - `identity` -- the identity plane: accounts named by pubkey, the write
-//!   that named one, and the restart that proves an accepted write's author
-//!   was decided once.
+//! - `identity` -- the identity plane: accounts named by pubkey, and the
+//!   write that named one.
+//! - `restart` -- the process boundary: stopping the engine and rebuilding
+//!   it over the same durable store. Its own module because a restart is a
+//!   claim about what SURVIVES rather than about identity, and several
+//!   feature directories make one.
+//! - `clock` -- what time this world's engine is running at. Its own module
+//!   because the stated instant is chosen before the engine exists and has
+//!   to be re-applied to the one a restart builds.
+//! - `writes` -- the two payload shapes an app hands the publish door: a
+//!   builder that carries no author, and an already-signed event that states
+//!   one in its own bytes.
+//! - `replaceable` -- which version of a whole-value event the store holds,
+//!   and what a compare-and-swap replacement did about it. Its own module
+//!   because its subject is a third party to every other write plane: the
+//!   store's row, which existed before the write did.
 //! - `signers` -- the capability plane: which keys this world can sign for,
 //!   when they answer, and who was asked. Distinct from `identity` because
 //!   a capability may arrive minutes after the identity was frozen, and the
@@ -63,22 +76,26 @@
 
 mod actions;
 mod budgets;
+mod clock;
 mod group_fixtures;
 mod group_surface;
 mod groups;
 mod identity;
 mod observe;
 mod queries;
+mod replaceable;
+mod restart;
 mod signers;
 mod staging;
 mod watches;
+mod writes;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use nostr::{EventId, Keys, PublicKey};
+use nostr::{EventId, Keys, PublicKey, Timestamp};
 
 use nmp::mechanism::runtime::Handle;
 use nmp::Engine;
@@ -88,9 +105,11 @@ use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 
 use self::observe::{DiagFeed, FeedState, ReceiptState};
 use self::signers::SignerGate;
-use self::staging::{PendingContactList, PendingNote};
+use self::staging::PendingContactList;
+use self::writes::ComposedWrite;
 
 pub use self::budgets::{EVENTUALLY, NEVER, RECONNECT, WIRE_QUIET, WIRE_SETTLE};
+pub use self::clock::{format_stated_time, parse_stated_time};
 pub use self::group_surface::GroupSurface;
 pub use self::groups::{parse_kind_list, GroupCall};
 pub use self::queries::{
@@ -168,7 +187,6 @@ pub struct NmpWorld {
     write_relay_of: HashMap<String, Vec<String>>,
 
     pending_contact_lists: Vec<PendingContactList>,
-    pending_notes: Vec<PendingNote>,
     /// Notes staged as already-signed events, kept verbatim so a later step
     /// can republish exactly what their author signed.
     pending_signed_notes: Vec<(String, nostr::Event)>,
@@ -239,6 +257,56 @@ pub struct NmpWorld {
     /// rather than a handle swap.
     store_dir: Option<tempfile::TempDir>,
     store_path: Option<PathBuf>,
+
+    // ---- the clock plane (`world::clock`) ------------------------------
+    /// The instant this scenario stated its device clock reads, if any.
+    /// Owned here rather than on the engine because it is chosen BEFORE the
+    /// engine exists and has to be re-applied to the fresh engine a restart
+    /// builds -- the same lifetime `durable_store` has, for the same reason.
+    pinned_clock: Option<Timestamp>,
+
+    // ---- the write plane (`world::writes`) -----------------------------
+    /// The builder a `When I compose ...` staged and has not published yet,
+    /// with the text it says. Two steps rather than one because a scenario
+    /// that hands over a tag table composes on one line and publishes on the
+    /// next.
+    pending_builder: Option<nmp_grammar::EventBuilder>,
+    /// Every builder this scenario published, in order, each pointing at the
+    /// entry it took in [`Self::receipts`]. Only the BUILDERS are kept here;
+    /// their receipts live in the world's one ordered publish list (#995),
+    /// which is also why this is a list at all -- `event-builder.feature`
+    /// publishes the SAME text twice and then asks about each, so the
+    /// identity plane's by-text map cannot tell them apart.
+    composed: Vec<ComposedWrite>,
+    /// Whole signed events bound to the id word a scenario names them by.
+    /// Distinct from [`Self::id_labels`], which binds a word to an id: a
+    /// pre-signed scenario publishes the EVENT, and then asks whether the
+    /// bytes that arrived are the bytes it handed over.
+    signed_by_label: BTreeMap<String, nostr::Event>,
+    /// The event a `When I publish ... as-is` actually handed the door,
+    /// including a deliberately corrupted one.
+    handed_over: Option<nostr::Event>,
+
+    // ---- the replaceable plane (`world::replaceable`) -------------------
+    /// A replacement composed against a base and not yet published, so a
+    /// scenario can move the winner underneath it first. The gap between
+    /// composing and publishing is what makes "checked at acceptance, not at
+    /// compose time" a claim with two distinguishable answers.
+    pending_replacement: Option<(
+        nmp_grammar::Identity,
+        Option<EventId>,
+        nmp_grammar::EventBuilder,
+    )>,
+    /// Contact lists by an author this world cannot sign for, which reached
+    /// the store the only way a foreign event ever does -- observed from a
+    /// relay -- keyed by whose they are.
+    foreign_contact_lists: BTreeMap<String, String>,
+    /// What the scenario SAID each staged version's timestamp was, keyed by
+    /// the word it named it with. Held rather than read back off the wire
+    /// because #995 retires a displaced predecessor's outbox obligation, so a
+    /// version that is legitimately the store's may correctly never reach any
+    /// relay.
+    stated_created_at: BTreeMap<String, Timestamp>,
 
     /// The relay every `watch` step pins its demand to -- the subject of the
     /// subscription-collapse scenarios.

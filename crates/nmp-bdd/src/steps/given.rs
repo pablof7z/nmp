@@ -9,8 +9,13 @@ use cucumber::given;
 use crate::steps::{parse_people, parse_quoted_list};
 use crate::world::{parse_kind_list, NmpWorld, ME};
 
-#[given(regex = r#"^only (\d+) indexer relays? (?:is|are) configured$"#)]
-async fn only_n_indexers(w: &mut NmpWorld, n: usize) {
+#[given(regex = r#"^(?:only )?(\d+|an) indexer relays? (?:is|are) configured$"#)]
+async fn n_indexers(w: &mut NmpWorld, n: String) {
+    let n = if n == "an" {
+        1
+    } else {
+        n.parse().expect("nmp-bdd: an indexer count is a number")
+    };
     w.configure_n_indexers(n);
 }
 
@@ -99,9 +104,14 @@ async fn logged_in_as_person(w: &mut NmpWorld, person: String) {
     w.log_in_as(&person, &[]);
 }
 
+/// The name may be an ordinary one (`Alice`) or a key
+/// (`"4c26...81f5"`) -- `features/writes/` names its people by the key that
+/// signed, and the quotes it writes them in are punctuation, not part of the
+/// name. Trimming them here is what makes one label name one keypair across
+/// both spellings in the same scenario.
 #[given(regex = r#"^(\S+) has posted a note saying "([^"]+)"$"#)]
 async fn person_posted_note(w: &mut NmpWorld, person: String, text: String) {
-    w.stage_note(&person, &text);
+    w.stage_note(person.trim_matches('"'), &text);
 }
 
 #[given(regex = r#"^(\S+) has posted (\d+) notes?$"#)]
@@ -160,7 +170,42 @@ async fn directory_knows_my_write_relays(w: &mut NmpWorld, list: String) {
 /// can republish exactly the bytes its author signed.
 #[given(regex = r#"^(\S+) has posted a note saying "([^"]+)" signed by \S+$"#)]
 async fn person_posted_signed_note(w: &mut NmpWorld, person: String, text: String) {
-    w.stage_signed_note(&person, &text);
+    w.stage_note(&person, &text);
+}
+
+// ---- the clock ----------------------------------------------------------
+//
+// The subject of `features/writes/`: an acceptance stamp is whatever the
+// reducer's clock said, so a spec that names an instant needs one it can
+// state. See `world::clock`.
+
+#[given(regex = r#"^my device clock reads "([^"]+)"$"#)]
+async fn device_clock_reads(w: &mut NmpWorld, at: String) {
+    w.set_device_clock(&at).await;
+}
+
+// ---- an already-signed event a scenario names ---------------------------
+
+/// BINDS the scenario's id word to the event a `Given` staged. See
+/// `NmpWorld::bind_signed_event_label` for why a `.feature` cannot spell a
+/// real event id and why a binding proves exactly what the scenario claims.
+#[given(regex = r#"^that note is the signed event "([0-9a-f]{64})"$"#)]
+async fn note_is_the_signed_event(w: &mut NmpWorld, label: String) {
+    w.bind_signed_event_label(&label);
+}
+
+/// A real forgery: the bytes change and the signature is left alone, which is
+/// exactly the payload the acceptance boundary has to catch.
+#[given(regex = r#"^the signed event "([0-9a-f]{64})" has had one byte of its content altered$"#)]
+async fn signed_event_altered(w: &mut NmpWorld, label: String) {
+    w.tamper_signed_event(&label);
+}
+
+/// Every `features/writes/` Background states its account by key, because
+/// that feature is written for a reader who cares which key signed.
+#[given(regex = r#"^I am logged in as the account with pubkey "([0-9a-f]{64})"$"#)]
+async fn logged_in_as_pubkey(w: &mut NmpWorld, pubkey: String) {
+    w.log_in_as_identity(&pubkey);
 }
 
 /// A signer for the current account already exists in this world (every

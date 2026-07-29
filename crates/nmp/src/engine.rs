@@ -399,6 +399,34 @@ impl Engine {
         self.with_handle(Handle::clone)
     }
 
+    /// The engine thread's wall clock, so a harness can state what time this
+    /// engine is running at.
+    ///
+    /// Same gating and same justification as the two hatches above --
+    /// `#[doc(hidden)]` and behind `unstable-mechanism`, in-workspace only.
+    /// `nmp-bdd` needs it because `features/writes/` is written in sentences
+    /// about a stated instant (*"Given my device clock reads ..."*, *"And 2
+    /// seconds later ..."*) and `features/routing/` in sentences about time
+    /// passing (*"And 30 days pass with nothing learned"*). Acceptance-time
+    /// stamping and every deadline sweep are computed against the reducer's
+    /// clock, and the reducer's clock is whatever the runtime last ticked it
+    /// with -- so a spec that names an instant is unassertable without this.
+    ///
+    /// It is a REAL clock, not a stub: an engine whose clock is never set
+    /// reads `Timestamp::now()` at exactly the sites it always did.
+    #[cfg(feature = "unstable-mechanism")]
+    #[doc(hidden)]
+    pub fn clock(&self) -> Result<crate::mechanism::runtime::EngineClock, EngineError> {
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        match &*guard {
+            Some(inner) => Ok(inner.engine_thread.clock()),
+            None => Err(EngineError::EngineClosed),
+        }
+    }
+
     /// Run `f` against the live `Handle` while holding `inner`'s lock for
     /// the duration of the call -- see this module's doc for why that,
     /// rather than cloning the `Handle` and releasing the lock first, is
