@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use nostr::{Keys, PublicKey, Timestamp, UnsignedEvent};
 
-use nmp::mechanism::runtime::{EngineThread, Handle};
+use nmp::mechanism::runtime::Handle;
+use nmp::Engine;
 use nmp_router::{Lane, LanedRelay, LiveDirectory, RelayDirectory, RelayUrl};
 use nmp_store::{EventStore, MemoryStore, RedbStore};
 use nmp_transport::PoolConfig;
@@ -259,7 +260,14 @@ impl NmpWorld {
 
         for name in self.relay_order.clone() {
             let config = self.relay_configs.get(&name).cloned().unwrap_or_default();
-            let relay = ScriptedRelay::start(&config).await;
+            let mut relay = ScriptedRelay::start(&config).await;
+            // `Given relay "R" cannot connect`: bind it (so it has a real URL
+            // a group can be constructed with and a real port nobody else can
+            // take), then sever it, so a connection attempt is REFUSED rather
+            // than quietly succeeding against a relay that answers nothing.
+            if self.is_unreachable(&name) {
+                relay.disconnect().await;
+            }
             self.relays.insert(name, relay);
         }
 
@@ -355,14 +363,14 @@ impl NmpWorld {
         // `world::identity`). The flag is set by those `Given`s rather than
         // inferred later because the store is chosen once, at start-up,
         // before any `When` exists to ask.
-        let (engine_thread, handle) = if self.durable_store {
+        let (engine, handle) = if self.durable_store {
             let store = self.open_durable_store();
             self.spawn_over(store, directory)
         } else {
             self.spawn_over(MemoryStore::new(), directory)
         };
 
-        self.engine = Some(engine_thread);
+        self.engine = Some(engine);
         self.handle = Some(handle);
 
         // Every signer an identity scenario registered, plus the ordinary
@@ -387,13 +395,20 @@ impl NmpWorld {
 
     /// Spawn over whichever store this scenario chose. Generic so the choice
     /// above is a value rather than a duplicated call, and so neither store
-    /// type leaks into `NmpWorld` -- `EngineThread` is not generic, and the
-    /// store is moved whole into the engine thread and never comes back.
-    fn spawn_over<S>(&self, store: S, directory: LiveDirectory) -> (EngineThread, Handle)
+    /// type leaks into `NmpWorld` -- `Engine` is not generic, and the store is
+    /// moved whole into the engine thread and never comes back.
+    ///
+    /// ONE engine, TWO surfaces. The product verbs a scenario is about run
+    /// through `Engine` (`features/groups/` publishes through the
+    /// `GroupOperations` extension trait on exactly this value); the raw
+    /// delta and diagnostics channels a `Then` step has to FOLD run through
+    /// the same engine's `Handle`. See `Engine::mechanism_handle`'s doc for
+    /// why a fixture that owns both ends may hold both.
+    fn spawn_over<S>(&self, store: S, directory: LiveDirectory) -> (Engine, Handle)
     where
         S: EventStore + Send + 'static,
     {
-        EngineThread::spawn(
+        let engine = Engine::from_parts(
             store,
             directory,
             20,
@@ -414,7 +429,32 @@ impl NmpWorld {
                 "::1".to_string(),
             ]),
         )
-        .expect("BDD engine thread construction")
+        .expect("BDD engine construction");
+        let handle = engine
+            .mechanism_handle()
+            .expect("a freshly built engine is open");
+        (engine, handle)
+    }
+
+    /// Stop the engine and give up every handle onto it, blocking until its
+    /// threads have actually exited.
+    ///
+    /// One method because two callers need exactly this and must not drift:
+    /// the identity plane's restart (`world::identity::restart_engine`, which
+    /// then reopens the SAME durable store) and any teardown that wants the
+    /// process boundary to be real rather than a handle swap. `Engine`'s own
+    /// `shutdown` is what asks the engine thread to stop and joins it, and it
+    /// is idempotent -- but the cloned `Handle` above has to go too, or the
+    /// world keeps a way to talk to a stopped engine.
+    pub(super) fn stop_engine(&mut self) {
+        // The cloned handle goes FIRST, before anything blocks: `shutdown`
+        // joins the engine thread, and a fixture that were still holding a way
+        // to talk to it across that join would be describing a process that
+        // has not actually stopped.
+        self.handle = None;
+        if let Some(engine) = self.engine.take() {
+            engine.shutdown();
+        }
     }
 
     /// This scenario's on-disk store, at a path created on FIRST use and kept

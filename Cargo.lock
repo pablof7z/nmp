@@ -2021,6 +2021,7 @@ dependencies = [
  "nmp-local-signer",
  "nmp-network-policy",
  "nmp-nip22",
+ "nmp-nip29",
  "nmp-nip51",
  "nmp-resolver",
  "nmp-router",

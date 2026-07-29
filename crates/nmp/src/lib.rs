@@ -147,6 +147,19 @@ pub mod mechanism {
 #[cfg(feature = "nip22")]
 pub mod nip22;
 
+// #977: the engine binding for the NIP-29 `Group` door. Unconditional, unlike
+// `nip22` above: `nmp-nip29` is pure composition over `nostr` +
+// `nmp-grammar` with no mechanism crate behind it, so there is nothing for a
+// feature flag to keep unlinked.
+mod group;
+
+// The composition half, re-exported AS ITSELF so the design's own spelling
+// (`nip29::Group::new(host, "photographers")`) is what an app writes. The
+// engine-bound half is the extension trait below, in scope by default so
+// `group.publish(&engine, builder)` needs no import.
+pub use crate::group::{GroupOperations, GroupPublishError, GroupReceipts};
+pub use nmp_nip29 as nip29;
+
 pub use auth::{
     AuthPolicy, AuthPolicyDecision, AuthPolicyError, AuthPolicyOp, AuthPolicyPendingSender,
     AuthPolicyRequest, AuthPolicyResolveError, AuthPolicyResult,

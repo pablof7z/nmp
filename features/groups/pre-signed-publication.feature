@@ -12,7 +12,7 @@ Feature: A pre-signed event is published unchanged, and its h is validated
     And I am logged in as "a1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1ce"
     And my relay list names "wss://alice-write.example" as my write relay
 
-  @designed @nip29
+  @nip29
   Scenario: A correctly contextualised signed event goes out byte for byte
     Given an event signed earlier by "a1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1ce" of kind 9 with content "first light"
     And that signed event carries an h tag with value "photographers"
@@ -24,7 +24,7 @@ Feature: A pre-signed event is published unchanged, and its h is validated
     And the signer was never asked to sign
     And it was delivered to "wss://relay.groups.example" and to no other relay
 
-  @designed @nip29
+  @nip29
   Scenario: The id is known before publication, so an observation can be armed on it
     Given an event signed earlier by "a1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1ce" of kind 9 with content "first light"
     And that signed event carries an h tag with value "photographers"
@@ -33,7 +33,7 @@ Feature: A pre-signed event is published unchanged, and its h is validated
     When I publish that signed event through the group
     Then the query for that id matches the event that reached "wss://relay.groups.example"
 
-  @designed @nip29
+  @nip29
   Scenario: A signed event with no h is refused, not repaired
     Given an event signed earlier by "a1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1ce" of kind 9 with content "first light"
     And that signed event carries no h tag
@@ -43,7 +43,7 @@ Feature: A pre-signed event is published unchanged, and its h is validated
     And its id was never recomputed
     And relay "wss://relay.groups.example" received no event
 
-  @designed @nip29
+  @nip29
   Scenario: A signed event carrying another group's h is refused, and the error says both
     Given an event signed earlier by "a1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1ce" of kind 9 with content "still wet"
     And that signed event carries an h tag with value "darkroom"
@@ -52,7 +52,7 @@ Feature: A pre-signed event is published unchanged, and its h is validated
     And the error names both "darkroom" and "photographers"
     And no relay received the event
 
-  @designed @nip29
+  @nip29
   Scenario: A signed event with more than one h tag is refused
     Given an event signed earlier by "a1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1ce" of kind 9 with content "first light"
     And that signed event carries h tags with values "photographers" and "darkroom"
@@ -60,7 +60,7 @@ Feature: A pre-signed event is published unchanged, and its h is validated
     Then the publication is refused with a typed ambiguous-group-context error
     And relay "wss://relay.groups.example" received no event
 
-  @designed @nip29
+  @nip29
   Scenario: The route follows the group, not the signature
     Given an event signed earlier by "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0" of kind 9 with content "not mine"
     And that signed event carries an h tag with value "photographers"
@@ -71,7 +71,7 @@ Feature: A pre-signed event is published unchanged, and its h is validated
     And relay "wss://alice-write.example" received no event
     And the signature still belongs to "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0"
 
-  @designed @nip29
+  @nip29
   Scenario: A pre-signed publication that the host rejects keeps its id
     Given an event signed earlier by "a1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1ce" of kind 9 with content "first light"
     And that signed event carries an h tag with value "photographers"

@@ -22,7 +22,8 @@
 //! signature should look like without inventing one, so it is left for
 //! whoever needs it to decide with a concrete falsifier in hand.
 
-use nostr::{EventBuilder, Kind, PublicKey, Tag};
+use nmp_grammar::EventBuilder;
+use nostr::{Kind, PublicKey, Tag};
 
 const JOIN_REQUEST: u16 = 9021;
 const LEAVE_REQUEST: u16 = 9022;
@@ -39,7 +40,7 @@ const CREATE_INVITE: u16 = 9009;
 /// `invite_code` becomes a `["code", "<code>"]` tag when supplied. When it is
 /// `None` no `code` tag is added at all -- never an empty one.
 pub fn join_request(invite_code: Option<&str>) -> EventBuilder {
-    let mut builder = EventBuilder::new(Kind::from(JOIN_REQUEST), "");
+    let mut builder = EventBuilder::new(Kind::from(JOIN_REQUEST));
     if let Some(code) = invite_code {
         builder = builder.tag(code_tag(code));
     }
@@ -48,7 +49,7 @@ pub fn join_request(invite_code: Option<&str>) -> EventBuilder {
 
 /// kind:9022 -- leave a group; the relay removes the sender automatically.
 pub fn leave_request() -> EventBuilder {
-    EventBuilder::new(Kind::from(LEAVE_REQUEST), "")
+    EventBuilder::new(Kind::from(LEAVE_REQUEST))
 }
 
 /// kind:9000 -- put-user: add a member, optionally granting a role.
@@ -61,12 +62,12 @@ pub fn add_user(pubkey: PublicKey, role: Option<&str>) -> EventBuilder {
         Some(role) => Tag::parse(["p", &pubkey.to_hex(), role]).expect("'p' is well-formed"),
         None => Tag::public_key(pubkey),
     };
-    EventBuilder::new(Kind::from(PUT_USER), "").tag(tag)
+    EventBuilder::new(Kind::from(PUT_USER)).tag(tag)
 }
 
 /// kind:9001 -- remove-user: drop a member from the group.
 pub fn remove_user(pubkey: PublicKey) -> EventBuilder {
-    EventBuilder::new(Kind::from(REMOVE_USER), "").tag(Tag::public_key(pubkey))
+    EventBuilder::new(Kind::from(REMOVE_USER)).tag(Tag::public_key(pubkey))
 }
 
 /// kind:9002 -- edit-metadata: set the group's display fields.
@@ -75,7 +76,7 @@ pub fn remove_user(pubkey: PublicKey) -> EventBuilder {
 /// entirely -- an omitted field is not touched, never cleared, because no tag
 /// for it is emitted at all.
 pub fn edit_metadata(name: Option<&str>, about: Option<&str>) -> EventBuilder {
-    let mut builder = EventBuilder::new(Kind::from(EDIT_METADATA), "");
+    let mut builder = EventBuilder::new(Kind::from(EDIT_METADATA));
     if let Some(name) = name {
         builder = builder.tag(Tag::parse(["name", name]).expect("'name' is well-formed"));
     }
@@ -87,23 +88,23 @@ pub fn edit_metadata(name: Option<&str>, about: Option<&str>) -> EventBuilder {
 
 /// kind:9005 -- delete-event: remove one group-hosted event by id.
 pub fn delete_event(event_id: nostr::EventId) -> EventBuilder {
-    EventBuilder::new(Kind::from(DELETE_EVENT), "").tag(Tag::event(event_id))
+    EventBuilder::new(Kind::from(DELETE_EVENT)).tag(Tag::event(event_id))
 }
 
 /// kind:9007 -- create-group: bring a new group into existence at the host.
 pub fn create_group() -> EventBuilder {
-    EventBuilder::new(Kind::from(CREATE_GROUP), "")
+    EventBuilder::new(Kind::from(CREATE_GROUP))
 }
 
 /// kind:9008 -- delete-group: remove a group from the host entirely.
 pub fn delete_group() -> EventBuilder {
-    EventBuilder::new(Kind::from(DELETE_GROUP), "")
+    EventBuilder::new(Kind::from(DELETE_GROUP))
 }
 
 /// kind:9009 -- create-invite: mint an arbitrary code redeemable by
 /// [`join_request`].
 pub fn create_invite(code: &str) -> EventBuilder {
-    EventBuilder::new(Kind::from(CREATE_INVITE), "").tag(code_tag(code))
+    EventBuilder::new(Kind::from(CREATE_INVITE)).tag(code_tag(code))
 }
 
 fn code_tag(code: &str) -> Tag {
@@ -113,11 +114,7 @@ fn code_tag(code: &str) -> Tag {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{Keys, Timestamp};
-
-    fn author() -> PublicKey {
-        Keys::generate().public_key()
-    }
+    use nostr::Keys;
 
     fn subject() -> PublicKey {
         Keys::generate().public_key()
@@ -125,8 +122,6 @@ mod tests {
 
     fn rows(builder: EventBuilder) -> Vec<Vec<String>> {
         builder
-            .custom_created_at(Timestamp::from(1_700_000_000u64))
-            .build(author())
             .tags
             .iter()
             .map(|tag| tag.as_slice().to_vec())
@@ -134,10 +129,7 @@ mod tests {
     }
 
     fn kind_of(builder: EventBuilder) -> Kind {
-        builder
-            .custom_created_at(Timestamp::from(1_700_000_000u64))
-            .build(author())
-            .kind
+        builder.kind
     }
 
     #[test]

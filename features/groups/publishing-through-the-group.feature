@@ -12,7 +12,7 @@ Feature: A group publication is handed an event and nothing else
     And my relay list names "wss://alice-write.example" as my write relay
     And a relay "wss://bystander.example" exists that nothing references
 
-  @designed @nip29
+  @nip29
   Scenario: The app supplies an event and the group supplies everything else
     When I publish an event of kind 9 with content "first light" through the group
     Then the published event carries an h tag with value "photographers"
@@ -20,21 +20,21 @@ Feature: A group publication is handed an event and nothing else
     And no other relay received the published event
     And I named no relay and no tag on that call
 
-  @designed @nip29
+  @nip29
   Scenario: A group write never reaches the author's own relays
     When I publish an event of kind 9 with content "first light" through the group
     Then relay "wss://alice-write.example" received no event
     And relay "wss://bystander.example" received no connection at all
     And the write consulted no relay list of mine
 
-  @designed @nip29
+  @nip29
   Scenario: The route is minted by the group, not spelled by the app
     When I publish an event of kind 9 with content "first light" through the group
     Then the write's routing is explicit over exactly "wss://relay.groups.example"
     And the group minted that routing from the host it was constructed with
     And the app contributed no relay to that routing
 
-  @designed @nip29
+  @nip29
   Scenario: A group write does not wait on the author's relay list
     Given my relay list has never been fetched
     When I publish an event of kind 9 with content "first light" through the group
@@ -42,7 +42,7 @@ Feature: A group publication is handed an event and nothing else
     And the write never waited on a relay list
     And the write was not reported as unroutable
 
-  @designed @nip29
+  @nip29
   Scenario: Two groups on two hosts never bleed into each other
     Given the group "darkroom" hosted by relay "wss://relay.darkroom.example"
     When I publish an event of kind 9 with content "first light" through the group "photographers"
@@ -50,13 +50,13 @@ Feature: A group publication is handed an event and nothing else
     Then relay "wss://relay.groups.example" received only the event carrying h "photographers"
     And relay "wss://relay.darkroom.example" received only the event carrying h "darkroom"
 
-  @designed @nip29
+  @nip29
   Scenario: The receipt names the host and nothing else
     When I publish an event of kind 9 with content "first light" through the group
     Then the receipt reports the event acked by "wss://relay.groups.example"
     And the receipt names no relay other than "wss://relay.groups.example"
 
-  @designed @nip29
+  @nip29
   Scenario: A host that rejects the write says so, and nothing is tried elsewhere
     Given relay "wss://relay.groups.example" rejects every event
     When I publish an event of kind 9 with content "first light" through the group

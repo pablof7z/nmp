@@ -42,6 +42,12 @@
 //!   key it stayed pinned to, and what a named key with no signer does
 //!   instead of failing. Distinct from `writes`; both read the receipt, only
 //!   one is about authorship.
+//! - `groups` -- the NIP-29 `Group` door: which HOST an event reached (and
+//!   which hosts it did not), what the delivered event literally was, and
+//!   what the door refused. Distinct from `writes` again: that family asks
+//!   where a publish was routed, this one asks a narrower and stricter
+//!   question and answers it from the relay's own record of the bytes as
+//!   well as from the receipt.
 //! - `writes` -- the write plane: where a publish was routed, what its
 //!   receipt said, and that a republished payload came back out untouched.
 //! - `routing` -- the READ plane: which relay was asked for what kind, in
@@ -77,6 +83,7 @@ macro_rules! nothing_to_observe {
 
 mod budget;
 mod feed;
+mod groups;
 mod identity;
 mod routing;
 mod wire;

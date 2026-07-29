@@ -12,7 +12,7 @@ Feature: The app never names the host, the route, or the context tag
     And my relay list names "wss://alice-write.example" as my write relay
     And a relay "wss://bystander.example" exists that nothing references
 
-  @designed @nip29 @must-never
+  @nip29 @must-never
   Scenario: Every relay a group write touches traces back to the group's own identity
     When I publish an event of kind 9 with content "first light" through the group
     And I publish a join request through the group
@@ -21,28 +21,28 @@ Feature: The app never names the host, the route, or the context tag
     And the app supplied no relay anywhere in that run
     And relay "wss://bystander.example" received no connection at all
 
-  @designed @nip29 @must-never
+  @nip29 @must-never
   Scenario: There is no way to name a relay on a group write
     When I inspect the group's write surface
     Then no group write operation accepts a relay
     And no group write operation accepts a routing value
     And a group write cannot be redirected to a relay other than its host
 
-  @designed @nip29 @must-never
+  @nip29 @must-never
   Scenario: There is no way to set the h tag through the group
     When I inspect the group's write surface
     Then no group write operation accepts an h value
     And an event that arrives carrying its own h is refused
     And the group id given at construction is the only source of the h tag
 
-  @designed @nip29 @must-never
+  @nip29 @must-never
   Scenario: A group write never enters the author's outbox lane
     When I publish an event of kind 9 with content "first light" through the group
     Then diagnostics show the write on an explicit route
     And diagnostics show no outbox resolution for that write
     And no relay list of mine was read for that write
 
-  @designed @nip29 @must-never
+  @nip29 @must-never
   Scenario: A group read is pinned by the group, never widened by what the engine learns
     Given a filter selecting kind 9
     And the engine later learns of relay "wss://gossip.example" for this group's members

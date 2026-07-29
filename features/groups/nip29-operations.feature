@@ -16,7 +16,7 @@ Feature: NIP-29's own operations are named, not hand-assembled
     And I am logged in as "a1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1ce"
     And my relay list names "wss://alice-write.example" as my write relay
 
-  @designed @nip29
+  @nip29
   Scenario: A join request with an invite code
     When I publish a join request with invite code "dark-slide-42" through the group
     Then the published event is kind 9021
@@ -25,7 +25,7 @@ Feature: NIP-29's own operations are named, not hand-assembled
     And the published event was delivered to "wss://relay.groups.example"
     And no other relay received the published event
 
-  @designed @nip29
+  @nip29
   Scenario: A join request with no invite code carries no code tag
     When I publish a join request with no invite code through the group
     Then the published event is kind 9021
@@ -33,14 +33,14 @@ Feature: NIP-29's own operations are named, not hand-assembled
     And the published event carries no code tag
     And the published event carries no empty tag
 
-  @designed @nip29
+  @nip29
   Scenario: A leave request
     When I publish a leave request through the group
     Then the published event is kind 9022
     And the published event carries an h tag with value "photographers"
     And the published event was delivered to "wss://relay.groups.example"
 
-  @designed @nip29
+  @nip29
   Scenario: Adding a user
     When I add user "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0" to the group
     Then the published event is kind 9000
@@ -48,13 +48,13 @@ Feature: NIP-29's own operations are named, not hand-assembled
     And the published event carries a p tag naming "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0"
     And the published event was delivered to "wss://relay.groups.example"
 
-  @designed @nip29
+  @nip29
   Scenario: Adding a user with a role
     When I add user "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0" to the group with role "moderator"
     Then the published event is kind 9000
     And the published event carries a p tag naming "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0" with role "moderator"
 
-  @designed @nip29
+  @nip29
   Scenario: Removing a user
     When I remove user "3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad" from the group
     Then the published event is kind 9001
@@ -62,7 +62,7 @@ Feature: NIP-29's own operations are named, not hand-assembled
     And the published event carries a p tag naming "3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad"
     And the published event was delivered to "wss://relay.groups.example"
 
-  @designed @nip29
+  @nip29
   Scenario: Editing the group metadata
     When I edit the group metadata with name "Photographers" and about "film only, no spoilers"
     Then the published event is kind 9002
@@ -70,7 +70,7 @@ Feature: NIP-29's own operations are named, not hand-assembled
     And the published event carries a name tag with value "Photographers"
     And the published event carries an about tag with value "film only, no spoilers"
 
-  @designed @nip29
+  @nip29
   Scenario: Editing only one metadata field leaves the others untouched
     When I edit the group metadata with name "Photographers" and nothing else
     Then the published event is kind 9002
@@ -78,7 +78,7 @@ Feature: NIP-29's own operations are named, not hand-assembled
     And the published event carries no about tag
     And the published event carries no empty tag
 
-  @designed @nip29
+  @nip29
   Scenario: A moderation action the host refuses surfaces truthfully
     Given I am not an admin of "photographers"
     And relay "wss://relay.groups.example" rejects kind 9001 with "restricted: you are not an admin of this group"
@@ -89,7 +89,7 @@ Feature: NIP-29's own operations are named, not hand-assembled
     And no other relay was tried
     And the operation was not retried anywhere else
 
-  @designed @nip29
+  @nip29
   Scenario: A refused moderation action is a relay rejection, not a guess
     Given I am not an admin of "photographers"
     And relay "wss://relay.groups.example" rejects kind 9001 with "restricted: you are not an admin of this group"
@@ -98,7 +98,7 @@ Feature: NIP-29's own operations are named, not hand-assembled
     And the failure is not reported as a routing failure
     And NMP made no claim of its own about my permissions in the group
 
-  @designed @nip29
+  @nip29
   Scenario Outline: Every operation takes the same path as an ordinary publication
     When I invoke the group operation <operation>
     Then the published event carries an h tag with value "photographers"
@@ -115,14 +115,14 @@ Feature: NIP-29's own operations are named, not hand-assembled
       | remove user   |
       | edit metadata |
 
-  @designed @nip29
+  @nip29
   Scenario: The app names no kind number and no tag name to invoke an operation
     When I remove user "3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad" from the group
     Then I named no kind number on that call
     And I named no tag name on that call
     And I named no relay on that call
 
-  @designed @nip29
+  @nip29
   Scenario: The group offers no composer for a kind NIP-29 does not define
     When I inspect the group's operation surface
     Then it offers operations only for kinds NIP-29 itself defines
