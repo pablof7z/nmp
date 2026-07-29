@@ -433,6 +433,15 @@ pub struct NmpWorld {
 
     pending_contact_lists: Vec<PendingContactList>,
     pending_notes: Vec<PendingNote>,
+    /// Notes staged as already-signed events, kept verbatim so a later step
+    /// can republish exactly what their author signed.
+    pending_signed_notes: Vec<(String, nostr::Event)>,
+    signed_notes: HashMap<String, nostr::Event>,
+    /// The already-signed event the last republish step handed over.
+    republished: Option<nostr::Event>,
+    /// Whether the last publish said "figure it out" rather than naming
+    /// relays -- what "the app named no relay anywhere" reads.
+    last_publish_was_auto: bool,
     /// Groups I administer, staged as kind:39001 fixtures at the watched
     /// relay (see [`NmpWorld::stage_administered_groups`]).
     pending_groups: Vec<String>,
@@ -641,6 +650,29 @@ impl NmpWorld {
         });
     }
 
+    /// The same staging, but the world KEEPS the exact signed event so a
+    /// later step can republish it verbatim. Routing and authorship are
+    /// separate axes: republishing this event is the standing proof, and it
+    /// only proves anything if the bytes that go back out are the bytes
+    /// their author signed.
+    pub fn stage_signed_note(&mut self, person: &str, text: &str) {
+        let keys = self.person(person);
+        self.write_relay_for(person);
+        let created_at = self.next_created_at();
+        let signed = UnsignedEvent::new(
+            keys.public_key(),
+            Timestamp::from(created_at),
+            nostr::Kind::TextNote,
+            vec![],
+            text,
+        )
+        .sign_with_keys(&keys)
+        .expect("fixture keys sign cleanly");
+        self.signed_notes.insert(text.to_string(), signed.clone());
+        self.pending_signed_notes
+            .push((person.to_string(), signed));
+    }
+
     // ---- lazy startup ----------------------------------------------------
 
     /// Start every staged relay, seed every staged fixture event, and spawn
@@ -707,6 +739,17 @@ impl NmpWorld {
                 self.relays[&relay_name]
                     .seed_note(&author_keys, &pending.text, pending.created_at)
                     .await;
+            }
+        }
+
+        for (author, event) in std::mem::take(&mut self.pending_signed_notes) {
+            let relay_names = self
+                .write_relay_of
+                .get(&author)
+                .cloned()
+                .expect("nmp-bdd: a staged note's author must already have a write relay");
+            for relay_name in relay_names {
+                self.relays[&relay_name].seed_signed_event(&event).await;
             }
         }
 
@@ -872,20 +915,135 @@ impl NmpWorld {
             vec![],
             text,
         );
+        self.publish_intent(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned),
+            durability: Durability::Durable,
+            routing: WriteRouting::Auto,
+            identity_override: None,
+            correlation: None,
+        });
+    }
+
+    /// `When I publish a note saying "..." to exactly <relays>` -- the app
+    /// naming its own destinations. `relays` may name relays no `Given`
+    /// mentioned (an app publishing to a relay a user typed into a text
+    /// field is the point), so any unknown name is registered as an
+    /// ordinary well-behaved relay before the engine starts.
+    ///
+    /// An EMPTY list is passed through unchanged: refusing it is the
+    /// engine's job, at its acceptance door, and a world that quietly
+    /// declined to make the call could not observe that.
+    pub async fn publish_note_to_exactly(&mut self, text: &str, relay_names: &[String]) {
+        for name in relay_names {
+            if !self.relay_configs.contains_key(name) {
+                self.register_bystander_relay(name);
+            }
+        }
+        self.ensure_started().await;
+        let me = self
+            .active_person
+            .clone()
+            .expect("nmp-bdd: publishing a note needs a logged-in account");
+        let me_keys = self.person(&me);
+        let unsigned = UnsignedEvent::new(
+            me_keys.public_key(),
+            Timestamp::now(),
+            nostr::Kind::TextNote,
+            vec![],
+            text,
+        );
+        let routing = self.explicit_routing(relay_names);
+        self.snapshot_relay_contacts();
+        self.publish_intent(WriteIntent {
+            payload: WritePayload::Unsigned(unsigned),
+            durability: Durability::Durable,
+            routing,
+            identity_override: None,
+            correlation: None,
+        });
+    }
+
+    /// `When I publish <person>'s signed note unchanged to exactly <relay>`
+    /// -- the archive-republish case. The payload is the event that person
+    /// signed, byte for byte; the route is mine. Nothing about either was
+    /// consumed by the other.
+    pub async fn republish_signed_note_to_exactly(&mut self, text: &str, relay_names: &[String]) {
+        for name in relay_names {
+            if !self.relay_configs.contains_key(name) {
+                self.register_bystander_relay(name);
+            }
+        }
+        self.ensure_started().await;
+        let event = self
+            .signed_notes
+            .get(text)
+            .cloned()
+            .expect("nmp-bdd: republishing needs a note staged as already-signed");
+        let routing = self.explicit_routing(relay_names);
+        self.snapshot_relay_contacts();
+        self.republished = Some(event.clone());
+        self.publish_intent(WriteIntent {
+            payload: WritePayload::Signed(event),
+            durability: Durability::Durable,
+            routing,
+            identity_override: None,
+            correlation: None,
+        });
+    }
+
+    fn explicit_routing(&self, relay_names: &[String]) -> WriteRouting {
+        WriteRouting::Explicit(
+            relay_names
+                .iter()
+                .map(|name| self.relay_url(name))
+                .collect(),
+        )
+    }
+
+    fn publish_intent(&mut self, intent: WriteIntent) {
+        self.last_publish_was_auto = matches!(intent.routing, WriteRouting::Auto);
         let rx = self
             .handle()
-            .publish(WriteIntent {
-                payload: WritePayload::Unsigned(unsigned),
-                durability: Durability::Durable,
-                routing: WriteRouting::Auto,
-                identity_override: None,
-                correlation: None,
-            })
+            .publish(intent)
             .expect("BDD receipt correlation namespace must be available");
         self.last_receipt = Some(ReceiptState {
             rx,
             seen: Vec::new(),
         });
+    }
+
+    /// The event a republish step handed to the engine, for the `Then` that
+    /// checks the id and signature came back out untouched.
+    pub fn republished_event(&self) -> Option<&nostr::Event> {
+        self.republished.as_ref()
+    }
+
+    /// The one note staged as already-signed, so a republish step can name
+    /// its author without repeating its text.
+    pub fn only_staged_signed_note_text(&self) -> Option<String> {
+        match self.signed_notes.len() {
+            1 => self.signed_notes.keys().next().cloned(),
+            _ => None,
+        }
+    }
+
+    /// This world configures no app relays anywhere -- the `Given` that says
+    /// so out loud is checking the harness, not the engine.
+    pub fn assert_no_app_relays(&self) {
+        assert!(
+            !self.started,
+            "nmp-bdd: state the app-relay topology before anything runs"
+        );
+    }
+
+    /// Logging in registers a real `LocalKeySigner` (see `ensure_started`),
+    /// so a scenario whose point is "the signer was never asked" only means
+    /// something once one exists to ask.
+    pub fn assert_signer_registered(&self) {
+        assert!(
+            self.active_person.is_some(),
+            "nmp-bdd: a registered signer needs a logged-in account"
+        );
     }
 
     /// `When I switch to <person>'s account` (a person already known to the
@@ -1311,6 +1469,57 @@ impl NmpWorld {
             .as_mut()
             .expect("nmp-bdd: no publish is in flight");
         receipt.eventually(EVENTUALLY, pred)
+    }
+
+    /// The negative form: true iff `pred` NEVER becomes true within the
+    /// window. Costs its full budget by construction -- there is no early
+    /// exit from "this did not happen".
+    pub fn receipt_never(&mut self, pred: impl Fn(&[WriteStatus]) -> bool) -> bool {
+        let receipt = self
+            .last_receipt
+            .as_mut()
+            .expect("nmp-bdd: no publish is in flight");
+        !receipt.eventually(NEVER, pred)
+    }
+
+    /// Everything the last publish's receipt has reported so far -- for
+    /// assertion MESSAGES and for order-sensitive checks ("Failed was
+    /// first"), never as a substitute for a bounded wait.
+    pub fn receipt_statuses(&mut self) -> Vec<WriteStatus> {
+        let Some(receipt) = self.last_receipt.as_mut() else {
+            return Vec::new();
+        };
+        receipt.eventually(Duration::from_millis(0), |_| true);
+        receipt.seen.clone()
+    }
+
+    /// How many publishes are outstanding. One publish is one obligation and
+    /// one receipt stream; this world keeps only the last, so anything other
+    /// than 1 means a scenario published a second time.
+    pub fn receipt_count(&self) -> usize {
+        usize::from(self.last_receipt.is_some())
+    }
+
+    /// True when the last publish carried `WriteRouting::Auto` -- i.e. the
+    /// app named no relay and NMP derived the route itself.
+    pub fn last_publish_named_no_relay(&self) -> bool {
+        self.last_publish_was_auto
+    }
+
+    /// Was ANY relay in this world ever contacted? The precondition behind
+    /// every "was never contacted" assertion: in an empty world nothing is
+    /// contacted, and that must not read as proof.
+    pub fn any_relay_contacted(&self) -> bool {
+        self.relays.values().any(ScriptedRelay::contacted)
+    }
+
+    /// The exact event a person's staged already-signed note carries.
+    pub fn staged_signed_event_of(&mut self, person: &str) -> Option<nostr::Event> {
+        let pk = self.person(person).public_key();
+        self.signed_notes
+            .values()
+            .find(|event| event.pubkey == pk)
+            .cloned()
     }
 
     pub fn diagnostics_matching(

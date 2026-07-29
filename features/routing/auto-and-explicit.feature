@@ -24,7 +24,6 @@ Feature: An app says "figure it out" or "these exact relays", and nothing else
 
   # ---- the two words ---------------------------------------------------
 
-  @designed
   Scenario: An ordinary note names no relays at all
     # The default case, and the one the app should never have to think about.
     # The app hands over a note and a routing of "figure it out"; it passes no
@@ -34,7 +33,6 @@ Feature: An app says "figure it out" or "these exact relays", and nothing else
     And the app named no relay anywhere in that publish
     And exactly one receipt exists for that publish
 
-  @designed
   Scenario: An app naming exact relays gets exactly those relays
     # "use these exact relays and that is that no matter what else happens".
     # My own write relays are known and still receive nothing: an Explicit
@@ -80,7 +78,6 @@ Feature: An app says "figure it out" or "these exact relays", and nothing else
 
   # ---- routing is independent of authorship ----------------------------
 
-  @designed
   Scenario: Republishing someone else's signed event to my own archive relay
     # The proof that routing and authorship are separate axes: the user sees a
     # cool event from someone they follow, right-clicks, and publishes that
@@ -95,7 +92,6 @@ Feature: An app says "figure it out" or "these exact relays", and nothing else
     And nothing identifying me appears anywhere in the payload
     And "outbox-a" was never contacted
 
-  @designed
   Scenario: My own relay list has no bearing on where someone else's event goes
     # The stronger form of the same case. My directory is fully populated, my
     # write relays are known and healthy, and none of that is an input to a
@@ -110,7 +106,6 @@ Feature: An app says "figure it out" or "these exact relays", and nothing else
 
   # ---- the empty route -------------------------------------------------
 
-  @designed
   Scenario: An explicit route with no relays is rejected immediately
     # The owner's ruling, verbatim: "reject it immediately". This is stricter
     # than master, and deliberately so -- today an empty `PrivateNarrow` is
@@ -125,7 +120,6 @@ Feature: An app says "figure it out" or "these exact relays", and nothing else
     And nothing is written to the journal
     And no relay is contacted
 
-  @designed
   Scenario: The refusal happens before a signature is ever requested
     # Refused "at the door" means before acceptance, not after signing and
     # before delivery. Nothing durable, and nothing asked of the signer.

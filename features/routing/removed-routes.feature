@@ -112,7 +112,6 @@ Feature: The routes that were removed stay removed
 
   # ---- what the removals must not have taken with them -----------------
 
-  @designed
   Scenario: Fail-closed survived the removal of the private route
     # `PrivateNarrow`'s discipline transfers to `Explicit` intact: verbatim
     # execution, no widen path, and a directory that is never consulted. What
