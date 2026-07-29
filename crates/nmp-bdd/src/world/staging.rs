@@ -342,8 +342,8 @@ impl NmpWorld {
         }
 
         let (engine_thread, handle) = match self.open_store() {
-            BddStore::Memory(store) => self.spawn_over(store, directory),
-            BddStore::Durable(store) => self.spawn_over(store, directory),
+            BddStore::Memory(store) => self.spawn_over(*store, directory),
+            BddStore::Durable(store) => self.spawn_over(*store, directory),
         };
 
         self.engine = Some(engine_thread);
@@ -356,7 +356,7 @@ impl NmpWorld {
         self.register_identity_signers();
         if let Some(active) = self.active_person.clone() {
             let keys = self.person(&active);
-            if !self.identities_with_signers.iter().any(|l| *l == active) {
+            if !self.identities_with_signers.contains(&active) {
                 let signer = self.counting_signer(&keys);
                 self.handle()
                     .add_signer(signer)
@@ -418,7 +418,7 @@ impl NmpWorld {
     /// chosen once, at start-up, before any `When` exists to ask.
     fn open_store(&mut self) -> BddStore {
         if !self.durable_store {
-            return BddStore::Memory(MemoryStore::new());
+            return BddStore::Memory(Box::new(MemoryStore::new()));
         }
         let path = match &self.store_path {
             Some(path) => path.clone(),
@@ -430,15 +430,19 @@ impl NmpWorld {
                 path
             }
         };
-        BddStore::Durable(
+        BddStore::Durable(Box::new(
             RedbStore::open(&path).expect("nmp-bdd: the scenario's durable store must open"),
-        )
+        ))
     }
 }
 
 /// Which store a scenario got, so the two spawn arms below stay one decision
 /// made in one place.
 enum BddStore {
-    Memory(MemoryStore),
-    Durable(RedbStore),
+    /// Both variants are boxed. `MemoryStore` is the large one here (>=1024
+    /// bytes), so leaving it inline would make every `BddStore` value carry
+    /// that footprint; boxing both keeps the enum small whichever store grows
+    /// next.
+    Memory(Box<MemoryStore>),
+    Durable(Box<RedbStore>),
 }

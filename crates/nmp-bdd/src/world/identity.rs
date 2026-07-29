@@ -345,8 +345,8 @@ impl NmpWorld {
                 .get_mut(text)
                 .unwrap_or_else(|| panic!("nmp-bdd: nothing was published saying {text:?}"));
         }
-        if self.restarted_receipt.is_some() {
-            return self.restarted_receipt.as_mut().expect("checked just above");
+        if let Some(receipt) = self.restarted_receipt.as_mut() {
+            return receipt;
         }
         let key = self
             .last_receipt_text
@@ -579,7 +579,7 @@ impl NmpWorld {
             let hit = self
                 .relays
                 .get(relay)
-                .map(|r| r.admitted_events().iter().any(|event| pred(event)))
+                .map(|r| r.admitted_events().iter().any(&pred))
                 .unwrap_or(false);
             if hit {
                 return true;

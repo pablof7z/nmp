@@ -151,7 +151,7 @@ impl NmpWorld {
     pub(super) fn register_identity_signers(&mut self) {
         for label in self.identities_with_signers.clone() {
             let keys = self.person(&label);
-            if self.slow_signers.iter().any(|l| *l == label) {
+            if self.slow_signers.contains(&label) {
                 let gate = Arc::new(SignerGate::new());
                 self.signer_gates.insert(label.clone(), Arc::clone(&gate));
                 self.handle()
