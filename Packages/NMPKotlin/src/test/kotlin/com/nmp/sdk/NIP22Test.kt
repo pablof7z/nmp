@@ -216,58 +216,6 @@ class NIP22Test {
      * acceptance. What all three languages still assert is the thing NIP-22
      * actually owns: the exact tag rows, in the exact order. */
     @Test
-<<<<<<< HEAD
-    fun goldenFixturePinsTheExactComposedBytes() =
-        runBlocking {
-            val authorPubkey = "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f"
-            val expectedEventId = "b1981e70a89150af5ca02548324f3ca2a1fff1b97581d46ab53e11116a553938"
-
-            NMPEngine(NMPConfig()).use { engine ->
-                engine.setActiveAccount(authorPubkey)
-
-                val intent =
-                    commentIntent(
-                        root = CommentRoot.External(Nip73Target.PodcastEpisodeGuid("golden-guid-572")),
-                        parent = CommentParent.Root,
-                        authorPubkey = authorPubkey,
-                        createdAt = 1_700_000_000uL,
-                        content = "golden fixture content",
-                    )
-                val payload = intent.payload as WritePayload.Unsigned
-                assertEquals(authorPubkey, payload.pubkey)
-                assertEquals(1_700_000_000uL, payload.createdAt)
-                assertEquals(1111u.toUShort(), payload.kind)
-                assertEquals(
-                    listOf(
-                        listOf("I", "podcast:item:guid:golden-guid-572"),
-                        listOf("K", "podcast:item:guid"),
-                        listOf("i", "podcast:item:guid:golden-guid-572"),
-                        listOf("k", "podcast:item:guid"),
-                    ),
-                    payload.tags,
-                )
-                assertEquals("golden fixture content", payload.content)
-                assertEquals(Durability.Durable, intent.durability)
-                assertEquals(WriteRouting.Auto, intent.routing)
-                assertEquals(null, intent.identityOverride)
-                assertEquals(null, intent.correlation)
-
-                val receipt = engine.publish(intent)
-                val statuses = withTimeout(5_000) { receipt.status.take(2).toList() }
-                assertEquals(WriteStatus.Accepted, statuses.first())
-
-                // Cross-check the actual computed event id via the ordinary
-                // read path: the pending row's own `id` field IS the
-                // composed event id.
-                val demand =
-                    commentThreadDemand(
-                        CommentRoot.External(Nip73Target.PodcastEpisodeGuid("golden-guid-572")),
-                    )
-                val row = withTimeout(5_000) { engine.observe(demand).first { it.rows.isNotEmpty() } }.rows.first()
-                assertEquals(expectedEventId, row.id)
-            }
-        }
-=======
     fun composedCommentPinsTheExactTagRows() {
         val intent =
             commentIntent(
@@ -289,11 +237,10 @@ class NIP22Test {
             payload.tags,
         )
         assertEquals(Durability.Durable, intent.durability)
-        assertEquals(WriteRouting.AuthorOutbox, intent.routing)
+        assertEquals(WriteRouting.Auto, intent.routing)
         assertEquals(null, intent.identityOverride)
         assertEquals(null, intent.correlation)
     }
->>>>>>> d30ae57e (Project the builder into the Swift and Kotlin SDK wrappers, regenerate surface snapshots)
 
     /** #572 review finding 4: "durable acceptance makes one canonical
      * pending comment visible through the ordinary query path" was NOT

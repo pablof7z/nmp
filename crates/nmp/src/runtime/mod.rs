@@ -2739,10 +2739,7 @@ mod relay_worker_reconciliation_tests {
     use nmp_router::FixtureDirectory;
     use nmp_store::MemoryStore;
     use nostr::{Keys, Kind};
-<<<<<<< HEAD
-=======
 
->>>>>>> d30ae57e (Project the builder into the Swift and Kotlin SDK wrappers, regenerate surface snapshots)
     fn query(author: &str) -> LiveQuery {
         LiveQuery::from_filter(Filter {
             kinds: Some(BTreeSet::from([1])),

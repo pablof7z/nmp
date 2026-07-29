@@ -2863,6 +2863,14 @@ enum Enum {
             ),
         },
         Variant {
+            name: "ReplaceableEditHasNoWireForm",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "#591: `FfiWriteIntent.correlation` was `Some` but failed\n`nmp_grammar::CorrelationToken`'s `TryFrom<&str>` bounded/non-empty\nvalidation (empty, or over `CorrelationToken::MAX_LEN` bytes). Synchronous,\nbefore any engine call -- same discipline as `InvalidPublicKey`/\n`InvalidTag` above.\nA composer returned a CAS-guarded replaceable edit, which has no\nwire form on purpose: a replaceable precondition crosses this\nboundary only inside a fused semantic method that owns its policy\n(`NmpEngine::follow`/`unfollow`), never as a payload a native caller\ncould reassemble without the guard\n(`docs/internals/writes/payload-and-replaceable-edits.md` §5). This\nis the payload axis of #951's bug class: a projection door refuses\nas a VALUE instead of panicking on an exported path.",
+            ),
+        },
+        Variant {
             name: "InvalidCorrelationToken",
             discr: None,
             fields: [
@@ -2879,9 +2887,7 @@ enum Enum {
                     docstring: None,
                 },
             ],
-            docstring: Some(
-                "#591: `FfiWriteIntent.correlation` was `Some` but failed\n`nmp_grammar::CorrelationToken`'s `TryFrom<&str>` bounded/non-empty\nvalidation (empty, or over `CorrelationToken::MAX_LEN` bytes). Synchronous,\nbefore any engine call -- same discipline as `InvalidPublicKey`/\n`InvalidTag` above.",
-            ),
+            docstring: None,
         },
         Variant {
             name: "InvalidNip73Target",
@@ -2964,19 +2970,7 @@ enum Enum {
             docstring: None,
         },
         Variant {
-            name: "BaseHasWrongAuthor",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-        Variant {
             name: "BaseHasWrongKind",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-        Variant {
-            name: "TimestampExhausted",
             discr: None,
             fields: [],
             docstring: None,
@@ -4279,40 +4273,15 @@ enum Enum {
     discr_type: None,
     variants: [
         Variant {
-            name: "Unsigned",
+            name: "Event",
             discr: None,
             fields: [
                 Field {
-                    name: "pubkey",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "created_at",
-                    type_: UInt64,
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "kind",
-                    type_: UInt16,
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "tags",
-                    type_: Sequence {
-                        inner_type: Sequence {
-                            inner_type: String,
-                        },
+                    name: "builder",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiEventBuilder",
                     },
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "content",
-                    type_: String,
                     default: None,
                     docstring: None,
                 },
@@ -4376,7 +4345,7 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "The event payload of a write intent (`nmp::WritePayload` mirror). VISION\nP: signing and publishing are ORTHOGONAL stages -- `Unsigned` is a\ntemplate the engine signs internally (\"the key lives in the engine\",\nledger #12); `Signed` (#32, the M5 unlock) is a caller that already\nholds a validly-signed event -- an external signer provider, or a\nverbatim republish -- and hands its fields across as-is. `Signed`'s\nfields are field-for-field [`FfiRow`] (the read-side mirror of a signed\n`nostr::Event`) plus `sig`, deliberately: the write side stays symmetric\nwith the read side rather than introducing a JSON-blob shape.\n\n`Signed`'s fields are PARSED at this FFI boundary (typed hex/signature-\nshape errors, see `convert::signed_event_from_ffi`) but NOT verified\nhere (#52 Unit B) -- `nostr::Event::verify` runs at\n`nmp-engine::core::EngineCore::on_publish`'s acceptance boundary (Unit\nA0/#56) instead, so the guarantee holds for every entry point, not only\nthis one. A tampered `Signed` event still parses fine here and is\nrejected downstream, surfacing as `WriteStatus::Failed` on the receipt\nstream rather than a synchronous `FfiError`. The engine itself never\nre-signs, mutates a tag, or recomputes an id for this variant.",
+        "The event payload of a write intent (`nmp::WritePayload` mirror). VISION\nP: signing and publishing are ORTHOGONAL stages -- `Event` describes an\nevent the engine stamps, freezes and signs internally (\"the key lives in\nthe engine\", ledger #12); `Signed` (#32, the M5 unlock) is a caller that\nalready holds a validly-signed event -- an external signer provider, or\na verbatim republish of somebody else's note to an archive relay -- and\nhands its fields across as-is. `Signed`'s\nfields are field-for-field [`FfiRow`] (the read-side mirror of a signed\n`nostr::Event`) plus `sig`, deliberately: the write side stays symmetric\nwith the read side rather than introducing a JSON-blob shape.\n\nThere is no `ReplaceableEdit` mirror and never was: a CAS-guarded\nreplacement crosses this boundary only as a fused semantic method\n(`NmpEngine::follow`/`unfollow`), which owns the evidence policy, the\nprecondition and the routing together. The native surface learns\n`follow(target)`, not the pieces it would otherwise have to reassemble.\n\n`Signed`'s fields are PARSED at this FFI boundary (typed hex/signature-\nshape errors, see `convert::signed_event_from_ffi`) but NOT verified\nhere (#52 Unit B) -- `nostr::Event::verify` runs at\n`nmp-engine::core::EngineCore::on_publish`'s acceptance boundary (Unit\nA0/#56) instead, so the guarantee holds for every entry point, not only\nthis one. A tampered `Signed` event still parses fine here and is\nrejected downstream, surfacing as `WriteStatus::Failed` on the receipt\nstream rather than a synchronous `FfiError`. The engine itself never\nre-signs, mutates a tag, or recomputes an id for this variant.",
     ),
 }
 
@@ -5350,6 +5319,55 @@ record Record {
     ],
     docstring: Some(
         "The engine-global diagnostics snapshot (M5 plan §1.1) -- \"the acceptance\ntest rendered on screen, permanently.\" Pushed reactively via\n`NmpEngine::observe_diagnostics`, never polled; read-only and off the\ndata path (never influences routing/delivery).",
+    ),
+}
+
+record Record {
+    name: "FfiEventBuilder",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "kind",
+            type_: UInt16,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "tags",
+            type_: Sequence {
+                inner_type: Sequence {
+                    inner_type: String,
+                },
+            },
+            default: Some(
+                EmptySequence,
+            ),
+            docstring: None,
+        },
+        Field {
+            name: "content",
+            type_: String,
+            default: Some(
+                String(
+                    "",
+                ),
+            ),
+            docstring: None,
+        },
+        Field {
+            name: "created_at",
+            type_: Optional {
+                inner_type: UInt64,
+            },
+            default: Some(
+                None,
+            ),
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "`nmp::EventBuilder` mirror: the kind is demanded, everything else is\noptional, and there is no author field because a builder has no author\nuntil the engine resolves the write's identity at acceptance.\n\nA UniFFI **Record with defaulted fields**, not an Object: Swift and\nKotlin's native idiom for \"a record with defaults\" IS a labeled-argument\ninitializer, so a Swift caller writes\n`FfiEventBuilder(kind: 1, content: \"hello\")` and a Kotlin caller\n`FfiEventBuilder(kind = 1u, content = \"hello\")`. A fluent object builder\nwould cross as an `Arc` handle whose combinators cannot consume `self`,\nbuying interior mutability and a round-trip per field for a type that is\nfour fields of data with no identity and no lifetime.\n\n`created_at` absent means \"stamp it at acceptance\"; present means\nexactly this timestamp, kept verbatim -- including one that loses a\nreplaceable race. Nothing here is validated: unrecognised tags cross\nunchanged and a kind no module knows is published rather than refused.",
     ),
 }
 
@@ -6482,7 +6500,7 @@ record Record {
                 None,
             ),
             docstring: Some(
-                "`nmp::WriteIntent::identity_override` mirror (#47 Unit A): the\nidentity this ONE write is published under, as 64-char hex (the\nmodule-wide `convert::parse_pubkey` rule every other pubkey input\nhere follows) or bech32 `npub` (an identity is the one input an app\nmost plausibly holds in display form). `None` -- the default, and\nwhat every existing caller gets -- means \"the active account at\nacceptance time\", unchanged.\n`Some` must name exactly the payload's own author; misuse fails\nclosed, never silently retargets: a MALFORMED string is a typed\nsynchronous [`crate::convert::FfiError::InvalidPublicKey`] before any\nengine call, while a well-formed-but-MISMATCHED override (not the\ndraft/event author) is rejected at the engine's acceptance boundary\nas `FfiWriteStatus::Failed` on the receipt stream -- no `Accepted`\never precedes it. An override naming a pubkey with no registered\nsigner parks as `FfiWriteStatus::AwaitingCapability` (retained, not\nterminated) until that capability attaches; acceptance PINS the\noverride, so a later `set_active_account` cannot retarget the write.",
+                "`nmp::WriteIntent::identity_override` mirror (#47 Unit A): the\nidentity this ONE write is published under, as 64-char hex (the\nmodule-wide `convert::parse_pubkey` rule every other pubkey input\nhere follows) or bech32 `npub` (an identity is the one input an app\nmost plausibly holds in display form). `None` -- the default, and\nwhat every existing caller gets -- means \"the active account at\nacceptance time\", unchanged.\nOn an `Event` payload `Some` SELECTS the author -- a builder states\nnone, so there is nothing for it to contradict. On a `Signed`\npayload it may only RESTATE the author already frozen in the bytes:\nnaming that author changes nothing, and naming anybody else is a\nconsent/author contradiction. A MALFORMED string is a typed\nsynchronous [`crate::convert::FfiError::InvalidPublicKey`] before any\nengine call, while a well-formed-but-contradictory override on a\nsigned event is rejected at the engine's acceptance boundary\nas `FfiWriteStatus::Failed` on the receipt stream -- no `Accepted`\never precedes it. An override naming a pubkey with no registered\nsigner parks as `FfiWriteStatus::AwaitingCapability` (retained, not\nterminated) until that capability attaches; acceptance PINS the\noverride, so a later `set_active_account` cannot retarget the write.",
             ),
         },
         Field {
@@ -6961,20 +6979,6 @@ function Function {
             default: None,
         },
         Argument {
-            name: "author_pubkey",
-            type_: String,
-            by_ref: false,
-            optional: false,
-            default: None,
-        },
-        Argument {
-            name: "created_at",
-            type_: UInt64,
-            by_ref: false,
-            optional: false,
-            default: None,
-        },
-        Argument {
             name: "content",
             type_: String,
             by_ref: false,
@@ -7024,16 +7028,6 @@ function Function {
                 ),
             },
             FfiArgument {
-                name: "author_pubkey",
-                type_: RustBuffer(
-                    None,
-                ),
-            },
-            FfiArgument {
-                name: "created_at",
-                type_: UInt64,
-            },
-            FfiArgument {
                 name: "content",
                 type_: RustBuffer(
                     None,
@@ -7060,7 +7054,7 @@ function Function {
         is_object_free_function: false,
     },
     docstring: Some(
-        "Compose an ordinary durable, `Auto`-routed [`FfiWriteIntent`] for a\nNIP-22 comment (`nmp::nip22::comment_intent` mirror). This function is\nengine-free: author and event time are explicit deterministic composition\ninputs. Publish the returned value through\n[`crate::facade::NmpEngine::publish`], the same generic write lifecycle as\nevery other ordinary intent. `correlation` (#591) passes straight through\nto `WriteIntent.correlation`; NIP-22 owns no separate correlation,\ntake-once, signing, routing, receipt, or retry machinery.",
+        "Compose an ordinary durable, `Auto`-routed [`FfiWriteIntent`] for a\nNIP-22 comment (`nmp::nip22::comment_intent` mirror). This function is\nengine-free and stays so: it names no author and reads no clock, because\nthe engine resolves the identity and stamps the time at acceptance.\nPublish the returned value through\n[`crate::facade::NmpEngine::publish`], the same generic write lifecycle as\nevery other ordinary intent. `correlation` (#591) passes straight through\nto `WriteIntent.correlation`; NIP-22 owns no separate correlation,\ntake-once, signing, routing, receipt, or retry machinery.",
     ),
     throws: Some(
         Enum {
@@ -7070,7 +7064,7 @@ function Function {
     ),
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_comment_intent",
     checksum: Some(
-        15238,
+        39539,
     ),
 }
 
