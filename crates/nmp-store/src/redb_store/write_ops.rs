@@ -2,6 +2,7 @@ use super::canonical::{
     encode_stored_event, encode_stored_event_record, record_to_stored_event,
     stored_event_to_record, try_decode_stored_event, try_decode_stored_event_record,
 };
+use super::commit::commit_prepared;
 use super::ingest_txn::{GovernedIngestTxn, GovernedWrite, RedbIngestTxn};
 use super::mutation::{
     fan_out_signed_in_txn, find_any_displaced_key_by_event_id_in_txn,
@@ -672,8 +673,7 @@ pub(super) fn accept_write(
     }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::AcceptBeforeCommit);
-    write.commit()?;
-    Ok(outcome)
+    write.commit_prepared(outcome)
 }
 
 pub(super) fn promote_signed(
@@ -910,8 +910,7 @@ pub(super) fn promote_signed(
     }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::PromoteBeforeCommit);
-    write.commit()?;
-    Ok(outcome)
+    write.commit_prepared(outcome)
 }
 
 pub(super) fn compensate_write_with_state(
@@ -1200,8 +1199,7 @@ pub(super) fn compensate_write_with_state(
     })?;
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::CompensateBeforeCommit);
-    write.commit()?;
-    Ok(outcome)
+    write.commit_prepared(outcome)
 }
 
 pub(super) fn cancel_ephemeral_receipt(
@@ -1243,9 +1241,10 @@ pub(super) fn cancel_ephemeral_receipt(
         }
     };
     if outcome == crate::CancelEphemeralOutcome::Cancelled {
-        write_txn.commit().map_err(persist_err)?;
+        commit_prepared(write_txn, outcome)
+    } else {
+        Ok(outcome)
     }
-    Ok(outcome)
 }
 
 pub(super) fn mark_ephemeral_signed(
@@ -1278,7 +1277,8 @@ pub(super) fn mark_ephemeral_signed(
         }
     };
     if changed {
-        write_txn.commit().map_err(persist_err)?;
+        commit_prepared(write_txn, changed)
+    } else {
+        Ok(changed)
     }
-    Ok(changed)
 }

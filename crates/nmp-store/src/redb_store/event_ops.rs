@@ -1,3 +1,4 @@
+use super::commit::commit_prepared;
 use super::ingest::insert_with_tables;
 use super::ingest_txn::GovernedWrite;
 use super::mutation::remove_row_in_txn;
@@ -57,8 +58,7 @@ pub(super) fn insert(
     let outcome = write.apply(|tables, _write_txn| insert_with_tables(tables, event, from))?;
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::ObservationBeforeCommit);
-    write.commit()?;
-    Ok(outcome)
+    write.commit_prepared(outcome)
 }
 
 pub(super) fn insert_batch(
@@ -90,7 +90,7 @@ pub(super) fn insert_batch(
     })?;
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::ObservationBeforeCommit);
-    write.commit()?;
+    let outcomes = write.commit_prepared(outcomes)?;
     #[cfg(feature = "bench-instrumentation")]
     {
         crate::ingest_attribution::transaction_total(transaction_started.elapsed());
@@ -428,8 +428,7 @@ pub(super) fn remove(
 ) -> Result<Option<StoredEvent>, PersistenceError> {
     let mut write = GovernedWrite::begin(store)?;
     let removed = write.apply(|txn, _write_txn| remove_row_in_txn(txn, id, |_| true))?;
-    write.commit()?;
-    Ok(removed)
+    write.commit_prepared(removed)
 }
 
 pub(super) fn expire_due(
@@ -463,8 +462,7 @@ pub(super) fn expire_due(
         }
         Ok(removed)
     })?;
-    write.commit()?;
-    Ok(removed)
+    write.commit_prepared(removed)
 }
 
 pub(super) fn next_expiration(store: &RedbStore) -> Option<Timestamp> {
@@ -512,8 +510,7 @@ pub(super) fn record_coverage(
             .insert(row_key.as_str(), encoded.as_str())
             .map_err(persist_err)?;
     }
-    write_txn.commit().map_err(persist_err)?;
-    Ok(())
+    commit_prepared(write_txn, ())
 }
 
 pub(super) fn get_coverage(
@@ -673,7 +670,7 @@ pub(super) fn gc(store: &mut RedbStore, claims: &ClaimSet) -> Result<GcReport, P
     })?;
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::GcBeforeCommit);
-    write.commit()?;
+    let report = write.commit_prepared(report)?;
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::GcAfterCommit);
 

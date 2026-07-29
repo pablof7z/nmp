@@ -109,6 +109,7 @@ use outbox::*;
 mod canonical;
 #[cfg(test)]
 use canonical::*;
+mod commit;
 mod query;
 #[cfg(feature = "bench-instrumentation")]
 pub use query::set_bench_exact_cardinality;
@@ -455,6 +456,9 @@ mod corruption_tests;
 
 #[cfg(test)]
 mod crash_atomicity_tests;
+
+#[cfg(test)]
+mod commit_structure_tests;
 
 #[cfg(test)]
 mod durability_tests;

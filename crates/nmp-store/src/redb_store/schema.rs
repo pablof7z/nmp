@@ -36,9 +36,11 @@ pub(super) fn persist_err(e: impl Into<redb::Error>) -> PersistenceError {
 /// that sets the latch, whose durability is genuinely unknown). See
 /// [`PersistenceFault`] for why `Io` cannot honestly be narrowed further.
 ///
-/// Everything redb models above the storage layer — a table type mismatch,
-/// a missing table, an upgrade requirement, a savepoint refusal — is this
-/// crate misusing its own database, not an I/O event: `Invariant`.
+/// Every variant redb 4.1 models above the storage layer — a table type
+/// mismatch, a missing table, an upgrade requirement, a savepoint refusal —
+/// is enumerated as this crate misusing its own database: `Invariant`.
+/// `redb::Error` is non-exhaustive, so the wildcard is reserved for a future
+/// backend state and must remain conservative.
 fn classify(error: &redb::Error) -> PersistenceFault {
     match error {
         redb::Error::PreviousIo | redb::Error::DatabaseClosed => PersistenceFault::Latched,
@@ -46,8 +48,34 @@ fn classify(error: &redb::Error) -> PersistenceFault {
         redb::Error::Corrupted(_) => PersistenceFault::Corrupted,
         redb::Error::ValueTooLarge(_) => PersistenceFault::ValueTooLarge,
         redb::Error::LockPoisoned(_) => PersistenceFault::LockPoisoned,
-        _ => PersistenceFault::Invariant,
+        redb::Error::DatabaseAlreadyOpen
+        | redb::Error::InvalidSavepoint
+        | redb::Error::ImmediateDurabilityRequired
+        | redb::Error::RepairAborted
+        | redb::Error::PersistentSavepointModified
+        | redb::Error::PersistentSavepointExists
+        | redb::Error::EphemeralSavepointExists
+        | redb::Error::TransactionInProgress
+        | redb::Error::UpgradeRequired(_)
+        | redb::Error::TableTypeMismatch { .. }
+        | redb::Error::TableIsMultimap(_)
+        | redb::Error::TableIsNotMultimap(_)
+        | redb::Error::TypeDefinitionChanged { .. }
+        | redb::Error::TableDoesNotExist(_)
+        | redb::Error::TableExists(_)
+        | redb::Error::TableAlreadyOpen(_, _)
+        | redb::Error::ReadTransactionStillInUse(_) => PersistenceFault::Invariant,
+        _ => unknown_backend_fault(),
     }
+}
+
+/// The mandatory conservative fallback for a future redb error variant.
+///
+/// Kept as a separately falsifiable mapping because `redb::Error` is
+/// non-exhaustive and current Rust cannot construct a future variant in a
+/// unit test.
+pub(super) fn unknown_backend_fault() -> PersistenceFault {
+    PersistenceFault::UnknownBackend
 }
 
 /// The ONE refusal for durable bytes that are not the exact current schema
