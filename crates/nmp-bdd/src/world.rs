@@ -669,8 +669,7 @@ impl NmpWorld {
         .sign_with_keys(&keys)
         .expect("fixture keys sign cleanly");
         self.signed_notes.insert(text.to_string(), signed.clone());
-        self.pending_signed_notes
-            .push((person.to_string(), signed));
+        self.pending_signed_notes.push((person.to_string(), signed));
     }
 
     // ---- lazy startup ----------------------------------------------------

@@ -25983,7 +25983,7 @@ reexport nmp::WriteIntent => nmp_grammar::write::WriteIntent
                                     "kind": "plain"
                                   }
                                 },
-                                "name": "AuthorOutbox",
+                                "name": "Auto",
                                 "visibility": "default"
                               },
                               {
@@ -25998,96 +25998,30 @@ reexport nmp::WriteIntent => nmp_grammar::write::WriteIntent
                                           "inner": {
                                             "struct_field": {
                                               "resolved_path": {
-                                                "args": null,
-                                                "path": "PrivateRoute",
-                                                "resolved_item": {
-                                                  "definition": {
-                                                    "attrs": [],
-                                                    "inner": {
-                                                      "struct": {
-                                                        "generics": {
-                                                          "params": [],
-                                                          "where_predicates": []
-                                                        },
-                                                        "kind": {
-                                                          "plain": {
-                                                            "fields": [
-                                                              {
-                                                                "attrs": [],
-                                                                "inner": {
-                                                                  "struct_field": {
-                                                                    "resolved_path": {
-                                                                      "args": {
-                                                                        "angle_bracketed": {
-                                                                          "args": [
-                                                                            {
-                                                                              "type": {
-                                                                                "resolved_path": {
-                                                                                  "args": null,
-                                                                                  "path": "nostr::RelayUrl",
-                                                                                  "resolved_item": {
-                                                                                    "definition": {
-                                                                                      "previously_defined": "nostr::types::url::RelayUrl"
-                                                                                    },
-                                                                                    "path": "nostr::types::url::RelayUrl"
-                                                                                  }
-                                                                                }
-                                                                              }
-                                                                            }
-                                                                          ],
-                                                                          "constraints": []
-                                                                        }
-                                                                      },
-                                                                      "path": "NarrowOnly",
-                                                                      "resolved_item": {
-                                                                        "definition": {
-                                                                          "attrs": [],
-                                                                          "inner": {
-                                                                            "struct": {
-                                                                              "generics": {
-                                                                                "params": [
-                                                                                  {
-                                                                                    "kind": {
-                                                                                      "type": {
-                                                                                        "bounds": [],
-                                                                                        "default": null,
-                                                                                        "is_synthetic": false
-                                                                                      }
-                                                                                    },
-                                                                                    "name": "T"
-                                                                                  }
-                                                                                ],
-                                                                                "where_predicates": []
-                                                                              },
-                                                                              "kind": {
-                                                                                "plain": {
-                                                                                  "fields": [],
-                                                                                  "has_stripped_fields": true
-                                                                                }
-                                                                              }
-                                                                            }
-                                                                          },
-                                                                          "name": "NarrowOnly",
-                                                                          "visibility": "public"
-                                                                        },
-                                                                        "path": "nmp_grammar::write::NarrowOnly"
-                                                                      }
-                                                                    }
-                                                                  }
-                                                                },
-                                                                "name": "relays",
-                                                                "visibility": "public"
-                                                              }
-                                                            ],
-                                                            "has_stripped_fields": false
+                                                "args": {
+                                                  "angle_bracketed": {
+                                                    "args": [
+                                                      {
+                                                        "type": {
+                                                          "resolved_path": {
+                                                            "args": null,
+                                                            "path": "nostr::RelayUrl",
+                                                            "resolved_item": {
+                                                              "definition": {
+                                                                "previously_defined": "nostr::types::url::RelayUrl"
+                                                              },
+                                                              "path": "nostr::types::url::RelayUrl"
+                                                            }
                                                           }
                                                         }
                                                       }
-                                                    },
-                                                    "name": "PrivateRoute",
-                                                    "visibility": "public"
-                                                  },
-                                                  "path": "nmp_grammar::write::PrivateRoute"
+                                                    ],
+                                                    "constraints": []
+                                                  }
+                                                },
+                                                "path": "Vec",
+                                                "resolved_item": {
+                                                  "path": "alloc::vec::Vec"
                                                 }
                                               }
                                             }
@@ -26099,56 +26033,7 @@ reexport nmp::WriteIntent => nmp_grammar::write::WriteIntent
                                     }
                                   }
                                 },
-                                "name": "PrivateNarrow",
-                                "visibility": "default"
-                              },
-                              {
-                                "attrs": [],
-                                "inner": {
-                                  "variant": {
-                                    "discriminant": null,
-                                    "kind": {
-                                      "tuple": [
-                                        {
-                                          "attrs": [],
-                                          "inner": {
-                                            "struct_field": {
-                                              "resolved_path": {
-                                                "args": null,
-                                                "path": "RelayListBootstrapAuthority",
-                                                "resolved_item": {
-                                                  "definition": {
-                                                    "attrs": [],
-                                                    "inner": {
-                                                      "struct": {
-                                                        "generics": {
-                                                          "params": [],
-                                                          "where_predicates": []
-                                                        },
-                                                        "kind": {
-                                                          "plain": {
-                                                            "fields": [],
-                                                            "has_stripped_fields": true
-                                                          }
-                                                        }
-                                                      }
-                                                    },
-                                                    "name": "RelayListBootstrapAuthority",
-                                                    "visibility": "public"
-                                                  },
-                                                  "path": "nmp_grammar::write::RelayListBootstrapAuthority"
-                                                }
-                                              }
-                                            }
-                                          },
-                                          "name": "0",
-                                          "visibility": "default"
-                                        }
-                                      ]
-                                    }
-                                  }
-                                },
-                                "name": "RelayListBootstrap",
+                                "name": "Explicit",
                                 "visibility": "default"
                               }
                             ]

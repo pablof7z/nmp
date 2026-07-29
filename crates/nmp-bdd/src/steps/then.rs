@@ -34,9 +34,9 @@ use cucumber::then;
 use nmp::mechanism::outbox::WriteStatus;
 
 use crate::steps::{parse_people, parse_tag};
-use nostr::JsonUtil;
 use crate::world::{NmpWorld, EVENTUALLY, ME};
 use nmp_test_support::relays::{WireRecord, WireReq};
+use nostr::JsonUtil;
 
 /// A step's precondition that the world produced the thing it reads (see this
 /// module's doc). `$present` is the PRECONDITION -- true when there is
@@ -1144,9 +1144,7 @@ async fn refused_before_acceptance(w: &mut NmpWorld) {
         "expected Failed to be the FIRST and only status, never Accepted; saw {statuses:?}"
     );
     assert!(
-        !statuses
-            .iter()
-            .any(|s| matches!(s, WriteStatus::Accepted)),
+        !statuses.iter().any(|s| matches!(s, WriteStatus::Accepted)),
         "a refused publish must never report Accepted; saw {statuses:?}"
     );
 }
@@ -1155,9 +1153,7 @@ async fn refused_before_acceptance(w: &mut NmpWorld) {
 async fn no_receipt_is_created(w: &mut NmpWorld) {
     let statuses = w.receipt_statuses();
     assert!(
-        !statuses
-            .iter()
-            .any(|s| matches!(s, WriteStatus::Accepted)),
+        !statuses.iter().any(|s| matches!(s, WriteStatus::Accepted)),
         "a refused publish allocates no durable receipt; saw {statuses:?}"
     );
 }
@@ -1166,9 +1162,7 @@ async fn no_receipt_is_created(w: &mut NmpWorld) {
 async fn nothing_written_to_journal(w: &mut NmpWorld) {
     let statuses = w.receipt_statuses();
     assert!(
-        !statuses
-            .iter()
-            .any(|s| matches!(s, WriteStatus::Accepted)),
+        !statuses.iter().any(|s| matches!(s, WriteStatus::Accepted)),
         "acceptance IS the journal write, and it must not have happened; saw {statuses:?}"
     );
 }
