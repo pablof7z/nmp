@@ -280,6 +280,51 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
     AcquisitionEvidence { sources, shortfall }
 }
 
+/// Combine independently-planned Demand scopes into one query snapshot
+/// without allowing one scope's plan to prove another scope. The public
+/// evidence shape remains per physical source, so a source appearing in
+/// multiple scopes is folded to its least-proven watermark while explicit
+/// shortfalls are unioned.
+pub(crate) fn merge_acquisition_evidence(
+    parts: impl IntoIterator<Item = AcquisitionEvidence>,
+) -> AcquisitionEvidence {
+    let mut sources: BTreeMap<(RelayUrl, AccessContext), SourceEvidence> = BTreeMap::new();
+    let mut shortfall = Vec::new();
+
+    for part in parts {
+        for source in part.sources {
+            let key = (source.relay.clone(), source.access);
+            match sources.entry(key) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(source);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let current = entry.get_mut();
+                    debug_assert_eq!(
+                        current.status, source.status,
+                        "one physical session has one current link status"
+                    );
+                    current.reconciled_through =
+                        match (current.reconciled_through, source.reconciled_through) {
+                            (Some(left), Some(right)) => Some(left.min(right)),
+                            _ => None,
+                        };
+                }
+            }
+        }
+        for fact in part.shortfall {
+            if !shortfall.contains(&fact) {
+                shortfall.push(fact);
+            }
+        }
+    }
+
+    AcquisitionEvidence {
+        sources: sources.into_values().collect(),
+        shortfall,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

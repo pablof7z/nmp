@@ -8,15 +8,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, DemandOp, Derived, Filter,
-    Freshness, IdentityField, IndexedTagName, RoutingEvidence, RoutingEvidenceKind, Selector,
-    SetAlgebra, SetOp, SourceAuthority,
+    AccessContext, Binding, CacheMode, ConcreteFilter, ContextualAtom, Demand, DemandOp, Derived,
+    Filter, Freshness, IdentityField, IndexedTagName, RoutingEvidence, RoutingEvidenceKind,
+    Selector, SetAlgebra, SetOp, SourceAuthority,
 };
 use nmp_resolver::testkit::{
     addressable, deletion, kind10000_mutes, kind10003_bookmarks, kind3, kind39002, Harness,
 };
-use nmp_resolver::{Engine, LiveQuery};
-use nmp_store::{MemoryStore, RelayObserved};
+use nmp_resolver::{Engine, HandleId, LiveQuery, ResolutionNodeKind, ResolvedValue};
+use nmp_store::{EventStore, MemoryStore, RelayObserved};
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
 // ---- ConcreteFilter builders (test-local; mirrors nmp-grammar's own test
@@ -459,6 +459,258 @@ fn derived_inner_limit_selects_newest_events_and_refills_after_retraction() {
         "retracting a top-N row pulls the next-newest event back in"
     );
     assert_eq!(h.demand(), BTreeSet::from([inner, outer_b, outer_c]));
+}
+
+/// QUERIES-DERIVED-CACHE-001/003/004: the inner Demand's Strict cache
+/// projection is evaluated over stored provenance before its explicit NIP-01
+/// limit. The fixture stages real canonical rows and relay observations; it
+/// never inserts the projected author set.
+#[test]
+fn derived_inner_strict_cache_filters_provenance_before_limit() {
+    use nmp_resolver::testkit::kind1;
+
+    let pinned = nostr::RelayUrl::parse("wss://strict-inner-a.example").unwrap();
+    let other = nostr::RelayUrl::parse("wss://strict-inner-b.example").unwrap();
+    let older_eligible_author = Keys::generate();
+    let newer_ineligible_author = Keys::generate();
+    let shared_author = Keys::generate();
+    let older_eligible = kind1(&older_eligible_author, "seen on A", 100);
+    let newer_ineligible = kind1(&newer_ineligible_author, "seen only on B", 300);
+    let shared = kind1(&shared_author, "seen on A and B", 200);
+
+    let mut store = MemoryStore::new();
+    store
+        .insert(
+            older_eligible,
+            RelayObserved::new(pinned.clone(), Timestamp::from(100)),
+        )
+        .unwrap();
+    store
+        .insert(
+            newer_ineligible,
+            RelayObserved::new(other.clone(), Timestamp::from(300)),
+        )
+        .unwrap();
+    store
+        .insert(
+            shared.clone(),
+            RelayObserved::new(other, Timestamp::from(200)),
+        )
+        .unwrap();
+    store
+        .insert(
+            shared,
+            RelayObserved::new(pinned.clone(), Timestamp::from(201)),
+        )
+        .unwrap();
+
+    let mut inner = Demand::new(
+        Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            limit: Some(2),
+            ..Filter::default()
+        },
+        SourceAuthority::Pinned(BTreeSet::from([pinned.clone()])),
+        AccessContext::Public,
+    )
+    .unwrap();
+    inner.cache = CacheMode::Strict;
+    let outer = Filter {
+        kinds: Some(BTreeSet::from([7u16])),
+        authors: Some(Binding::Derived(Box::new(Derived {
+            inner,
+            project: Selector::Authors,
+        }))),
+        ..Filter::default()
+    };
+
+    let mut engine = Engine::new(store);
+    let (_handle, _opened) = engine
+        .subscribe(LiveQuery::from_filter(outer))
+        .expect("stored-row projection should succeed");
+    let demand = engine.active_demand();
+    let outer_authors: BTreeSet<String> = demand
+        .iter()
+        .filter(|atom| atom.filter.kinds == Some(BTreeSet::from([7u16])))
+        .flat_map(|atom| atom.filter.authors.clone().unwrap_or_default())
+        .collect();
+
+    assert_eq!(
+        outer_authors,
+        BTreeSet::from([
+            older_eligible_author.public_key().to_hex(),
+            shared_author.public_key().to_hex(),
+        ]),
+        "Strict must discard the newer B-only row before limit:2 is finalized, while a row seen on both A and B remains eligible"
+    );
+}
+
+/// QUERIES-DERIVED-CACHE-002: Agnostic reads retain ordinary canonical-cache
+/// eligibility even when the Demand itself is pinned elsewhere.
+#[test]
+fn derived_inner_agnostic_cache_accepts_rows_from_any_provenance_before_limit() {
+    use nmp_resolver::testkit::kind1;
+
+    let pinned = nostr::RelayUrl::parse("wss://agnostic-inner-a.example").unwrap();
+    let other = nostr::RelayUrl::parse("wss://agnostic-inner-b.example").unwrap();
+    let older_author = Keys::generate();
+    let newer_author = Keys::generate();
+    let mut store = MemoryStore::new();
+    store
+        .insert(
+            kind1(&older_author, "older on A", 100),
+            RelayObserved::new(pinned.clone(), Timestamp::from(100)),
+        )
+        .unwrap();
+    store
+        .insert(
+            kind1(&newer_author, "newer on B", 200),
+            RelayObserved::new(other, Timestamp::from(200)),
+        )
+        .unwrap();
+
+    let inner = Demand::new(
+        Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            limit: Some(1),
+            ..Filter::default()
+        },
+        SourceAuthority::Pinned(BTreeSet::from([pinned])),
+        AccessContext::Public,
+    )
+    .unwrap();
+    let outer = Filter {
+        kinds: Some(BTreeSet::from([7u16])),
+        authors: Some(Binding::Derived(Box::new(Derived {
+            inner,
+            project: Selector::Authors,
+        }))),
+        ..Filter::default()
+    };
+
+    let mut engine = Engine::new(store);
+    let (_handle, _opened) = engine
+        .subscribe(LiveQuery::from_filter(outer))
+        .expect("stored-row projection should succeed");
+    let authors: BTreeSet<String> = engine
+        .active_demand()
+        .into_iter()
+        .filter(|atom| atom.filter.kinds == Some(BTreeSet::from([7u16])))
+        .flat_map(|atom| atom.filter.authors.unwrap_or_default())
+        .collect();
+    assert_eq!(
+        authors,
+        BTreeSet::from([newer_author.public_key().to_hex()]),
+        "Agnostic must keep the newest B-only canonical row eligible"
+    );
+}
+
+fn derived_scalar_values(engine: &Engine<MemoryStore>, handle: HandleId) -> BTreeSet<String> {
+    engine
+        .resolution_snapshot(handle)
+        .into_iter()
+        .find_map(|node| match node.kind {
+            ResolutionNodeKind::Derived { values } => Some(
+                values
+                    .into_iter()
+                    .map(|value| match value {
+                        ResolvedValue::Scalar(value) => value,
+                        ResolvedValue::AddressCoordinate { .. } => {
+                            panic!("Authors projection cannot yield an address coordinate")
+                        }
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .expect("fixture contains one Derived node")
+}
+
+/// QUERIES-DERIVED-FRESHNESS-004's reactive companion: two descriptors whose
+/// nested cache policies differ keep independent projected state across both
+/// row insertion and provenance-growth recomputes.
+#[test]
+fn derived_inner_cache_policies_do_not_cross_contaminate_reactive_recompute() {
+    use nmp_resolver::testkit::kind1;
+
+    let pinned = nostr::RelayUrl::parse("wss://reactive-inner-a.example").unwrap();
+    let other = nostr::RelayUrl::parse("wss://reactive-inner-b.example").unwrap();
+    let first_author = Keys::generate();
+    let second_author = Keys::generate();
+    let first = kind1(&first_author, "first B-only row", 100);
+    let second = kind1(&second_author, "second B-only row", 200);
+    let mut store = MemoryStore::new();
+    store
+        .insert(
+            first.clone(),
+            RelayObserved::new(other.clone(), Timestamp::from(100)),
+        )
+        .unwrap();
+    let mut engine = Engine::new(store);
+
+    let query = |cache| {
+        let mut inner = Demand::new(
+            Filter {
+                kinds: Some(BTreeSet::from([1u16])),
+                ..Filter::default()
+            },
+            SourceAuthority::Pinned(BTreeSet::from([pinned.clone()])),
+            AccessContext::Public,
+        )
+        .unwrap();
+        inner.cache = cache;
+        LiveQuery::from_filter(Filter {
+            kinds: Some(BTreeSet::from([7u16])),
+            authors: Some(Binding::Derived(Box::new(Derived {
+                inner,
+                project: Selector::Authors,
+            }))),
+            ..Filter::default()
+        })
+    };
+    let (strict, _) = engine.subscribe(query(CacheMode::Strict)).unwrap();
+    let (agnostic, _) = engine.subscribe(query(CacheMode::Agnostic)).unwrap();
+    assert!(derived_scalar_values(&engine, strict.id()).is_empty());
+    assert_eq!(
+        derived_scalar_values(&engine, agnostic.id()),
+        BTreeSet::from([first_author.public_key().to_hex()])
+    );
+
+    engine
+        .ingest_observed(vec![(
+            second,
+            RelayObserved::new(other, Timestamp::from(200)),
+        )])
+        .unwrap();
+    assert!(derived_scalar_values(&engine, strict.id()).is_empty());
+    assert_eq!(
+        derived_scalar_values(&engine, agnostic.id()),
+        BTreeSet::from([
+            first_author.public_key().to_hex(),
+            second_author.public_key().to_hex(),
+        ]),
+        "a B-only insert updates Agnostic without leaking into Strict"
+    );
+
+    engine
+        .ingest_observed(vec![(
+            first,
+            RelayObserved::new(pinned, Timestamp::from(201)),
+        )])
+        .unwrap();
+    assert_eq!(
+        derived_scalar_values(&engine, strict.id()),
+        BTreeSet::from([first_author.public_key().to_hex()]),
+        "provenance growth into A makes the row eligible for Strict"
+    );
+    assert_eq!(
+        derived_scalar_values(&engine, agnostic.id()),
+        BTreeSet::from([
+            first_author.public_key().to_hex(),
+            second_author.public_key().to_hex(),
+        ]),
+        "the same recompute leaves the Agnostic result unchanged"
+    );
 }
 
 /// #49/#714 promotion falsifier: the exact ratified nested-context shape.

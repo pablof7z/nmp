@@ -524,10 +524,14 @@ impl<S: EventStore> EngineCore<S> {
     /// is already represented by the initial session; shadow planning never
     /// needs to mutate the widen-only discovery subscription.
     pub(super) fn history_shadow_plan(&self, id: HistorySessionId) -> RelayPlan {
-        match self.histories.get(&id).map(|state| &state.acquisition) {
-            Some(HandleAcquisition::CoverageSatisfied(plan)) => plan.clone(),
-            Some(HandleAcquisition::CacheOnly(plan)) => plan.clone(),
-            Some(HandleAcquisition::Live) | None => self.shadow_plan_for(self.wire_demand()),
+        match self
+            .histories
+            .get(&id)
+            .and_then(|state| state.acquisition.root())
+        {
+            Some(ScopeAcquisition::CoverageSatisfied(plan))
+            | Some(ScopeAcquisition::CacheOnly(plan)) => plan.clone(),
+            Some(ScopeAcquisition::Live) | None => self.shadow_plan_for(self.wire_demand()),
         }
     }
 
@@ -670,20 +674,7 @@ impl<S: EventStore> EngineCore<S> {
             .histories
             .get(&id)
             .expect("history evidence requires a live session");
-        let subtree_atoms = self.history_subtree_atoms(id);
-        let auth_status = self.auth_status_map();
-        let evidence_plan = state
-            .acquisition
-            .evidence_plan()
-            .unwrap_or_else(|| self.router.plan());
-        evidence::acquisition_evidence(
-            &subtree_atoms,
-            evidence_plan,
-            self.resolver.store(),
-            &self.connected_relays,
-            &auth_status,
-            &self.ever_connected_relays,
-        )
+        self.acquisition_evidence_for_scopes(self.history_demand_scopes(id), &state.acquisition)
     }
 
     pub(super) fn history_rows_and_evidence_for(
@@ -765,6 +756,36 @@ impl<S: EventStore> EngineCore<S> {
             .flat_map(|state| state.handle_ids.iter().copied())
             .flat_map(|handle| self.resolver.subtree_atoms(handle))
             .collect()
+    }
+
+    /// Union every active history partition by structural Demand boundary.
+    /// History handles are time-window variants of one descriptor, so their
+    /// graph shape and opening-time policy vector are identical while their
+    /// current root atoms differ.
+    fn history_demand_scopes(
+        &self,
+        id: HistorySessionId,
+    ) -> Vec<(BTreeSet<ContextualAtom>, Freshness)> {
+        let Some(state) = self.histories.get(&id) else {
+            return Vec::new();
+        };
+        let mut combined: Vec<(BTreeSet<ContextualAtom>, Freshness)> = Vec::new();
+        for handle in &state.handle_ids {
+            for (index, (atoms, freshness)) in
+                self.resolver.demand_scopes(*handle).into_iter().enumerate()
+            {
+                if let Some((combined_atoms, existing_freshness)) = combined.get_mut(index) {
+                    debug_assert_eq!(
+                        *existing_freshness, freshness,
+                        "one history descriptor keeps one policy per Demand boundary"
+                    );
+                    combined_atoms.extend(atoms);
+                } else {
+                    combined.push((atoms, freshness));
+                }
+            }
+        }
+        combined
     }
 
     pub(super) fn advance_history_projection(

@@ -162,8 +162,10 @@ use crate::types::{Element, FieldSlot, NodeId, ParentLink, ResolvedSet};
 /// `selection + source + access + cache + freshness`, not a bare `Filter`. Two `Demand`s
 /// with the same `Filter` but different `source`/`access` are DIFFERENT
 /// subscriptions with distinct atom/wire/coverage identity (bug-class ledger
-/// #18); `cache` and `freshness` do NOT participate in that identity (see
-/// [`AcquisitionKey`]) -- both are per-handle policies.
+/// #18). The root `cache` and `freshness` fields do not participate in that
+/// identity (see [`AcquisitionKey`]) because they are per-handle policies.
+/// Nested Demand fields remain inside `selection` and are enforced at their
+/// exact `Derived` boundary.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LiveQuery(pub Demand);
 
@@ -176,13 +178,13 @@ impl LiveQuery {
     }
 }
 
-/// The cache-FREE portion of a [`Demand`] that determines graph/atom/wire/
-/// coverage sharing (#106, atlas's resolver-threading forward-note): two
-/// `Demand`s differing ONLY in `cache` or `freshness` dedup onto the SAME graph node, the
-/// SAME atoms, and the SAME wire/coverage history -- `cache` never widens
-/// what's shared, it only selects which cached rows a given HANDLE's own
-/// projection later serves (the `nmp` acquisition core's
-/// `rows_and_evidence_for`, #107).
+/// The root-policy-free portion of a [`Demand`] that determines graph/atom/
+/// wire/coverage sharing (#106, atlas's resolver-threading forward-note): two
+/// Demands differing only in root `cache` or `freshness` dedup onto the same
+/// graph node, atoms, and wire/coverage history. Nested policies stay inside
+/// `selection`: cache changes an interior projection and freshness changes
+/// that boundary's wire participation, so erasing either would conflate two
+/// different derived graphs (#1106).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct AcquisitionKey {
     selection: Filter,
@@ -213,12 +215,12 @@ pub struct HandleId(u64);
 /// explicitly deferred M4 concern, not built here).
 pub struct QueryHandle {
     id: HandleId,
-    /// This handle's OWN `CacheMode` (#106) -- never shared with sibling
-    /// handles on the same (cache-free-deduped) graph node; read by
+    /// This handle's root `CacheMode` (#106) -- never shared with sibling
+    /// handles on the same (root-policy-free-deduped) graph node; read by
     /// the `nmp` acquisition core's row-projection layer (#107), not consumed inside the
     /// resolver itself.
     cache: nmp_grammar::CacheMode,
-    /// This handle's own coverage/wire policy (#565), excluded from the
+    /// This handle's root coverage/wire policy (#565), excluded from the
     /// shared acquisition key exactly like `cache`.
     freshness: nmp_grammar::Freshness,
     pending_drops: Weak<RefCell<Vec<HandleId>>>,
@@ -480,6 +482,21 @@ impl<S: EventStore> Engine<S> {
             .atoms_in_structural_order(root)
             .into_iter()
             .collect()
+    }
+
+    /// The current atoms owned by each Demand boundary in this handle's
+    /// graph, root first, paired with that boundary's declared freshness.
+    /// The root placeholder is replaced by [`QueryHandle::freshness`] in the
+    /// acquisition core; nested values come from their exact
+    /// `Derived.inner` declarations.
+    pub fn demand_scopes(
+        &self,
+        id: HandleId,
+    ) -> Vec<(BTreeSet<ContextualAtom>, nmp_grammar::Freshness)> {
+        let Some(&root) = self.handle_to_root.get(&id) else {
+            return Vec::new();
+        };
+        self.graph.demand_scopes(root)
     }
 
     pub fn graph_snapshot(&self) -> GraphSnapshot {
@@ -1214,12 +1231,30 @@ impl<S: EventStore> Engine<S> {
     /// `Derived` node from silently turning into an unbounded local scan.
     fn projection_input_events(
         &self,
+        filter_id: NodeId,
         filter: &ConcreteFilter,
+        cache: nmp_grammar::CacheMode,
     ) -> Result<Vec<StoredEvent>, PersistenceError> {
         let nostr_filter = filter.to_nostr();
-        let rows = match filter.limit {
-            Some(limit) => self.store.query_newest(&nostr_filter, limit)?,
-            None => self.store.query(&nostr_filter)?,
+        let strict_relays = self.graph.strict_projection_relays(filter_id, cache);
+        let rows = match (strict_relays.as_ref(), filter.limit) {
+            (Some(relays), Some(limit)) => {
+                self.store
+                    .query_newest_observed_by(&nostr_filter, relays, limit)?
+            }
+            (Some(relays), None) => self
+                .store
+                .query(&nostr_filter)?
+                .into_iter()
+                .filter(|row| {
+                    row.provenance
+                        .seen
+                        .keys()
+                        .any(|relay| relays.contains(relay))
+                })
+                .collect(),
+            (None, Some(limit)) => self.store.query_newest(&nostr_filter, limit)?,
+            (None, None) => self.store.query(&nostr_filter)?,
         };
         Ok(rows)
     }
@@ -1240,7 +1275,10 @@ impl<S: EventStore> Engine<S> {
             }
             Node::Derived(n) => {
                 let new = match self.graph.wide_concrete(n.inner) {
-                    Some(cf) => project_events(&self.projection_input_events(&cf)?, &n.project),
+                    Some(cf) => project_events(
+                        &self.projection_input_events(n.inner, &cf, n.cache)?,
+                        &n.project,
+                    ),
                     None => ResolvedSet::new(),
                 };
                 self.graph.set_derived_cached(id, new)
@@ -1400,7 +1438,10 @@ impl<S: EventStore> Engine<S> {
                     depth + 1,
                 )?;
                 let cached = match self.graph.wide_concrete(inner) {
-                    Some(cf) => project_events(&self.projection_input_events(&cf)?, &d.project),
+                    Some(cf) => project_events(
+                        &self.projection_input_events(inner, &cf, d.inner.cache)?,
+                        &d.project,
+                    ),
                     None => ResolvedSet::new(),
                 };
                 self.graph.insert(
@@ -1408,6 +1449,8 @@ impl<S: EventStore> Engine<S> {
                     Node::Derived(DerivedNode {
                         inner,
                         project: d.project.clone(),
+                        cache: d.inner.cache,
+                        freshness: d.inner.freshness,
                         cached,
                     }),
                     parent,

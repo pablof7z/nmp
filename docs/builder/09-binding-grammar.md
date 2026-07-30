@@ -91,10 +91,13 @@ demand for newly named records, withdraws records no longer named, preserves
 shared demand, and updates the existing observation handle.
 
 The app never owns the expanded id set or watches the inner kind to reopen
-network subscriptions. The inner demand names its own source and access
-context. It never implicitly inherits those values from the outer observation.
-That prevents, for example, an inner user-list query from accidentally running
-through an outer group host or borrowing its AUTH evidence.
+network subscriptions. The inner demand names its own source, access, cache,
+and freshness policy. It never implicitly inherits those values from the outer
+observation. That prevents, for example, an inner user-list query from
+accidentally running through an outer group host, borrowing its AUTH evidence,
+or opening remote work when the inner demand is cache-only. A Strict pinned
+inner demand admits only rows observed from one of its pins, before applying
+its own result limit; Agnostic admits any canonical cached match.
 
 `Derived` may feed any compatible set-valued field:
 
