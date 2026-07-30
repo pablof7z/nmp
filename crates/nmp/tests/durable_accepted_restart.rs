@@ -118,13 +118,9 @@ fn authenticate(
     let (send_token, auth_event) = send
         .into_iter()
         .find_map(|effect| match effect {
-            Effect::RelayAuth(AuthEffect::Send {
-                token,
-                epoch,
-                event,
-            }) => {
-                assert_eq!(epoch.session, *session);
-                assert_eq!(epoch.handle, handle);
+            Effect::RelayAuth(AuthEffect::Send { token, event }) => {
+                assert_eq!(token.epoch.session, *session);
+                assert_eq!(token.epoch.handle, handle);
                 Some((token, event))
             }
             _ => None,

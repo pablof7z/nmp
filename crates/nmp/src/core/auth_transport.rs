@@ -477,7 +477,6 @@ impl<S: EventStore> EngineCore<S> {
                 };
                 effects.push(Effect::RelayAuth(AuthEffect::Send {
                     token: send_token,
-                    epoch: state.epoch.clone(),
                     event: Box::new(event),
                 }));
             }

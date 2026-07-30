@@ -460,7 +460,7 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
         let (send_token, auth_event) = send
             .into_iter()
             .find_map(|effect| match effect {
-                Effect::RelayAuth(AuthEffect::Send { token, event, .. }) => Some((token, event)),
+                Effect::RelayAuth(AuthEffect::Send { token, event }) => Some((token, event)),
                 _ => None,
             })
             .unwrap();
