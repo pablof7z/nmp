@@ -539,7 +539,8 @@ echo "ok - workflow removes bootstrap signal in steady state"
 
 # Allowlist schema is exact, canonical, and component-scoped.
 allowlist_fail() {
-  local label=$1 body=$2 repo="$TMP/allow-${label//[^a-zA-Z0-9]/-}"
+  local label=$1 body=$2
+  local repo="$TMP/allow-${label//[^a-zA-Z0-9]/-}"
   new_repo "$repo"
   printf '%s\n' "$body" > "$repo/scripts/check-sdk-parity-allowlist.toml"
   commit_case "$repo" allowlist
