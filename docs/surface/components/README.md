@@ -14,8 +14,8 @@ contains it:
   `ffi_package`, `ffi_manifest`, and `library_stem`.
 - A co-located namespace points `artifact_owner` at an active self-owning
   record and declares none of those three library fields. Ownership is depth
-  one. Regeneration builds each owner once, then extracts each namespace
-  independently.
+  one. Regeneration gives each owner an isolated Cargo target, builds it once,
+  then extracts each of that owner's namespaces independently.
 - Every active record declares `ffi_sources`. Swift and Kotlin each declare
   both manifest/source roots, or two empty arrays plus a non-empty omission
   reason. A generated-only internal namespace is not falsely presented as an
@@ -26,8 +26,9 @@ contains it:
   remain release provenance.
 
 Descriptors are limited to 32,768 bytes, snapshots to 20,000 lines and
-2,000,000 bytes, and the catalog to 128 records. Paths are relative,
-canonical, and backed by regular files or trees in the exact Git revision.
+2,000,000 bytes, and the catalog to 128 records. Snapshots are UTF-8, LF-only,
+and cannot contain NUL bytes. Paths are relative, canonical, and backed by
+regular files or trees in the exact Git revision.
 Namespaces, library/package identities, Android identities, and source roots
 cannot collide.
 

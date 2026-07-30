@@ -123,6 +123,8 @@ fi
 # protected checker/CI program. The pull_request_target job sets SKIP_REGEN and
 # treats the untrusted head strictly as Git data; it never compiles head code.
 if [[ ${SURFACE_SKIP_REGEN:-0} != 1 ]]; then
+  [[ -z $(git status --porcelain=v1 --untracked-files=all) ]] ||
+    fail "deterministic regeneration requires a clean worktree"
   SURFACE_HEAD_REF="$HEAD_REF" \
     SURFACE_CATALOG_BIN="$CATALOG_BIN" \
     "$REGEN_CMD" --output-dir "$TMP/generated"

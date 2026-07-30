@@ -67,7 +67,7 @@ jobs:
           SURFACE_CATALOG_TOOL_DIR: ${{ runner.temp }}/nmp-surface-governance/tools/surface-component-catalog
           SURFACE_CATALOG_TARGET_DIR: ${{ runner.temp }}/nmp-surface-governance-target/catalog
         run: |
-          ${{ runner.temp }}/nmp-surface-governance/scripts/test-surface-governance.sh
+          ${{ runner.temp }}/nmp-surface-governance/scripts/test-surface-governance.sh "${{ github.workspace }}"
           ${{ runner.temp }}/nmp-surface-governance/scripts/test-install-surface-tools.sh
 
       - name: Compute changed projection context with trusted base checker

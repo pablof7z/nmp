@@ -693,6 +693,14 @@ fn validate_snapshot(key: &str, entry: &Entry, bytes: &[u8]) -> Result<()> {
             bytes.len()
         )));
     }
+    if bytes.contains(&0) {
+        return Err(invalid(format!("{key} snapshot contains a NUL byte")));
+    }
+    if bytes.contains(&b'\r') {
+        return Err(invalid(format!(
+            "{key} snapshot contains a carriage return; snapshots must use LF line endings"
+        )));
+    }
     let text = std::str::from_utf8(bytes)
         .map_err(|_| invalid(format!("{key} snapshot is not valid UTF-8")))?;
     let lines = text.lines().count();
@@ -1469,7 +1477,8 @@ fn allowlist_rows(repo: &Path, reference: &str, catalog: &Catalog) -> Result<()>
         )));
     }
     let mut tuples = BTreeSet::new();
-    let mut stdout = io::stdout().lock();
+    let mut previous = None;
+    let mut rows = Vec::new();
     for exception in allowlist.exception {
         let record = catalog.records.get(&exception.component).ok_or_else(|| {
             invalid(format!(
@@ -1506,15 +1515,24 @@ fn allowlist_rows(repo: &Path, reference: &str, catalog: &Catalog) -> Result<()>
             exception.concept.clone(),
             exception.platform.clone(),
         );
-        if !tuples.insert(tuple) {
+        if !tuples.insert(tuple.clone()) {
             return Err(invalid(
                 "duplicate component/concept/platform parity exception",
             ));
         }
-        let row = format!(
+        if previous.as_ref().is_some_and(|prior| prior >= &tuple) {
+            return Err(invalid(
+                "parity exceptions must be in canonical component/concept/platform order",
+            ));
+        }
+        previous = Some(tuple);
+        rows.push(format!(
             "{}\t{}\t{}\t{}",
             exception.component, exception.concept, exception.platform, exception.justification
-        );
+        ));
+    }
+    let mut stdout = io::stdout().lock();
+    for row in rows {
         stdout.write_all(row.as_bytes())?;
         stdout.write_all(&[0])?;
     }

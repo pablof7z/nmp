@@ -7,7 +7,8 @@
 # declared Swift/Kotlin roots. This prevents a coincidental word in one
 # component from masking a missing projection in another. Intentional modeling
 # differences are exact (component, concept, platform) exceptions in
-# scripts/check-sdk-parity-allowlist.toml.
+# scripts/check-sdk-parity-allowlist.toml. Exceptions that suppress nothing
+# are reported explicitly so obsolete escape hatches cannot rot silently.
 #
 # This remains a deliberately conservative text heuristic: exported Rust
 # type/function identifiers and hand-written SDK identifiers are split into
@@ -206,6 +207,8 @@ total_missing_swift=0
 total_missing_kotlin=0
 total_allowed_swift=0
 total_allowed_kotlin=0
+total_stale_swift=0
+total_stale_kotlin=0
 
 for dir in "$tmp"/components/*; do
   [[ -d "$dir" ]] || {
@@ -241,6 +244,7 @@ for dir in "$tmp"/components/*; do
     if [[ -f "$dir/omit-$platform" ]]; then
       : > "$dir/missing-$platform"
       : > "$dir/allowed-$platform"
+      cp "$dir/allow-$platform" "$dir/stale-$platform"
       continue
     fi
     [[ -s "$dir/$platform-roots" ]] || {
@@ -253,16 +257,21 @@ for dir in "$tmp"/components/*; do
     comm -23 "$dir/rust-words" "$dir/$platform-words" > "$dir/missing-$platform.raw"
     comm -23 "$dir/missing-$platform.raw" "$dir/allow-$platform" > "$dir/missing-$platform"
     comm -12 "$dir/missing-$platform.raw" "$dir/allow-$platform" > "$dir/allowed-$platform"
+    comm -23 "$dir/allow-$platform" "$dir/missing-$platform.raw" > "$dir/stale-$platform"
   done
 
   missing_swift=$(wc -l < "$dir/missing-swift" | tr -d ' ')
   missing_kotlin=$(wc -l < "$dir/missing-kotlin" | tr -d ' ')
   allowed_swift=$(wc -l < "$dir/allowed-swift" | tr -d ' ')
   allowed_kotlin=$(wc -l < "$dir/allowed-kotlin" | tr -d ' ')
+  stale_swift=$(wc -l < "$dir/stale-swift" | tr -d ' ')
+  stale_kotlin=$(wc -l < "$dir/stale-kotlin" | tr -d ' ')
   total_missing_swift=$((total_missing_swift + missing_swift))
   total_missing_kotlin=$((total_missing_kotlin + missing_kotlin))
   total_allowed_swift=$((total_allowed_swift + allowed_swift))
   total_allowed_kotlin=$((total_allowed_kotlin + allowed_kotlin))
+  total_stale_swift=$((total_stale_swift + stale_swift))
+  total_stale_kotlin=$((total_stale_kotlin + stale_kotlin))
 
   if [[ $QUIET -eq 0 ]]; then
     if (( missing_swift > 0 )); then
@@ -275,11 +284,31 @@ for dir in "$tmp"/components/*; do
       report_words "$component" kotlin "$dir/missing-kotlin" "$dir/rust-map"
       echo
     fi
+    if (( allowed_swift > 0 )); then
+      echo "ALLOWLISTED FOR SWIFT ($component; $allowed_swift concept(s)):"
+      report_words "$component" swift "$dir/allowed-swift" "$dir/rust-map"
+      echo
+    fi
+    if (( allowed_kotlin > 0 )); then
+      echo "ALLOWLISTED FOR KOTLIN ($component; $allowed_kotlin concept(s)):"
+      report_words "$component" kotlin "$dir/allowed-kotlin" "$dir/rust-map"
+      echo
+    fi
+    if (( stale_swift > 0 )); then
+      echo "CURRENTLY-UNUSED ALLOWLIST ENTRIES FOR SWIFT ($component):"
+      sed 's/^/  - /' "$dir/stale-swift"
+      echo
+    fi
+    if (( stale_kotlin > 0 )); then
+      echo "CURRENTLY-UNUSED ALLOWLIST ENTRIES FOR KOTLIN ($component):"
+      sed 's/^/  - /' "$dir/stale-kotlin"
+      echo
+    fi
   fi
 done
 
 if [[ $QUIET -eq 1 ]]; then
-  echo "check-sdk-parity: components=$total_components rust-concepts=$total_rust_words missing-from-swift=$total_missing_swift missing-from-kotlin=$total_missing_kotlin allowlisted-swift=$total_allowed_swift allowlisted-kotlin=$total_allowed_kotlin"
+  echo "check-sdk-parity: components=$total_components rust-concepts=$total_rust_words missing-from-swift=$total_missing_swift missing-from-kotlin=$total_missing_kotlin allowlisted-swift=$total_allowed_swift allowlisted-kotlin=$total_allowed_kotlin stale-allowlist-swift=$total_stale_swift stale-allowlist-kotlin=$total_stale_kotlin"
 elif (( total_missing_swift == 0 && total_missing_kotlin == 0 )); then
   echo "OK: $total_components component(s) have per-component Swift/Kotlin concept coverage outside exact TOML exceptions."
 fi

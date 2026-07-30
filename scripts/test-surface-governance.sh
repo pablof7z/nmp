@@ -4,7 +4,15 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 CHECK="$SCRIPT_DIR/check-surface-governance.sh"
 PARITY="$SCRIPT_DIR/check-sdk-parity.sh"
-ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)
+[[ $# -eq 1 ]] || {
+  echo "usage: $0 <workspace-root>" >&2
+  exit 2
+}
+ROOT=$1
+git -C "$ROOT" rev-parse --show-toplevel >/dev/null 2>&1 || {
+  echo "test-surface-governance: workspace root is not a Git worktree: $ROOT" >&2
+  exit 2
+}
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -232,6 +240,10 @@ expect_catalog_mutation_fail "unknown descriptor field" \
   "printf 'invented = true\\n' >> '$TMP/catalog-unknown-descriptor-field/docs/surface/components/alpha/component.toml'"
 expect_catalog_mutation_fail "legacy snapshot resurrection" \
   "printf 'old\\n' > '$TMP/catalog-legacy-snapshot-resurrection/docs/surface/nmp-ffi-component.txt'"
+expect_catalog_mutation_fail "snapshot NUL byte" \
+  "printf 'component \"alpha\"\\0namespace \"alpha_ffi\"\\n' > '$TMP/catalog-snapshot-NUL-byte/docs/surface/components/alpha/uniffi.txt'"
+expect_catalog_mutation_fail "snapshot CRLF line ending" \
+  "printf 'component \"alpha\"\\r\\nnamespace \"alpha_ffi\"\\r\\n' > '$TMP/catalog-snapshot-CRLF-line-ending/docs/surface/components/alpha/uniffi.txt'"
 expect_catalog_mutation_fail "orphan catalog file" \
   "printf 'orphan\\n' > '$TMP/catalog-orphan-catalog-file/docs/surface/components/orphan.txt'"
 expect_catalog_mutation_fail "path traversal" \
@@ -448,7 +460,52 @@ rm "$repo/docs/surface/components/beta/uniffi.txt"
 commit_case "$repo" beta-retired
 expect_fail "new record cannot begin retired" "$CATALOG_BIN" transition "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
 
-# Allowlist schema is exact and component-scoped.
+# The one owner bootstrap is exact: regular legacy base, exactly two active
+# records, then the ordinary steady-state transition rules take over.
+bootstrap_repo() {
+  local repo=$1
+  new_repo "$repo"
+  rm -r "$repo/docs/surface/components"
+  printf 'legacy core snapshot\n' > "$repo/docs/surface/nmp-ffi-component.txt"
+  commit_case "$repo" legacy-base
+}
+
+repo="$TMP/bootstrap-valid"; bootstrap_repo "$repo"
+base=$(git -C "$repo" rev-parse HEAD)
+rm "$repo/docs/surface/nmp-ffi-component.txt"
+mkdir -p "$repo/docs/surface/components"
+printf '# Fixture component catalog\n' > "$repo/docs/surface/components/README.md"
+descriptor "$repo" nmp-core nmp-core
+descriptor "$repo" nmp-nip46 nmp-nip46
+commit_case "$repo" exact-bootstrap
+expect_pass "exact two-record bootstrap" "$CATALOG_BIN" transition \
+  "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
+
+repo="$TMP/bootstrap-extra"; bootstrap_repo "$repo"
+base=$(git -C "$repo" rev-parse HEAD)
+rm "$repo/docs/surface/nmp-ffi-component.txt"
+mkdir -p "$repo/docs/surface/components"
+printf '# Fixture component catalog\n' > "$repo/docs/surface/components/README.md"
+descriptor "$repo" nmp-core nmp-core
+descriptor "$repo" nmp-nip46 nmp-nip46
+descriptor "$repo" premature premature
+commit_case "$repo" extra-bootstrap-record
+expect_fail "bootstrap extra record" "$CATALOG_BIN" transition \
+  "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
+
+repo="$TMP/bootstrap-missing-legacy"; new_repo "$repo"
+rm -r "$repo/docs/surface/components"
+commit_case "$repo" catalog-absent
+base=$(git -C "$repo" rev-parse HEAD)
+mkdir -p "$repo/docs/surface/components"
+printf '# Fixture component catalog\n' > "$repo/docs/surface/components/README.md"
+descriptor "$repo" nmp-core nmp-core
+descriptor "$repo" nmp-nip46 nmp-nip46
+commit_case "$repo" bootstrap-without-legacy
+expect_fail "bootstrap missing legacy snapshot" "$CATALOG_BIN" transition \
+  "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
+
+# Allowlist schema is exact, canonical, and component-scoped.
 allowlist_fail() {
   local label=$1 body=$2 repo="$TMP/allow-${label//[^a-zA-Z0-9]/-}"
   new_repo "$repo"
@@ -462,6 +519,7 @@ allowlist_fail "allowlist malformed concept" $'schema = 1\n[[exception]]\ncompon
 allowlist_fail "allowlist malformed platform" $'schema = 1\n[[exception]]\ncomponent="alpha"\nconcept="widget"\nplatform="rust"\njustification="fixture"'
 allowlist_fail "allowlist empty reason" $'schema = 1\n[[exception]]\ncomponent="alpha"\nconcept="widget"\nplatform="swift"\njustification=" "'
 allowlist_fail "allowlist duplicate tuple" $'schema = 1\n[[exception]]\ncomponent="alpha"\nconcept="widget"\nplatform="swift"\njustification="one"\n[[exception]]\ncomponent="alpha"\nconcept="widget"\nplatform="swift"\njustification="two"'
+allowlist_fail "allowlist noncanonical order" $'schema = 1\n[[exception]]\ncomponent="alpha"\nconcept="widget"\nplatform="swift"\njustification="swift first"\n[[exception]]\ncomponent="alpha"\nconcept="widget"\nplatform="kotlin"\njustification="kotlin belongs first"'
 
 # A concept in beta cannot mask alpha's absent Swift concept.
 repo="$TMP/parity"; new_repo "$repo"; descriptor "$repo" beta beta
@@ -509,6 +567,19 @@ commit_case "$repo" exact-exception
 expect_pass "exact component parity exception" env \
   SDK_PARITY_ROOT="$repo" SDK_PARITY_HEAD_REF=HEAD \
   SDK_PARITY_CATALOG_BIN="$CATALOG_BIN" bash "$PARITY" --quiet
+printf '// swift AlphaWidget\n' \
+  > "$repo/Packages/Alpha/Sources/Alpha/Alpha.swift"
+commit_case "$repo" stale-exception
+stale_output=$(
+  SDK_PARITY_ROOT="$repo" SDK_PARITY_HEAD_REF=HEAD \
+    SDK_PARITY_CATALOG_BIN="$CATALOG_BIN" bash "$PARITY"
+)
+grep -Fq 'CURRENTLY-UNUSED ALLOWLIST ENTRIES FOR SWIFT (alpha)' \
+  <<< "$stale_output" || {
+  echo "FAIL: stale parity exception was not visible" >&2
+  exit 1
+}
+echo "ok - stale parity exception is visible"
 
 # End-to-end checker: regeneration, evidence, projections, protected program,
 # bootstrap refusal in steady state, and dirty checkout behavior.
@@ -548,6 +619,9 @@ for protected in \
   scripts/check-sdk-parity.sh \
   scripts/lib/require-commands.sh \
   .github/workflows/ci.yml \
+  tools/component-interface-snapshot/Cargo.lock \
+  tools/component-interface-snapshot/Cargo.toml \
+  tools/component-interface-snapshot/src/main.rs \
   tools/surface-component-catalog/src/main.rs; do
   repo="$TMP/checker-protected-$(basename "$protected")"
   new_repo "$repo"
@@ -563,8 +637,47 @@ for protected in \
 done
 expect_fail "bootstrap flag cannot bypass steady state" run_checker "$repo" "$base" 1
 
+repo="$TMP/checker-wrong-pr"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
+printf 'component "alpha"\nnamespace "alpha_ffi"\nrecord "v2"\n' \
+  > "$repo/actual/components/alpha/uniffi.txt"
+cp "$repo/actual/components/alpha/uniffi.txt" \
+  "$repo/docs/surface/components/alpha/uniffi.txt"
+append_entry "$repo" ffi 998
+commit_case "$repo" wrong-pr-evidence
+expect_fail "change-log evidence names wrong PR" run_checker "$repo" "$base"
+
+repo="$TMP/checker-wrong-projection"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
+printf 'component "alpha"\nnamespace "alpha_ffi"\nrecord "v2"\n' \
+  > "$repo/actual/components/alpha/uniffi.txt"
+cp "$repo/actual/components/alpha/uniffi.txt" \
+  "$repo/docs/surface/components/alpha/uniffi.txt"
+append_entry "$repo" correction
+commit_case "$repo" wrong-projection-evidence
+expect_fail "change-log evidence names wrong projection" run_checker "$repo" "$base"
+
+repo="$TMP/checker-placeholder"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
+printf 'component "alpha"\nnamespace "alpha_ffi"\nrecord "v2"\n' \
+  > "$repo/actual/components/alpha/uniffi.txt"
+cp "$repo/actual/components/alpha/uniffi.txt" \
+  "$repo/docs/surface/components/alpha/uniffi.txt"
+append_entry "$repo" ffi
+sed -i.bak 's/Fixture Reviewer, PR #999, 2026-07-30/pending, PR #999, 2026-07-30/' \
+  "$repo/docs/surface-change-log.md"
+rm "$repo/docs/surface-change-log.md.bak"
+commit_case "$repo" placeholder-signoff
+expect_fail "change-log placeholder signoff" run_checker "$repo" "$base"
+
 repo="$TMP/checker-dirty"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
 printf 'dirty\n' >> "$repo/actual/components/alpha/uniffi.txt"
-expect_fail "dirty checkout cannot hide stale generation" run_checker "$repo" "$base"
+expect_fail "unstaged dirty checkout" run_checker "$repo" "$base"
+
+repo="$TMP/checker-staged"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
+printf '// staged\n' >> "$repo/Packages/Alpha/Sources/Alpha/Alpha.swift"
+git -C "$repo" add Packages/Alpha/Sources/Alpha/Alpha.swift
+expect_fail "staged dirty checkout" run_checker "$repo" "$base"
+
+repo="$TMP/checker-untracked"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
+printf 'untracked\n' > "$repo/docs/surface/components/untracked.txt"
+expect_fail "untracked dirty checkout" run_checker "$repo" "$base"
 
 echo "surface governance adversarial tests passed"

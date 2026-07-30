@@ -88,7 +88,7 @@ jobs:
           SURFACE_CATALOG_TARGET_DIR: ${{ runner.temp }}/nmp-surface-regeneration-target/catalog
           SURFACE_BUILD_TARGET_DIR: ${{ runner.temp }}/nmp-surface-regeneration-target/build
         run: |
-          ${{ runner.temp }}/nmp-surface-regeneration/scripts/test-surface-governance.sh
+          ${{ runner.temp }}/nmp-surface-regeneration/scripts/test-surface-governance.sh "${{ github.workspace }}"
           ${{ runner.temp }}/nmp-surface-regeneration/scripts/test-install-surface-tools.sh
           source ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-toolchain.env
           RUSTUP_TOOLCHAIN="$SURFACE_RUST_TOOLCHAIN" cargo "+$SURFACE_RUST_TOOLCHAIN" test --locked \

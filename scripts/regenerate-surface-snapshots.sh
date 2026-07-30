@@ -102,7 +102,9 @@ while IFS= read -r -d '' key <&3; do
   IFS= read -r -d '' library_stem <&3
   IFS= read -r -d '' snapshot <&3
 
-  owner_target="$BUILD_TARGET/component-owners"
+  # Different artifact owners never share Cargo output state. Co-located
+  # namespaces still reuse their one owner's exact build.
+  owner_target="$BUILD_TARGET/component-owners/$owner"
   owner_marker="$TMP/owners/$owner"
   mkdir -p "$TMP/owners"
   if [[ ! -f "$owner_marker" ]]; then
