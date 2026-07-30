@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{
-    AcceptOutcome, AcceptWrite, CancelEphemeralOutcome, ClaimSet, CompensateOutcome,
-    CompensationReason, CoverageInterval, CoverageKey, EventCursor, EventStore, GcReport,
+    AcceptOutcome, AcceptWrite, CancelEphemeralOutcome, CompensateOutcome, CompensationReason,
+    CoverageInterval, CoverageKey, EventCursor, EventStore, GcReport, GcRetentionSet,
     InsertOutcome, MemoryStore, PersistenceError, PromoteOutcome, RecoveredAttempt,
     RecoveredIntent, RecoveredReceipt, RecoveredRouteRevision, RelayObserved, RetractReason,
     StoredEvent,
@@ -140,7 +140,7 @@ impl EventStore for FailingReadStore {
         self.inner.get_coverage(key, relay)
     }
 
-    fn gc(&mut self, claims: &ClaimSet) -> Result<GcReport, PersistenceError> {
+    fn gc(&mut self, claims: &GcRetentionSet) -> Result<GcReport, PersistenceError> {
         self.inner.gc(claims)
     }
 

@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 use crate::{
     coverage_key, sentinel_signature, AcceptOutcome, AcceptWrite, AttemptHandoffDetail,
-    AttemptOutcome, ClaimSet, CoverageInterval, EventStore, HandoffEvidence, InsertOutcome,
+    AttemptOutcome, CoverageInterval, EventStore, GcRetentionSet, HandoffEvidence, InsertOutcome,
     IntentId, IntentSigState, LaneKey, MemoryStore, PostHandoffState, RedbStore, RefuseReason,
     RelayObserved, StoredEvent, TransientCause, WriteDurability,
 };
@@ -709,7 +709,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
     );
     let report = harness
         .store()
-        .gc(&ClaimSet::new(vec![protect_author(&alice)]))
+        .gc(&GcRetentionSet::new(vec![protect_author(&alice)]))
         .unwrap();
     assert_eq!(report.events_evicted, 1);
     assert_eq!(report.coverage_rows_shrunk, 2);
@@ -744,7 +744,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
     );
     let report = harness
         .store()
-        .gc(&ClaimSet::new(vec![protect_author(&alice)]))
+        .gc(&GcRetentionSet::new(vec![protect_author(&alice)]))
         .unwrap();
     assert_eq!(report.events_evicted, 1);
     assert_eq!(report.coverage_rows_deleted, 1);
