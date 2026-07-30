@@ -8,6 +8,18 @@ The July 11 architecture promotion intentionally corrected several assumptions
 after the original milestones. These are agreed target contracts, not claims
 about current code:
 
+- **Behavioral evidence is only partially migrated to explicit traceability
+  (#1071).** The source-traced audit covers all 335 legacy scenario
+  definitions and the governed owner paths now require a stable ID, one of
+  `specified | built | known-violation`, an evidence locator/falsifier for
+  built behavior, and an open issue for every gap or known violation. The
+  legacy root `features/` corpus and `crates/nmp-bdd` still remain while owners
+  migrate in PR-sized slices. Their green run uses `unstable-mechanism`,
+  fixture routing facts, and raw handles, so it is mechanism-integration
+  evidence rather than supported-facade acceptance. Closure requires every
+  audited ID to resolve to one semantic owner, genuine `Engine::new` capstones
+  to run in a distinct acceptance lane, and the duplicate runner to be
+  deleted.
 - **Full Demand identity and scoped acquisition evidence are built
   end-to-end (#49/#714).** Rust, FFI, Swift, and Kotlin carry
   `selection + source authority + access context + cache + freshness`, including

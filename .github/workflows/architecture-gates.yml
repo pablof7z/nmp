@@ -179,6 +179,20 @@ jobs:
       - name: Keep nmp-ffi off direct mechanism-crate edges
         run: bash scripts/check-ffi-facade-boundary.sh
 
+  behavior-traceability:
+    name: Behavioral status and evidence traceability
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Falsify the behavior metadata validator
+        run: python3 scripts/test-behavior-traceability.py
+
+      - name: Resolve every governed behavior to status and evidence
+        run: python3 scripts/check-behavior-traceability.py
+
   # A 600-line hard cap per file, scoped to crates/nmp-bdd. The cap was a norm
   # before it was a check, which is how that tree's `world.rs` reached 1,333
   # lines; the script's own header records why the scope is this one crate and

@@ -1,221 +1,251 @@
-# BDD in NMP: readable contracts over the supported facade
+# Behavioral specifications and executable evidence
 
-- **Date:** 2026-07-11
-- **Status:** CURRENT PRACTICE + TARGET CONTRACT. Existing untagged scenarios
-  describe built behavior. `@wip` scenarios record promoted obligations whose
-  public mechanism is not built.
-- **Grounding:** `docs/VISION.md`, `docs/bug-class-ledger.md`, and the four
-  detailed contracts under `docs/design/`.
+- **Date:** 2026-07-30
+- **Status:** CURRENT MODEL + INCREMENTAL MIGRATION
+- **Owner:** #1071
+- **Grounding:** `docs/VISION.md`, `docs/bug-class-ledger.md`, and
+  `docs/design/architecture-review-gates.md`
 
-## 1. Purpose
+## 1. One claim, one identity, one proof owner
 
-NMP closes a bug class only when the supported facade makes the bad path
-unreachable and a falsifier proves the behavior. Gherkin scenarios are the
-human-readable layer over those proofs. They do not replace crate-level unit,
-property, compile-fail, persistence, or platform tests.
+Readable behavior and executable evidence are different artifacts:
 
-Scenarios must survive an internal rewrite because they speak only in public
-behavior:
+- English states the externally meaningful distinction.
+- An evidence locator names the executable witness.
+- A falsifier says what must turn red if the mechanism disappears.
 
-- an app declares a live query;
-- an app publishes a write intent;
-- query snapshots, receipts, diagnostics, and typed call results reveal what
-  happened;
-- reconstruction/restart proves what was actually durable.
+No directory, tag, feature name, or passing adjacent test implies that a
+behavior is built. A `built` claim exists only when all three artifacts agree.
+This follows the ledger's closing rule: a bad path is excluded by a structural
+mechanism plus a falsifier, never by prose or reviewer memory.
 
-The current BDD harness exercises the real Rust runtime against scripted local
-relays. Swift and Kotlin falsifiers remain necessary where the native reactive
-or secure-provider boundary is part of the contract.
+Each scenario has one stable identity. That identity follows the behavior when
+its English specification or executable proof moves to its semantic owner. Do
+not copy a scenario into another runner, mint a replacement ID for the same
+distinction, or preserve the old spelling as a compatibility alias.
 
-## 2. Vocabulary and bias control
+## 2. Current migration boundary
 
-Scenario prose uses people, protocol operations, query meaning, planned
-sources, receipt facts, and diagnostics. It avoids Rust implementation names.
+The root `features/` tree and `crates/nmp-bdd` predate this model. #1071's
+source-traced audit records all 335 legacy scenario definitions before any
+bulk restructuring:
 
-The initial executable fixtures happen to contain kind:1 notes and NIP-02
-contact lists because that is what the existing harness can build. They are one
-protocol-shaped exemplar, not the BDD ontology and not a preferred NMP product.
-New acceptance groups must include kind-diverse and module-composition cases.
+- the root corpus has lifecycle encoded by `@wip`, `@designed`, or the absence
+  of a tag;
+- those meanings disagree between old prose and the runner;
+- the runner uses `nmp/unstable-mechanism`, fixture routing facts, and raw
+  mechanism handles;
+- a green `nmp-bdd` run is therefore mechanism integration evidence, not proof
+  that the supported application facade works.
 
-Use these distinctions:
-
-| Concept | Scenario wording |
-|---|---|
-| Reactive input | current pubkey, or a named app input once that target exists |
-| Signer choice | default identity for this publish, or explicit identity override |
-| Local data | cached/matching rows in this engine |
-| Acquisition | planned source, requested, AUTH-blocked, EOSE observed, unavailable, limited |
-| Relay context | typed indexer policy or protocol host context, never an arbitrary route list |
-| Protocol ownership | exact NIP-defined schema/operation, not a broad content category |
-| Durability | accepted obligation, pending row, signer waiting, attempt, ACK/rejection |
-
-Do not write `synced`, `syncHealth`, `globally complete`, `authoritative empty`,
-or "the cache is truth." EOSE and watermarks are source/request facts.
-
-Do not use "account leak" to describe valid rows shared inside one engine. One
-engine is one local trust domain. Test dependency-scoped rerooting and explicit
-destructive reset instead.
-
-## 3. Admissible observables
-
-Every `Then` resolves to an app-visible surface:
-
-1. **Query snapshots:** current canonical local rows plus cache, acquisition,
-   and shortfall evidence.
-2. **Receipt facts:** acceptance, signer waiting, signature promotion, route and
-   attempt facts, per-relay outcomes, cancellation, expiry, and ambiguity.
-3. **Diagnostics:** exact plan revision, wire filters, connection/AUTH/EOSE,
-   event counts, lanes, coalescing, limits, pressure, retry, and errors.
-4. **Typed operation results:** rejection before acceptance, contextual
-   composition failure, destructive reset completion, or provider attach
-   result.
-5. **Restart observation:** reconstruct the engine and assert the same public
-   query/receipt/diagnostic facts, never inspect database internals directly.
-
-Current `Coverage.unknown | completeUpTo` steps are allowed only in executable
-current scenarios and must be described as the current aggregate API. Target
-scenarios use per-planned-source evidence.
-
-Timing belongs to bounded test helpers, not prose. Production behavior contains
-no sleep-and-check polling.
-
-## 4. Tooling and suite structure
-
-The suite uses `cucumber` with plain `.feature` files and one fresh `NmpWorld`
-per scenario. It runs the real `EngineThread` against scripted in-process
-relays. Because `EngineThread` deliberately requires explicit lifecycle
-ownership, dropping a world shuts down its handle and joins its engine before
-the next scenario starts; a thread-census regression test prevents detached
-engine graphs from accumulating across the suite. Existing crate-level
-mechanism tests remain in place.
+Migration is physical and owner-by-owner:
 
 ```text
-features/
-  queries/
-  routing/
-  identity/
-  writes/
-  coverage/
-  sync/
-  diagnostics/
-  modules/       # target protocol ownership/composition
-  limits/        # target boundedness/shortfall
-  must-never/
-crates/nmp-bdd/
-  src/world/       # {budgets,queries,observe,staging,actions,watches}.rs
-  src/relays.rs
-  src/steps/{given,when}.rs
-  src/steps/then/  # {feed,receipts,routing,wire,budget}.rs
-  tests/bdd.rs
+features/                                  # audited legacy corpus; shrinking
+crates/<owner>/tests/behavior/**/*.feature # governed English at mechanism owner
+crates/nmp/tests/acceptance/**/*.feature   # governed public-facade capstones
 ```
 
-Every file in `crates/nmp-bdd` stays under 600 lines
-(`scripts/check-bdd-file-length.sh`); each module's own doc comment says what
-it owns and why that is the boundary.
+Every `.feature` file below a governed owner path is validated by
+`scripts/check-behavior-traceability.py`. The legacy root is not placed on an
+allowlist and there is no second manifest. A coherent PR moves or deletes the
+old scenario and adds governed metadata at the new owner in the same change.
+When the final legacy behavior has an owner, the separate `nmp-bdd` crate and
+its BDD-only architecture gate are deleted.
 
-Tags carry meaning:
+New behavior must not be added to the legacy root during migration.
 
-- `@ledger-N`: maps the scenario to bug-class ledger entry N.
-- `@must-never`: stages a forbidden runtime consequence.
-- `@wip`: promoted target behavior that the runner intentionally excludes
-  until its owning implementation issue lands.
-- `@live`: bounded real-network proof, excluded from the default deterministic
-  suite.
+## 3. Status is explicit metadata
 
-The step catalog is closed and reviewed. A new behavior may add a reusable step
-in the same implementation PR; scenarios do not invent ad hoc synonyms.
+Machine-readable comments sit contiguously above every governed `Scenario` or
+`Scenario Outline`. Tags may follow the metadata block.
 
-## 5. Current executable scope
+```gherkin
+# nmp:id=ROUTING-DISCOVERY-003
+# nmp:status=built
+# nmp:evidence=rust:nmp::public_engine_bootstraps_author_route_before_content_fetch
+# nmp:falsifier=disabling NIP-65 ingestion leaves the final public query empty
+@acceptance
+Scenario: A cold feed discovers the author's route before fetching content
+```
 
-The current harness proves a narrow but real slice:
+The ID format is `<DOMAIN>-<CONTEXT>-<NNN>`. IDs are never renumbered or
+recycled. A behavior merged into another behavior retains its history in the
+owning issue and git rather than acquiring a second live identity.
 
-- a NIP-02-derived author set reroutes surgically when the contact list changes;
-- indexers bootstrap author write-relay discovery;
-- current `Reactive(ActivePubkey)` demand reroots;
-- receipts report divergent per-relay ACK/rejection;
-- the current aggregate unknown state is distinct from an empty row set;
-- capped routing, NIP-77 capability gating, reconnect replay, and diagnostics
-  have executable scenarios.
+Exactly three statuses exist:
 
-These remain current implementation evidence. They must not be generalized in
-prose beyond what their assertions prove.
+### `specified`
 
-## 6. Promoted target scenario groups
+The behavior is agreed, but its implementation or required evidence is not
+complete.
 
-### Query demand and evidence (`#7`, `#11`, `#18`)
+Required:
 
-- Changing `$currentPubkey` reroots only dependent observations while a literal
-  multi-account query remains live.
-- Equal selections under different source/AUTH contexts do not borrow evidence.
-- One source at EOSE plus one offline/AUTH-blocked source yields both facts and
-  no global completion state.
-- A reusable NIP-02 fragment prints the same closed graph as raw construction.
-- Engine-imposed shortfall is distinct from a caller-requested result bound.
+```gherkin
+# nmp:status=specified
+# nmp:gap=implementation
+# nmp:issue=#123
+```
 
-### Durable write, signer, and retry (`#9`, `#10`, `#15`, `#16`, `#19`)
+`nmp:gap` is exactly one of `implementation`, `evidence`, `fixture`, or
+`platform`. The issue must be open and must explain the consequence of the
+gap. A specified scenario may point to narrower evidence, but that evidence
+does not promote the broader claim.
 
-- `Accepted` survives immediate process death with the pending row and receipt.
-- Matching ordinary and derived queries see the unsigned pending row through
-  normal store semantics.
-- Default signer selection and explicit override are pinned at acceptance.
-- Missing NIP-46/provider capability remains durable `AwaitingSigner` and
-  resumes after a matching provider attaches.
-- Invalid signer responses cannot promote the row.
-- Pre-signature cancellation restores a displaced replaceable winner.
-- Relay rejection after signing changes receipt facts only.
-- Retry ordinal and next eligibility survive restart; at-most-once ambiguity
-  never sends twice.
+### `built`
 
-### Protocol modules and composition (`#3`, `#6`, `#14`)
+The behavior is implemented at the claimed boundary and its falsifier has
+been performed.
 
-- A module claims only exact schemas defined by its NIP.
-- NIP-29 adds `h` and group-host context to a foreign-owned immutable draft
-  without claiming its kind.
-- Core validates the final body, signs once, and exposes the contextual route in
-  diagnostics.
-- Enabling no protocol module retains a useful raw two-noun engine.
-- Swift, Kotlin, and direct Rust produce byte-identical unsigned bodies for the
-  same composed operation.
+Required:
 
-### Bounded delivery and reset (`#4`, `#17`)
+```gherkin
+# nmp:status=built
+# nmp:evidence=rust:nmp-router::coverage_respects_whole_demand_cap
+# nmp:falsifier=changing cap-exhausted shortfall to no-candidates makes the owner test fail
+```
 
-- Slow query/diagnostic observers have bounded memory and eventually see the
-  newest exact local state.
-- Receipt observers may detach and reattach without losing persisted facts.
-- Oversized derived demand chunks exactly or reports shortfall; never first-N.
-- Ingress overload backpressures or disconnects with a diagnostic reason.
-- Explicit destructive reset clears cache, pending writes, receipts, evidence,
-  and capabilities before another untrusted local user enters.
+The evidence locator format is `<kind>:<owner>::<test-or-check>`. Current kinds
+are `rust`, `property`, `compile`, `script`, `swift`, and `kotlin`. A locator
+names the narrowest executable owner; it is not a link to a plan, issue,
+comment, or prose-only document.
 
-The corresponding `@wip` feature files are durable acceptance targets, not
-claims of current build status.
+### `known-violation`
 
-## 7. Scenario style
+The scenario deliberately records behavior that is currently false.
 
-- One promise per scenario title.
-- Stage topology, protocol facts, app state, then one triggering action.
-- Assert only through the admissible public observables.
-- Use content kinds only where the protocol scenario needs them; do not make
-  kind:1 the default placeholder for unrelated architecture.
-- A cap scenario must allow explicit shortfall when its objective cannot be
-  satisfied. Never assert "at least two" and "under cap" as simultaneously
-  guaranteed for impossible inputs.
-- A current scenario must pass before merge. A target scenario stays `@wip`
-  until its implementation and supported-facade falsifier land together.
-- When behavior changes, update the scenario, ledger, canonical design doc,
-  platform projections, and builder guidance in the same governed change.
+Required:
 
-## 8. Completion discipline
+```gherkin
+# nmp:status=known-violation
+# nmp:issue=#456
+```
 
-Removing `@wip` is a proof promotion. The owning PR must identify:
+The open issue owns the repair. Do not make a false scenario green, exclude it
+through a runner expression, or relabel it as a capability.
 
-1. the structural mechanism that excludes the bug;
-2. the deterministic BDD scenario;
-3. lower-level mechanism tests;
-4. restart tests where durability is claimed;
-5. diagnostics assertions for invisible routing/evidence/retry behavior; and
-6. native Swift/Kotlin falsification where the platform boundary participates.
+## 4. Tags do not carry lifecycle
 
-Passing prose is not proof. Passing one platform is not a cross-platform
-contract. A public behavior becomes `BUILT` only when the supported facade and
-required projections agree.
+`@acceptance` is the only execution-selector tag in the governed deterministic
+corpus. It means that a **built** scenario is one of the few cross-component
+journeys executed through the supported public facade.
+
+The validator rejects:
+
+- `@wip`;
+- `@designed`;
+- `@live`; and
+- any `@requires-*` tag.
+
+Feature flags, environment variables, protocol availability, and platform
+applicability are not lifecycle states. A platform-specific contract is
+represented by a platform evidence locator or an explicit `platform` gap.
+Real-network smoke tests live in a separate bounded workflow and can never be
+the sole evidence for a correctness claim.
+
+`@ledger-N` and `@must-never` remain explanatory mappings. They do not promote
+status.
+
+## 5. Put proof at the semantic owner
+
+Choose evidence by the behavior's boundary, not by the historical test
+directory:
+
+| Claim | Canonical evidence |
+|---|---|
+| Supported Rust application journey | Public-facade acceptance target using `Engine::new` and public observations |
+| Reducer/state transition | Owning crate unit or integration test |
+| Routing invariant across many inputs | Property/model test with a differential oracle |
+| Durable write, receipt, or evidence | Store/runtime restart or crash test |
+| Forbidden dependency/API construction | Compile-fail test or trusted script |
+| Swift/Kotlin reactive or provider behavior | XCTest/Gradle test at that platform boundary |
+| Real relay compatibility | Bounded smoke test plus deterministic evidence elsewhere |
+
+An English `.feature` beside a mechanism owner is not automatically a
+Cucumber target. It preserves the distinction and points to the owner-native
+proof. Only `@acceptance` scenarios belong to the public-facade runner.
+
+Do not duplicate mechanism tests through Cucumber step definitions merely to
+make the English executable. Conversely, do not cite a lower-level reducer
+test as acceptance evidence for a public-facade journey.
+
+## 6. Facade acceptance must be independently observable
+
+A public-facade capstone:
+
+1. constructs the supported `Engine` through `Engine::new`;
+2. uses only public query/write verbs;
+3. observes public rows, receipts, diagnostics, typed results, or reconstructed
+   state;
+4. drives independent scripted relays through their wire boundary;
+5. does not inject the answer through `FixtureRoutingFacts`, raw reducer
+   commands, a mechanism handle, or a shared private state object; and
+6. fails if the named production behavior is removed.
+
+For example, a discovery bootstrap test must seed a real kind:10002 only at an
+indexer, start without the target author's route, independently witness the
+discovery request, and observe content only after ingestion. Preloading the
+author route can prove a no-fallback routing rule, but it cannot prove
+discovery.
+
+## 7. Falsifier workflow
+
+Before marking a scenario `built`:
+
+1. identify the production decision that owns the behavior;
+2. name the exact evidence test/check;
+3. make the smallest meaningful mutation that removes or corrupts that
+   decision;
+4. run the named evidence and record its relevant red failure;
+5. restore production code;
+6. rerun the evidence green; and
+7. report the mutation and both results on the owning issue/PR.
+
+Changing only the test assertion is weaker than mutating the mechanism and is
+not sufficient when a production seam can be changed safely. Timing out a
+test is evidence only when the missing behavior is itself bounded liveness and
+the bound has enough margin to distinguish it from a slow machine.
+
+## 8. CI and local commands
+
+The traceability lane is intentionally separate from workspace compilation:
+
+```bash
+python3 scripts/test-behavior-traceability.py
+python3 scripts/check-behavior-traceability.py
+```
+
+The first command falsifies the validator itself. The second checks every
+governed behavior file, resolves Rust/property evidence into its owner crate,
+and rejects duplicate or incomplete claims.
+
+Owner tests remain separate commands, for example:
+
+```bash
+cargo test -p nmp-router --test contract coverage_respects_whole_demand_cap
+```
+
+The public-facade acceptance target and its distinct CI lane land when the
+first genuine capstone migrates. Native evidence remains in the existing
+macOS/Kotlin qualification lanes.
+
+## 9. Change and review discipline
+
+A behavioral PR must answer:
+
+- What user-visible or architectural distinction changed?
+- Which stable IDs are added, moved, merged, or deleted?
+- Is product status independent from proof status?
+- Does every built locator resolve to the exact owner test/check?
+- What production mutation was performed, and what failed?
+- Does the fixture establish the condition independently, or inject the
+  answer?
+- Can the proof pass while the public behavior named in English is broken?
+- Is the scenario at the semantic owner, with the old duplicate removed?
+- Are documentation, known gaps, SDK projections, and native evidence updated
+  where the boundary requires them?
+
+No PR may promote status by merely removing a tag. No execution plan or issue
+comment supersedes this current owning document; when the model changes, this
+document changes with it.
