@@ -3,15 +3,17 @@ set -euo pipefail
 
 SCRIPT=$(cd "$(dirname "$0")" && pwd)/build-swift-xcframework.sh
 CHECKER=$(cd "$(dirname "$0")" && pwd)/check-macos-deployment-target.sh
+TOOL_HELPER=$(cd "$(dirname "$0")" && pwd)/lib/require-commands.sh
 COMPONENT_BUILDER=$(cd "$(dirname "$0")" && pwd)/build-component-release.sh
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 REPO="$TMP/repo"
 BIN="$TMP/bin"
-mkdir -p "$REPO/scripts" "$REPO/Packages/NMP" "$BIN"
+mkdir -p "$REPO/scripts/lib" "$REPO/Packages/NMP" "$BIN"
 cp "$SCRIPT" "$REPO/scripts/"
 cp "$CHECKER" "$REPO/scripts/"
+cp "$TOOL_HELPER" "$REPO/scripts/lib/"
 cp "$COMPONENT_BUILDER" "$REPO/scripts/"
 git -C "$REPO" init -q
 

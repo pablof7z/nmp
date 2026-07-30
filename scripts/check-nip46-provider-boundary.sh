@@ -5,13 +5,28 @@
 
 set -euo pipefail
 
+SCRIPT_PATH=${BASH_SOURCE[0]}
+SCRIPT_DIR=${SCRIPT_PATH%/*}
+[[ $SCRIPT_DIR != "$SCRIPT_PATH" ]] || SCRIPT_DIR=.
+source "$SCRIPT_DIR/lib/require-commands.sh" || exit 2
+
 MODE=all
 if [[ ${1:-} == "--workflows-only" ]]; then
   MODE=workflows
   shift
 fi
 
-ROOT=${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
+if [[ -n ${1:-} ]]; then
+  ROOT=$1
+else
+  require_commands dirname || exit 2
+  ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+fi
+if [[ "$MODE" == workflows ]]; then
+  require_commands grep || exit 2
+else
+  require_commands cargo find grep tr wc xargs || exit 2
+fi
 cd "$ROOT"
 
 fail() { echo "nip46-provider-boundary: $*" >&2; exit 1; }

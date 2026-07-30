@@ -5,6 +5,12 @@
 
 set -euo pipefail
 
+SCRIPT_PATH=${BASH_SOURCE[0]}
+SCRIPT_DIR=${SCRIPT_PATH%/*}
+[[ $SCRIPT_DIR != "$SCRIPT_PATH" ]] || SCRIPT_DIR=.
+source "$SCRIPT_DIR/lib/require-commands.sh" || exit 2
+require_commands find grep mktemp rm tr uname wc xargs || exit 2
+
 if [[ $# -ne 4 ]]; then
   echo "usage: $0 CORE_LIBRARY PROVIDER_LIBRARY CORE_BINDINGS PROVIDER_BINDINGS" >&2
   exit 2
@@ -27,6 +33,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 case "$(uname -s)" in
   Darwin)
+    require_commands nm strings || exit 2
     # Apple nm can lag the LLVM object format shipped by the pinned nightly.
     # Prefer its defined-global map; fall back to the archive's string table,
     # which still contains the exported UniFFI symbol names.
@@ -38,6 +45,7 @@ case "$(uname -s)" in
     fi
     ;;
   Linux)
+    require_commands nm || exit 2
     nm -D --defined-only "$CORE_LIBRARY" > "$TMP/core-symbols"
     nm -D --defined-only "$PROVIDER_LIBRARY" > "$TMP/provider-symbols"
     ;;

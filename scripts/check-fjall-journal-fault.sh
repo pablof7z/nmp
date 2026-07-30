@@ -18,6 +18,12 @@
 # production backend.
 set -euo pipefail
 
+SCRIPT_PATH=${BASH_SOURCE[0]}
+SCRIPT_DIR=${SCRIPT_PATH%/*}
+[[ $SCRIPT_DIR != "$SCRIPT_PATH" ]] || SCRIPT_DIR=.
+source "$SCRIPT_DIR/lib/require-commands.sh" || exit 2
+require_commands cargo dirname uname || exit 2
+
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 HARNESS="$REPO/tools/fjall-journal-fault/harness"
 
