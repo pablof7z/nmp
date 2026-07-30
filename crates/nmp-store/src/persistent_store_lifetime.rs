@@ -33,6 +33,8 @@ fn resolve_store_path(path: &Path) -> io::Result<PathBuf> {
         match std::fs::canonicalize(&candidate) {
             Ok(path) => return Ok(path),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                #[cfg(test)]
+                call_path_resolution_test_hook(&candidate);
                 match std::fs::symlink_metadata(&candidate) {
                     Ok(metadata) if metadata.file_type().is_symlink() => {
                         let target = std::fs::read_link(&candidate)?;
@@ -78,6 +80,55 @@ fn resolve_store_path(path: &Path) -> io::Result<PathBuf> {
              chain that long, or a final component being created and removed without pause"
         ),
     ))
+}
+
+#[cfg(test)]
+type PathResolutionTestHook = Box<dyn FnMut(&Path)>;
+
+#[cfg(test)]
+std::thread_local! {
+    static PATH_RESOLUTION_TEST_HOOK:
+        std::cell::RefCell<Option<PathResolutionTestHook>> = const {
+            std::cell::RefCell::new(None)
+        };
+}
+
+#[cfg(test)]
+struct ClearPathResolutionTestHook;
+
+#[cfg(test)]
+impl Drop for ClearPathResolutionTestHook {
+    fn drop(&mut self) {
+        PATH_RESOLUTION_TEST_HOOK.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+
+#[cfg(test)]
+fn with_path_resolution_test_hook<T>(
+    hook: impl FnMut(&Path) + 'static,
+    operation: impl FnOnce() -> T,
+) -> T {
+    PATH_RESOLUTION_TEST_HOOK.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        assert!(
+            slot.is_none(),
+            "one path-resolution operation cannot install two test hooks"
+        );
+        *slot = Some(Box::new(hook));
+    });
+    let _clear = ClearPathResolutionTestHook;
+    operation()
+}
+
+#[cfg(test)]
+fn call_path_resolution_test_hook(path: &Path) {
+    PATH_RESOLUTION_TEST_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().as_mut() {
+            hook(path);
+        }
+    });
 }
 
 /// The sidecar deliberately outlives the database file, including across a
@@ -518,7 +569,7 @@ mod tests {
     use std::io::{BufRead, Read, Write};
     use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{mpsc, Arc, Barrier};
+    use std::sync::{mpsc, Arc, Barrier, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -566,6 +617,57 @@ mod tests {
             "resolving a path whose parent exists must not fail while the final \
              component is being created: {observed:?}"
         );
+    }
+
+    const PHASE_TIMEOUT: Duration = Duration::from_secs(5);
+    const PHASE_LEDGER_CAPACITY: usize = 8;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ResolutionRacePhase {
+        ContenderObservedMissing,
+        TargetCreated,
+        WinnerOpened,
+        ContenderResumed,
+        TypedRefusal,
+        Resolved,
+    }
+
+    #[derive(Debug)]
+    struct PhaseLedger {
+        entries: [Option<ResolutionRacePhase>; PHASE_LEDGER_CAPACITY],
+        len: usize,
+    }
+
+    impl PhaseLedger {
+        fn new() -> Self {
+            Self {
+                entries: [None; PHASE_LEDGER_CAPACITY],
+                len: 0,
+            }
+        }
+
+        fn record(&mut self, phase: ResolutionRacePhase) {
+            assert!(
+                self.len < self.entries.len(),
+                "fixed phase ledger exhausted before recording {phase:?}: {self:?}"
+            );
+            self.entries[self.len] = Some(phase);
+            self.len += 1;
+        }
+
+        fn recorded(&self) -> &[Option<ResolutionRacePhase>] {
+            &self.entries[..self.len]
+        }
+    }
+
+    fn record_phase(ledger: &Arc<Mutex<PhaseLedger>>, phase: ResolutionRacePhase) {
+        ledger.lock().unwrap().record(phase);
+    }
+
+    fn phase_snapshot(
+        ledger: &Arc<Mutex<PhaseLedger>>,
+    ) -> [Option<ResolutionRacePhase>; PHASE_LEDGER_CAPACITY] {
+        ledger.lock().unwrap().entries
     }
 
     #[test]
@@ -809,6 +911,196 @@ mod tests {
         // target is immediately ownable.
         let owner = acquire_ownership(&first).expect("failed acquisition released its lock");
         drop(owner);
+    }
+
+    #[test]
+    fn missing_target_created_between_resolution_observations_retries_coherently() {
+        for attempt in 0..50 {
+            let fixture = tempfile::tempdir().unwrap();
+            let path = fixture.path().join(format!("appeared-{attempt}.redb"));
+            let phases = Arc::new(Mutex::new(PhaseLedger::new()));
+            let (missing_tx, missing_rx) = mpsc::sync_channel(1);
+            let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+
+            let contender_path = path.clone();
+            let contender_phases = Arc::clone(&phases);
+            let contender = thread::spawn(move || {
+                let mut missing_tx = Some(missing_tx);
+                let mut resume_rx = Some(resume_rx);
+                with_path_resolution_test_hook(
+                    move |_| {
+                        record_phase(
+                            &contender_phases,
+                            ResolutionRacePhase::ContenderObservedMissing,
+                        );
+                        missing_tx
+                            .take()
+                            .expect("the controlled path must be observed missing once")
+                            .send(())
+                            .unwrap();
+                        resume_rx
+                            .take()
+                            .expect("the controlled path must resume once")
+                            .recv_timeout(PHASE_TIMEOUT)
+                            .unwrap_or_else(|error| {
+                                panic!(
+                                    "resolver was not released within {PHASE_TIMEOUT:?}: {error}; \
+                                     phases={:?}",
+                                    phase_snapshot(&contender_phases)
+                                )
+                            });
+                        record_phase(&contender_phases, ResolutionRacePhase::ContenderResumed);
+                    },
+                    || resolve_store_path(&contender_path),
+                )
+            });
+
+            missing_rx
+                .recv_timeout(PHASE_TIMEOUT)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "resolver did not observe the missing target within {PHASE_TIMEOUT:?}: \
+                         {error}; attempt={attempt}; phases={:?}",
+                        phase_snapshot(&phases)
+                    )
+                });
+            std::fs::write(&path, b"appeared between observations").unwrap();
+            record_phase(&phases, ResolutionRacePhase::TargetCreated);
+            resume_tx.send(()).unwrap();
+
+            let resolved = contender.join().unwrap().unwrap_or_else(|error| {
+                panic!(
+                    "a target that appeared between observations returned a stale error: \
+                     {error}; attempt={attempt}; phases={:?}",
+                    phase_snapshot(&phases)
+                )
+            });
+            record_phase(&phases, ResolutionRacePhase::Resolved);
+            assert_eq!(resolved, std::fs::canonicalize(&path).unwrap());
+            assert_eq!(
+                phases.lock().unwrap().recorded(),
+                [
+                    Some(ResolutionRacePhase::ContenderObservedMissing),
+                    Some(ResolutionRacePhase::TargetCreated),
+                    Some(ResolutionRacePhase::ContenderResumed),
+                    Some(ResolutionRacePhase::Resolved),
+                ],
+                "attempt={attempt}"
+            );
+        }
+    }
+
+    #[test]
+    fn target_created_between_resolution_observations_has_exactly_one_owner() {
+        const OPENER_COUNT: usize = 8;
+
+        for attempt in 0..50 {
+            let fixture = tempfile::tempdir().unwrap();
+            let path = fixture.path().join(format!("raced-{attempt}.redb"));
+            let phases = Arc::new(Mutex::new(PhaseLedger::new()));
+            let (missing_tx, missing_rx) = mpsc::sync_channel(1);
+            let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+
+            let contender_path = path.clone();
+            let contender_phases = Arc::clone(&phases);
+            let contender = thread::spawn(move || {
+                let mut missing_tx = Some(missing_tx);
+                let mut resume_rx = Some(resume_rx);
+                with_path_resolution_test_hook(
+                    move |_| {
+                        record_phase(
+                            &contender_phases,
+                            ResolutionRacePhase::ContenderObservedMissing,
+                        );
+                        missing_tx
+                            .take()
+                            .expect("the controlled opener must observe missing once")
+                            .send(())
+                            .unwrap();
+                        resume_rx
+                            .take()
+                            .expect("the controlled opener must resume once")
+                            .recv_timeout(PHASE_TIMEOUT)
+                            .unwrap_or_else(|error| {
+                                panic!(
+                                    "contender was not released within {PHASE_TIMEOUT:?}: \
+                                     {error}; phases={:?}",
+                                    phase_snapshot(&contender_phases)
+                                )
+                            });
+                        record_phase(&contender_phases, ResolutionRacePhase::ContenderResumed);
+                    },
+                    || crate::RedbStore::open(&contender_path),
+                )
+            });
+
+            missing_rx
+                .recv_timeout(PHASE_TIMEOUT)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "contender did not observe the missing target within {PHASE_TIMEOUT:?}: \
+                         {error}; attempt={attempt}; phases={:?}",
+                        phase_snapshot(&phases)
+                    )
+                });
+            let winner = crate::RedbStore::open(&path).unwrap();
+            record_phase(&phases, ResolutionRacePhase::WinnerOpened);
+
+            let other_losers = (0..OPENER_COUNT - 2)
+                .map(|_| {
+                    let path = path.clone();
+                    thread::spawn(move || crate::RedbStore::open(&path))
+                })
+                .collect::<Vec<_>>();
+            let mut typed_refusals = 0;
+            for loser in other_losers {
+                assert!(matches!(
+                    loser.join().unwrap(),
+                    Err(RedbStoreOpenError::StoreAlreadyOpen { .. })
+                ));
+                typed_refusals += 1;
+            }
+
+            resume_tx.send(()).unwrap();
+            match contender.join().unwrap() {
+                Err(RedbStoreOpenError::StoreAlreadyOpen { .. }) => {
+                    record_phase(&phases, ResolutionRacePhase::TypedRefusal);
+                    typed_refusals += 1;
+                }
+                Err(error) => {
+                    panic!(
+                        "the resumed contender returned an invalid third outcome: \
+                         {error}; attempt={attempt}; phases={:?}",
+                        phase_snapshot(&phases)
+                    );
+                }
+                Ok(second_owner) => {
+                    drop(second_owner);
+                    panic!(
+                        "the resumed contender became a second owner; attempt={attempt}; \
+                         phases={:?}",
+                        phase_snapshot(&phases)
+                    );
+                }
+            }
+
+            assert_eq!(
+                phases.lock().unwrap().recorded(),
+                [
+                    Some(ResolutionRacePhase::ContenderObservedMissing),
+                    Some(ResolutionRacePhase::WinnerOpened),
+                    Some(ResolutionRacePhase::ContenderResumed),
+                    Some(ResolutionRacePhase::TypedRefusal),
+                ],
+                "attempt={attempt}"
+            );
+            assert_eq!(
+                typed_refusals,
+                OPENER_COUNT - 1,
+                "one owner requires every other opener to receive the typed refusal"
+            );
+            drop(winner);
+        }
     }
 
     #[test]
