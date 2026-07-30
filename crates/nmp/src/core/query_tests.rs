@@ -4,8 +4,7 @@ use super::*;
 
 #[cfg(test)]
 mod affected_handle_invalidation_tests {
-    use nmp_grammar::IndexedTagName;
-    use nmp_router::FixtureDirectory;
+    use nmp_grammar::{Binding, Filter, IndexedTagName};
     use nmp_store::MemoryStore;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
@@ -99,7 +98,7 @@ mod affected_handle_invalidation_tests {
     fn local_signed_acceptance_updates_unlimited_handle_without_projection_read() {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://local-delta.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(MemoryStore::new(), 20);
 
         let initial = room_event(&keys, 7, 0, 10);
         core.resolver
@@ -142,7 +141,7 @@ mod affected_handle_invalidation_tests {
                 RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
             )
             .unwrap();
-        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(store, 20);
         core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
 
         let follows_query = LiveQuery::from_filter(Filter {
@@ -181,7 +180,7 @@ mod affected_handle_invalidation_tests {
     fn local_compensation_removes_pending_row_without_projection_read() {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://local-compensation.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(MemoryStore::new(), 20);
         core.active_pubkey = Some(keys.public_key());
         let subscribe = core.handle(EngineMsg::Subscribe(unlimited_room_query(9)));
         let handle = subscribed_handle(&subscribe);
@@ -253,7 +252,7 @@ mod affected_handle_invalidation_tests {
                     .collect(),
             )
             .unwrap();
-        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 21);
+        let mut core = EngineCore::new(store, 21);
         core.active_pubkey = Some(keys.public_key());
         let subscribe = core.handle(EngineMsg::Subscribe(room_query_for_kind(10, 9, 2)));
         let handle = subscribed_handle(&subscribe);
@@ -329,7 +328,7 @@ mod affected_handle_invalidation_tests {
                 RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
             )
             .unwrap();
-        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(store, 20);
         core.active_pubkey = Some(keys.public_key());
         let subscribe = core.handle(EngineMsg::Subscribe(LiveQuery::from_filter(
             Filter::default(),
@@ -407,7 +406,7 @@ mod affected_handle_invalidation_tests {
                 RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
             )
             .unwrap();
-        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(store, 20);
         core.active_pubkey = Some(keys.public_key());
         let subscribe = core.handle(EngineMsg::Subscribe(unlimited_room_query(13)));
         let handle = subscribed_handle(&subscribe);
@@ -473,7 +472,7 @@ mod affected_handle_invalidation_tests {
                 RelayObserved::new(relay, Timestamp::from(51u64)),
             )
             .unwrap();
-        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 51);
+        let mut core = EngineCore::new(store, 51);
         let subscribe = core.handle(EngineMsg::Subscribe(unlimited_room_query(11)));
         let handle = subscribed_handle(&subscribe);
         core.projection_store_queries.set(0);
@@ -593,7 +592,7 @@ mod affected_handle_invalidation_tests {
                         .collect(),
                 )
                 .unwrap();
-            let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 13);
+            let mut core = EngineCore::new(store, 13);
             let subscribed = core.handle(EngineMsg::Subscribe(LiveQuery::from_filter(
                 Filter::default(),
             )));
@@ -679,7 +678,7 @@ mod affected_handle_invalidation_tests {
     fn ordinary_room_batch_queries_only_the_matching_handle_and_skips_router_compile() {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://affected-room.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(MemoryStore::new(), 20);
 
         let mut seed = Vec::new();
         for room in 0..HANDLE_COUNT {
@@ -773,7 +772,7 @@ mod affected_handle_invalidation_tests {
     fn top_n_insert_queries_only_its_handle_and_emits_eviction_delta() {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://top-n-affected.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(MemoryStore::new(), 20);
         let oldest = room_event(&keys, 7, 0, 10);
         let retained = room_event(&keys, 7, 1, 20);
         let unrelated = room_event(&keys, 8, 0, 10);
@@ -821,7 +820,7 @@ mod affected_handle_invalidation_tests {
     fn top_n_visible_removal_uses_one_bounded_backfill_read() {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://top-n-backfill.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(MemoryStore::new(), 20);
         let oldest = room_event(&keys, 21, 0, 10);
         let middle = room_event(&keys, 21, 1, 20);
         let newest = room_event(&keys, 21, 2, 30);
@@ -880,7 +879,7 @@ mod affected_handle_invalidation_tests {
         pair.sort_by_key(|event| event.id);
         let arriving = pair[0].clone();
         let seeded = pair[1].clone();
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(MemoryStore::new(), 20);
         core.resolver
             .store_mut()
             .insert(
@@ -922,7 +921,7 @@ mod affected_handle_invalidation_tests {
             .custom_created_at(Timestamp::from(20u64))
             .sign_with_keys(&keys)
             .unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(MemoryStore::new(), 20);
         core.handle(EngineMsg::Subscribe(room_query(23)));
         core.projection_store_queries.set(0);
 
@@ -950,7 +949,7 @@ mod affected_handle_invalidation_tests {
         let first = RelayUrl::parse("wss://batch-source-a.example").unwrap();
         let second = RelayUrl::parse("wss://batch-source-b.example").unwrap();
         let event = room_event(&keys, 24, 0, 10);
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(MemoryStore::new(), 20);
         core.handle(EngineMsg::Subscribe(room_query(24)));
         core.projection_store_queries.set(0);
 
@@ -985,7 +984,7 @@ mod affected_handle_invalidation_tests {
     fn replaceable_supersession_invalidates_old_and_new_matches_only() {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://replaceable-affected.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(MemoryStore::new(), 20);
         let replaceable = |room: usize, created_at: u64| {
             EventBuilder::new(Kind::from(10_000u16), format!("winner-{room}"))
                 .tag(Tag::parse(["h".to_owned(), format!("room-{room}")]).unwrap())
@@ -1034,7 +1033,7 @@ mod affected_handle_invalidation_tests {
     fn kind_five_removed_row_invalidates_matching_handle_without_shape_luck() {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://deletion-affected.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(MemoryStore::new(), 20);
         let target = room_event(&keys, 12, 0, 10);
         core.resolver
             .store_mut()
@@ -1077,7 +1076,7 @@ mod affected_handle_invalidation_tests {
         demand.source = SourceAuthority::Pinned(BTreeSet::from([pinned.clone()]));
         demand.cache = CacheMode::Strict;
 
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(MemoryStore::new(), 20);
         core.handle(EngineMsg::Subscribe(LiveQuery(demand)));
 
         let event = room_event(&keys, 25, 0, 10);
@@ -1119,7 +1118,7 @@ mod affected_handle_invalidation_tests {
         let me = Keys::generate();
         let followed = Keys::generate();
         let relay = RelayUrl::parse("wss://derived-fallback.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(MemoryStore::new(), 20);
         let contact_list = EventBuilder::new(Kind::ContactList, "")
             .tag(Tag::public_key(followed.public_key()))
             .custom_created_at(Timestamp::from(10u64))
@@ -1173,7 +1172,7 @@ mod affected_handle_invalidation_tests {
     fn incomplete_projection_forces_one_recovery_read_before_direct_deltas_resume() {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://projection-recovery.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(MemoryStore::new(), 20);
         let subscribed = core.handle(EngineMsg::Subscribe(unlimited_room_query(28)));
         let handle = subscribed_handle(&subscribed);
         core.handles.get_mut(&handle).unwrap().projection_complete = false;
@@ -1213,7 +1212,7 @@ mod affected_handle_invalidation_tests {
         let keys = Keys::generate();
         let first = RelayUrl::parse("wss://differential-a.example").unwrap();
         let second = RelayUrl::parse("wss://differential-b.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(MemoryStore::new(), 20);
         let subscribe = core.handle(EngineMsg::Subscribe(unlimited_room_query(26)));
         let handle = subscribed_handle(&subscribe);
         let mut app_rows = BTreeMap::<EventId, Row>::new();
@@ -1298,7 +1297,7 @@ mod affected_handle_invalidation_tests {
 
     #[test]
     fn resolver_internal_handle_is_filtered_before_any_projection_read() {
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(MemoryStore::new(), 20);
         let (internal, _delta) = core.resolver.subscribe(room_query(1)).unwrap();
         core.projection_store_queries.set(0);
 
@@ -1311,7 +1310,7 @@ mod affected_handle_invalidation_tests {
 
     #[test]
     fn projected_private_relay_evidence_is_gated_without_counter_inflation() {
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(MemoryStore::new(), 20);
         let private = RelayUrl::parse("ws://127.0.0.1:7777").unwrap();
         let atom = ContextualAtom {
             filter: ConcreteFilter {
@@ -1339,7 +1338,7 @@ mod affected_handle_invalidation_tests {
 
     #[test]
     fn operator_allowlist_admits_projected_local_evidence() {
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20)
+        let mut core = EngineCore::new(MemoryStore::new(), 20)
             .with_relay_admission(RelayAdmissionPolicy::new(["127.0.0.1".to_string()]));
         let atom = ContextualAtom {
             filter: ConcreteFilter::default(),
@@ -1362,7 +1361,7 @@ mod affected_handle_invalidation_tests {
 mod coverage_evidence_refresh_tests {
     use std::borrow::Cow;
 
-    use nmp_router::FixtureDirectory;
+    use nmp_grammar::Filter;
     use nmp_store::MemoryStore;
     use nostr::{Kind, SubscriptionId};
 
@@ -1389,7 +1388,7 @@ mod coverage_evidence_refresh_tests {
         TransportRelayHandle,
         RelaySessionKey,
     ) {
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(MemoryStore::new(), 20);
         let handle = TransportRelayHandle {
             slot: 7,
             generation: 1,
@@ -1495,7 +1494,7 @@ mod coverage_evidence_refresh_tests {
     #[test]
     fn evidence_only_refresh_falls_back_for_incomplete_projections() {
         let relay = RelayUrl::parse("wss://evidence-recovery.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(MemoryStore::new(), 20);
         let live = core.handle(EngineMsg::Subscribe(pinned_query(&relay)));
         let live_id = live
             .iter()

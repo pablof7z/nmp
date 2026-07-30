@@ -9,7 +9,6 @@
 
 use std::collections::BTreeSet;
 
-use nmp_router::FixtureDirectory;
 use nmp_store::{EventStore, MemoryStore, PersistenceFault, RedbStore};
 use nostr::{Keys, Kind, RelayMessage, RelayUrl, Timestamp};
 
@@ -144,11 +143,7 @@ fn transient_bootstrap_failure_is_fully_reversible(fault: PersistenceFault, seq:
     let relay_b = RelayUrl::parse("wss://bootstrap-retry-b.example.com").unwrap();
     let faults = LaneFaults::default();
     faults.fail_bootstrap(fault);
-    let mut core = EngineCore::new(
-        FaultyLaneStore::new(MemoryStore::new(), faults.clone()),
-        Box::new(FixtureDirectory::new()),
-        10,
-    );
+    let mut core = EngineCore::new(FaultyLaneStore::new(MemoryStore::new(), faults.clone()), 10);
 
     let (receipt, signed, blocked) =
         publish_narrow(&mut core, &author, &[relay_a.clone(), relay_b.clone()], seq);
@@ -234,11 +229,7 @@ fn a_failed_bootstrap_never_parks_an_intent_permanently() {
     let relay = RelayUrl::parse("wss://bootstrap-parked.example.com").unwrap();
     let faults = LaneFaults::default();
     faults.fail_bootstrap(PersistenceFault::Io);
-    let mut core = EngineCore::new(
-        FaultyLaneStore::new(MemoryStore::new(), faults.clone()),
-        Box::new(FixtureDirectory::new()),
-        10,
-    );
+    let mut core = EngineCore::new(FaultyLaneStore::new(MemoryStore::new(), faults.clone()), 10);
 
     let (receipt, signed, _) =
         publish_narrow(&mut core, &author, std::slice::from_ref(&relay), 702);
@@ -271,11 +262,7 @@ fn an_unresolved_bootstrap_keeps_retaining_and_backs_off() {
     let relay_b = RelayUrl::parse("wss://bootstrap-retain-b.example.com").unwrap();
     let faults = LaneFaults::default();
     faults.fail_bootstrap(PersistenceFault::Io);
-    let mut core = EngineCore::new(
-        FaultyLaneStore::new(MemoryStore::new(), faults.clone()),
-        Box::new(FixtureDirectory::new()),
-        10,
-    );
+    let mut core = EngineCore::new(FaultyLaneStore::new(MemoryStore::new(), faults.clone()), 10);
 
     let (receipt, _, _) =
         publish_narrow(&mut core, &author, &[relay_a.clone(), relay_b.clone()], 703);
@@ -319,11 +306,7 @@ fn a_boot_route_revision_read_error_re_enables_worker_reconciliation() {
     let path = directory.path().join("bootstrap-retry.redb");
 
     {
-        let mut core = EngineCore::new(
-            RedbStore::open(&path).unwrap(),
-            Box::new(FixtureDirectory::new()),
-            10,
-        );
+        let mut core = EngineCore::new(RedbStore::open(&path).unwrap(), 10);
         publish_narrow(&mut core, &author, std::slice::from_ref(&relay), 704);
     }
 
@@ -331,7 +314,6 @@ fn a_boot_route_revision_read_error_re_enables_worker_reconciliation() {
     faults.fail_route_revisions();
     let mut recovered = EngineCore::new(
         FaultyLaneStore::new(RedbStore::open(&path).unwrap(), faults.clone()),
-        Box::new(FixtureDirectory::new()),
         10,
     );
     recovered.recover_on_boot();
@@ -361,11 +343,7 @@ fn a_boot_route_revision_read_error_re_enables_worker_reconciliation() {
     // is exclusive, so the tainted core has to release it first.
     let writes = requirements.writes.clone();
     drop(recovered);
-    let mut fresh = EngineCore::new(
-        RedbStore::open(&path).unwrap(),
-        Box::new(FixtureDirectory::new()),
-        10,
-    );
+    let mut fresh = EngineCore::new(RedbStore::open(&path).unwrap(), 10);
     fresh.recover_on_boot();
     assert_eq!(
         writes,

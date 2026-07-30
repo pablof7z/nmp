@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use nmp_grammar::{
     AccessContext, ConcreteFilter, ContextualAtom, RelaySessionKey, SourceAuthority,
 };
-use nmp_router::{test_relay, DiscoveryKinds, FixtureDirectory, Router, RuleRegistry};
+use nmp_router::{test_relay, FixtureRoutingFacts, Router, RuleRegistry};
 use nostr::Keys;
 
 #[test]
@@ -30,12 +30,9 @@ fn authorless_public_a_b_are_three_exact_session_plans() {
             routing_evidence: BTreeSet::new(),
         })
         .collect();
-    let mut router = Router::new(
-        DiscoveryKinds::default(),
-        RuleRegistry::default_widen_only(),
-    );
+    let mut router = Router::new(RuleRegistry::default_widen_only());
 
-    router.compile(&demand, &FixtureDirectory::new(), 10);
+    router.compile(&demand, &FixtureRoutingFacts::new(), 10);
 
     let expected = BTreeSet::from([
         RelaySessionKey::public(relay.clone()),
@@ -63,7 +60,7 @@ fn authorless_public_a_b_are_three_exact_session_plans() {
         .collect::<BTreeSet<_>>();
     assert_eq!(coverage.len(), 3);
 
-    router.compile(&demand, &FixtureDirectory::new(), 2);
+    router.compile(&demand, &FixtureRoutingFacts::new(), 2);
     assert_eq!(router.plan().reqs.len(), 2);
     assert_eq!(router.plan().refused_sessions.len(), 1);
     assert_eq!(router.plan().limited.len(), 1);
@@ -90,14 +87,11 @@ fn same_session_different_source_partitions_are_extended_not_overwritten() {
             routing_evidence: BTreeSet::new(),
         },
     ]);
-    let mut router = Router::new(
-        DiscoveryKinds::default(),
-        RuleRegistry::default_widen_only(),
-    );
+    let mut router = Router::new(RuleRegistry::default_widen_only());
 
     router.compile(
         &demand,
-        &FixtureDirectory::new().with_app([relay.clone()]),
+        &FixtureRoutingFacts::new().with_operator_app([relay.clone()]),
         10,
     );
 

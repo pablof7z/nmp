@@ -22,7 +22,7 @@ use nmp_resolver::LiveQuery;
 use nostr::filter::MatchEventOptions;
 use nostr::{Event, EventId, Keys};
 
-use nmp_router::{test_relay, DiscoveryKinds, FixtureDirectory, RelayUrl, Router, RuleRegistry};
+use nmp_router::{test_relay, FixtureRoutingFacts, RelayUrl, Router, RuleRegistry};
 
 fn my_follows_filter() -> Filter {
     Filter {
@@ -59,7 +59,6 @@ fn differential_oracle_identical_delivery() {
     // ---- Arrange: real resolver-generated demand ------------------------
     let me = Keys::generate();
     let follows: Vec<Keys> = (0..4).map(|_| Keys::generate()).collect();
-    let follows_hex: Vec<String> = follows.iter().map(|k| k.public_key().to_hex()).collect();
 
     let mut h = Harness::new();
     h.set_active(Some(me.public_key()));
@@ -80,7 +79,7 @@ fn differential_oracle_identical_delivery() {
     // Overlapping relay pool -- forces multiple authors to share a relay,
     // which is exactly what needs coalescing.
     let pool = vec![test_relay(0), test_relay(1), test_relay(2)];
-    let dir = FixtureDirectory::shared_pool_mailboxes(&follows_hex, &pool);
+    let dir = FixtureRoutingFacts::shared_pool_mailboxes(&follow_pks, &pool);
 
     let mut relay_store: BTreeMap<RelayUrl, Vec<Event>> = BTreeMap::new();
     for relay in &pool {
@@ -96,14 +95,13 @@ fn differential_oracle_identical_delivery() {
         relay_store.insert(relay.clone(), events);
     }
 
-    let discovery = DiscoveryKinds::default();
     let cap = 10;
 
     // ---- Act: compile both paths over the identical demand/facts -------
-    let mut router_a = Router::new(discovery.clone(), RuleRegistry::dedup_only());
+    let mut router_a = Router::new(RuleRegistry::dedup_only());
     router_a.compile(&demand_ctx, &dir, cap);
 
-    let mut router_b = Router::new(discovery, RuleRegistry::default_widen_only());
+    let mut router_b = Router::new(RuleRegistry::default_widen_only());
     router_b.compile(&demand_ctx, &dir, cap);
 
     // ---- Path A: one WireReq per (author, relay), no merge --------------
@@ -118,7 +116,7 @@ fn differential_oracle_identical_delivery() {
                 for author in &prov.covers_authors {
                     if let Some(atom) = demand
                         .iter()
-                        .find(|a| a.authors.as_ref() == Some(&BTreeSet::from([author.clone()])))
+                        .find(|a| a.authors.as_ref() == Some(&BTreeSet::from([author.to_hex()])))
                     {
                         let wire_events: Vec<Event> = store
                             .iter()
@@ -152,7 +150,7 @@ fn differential_oracle_identical_delivery() {
                 for author in &prov.covers_authors {
                     if let Some(atom) = demand
                         .iter()
-                        .find(|a| a.authors.as_ref() == Some(&BTreeSet::from([author.clone()])))
+                        .find(|a| a.authors.as_ref() == Some(&BTreeSet::from([author.to_hex()])))
                     {
                         delivered_b
                             .get_mut(atom)

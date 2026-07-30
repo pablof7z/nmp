@@ -3,23 +3,18 @@ Feature: Where an ordinary event goes when the app says nothing
   after that is the built-in outbox resolver's business, and outbox is not one
   source but three, added together:
 
-    1. the author's own NIP-65 WRITE relays,
+    1. the author's neutral outbound routes,
     2. the operator-configured app relays, always,
-    3. every p-tagged recipient's NIP-65 READ relays -- their inbox.
+    3. every p-tagged recipient's neutral inbound routes -- their inbox.
 
   Pablo, on what the app surface is allowed to be:
 
   > the app should be able to say "publish this event" and it would default to using outbox.
 
-  Master implements source 1 and nothing else. `resolve_routes`'s
-  `AuthorOutbox` arm (`crates/nmp/src/core/write.rs:2591-2604`) reads
-  `directory.write_relays(&author)`, maps it to bare URLs, and errors when the
-  set is empty -- no p-tag fan-out, no app relays. The vocabulary for the rest
-  already ships and is consumed only by reads: `RelayDirectory::read_relays`
-  and `RelayDirectory::app_relays` (`crates/nmp-router/src/facts.rs:81-117`),
-  whose doc comments describe this exact fan-out as though it were built. The
-  designed resolver invents no new fact source; it consumes the ones the write
-  path ignores.
+  The built resolver reads only `RoutingFacts`: one atomic author fact owns
+  both directional sets, while operator app and fallback sets remain
+  independent policy. It invents no protocol kind, discovery source, or
+  implicit indexer lane.
 
   The recipient half is the one that is easy to get subtly wrong, and the trait
   doc says so outright: a recipient is reached at their READ relays, NEVER
@@ -48,8 +43,8 @@ Feature: Where an ordinary event goes when the app says nothing
 
   Scenario: The author is reached at their write relays, never their read relays
     # The mirror image of the recipient rule below, and the reason both halves
-    # have to be stated: NIP-65 is two sets, and outbox reads a DIFFERENT one
-    # depending on whether the identity is the author or an addressee. An
+    # have to be stated: an author fact has two sets, and outbox reads a
+    # DIFFERENT one depending on whether the identity is the author or an addressee. An
     # author's read-marked relay is where they collect mail, not where they
     # publish; routing a note there tells nobody anything.
     Given my relay list also names "author-read-only" as a read-marked relay
@@ -61,12 +56,9 @@ Feature: Where an ordinary event goes when the app says nothing
   # ---- the p-tagged recipients' inboxes ---------------------------------
 
   Scenario: A p-tagged recipient adds their inbox, never their outbox
-    # THE load-bearing distinction of this file. `read_relays`'s own doc names
-    # the policy that does not exist yet: "This is what the p-tag inbox
-    # fan-out (`resolve_routes`'s `Default` write policy) consumes for a
-    # recipient, never `write_relays`" (`facts.rs:105-117`). Bob's write relay
-    # appears in this scenario purely so the assertion that it is NOT used has
-    # something to bite on.
+    # THE load-bearing distinction of this file. Bob's outbound relay appears
+    # purely so the assertion that the resolver consumes only his inbound set
+    # has something to bite on.
     Given Bob's relay list names "bob-inbox" as his read relay
     And Bob's relay list names "bob-outbox" as his write relay
     And no app relays are configured

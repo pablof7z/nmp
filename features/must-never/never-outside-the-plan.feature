@@ -10,5 +10,5 @@ Feature: The engine never talks to a relay it has no reason to
     And I am logged in as an account that follows Alice and Bob
     When my feed of my follows' notes runs to a steady state
     Then every contacted relay appears in the diagnostics with its routing lane
-    And no relay outside the indexers, "relay-a", and "relay-b" was ever contacted
+    And no relay outside the indexers, "me-relay", "relay-a", and "relay-b" was ever contacted
     And relay "bystander" received no connection at all

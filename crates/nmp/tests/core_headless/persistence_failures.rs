@@ -217,11 +217,11 @@ fn ingest_door_surfaces_io_failure_as_persistence_error_not_panic() {
 fn ingest_io_failure_degrades_read_only_without_panicking() {
     let a = Keys::generate();
     let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay.clone()]);
     // `query`/coverage doors stay healthy; only `insert` fails — so the
     // subscribe/connect setup below (which reads, never inserts) succeeds,
     // proving the degrade is specific to the failing ingest door.
-    let mut core = EngineCore::new(FailIngestStore::armed(), Box::new(dir), 10);
+    let mut core = EngineCore::new_with_fixture_routing_facts(FailIngestStore::armed(), dir, 10);
 
     let _ = core.handle(EngineMsg::Subscribe(literal_query(
         &[1],
@@ -276,58 +276,63 @@ fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
     let healthy_author = Keys::generate();
     let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
     let healthy_relay = RelayUrl::parse("wss://healthy-relay.example.com").unwrap();
-    let dir = FixtureDirectory::new()
-        .with_write(author.public_key().to_hex(), [relay.clone()])
-        .with_write(
-            healthy_author.public_key().to_hex(),
-            [healthy_relay.clone()],
-        );
-    let mut core = EngineCore::new(FailIngestStore::armed(), Box::new(dir), 10);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(author.public_key(), [relay.clone()])
+        .with_outbound_routes(healthy_author.public_key(), [healthy_relay.clone()]);
+    let mut core = EngineCore::new_with_fixture_routing_facts(FailIngestStore::armed(), dir, 10);
 
-    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+    let _ = connect(&mut core, 0, &relay);
+    let _ = connect(&mut core, 1, &healthy_relay);
+    let failed_subscribed = core.handle(EngineMsg::Subscribe(literal_query(
         &[1],
         &author.public_key().to_hex(),
     )));
-    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+    let (request, request_filter) = {
+        let (sub_id, filter) = req_for_kind(&failed_subscribed, &relay, 1);
+        (sub_id.clone(), filter.clone())
+    };
+    let healthy_subscribed = core.handle(EngineMsg::Subscribe(literal_query(
         &[2],
         &healthy_author.public_key().to_hex(),
     )));
-    let connected = connect(&mut core, 0, &relay);
-    let request = connected
-        .iter()
-        .find_map(|effect| match effect {
-            Effect::Replay(session, requests) if session == &public_session(&relay) => requests
-                .iter()
-                .find(|request| {
-                    request
-                        .filter
-                        .kinds
-                        .as_ref()
-                        .is_some_and(|kinds| kinds.contains(&1))
-                })
-                .map(|request| request.sub_id.clone()),
-            _ => None,
-        })
-        .expect("connect replays the exact kind:1 request");
-    let healthy_connected = connect(&mut core, 1, &healthy_relay);
-    let healthy_request = healthy_connected
-        .iter()
-        .find_map(|effect| match effect {
-            Effect::Replay(session, requests) if session == &public_session(&healthy_relay) => {
-                requests
-                    .iter()
-                    .find(|request| {
-                        request
-                            .filter
-                            .kinds
-                            .as_ref()
-                            .is_some_and(|kinds| kinds.contains(&2))
-                    })
-                    .map(|request| request.sub_id.clone())
-            }
-            _ => None,
-        })
-        .expect("healthy connect replays its independent kind:2 request");
+    let (healthy_request, healthy_filter) = {
+        let (sub_id, filter) = req_for_kind(&healthy_subscribed, &healthy_relay, 2);
+        (sub_id.clone(), filter.clone())
+    };
+    let failed_request_accepted = core.on_wire_request_handoff(
+        &public_session(&relay),
+        &request,
+        request_filter.hash(),
+        Some(RelayHandle {
+            slot: 0,
+            generation: 1,
+        }),
+        true,
+        None,
+    );
+    let healthy_request_accepted = core.on_wire_request_handoff(
+        &public_session(&healthy_relay),
+        &healthy_request,
+        healthy_filter.hash(),
+        Some(RelayHandle {
+            slot: 1,
+            generation: 1,
+        }),
+        true,
+        None,
+    );
+    assert!(
+        failed_request_accepted
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitObservationEvidence(..))),
+        "the failed request must cross the same accepted handoff edge as runtime: {failed_request_accepted:?}"
+    );
+    assert!(
+        healthy_request_accepted
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitObservationEvidence(..))),
+        "the healthy request must cross the same accepted handoff edge as runtime: {healthy_request_accepted:?}"
+    );
     let wire = wire_sub_string(&request);
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(500u64)));
 
@@ -361,6 +366,15 @@ fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
             .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
         "the poisoned request must retire without a coverage effect: {completed:?}"
     );
+    assert!(
+        !completed.iter().any(|effect| match effect {
+            Effect::EmitObservationEvidence(_, evidence) => evidence
+                .iter()
+                .any(|item| { matches!(item.fact, ObservationFact::RequestSettled { .. }) }),
+            _ => false,
+        }),
+        "a failed local EVENT commit must not become protocol absence evidence: {completed:?}"
+    );
     let atom = ctx_atom(cf(&[1], &[&author.public_key().to_hex()]));
     assert_eq!(core.get_coverage(&atom, &relay), None);
 
@@ -391,6 +405,21 @@ fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
             .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
         "another in-flight request remains eligible after the first fails"
     );
+    assert!(
+        healthy_completed.iter().any(|effect| match effect {
+            Effect::EmitObservationEvidence(_, evidence) => evidence.iter().any(|item| {
+                matches!(
+                    item.fact,
+                    ObservationFact::RequestSettled {
+                        terminal: RequestTerminal::Eose,
+                        ..
+                    }
+                )
+            }),
+            _ => false,
+        }),
+        "a healthy persisted completion must expose its EOSE settlement: {healthy_completed:#?}"
+    );
     let healthy_atom = ctx_atom(cf(&[2], &[&healthy_author.public_key().to_hex()]));
     assert!(core.get_coverage(&healthy_atom, &healthy_relay).is_some());
 }
@@ -420,9 +449,9 @@ fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
         )
         .expect("protected pinned demand"),
     );
-    let mut core = EngineCore::new(
+    let mut core = EngineCore::new_with_fixture_routing_facts(
         FailIngestStore::armed(),
-        Box::new(FixtureDirectory::new()),
+        FixtureRoutingFacts::new(),
         10,
     );
 
@@ -563,11 +592,11 @@ fn failed_event_commit_poisons_only_the_then_current_wire_fifo_revisions() {
     let b = Keys::generate();
     let c = Keys::generate();
     let relay = RelayUrl::parse("wss://fifo-isolation.example.com").unwrap();
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [relay.clone()])
-        .with_write(b.public_key().to_hex(), [relay.clone()])
-        .with_write(c.public_key().to_hex(), [relay.clone()]);
-    let mut core = EngineCore::new(FailIngestStore::armed(), Box::new(dir), 10);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [relay.clone()])
+        .with_outbound_routes(b.public_key(), [relay.clone()])
+        .with_outbound_routes(c.public_key(), [relay.clone()]);
+    let mut core = EngineCore::new_with_fixture_routing_facts(FailIngestStore::armed(), dir, 10);
     connect(&mut core, 0, &relay);
 
     let first = core.handle(EngineMsg::Subscribe(literal_query(
@@ -666,10 +695,10 @@ fn post_commit_projection_failure_does_not_poison_request_coverage() {
     let author = Keys::generate();
     let followed = Keys::generate();
     let relay = RelayUrl::parse("wss://projection-failure.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(author.public_key().to_hex(), [relay.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()]);
     let fail_query = Rc::new(Cell::new(false));
     let store = FailIngestStore::projection_armed(fail_query.clone());
-    let mut core = EngineCore::new(store, Box::new(dir), 10);
+    let mut core = EngineCore::new_with_fixture_routing_facts(store, dir, 10);
     let _ = core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
     let my_follows = LiveQuery::from_filter(Filter {
         kinds: Some(BTreeSet::from([1u16])),
@@ -749,13 +778,13 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
     let healthy = Keys::generate();
     let failed_relay = RelayUrl::parse("wss://failed-coverage.example.com").unwrap();
     let healthy_relay = RelayUrl::parse("wss://healthy-coverage.example.com").unwrap();
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [failed_relay.clone()])
-        .with_write(b.public_key().to_hex(), [failed_relay.clone()])
-        .with_write(healthy.public_key().to_hex(), [healthy_relay.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [failed_relay.clone()])
+        .with_outbound_routes(b.public_key(), [failed_relay.clone()])
+        .with_outbound_routes(healthy.public_key(), [healthy_relay.clone()]);
     let batch_sizes = Rc::new(RefCell::new(Vec::new()));
     let store = FailIngestStore::coverage_armed(batch_sizes.clone());
-    let mut core = EngineCore::new(store, Box::new(dir), 10);
+    let mut core = EngineCore::new_with_fixture_routing_facts(store, dir, 10);
 
     for author in [&a, &b, &healthy] {
         let _ = core.handle(EngineMsg::Subscribe(literal_query(
@@ -1131,11 +1160,7 @@ fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
         .collect();
 
     let calls = Rc::new(Cell::new(0u64));
-    let mut core = EngineCore::new(
-        WakeLaneProbeStore::new(calls.clone()),
-        Box::new(FixtureDirectory::new()),
-        10,
-    );
+    let mut core = EngineCore::new(WakeLaneProbeStore::new(calls.clone()), 10);
     activate(&mut core, &author);
 
     // N distinct durable writes, each routed to its OWN distinct relay, none
@@ -1209,11 +1234,7 @@ fn unchanged_worker_demand_reads_zero_outbox_lanes() {
         .collect();
 
     let calls = Rc::new(Cell::new(0u64));
-    let mut core = EngineCore::new(
-        WakeLaneProbeStore::new(calls.clone()),
-        Box::new(FixtureDirectory::new()),
-        10,
-    );
+    let mut core = EngineCore::new(WakeLaneProbeStore::new(calls.clone()), 10);
     activate(&mut core, &author);
 
     for (i, relay) in relays.iter().enumerate() {
@@ -1284,11 +1305,7 @@ fn route_parked_intents_add_no_worker_demand_and_no_store_reads() {
     let parked_relay = RelayUrl::parse("wss://parked-unrouted.example.com").unwrap();
 
     let calls = Rc::new(Cell::new(0u64));
-    let mut core = EngineCore::new(
-        WakeLaneProbeStore::new(calls.clone()),
-        Box::new(FixtureDirectory::new()),
-        10,
-    );
+    let mut core = EngineCore::new(WakeLaneProbeStore::new(calls.clone()), 10);
     activate(&mut core, &author);
 
     // One ordinary routed write, so the assertions below distinguish "parked
@@ -1392,7 +1409,6 @@ fn an_unknown_lane_creation_failure_retains_every_candidate_worker() {
     let calls = Rc::new(Cell::new(0u64));
     let mut core = EngineCore::new(
         WakeLaneProbeStore::with_failing_bootstrap(calls.clone()),
-        Box::new(FixtureDirectory::new()),
         10,
     );
     activate(&mut core, &author);
@@ -1462,11 +1478,7 @@ fn relay_worker_projection_redb_benchmark() {
         .collect();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("worker-projection-benchmark.redb");
-    let mut core = EngineCore::new(
-        RedbStore::open(&path).unwrap(),
-        Box::new(FixtureDirectory::new()),
-        INTENTS + 1,
-    );
+    let mut core = EngineCore::new(RedbStore::open(&path).unwrap(), INTENTS + 1);
     activate(&mut core, &author);
 
     for (i, relay) in relays.iter().enumerate() {
@@ -1529,7 +1541,6 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
     let calls = Rc::new(Cell::new(0u64));
     let mut core = EngineCore::new(
         WakeLaneProbeStore::with_failing_bootstrap(calls.clone()),
-        Box::new(FixtureDirectory::new()),
         10,
     );
     activate(&mut core, &author);
@@ -1641,11 +1652,7 @@ fn receipt_for_intent_resolves_correctly_after_boot_recovery() {
     let path = dir.path().join("receipt-index.redb");
 
     let (receipt_a, receipt_b) = {
-        let mut core = EngineCore::new(
-            RedbStore::open(&path).unwrap(),
-            Box::new(FixtureDirectory::new()),
-            10,
-        );
+        let mut core = EngineCore::new(RedbStore::open(&path).unwrap(), 10);
         connect_signer(&mut core, 0, &relay_a, author_a.public_key());
         connect_signer(&mut core, 1, &relay_b, author_b.public_key());
         release_author_probe(
@@ -1680,11 +1687,7 @@ fn receipt_for_intent_resolves_correctly_after_boot_recovery() {
         (receipt_a, receipt_b)
     };
 
-    let mut core = EngineCore::new(
-        RedbStore::open(&path).unwrap(),
-        Box::new(FixtureDirectory::new()),
-        10,
-    );
+    let mut core = EngineCore::new(RedbStore::open(&path).unwrap(), 10);
     core.recover_on_boot();
 
     // relay_a's deadline (40) is due; relay_b's (50) is not yet.
@@ -1735,7 +1738,7 @@ fn receipt_for_intent_unaffected_by_an_earlier_pending_removal() {
     let author2 = Keys::generate();
     let relay1 = RelayUrl::parse("wss://receipt-index-removal-1.example.com").unwrap();
     let relay2 = RelayUrl::parse("wss://receipt-index-removal-2.example.com").unwrap();
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     connect_signer(&mut core, 0, &relay1, author1.public_key());
     connect_signer(&mut core, 1, &relay2, author2.public_key());
     release_author_probe(

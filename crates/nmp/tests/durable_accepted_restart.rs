@@ -13,7 +13,7 @@ use nmp_grammar::{
     AccessContext, Durability, EventBuilder as NmpEventBuilder, Identity, RelaySessionKey,
     WriteIntent, WritePayload, WriteRouting,
 };
-use nmp_router::FixtureDirectory;
+use nmp_router::FixtureRoutingFacts;
 use nmp_store::{
     sentinel_signature, AcceptWrite, AttemptOutcome, EventStore, IntentSigState, RedbStore,
     SigState, WriteDurability,
@@ -41,8 +41,8 @@ fn signed(keys: &Keys, content: &str, created_at: u64) -> nostr::Event {
         .unwrap()
 }
 
-fn directory(pk: PublicKey, relay: RelayUrl) -> FixtureDirectory {
-    FixtureDirectory::new().with_write(pk.to_hex(), [relay])
+fn directory(pk: PublicKey, relay: RelayUrl) -> FixtureRoutingFacts {
+    FixtureRoutingFacts::new().with_outbound_routes(pk, [relay])
 }
 
 // With the #8 AUTH reducer landed, the write plane rides the signing
@@ -153,9 +153,9 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
 
     let id = {
         let store = RedbStore::open(&path).unwrap();
-        let mut core = EngineCore::new(
+        let mut core = EngineCore::new_with_fixture_routing_facts(
             store,
-            Box::new(directory(keys.public_key(), relay.clone())),
+            directory(keys.public_key(), relay.clone()),
             10,
         );
         let handle = RelayHandle {
@@ -185,12 +185,10 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
         .unwrap();
 
     let store = RedbStore::open(&path).unwrap();
-    let mut core = EngineCore::new(
+    let mut core = EngineCore::new_with_fixture_routing_facts(
         store,
-        Box::new(FixtureDirectory::new().with_write(
-            keys.public_key().to_hex(),
-            [relay.clone(), appended.clone()],
-        )),
+        FixtureRoutingFacts::new()
+            .with_outbound_routes(keys.public_key(), [relay.clone(), appended.clone()]),
         10,
     );
     let recovery = core.recover_on_boot();
@@ -308,9 +306,9 @@ fn at_most_once_started_attempt_becomes_outcome_unknown_and_is_never_resent() {
     let session = signer_session(&relay, event.pubkey);
     let intent_id = {
         let store = RedbStore::open(&path).unwrap();
-        let mut core = EngineCore::new(
+        let mut core = EngineCore::new_with_fixture_routing_facts(
             store,
-            Box::new(directory(keys.public_key(), relay.clone())),
+            directory(keys.public_key(), relay.clone()),
             10,
         );
         let handle = RelayHandle {
@@ -339,9 +337,9 @@ fn at_most_once_started_attempt_becomes_outcome_unknown_and_is_never_resent() {
     };
 
     let store = RedbStore::open(&path).unwrap();
-    let mut core = EngineCore::new(
+    let mut core = EngineCore::new_with_fixture_routing_facts(
         store,
-        Box::new(directory(keys.public_key(), relay.clone())),
+        directory(keys.public_key(), relay.clone()),
         10,
     );
     let recovery = core.recover_on_boot();
@@ -379,9 +377,9 @@ fn pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates() {
     );
     let id = {
         let store = RedbStore::open(&path).unwrap();
-        let mut core = EngineCore::new(
+        let mut core = EngineCore::new_with_fixture_routing_facts(
             store,
-            Box::new(directory(keys.public_key(), relay.clone())),
+            directory(keys.public_key(), relay.clone()),
             10,
         );
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
@@ -402,7 +400,8 @@ fn pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates() {
         rows[0].provenance.local.as_ref().unwrap().sig_state,
         SigState::Pending
     );
-    let mut core = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
+    let mut core =
+        EngineCore::new_with_fixture_routing_facts(store, directory(keys.public_key(), relay), 10);
     assert!(core.recover_on_boot().is_empty());
     let reattached = core.reattach_receipt(id);
     assert!(reattached.is_attached());
@@ -465,9 +464,9 @@ fn overridden_unsigned_intent_replays_and_resumes_pinned_to_override_after_reope
     );
     let id = {
         let store = RedbStore::open(&path).unwrap();
-        let mut core = EngineCore::new(
+        let mut core = EngineCore::new_with_fixture_routing_facts(
             store,
-            Box::new(directory(override_keys.public_key(), relay.clone())),
+            directory(override_keys.public_key(), relay.clone()),
             10,
         );
         // A is the active account; the override alone authorizes B's draft.
@@ -491,9 +490,9 @@ fn overridden_unsigned_intent_replays_and_resumes_pinned_to_override_after_reope
         rows[0].provenance.local.as_ref().unwrap().sig_state,
         SigState::Pending
     );
-    let mut core = EngineCore::new(
+    let mut core = EngineCore::new_with_fixture_routing_facts(
         store,
-        Box::new(directory(override_keys.public_key(), relay)),
+        directory(override_keys.public_key(), relay),
         10,
     );
     assert!(core.recover_on_boot().is_empty());
@@ -571,12 +570,10 @@ fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
     let s2 = signer_session(&r2, event.pubkey);
     let (a, b) = {
         let store = RedbStore::open(&path).unwrap();
-        let mut core = EngineCore::new(
+        let mut core = EngineCore::new_with_fixture_routing_facts(
             store,
-            Box::new(
-                FixtureDirectory::new()
-                    .with_write(keys.public_key().to_hex(), [r1.clone(), r2.clone()]),
-            ),
+            FixtureRoutingFacts::new()
+                .with_outbound_routes(keys.public_key(), [r1.clone(), r2.clone()]),
             10,
         );
         let h1 = RelayHandle {
@@ -607,12 +604,10 @@ fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
     };
 
     let store = RedbStore::open(&path).unwrap();
-    let mut core = EngineCore::new(
+    let mut core = EngineCore::new_with_fixture_routing_facts(
         store,
-        Box::new(
-            FixtureDirectory::new()
-                .with_write(keys.public_key().to_hex(), [r1.clone(), r2.clone()]),
-        ),
+        FixtureRoutingFacts::new()
+            .with_outbound_routes(keys.public_key(), [r1.clone(), r2.clone()]),
         10,
     );
     let effects = core.recover_on_boot();
@@ -695,7 +690,7 @@ fn assert_persisted_routing_fails_closed_without_dropping(
 
     let store = RedbStore::open(&path).unwrap();
     let route_directory = directory(keys.public_key(), route_probe.clone());
-    let mut core = EngineCore::new(store, Box::new(route_directory), 10);
+    let mut core = EngineCore::new_with_fixture_routing_facts(store, route_directory, 10);
     let effects = core.recover_on_boot();
     assert!(!effects
         .iter()
@@ -803,9 +798,9 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
     };
 
     let store = RedbStore::open(&path).unwrap();
-    let mut core = EngineCore::new(
+    let mut core = EngineCore::new_with_fixture_routing_facts(
         store,
-        Box::new(directory(keys.public_key(), relay.clone())),
+        directory(keys.public_key(), relay.clone()),
         10,
     );
     let recovery = core.recover_on_boot();
@@ -863,7 +858,8 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
     drop(core);
     let store = RedbStore::open(&path).unwrap();
     assert!(store.recover_outbox().expect("recover outbox").is_empty());
-    let mut reopened = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
+    let mut reopened =
+        EngineCore::new_with_fixture_routing_facts(store, directory(keys.public_key(), relay), 10);
     assert!(reopened.recover_on_boot().is_empty());
     let replay = reopened.reattach_receipt(receipt);
     assert!(replay.is_attached());
@@ -879,9 +875,9 @@ fn signed_ephemeral_receipt_replays_signed_and_refuses_cancellation_after_reopen
     let event = signed(&keys, "signed ephemeral", 778);
     let receipt = {
         let store = RedbStore::open(&path).unwrap();
-        let mut core = EngineCore::new(
+        let mut core = EngineCore::new_with_fixture_routing_facts(
             store,
-            Box::new(directory(keys.public_key(), relay.clone())),
+            directory(keys.public_key(), relay.clone()),
             10,
         );
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
@@ -900,7 +896,8 @@ fn signed_ephemeral_receipt_replays_signed_and_refuses_cancellation_after_reopen
 
     let store = RedbStore::open(&path).unwrap();
     assert!(store.recover_outbox().expect("recover outbox").is_empty());
-    let mut reopened = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
+    let mut reopened =
+        EngineCore::new_with_fixture_routing_facts(store, directory(keys.public_key(), relay), 10);
     assert!(reopened.recover_on_boot().is_empty());
     let replay = reopened.reattach_receipt(receipt);
     assert!(replay.is_attached());
@@ -931,9 +928,9 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
     let session = signer_session(&relay, event.pubkey);
     let (intent_id, receipt_id) = {
         let store = RedbStore::open(&path).unwrap();
-        let mut core = EngineCore::new(
+        let mut core = EngineCore::new_with_fixture_routing_facts(
             store,
-            Box::new(directory(keys.public_key(), relay.clone())),
+            directory(keys.public_key(), relay.clone()),
             10,
         );
         let handle = RelayHandle {
@@ -989,7 +986,8 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
     drop(db);
 
     let store = RedbStore::open(&path).unwrap();
-    let mut core = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
+    let mut core =
+        EngineCore::new_with_fixture_routing_facts(store, directory(keys.public_key(), relay), 10);
     assert!(core.recover_on_boot().is_empty());
     let unreadable = core.reattach_receipt(receipt_id);
     assert_eq!(unreadable.outcome, ReattachOutcome::RetainedButUnreadable);
@@ -1008,7 +1006,8 @@ fn retained_terminal_receipt_is_attached_and_replays_terminal_fact() {
     let keys = Keys::generate();
     let relay = RelayUrl::parse("wss://terminal.example").unwrap();
     let store = nmp_store::MemoryStore::new();
-    let mut core = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
+    let mut core =
+        EngineCore::new_with_fixture_routing_facts(store, directory(keys.public_key(), relay), 10);
     core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(NmpEventBuilder {
@@ -1038,7 +1037,11 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
     let relay = RelayUrl::parse("wss://corrupt-receipt.example").unwrap();
     let (intent_id, receipt_id) = {
         let store = RedbStore::open(&path).unwrap();
-        let mut core = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
+        let mut core = EngineCore::new_with_fixture_routing_facts(
+            store,
+            directory(keys.public_key(), relay),
+            10,
+        );
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Event(NmpEventBuilder {
@@ -1077,7 +1080,7 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
     drop(db);
 
     let store = RedbStore::open(&path).unwrap();
-    let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+    let mut core = EngineCore::new(store, 10);
     assert!(core.recover_on_boot().is_empty());
     let replay = core.reattach_receipt(receipt_id);
     assert_eq!(replay.outcome, ReattachOutcome::RetainedButUnreadable);
@@ -1131,7 +1134,7 @@ fn relay_list_bootstrap_routing_round_trips_across_a_restart() {
 
     let id = {
         let store = RedbStore::open(&path).unwrap();
-        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+        let mut core = EngineCore::new(store, 10);
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Signed(event),
             durability: Durability::Durable,
@@ -1154,7 +1157,7 @@ fn relay_list_bootstrap_routing_round_trips_across_a_restart() {
     };
 
     let store = RedbStore::open(&path).unwrap();
-    let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+    let mut core = EngineCore::new(store, 10);
     let recovery = core.recover_on_boot();
     let ensured = recovery
         .iter()
@@ -1185,7 +1188,7 @@ fn corrupt_route_lane_evidence_is_unreadable_not_absent() {
     let event = signed(&keys, "corrupt route", 502);
     let (intent_id, receipt_id) = {
         let store = RedbStore::open(&path).unwrap();
-        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+        let mut core = EngineCore::new(store, 10);
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Signed(event),
             durability: Durability::Durable,
@@ -1218,7 +1221,7 @@ fn corrupt_route_lane_evidence_is_unreadable_not_absent() {
     drop(db);
 
     let store = RedbStore::open(&path).unwrap();
-    let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+    let mut core = EngineCore::new(store, 10);
     assert!(core.recover_on_boot().is_empty());
     let replay = core.reattach_receipt(receipt_id);
     assert_eq!(replay.outcome, ReattachOutcome::RetainedButUnreadable);
@@ -1305,9 +1308,9 @@ fn boot_degrades_explicitly_when_the_durable_journal_will_not_decode() {
         store.recover_outbox().is_err(),
         "an undecodable journal row is an error, never an empty recovery"
     );
-    let mut core = EngineCore::new(
+    let mut core = EngineCore::new_with_fixture_routing_facts(
         store,
-        Box::new(directory(keys.public_key(), relay.clone())),
+        directory(keys.public_key(), relay.clone()),
         10,
     );
     let effects = core.recover_on_boot();

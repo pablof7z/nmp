@@ -6,27 +6,14 @@
 //! no I/O. It deliberately stops there, because the SAFE answer depends on a
 //! fact a pure destination policy does not have:
 //! WHERE the URL came from. A `127.0.0.1` relay a user explicitly configured
-//! for local development is fine; the SAME `127.0.0.1` arriving inside a
-//! network-sourced, validly-signed kind:10002 is an SSRF pivot. Provenance is
-//! the whole difference, so the decision lives here in the engine — the layer
-//! that knows a URL was *discovered* — never in transport.
-//!
-//! This policy is applied at exactly one choke point: `EngineCore::
-//! ingest_relay_list_winner`, where a kind:10002 winner's parsed `r`-tag
-//! relays are about to become routable `Nip65Write`/`Nip65Read` lanes in the
-//! directory. A relay rejected here never enters the directory, so the router
-//! never builds a candidate for it, so no `Effect` ever names it, so it never
-//! reaches `pool.ensure_open`. Rejection is structural, not a downstream
-//! filter (bug-class-ledger method: make the bad state unreachable, then
-//! prove it with one falsifier).
-//!
-//! Relays that enter through operator config (`LiveDirectory`'s
-//! indexers/app/fallback builder inputs) never pass through this gate — that
-//! is the intended provenance split: config is trusted, discovery is not.
+//! for local development is fine; the same URL learned from untrusted network
+//! content is an SSRF pivot. Protocol owners apply this policy before they
+//! use the private neutral fact writer. Operator configuration is trusted and
+//! bypasses this discovery gate.
 
 use nmp_grammar::relay::relay_host_key;
 use nmp_network_policy::DestinationPolicy;
-use nmp_router::{LanedRelay, RelayUrl};
+use nmp_router::RelayUrl;
 
 /// The operator's relay admission policy for DISCOVERED relays (issue #121).
 ///
@@ -80,25 +67,6 @@ impl RelayAdmissionPolicy {
     pub fn admits_discovered(&self, url: &RelayUrl) -> bool {
         relay_host_key(url).is_some_and(|host| self.destination_policy.admit_host(&host).is_ok())
     }
-
-    /// Split a discovered lane's relays into the admitted set and the count
-    /// rejected. The count feeds `EngineCore`'s diagnostics rejection tally
-    /// (issue #121: "count rejections in diagnostics").
-    #[must_use]
-    pub fn filter_discovered(&self, relays: Vec<LanedRelay>) -> (Vec<LanedRelay>, u64) {
-        let mut rejected = 0u64;
-        let admitted = relays
-            .into_iter()
-            .filter(|r| {
-                let ok = self.admits_discovered(&r.url);
-                if !ok {
-                    rejected += 1;
-                }
-                ok
-            })
-            .collect();
-        (admitted, rejected)
-    }
 }
 
 /// Reduce an operator allowlist entry to the host key it should match on.
@@ -117,12 +85,6 @@ fn normalize_allow_entry(entry: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nmp_router::Lane;
-
-    fn laned(url: &str) -> LanedRelay {
-        LanedRelay::new(RelayUrl::parse(url).unwrap(), Lane::Nip65Write)
-    }
-
     #[test]
     fn default_policy_rejects_every_discovered_local_host() {
         let policy = RelayAdmissionPolicy::default();
@@ -160,14 +122,22 @@ mod tests {
     #[test]
     fn filter_discovered_partitions_and_counts_rejections() {
         let policy = RelayAdmissionPolicy::default();
-        let (admitted, rejected) = policy.filter_discovered(vec![
-            laned("wss://relay.example.com"),
-            laned("ws://127.0.0.1:7777"),
-            laned("ws://10.0.0.9"),
-            laned("wss://nostr.wine/npub1abc"),
-        ]);
+        let candidates = [
+            "wss://relay.example.com",
+            "ws://127.0.0.1:7777",
+            "ws://10.0.0.9",
+            "wss://nostr.wine/npub1abc",
+        ]
+        .into_iter()
+        .map(|url| RelayUrl::parse(url).unwrap())
+        .collect::<Vec<_>>();
+        let admitted = candidates
+            .iter()
+            .filter(|relay| policy.admits_discovered(relay))
+            .collect::<Vec<_>>();
+        let rejected = candidates.len() - admitted.len();
         assert_eq!(rejected, 2, "the loopback and RFC-1918 relays are rejected");
         assert_eq!(admitted.len(), 2);
-        assert!(admitted.iter().all(|r| policy.admits_discovered(&r.url)));
+        assert!(admitted.iter().all(|relay| policy.admits_discovered(relay)));
     }
 }

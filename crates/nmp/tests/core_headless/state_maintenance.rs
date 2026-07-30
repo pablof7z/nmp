@@ -14,7 +14,7 @@ use super::*;
 fn root_query_emits_removed_on_delete() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
@@ -74,7 +74,7 @@ fn root_query_emits_removed_on_delete() {
 fn expiry_emits_removed_via_manual_tick() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
@@ -130,9 +130,9 @@ fn next_deadline_is_min_over_expiry_and_neg_liveness() {
     let a = Keys::generate();
     let b = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [relay0.clone()])
-        .with_write(b.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [relay0.clone()])
+        .with_outbound_routes(b.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
 
     assert_eq!(

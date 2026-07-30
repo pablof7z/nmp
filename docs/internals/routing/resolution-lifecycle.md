@@ -190,7 +190,7 @@ when every relay acked. Pablo's worked example, in full:
 > an outbox can end too; for example, if the user is p-tagging 3 users and only one of them has a 10002 and we know the other two don't have one, once we have the relays we'll publish to for the author's own relay + any app relay + some of the 1-p-tagged-user that did have a 10002 then the outbox item is consumed.
 
 Map it onto the three-valued knowledge model (`knowledge-and-settlement.md`):
-author `Known`, p1 `Known`, p2 and p3 `KnownAbsent` — zero `Unknown`s remain,
+author `Present`, p1 `Present`, p2 and p3 `Absent` — zero `Unknown`s remain,
 so the resolver's answer can never change again for this intent, so
 re-executing it is pointless, so the `Auto` retires. `route_complete` is a
 statement about *knowledge exhaustion*, not about success: an intent can be

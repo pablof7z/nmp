@@ -20,9 +20,9 @@ sealed class NMPSourceAuthority {
 
     object Public : NMPSourceAuthority()
 
-    /** Ask ONLY this relay set, on the wire, full stop -- never author-
-     * outbox/directory/app/fallback/indexer routing, regardless of whether
-     * the selection is author-bearing. Must be nonempty:
+    /** Ask ONLY this relay set, on the wire, full stop -- never neutral
+     * author facts, hints, provenance, or operator policy, regardless of
+     * whether the selection is author-bearing. Must be nonempty:
      * `NMPEngine.observe(NMPDemand)` throws
      * `NMPError.EmptyPinnedRelaySet` if it is not. */
     data class Pinned(val relays: Set<String>) : NMPSourceAuthority()

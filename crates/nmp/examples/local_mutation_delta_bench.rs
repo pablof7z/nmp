@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use nmp::mechanism::core::{Effect, EngineCore, EngineMsg, RowDelta};
 use nmp_grammar::{Binding, Filter, IndexedTagName};
 use nmp_resolver::{HandleId, LiveQuery};
-use nmp_router::FixtureDirectory;
+use nmp_router::FixtureRoutingFacts;
 use nmp_store::{
     sentinel_signature, AcceptWrite, IntentSigState, RedbStore, RelayObserved, WriteDurability,
 };
@@ -305,7 +305,7 @@ fn main() {
 
     for (scenario_index, scenario) in Scenario::ALL.into_iter().enumerate() {
         let store = RedbStore::open(&path).expect("open benchmark store");
-        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(store, 20);
         let (_handle, initial_rows) = initial_snapshot(core.handle(EngineMsg::Subscribe(
             LiveQuery::from_filter(scenario_filter(scenario, &author)),
         )));

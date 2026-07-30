@@ -92,7 +92,9 @@ Second agent (did repo/web fetch — cited builder.rs, Trellis lib.rs, issue #31
 NMP = **headless, embeddable Nostr sync-and-routing engine**. Central abstraction: **declarative live query + typed write intent** over a **local-first synchronizing replica**.
 - NMP OWNS (data plane + network correctness): validation, dedup, replaceable/delete/expiry, provenance, persistence+replay, subscription compilation/sharing, outbox/relay selection, request+event routing, reconnection, backpressure, durable write outbox with acknowledged receipts, query leases (scoped remote demand).
 - NMP does NOT own: the app's state model, lifecycle, UI architecture, or "who is active."
-- **Identity seam:** app owns "who" (active account is an INPUT); engine owns the DERIVED routing state (that account's relay list, discovered outboxes) + all fetching.
+- **Identity seam:** app owns "who" (active account is an INPUT); generic
+  routing owns only neutral three-valued author-route facts. Optional protocol
+  assembly owns fetching and atomically replaces those facts.
 - **Delivery:** queries surface as the platform's native reactive primitive (Swift AsyncSequence/@Observable, Kotlin Flow, JS async iterator/signal, Rust Stream). App folds streams into its OWN state. NMP hands you streams, not an AppState to render.
 - Scales down (podcast-player: 2 queries + 1 intent, otherwise a normal SwiftUI app) and up (full client: many queries + heavy outbox routing). Cost of adoption ∝ use. That IS the pay-as-you-go property #2 demands.
 

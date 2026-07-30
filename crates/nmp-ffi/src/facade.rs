@@ -14,14 +14,9 @@
 //! `nmp`'s async pull surfaces. Long-lived observations expose `next()` and
 //! `cancel()` directly; no drain-thread/callback-observer bridge remains.
 //!
-//! Directory: `nmp_router::LiveDirectory` (M5's self-bootstrapping outbox,
-//! now assembled inside `nmp::Engine::new`) is what backs every `NmpEngine`
-//! -- a Swift app supplies ONLY the operator indexer relay set; every
-//! author's NIP-65 write relays (including the app's own account) are
-//! discovered by the engine itself, live, via its own internal kind:10002
-//! reads against those same indexers (`nmp_engine::core::EngineCore`'s
-//! auto-discovery). `NmpEngineConfig` no longer accepts a pre-resolved
-//! write-relay map -- there is nothing for a caller to resolve up front.
+//! Neutral routing facts are assembled privately by `nmp::Engine`; this
+//! facade forwards operator configuration and never exposes a mutable
+//! directory.
 
 use std::sync::{Arc, Mutex};
 
@@ -66,10 +61,12 @@ fn start_following_action(
     NmpFollowActionStream::new(action.into_async())
 }
 
-/// Construction config for [`NmpEngine::new`]. See the module doc: the only
-/// relay facts a caller ever supplies are the three operator-configured
-/// lanes -- `indexer_relays`, `app_relays`, `fallback_relays`
-/// (`routing-and-ownership.md` §2.1) -- everything else is discovered live.
+/// Construction config for [`NmpEngine::new`].
+///
+/// This core native assembly accepts only neutral operator app/fallback
+/// policy. It exposes no discovery-source setting and no mutable author-route
+/// map: without a separately assembled route provider, `Auto` remains
+/// route-waiting until operator policy supplies a destination.
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct NmpEngineConfig {
     /// `None` -> in-memory store (nothing survives a restart). `Some(path)`
@@ -77,16 +74,15 @@ pub struct NmpEngineConfig {
     /// reopened across restarts is what preserves source-scoped evidence for
     /// a cold, offline read -- ledger #7).
     pub store_path: Option<String>,
-    pub indexer_relays: Vec<String>,
-    /// Operator app relay set (`Lane::AppRelay`). Default empty.
+    /// Operator app relay set (`Lane::OperatorApp`). Default empty.
     pub app_relays: Vec<String>,
-    /// Operator fallback relay set (`Lane::Fallback`). Default empty.
+    /// Operator fallback relay set (`Lane::OperatorFallback`). Default empty.
     pub fallback_relays: Vec<String>,
     /// Local/private relay HOSTS the operator explicitly opts into despite
-    /// the SSRF admission policy (issue #121). A DISCOVERED (network-sourced
-    /// kind:10002) relay on a loopback / RFC-1918 / link-local / `.onion`
-    /// host is rejected by default; listing its host here (e.g. `"127.0.0.1"`
-    /// or `"localhost"`) re-admits discovered relays on that exact host.
+    /// the SSRF admission policy (issue #121). A network-derived relay on a
+    /// loopback / RFC-1918 / link-local / `.onion` host is rejected by
+    /// default; listing its host here (e.g. `"127.0.0.1"` or `"localhost"`)
+    /// re-admits derived relays on that exact host.
     /// Host-only match (port- and path-insensitive). Default empty.
     ///
     /// `default = []` keeps this field OPTIONAL for existing foreign-language
@@ -127,7 +123,6 @@ impl Default for NmpEngineConfig {
     fn default() -> Self {
         Self {
             store_path: None,
-            indexer_relays: Vec::new(),
             app_relays: Vec::new(),
             fallback_relays: Vec::new(),
             allowed_local_relay_hosts: Vec::new(),
@@ -170,7 +165,7 @@ impl From<NmpEngineConfig> for nmp::EngineConfig {
     fn from(config: NmpEngineConfig) -> Self {
         nmp::EngineConfig {
             store_path: config.store_path,
-            indexer_relays: config.indexer_relays,
+            indexer_relays: Vec::new(),
             app_relays: config.app_relays,
             fallback_relays: config.fallback_relays,
             allowed_local_relay_hosts: config.allowed_local_relay_hosts,
@@ -984,6 +979,23 @@ mod tests {
         let config = NmpEngineConfig::default();
         assert_eq!(config.max_auth_capabilities, 64);
         assert_eq!(nmp::EngineConfig::from(config).max_auth_capabilities, 64);
+    }
+
+    #[test]
+    fn core_native_config_cannot_assemble_an_author_route_provider() {
+        let config = NmpEngineConfig {
+            app_relays: vec!["wss://app.example".to_string()],
+            fallback_relays: vec!["wss://fallback.example".to_string()],
+            ..NmpEngineConfig::default()
+        };
+        let projected = nmp::EngineConfig::from(config);
+
+        assert!(
+            projected.indexer_relays.is_empty(),
+            "core native has no discovery-source setting; optional providers own their sources"
+        );
+        assert_eq!(projected.app_relays, ["wss://app.example"]);
+        assert_eq!(projected.fallback_relays, ["wss://fallback.example"]);
     }
 
     #[test]

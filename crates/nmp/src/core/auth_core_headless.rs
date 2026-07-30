@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
-use nmp_router::FixtureDirectory;
+use nmp_router::FixtureRoutingFacts;
 use nmp_store::MemoryStore;
 use nmp_transport::{DisconnectReason, RelayFrame, RelayHandle};
 use nostr::{EventBuilder, EventId, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp};
@@ -35,11 +35,12 @@ impl Fixture {
             access: session.access,
             routing_evidence: BTreeSet::new(),
         };
-        let directory = FixtureDirectory::new().with_write(keys.public_key().to_hex(), [relay]);
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(directory), 10);
+        let directory = FixtureRoutingFacts::new().with_outbound_routes(keys.public_key(), [relay]);
+        let mut core =
+            EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), directory, 10);
         core.attribution.observe_demand([&atom]);
         core.router
-            .compile(&BTreeSet::from([atom]), core.directory.as_ref(), core.cap);
+            .compile(&BTreeSet::from([atom]), &core.routing_facts, core.cap);
         let sub_id = core.router.plan().reqs[&session][0].sub_id.clone();
         let handle = RelayHandle {
             slot: 7,

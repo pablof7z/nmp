@@ -18,7 +18,7 @@ fn an_explicit_route_with_no_relays_is_refused_before_acceptance() {
     // The directory is empty on purpose: there is no write relay anywhere
     // for a refusal-turned-fallback to leak into, so a passing assertion
     // here is about the door, not about luck.
-    let dir = FixtureDirectory::new();
+    let dir = FixtureRoutingFacts::new();
     let mut core = new_core(dir);
     activate(&mut core, &a);
 
@@ -63,7 +63,7 @@ fn an_explicit_route_with_no_relays_is_refused_before_acceptance() {
 fn an_unreachable_explicit_relay_is_accepted_because_the_door_cannot_know() {
     let a = Keys::generate();
     let nowhere = RelayUrl::parse("wss://non-existent.example").unwrap();
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     activate(&mut core, &a);
 
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
@@ -117,7 +117,7 @@ fn one_attempt_start_failure_is_owned_nonterminal_and_never_hits_the_wire() {
     let good = RelayUrl::parse("wss://persisted.example").unwrap();
     let blocked = RelayUrl::parse("wss://blocked.example").unwrap();
     let store = SharedFailStartStore::new([blocked.clone()]);
-    let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+    let mut core = EngineCore::new(store, 10);
     connect_signer(&mut core, 0, &good, author.public_key());
     connect_signer(&mut core, 1, &blocked, author.public_key());
     authenticate_signer(&mut core, 0, &good, &author);
@@ -155,7 +155,7 @@ fn one_attempt_start_failure_is_owned_nonterminal_and_never_hits_the_wire() {
 fn sent_never_fires_synchronously_and_only_written_handoff_produces_it() {
     let author = Keys::generate();
     let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(author.public_key().to_hex(), [relay.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
     connect_signer(&mut core, 0, &relay, author.public_key());
     authenticate_signer(&mut core, 0, &relay, &author);
@@ -226,7 +226,7 @@ fn ephemeral_written_handoff_cannot_mint_persisted_sent_truth() {
     let author = Keys::generate();
     let relay_a = RelayUrl::parse("wss://ephemeral-a.example").unwrap();
     let relay_b = RelayUrl::parse("wss://ephemeral-b.example").unwrap();
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     activate(&mut core, &author);
     let accepted = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(93, "ephemeral handoff")),
@@ -276,10 +276,8 @@ fn not_handed_off_and_ambiguous_project_distinct_truth_without_sent() {
     let author = Keys::generate();
     let relay_a = RelayUrl::parse("wss://relay-a.example.com").unwrap();
     let relay_b = RelayUrl::parse("wss://relay-b.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(
-        author.public_key().to_hex(),
-        [relay_a.clone(), relay_b.clone()],
-    );
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(author.public_key(), [relay_a.clone(), relay_b.clone()]);
     let mut core = new_core(dir);
     connect_signer(&mut core, 0, &relay_a, author.public_key());
     connect_signer(&mut core, 1, &relay_b, author.public_key());
@@ -343,7 +341,7 @@ fn not_handed_off_and_ambiguous_project_distinct_truth_without_sent() {
 fn event_handoff_for_an_unknown_correlation_is_inert() {
     let author = Keys::generate();
     let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(author.public_key().to_hex(), [relay.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
     let _ = publish_explicit(&mut core, &author, [relay]);
 
@@ -358,7 +356,7 @@ fn all_attempt_start_failures_retain_every_lane_without_empty_terminal_sentinel(
     let a = RelayUrl::parse("wss://blocked-a.example").unwrap();
     let b = RelayUrl::parse("wss://blocked-b.example").unwrap();
     let store = SharedFailStartStore::new([a.clone(), b.clone()]);
-    let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+    let mut core = EngineCore::new(store, 10);
     connect_signer(&mut core, 0, &a, author.public_key());
     connect_signer(&mut core, 1, &b, author.public_key());
     authenticate_signer(&mut core, 0, &a, &author);
@@ -388,7 +386,7 @@ fn ack_of_persisted_lane_does_not_terminalize_mixed_blocked_obligation() {
     let good = RelayUrl::parse("wss://ack-persisted.example").unwrap();
     let blocked = RelayUrl::parse("wss://still-blocked.example").unwrap();
     let store = SharedFailStartStore::new([blocked.clone()]);
-    let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+    let mut core = EngineCore::new(store, 10);
     core.handle(EngineMsg::RelayConnected(
         RelayHandle {
             slot: 0,
@@ -429,11 +427,7 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("start-failure.redb");
     let receipt = {
-        let mut first = EngineCore::new(
-            RedbFailStartStore::open(&path, [relay.clone()]),
-            Box::new(FixtureDirectory::new()),
-            10,
-        );
+        let mut first = EngineCore::new(RedbFailStartStore::open(&path, [relay.clone()]), 10);
         connect_signer(&mut first, 0, &relay, author.public_key());
         authenticate_signer(&mut first, 0, &relay, &author);
         let (id, _, effects) = publish_explicit(&mut first, &author, [relay.clone()]);
@@ -443,11 +437,7 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
         id
     };
 
-    let mut still_blocked = EngineCore::new(
-        RedbFailStartStore::open(&path, [relay.clone()]),
-        Box::new(FixtureDirectory::new()),
-        10,
-    );
+    let mut still_blocked = EngineCore::new(RedbFailStartStore::open(&path, [relay.clone()]), 10);
     assert!(still_blocked
         .recover_on_boot()
         .iter()
@@ -462,11 +452,7 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
         .contains(&WriteStatus::PersistenceBlocked(relay.clone())));
     drop(still_blocked);
 
-    let mut recovered = EngineCore::new(
-        RedbFailStartStore::open(&path, []),
-        Box::new(FixtureDirectory::new()),
-        10,
-    );
+    let mut recovered = EngineCore::new(RedbFailStartStore::open(&path, []), 10);
     let boot = recovered.recover_on_boot();
     assert!(boot
         .iter()
@@ -507,10 +493,10 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
     let path = dir.path().join("author-route.redb");
     let receipt = {
         let directory =
-            FixtureDirectory::new().with_write(author.public_key().to_hex(), [relay.clone()]);
-        let mut core = EngineCore::new(
+            FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()]);
+        let mut core = EngineCore::new_with_fixture_routing_facts(
             RedbFailStartStore::open(&path, [relay.clone()]),
-            Box::new(directory),
+            directory,
             10,
         );
         connect_signer(&mut core, 0, &relay, author.public_key());
@@ -545,11 +531,7 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
         assert!(store.recover_attempts(intent).unwrap().is_empty());
     }
 
-    let mut recovered = EngineCore::new(
-        RedbFailStartStore::open(&path, []),
-        Box::new(FixtureDirectory::new()),
-        10,
-    );
+    let mut recovered = EngineCore::new(RedbFailStartStore::open(&path, []), 10);
     recovered.recover_on_boot();
     connect_signer(&mut recovered, 0, &relay, author.public_key());
     let effects = release_author_probe(
@@ -581,10 +563,10 @@ fn author_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vo
     let path = dir.path().join("author-route.redb");
     let receipt = {
         let directory =
-            FixtureDirectory::new().with_write(author.public_key().to_hex(), [old.clone()]);
-        let mut core = EngineCore::new(
+            FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [old.clone()]);
+        let mut core = EngineCore::new_with_fixture_routing_facts(
             RedbFailStartStore::open(&path, [old.clone()]),
-            Box::new(directory),
+            directory,
             10,
         );
         connect_signer(&mut core, 0, &old, author.public_key());
@@ -610,10 +592,10 @@ fn author_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vo
     // already-durable old obligation may still start and publish.
     {
         let changed =
-            FixtureDirectory::new().with_write(author.public_key().to_hex(), [new.clone()]);
-        let mut core = EngineCore::new(
+            FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [new.clone()]);
+        let mut core = EngineCore::new_with_fixture_routing_facts(
             RedbFailStartStore::open_with_route_failure(&path),
-            Box::new(changed),
+            changed,
             10,
         );
         core.recover_on_boot();
@@ -681,8 +663,13 @@ fn author_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vo
     // Once a later boot can persist the changed revision, `new` starts. The
     // old lane is retained in route history but is already terminal (Acked),
     // so it is correctly not published again.
-    let changed = FixtureDirectory::new().with_write(author.public_key().to_hex(), [new.clone()]);
-    let mut core = EngineCore::new(RedbFailStartStore::open(&path, []), Box::new(changed), 10);
+    let changed =
+        FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [new.clone()]);
+    let mut core = EngineCore::new_with_fixture_routing_facts(
+        RedbFailStartStore::open(&path, []),
+        changed,
+        10,
+    );
     core.recover_on_boot();
     connect_signer(&mut core, 0, &new, author.public_key());
     let effects = release_author_probe(
@@ -712,10 +699,10 @@ fn route_revision_failure_emits_no_attempt_or_wire_and_claims_no_crash_durable_u
     let path = dir.path().join("route-failure.redb");
     {
         let directory =
-            FixtureDirectory::new().with_write(author.public_key().to_hex(), [relay.clone()]);
-        let mut core = EngineCore::new(
+            FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()]);
+        let mut core = EngineCore::new_with_fixture_routing_facts(
             RedbFailStartStore::open_with_route_failure(&path),
-            Box::new(directory),
+            directory,
             10,
         );
         activate(&mut core, &author);
@@ -743,11 +730,7 @@ fn route_revision_failure_emits_no_attempt_or_wire_and_claims_no_crash_durable_u
     assert!(store.recover_attempts(intent).unwrap().is_empty());
     drop(store);
 
-    let mut recovered = EngineCore::new(
-        RedbFailStartStore::open(&path, []),
-        Box::new(FixtureDirectory::new()),
-        10,
-    );
+    let mut recovered = EngineCore::new(RedbFailStartStore::open(&path, []), 10);
     assert!(recovered.recover_on_boot().is_empty());
 }
 
@@ -756,10 +739,8 @@ fn write_ack_per_relay() {
     let a = Keys::generate();
     let relay_ok = RelayUrl::parse("wss://relay-ok.example.com").unwrap();
     let relay_bad = RelayUrl::parse("wss://relay-bad.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(
-        a.public_key().to_hex(),
-        [relay_ok.clone(), relay_bad.clone()],
-    );
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [relay_ok.clone(), relay_bad.clone()]);
     let mut core = new_core(dir);
     activate(&mut core, &a);
     connect_signer(&mut core, 0, &relay_ok, a.public_key());
@@ -831,10 +812,10 @@ fn write_ack_per_relay() {
 fn uncommitted_attempt_terminal_emits_no_receipt_and_keeps_lane_live() {
     let a = Keys::generate();
     let relay = RelayUrl::parse("wss://finish-failure.example").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]);
-    let mut core = EngineCore::new(
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay.clone()]);
+    let mut core = EngineCore::new_with_fixture_routing_facts(
         FailOnceCompensationStore::failing_attempt_finish(),
-        Box::new(dir),
+        dir,
         10,
     );
     activate(&mut core, &a);
@@ -888,7 +869,7 @@ fn uncommitted_attempt_terminal_emits_no_receipt_and_keeps_lane_live() {
 
 #[test]
 fn unaccepted_failure_ids_are_distinct_and_disjoint_from_store_receipts() {
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     let fail = |core: &mut EngineCore<MemoryStore>, seq| {
         core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Event(draft(seq, "unaccepted")),

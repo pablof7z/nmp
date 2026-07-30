@@ -16,7 +16,6 @@ use nmp::mechanism::core::{HistoryQuery, RelayAdmissionPolicy, RowDelta};
 use nmp::mechanism::runtime::{EngineThread, HistoryReceiver, RowsMsg, RowsReceiver};
 use nmp_grammar::{AccessContext, Binding, Demand, Filter, SourceAuthority};
 use nmp_resolver::LiveQuery;
-use nmp_router::FixtureDirectory;
 use nmp_store::{EventStore, MemoryStore, RedbStore};
 use nmp_transport::PoolConfig;
 use nostr::{EventBuilder, EventId, JsonUtil, Keys, Kind, RelayUrl, Tag, Timestamp};
@@ -725,7 +724,6 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     let (engine_thread, handle) = if config.memory_store {
         EngineThread::spawn(
             MemoryStore::default(),
-            FixtureDirectory::new(),
             config.relays,
             pool_config,
             RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
@@ -745,7 +743,6 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         };
         EngineThread::spawn(
             store,
-            FixtureDirectory::new(),
             config.relays,
             pool_config,
             RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),

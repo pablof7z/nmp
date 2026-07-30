@@ -11,7 +11,7 @@ use nostr::JsonUtil;
 /// One ordered fact from a live observation's real execution.
 ///
 /// `kind` is one of `reactive_input`, `derived_set`, `concrete_filter`,
-/// `relay_request`, `relay_eose`, `relay_closed`, `relay_refused`, `withdrawn`,
+/// `relay_request`, `request_settled`, `relay_closed`, `relay_refused`, `withdrawn`,
 /// or `overflow`. Resolver facts carry exact public wire values in `values`;
 /// relay requests carry their canonical NIP-01 filter JSON there. Additional
 /// scalar correlation fields are ordered key/value `attributes`: `field`,
@@ -139,7 +139,7 @@ impl ObservationEvidence {
                     attribute("replay", replay),
                 ];
             }
-            crate::core::ObservationFact::RelayEose {
+            crate::core::ObservationFact::RequestSettled {
                 path,
                 filter_revision,
                 relay,
@@ -147,8 +147,9 @@ impl ObservationEvidence {
                 transport_generation,
                 request_revision,
                 observed_at,
+                terminal,
             } => {
-                evidence.kind = "relay_eose";
+                evidence.kind = "request_settled";
                 evidence.path = Some(path);
                 evidence.revision = Some(filter_revision);
                 evidence.attributes = vec![
@@ -157,6 +158,13 @@ impl ObservationEvidence {
                     attribute("transport_generation", transport_generation),
                     attribute("request_revision", request_revision),
                     attribute("observed_at", observed_at.as_secs()),
+                    attribute(
+                        "terminal",
+                        match terminal {
+                            crate::core::RequestTerminal::Eose => "eose",
+                            crate::core::RequestTerminal::Nip77 => "nip77",
+                        },
+                    ),
                 ];
             }
             crate::core::ObservationFact::RelayClosed {

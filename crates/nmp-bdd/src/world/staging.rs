@@ -17,13 +17,14 @@
 //! saying what exists, while staging an unfinished lookup is saying what has
 //! not been found yet.
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use nostr::{Keys, PublicKey, Timestamp, UnsignedEvent};
 
 use nmp::mechanism::runtime::Handle;
 use nmp::Engine;
-use nmp_router::{Lane, LanedRelay, LiveDirectory, RelayDirectory, RelayUrl};
+use nmp_router::FixtureRoutingFacts;
 use nmp_store::{EventStore, MemoryStore, RedbStore};
 use nmp_transport::PoolConfig;
 
@@ -210,6 +211,11 @@ impl NmpWorld {
     /// contact list.
     pub fn stage_follows(&mut self, person: &str, follows: &[String]) {
         self.person(person);
+        // A contact list is an authored event just like a staged note. Give
+        // it the same ordinary author-owned fixture route so the derived
+        // query has a real source after the deleted generic indexer lane.
+        // This must not put kind:3 back on operator NIP-65 sources.
+        self.write_relay_for(person);
         for f in follows {
             self.person(f);
         }
@@ -320,7 +326,7 @@ impl NmpWorld {
                 .iter()
                 .map(|name| self.person(name).public_key())
                 .collect();
-            let mut targets: Vec<String> = self.indexer_names.clone();
+            let mut targets: Vec<String> = self.app_relay_names.clone();
             if let Some(own) = self.write_relay_of.get(&pending.author) {
                 for r in own {
                     if !targets.contains(r) {
@@ -354,68 +360,43 @@ impl NmpWorld {
         self.spawn_engine().await;
     }
 
-    /// Build the directory from the staged relay topology and spawn a REAL
+    /// Build the neutral fact snapshot from the staged relay topology and spawn a REAL
     /// `EngineThread` over this scenario's durable store.
     ///
     /// Its own method, called by `ensure_started` and again by the identity
     /// plane's restart step, because "reconstruct the engine from the same
     /// durable store" only means anything if the second engine is built the
-    /// same way the first was -- same directory facts, same relays, same
+    /// same way the first was -- same routing facts, same relays, same
     /// admission policy, nothing carried over in memory.
     pub(super) async fn spawn_engine(&mut self) {
-        let indexer_urls: Vec<RelayUrl> = self
-            .indexer_names
-            .iter()
-            .map(|name| self.relays[name].url.clone())
-            .collect();
-        // The operator's own sets, alongside the indexers and on the same
-        // footing: configured facts the engine is handed, never anything it
-        // discovered. `app_relays` is additive for every write and
-        // `fallback_relays` tops up a short recipient unless an app relay
-        // suppressed it.
+        // Static neutral facts are a BDD-only snapshot. Indexers remain
+        // staged protocol sources; generic routing does not see them.
         let app_urls = self.app_relay_urls();
         let fallback_urls = self.fallback_relay_urls();
-        let mut directory = LiveDirectory::builder()
-            .indexers(indexer_urls)
-            .app_relays(app_urls)
-            .fallback_relays(fallback_urls)
-            .build();
-        for (person, relay_names) in self.write_relay_of.clone() {
-            let pk_hex = self.person(&person).public_key().to_hex();
-            let laned: Vec<LanedRelay> = relay_names
-                .iter()
-                .map(|name| LanedRelay::new(self.relays[name].url.clone(), Lane::Nip65Write))
-                .collect();
-            directory.ingest_write_relays(pk_hex, laned);
-        }
-        // The INBOX half, and a distinct one: an outbox fan-out reaches a
-        // p-tagged recipient at their READ relays and never at their write
-        // set, so a world that staged only one of the two would let a
-        // scenario pass for the wrong reason.
-        for (person, relay_names) in self.read_relay_of.clone() {
-            let pk_hex = self.person(&person).public_key().to_hex();
-            let laned: Vec<LanedRelay> = relay_names
-                .iter()
-                .map(|name| LanedRelay::new(self.relays[name].url.clone(), Lane::Nip65Read))
-                .collect();
-            directory.ingest_read_relays(pk_hex, laned);
-        }
-        // A kind:10002 that names nothing is still an ingested FACT: the
-        // directory records the empty set rather than leaving the author
-        // unresolved, which is exactly the distinction `Known` (possibly
-        // zero) versus `Unknown` exists to keep.
-        for person in self.declares_no_relays.clone() {
-            let pk_hex = self.person(&person).public_key().to_hex();
-            directory.ingest_write_relays(pk_hex.clone(), Vec::new());
-            directory.ingest_read_relays(pk_hex, Vec::new());
-        }
-        // The half-empty list: it exists, and its WRITE half names nothing.
-        // Recorded after the two loops above so a person who also declared
-        // read relays keeps them -- a list whose entries are all read-marked
-        // is exactly this shape, and it is still an answer.
-        for person in self.declares_no_write_relays.clone() {
-            let pk_hex = self.person(&person).public_key().to_hex();
-            directory.ingest_write_relays(pk_hex, Vec::new());
+        let mut facts = FixtureRoutingFacts::new()
+            .with_operator_app(app_urls)
+            .with_operator_fallback(fallback_urls);
+        let mut authors = BTreeSet::new();
+        authors.extend(self.write_relay_of.keys().cloned());
+        authors.extend(self.read_relay_of.keys().cloned());
+        authors.extend(self.declares_no_relays.iter().cloned());
+        authors.extend(self.declares_no_write_relays.iter().cloned());
+        for person in authors {
+            let outbound = self
+                .write_relay_of
+                .get(&person)
+                .into_iter()
+                .flatten()
+                .map(|name| self.relays[name].url.clone())
+                .collect::<Vec<_>>();
+            let inbound = self
+                .read_relay_of
+                .get(&person)
+                .into_iter()
+                .flatten()
+                .map(|name| self.relays[name].url.clone())
+                .collect::<Vec<_>>();
+            facts = facts.with_author_routes(self.person(&person).public_key(), outbound, inbound);
         }
 
         // Which store, decided where the decision is: in memory by default,
@@ -434,9 +415,9 @@ impl NmpWorld {
         // before any `When` exists to ask.
         let (engine, handle) = if self.durable_store {
             let store = self.open_durable_store();
-            self.spawn_over(store, directory)
+            self.spawn_over(store, facts)
         } else {
-            self.spawn_over(MemoryStore::new(), directory)
+            self.spawn_over(MemoryStore::new(), facts)
         };
 
         self.engine = Some(engine);
@@ -479,24 +460,27 @@ impl NmpWorld {
     /// delta and diagnostics channels a `Then` step has to FOLD run through
     /// the same engine's `Handle`. See `Engine::mechanism_handle`'s doc for
     /// why a fixture that owns both ends may hold both.
-    fn spawn_over<S>(&self, store: S, directory: LiveDirectory) -> (Engine, Handle)
+    fn spawn_over<S>(&self, store: S, facts: FixtureRoutingFacts) -> (Engine, Handle)
     where
         S: EventStore + Send + 'static,
     {
-        let engine = Engine::from_parts(
+        let nip65_sources = self
+            .indexer_names
+            .iter()
+            .map(|name| self.relays[name].url.clone())
+            .collect();
+        let engine = Engine::from_parts_with_fixture_routing_facts_and_nip65_sources(
             store,
-            directory,
+            facts,
+            nip65_sources,
             20,
             PoolConfig {
                 reconnect_delay_initial: Some(Duration::from_millis(20)),
                 ..PoolConfig::default()
             },
-            // The BDD harness injects its (local, in-process) relays straight
-            // into the directory via `ingest_write_relays`, so they never pass
-            // through the engine's discovered-relay admission gate (issue
-            // #121). Opt those local hosts in anyway, so any scenario that DOES
-            // exercise kind:10002 discovery of a scripted local relay is
-            // admitted rather than silently dropped.
+            // Static fixture facts do not pass through the network-discovery
+            // gate. Opt local hosts in because feature-on NIP-65 scenarios do
+            // discover routes from scripted local relay-list events.
             nmp::mechanism::core::RelayAdmissionPolicy::new([
                 "127.0.0.1".to_string(),
                 "localhost".to_string(),

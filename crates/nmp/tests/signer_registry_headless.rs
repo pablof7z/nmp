@@ -3,7 +3,7 @@
 //! reactive reads and authorizes default unsigned acceptance. Once accepted,
 //! a write resolves the exact signer frozen at that boundary; later read-root
 //! changes cannot redirect it. Deliberately
-//! offline (an empty `FixtureDirectory`, `MemoryStore` pre-seeded directly
+//! offline (an empty `FixtureRoutingFacts`, `MemoryStore` pre-seeded directly
 //! via `EventStore::insert` rather than a live relay round trip): the read
 //! side's first batch is computed purely from the local store
 //! (`EngineCore::on_subscribe`, zero I/O -- the same fact
@@ -27,7 +27,7 @@ use nmp_grammar::{Binding, Filter, IdentityField};
 use nmp_grammar::{Durability, EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_local_signer::LocalKeySigner;
 use nmp_resolver::LiveQuery;
-use nmp_router::FixtureDirectory;
+use nmp_router::FixtureRoutingFacts;
 use nmp_signer::{
     SignerError, SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent,
     SigningCapability,
@@ -187,9 +187,9 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
     // never needs one (the local store already answers the first batch);
     // the write side's routing will fail closed AFTER `Signed` is already
     // observed, which is all this test needs (see the module doc).
-    let dir = FixtureDirectory::new();
+    let dir = FixtureRoutingFacts::new();
 
-    let (engine_thread, handle) = EngineThread::spawn(
+    let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
         store,
         dir,
         10,
@@ -323,8 +323,8 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
 fn no_active_account_cannot_select_an_arbitrary_registered_signer() {
     let a = Keys::generate();
     let store = MemoryStore::new();
-    let dir = FixtureDirectory::new();
-    let (engine_thread, handle) = EngineThread::spawn(
+    let dir = FixtureRoutingFacts::new();
+    let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
         store,
         dir,
         10,
@@ -371,7 +371,7 @@ fn no_active_account_cannot_select_an_arbitrary_registered_signer() {
 /// changes hollowed that claim out: a builder structurally cannot carry an
 /// author (#1005), so there was nothing "b-authored" left to reject, and the
 /// only `Failed` it was actually observing came from `AuthorOutbox` erroring
-/// on an empty `FixtureDirectory` — the exact defect this issue fixes. What
+/// on an empty `FixtureRoutingFacts` — the exact defect this issue fixes. What
 /// the fixture really pins is restated here as the property that replaced it.
 #[test]
 fn an_auto_write_on_a_cold_directory_parks_instead_of_failing() {
@@ -379,7 +379,6 @@ fn an_auto_write_on_a_cold_directory_parks_instead_of_failing() {
     let b = Keys::generate();
     let (engine_thread, handle) = EngineThread::spawn(
         MemoryStore::new(),
-        FixtureDirectory::new(),
         10,
         Default::default(),
         RelayAdmissionPolicy::default(),
@@ -441,7 +440,6 @@ fn a_builder_composed_before_a_switch_publishes_as_the_account_active_at_accepta
     let b_calls = Arc::new(AtomicUsize::new(0));
     let (engine_thread, handle) = EngineThread::spawn(
         MemoryStore::new(),
-        FixtureDirectory::new(),
         10,
         Default::default(),
         RelayAdmissionPolicy::default(),
@@ -505,7 +503,6 @@ fn attaching_matching_signer_rearms_awaiting_intent() {
     let a = Keys::generate();
     let (engine_thread, handle) = EngineThread::spawn(
         MemoryStore::new(),
-        FixtureDirectory::new(),
         10,
         Default::default(),
         RelayAdmissionPolicy::default(),
@@ -559,7 +556,6 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
     let b = Keys::generate();
     let (engine_thread, handle) = EngineThread::spawn(
         MemoryStore::new(),
-        FixtureDirectory::new(),
         10,
         Default::default(),
         RelayAdmissionPolicy::default(),
@@ -615,7 +611,6 @@ fn stale_registration_cannot_detach_replacement_for_same_pubkey() {
     let keys = Keys::generate();
     let (engine_thread, handle) = EngineThread::spawn(
         MemoryStore::new(),
-        FixtureDirectory::new(),
         10,
         Default::default(),
         RelayAdmissionPolicy::default(),
@@ -708,7 +703,6 @@ fn an_explicit_identity_signs_as_a_registered_secondary_without_rerooting_active
     let b = Keys::generate();
     let (engine_thread, handle) = EngineThread::spawn(
         MemoryStore::new(),
-        FixtureDirectory::new(),
         10,
         Default::default(),
         RelayAdmissionPolicy::default(),
@@ -823,7 +817,6 @@ fn unregistered_override_parks_durably_and_never_retargets_on_account_switch() {
     let b = Keys::generate();
     let (engine_thread, handle) = EngineThread::spawn(
         MemoryStore::new(),
-        FixtureDirectory::new(),
         10,
         Default::default(),
         RelayAdmissionPolicy::default(),
@@ -896,7 +889,6 @@ fn an_explicit_identity_signs_while_logged_out() {
     let b = Keys::generate();
     let (engine_thread, handle) = EngineThread::spawn(
         MemoryStore::new(),
-        FixtureDirectory::new(),
         10,
         Default::default(),
         RelayAdmissionPolicy::default(),
@@ -939,7 +931,6 @@ fn an_explicit_identity_signs_while_logged_out() {
 fn pubkeyless_capability_is_a_typed_registration_error() {
     let (engine_thread, handle) = EngineThread::spawn(
         MemoryStore::new(),
-        FixtureDirectory::new(),
         10,
         Default::default(),
         RelayAdmissionPolicy::default(),

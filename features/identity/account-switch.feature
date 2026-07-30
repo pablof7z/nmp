@@ -1,6 +1,6 @@
 Feature: Current-pubkey-dependent demand reroots
   Scenario: A query using the current pubkey follows the new input
-    Given only 1 indexer relay is configured
+    Given app relays "account-source" are configured
     And Carol's relay list names "carol-relay" as her write relay
     And Dave's relay list names "dave-relay" as his write relay
     And Carol has posted a note saying "hello from carol"

@@ -6,7 +6,7 @@ use super::*;
 mod receipt_allocator_tests {
     use super::*;
 
-    use nmp_router::FixtureDirectory;
+    use nmp_router::FixtureRoutingFacts;
     use nmp_store::MemoryStore;
     use nostr::{Keys, Kind};
 
@@ -23,6 +23,22 @@ mod receipt_allocator_tests {
             identity: Identity::Active,
             correlation: None,
         }
+    }
+
+    fn frozen_note(author: PublicKey) -> SignedEvent {
+        let created_at = Timestamp::from(1_700_000_000);
+        let kind = Kind::TextNote;
+        let tags = nostr::Tags::new();
+        let content = "route need".to_string();
+        SignedEvent::new(
+            EventId::new(&author, &created_at, &kind, &tags, &content),
+            author,
+            created_at,
+            kind,
+            tags,
+            content,
+            nmp_store::sentinel_signature(),
+        )
     }
 
     #[test]
@@ -54,7 +70,7 @@ mod receipt_allocator_tests {
             )
             .unwrap();
 
-        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+        let mut core = EngineCore::new(store, 10);
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::ReplaceableEdit {
@@ -91,7 +107,7 @@ mod receipt_allocator_tests {
     #[test]
     fn last_upper_half_id_is_issued_once_then_exhaustion_is_stable_and_typed() {
         const FIRST_UNACCEPTED_ID: u64 = 1u64 << 63;
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 10);
+        let mut core = EngineCore::new(MemoryStore::new(), 10);
         core.set_next_unaccepted_receipt_for_test(Some(FIRST_UNACCEPTED_ID));
 
         let last = core.handle(EngineMsg::Publish(rejected_intent(1)));
@@ -127,7 +143,7 @@ mod receipt_allocator_tests {
 
     #[test]
     fn last_attempt_correlation_is_issued_once_then_exhaustion_is_stable_and_typed() {
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 10);
+        let mut core = EngineCore::new(MemoryStore::new(), 10);
         core.set_next_attempt_correlation_for_test(Some(u64::MAX));
 
         assert_eq!(
@@ -150,8 +166,9 @@ mod receipt_allocator_tests {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://correlation-exhausted.example").unwrap();
         let directory =
-            FixtureDirectory::new().with_write(keys.public_key().to_hex(), [relay.clone()]);
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(directory), 10);
+            FixtureRoutingFacts::new().with_outbound_routes(keys.public_key(), [relay.clone()]);
+        let mut core =
+            EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), directory, 10);
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Event(nmp_grammar::EventBuilder {
@@ -212,8 +229,8 @@ mod receipt_allocator_tests {
         let a = RelayUrl::parse("wss://chosen-a.example").unwrap();
         let b = RelayUrl::parse("wss://chosen-b.example").unwrap();
         let unrelated = RelayUrl::parse("wss://unrelated.example").unwrap();
-        let directory = FixtureDirectory::new().with_write(author.to_hex(), [unrelated]);
-        let core = EngineCore::new(MemoryStore::new(), Box::new(directory), 10);
+        let directory = FixtureRoutingFacts::new().with_outbound_routes(author, [unrelated]);
+        let core = EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), directory, 10);
         let route = WriteRouting::Explicit(vec![b.clone(), a.clone()]);
 
         let created_at = Timestamp::from(1_700_000_000);
@@ -237,8 +254,67 @@ mod receipt_allocator_tests {
             "an explicit route executes only the caller's set and never unions a directory fact"
         );
         assert!(
-            answer.complete && answer.unknown_authors.is_empty(),
+            answer.complete && answer.author_route_needs.is_empty(),
             "verbatim execution reads nothing, so it can never learn anything later: {answer:?}"
+        );
+    }
+
+    #[test]
+    fn every_zero_destination_author_state_remains_a_provider_need() {
+        let author = Keys::generate().public_key();
+        let event = frozen_note(author);
+        let cases = [
+            ("Unknown", "Unknown", FixtureRoutingFacts::new()),
+            (
+                "Present empty",
+                "Present outbound",
+                FixtureRoutingFacts::new().with_author_routes(author, [], []),
+            ),
+            (
+                "Absent",
+                "Absent",
+                FixtureRoutingFacts::new().with_author_absent(author),
+            ),
+        ];
+
+        for (label, detail_label, facts) in cases {
+            let core = EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), facts, 10);
+            let answer = core.resolve_routes(&WriteRouting::Auto, &event);
+
+            assert!(
+                answer.relays.is_empty() && !answer.complete,
+                "{label} with no operator route must park: {answer:?}"
+            );
+            assert_eq!(
+                answer.author_route_needs,
+                BTreeSet::from([author]),
+                "{label} remains a provider need because a later positive replacement is the only unpark signal"
+            );
+            assert!(
+                answer
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains(detail_label)),
+                "the receipt must distinguish {label} truthfully: {answer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_settled_zero_route_author_retires_when_an_operator_route_exists() {
+        let author = Keys::generate().public_key();
+        let app = RelayUrl::parse("wss://app.example").unwrap();
+        let facts = FixtureRoutingFacts::new()
+            .with_author_absent(author)
+            .with_operator_app([app.clone()]);
+        let core = EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), facts, 10);
+
+        let answer = core.resolve_routes(&WriteRouting::Auto, &frozen_note(author));
+
+        assert_eq!(answer.relays, BTreeSet::from([app]));
+        assert!(
+            answer.complete && answer.author_route_needs.is_empty(),
+            "a settled contributor with an actual destination has no remaining provider need: {answer:?}"
         );
     }
 

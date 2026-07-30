@@ -1336,17 +1336,12 @@ pub fn cancel_write_outcome_to_ffi(outcome: CancelWriteOutcome) -> FfiCancelWrit
 /// `FfiSelector`/`FfiBinding` have for the filter grammar.
 fn lane_to_ffi_string(lane: Lane) -> String {
     match lane {
-        Lane::Nip65Write => "nip65_write",
+        Lane::AuthorOutbound => "author_outbound",
         Lane::Hint => "hint",
         Lane::Provenance => "provenance",
-        Lane::UserConfigured => "user_configured",
-        Lane::IndexerDiscovery => "indexer_discovery",
-        Lane::GroupHost => "group_host",
-        Lane::DmInbox => "dm_inbox",
-        Lane::Nip65Read => "nip65_read",
-        Lane::AppRelay => "app_relay",
-        Lane::Fallback => "fallback",
-        Lane::ExplicitPinned => "explicit_pinned",
+        Lane::OperatorApp => "operator_app",
+        Lane::OperatorFallback => "operator_fallback",
+        Lane::Exact => "exact",
     }
     .to_string()
 }
@@ -1508,10 +1503,10 @@ mod write_status_tests {
             ),
             (
                 GWriteStatus::AwaitingRoute {
-                    detail: "no relay list known yet for beef".to_string(),
+                    detail: "no route is known yet for beef".to_string(),
                 },
                 FfiWriteStatus::AwaitingRoute {
-                    detail: "no relay list known yet for beef".to_string(),
+                    detail: "no route is known yet for beef".to_string(),
                 },
             ),
             (
@@ -2091,7 +2086,7 @@ mod tests {
                 subid_length_limit: None,
                 subid_length_rejects_our_ids: false,
                 authors_served: 1,
-                by_lane: vec![(Lane::AppRelay, 2)],
+                by_lane: vec![(Lane::OperatorApp, 2)],
                 filters: vec!["{\"kinds\":[9999]}".to_string()],
                 events_by_kind: vec![(9999, 3)],
                 coverage: vec![
@@ -2126,7 +2121,7 @@ mod tests {
                 StalledWrite {
                     id: "unroutable-descriptor".to_string(),
                     stage: StalledWriteStage::Unroutable,
-                    detail: "no DM relay list known yet".to_string(),
+                    detail: "no route is known yet".to_string(),
                     stalled_since: Timestamp::from(1_700_000_001u64),
                 },
                 StalledWrite {
@@ -2173,7 +2168,7 @@ mod tests {
                 (
                     "unroutable-descriptor",
                     FfiStalledWriteStage::Unroutable,
-                    "no DM relay list known yet",
+                    "no route is known yet",
                     1_700_000_001u64
                 ),
                 (

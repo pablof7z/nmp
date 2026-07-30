@@ -42,7 +42,7 @@ use nmp_nip02::{
 use nostr::{JsonUtil, Keys, Kind};
 
 const WAIT: Duration = Duration::from_secs(10);
-const DISCOVERY_TRIGGER_KIND: u16 = 9_997;
+const SOURCE_ANCHOR_KIND: u16 = 9_997;
 const QUERY_KIND: u16 = 9_998;
 const WRITE_KIND: u16 = 9_999;
 const REATTACH_LIVE_KIND: u16 = 9_996;
@@ -303,7 +303,7 @@ struct NormDiagnostics {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HandoffBaseline {
-    discovery: u64,
+    anchor: u64,
     content: u64,
 }
 
@@ -475,17 +475,12 @@ fn recv_before<T, R: TimedRecv<T>>(rx: &R, deadline: Instant, what: &str) -> T {
 
 fn lane_name(lane: Lane) -> &'static str {
     match lane {
-        Lane::Nip65Write => "nip65_write",
+        Lane::AuthorOutbound => "author_outbound",
         Lane::Hint => "hint",
         Lane::Provenance => "provenance",
-        Lane::UserConfigured => "user_configured",
-        Lane::IndexerDiscovery => "indexer_discovery",
-        Lane::GroupHost => "group_host",
-        Lane::DmInbox => "dm_inbox",
-        Lane::Nip65Read => "nip65_read",
-        Lane::AppRelay => "app_relay",
-        Lane::Fallback => "fallback",
-        Lane::ExplicitPinned => "explicit_pinned",
+        Lane::OperatorApp => "operator_app",
+        Lane::OperatorFallback => "operator_fallback",
+        Lane::Exact => "exact",
     }
 }
 
@@ -967,38 +962,39 @@ fn handoff_is_quiescent(
     let [relay] = snapshot.relays.as_slice() else {
         return None;
     };
-    let has_discovery = relay
+    let has_anchor = relay
         .filters
         .iter()
-        .any(|filter| filter_names_kind(filter, DISCOVERY_TRIGGER_KIND));
+        .any(|filter| filter_names_kind(filter, SOURCE_ANCHOR_KIND));
     let has_content = relay
         .filters
         .iter()
         .any(|filter| filter_names_kind(filter, QUERY_KIND));
-    let has_internal_discovery = relay
+    let has_nip65_query = relay
         .filters
         .iter()
         .any(|filter| filter_names_kind(filter, Kind::RelayList.as_u16()));
-    let routed_through_nip65 = relay
+    let routed_through_app_policy = relay
         .by_lane
         .iter()
-        .any(|(lane, count)| lane == "nip65_write" && *count > 0);
+        .any(|(lane, count)| lane == "operator_app" && *count > 0);
     let baseline = HandoffBaseline {
-        discovery: relay_witness.query_count_for_kind(Kind::RelayList.as_u16()),
+        anchor: relay_witness.query_count_for_kind(SOURCE_ANCHOR_KIND),
         content: relay_witness.query_count_for_kind(QUERY_KIND),
     };
-    // The explicit discovery-trigger subscription is still owned at this
+    // The explicit source-anchor subscription is still owned at this
     // barrier, so its filter must remain in every current snapshot until the
-    // named cancellation below. The actual relay REQ counters plus cumulative
-    // engine event counters are the durable proof that the internal NIP-65
-    // discovery and content phases crossed the wire and were processed (#722).
-    (has_discovery
+    // named cancellation below. This crate builds nmp without the optional
+    // `nip65` feature: the absence of any kind:10002 request is the
+    // load-bearing feature-off truth, while both ordinary requests must route
+    // through the configured app policy.
+    (has_anchor
         && has_content
-        && !has_internal_discovery
-        && routed_through_nip65
-        && baseline.discovery != 0
+        && !has_nip65_query
+        && routed_through_app_policy
+        && baseline.anchor != 0
         && baseline.content != 0
-        && event_count(relay, Kind::RelayList.as_u16()) == baseline.discovery
+        && event_count(relay, SOURCE_ANCHOR_KIND) == baseline.anchor
         && event_count(relay, QUERY_KIND) == baseline.content)
         .then_some(baseline)
 }
@@ -1016,22 +1012,22 @@ fn content_phase_is_quiescent(
         .iter()
         .any(|filter| filter_names_kind(filter, QUERY_KIND));
     let has_stale_filter = relay.filters.iter().any(|filter| {
-        filter_names_kind(filter, DISCOVERY_TRIGGER_KIND)
+        filter_names_kind(filter, SOURCE_ANCHOR_KIND)
             || filter_names_kind(filter, Kind::RelayList.as_u16())
     });
-    let routed_through_nip65 = relay
+    let routed_through_app_policy = relay
         .by_lane
         .iter()
-        .any(|(lane, count)| lane == "nip65_write" && *count > 0);
+        .any(|(lane, count)| lane == "operator_app" && *count > 0);
     let content_req_count = relay_witness.query_count_for_kind(QUERY_KIND);
-    let discovery_req_count = relay_witness.query_count_for_kind(Kind::RelayList.as_u16());
+    let anchor_req_count = relay_witness.query_count_for_kind(SOURCE_ANCHOR_KIND);
     has_content
         && !has_stale_filter
-        && routed_through_nip65
+        && routed_through_app_policy
         && content_req_count == baseline.content
-        && discovery_req_count == baseline.discovery
+        && anchor_req_count == baseline.anchor
         && event_count(relay, QUERY_KIND) == baseline.content
-        && event_count(relay, Kind::RelayList.as_u16()) == baseline.discovery
+        && event_count(relay, SOURCE_ANCHOR_KIND) == baseline.anchor
         && !relay.coverage.is_empty()
         && relay
             .coverage
@@ -1047,17 +1043,17 @@ fn assert_content_phase_diagnostics(
 ) {
     assert!(
         content_phase_is_quiescent(snapshot, baseline, relay),
-        "{surface} diagnostics must contain only the discovered NIP-65-routed content plan, \
-         with content/discovery REQs and events unchanged from the drained handoff \
+        "{surface} diagnostics must contain only the app-policy-routed content plan, \
+         with content/source-anchor REQs and events unchanged from the drained handoff \
          baseline {baseline:?}: {snapshot:?}"
     );
 }
 
-// Borrow the live discovery subscription across the barrier. This is an
+// Borrow the live source-anchor subscription across the barrier. This is an
 // ownership witness, not data input: the caller cannot consume/cancel the
 // subscription before the pre-cancel diagnostics state has been accepted.
 fn wait_for_direct_handoff_quiescence(
-    _discovery_subscription: &Subscription,
+    _anchor_subscription: &Subscription,
     rx: &mpsc::Receiver<DiagnosticsSnapshot>,
     relay: &ScriptedRelay,
 ) -> HandoffBaseline {
@@ -1069,8 +1065,8 @@ fn wait_for_direct_handoff_quiescence(
             panic!(
                 "direct handoff diagnostics did not settle within the total {WAIT:?} bound: \
                  {error}; last snapshot: {last_diagnostics:?}; relay query counts: \
-                 discovery={}, content={}",
-                relay.query_count_for_kind(Kind::RelayList.as_u16()),
+                 anchor={}, content={}",
+                relay.query_count_for_kind(SOURCE_ANCHOR_KIND),
                 relay.query_count_for_kind(QUERY_KIND),
             )
         });
@@ -1094,8 +1090,8 @@ fn wait_for_ffi_handoff_quiescence(
             panic!(
                 "FFI handoff diagnostics did not settle within the total {WAIT:?} bound: \
                  {error}; last snapshot: {last_diagnostics:?}; relay query counts: \
-                 discovery={}, content={}",
-                relay.query_count_for_kind(Kind::RelayList.as_u16()),
+                 anchor={}, content={}",
+                relay.query_count_for_kind(SOURCE_ANCHOR_KIND),
                 relay.query_count_for_kind(QUERY_KIND),
             )
         });
@@ -1198,7 +1194,7 @@ fn collect_ffi_receipts_until_awaiting_auth(
 /// lane as `AwaitingAuth` until the transport's ordered first-read
 /// completion releases it (a relay that never challenges releases within
 /// the window; one that does parks it for real).
-fn expected_send_preamble(keys: &Keys) -> Vec<NormStatus> {
+fn expected_send_preamble(keys: &Keys, route_complete: bool) -> Vec<NormStatus> {
     let event = UnsignedEvent::new(
         keys.public_key(),
         Timestamp::from(WRITE_CREATED_AT),
@@ -1212,17 +1208,19 @@ fn expected_send_preamble(keys: &Keys) -> Vec<NormStatus> {
     vec![
         NormStatus::Accepted,
         NormStatus::Signed(event.id.to_hex()),
-        // An explicit route reads no directory facts, so it has no unknowns
-        // and is complete at its first resolution.
-        NormStatus::Routed(vec![relay.clone()], true),
+        // These feature-off Auto scenarios get an executable destination
+        // from operator app policy while the author's neutral route fact
+        // remains Unknown. Delivery may finish; routing truthfully stays
+        // open because no optional provider is assembled in this crate.
+        NormStatus::Routed(vec![relay.clone()], route_complete),
         NormStatus::AwaitingRelay(relay.clone()),
         NormStatus::AwaitingAuth(relay.clone()),
         NormStatus::Sent(relay),
     ]
 }
 
-fn expected_success_receipts(keys: &Keys) -> Vec<NormStatus> {
-    let mut receipts = expected_send_preamble(keys);
+fn expected_success_receipts(keys: &Keys, route_complete: bool) -> Vec<NormStatus> {
+    let mut receipts = expected_send_preamble(keys, route_complete);
     receipts.push(NormStatus::Acked("<loopback-relay>".to_string()));
     receipts
 }
@@ -1232,18 +1230,22 @@ fn expected_success_receipts(keys: &Keys) -> Vec<NormStatus> {
 /// `OK false "auth-required:"` the write emits exactly one `AwaitingAuth`
 /// beat and the lane stays parked — no retry, no terminal status.
 fn expected_auth_parked_receipts(keys: &Keys) -> Vec<NormStatus> {
-    let mut receipts = expected_send_preamble(keys);
+    let mut receipts = expected_send_preamble(keys, false);
     receipts.push(NormStatus::AwaitingAuth("<loopback-relay>".to_string()));
     receipts
 }
 
-fn stage_direct_discovery(engine: &Engine, pubkey: &str, relay: &ScriptedRelay) -> Subscription {
+fn stage_direct_source_anchor(
+    engine: &Engine,
+    pubkey: &str,
+    relay: &ScriptedRelay,
+) -> Subscription {
     let subscription = engine
         .observe(
-            LiveQuery::from_filter(direct_filter(pubkey, DISCOVERY_TRIGGER_KIND)),
+            LiveQuery::from_filter(direct_filter(pubkey, SOURCE_ANCHOR_KIND)),
             None,
         )
-        .expect("direct discovery query must open");
+        .expect("direct source-anchor query must open");
 
     let deadline = Instant::now() + WAIT;
     loop {
@@ -1252,8 +1254,8 @@ fn stage_direct_discovery(engine: &Engine, pubkey: &str, relay: &ScriptedRelay) 
             .recv_timeout(remaining)
             .unwrap_or_else(|error| {
                 panic!(
-                "direct discovery query did not settle within the total {WAIT:?} bound: {error}"
-            )
+                    "direct source-anchor query did not settle within the total {WAIT:?} bound: {error}"
+                )
             });
         let evidence = normalize_direct_evidence(frame.evidence, relay.url.as_str());
         if evidence == expected_limited_evidence() {
@@ -1263,19 +1265,19 @@ fn stage_direct_discovery(engine: &Engine, pubkey: &str, relay: &ScriptedRelay) 
     subscription
 }
 
-fn stage_ffi_discovery(
+fn stage_ffi_source_anchor(
     engine: &NmpEngine,
     pubkey: &str,
     relay: &ScriptedRelay,
 ) -> Arc<NmpRowStream> {
     let handle = engine
-        .observe(ffi_filter(pubkey, DISCOVERY_TRIGGER_KIND), None)
-        .expect("FFI discovery query must open");
+        .observe(ffi_filter(pubkey, SOURCE_ANCHOR_KIND), None)
+        .expect("FFI source-anchor query must open");
     let rx = bridge_rows(&handle);
 
     let deadline = Instant::now() + WAIT;
     loop {
-        let (_deltas, evidence) = recv_before(&rx, deadline, "FFI discovery query");
+        let (_deltas, evidence) = recv_before(&rx, deadline, "FFI source-anchor query");
         let evidence = normalize_ffi_evidence(evidence, relay.url.as_str());
         if evidence == expected_limited_evidence() {
             break;
@@ -1286,7 +1288,11 @@ fn stage_ffi_discovery(
 
 async fn setup_relay(keys: &Keys, query_event: &nostr::Event) -> ScriptedRelay {
     let relay = ScriptedRelay::start(&RelayConfig::default()).await;
-    relay.seed_own_relay_list(keys, QUERY_CREATED_AT - 1).await;
+    let anchor = nostr::EventBuilder::new(Kind::Custom(SOURCE_ANCHOR_KIND), "source anchor")
+        .custom_created_at(Timestamp::from(QUERY_CREATED_AT - 1))
+        .sign_with_keys(keys)
+        .expect("source anchor fixture must sign");
+    relay.seed_signed_event(&anchor).await;
     relay.seed_signed_event(query_event).await;
     relay
 }
@@ -1469,8 +1475,8 @@ fn routing_axis(seen: &[NormFollowActionStatus]) -> Vec<&'static str> {
 /// This is NOT the oracle tolerating a difference. Every fact is still
 /// compared, and each axis's own order is still compared exactly; what is
 /// dropped is the one degree of freedom `resolution-lifecycle.md` §7.2.1
-/// already pins as unordered by construction — routing advances on discovery
-/// round-trips, delivery on delivery round-trips, and nothing sequences those
+/// already pins as unordered by construction — routing advances on provider
+/// fact changes, delivery on delivery round-trips, and nothing sequences those
 /// two against each other on either surface.
 fn canonical_axes(seen: Vec<NormFollowActionStatus>) -> Vec<NormFollowActionStatus> {
     let (routing, rest): (Vec<_>, Vec<_>) = seen.into_iter().partition(|status| {
@@ -1482,17 +1488,13 @@ fn canonical_axes(seen: Vec<NormFollowActionStatus>) -> Vec<NormFollowActionStat
     rest.into_iter().chain(routing).collect()
 }
 
-/// Drain a follow action to CLOSURE, never to the first delivery terminal.
+/// Drain through the action's delivery terminal.
 ///
-/// Routing completeness advances on discovery round-trips and delivery
-/// advances on delivery round-trips, and nothing orders those two against
-/// each other — so a prefix cut at `Acked` has no stable total order and two
-/// runs of the identical scenario legitimately produce different vectors
-/// (`resolution-lifecycle.md` §7.2.1). Closure is causally after BOTH, which
-/// is the only cut a direct/FFI comparison can be made over.
-///
-/// Waiting for closure is waiting on settlement, so the wait is bounded and
-/// its expiry names which axis failed to advance.
+/// This parity crate deliberately builds feature-off. Operator app policy
+/// supplies an executable route, but no optional protocol provider can settle
+/// the author's neutral route fact, so the routing axis remains open after
+/// delivery. Waiting for stream closure here would falsely require NIP-65
+/// behavior from a build that does not contain it.
 fn collect_direct_follow_action(action: FollowAction) -> Vec<NormFollowActionStatus> {
     let deadline = Instant::now() + WAIT;
     let mut result = Vec::new();
@@ -1507,7 +1509,7 @@ fn collect_direct_follow_action(action: FollowAction) -> Vec<NormFollowActionSta
                 stalled_axes(&result)
             ),
         };
-        result.push(match status {
+        let normalized = match status {
             FollowActionStatus::Acquiring => NormFollowActionStatus::Acquiring,
             FollowActionStatus::NoChange { following } => {
                 NormFollowActionStatus::NoChange(following)
@@ -1518,7 +1520,24 @@ fn collect_direct_follow_action(action: FollowAction) -> Vec<NormFollowActionSta
             FollowActionStatus::Failed(failure) => {
                 NormFollowActionStatus::Failed(format!("{failure:?}"))
             }
-        });
+        };
+        let done = matches!(
+            normalized,
+            NormFollowActionStatus::NoChange(_)
+                | NormFollowActionStatus::Failed(_)
+                | NormFollowActionStatus::Receipt(
+                    "acked"
+                        | "rejected"
+                        | "gave_up"
+                        | "replaceable_conflict"
+                        | "superseded"
+                        | "failed"
+                )
+        );
+        result.push(normalized);
+        if done {
+            return canonical_axes(result);
+        }
     }
 }
 
@@ -1538,7 +1557,7 @@ fn collect_ffi_follow_action(
                 stalled_axes(&result)
             ),
         };
-        result.push(match status {
+        let normalized = match status {
             FfiFollowActionStatus::Acquiring => NormFollowActionStatus::Acquiring,
             FfiFollowActionStatus::NoChange { following } => {
                 NormFollowActionStatus::NoChange(following)
@@ -1549,7 +1568,24 @@ fn collect_ffi_follow_action(
             FfiFollowActionStatus::Failed { failure } => {
                 NormFollowActionStatus::Failed(format!("{failure:?}"))
             }
-        });
+        };
+        let done = matches!(
+            normalized,
+            NormFollowActionStatus::NoChange(_)
+                | NormFollowActionStatus::Failed(_)
+                | NormFollowActionStatus::Receipt(
+                    "acked"
+                        | "rejected"
+                        | "gave_up"
+                        | "replaceable_conflict"
+                        | "superseded"
+                        | "failed"
+                )
+        );
+        result.push(normalized);
+        if done {
+            return canonical_axes(result);
+        }
     }
 }
 
@@ -1618,9 +1654,6 @@ fn wait_for_ffi_follow_availability(
 async fn setup_follow_relay(author: &Keys, existing: &Keys) -> ScriptedRelay {
     let relay = ScriptedRelay::start(&RelayConfig::default()).await;
     relay
-        .seed_own_relay_list(author, QUERY_CREATED_AT - 1)
-        .await;
-    relay
         .seed_contact_list(author, &[existing.public_key()], QUERY_CREATED_AT)
         .await;
     relay
@@ -1634,7 +1667,7 @@ async fn run_direct_follow_scenario(
     let relay = setup_follow_relay(author, existing).await;
     let engine = Arc::new(
         Engine::new(EngineConfig {
-            indexer_relays: vec![relay.url.to_string()],
+            app_relays: vec![relay.url.to_string()],
             allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
             ..EngineConfig::default()
         })
@@ -1702,8 +1735,7 @@ async fn run_ffi_follow_scenario(
     let relay = setup_follow_relay(author, existing).await;
     let engine = NmpEngine::new(NmpEngineConfig {
         store_path: None,
-        indexer_relays: vec![relay.url.to_string()],
-        app_relays: vec![],
+        app_relays: vec![relay.url.to_string()],
         fallback_relays: vec![],
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
         ..NmpEngineConfig::default()
@@ -1765,12 +1797,9 @@ async fn run_direct_missing_contact_list(
     target: &Keys,
 ) -> (NormFollowSnapshot, Vec<NormFollowActionStatus>) {
     let relay = ScriptedRelay::start(&RelayConfig::default()).await;
-    relay
-        .seed_own_relay_list(author, QUERY_CREATED_AT - 1)
-        .await;
     let engine = Arc::new(
         Engine::new(EngineConfig {
-            indexer_relays: vec![relay.url.to_string()],
+            app_relays: vec![relay.url.to_string()],
             allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
             ..EngineConfig::default()
         })
@@ -1805,13 +1834,9 @@ async fn run_ffi_missing_contact_list(
     target: &Keys,
 ) -> (NormFollowSnapshot, Vec<NormFollowActionStatus>) {
     let relay = ScriptedRelay::start(&RelayConfig::default()).await;
-    relay
-        .seed_own_relay_list(author, QUERY_CREATED_AT - 1)
-        .await;
     let engine = NmpEngine::new(NmpEngineConfig {
         store_path: None,
-        indexer_relays: vec![relay.url.to_string()],
-        app_relays: vec![],
+        app_relays: vec![relay.url.to_string()],
         fallback_relays: vec![],
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
         ..NmpEngineConfig::default()
@@ -1845,11 +1870,9 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
     let expected_row_id = query_event.id.to_hex();
     let relay_url = relay.url.to_string();
     let engine = Engine::new(EngineConfig {
-        indexer_relays: vec![relay_url.clone()],
-        // This scenario exercises the REAL discovery path: the author's
-        // seeded kind:10002 names this loopback relay as its write relay, so
-        // it arrives as a DISCOVERED relay and must be opted past the SSRF
-        // admission policy (issue #121) for the test's loopback host.
+        app_relays: vec![relay_url.clone()],
+        // This feature-off parity crate routes the loopback through explicit
+        // operator app policy. No kind:10002 query or protocol lane exists.
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
         ..EngineConfig::default()
     })
@@ -1875,7 +1898,7 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
         }
     });
 
-    let discovery_subscription = stage_direct_discovery(&engine, &pubkey.to_hex(), &relay);
+    let anchor_subscription = stage_direct_source_anchor(&engine, &pubkey.to_hex(), &relay);
 
     let subscription = engine
         .observe(
@@ -1905,12 +1928,12 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
     // Exact worker ownership (#235) may legitimately close this relay when
     // demand reaches zero. Keep both observations live until actual relay
     // counters and cumulative diagnostics prove every admitted
-    // discovery/content response crossed the handoff. That equality barrier
-    // is the stable baseline; only then may withdrawing discovery prove the
+    // source-anchor/content response crossed the handoff. That equality barrier
+    // is the stable baseline; only then may withdrawing the anchor prove the
     // handoff caused no replay.
     let handoff_baseline =
-        wait_for_direct_handoff_quiescence(&discovery_subscription, &diag_rx, &relay);
-    discovery_subscription.cancel();
+        wait_for_direct_handoff_quiescence(&anchor_subscription, &diag_rx, &relay);
+    anchor_subscription.cancel();
 
     let diagnostics_deadline = Instant::now() + WAIT;
     let mut last_diagnostics = None;
@@ -1920,8 +1943,8 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
             panic!(
                 "direct diagnostics did not settle within the total {WAIT:?} bound: {error}; \
                  handoff baseline: {handoff_baseline:?}; last snapshot: {last_diagnostics:?}; \
-                 relay query counts: discovery={}, content={}",
-                relay.query_count_for_kind(Kind::RelayList.as_u16()),
+                 relay query counts: anchor={}, content={}",
+                relay.query_count_for_kind(SOURCE_ANCHOR_KIND),
                 relay.query_count_for_kind(QUERY_KIND),
             )
         });
@@ -1952,7 +1975,7 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
     let receipts = collect_direct_receipts(receipt_rx, &relay_url);
     assert_eq!(
         receipts,
-        expected_success_receipts(keys),
+        expected_success_receipts(keys, false),
         "direct durable publish must expose the exact ordered \
          acceptance/sign/route/await-relay/send/ack facts"
     );
@@ -1996,12 +2019,9 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
     let relay_url = relay.url.to_string();
     let engine = NmpEngine::new(NmpEngineConfig {
         store_path: None,
-        indexer_relays: vec![relay_url.clone()],
-        app_relays: vec![],
+        app_relays: vec![relay_url.clone()],
         fallback_relays: vec![],
-        // Same real-discovery opt-in as `run_direct_success` — the seeded
-        // kind:10002 names this loopback relay, so it must be admitted past
-        // the SSRF policy (issue #121) for the two facades to stay identical.
+        // Same feature-off operator policy as `run_direct_success`.
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
         ..NmpEngineConfig::default()
     })
@@ -2018,7 +2038,7 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
         .observe_diagnostics()
         .expect("FFI diagnostics must open");
     let diag_rx = bridge_diagnostics(&diagnostics_handle);
-    let discovery_handle = stage_ffi_discovery(&engine, &pubkey, &relay);
+    let anchor_handle = stage_ffi_source_anchor(&engine, &pubkey, &relay);
     let query_handle = engine
         .observe(ffi_filter(&pubkey, QUERY_KIND), None)
         .expect("FFI query must open");
@@ -2035,7 +2055,7 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
     };
     // Same durable, continuously-owned handoff proof as the direct facade.
     let handoff_baseline = wait_for_ffi_handoff_quiescence(&diag_rx, &relay);
-    discovery_handle.cancel();
+    anchor_handle.cancel();
 
     let diagnostics_deadline = Instant::now() + WAIT;
     let mut last_diagnostics = None;
@@ -2045,8 +2065,8 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
             panic!(
                 "FFI diagnostics did not settle within the total {WAIT:?} bound: {error}; \
                  handoff baseline: {handoff_baseline:?}; last snapshot: {last_diagnostics:?}; \
-                 relay query counts: discovery={}, content={}",
-                relay.query_count_for_kind(Kind::RelayList.as_u16()),
+                 relay query counts: anchor={}, content={}",
+                relay.query_count_for_kind(SOURCE_ANCHOR_KIND),
                 relay.query_count_for_kind(QUERY_KIND),
             )
         });
@@ -2078,7 +2098,7 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
     let receipts = collect_ffi_receipts(&receipt_rx, &relay_url);
     assert_eq!(
         receipts,
-        expected_success_receipts(keys),
+        expected_success_receipts(keys, false),
         "FFI durable publish must expose the exact ordered \
          acceptance/sign/route/await-relay/send/ack facts"
     );
@@ -2096,10 +2116,8 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
     }
 }
 
-/// #8 U2 fail-closed AUTH park, direct half. Same seeding/discovery
-/// preamble as `run_direct_success` (reads are NOT gated by
-/// `auth_required_writes`, so real NIP-65 discovery works unchanged) and
-/// the identical engine construction/keys, but the relay answers the
+/// #8 U2 fail-closed AUTH park, direct half. Same feature-off operator-source
+/// preamble as `run_direct_success`, but the relay answers the
 /// unauthenticated durable EVENT with `["AUTH", challenge]` +
 /// `["OK", id, false, "auth-required: ..."]`. No AUTH policy registry
 /// exists at this wave, so the write must park on exactly one
@@ -2110,11 +2128,15 @@ async fn run_direct_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<
         ..RelayConfig::default()
     })
     .await;
-    relay.seed_own_relay_list(keys, QUERY_CREATED_AT - 1).await;
+    let anchor = nostr::EventBuilder::new(Kind::Custom(SOURCE_ANCHOR_KIND), "source anchor")
+        .custom_created_at(Timestamp::from(QUERY_CREATED_AT - 1))
+        .sign_with_keys(keys)
+        .expect("source anchor fixture must sign");
+    relay.seed_signed_event(&anchor).await;
     relay.seed_signed_event(query_event).await;
     let relay_url = relay.url.to_string();
     let engine = Engine::new(EngineConfig {
-        indexer_relays: vec![relay_url.clone()],
+        app_relays: vec![relay_url.clone()],
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
         ..EngineConfig::default()
     })
@@ -2127,7 +2149,7 @@ async fn run_direct_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<
         .set_active_account(Some(pubkey))
         .expect("direct auth-parked account must activate");
 
-    let discovery_cancel = stage_direct_discovery(&engine, &pubkey.to_hex(), &relay);
+    let anchor_cancel = stage_direct_source_anchor(&engine, &pubkey.to_hex(), &relay);
 
     let unsigned = UnsignedEvent::new(
         pubkey,
@@ -2152,7 +2174,7 @@ async fn run_direct_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<
         "a fail-closed AUTH park must emit no further direct status: no retry, no terminal"
     );
 
-    discovery_cancel.cancel();
+    anchor_cancel.cancel();
     engine.shutdown();
     relay.shutdown();
     receipts
@@ -2167,13 +2189,16 @@ async fn run_ffi_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<Nor
         ..RelayConfig::default()
     })
     .await;
-    relay.seed_own_relay_list(keys, QUERY_CREATED_AT - 1).await;
+    let anchor = nostr::EventBuilder::new(Kind::Custom(SOURCE_ANCHOR_KIND), "source anchor")
+        .custom_created_at(Timestamp::from(QUERY_CREATED_AT - 1))
+        .sign_with_keys(keys)
+        .expect("source anchor fixture must sign");
+    relay.seed_signed_event(&anchor).await;
     relay.seed_signed_event(query_event).await;
     let relay_url = relay.url.to_string();
     let engine = NmpEngine::new(NmpEngineConfig {
         store_path: None,
-        indexer_relays: vec![relay_url.clone()],
-        app_relays: vec![],
+        app_relays: vec![relay_url.clone()],
         fallback_relays: vec![],
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
         ..NmpEngineConfig::default()
@@ -2187,7 +2212,7 @@ async fn run_ffi_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<Nor
         .set_active_account(Some(pubkey.clone()))
         .expect("FFI auth-parked account must activate");
 
-    let discovery_handle = stage_ffi_discovery(&engine, &pubkey, &relay);
+    let anchor_handle = stage_ffi_source_anchor(&engine, &pubkey, &relay);
 
     let receipt = engine
         .publish(FfiWriteIntent {
@@ -2213,7 +2238,7 @@ async fn run_ffi_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<Nor
         "a fail-closed AUTH park must emit no further FFI status: no retry, no terminal"
     );
 
-    discovery_handle.cancel();
+    anchor_handle.cancel();
     engine.shutdown();
     relay.shutdown();
     receipts
@@ -2222,19 +2247,20 @@ async fn run_ffi_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<Nor
 /// #47 explicit-identity publish, direct half. The named pubkey is
 /// registered as a SECONDARY account -- in the engine's signer set but
 /// never active -- while the active account is a different registered
-/// identity. Same seeding/discovery preamble as `run_direct_success`, but
-/// the seeded kind:10002 belongs to the NAMED identity: `Auto`
-/// routes by the intent's author, which #47 pins to that key. A silent
+/// identity. The operator app source is identity-neutral: `Auto` still
+/// freezes the NAMED identity as author before routing. A silent
 /// fallback to the active account would sign a DIFFERENT author and change
 /// the deterministic event id the `Signed` receipt names.
 async fn run_direct_override_publish(active: &Keys, override_keys: &Keys) -> Vec<NormStatus> {
     let relay = ScriptedRelay::start(&RelayConfig::default()).await;
-    relay
-        .seed_own_relay_list(override_keys, QUERY_CREATED_AT - 1)
-        .await;
+    let anchor = nostr::EventBuilder::new(Kind::Custom(SOURCE_ANCHOR_KIND), "source anchor")
+        .custom_created_at(Timestamp::from(QUERY_CREATED_AT - 1))
+        .sign_with_keys(override_keys)
+        .expect("source anchor fixture must sign");
+    relay.seed_signed_event(&anchor).await;
     let relay_url = relay.url.to_string();
     let engine = Engine::new(EngineConfig {
-        indexer_relays: vec![relay_url.clone()],
+        app_relays: vec![relay_url.clone()],
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
         ..EngineConfig::default()
     })
@@ -2251,7 +2277,7 @@ async fn run_direct_override_publish(active: &Keys, override_keys: &Keys) -> Vec
         .expect("direct override account must register as a secondary")
         .public_key();
 
-    let discovery_cancel = stage_direct_discovery(&engine, &override_pubkey.to_hex(), &relay);
+    let anchor_cancel = stage_direct_source_anchor(&engine, &override_pubkey.to_hex(), &relay);
 
     let unsigned = UnsignedEvent::new(
         override_pubkey,
@@ -2271,7 +2297,7 @@ async fn run_direct_override_publish(active: &Keys, override_keys: &Keys) -> Vec
         .expect("direct override publish must enqueue");
     let receipts = collect_direct_receipts(receipt_rx, &relay_url);
 
-    discovery_cancel.cancel();
+    anchor_cancel.cancel();
     engine.shutdown();
     relay.shutdown();
     receipts
@@ -2283,14 +2309,15 @@ async fn run_direct_override_publish(active: &Keys, override_keys: &Keys) -> Vec
 /// so the byte-identical receipt comparison is honest.
 async fn run_ffi_override_publish(active: &Keys, override_keys: &Keys) -> Vec<NormStatus> {
     let relay = ScriptedRelay::start(&RelayConfig::default()).await;
-    relay
-        .seed_own_relay_list(override_keys, QUERY_CREATED_AT - 1)
-        .await;
+    let anchor = nostr::EventBuilder::new(Kind::Custom(SOURCE_ANCHOR_KIND), "source anchor")
+        .custom_created_at(Timestamp::from(QUERY_CREATED_AT - 1))
+        .sign_with_keys(override_keys)
+        .expect("source anchor fixture must sign");
+    relay.seed_signed_event(&anchor).await;
     let relay_url = relay.url.to_string();
     let engine = NmpEngine::new(NmpEngineConfig {
         store_path: None,
-        indexer_relays: vec![relay_url.clone()],
-        app_relays: vec![],
+        app_relays: vec![relay_url.clone()],
         fallback_relays: vec![],
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
         ..NmpEngineConfig::default()
@@ -2308,7 +2335,7 @@ async fn run_ffi_override_publish(active: &Keys, override_keys: &Keys) -> Vec<No
         .expect("FFI override account must register as a secondary")
         .public_key();
 
-    let discovery_handle = stage_ffi_discovery(&engine, &override_pubkey, &relay);
+    let anchor_handle = stage_ffi_source_anchor(&engine, &override_pubkey, &relay);
 
     let receipt = engine
         .publish(FfiWriteIntent {
@@ -2331,7 +2358,7 @@ async fn run_ffi_override_publish(active: &Keys, override_keys: &Keys) -> Vec<No
     let receipt_rx = bridge_receipts(&receipt);
     let receipts = collect_ffi_receipts(&receipt_rx, &relay_url);
 
-    discovery_handle.cancel();
+    anchor_handle.cancel();
     engine.shutdown();
     relay.shutdown();
     receipts
@@ -2386,7 +2413,6 @@ async fn run_ffi_tampered(keys: &Keys) -> TamperedOutcome {
     let relay_url = relay.url.to_string();
     let engine = NmpEngine::new(NmpEngineConfig {
         store_path: None,
-        indexer_relays: vec![],
         app_relays: vec![relay_url.clone()],
         fallback_relays: vec![],
         ..NmpEngineConfig::default()
@@ -3216,7 +3242,7 @@ async fn explicit_identity_publish_signs_as_that_key_identically_direct_and_ffi(
     );
     assert_eq!(
         direct,
-        expected_success_receipts(&override_keys),
+        expected_success_receipts(&override_keys, false),
         "an override publish must sign as the OVERRIDE author -- the Signed receipt must carry \
          the deterministic id of the override-authored event, never the active account's"
     );
@@ -3255,13 +3281,10 @@ async fn direct_and_ffi_follow_actions_are_identical_over_real_loopback() {
     // because worker reconciliation closed the write session when the
     // follow write acked.
     //
-    // Asserted per AXIS rather than as one total order. Routing completeness
-    // and delivery advance on different sockets and nothing orders them
-    // against each other, so where the routing retirement lands among the
-    // delivery beats is genuinely nondeterministic — pinning it would be
-    // pinning a race (`resolution-lifecycle.md` §7.2.1). What IS determined:
-    // each axis's own order, and that BOTH reach their terminal, which is
-    // what closing the stream at all already proves.
+    // Asserted per AXIS rather than as one total order. Routing and delivery
+    // advance independently. In this feature-off crate the app relay makes
+    // delivery executable, while the author fact remains Unknown because no
+    // optional provider exists to settle it.
     for (label, seen) in [("follow", &direct.follow), ("unfollow", &direct.unfollow)] {
         assert_eq!(
             delivery_axis(seen),
@@ -3282,10 +3305,8 @@ async fn direct_and_ffi_follow_actions_are_identical_over_real_loopback() {
         );
         assert_eq!(
             routing_axis(seen).last(),
-            Some(&"routed_complete"),
-            "{label}: the routing axis must RETIRE, not merely emit a route -- a kind:3 p-tags \
-             everyone it names, and an unsettled relay-list absence leaves it at `routed` \
-             forever: {seen:?}"
+            Some(&"routed"),
+            "{label}: feature-off delivery must not fabricate route settlement: {seen:?}"
         );
     }
 }
@@ -3316,9 +3337,8 @@ async fn direct_and_ffi_follow_refuse_a_reconciled_missing_contact_list() {
 
 // ---- #972: explicit routing, direct Rust and FFI ------------------------
 
-/// Publish one write to one relay the caller named, with NO relay list
-/// seeded anywhere and NO discovery run first. `Auto` would fail closed
-/// here — the directory knows nothing about this author — so every relay
+/// Publish one write to one relay the caller named, with NO author route
+/// seeded anywhere and NO provider assembled. `Auto` would park here, so every relay
 /// this write reaches is one the caller chose.
 async fn run_direct_explicit_route(keys: &Keys, relay: &ScriptedRelay) -> Vec<NormStatus> {
     let relay_url = relay.url.to_string();
@@ -3360,7 +3380,6 @@ async fn run_ffi_explicit_route(keys: &Keys, relay: &ScriptedRelay) -> Vec<NormS
     let relay_url = relay.url.to_string();
     let engine = NmpEngine::new(NmpEngineConfig {
         store_path: None,
-        indexer_relays: vec![],
         app_relays: vec![],
         fallback_relays: vec![],
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
@@ -3401,7 +3420,7 @@ async fn run_ffi_explicit_route(keys: &Keys, relay: &ScriptedRelay) -> Vec<NormS
 
 /// #972 falsifier: an app naming one exact relay gets exactly that relay,
 /// identically from direct Rust and across the FFI boundary. Nothing is
-/// seeded and no discovery runs, so the directory has nothing to contribute
+/// seeded and no provider runs, so neutral facts have nothing to contribute
 /// and cannot be the reason the write lands.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn direct_and_ffi_publish_to_one_explicitly_named_relay_identically() {
@@ -3421,7 +3440,7 @@ async fn direct_and_ffi_publish_to_one_explicitly_named_relay_identically() {
     );
     assert_eq!(
         direct,
-        expected_success_receipts(&keys),
+        expected_success_receipts(&keys, true),
         "the write routes to exactly the one relay the caller named and is acked there"
     );
 }
@@ -3460,7 +3479,6 @@ async fn direct_and_ffi_refuse_an_empty_explicit_route_at_the_door() {
 
     let ffi_engine = NmpEngine::new(NmpEngineConfig {
         store_path: None,
-        indexer_relays: vec![],
         app_relays: vec![],
         fallback_relays: vec![],
         ..NmpEngineConfig::default()
