@@ -731,7 +731,22 @@ fn route_revision_failure_emits_no_attempt_or_wire_and_claims_no_crash_durable_u
     drop(store);
 
     let mut recovered = EngineCore::new(RedbFailStartStore::open(&path, []), 10);
-    assert!(recovered.recover_on_boot().is_empty());
+    let effects = recovered.recover_on_boot();
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::AuthorRouteNeedsChanged(needs)]
+                if needs == &BTreeSet::from([author.public_key()])
+        ),
+        "the failed volatile route must produce exactly its one provider-need effect: {effects:?}"
+    );
+    assert!(
+        !effects.iter().any(|effect| matches!(
+            effect,
+            Effect::PublishEvent(..) | Effect::EnsureWriteRelay(..)
+        )),
+        "redeclaring discovery need cannot claim a crash-durable route, attempt, or wire send"
+    );
 }
 
 #[test]

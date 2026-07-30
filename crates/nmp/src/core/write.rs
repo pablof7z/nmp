@@ -1196,6 +1196,15 @@ impl<S: EventStore> EngineCore<S> {
         for id in recovered_ids {
             self.close_if_all_lanes_terminal(id);
         }
+        // `pending` started empty in this process, so every need rebuilt
+        // above is new to the protocol assembly even if the prior process
+        // had already queried it. Needs themselves are deliberately
+        // stateless; replay the rebuilt set through the same typed effect
+        // live rewrites use so NIP-65 can reopen discovery after a crash.
+        let recovered_route_needs = self.author_route_needs();
+        if !recovered_route_needs.is_empty() {
+            effects.push(Effect::AuthorRouteNeedsChanged(recovered_route_needs));
+        }
         effects
     }
 
