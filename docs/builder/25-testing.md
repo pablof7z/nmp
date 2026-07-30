@@ -163,6 +163,28 @@ relay as an environmental skip rather than training the suite to tolerate
 random failures. Live tests supplement, but never replace, scripted transport
 and crash-recovery falsifiers.
 
+## Keep the repository toolchain reproducible
+
+The root `rust-toolchain.toml` pins an exact dated nightly, not the moving
+`nightly` alias. Nightly remains necessary because governed facade snapshot
+regeneration uses `cargo rustdoc -Z unstable-options`. The root pin must match
+`SURFACE_RUST_TOOLCHAIN` in `tools/surface-toolchain.env`; the exact
+host-independent `rustc`, Cargo, Clippy, and rustfmt version strings live in
+`tools/rust-toolchain-versions.env`.
+
+Run both toolchain falsifiers from a fresh checkout:
+
+```sh
+bash scripts/check-rust-toolchain.sh
+bash scripts/test-rust-toolchain.sh
+```
+
+The first command is the same assertion CI runs. The second mutates fixtures
+and proves that a floating nightly, a root/surface mismatch, a selected
+toolchain mismatch, version drift, or a missing required component is refused.
+A toolchain bump is therefore an explicit reviewed change to the root pin,
+surface pin, version oracle, and any regenerated governed snapshots.
+
 ## Suggested test matrix
 
 | Tier | What it proves | Network |
