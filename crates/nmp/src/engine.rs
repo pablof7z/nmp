@@ -1286,6 +1286,28 @@ mod tests {
             before,
             "refused reset must not touch the live store file"
         );
+        let hard_link = fixture.path().join("nmp-hard-link.redb");
+        std::fs::hard_link(&path, &hard_link).expect("hard-link alias must be created");
+        let hard_link_refusal = Engine::reset_persistent_store(&hard_link)
+            .expect_err("a hard-link alias of a live store must refuse reset");
+        assert_eq!(
+            hard_link_refusal,
+            EngineError::StoreStillOpen {
+                path: hard_link
+                    .canonicalize()
+                    .expect("hard-link path must canonicalize")
+                    .to_string_lossy()
+                    .into_owned(),
+            }
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("hard-link refusal must preserve the original name"),
+            before
+        );
+        assert_eq!(
+            std::fs::read(&hard_link).expect("hard-link refusal must preserve the alias"),
+            before
+        );
         let second_open = Engine::new(config.clone())
             .err()
             .expect("a second persistent engine owner must be refused");
@@ -1302,6 +1324,26 @@ mod tests {
 
         engine.shutdown();
 
+        let after_shutdown =
+            std::fs::read(&path).expect("shutdown store bytes must remain readable");
+        assert_eq!(
+            std::fs::read(&hard_link).expect("hard-link alias must match the store after shutdown"),
+            after_shutdown
+        );
+        assert!(matches!(
+            Engine::reset_persistent_store(&hard_link),
+            Err(EngineError::StoreResetFailed { reason })
+                if reason.contains("2 hard links")
+        ));
+        assert_eq!(
+            std::fs::read(&path).expect("multi-link refusal must preserve the original name"),
+            after_shutdown
+        );
+        assert_eq!(
+            std::fs::read(&hard_link).expect("multi-link refusal must preserve the alias"),
+            after_shutdown
+        );
+        std::fs::remove_file(&hard_link).expect("restore the single-link reset precondition");
         Engine::reset_persistent_store(&path).expect("a closed store must reset");
         assert!(
             !path.exists(),
