@@ -77,6 +77,36 @@ async fn person_write_relay(w: &mut NmpWorld, person: String, relay: String) {
     w.declare_write_relay(&person, &relay);
 }
 
+/// The plural form. Two write relays for ONE author is what makes a single
+/// event arrive twice, which is the only way a row's source set can grow past
+/// one -- see `features/coverage/row-provenance.feature`.
+#[given(regex = r#"^(\S+)'s relay list names (.+) as (?:her|his|their) write relays$"#)]
+async fn person_write_relays(w: &mut NmpWorld, person: String, list: String) {
+    let relays = parse_quoted_list(&list);
+    assert!(
+        relays.len() > 1,
+        "expected more than one quoted relay name in {list:?}; use the singular \
+         form for one"
+    );
+    for relay in relays {
+        w.declare_write_relay(&person, &relay);
+    }
+}
+
+/// A kind-39000 signed by the HOST relay named here, which is how NIP-29
+/// group metadata is actually authored. Two hosts of one group id are two
+/// authors, and therefore two addressable coordinates -- see
+/// `world::provenance`.
+#[given(regex = r#"^relay "([^"]+)" hosts group "([^"]+)" with metadata saying "([^"]+)"$"#)]
+async fn relay_hosts_group_metadata(
+    w: &mut NmpWorld,
+    relay: String,
+    group_id: String,
+    name: String,
+) {
+    w.stage_host_signed_group_metadata(&relay, &group_id, &name);
+}
+
 #[given(regex = r#"^my relay list names "([^"]+)" as my write relay$"#)]
 async fn my_write_relay(w: &mut NmpWorld, relay: String) {
     w.declare_write_relay(ME, &relay);

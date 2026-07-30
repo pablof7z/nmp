@@ -66,6 +66,9 @@
 //!   its mind again. Separate from `writes` because routed and published are
 //!   separate axes, and a suite that read one off the other could not tell a
 //!   misconfigured indexer set from a slow relay.
+//! - `provenance` -- WHO DELIVERED each row the feed shows. Distinct from
+//!   `feed` for the same reason `payloads` is distinct from `writes`: same
+//!   channel, different claim, and the two answer independently.
 //! - `routing` -- the READ plane: which relay was asked for what kind, in
 //!   which lane. Distinct from `writes`; both talk about relays, only one is
 //!   about an event this app sent.
@@ -107,6 +110,7 @@ mod groups;
 mod identity;
 mod outbox;
 mod payloads;
+mod provenance;
 mod replaceable;
 mod routes;
 mod routing;

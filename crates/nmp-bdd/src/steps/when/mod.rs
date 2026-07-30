@@ -25,6 +25,33 @@ async fn open_feed_limited(w: &mut NmpWorld, limit: usize) {
     w.open_my_follows_feed_limited(limit).await;
 }
 
+/// One literal author's notes, pinned to every named relay. This spelling is
+/// intentionally stronger than a follows feed: source-provenance scenarios
+/// must mechanically contact both relays instead of relying on the bounded
+/// outbox solver to choose every candidate.
+#[when(regex = r#"^I read (\S+)'s notes from relays (.+)$"#)]
+async fn read_authored_notes_from_relays(w: &mut NmpWorld, person: String, list: String) {
+    let relays = crate::steps::parse_quoted_list(&list);
+    assert!(
+        relays.len() > 1,
+        "expected more than one quoted relay name in {list:?}"
+    );
+    w.open_authored_notes_from_relays(&person, &relays).await;
+}
+
+/// One read, pinned to several hosts, of one group's metadata coordinate.
+/// The plural relay list is the point: divergence is only observable when a
+/// single query reaches both hosts.
+#[when(regex = r#"^I read the metadata for group "([^"]+)" from relays (.+)$"#)]
+async fn read_group_metadata_from_relays(w: &mut NmpWorld, group_id: String, list: String) {
+    let relays = crate::steps::parse_quoted_list(&list);
+    assert!(
+        !relays.is_empty(),
+        "expected at least one quoted relay name in {list:?}"
+    );
+    w.open_group_metadata_feed(&group_id, &relays).await;
+}
+
 #[when(regex = r#"^my feed of my follows' notes runs to a steady state$"#)]
 async fn feed_runs_to_steady_state(w: &mut NmpWorld) {
     w.open_my_follows_feed().await;

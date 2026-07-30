@@ -96,8 +96,21 @@ pub(super) fn tagged_note_query_values(
 /// `limit` caps the result COUNT, so the union refuses to widen across
 /// one (see `nmp_router::coalesce::neither_limited`).
 pub fn authored_note_query(relay: &RelayUrl, author_hex: &str, limit: Option<usize>) -> LiveQuery {
-    pinned_query(
-        relay,
+    authored_note_query_from_relays(BTreeSet::from([relay.clone()]), author_hex, limit)
+}
+
+/// One literal author's notes pinned to every relay in `relays`.
+///
+/// This is deliberately different from `my_follows_query`: the provenance
+/// falsifier needs both named relays to be contacted, while outbox routing is
+/// allowed to select a bounded covering subset of its candidates.
+pub(super) fn authored_note_query_from_relays(
+    relays: BTreeSet<RelayUrl>,
+    author_hex: &str,
+    limit: Option<usize>,
+) -> LiveQuery {
+    pinned_query_from_relays(
+        relays,
         Filter {
             kinds: Some(BTreeSet::from([1u16])),
             authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
@@ -150,6 +163,32 @@ pub fn my_group_state_query(relay: &RelayUrl) -> LiveQuery {
     )
 }
 
+/// ONE group's metadata coordinate (`kind:39000`, `#d` = the group id) across
+/// several named hosts, with NO author bound.
+///
+/// The unbound author is the whole shape: NIP-29 metadata is signed by the
+/// host relay, so an author-scoped read could only ever return one host's
+/// version and could not observe two hosts disagreeing. Pinned, like every
+/// other literal shape here, because group state has no author whose outbox
+/// could be discovered.
+pub(super) fn group_metadata_query(relays: BTreeSet<RelayUrl>, group_id: &str) -> LiveQuery {
+    LiveQuery(
+        Demand::new(
+            Filter {
+                kinds: Some(BTreeSet::from([39_000u16])),
+                tags: BTreeMap::from([(
+                    IndexedTagName::new('d').expect("'d' is an indexed tag name"),
+                    Binding::Literal(BTreeSet::from([group_id.to_string()])),
+                )]),
+                ..Filter::default()
+            },
+            SourceAuthority::Pinned(relays),
+            AccessContext::Public,
+        )
+        .expect("nmp-bdd: a pinned demand over a nonempty relay set is constructible"),
+    )
+}
+
 /// One author's contact list -- the replaceable coordinate
 /// `features/writes/replaceable-edits.feature` CAS-es against. Pinned like
 /// every other literal shape: what the scenario reads is the LOCAL winner,
@@ -166,10 +205,14 @@ pub fn contact_list_query(relay: &RelayUrl, author_hex: &str) -> LiveQuery {
 }
 
 fn pinned_query(relay: &RelayUrl, filter: Filter) -> LiveQuery {
+    pinned_query_from_relays(BTreeSet::from([relay.clone()]), filter)
+}
+
+fn pinned_query_from_relays(relays: BTreeSet<RelayUrl>, filter: Filter) -> LiveQuery {
     LiveQuery(
         Demand::new(
             filter,
-            SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+            SourceAuthority::Pinned(relays),
             AccessContext::Public,
         )
         .expect("nmp-bdd: a pinned demand over a nonempty relay set is constructible"),
