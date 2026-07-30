@@ -5,6 +5,12 @@
 
 set -euo pipefail
 
+SCRIPT_PATH=${BASH_SOURCE[0]}
+SCRIPT_DIR=${SCRIPT_PATH%/*}
+[[ $SCRIPT_DIR != "$SCRIPT_PATH" ]] || SCRIPT_DIR=.
+source "$SCRIPT_DIR/lib/require-commands.sh" || exit 2
+require_commands cmp comm grep mktemp rm sort strings tr wc || exit 2
+
 if [[ $# -ne 3 ]]; then
   echo "usage: $0 CORE_ONLY_LIBRARY MATCHED_CORE_LIBRARY MATCHED_PROVIDER_LIBRARY" >&2
   exit 2

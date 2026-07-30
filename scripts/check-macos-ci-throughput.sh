@@ -5,7 +5,18 @@
 
 set -euo pipefail
 
-ROOT=${1:-$(git rev-parse --show-toplevel)}
+SCRIPT_PATH=${BASH_SOURCE[0]}
+SCRIPT_DIR=${SCRIPT_PATH%/*}
+[[ $SCRIPT_DIR != "$SCRIPT_PATH" ]] || SCRIPT_DIR=.
+source "$SCRIPT_DIR/lib/require-commands.sh" || exit 2
+require_commands find grep sort || exit 2
+
+if [[ -n ${1:-} ]]; then
+  ROOT=$1
+else
+  require_commands git || exit 2
+  ROOT=$(git rev-parse --show-toplevel)
+fi
 WORKFLOW_DIR="$ROOT/.github/workflows"
 MACOS_WORKFLOW="$WORKFLOW_DIR/macos-qualification.yml"
 CI_WORKFLOW="$WORKFLOW_DIR/ci.yml"
