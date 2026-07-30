@@ -1,0 +1,169 @@
+# One macOS runner owns all native Apple qualification for a pull-request head.
+# This preserves the three existing suites while avoiding three independent
+# queue acquisitions and reusing the first core XCFramework build for SwiftPM
+# plus the iOS Simulator runtime proof.
+name: macOS qualification
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# GitHub concurrency groups are repository-wide. Workflow and event identity
+# keep unrelated workflows and PR-vs-push runs isolated; the PR number (falling
+# back to the full ref for non-PR events) makes a newer run supersede only the
+# older run with the same owner.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-qualification:
+    name: macOS qualification
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Add Apple targets (sim + macOS slices)
+        run: rustup target add aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-darwin
+
+      # Clean-clone Swift package smoke test (#18): Packages/NMP depends on an
+      # XCFramework and generated UniFFI bindings that are not committed.
+      - name: Build core XCFramework and generated bindings
+        id: core
+        run: scripts/build-swift-xcframework.sh --sim-only
+
+      - name: Preserve the core-only artifact for the provider mismatch proof
+        if: ${{ !cancelled() && steps.core.outcome == 'success' }}
+        run: |
+          core_only=$(
+            find Packages/NMP/NMP.xcframework -type f -name libnmp_ffi.a |
+              grep simulator | sort | head -n 1
+          )
+          test -n "$core_only"
+          cp "$core_only" "$RUNNER_TEMP/libnmp_ffi-core-only.a"
+
+      - name: Build the Swift package
+        id: swift_package
+        if: ${{ !cancelled() && steps.core.outcome == 'success' }}
+        run: swift build
+        working-directory: Packages/NMP
+
+      - name: Test the Swift package
+        if: ${{ !cancelled() && steps.swift_package.outcome == 'success' }}
+        run: swift test
+        working-directory: Packages/NMP
+
+      # iOS Simulator NIP-11 hostname runtime qualification (#465). Reuse the
+      # core XCFramework above instead of rebuilding it on a third runner.
+      - name: Install xcodegen
+        id: xcodegen
+        if: ${{ !cancelled() && steps.core.outcome == 'success' }}
+        run: command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
+
+      # The runner's DEFAULT active Xcode can be older than the pbxproj format
+      # xcodegen emits (observed: default Xcode 15.4 refused a freshly generated
+      # project as "a future Xcode project file format"). Select the newest
+      # installed Xcode for this runtime suite, then restore the runner default
+      # before the provider suite below.
+      - name: Select the newest installed Xcode
+        id: xcode
+        if: ${{ !cancelled() && steps.xcodegen.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          echo "original=$(xcode-select -p)" >> "$GITHUB_OUTPUT"
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          latest=${latest:-/Applications/Xcode.app}
+          echo "Selecting $latest"
+          sudo xcode-select -s "$latest"
+          xcodebuild -version
+
+      - name: Generate the Falsifier Xcode project
+        id: falsifier_project
+        if: ${{ !cancelled() && steps.xcode.outcome == 'success' }}
+        run: xcodegen generate
+        working-directory: apps/Falsifier
+
+      - name: Resolve an iOS Simulator destination
+        id: ios_sim
+        if: ${{ !cancelled() && steps.falsifier_project.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          UDID=$(xcrun simctl list devices available --json | python3 scripts/pick-ios-simulator-destination.py)
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+
+      - name: xcodebuild test (iOS Simulator NIP-11 runtime qualification)
+        if: ${{ !cancelled() && steps.ios_sim.outcome == 'success' }}
+        run: |
+          # `-retry-tests-on-failure`: a simulator's first cold boot was
+          # observed locally to occasionally truncate the fixture's very first
+          # loopback HTTP response body (Network.framework/NECP simulator-only
+          # initialization race). Root-caused to the fixture calling
+          # `connection.cancel()` right after `.contentProcessed` (accepted by
+          # the stack, not necessarily delivered yet); the fixture now waits
+          # for the client to actually close its end of the connection before
+          # cancelling. This retry stays as defense-in-depth for exactly the
+          # DNS/HTTP path this gate exists to qualify -- a real regression
+          # still fails after the budget.
+          xcodebuild test \
+            -project Falsifier.xcodeproj \
+            -scheme Falsifier \
+            -destination "id=${{ steps.ios_sim.outputs.udid }}" \
+            -retry-tests-on-failure \
+            -test-iterations 3
+        working-directory: apps/Falsifier
+
+      - name: Restore the runner's default Xcode
+        if: ${{ !cancelled() && steps.xcode.outcome != 'skipped' }}
+        run: |
+          sudo xcode-select -s "${{ steps.xcode.outputs.original }}"
+          xcodebuild -version
+
+      # The optional NIP-46 provider must rebuild core and provider from one
+      # Cargo resolution unit; the first core-only artifact above is retained
+      # as the mismatch oracle.
+      - name: Build matched core and NIP-46 provider XCFrameworks
+        id: nip46_provider
+        if: ${{ !cancelled() }}
+        run: scripts/build-swift-nip46-xcframework.sh --sim-only
+
+      - name: Prove matched identity and package-set mismatch
+        if: ${{ !cancelled() && steps.nip46_provider.outcome == 'success' }}
+        run: |
+          matched_core=$(
+            find Packages/NMP/NMP.xcframework -type f -name libnmp_ffi.a |
+              grep simulator | sort | head -n 1
+          )
+          matched_provider=$(
+            find Packages/NMPNip46/NMPNip46.xcframework -type f -name libnmp_nip46_ffi.a |
+              grep simulator | sort | head -n 1
+          )
+          scripts/check-nip46-component-identity.sh \
+            "$RUNNER_TEMP/libnmp_ffi-core-only.a" \
+            "$matched_core" \
+            "$matched_provider"
+
+      - name: Prove the provider is absent from the core link/resource maps
+        if: ${{ !cancelled() && steps.nip46_provider.outcome == 'success' }}
+        run: |
+          matched_core=$(
+            find Packages/NMP/NMP.xcframework -type f -name libnmp_ffi.a |
+              grep simulator | sort | head -n 1
+          )
+          matched_provider=$(
+            find Packages/NMPNip46/NMPNip46.xcframework -type f -name libnmp_nip46_ffi.a |
+              grep simulator | sort | head -n 1
+          )
+          scripts/check-nip46-artifact-inventory.sh \
+            "$matched_core" \
+            "$matched_provider" \
+            Packages/NMP/Sources/NMPFFI \
+            Packages/NMPNip46/Sources/NMPNip46FFI
+
+      - name: Test the selectable NIP-46 provider package
+        if: ${{ !cancelled() && steps.nip46_provider.outcome == 'success' }}
+        run: swift test
+        working-directory: Packages/NMPNip46

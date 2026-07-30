@@ -102,6 +102,8 @@ mod group_fixtures;
 mod group_surface;
 mod groups;
 mod identity;
+#[cfg(test)]
+mod identity_tests;
 mod observe;
 mod outbox;
 mod queries;

@@ -111,6 +111,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Falsify provider workflow ownership
+        run: bash scripts/test-nip46-provider-workflow.sh
+
       - name: Keep NIP-46 out of core signer and native artifacts
         run: bash scripts/check-nip46-provider-boundary.sh
 
@@ -139,6 +142,17 @@ jobs:
 
       - name: Keep every crates/nmp-bdd file under 600 lines
         run: bash scripts/check-bdd-file-length.sh
+
+  macos-ci-throughput:
+    name: macOS CI throughput contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Falsify runner ownership, suite coverage, and cancellation isolation
+        run: bash scripts/test-macos-ci-throughput.sh
 
   falsifier-honesty:
     name: Falsifier honesty (gate 6)
