@@ -121,9 +121,9 @@ jobs:
       - name: cargo test (workspace)
         run: cargo test --workspace
 
-  # All Apple qualification now lives in macos-qualification.yml. Pull requests
-  # compile the matched core/provider once for the macOS host, then run both
-  # Swift XCTest suites. Master additionally packages the full Apple slice set.
+  # All macOS qualification now lives in macos-qualification.yml. One runner
+  # owns the Swift package, optional NIP-46 provider, and iOS Simulator suites
+  # instead of making one pull-request head acquire three scarce runners.
 
   # Clean-clone Kotlin/JVM falsifier smoke test (#40): `Packages/NMPKotlin`
   # depends on uniffi-bindgen-generated Kotlin bindings + a compiled native
