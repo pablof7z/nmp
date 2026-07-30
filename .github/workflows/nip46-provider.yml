@@ -6,8 +6,44 @@ on:
   pull_request:
 
 jobs:
+  change-routing:
+    name: NIP-46 change routing
+    runs-on: ubuntu-latest
+    outputs:
+      required: ${{ steps.route.outputs.required }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run on master or classify pull-request changes
+        id: route
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          required=true
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            if candidate=$(scripts/check-nip46-provider-changes.sh "$BASE_SHA" "$HEAD_SHA") &&
+              [[ "$candidate" == "true" || "$candidate" == "false" ]]; then
+              required=$candidate
+            else
+              echo "::warning::NIP-46 change classification failed; running proofs"
+            fi
+          fi
+          echo "required=$required" >> "$GITHUB_OUTPUT"
+          if [[ "$required" == "true" ]]; then
+            echo "NIP-46 package proofs are required" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "NIP-46 package proofs are unaffected and will be skipped" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   package-removal:
     name: NIP-46 package removal
+    needs: change-routing
+    if: needs.change-routing.outputs.required == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,6 +59,8 @@ jobs:
 
   kotlin-provider:
     name: Kotlin NIP-46 component
+    needs: change-routing
+    if: needs.change-routing.outputs.required == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
