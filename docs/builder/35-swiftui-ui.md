@@ -151,6 +151,13 @@ Freshness is not a second cache or timer. `CacheOnly` contributes no wire work;
 an unsatisfied `MaxAge` opens ordinary cache-then-live work once. Evidence and
 shortfalls remain on the exact handles the component chose.
 
+A coverage-satisfied `MaxAge` handle retains the opening-time plan and
+watermarks that justified suppressing wire work; later routing changes do not
+rewrite or restart it. Its rows still react to canonical-store changes. Open a
+new observation to evaluate current routing, while global diagnostics continue
+to describe active wire work rather than a hypothetical replan. See
+[Evidence without global completeness](11-coverage.md#choose-freshness-per-observation).
+
 ## Replace profile and event decisions separately
 
 Literal profile references with otherwise-standard event behavior:
