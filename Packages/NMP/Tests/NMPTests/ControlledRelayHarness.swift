@@ -1,12 +1,11 @@
-#if targetEnvironment(simulator)
 import CryptoKit
 import Foundation
 @preconcurrency import Network
 @testable import NMP
 
 /// Test-owned hostname relay for full public-API read/write qualification on
-/// a real iOS Simulator. Ported from the original issue #598 reproducer in
-/// Pod0 so the upstream regression proof exercises the same wire boundary.
+/// the macOS Swift package host. Ported from the original issue #598
+/// reproducer so the regression proof exercises the same native wire boundary.
 final class ControlledRelayHarness: @unchecked Sendable {
     struct Snapshot: Sendable {
         let nip11Requests: Int
@@ -37,7 +36,7 @@ final class ControlledRelayHarness: @unchecked Sendable {
     }
 
     private let listener: NWListener
-    private let queue = DispatchQueue(label: "nmp.simulator.controlled-relay")
+    private let queue = DispatchQueue(label: "nmp.swift-host.controlled-relay")
     private let lock = NSLock()
     private var webSockets: [ObjectIdentifier: NWConnection] = [:]
     private var subscriptions: [String: NWConnection] = [:]
@@ -173,7 +172,7 @@ final class ControlledRelayHarness: @unchecked Sendable {
 
     private func sendRelayInformation(on connection: NWConnection) {
         let body = Data(
-            #"{"name":"NMP Simulator Relay","supported_nips":[1,11],"software":"nmp-test-harness","version":"1"}"#.utf8
+            #"{"name":"NMP Swift Test Relay","supported_nips":[1,11],"software":"nmp-test-harness","version":"1"}"#.utf8
         )
         let headers = Data(
             ("HTTP/1.1 200 OK\r\n" +
@@ -307,7 +306,7 @@ final class ControlledRelayHarness: @unchecked Sendable {
                 seededEvents.append(event)
                 return Array(subscriptions)
             }
-            sendJSON(["OK", eventID, true, "accepted by NMP simulator relay"], on: connection)
+            sendJSON(["OK", eventID, true, "accepted by NMP Swift test relay"], on: connection)
             subscribers.forEach { subscriptionID, subscriber in
                 sendJSON(["EVENT", subscriptionID, event], on: subscriber)
             }
@@ -453,4 +452,3 @@ final class ControlledRelayHarness: @unchecked Sendable {
         }.first
     }
 }
-#endif
