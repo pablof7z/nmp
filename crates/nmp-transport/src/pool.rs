@@ -38,6 +38,7 @@ pub use committed_observations::{
     CommittedObservationCandidate, CommittedObservationHit, CommittedObservationPublication,
 };
 use inner::PoolInner;
+pub use worker::ReconnectPreambleTransition;
 
 #[cfg(feature = "bench-instrumentation")]
 pub fn configure_diagnostic_duplicate_ceiling(capacity: usize, event_payload_only: bool) {
@@ -1057,13 +1058,30 @@ impl Pool {
     /// The preamble survives every reconnect (not cleared after use); the
     /// last call wins, including while the current worker is disconnected or
     /// dialing. Its finite replacement is independent of the bounded ordinary
-    /// command lane. Returns `true` iff the current worker accepted the
+    /// command lane. Returns `true` iff the current worker recorded the
     /// replacement; a stale or closed handle returns `false`.
     pub fn set_reconnect_preamble(&self, h: RelayHandle, frames: Vec<String>) -> bool {
-        match self.inner.lock() {
-            Ok(guard) => guard.set_reconnect_preamble_for(h, frames),
-            Err(_) => false,
-        }
+        self.begin_reconnect_preamble(h, frames).is_some()
+    }
+
+    /// Begin a reconnect-preamble ownership transition without holding the
+    /// pool mutex while a previously accepted socket write settles.
+    ///
+    /// The returned finite transition is immediately `Some(true)` when no
+    /// old replay is unflushed, remains pending while one is, and resolves
+    /// after that old write flushes or its generation ends. A stale or closed
+    /// handle returns `None`.
+    pub fn begin_reconnect_preamble(
+        &self,
+        h: RelayHandle,
+        frames: Vec<String>,
+    ) -> Option<ReconnectPreambleTransition> {
+        let registration = self
+            .inner
+            .lock()
+            .ok()?
+            .reconnect_preamble_registration_for(h)?;
+        Some(registration.replace(frames))
     }
 
     /// Schedule the registered reconnect preamble on this exact connected

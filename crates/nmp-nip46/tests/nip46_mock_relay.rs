@@ -972,6 +972,7 @@ fn client_invitation_reconnect_preamble_binds_the_accepted_signer() {
         let (first_stream, _) = listener.accept().unwrap();
         let mut first = tungstenite::accept(first_stream).unwrap();
         let mut subscription_id = None;
+        let mut connect_sent = false;
         while let Ok(message) = first.read() {
             let Message::Text(text) = message else {
                 continue;
@@ -981,22 +982,31 @@ fn client_invitation_reconnect_preamble_binds_the_accepted_signer() {
             match parts.first().and_then(Value::as_str) {
                 Some("REQ") => {
                     subscription_id = parts.get(1).and_then(Value::as_str).map(str::to_string);
-                    assert!(
-                        parts[2].get("authors").is_none(),
-                        "the pre-pairing filter must admit the not-yet-known signer"
-                    );
-                    let response = response_event(
-                        &remote_thread,
-                        client,
-                        "connect-valid",
-                        Some(secret.clone()),
-                        None,
-                    );
-                    first
-                        .send(Message::Text(
-                            event_frame(subscription_id.as_deref().unwrap(), response).into(),
-                        ))
-                        .unwrap();
+                    if !connect_sent {
+                        assert!(
+                            parts[2].get("authors").is_none(),
+                            "the pre-pairing filter must admit the not-yet-known signer"
+                        );
+                        connect_sent = true;
+                        let response = response_event(
+                            &remote_thread,
+                            client,
+                            "connect-valid",
+                            Some(secret.clone()),
+                            None,
+                        );
+                        first
+                            .send(Message::Text(
+                                event_frame(subscription_id.as_deref().unwrap(), response).into(),
+                            ))
+                            .unwrap();
+                    } else {
+                        assert_eq!(
+                            parts[2]["authors"],
+                            json!([remote_thread.public_key().to_hex()]),
+                            "the live connection must adopt the same bound preamble used after reconnect"
+                        );
+                    }
                 }
                 Some("EVENT") => {
                     let event = Event::from_json(parts[1].to_string()).unwrap();
@@ -1106,11 +1116,11 @@ fn snapshotted_secondary_preamble_is_revoked_before_its_post_binding_write() {
             match parts.first().and_then(Value::as_str) {
                 Some("REQ") => {
                     subscription_id = parts.get(1).and_then(Value::as_str).map(str::to_string);
-                    assert!(
-                        parts[2].get("authors").is_none(),
-                        "pairing begins with a broad filter because the signer is not known yet"
-                    );
                     if !connect_sent {
+                        assert!(
+                            parts[2].get("authors").is_none(),
+                            "pairing begins with a broad filter because the signer is not known yet"
+                        );
                         connect_sent = true;
                         let response = response_event(
                             &remote_for_primary,
@@ -1124,6 +1134,12 @@ fn snapshotted_secondary_preamble_is_revoked_before_its_post_binding_write() {
                                 event_frame(subscription_id.as_deref().unwrap(), response).into(),
                             ))
                             .unwrap();
+                    } else {
+                        assert_eq!(
+                            parts[2]["authors"],
+                            json!([remote_for_primary.public_key().to_hex()]),
+                            "the primary relay also advances to the acknowledged bound owner"
+                        );
                     }
                 }
                 Some("EVENT") => {
