@@ -54,8 +54,9 @@ over generated bindings without becoming independent semantic engines.
   namespace's proc-macro metadata extracted in library mode. The former
   aggregate `docs/surface/nmp-ffi-component.txt` path is forbidden.
 - A self-owning record declares its Cargo package/manifest/library stem and is
-  built once. A co-located interface names that owner and declares no library
-  fields; regeneration extracts each namespace from the one owner build.
+  built once in a target directory isolated to that artifact owner. A
+  co-located interface names that owner and declares no library fields;
+  regeneration extracts each namespace from the one owner build.
   Swift and Kotlin each declare both manifest and source roots or an explicit
   omission reason. The optional Android table is all-or-nothing and records
   Gradle project, namespace, Maven coordinate, manifests, and sources.
@@ -64,7 +65,8 @@ over generated bindings without becoming independent semantic engines.
   owned path disappear, package/library/namespace/Android identities stay
   reserved, tombstone bytes are immutable, and an owner cannot retire while a
   live child names it. The catalog is capped at 128 records, descriptors at
-  32 KiB, and each component snapshot at 20,000 lines / 2,000,000 bytes.
+  32 KiB, and each UTF-8, LF-only, NUL-free component snapshot at 20,000 lines
+  / 2,000,000 bytes.
 - The extractor is a standalone locked program under
   `tools/component-interface-snapshot`, outside the NMP workspace and product
   crate. Steady-state regeneration copies its manifest, lockfile, and source
@@ -93,6 +95,10 @@ over generated bindings without becoming independent semantic engines.
   active component from a clean checkout;
   `scripts/check-surface-governance.sh` verifies the catalog transition and
   every output.
+- Cross-SDK exceptions use one closed TOML record per exact
+  `(component, concept, platform)` tuple in canonical tuple order. The parity
+  report keeps both active suppressions and currently unused exceptions
+  visible.
 - Any baseline change, any change below the public Swift/Kotlin wrapper paths,
   or a change to their consumer package/build/settings manifests must append a
   schema-complete entry to
