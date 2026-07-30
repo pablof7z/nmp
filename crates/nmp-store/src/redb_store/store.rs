@@ -50,6 +50,7 @@ pub(super) enum RedbCrashPoint {
     LaneTransitionBeforeCommit,
     LaneStartBeforeCommit,
     LaneHandoffBeforeCommit,
+    DenyLaneAuthBeforeCommit,
     LaneCloseBeforeCommit,
     ObservationBeforeCommit,
     ObservationAfterCommit,

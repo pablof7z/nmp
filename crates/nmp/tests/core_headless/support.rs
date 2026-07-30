@@ -18,7 +18,7 @@ use nmp::mechanism::core::{
     ObservationFact, ReceiptId, RequestTerminal, RowDelta, ShortfallFact, SourceEvidence,
     SourceStatus,
 };
-use nmp::mechanism::outbox::WriteStatus;
+use nmp::mechanism::outbox::{RetryCause, WriteStatus};
 use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Durability, Filter, Identity,
     RelaySessionKey, SourceAuthority, WriteIntent, WritePayload, WriteRouting,

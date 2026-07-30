@@ -1224,6 +1224,53 @@ pub struct RecoveredLane {
     pub state: LaneState,
 }
 
+/// The typed source of a terminal authentication refusal.
+///
+/// This vocabulary is deliberately source-neutral: a local policy or signer
+/// refusal is not a relay rejection merely because it prevents a relay write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AuthDenialSource {
+    Policy,
+    Signer,
+    Relay,
+}
+
+/// Durable authentication-refusal evidence owned by one exact write lane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthDenial {
+    pub source: AuthDenialSource,
+    pub reason: String,
+}
+
+/// Terminal lane vocabulary.
+///
+/// Unlike an attempt terminal, a true AUTH denial can finish a lane before
+/// the first EVENT attempt exists (ordinal zero). Keeping this separate from
+/// [`AttemptOutcome`] makes `Started` structurally impossible in a terminal
+/// lane and avoids inventing an attempt merely to retain a denial.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LaneTerminalOutcome {
+    Acked,
+    Rejected(String),
+    GaveUp,
+    OutcomeUnknown,
+    AuthDenied(AuthDenial),
+}
+
+impl LaneTerminalOutcome {
+    fn from_attempt(outcome: AttemptOutcome) -> Result<Self, PersistenceError> {
+        match outcome {
+            AttemptOutcome::Started => Err(PersistenceError::invariant(
+                "Started is not a terminal lane outcome",
+            )),
+            AttemptOutcome::Acked => Ok(Self::Acked),
+            AttemptOutcome::Rejected(reason) => Ok(Self::Rejected(reason)),
+            AttemptOutcome::GaveUp => Ok(Self::GaveUp),
+            AttemptOutcome::OutcomeUnknown => Ok(Self::OutcomeUnknown),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LaneState {
     WaitingConnection,
@@ -1243,7 +1290,7 @@ pub enum LaneState {
     },
     Terminal {
         ordinal: u64,
-        outcome: AttemptOutcome,
+        outcome: LaneTerminalOutcome,
     },
 }
 
@@ -2075,6 +2122,18 @@ pub trait EventStore {
         _ordinal: u64,
         _outcome: AttemptOutcome,
         _finished_at: Timestamp,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        Err(PersistenceError::invariant("outbox lanes unsupported"))
+    }
+
+    /// Atomically finish an exact AUTH-waiting lane without fabricating an
+    /// EVENT attempt. Exact lane revision is checked before idempotence, so a
+    /// stale writer can never borrow success from a newer terminal fact.
+    fn deny_lane_auth(
+        &mut self,
+        _key: &LaneKey,
+        _expected_revision: u64,
+        _denial: AuthDenial,
     ) -> Result<RecoveredLane, PersistenceError> {
         Err(PersistenceError::invariant("outbox lanes unsupported"))
     }

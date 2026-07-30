@@ -154,6 +154,529 @@ fn bind(
     });
 }
 
+fn published_receipt(effects: &[Effect]) -> ReceiptId {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::EmitReceipt(id, WriteStatus::Accepted) => Some(*id),
+            _ => None,
+        })
+        .expect("durable write was accepted")
+}
+
+fn publish_waiting_auth(fixture: &mut Fixture, content: &str) -> (ReceiptId, nostr::Event) {
+    let event = EventBuilder::new(Kind::TextNote, content)
+        .custom_created_at(Timestamp::from(9))
+        .sign_with_keys(&fixture.keys)
+        .unwrap();
+    let effects = fixture.core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Signed(event.clone()),
+        durability: Durability::Durable,
+        routing: WriteRouting::Auto,
+        identity: Identity::Active,
+        correlation: None,
+    }));
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(_, WriteStatus::AwaitingAuth { relay })
+            if relay == &fixture.session.relay
+    )));
+    (published_receipt(&effects), event)
+}
+
+#[test]
+fn exact_policy_denial_commits_before_emit_and_replays_the_same_terminal_fact() {
+    let mut fixture = Fixture::new();
+    let (_, policy) = fixture.challenge("policy denial");
+    let (receipt, _) = publish_waiting_auth(&mut fixture, "policy denied write");
+    let policy = policy.unwrap();
+    bind(&mut fixture, &policy, AuthCapability::Policy, POLICY);
+
+    let denied = fixture.core.handle(EngineMsg::AuthPolicyCompleted(
+        policy,
+        Some(POLICY),
+        AuthPolicyOutcome::Deny {
+            reason: "account not permitted".into(),
+        },
+    ));
+    let expected = WriteStatus::AuthDenied {
+        relay: fixture.session.relay.clone(),
+        pubkey: fixture.keys.public_key(),
+        source: AuthDenialSource::Policy,
+        reason: "account not permitted".into(),
+    };
+    assert!(denied.iter().any(
+        |effect| matches!(effect, Effect::EmitReceipt(id, status) if *id == receipt && status == &expected)
+    ));
+
+    let intent = fixture
+        .core
+        .resolver
+        .store()
+        .reattach_receipt(receipt.0)
+        .unwrap()
+        .unwrap()
+        .intent_id
+        .unwrap();
+    assert!(matches!(
+        fixture.core.resolver.store().recover_outbox_lanes(intent).unwrap()[0].state,
+        LaneState::Terminal {
+            ordinal: 0,
+            outcome: LaneTerminalOutcome::AuthDenied(StoredAuthDenial {
+                source: StoredAuthDenialSource::Policy,
+                ref reason,
+            }),
+        } if reason == "account not permitted"
+    ));
+    assert!(fixture
+        .core
+        .reattach_receipt(receipt)
+        .facts
+        .contains(&expected));
+}
+
+#[test]
+fn challenge_parks_an_inflight_event_before_fast_policy_denial_can_win_the_ok_race() {
+    let mut fixture = Fixture::new();
+    fixture.core.handle(EngineMsg::AuthProbeReleased(
+        fixture.handle,
+        fixture.session.clone(),
+    ));
+    let event = EventBuilder::new(Kind::TextNote, "challenge races write OK")
+        .custom_created_at(Timestamp::from(10))
+        .sign_with_keys(&fixture.keys)
+        .unwrap();
+    let published = fixture.core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Signed(event.clone()),
+        durability: Durability::Durable,
+        routing: WriteRouting::Auto,
+        identity: Identity::Active,
+        correlation: None,
+    }));
+    let receipt = published_receipt(&published);
+    let correlation = published
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::PublishEvent(session, current, correlation)
+                if session == &fixture.session && current == &event =>
+            {
+                Some(*correlation)
+            }
+            _ => None,
+        })
+        .expect("ordinary cold session publishes after its probe releases");
+    fixture.core.handle(EngineMsg::EventHandoff(
+        correlation,
+        nmp_transport::HandoffResult::Written,
+    ));
+
+    let (challenged, token) = fixture.challenge("fast policy denial");
+    assert!(challenged.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(id, WriteStatus::AwaitingAuth { relay })
+            if *id == receipt && relay == &fixture.session.relay
+    )));
+    let intent = fixture.core.pending[&receipt].intent_id.unwrap();
+    assert!(matches!(
+        fixture
+            .core
+            .resolver
+            .store()
+            .recover_outbox_lanes(intent)
+            .unwrap()[0]
+            .state,
+        LaneState::WaitingAuth
+    ));
+
+    let token = token.unwrap();
+    bind(&mut fixture, &token, AuthCapability::Policy, POLICY);
+    let denied = fixture.core.handle(EngineMsg::AuthPolicyCompleted(
+        token,
+        Some(POLICY),
+        AuthPolicyOutcome::Deny {
+            reason: "fast refusal".into(),
+        },
+    ));
+    assert!(denied.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(
+            id,
+            WriteStatus::AuthDenied {
+                source: AuthDenialSource::Policy,
+                reason,
+                ..
+            }
+        ) if *id == receipt && reason == "fast refusal"
+    )));
+
+    let late_write_ok = fixture.core.handle(EngineMsg::RelayFrame(
+        fixture.handle,
+        fixture.session.clone(),
+        RelayFrame::from(RelayMessage::ok(
+            event.id,
+            false,
+            "auth-required: authenticate",
+        )),
+    ));
+    assert!(!late_write_ok.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(id, _) if *id == receipt
+    )));
+    assert!(matches!(
+        fixture
+            .core
+            .resolver
+            .store()
+            .recover_outbox_lanes(intent)
+            .unwrap()[0]
+            .state,
+        LaneState::Terminal {
+            outcome: LaneTerminalOutcome::AuthDenied(_),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn signer_rejection_and_correlated_auth_ok_false_are_the_other_exact_denials() {
+    let mut signer = Fixture::new();
+    let (_, policy) = signer.challenge("signer denial");
+    let (receipt, _) = publish_waiting_auth(&mut signer, "signer denied write");
+    let (sign_token, _) = signer.allow(policy.unwrap());
+    bind(&mut signer, &sign_token, AuthCapability::Signer, SIGNER);
+    let denied = signer.core.handle(EngineMsg::AuthSignerCompleted(
+        sign_token,
+        Some(SIGNER),
+        AuthSignerOutcome::Rejected {
+            reason: "user declined signature".into(),
+        },
+    ));
+    assert!(denied.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(
+            id,
+            WriteStatus::AuthDenied {
+                source: AuthDenialSource::Signer,
+                reason,
+                ..
+            }
+        ) if *id == receipt && reason == "user declined signature"
+    )));
+
+    let mut relay = Fixture::new();
+    let (_, policy) = relay.challenge("relay denial");
+    let (receipt, _) = publish_waiting_auth(&mut relay, "relay denied write");
+    let (sign_token, unsigned) = relay.allow(policy.unwrap());
+    let (send_token, auth_event) = relay.sign(sign_token, unsigned);
+    relay.send_accepted(send_token);
+    let denied = relay.ok(auth_event.id, false);
+    assert!(denied.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(
+            id,
+            WriteStatus::AuthDenied {
+                source: AuthDenialSource::Relay,
+                reason,
+                ..
+            }
+        ) if *id == receipt && reason == "auth result"
+    )));
+}
+
+#[test]
+fn auth_error_unavailable_and_subscription_closed_never_terminalize_a_write() {
+    for outcome in [
+        AuthPolicyOutcome::Unavailable,
+        AuthPolicyOutcome::Error {
+            reason: "policy backend failed".into(),
+        },
+    ] {
+        let mut fixture = Fixture::new();
+        let (_, policy) = fixture.challenge("non-denial");
+        let (receipt, _) = publish_waiting_auth(&mut fixture, "recoverable write");
+        let policy = policy.unwrap();
+        let instance = if matches!(outcome, AuthPolicyOutcome::Unavailable) {
+            None
+        } else {
+            bind(&mut fixture, &policy, AuthCapability::Policy, POLICY);
+            Some(POLICY)
+        };
+        let effects = fixture
+            .core
+            .handle(EngineMsg::AuthPolicyCompleted(policy, instance, outcome));
+        assert!(!effects.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(id, WriteStatus::AuthDenied { .. }) if *id == receipt
+        )));
+        let intent = fixture.core.pending[&receipt].intent_id.unwrap();
+        assert_eq!(
+            fixture
+                .core
+                .resolver
+                .store()
+                .recover_outbox_lanes(intent)
+                .unwrap()[0]
+                .state,
+            LaneState::WaitingAuth
+        );
+    }
+
+    let mut closed = Fixture::new();
+    let (_, _) = closed.challenge("subscription closure");
+    let (receipt, event) = publish_waiting_auth(&mut closed, "closed is not denied");
+    let effects = closed.core.handle(EngineMsg::RelayFrame(
+        closed.handle,
+        closed.session.clone(),
+        RelayFrame::from(RelayMessage::closed(
+            SubscriptionId::new(wire_sub_id_string(&closed.sub_id)),
+            "auth-required: authenticate",
+        )),
+    ));
+    assert!(!effects.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(id, WriteStatus::AuthDenied { .. }) if *id == receipt
+    )));
+    let intent = closed.core.pending[&receipt].intent_id.unwrap();
+    assert_eq!(
+        closed
+            .core
+            .resolver
+            .store()
+            .recover_outbox_lanes(intent)
+            .unwrap()[0]
+            .state,
+        LaneState::WaitingAuth
+    );
+
+    let (_, policy) = closed.challenge("after closure");
+    let (sign_token, unsigned) = closed.allow(policy.unwrap());
+    let (send_token, auth_event) = closed.sign(sign_token, unsigned);
+    closed.send_accepted(send_token);
+    let ready = closed.ok(auth_event.id, true);
+    assert!(ready.iter().any(|effect| matches!(
+        effect,
+        Effect::PublishEvent(session, current, _)
+            if session == &closed.session && current == &event
+    )));
+}
+
+#[test]
+fn auth_denial_isolated_by_exact_identity_leaves_same_url_peer_live() {
+    let alice = Keys::generate();
+    let bob = Keys::generate();
+    let relay = RelayUrl::parse("wss://shared-auth.example.com").unwrap();
+    let alice_session =
+        RelaySessionKey::new(relay.clone(), AccessContext::Nip42(alice.public_key()));
+    let bob_session = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(bob.public_key()));
+    let alice_handle = RelayHandle {
+        slot: 20,
+        generation: 1,
+    };
+    let bob_handle = RelayHandle {
+        slot: 21,
+        generation: 1,
+    };
+    let mut core = EngineCore::new(MemoryStore::new(), 10);
+    core.handle(EngineMsg::RelayConnected(
+        alice_handle,
+        alice_session.clone(),
+    ));
+    core.handle(EngineMsg::RelayConnected(bob_handle, bob_session.clone()));
+
+    let publish = |keys: &Keys| WriteIntent {
+        payload: WritePayload::Signed(
+            EventBuilder::new(Kind::TextNote, "identity isolated")
+                .custom_created_at(Timestamp::from(
+                    if keys.public_key() == alice.public_key() {
+                        20
+                    } else {
+                        21
+                    },
+                ))
+                .sign_with_keys(keys)
+                .unwrap(),
+        ),
+        durability: Durability::Durable,
+        routing: WriteRouting::Explicit(vec![relay.clone()]),
+        identity: Identity::Explicit(keys.public_key()),
+        correlation: None,
+    };
+    let alice_effects = core.handle(EngineMsg::Publish(publish(&alice)));
+    let alice_receipt = published_receipt(&alice_effects);
+    let bob_effects = core.handle(EngineMsg::Publish(publish(&bob)));
+    let bob_receipt = published_receipt(&bob_effects);
+
+    let challenge = core.handle(EngineMsg::RelayFrame(
+        alice_handle,
+        alice_session,
+        RelayFrame::from(RelayMessage::Auth {
+            challenge: Cow::Borrowed("alice only"),
+        }),
+    ));
+    let token = challenge
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::RelayAuth(AuthEffect::RequestPolicy { token, .. }) => Some(token),
+            _ => None,
+        })
+        .unwrap();
+    core.handle(EngineMsg::AuthCapabilityBound {
+        token: token.clone(),
+        capability: AuthCapability::Policy,
+        instance: POLICY,
+    });
+    let denied = core.handle(EngineMsg::AuthPolicyCompleted(
+        token,
+        Some(POLICY),
+        AuthPolicyOutcome::Deny {
+            reason: "alice is not permitted".into(),
+        },
+    ));
+    assert!(denied.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(
+            id,
+            WriteStatus::AuthDenied {
+                pubkey,
+                source: AuthDenialSource::Policy,
+                ..
+            }
+        ) if *id == alice_receipt && *pubkey == alice.public_key()
+    )));
+    assert!(!denied.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(id, WriteStatus::AuthDenied { .. }) if *id == bob_receipt
+    )));
+    let bob_intent = core.pending[&bob_receipt].intent_id.unwrap();
+    assert_eq!(
+        core.resolver
+            .store()
+            .recover_outbox_lanes(bob_intent)
+            .unwrap()[0]
+            .state,
+        LaneState::WaitingAuth
+    );
+
+    let bob_released = core.handle(EngineMsg::AuthProbeReleased(
+        bob_handle,
+        bob_session.clone(),
+    ));
+    assert!(bob_released.iter().any(|effect| matches!(
+        effect,
+        Effect::PublishEvent(session, _, _) if session == &bob_session
+    )));
+}
+
+#[test]
+fn one_auth_denied_lane_does_not_stop_other_lanes_on_the_same_receipt() {
+    let keys = Keys::generate();
+    let denied_relay = RelayUrl::parse("wss://denied-lane.example.com").unwrap();
+    let ordinary_relay = RelayUrl::parse("wss://ordinary-lane.example.com").unwrap();
+    let denied_session = RelaySessionKey::new(
+        denied_relay.clone(),
+        AccessContext::Nip42(keys.public_key()),
+    );
+    let ordinary_session = RelaySessionKey::new(
+        ordinary_relay.clone(),
+        AccessContext::Nip42(keys.public_key()),
+    );
+    let denied_handle = RelayHandle {
+        slot: 30,
+        generation: 1,
+    };
+    let ordinary_handle = RelayHandle {
+        slot: 31,
+        generation: 1,
+    };
+    let event = EventBuilder::new(Kind::TextNote, "independent lanes")
+        .custom_created_at(Timestamp::from(30))
+        .sign_with_keys(&keys)
+        .unwrap();
+    let mut core = EngineCore::new(MemoryStore::new(), 10);
+    core.handle(EngineMsg::RelayConnected(
+        denied_handle,
+        denied_session.clone(),
+    ));
+    core.handle(EngineMsg::RelayConnected(
+        ordinary_handle,
+        ordinary_session.clone(),
+    ));
+    let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Signed(event.clone()),
+        durability: Durability::Durable,
+        routing: WriteRouting::Explicit(vec![denied_relay.clone(), ordinary_relay.clone()]),
+        identity: Identity::Explicit(keys.public_key()),
+        correlation: None,
+    }));
+    let receipt = published_receipt(&accepted);
+
+    let challenge = core.handle(EngineMsg::RelayFrame(
+        denied_handle,
+        denied_session,
+        RelayFrame::from(RelayMessage::Auth {
+            challenge: Cow::Borrowed("deny one lane"),
+        }),
+    ));
+    let token = challenge
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::RelayAuth(AuthEffect::RequestPolicy { token, .. }) => Some(token),
+            _ => None,
+        })
+        .unwrap();
+    core.handle(EngineMsg::AuthCapabilityBound {
+        token: token.clone(),
+        capability: AuthCapability::Policy,
+        instance: POLICY,
+    });
+    let denied = core.handle(EngineMsg::AuthPolicyCompleted(
+        token,
+        Some(POLICY),
+        AuthPolicyOutcome::Deny {
+            reason: "policy denied this destination".into(),
+        },
+    ));
+    assert!(denied.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(
+            id,
+            WriteStatus::AuthDenied { relay, .. }
+        ) if *id == receipt && relay == &denied_relay
+    )));
+    assert!(core.pending.contains_key(&receipt));
+
+    let released = core.handle(EngineMsg::AuthProbeReleased(
+        ordinary_handle,
+        ordinary_session.clone(),
+    ));
+    let correlation = released
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::PublishEvent(session, current, correlation)
+                if session == &ordinary_session && current == &event =>
+            {
+                Some(*correlation)
+            }
+            _ => None,
+        })
+        .expect("ordinary lane still starts");
+    core.handle(EngineMsg::EventHandoff(
+        correlation,
+        nmp_transport::HandoffResult::Written,
+    ));
+    let acked = core.handle(EngineMsg::RelayFrame(
+        ordinary_handle,
+        ordinary_session,
+        RelayFrame::from(RelayMessage::ok(event.id, true, "saved")),
+    ));
+    assert!(acked.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(id, WriteStatus::Acked(relay))
+            if *id == receipt && relay == &ordinary_relay
+    )));
+    assert!(!core.pending.contains_key(&receipt));
+}
+
 #[test]
 fn exact_success_replays_once_and_only_then_allows_eose_credit() {
     let mut fixture = Fixture::new();

@@ -103,6 +103,7 @@
 //! -- a step file never has to know which of them a helper ended up in.
 
 mod actions;
+mod auth;
 mod budgets;
 mod clock;
 mod contacts;
@@ -214,11 +215,46 @@ impl nmp_signer::SigningCapability for CountingSigner {
     }
 }
 
+/// One app-owned policy for the active account, with per-relay answers.
+///
+/// The fixture is deliberately installed through the public facade and sees
+/// the real challenge request. It does not inject an answer into the reducer;
+/// the scripted relay must first challenge the exact websocket session.
+struct StagedAuthPolicy {
+    denied: Vec<(nostr::RelayUrl, String)>,
+}
+
+impl nmp::AuthPolicy for StagedAuthPolicy {
+    fn evaluate(&self, request: nmp::AuthPolicyRequest) -> nmp::AuthPolicyOp {
+        self.denied
+            .iter()
+            .find(|(relay, _)| relay == request.relay())
+            .map_or_else(nmp::AuthPolicyOp::allow, |(_, reason)| {
+                nmp::AuthPolicyOp::deny(reason.clone())
+            })
+    }
+}
+
+#[derive(Clone)]
+struct AuthDenialObservation {
+    pubkey: PublicKey,
+    source: nmp::AuthDenialSource,
+    reason: String,
+    event_attempts: usize,
+}
+
 #[derive(cucumber::World, Default)]
 pub struct NmpWorld {
     people: HashMap<String, Keys>,
 
     relay_configs: HashMap<String, RelayConfig>,
+    /// Relay-name -> the app policy's exact denial sentence. Resolved to the
+    /// relay's real local URL only after every scripted relay has bound.
+    auth_policy_denials: HashMap<String, String>,
+    /// The first live receipt fact and independent raw-socket EVENT count for
+    /// each denied relay. Kept across an in-scenario engine reconstruction.
+    auth_denial_observations: HashMap<String, AuthDenialObservation>,
+    auth_policy_registrations: Vec<nmp::AuthPolicyRegistration>,
     relay_order: Vec<String>,
     relays: HashMap<String, ScriptedRelay>,
     indexer_names: Vec<String>,

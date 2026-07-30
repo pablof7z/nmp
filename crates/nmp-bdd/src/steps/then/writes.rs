@@ -112,6 +112,43 @@ async fn reason_is_the_relays_own_words(w: &mut NmpWorld, message: String) {
     );
 }
 
+// ---- authentication: denial is a durable lane fact ---------------------
+
+#[then(regex = r#"^the receipt reports "([^"]+)" as authentication denied by policy$"#)]
+async fn receipt_reports_policy_auth_denial(w: &mut NmpWorld, relay: String) {
+    assert!(
+        w.receipt_reports_policy_auth_denial(&relay),
+        "expected a policy-owned AUTH denial for {relay:?}; saw {:?}",
+        w.identity_receipt_statuses(None)
+    );
+}
+
+#[then(regex = r#"^the reason is the policy's own words "([^"]+)"$"#)]
+async fn reason_is_the_policies_own_words(w: &mut NmpWorld, reason: String) {
+    assert!(
+        w.any_policy_auth_denial_reason_is(&reason),
+        "expected the app policy's exact sentence {reason:?}; saw {:?}",
+        w.identity_receipt_statuses(None)
+    );
+}
+
+#[then(regex = r#"^the reason is the same reason it was denied with$"#)]
+async fn replayed_denial_keeps_reason(w: &mut NmpWorld) {
+    assert!(
+        w.any_replayed_auth_denial_matches_first(),
+        "expected the reattached receipt to replay the first denial source and reason; saw {:?}",
+        w.identity_receipt_statuses(None)
+    );
+}
+
+#[then(regex = r#"^no further event attempt is made against "([^"]+)"$"#)]
+async fn no_event_after_auth_denial(w: &mut NmpWorld, relay: String) {
+    assert!(
+        w.no_event_attempt_after_auth_denial(&relay).await,
+        "the raw relay socket saw another EVENT after {relay:?} became durably AUTH-denied"
+    );
+}
+
 // ---- one publish retiring another ---------------------------------------
 //
 // These are the only steps that name a publish by ORDER instead of by

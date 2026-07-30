@@ -115,11 +115,37 @@ final class EvidenceMappingTests: XCTestCase {
         )
         XCTAssertEqual(
             WriteStatus(
-                .retryEligible(
-                    relay: "wss://retry.example", attempt: 2, eligibleAt: 123
+                .authDenied(
+                    relay: "wss://auth.example",
+                    pubkey: String(repeating: "a", count: 64),
+                    source: .policy,
+                    reason: "account not permitted"
                 )
             ),
-            .retryEligible(relay: "wss://retry.example", attempt: 2, eligibleAt: 123)
+            .authDenied(
+                relay: "wss://auth.example",
+                pubkey: String(repeating: "a", count: 64),
+                source: .policy,
+                reason: "account not permitted"
+            )
+        )
+        XCTAssertEqual(
+            WriteStatus(
+                .retryEligible(
+                    relay: "wss://retry.example",
+                    attempt: 2,
+                    eligibleAt: 123,
+                    cause: .relayRateLimited,
+                    detail: "rate-limited: slow down"
+                )
+            ),
+            .retryEligible(
+                relay: "wss://retry.example",
+                attempt: 2,
+                eligibleAt: 123,
+                cause: .relayRateLimited,
+                detail: "rate-limited: slow down"
+            )
         )
         XCTAssertEqual(
             WriteStatus(
