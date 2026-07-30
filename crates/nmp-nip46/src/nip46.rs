@@ -1679,7 +1679,6 @@ impl SessionWorker {
                 }
                 Err(_) => continue,
             };
-            self.set_preamble(handle);
             self.configured.insert(relay, handle);
             usable += 1;
         }
@@ -1735,15 +1734,20 @@ impl SessionWorker {
         ClientMessage::req(self.subscription_id.clone(), vec![self.filter()]).as_json()
     }
 
-    fn set_preamble(&self, handle: nmp_transport::RelayHandle) {
-        let _ = self
-            .pool
-            .set_reconnect_preamble(handle, vec![self.preamble()]);
+    fn set_preamble(&self, handle: nmp_transport::RelayHandle) -> bool {
+        self.pool
+            .set_reconnect_preamble(handle, vec![self.preamble()])
     }
 
-    fn refresh_preambles(&self) {
-        for (handle, _) in self.handles.values() {
-            self.set_preamble(*handle);
+    fn refresh_preambles(&mut self) {
+        let configured: Vec<RelayUrl> = self.configured.keys().cloned().collect();
+        for relay in configured {
+            let Some(handle) = self.pool.live_handle(&relay) else {
+                continue;
+            };
+            if self.set_preamble(handle) {
+                self.configured.insert(relay, handle);
+            }
         }
     }
 
@@ -1892,16 +1896,21 @@ impl SessionWorker {
                 // invitation and turn the anti-spoofing secret into a DoS.
                 return;
             }
+            let SessionRemote::AwaitingConnect(pending) =
+                std::mem::replace(&mut self.remote, SessionRemote::Known(event.pubkey))
+            else {
+                unreachable!("the exact connect response was validated while awaiting it");
+            };
+            self.refresh_preambles();
             if pending.completion.send(Ok(event.pubkey)).is_err() {
                 // A caller that abandoned the pairing result cannot leave a
                 // live session silently bound to a signer nobody received.
+                self.remote = SessionRemote::AwaitingConnect(pending);
                 if let Some(session) = self.session.upgrade() {
                     session.control.shutdown();
                 }
                 return;
             }
-            self.remote = SessionRemote::Known(event.pubkey);
-            self.refresh_preambles();
             return;
         }
 
@@ -2478,6 +2487,14 @@ mod tests {
         assert!(!worker_state.contains("bool"));
         assert!(source.contains("remote: SessionRemote"));
         assert!(source.contains("SessionRemote::awaiting_connect(secret)"));
+        let refresh = source
+            .split("fn refresh_preambles")
+            .nth(1)
+            .and_then(|rest| rest.split("fn on_pool").next())
+            .expect("refresh_preambles source");
+        assert!(refresh.contains("self.configured.keys()"));
+        assert!(refresh.contains("self.pool.live_handle"));
+        assert!(!refresh.contains("self.handles.values()"));
     }
 
     #[tokio::test(flavor = "current_thread")]
