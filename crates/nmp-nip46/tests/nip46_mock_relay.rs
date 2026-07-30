@@ -944,6 +944,337 @@ fn client_invitation_ignores_forged_secret_then_accepts_valid_signer() {
 }
 
 #[test]
+fn client_invitation_reconnect_preamble_binds_the_accepted_signer() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let relay = format!("ws://{}", listener.local_addr().unwrap());
+    let invitation = Nip46Invitation::new(
+        vec![nostr::RelayUrl::parse(&relay).unwrap()],
+        None,
+        Nip46ClientMetadata::default(),
+    )
+    .unwrap();
+    let uri = url::Url::parse(&invitation.uri()).unwrap();
+    let client = PublicKey::from_hex(uri.host_str().unwrap()).unwrap();
+    let secret = uri
+        .query_pairs()
+        .find(|(key, _)| key == "secret")
+        .map(|(_, value)| value.into_owned())
+        .unwrap();
+    let remote = Keys::generate();
+    let user = Keys::generate();
+    let expected_remote = remote.public_key();
+    let expected_user = user.public_key();
+    let remote_thread = remote.clone();
+    let user_thread = user.clone();
+    let (reconnect_filter_tx, reconnect_filter_rx) = mpsc::sync_channel(1);
+
+    thread::spawn(move || {
+        let (first_stream, _) = listener.accept().unwrap();
+        let mut first = tungstenite::accept(first_stream).unwrap();
+        let mut subscription_id = None;
+        let mut connect_sent = false;
+        while let Ok(message) = first.read() {
+            let Message::Text(text) = message else {
+                continue;
+            };
+            let frame: Value = serde_json::from_str(text.as_ref()).unwrap();
+            let parts = frame.as_array().unwrap();
+            match parts.first().and_then(Value::as_str) {
+                Some("REQ") => {
+                    subscription_id = parts.get(1).and_then(Value::as_str).map(str::to_string);
+                    if !connect_sent {
+                        assert!(
+                            parts[2].get("authors").is_none(),
+                            "the pre-pairing filter must admit the not-yet-known signer"
+                        );
+                        connect_sent = true;
+                        let response = response_event(
+                            &remote_thread,
+                            client,
+                            "connect-valid",
+                            Some(secret.clone()),
+                            None,
+                        );
+                        first
+                            .send(Message::Text(
+                                event_frame(subscription_id.as_deref().unwrap(), response).into(),
+                            ))
+                            .unwrap();
+                    } else {
+                        assert_eq!(
+                            parts[2]["authors"],
+                            json!([remote_thread.public_key().to_hex()]),
+                            "the live connection must adopt the same bound preamble used after reconnect"
+                        );
+                    }
+                }
+                Some("EVENT") => {
+                    let event = Event::from_json(parts[1].to_string()).unwrap();
+                    let plaintext = nip44::decrypt(
+                        remote_thread.secret_key(),
+                        &event.pubkey,
+                        event.content.as_bytes(),
+                    )
+                    .unwrap();
+                    let request: Value = serde_json::from_str(&plaintext).unwrap();
+                    let id = request["id"].as_str().unwrap();
+                    let method = request["method"].as_str().unwrap();
+                    if method != "get_public_key" {
+                        continue;
+                    }
+                    let response = response_event(
+                        &remote_thread,
+                        event.pubkey,
+                        id,
+                        Some(user_thread.public_key().to_hex()),
+                        None,
+                    );
+                    first
+                        .send(Message::Text(
+                            event_frame(subscription_id.as_deref().unwrap(), response).into(),
+                        ))
+                        .unwrap();
+                    first.close(None).unwrap();
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        let (second_stream, _) = listener.accept().unwrap();
+        let mut second = tungstenite::accept(second_stream).unwrap();
+        while let Ok(message) = second.read() {
+            let Message::Text(text) = message else {
+                continue;
+            };
+            let frame: Value = serde_json::from_str(text.as_ref()).unwrap();
+            let parts = frame.as_array().unwrap();
+            if parts.first().and_then(Value::as_str) == Some("REQ") {
+                reconnect_filter_tx.send(parts[2].clone()).unwrap();
+                break;
+            }
+        }
+    });
+
+    let signer = invitation.connect(REMOTE_OPERATION).unwrap();
+    assert_eq!(signer.remote_signer_public_key(), expected_remote);
+    assert_eq!(signer.user_public_key(), expected_user);
+    let reconnect_filter = reconnect_filter_rx
+        .recv_timeout(OBSERVATION)
+        .expect("the session reconnects with a refreshed subscription preamble");
+    assert_eq!(
+        reconnect_filter["authors"],
+        json!([expected_remote.to_hex()]),
+        "the refreshed reconnect preamble must reject every other author"
+    );
+}
+
+#[test]
+fn snapshotted_secondary_preamble_is_revoked_before_its_post_binding_write() {
+    let primary_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let primary_relay = format!("ws://{}", primary_listener.local_addr().unwrap());
+    let secondary_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let secondary_relay = format!("ws://{}", secondary_listener.local_addr().unwrap());
+    let secondary_url = nostr::RelayUrl::parse(&secondary_relay).unwrap();
+    let invitation = Nip46Invitation::new(
+        vec![
+            nostr::RelayUrl::parse(&primary_relay).unwrap(),
+            secondary_url.clone(),
+        ],
+        None,
+        Nip46ClientMetadata::default(),
+    )
+    .unwrap();
+    let uri = url::Url::parse(&invitation.uri()).unwrap();
+    let client = PublicKey::from_hex(uri.host_str().unwrap()).unwrap();
+    let secret = uri
+        .query_pairs()
+        .find(|(key, _)| key == "secret")
+        .map(|(_, value)| value.into_owned())
+        .unwrap();
+    let remote = Keys::generate();
+    let user = Keys::generate();
+    let expected_remote = remote.public_key();
+
+    let (allow_primary_handshake_tx, allow_primary_handshake_rx) = mpsc::channel();
+    let remote_for_primary = remote.clone();
+    let user_for_primary = user.clone();
+    thread::spawn(move || {
+        let (stream, _) = primary_listener.accept().unwrap();
+        allow_primary_handshake_rx
+            .recv_timeout(OBSERVATION)
+            .expect("the test releases the primary relay after the secondary disconnects");
+        let mut socket = tungstenite::accept(stream).unwrap();
+        let mut subscription_id = None;
+        let mut connect_sent = false;
+        while let Ok(message) = socket.read() {
+            let Message::Text(text) = message else {
+                continue;
+            };
+            let frame: Value = serde_json::from_str(text.as_ref()).unwrap();
+            let parts = frame.as_array().unwrap();
+            match parts.first().and_then(Value::as_str) {
+                Some("REQ") => {
+                    subscription_id = parts.get(1).and_then(Value::as_str).map(str::to_string);
+                    if !connect_sent {
+                        assert!(
+                            parts[2].get("authors").is_none(),
+                            "pairing begins with a broad filter because the signer is not known yet"
+                        );
+                        connect_sent = true;
+                        let response = response_event(
+                            &remote_for_primary,
+                            client,
+                            "connect-valid",
+                            Some(secret.clone()),
+                            None,
+                        );
+                        socket
+                            .send(Message::Text(
+                                event_frame(subscription_id.as_deref().unwrap(), response).into(),
+                            ))
+                            .unwrap();
+                    } else {
+                        assert_eq!(
+                            parts[2]["authors"],
+                            json!([remote_for_primary.public_key().to_hex()]),
+                            "the primary relay also advances to the acknowledged bound owner"
+                        );
+                    }
+                }
+                Some("EVENT") => {
+                    let event = Event::from_json(parts[1].to_string()).unwrap();
+                    let plaintext = nip44::decrypt(
+                        remote_for_primary.secret_key(),
+                        &event.pubkey,
+                        event.content.as_bytes(),
+                    )
+                    .unwrap();
+                    let request: Value = serde_json::from_str(&plaintext).unwrap();
+                    let id = request["id"].as_str().unwrap();
+                    let method = request["method"].as_str().unwrap();
+                    let result = match method {
+                        "get_public_key" => user_for_primary.public_key().to_hex(),
+                        "switch_relays" => "null".to_string(),
+                        other => panic!("unexpected method {other}"),
+                    };
+                    let response =
+                        response_event(&remote_for_primary, event.pubkey, id, Some(result), None);
+                    socket
+                        .send(Message::Text(
+                            event_frame(subscription_id.as_deref().unwrap(), response).into(),
+                        ))
+                        .unwrap();
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let (secondary_broad_tx, secondary_broad_rx) = mpsc::sync_channel(1);
+    let (close_secondary_tx, close_secondary_rx) = mpsc::channel();
+    let (secondary_first_req_tx, secondary_first_req_rx) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let (first_stream, _) = secondary_listener.accept().unwrap();
+        let mut first = tungstenite::accept(first_stream).unwrap();
+        loop {
+            let Message::Text(text) = first.read().unwrap() else {
+                continue;
+            };
+            let frame: Value = serde_json::from_str(text.as_ref()).unwrap();
+            let parts = frame.as_array().unwrap();
+            if parts.first().and_then(Value::as_str) == Some("REQ") {
+                assert!(
+                    parts[2].get("authors").is_none(),
+                    "the secondary relay also starts before signer ownership is established"
+                );
+                secondary_broad_tx.send(()).unwrap();
+                break;
+            }
+        }
+        close_secondary_rx
+            .recv_timeout(OBSERVATION)
+            .expect("the test closes the secondary only after observing session availability");
+        first.close(None).unwrap();
+        drop(first);
+
+        let (second_stream, _) = secondary_listener.accept().unwrap();
+        let mut second = tungstenite::accept(second_stream).unwrap();
+        loop {
+            let Message::Text(text) = second.read().unwrap() else {
+                continue;
+            };
+            let frame: Value = serde_json::from_str(text.as_ref()).unwrap();
+            let parts = frame.as_array().unwrap();
+            if parts.first().and_then(Value::as_str) == Some("REQ") {
+                secondary_first_req_tx.send(parts[2].clone()).unwrap();
+                break;
+            }
+        }
+    });
+
+    let (events_tx, events_rx) = mpsc::channel();
+    let (connect_tx, connect_rx) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let result = invitation.connect_observed(
+            REMOTE_OPERATION,
+            std::sync::Arc::new(move |event| {
+                let _ = events_tx.send(event);
+            }),
+        );
+        connect_tx.send(result).unwrap();
+    });
+
+    let deadline = Instant::now() + OBSERVATION;
+    loop {
+        match events_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Nip46ConnectionEvent::Available) => break,
+            Ok(_) => {}
+            Err(error) => panic!("the secondary relay never made the session available ({error})"),
+        }
+    }
+    secondary_broad_rx
+        .recv_timeout(OBSERVATION)
+        .expect("the secondary relay observed its startup broad REQ");
+    let secondary_snapshot =
+        nmp_transport::install_reconnect_preamble_snapshot_barrier(&secondary_url);
+    close_secondary_tx.send(()).unwrap();
+    loop {
+        match events_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Nip46ConnectionEvent::Unavailable) => break,
+            Ok(_) => {}
+            Err(error) => {
+                panic!("the session never observed the secondary relay disconnect ({error})")
+            }
+        }
+    }
+    assert!(
+        secondary_snapshot.wait_until_observed(OBSERVATION),
+        "relay B must snapshot the broad reconnect preamble before relay A binds"
+    );
+
+    allow_primary_handshake_tx.send(()).unwrap();
+    let signer = connect_rx
+        .recv_timeout(OBSERVATION)
+        .expect("the primary relay completes pairing")
+        .expect("pairing succeeds");
+    assert_eq!(signer.remote_signer_public_key(), expected_remote);
+
+    // This release creates the exact historical race: B snapshotted the broad
+    // frame before binding, but cannot attempt its write until after the
+    // ownership transition completed on A.
+    secondary_snapshot.release();
+    let first_post_binding_req = secondary_first_req_rx
+        .recv_timeout(OBSERVATION)
+        .expect("the dormant secondary relay reconnects");
+    assert_eq!(
+        first_post_binding_req["authors"],
+        json!([expected_remote.to_hex()]),
+        "no broad startup preamble may precede the author-bound reconnect REQ"
+    );
+}
+
+#[test]
 fn unavailable_signer_operation_is_retryable() {
     let (sender, operation) = SignerOp::<String>::pending_channel();
     drop(sender);

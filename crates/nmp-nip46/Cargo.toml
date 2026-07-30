@@ -30,5 +30,6 @@ nmp-grammar.workspace = true
 nmp-resolver.workspace = true
 nmp-router.workspace = true
 nmp-store.workspace = true
+nmp-transport = { workspace = true, features = ["bench-instrumentation"] }
 tempfile = "3"
 tungstenite = "0.29"

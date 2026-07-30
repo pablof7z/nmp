@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -342,18 +342,24 @@ impl Nip46Invitation {
         cancellation: &Nip46Cancellation,
         runtime: tokio::runtime::Handle,
     ) -> Result<Nip46Signer, Nip46Error> {
-        let client_keys = self.client_keys.clone();
+        let Self {
+            client_keys,
+            relays,
+            secret,
+            ..
+        } = self;
+        let signer_client_keys = client_keys.clone();
+        let (remote, connect_result) = SessionRemote::awaiting_connect(secret);
         let session = Session::spawn(
-            self.relays,
-            self.client_keys,
-            None,
+            relays,
+            client_keys,
+            remote,
             Some(cancellation),
             SessionRuntime(runtime),
         )?;
         forward_events(&session, event_sink)?;
         session.wait_available_async(timeout).await?;
-        let remote_signer_public_key = session
-            .accept_invitation(self.secret.as_str())
+        let remote_signer_public_key = connect_result
             .recv_timeout(timeout)
             .map_err(map_connect_recv)??;
         let user_public_key = request_string(&session, "get_public_key", Vec::new())
@@ -370,7 +376,7 @@ impl Nip46Invitation {
             user_public_key,
             remote_signer_public_key,
             session,
-            client_keys,
+            client_keys: signer_client_keys,
             origin: Nip46Origin::ClientInitiated,
         })
     }
@@ -382,12 +388,18 @@ impl Nip46Invitation {
         cancellation: Option<&Nip46Cancellation>,
         runtime: SessionRuntime,
     ) -> Result<Nip46Signer, Nip46Error> {
-        let client_keys = self.client_keys.clone();
-        let session = Session::spawn(self.relays, self.client_keys, None, cancellation, runtime)?;
+        let Self {
+            client_keys,
+            relays,
+            secret,
+            ..
+        } = self;
+        let signer_client_keys = client_keys.clone();
+        let (remote, connect_result) = SessionRemote::awaiting_connect(secret);
+        let session = Session::spawn(relays, client_keys, remote, cancellation, runtime)?;
         forward_events(&session, event_sink)?;
         session.wait_available(timeout)?;
-        let remote_signer_public_key = session
-            .accept_invitation(self.secret.as_str())
+        let remote_signer_public_key = connect_result
             .recv_timeout(timeout)
             .map_err(map_connect_recv)??;
         let user_public_key = request_string(&session, "get_public_key", Vec::new())
@@ -404,7 +416,7 @@ impl Nip46Invitation {
             user_public_key,
             remote_signer_public_key,
             session,
-            client_keys,
+            client_keys: signer_client_keys,
             origin: Nip46Origin::ClientInitiated,
         })
     }
@@ -586,7 +598,7 @@ impl Nip46Signer {
         let session = Session::spawn(
             parsed.relays,
             client_keys.clone(),
-            Some(remote_signer_public_key),
+            SessionRemote::Known(remote_signer_public_key),
             Some(cancellation),
             SessionRuntime(runtime),
         )?;
@@ -652,7 +664,7 @@ impl Nip46Signer {
         let session = Session::spawn(
             parsed.relays,
             client_keys.clone(),
-            Some(remote_signer_public_key),
+            SessionRemote::Known(remote_signer_public_key),
             cancellation,
             runtime,
         )?;
@@ -826,7 +838,7 @@ impl Nip46Signer {
         let session = Session::spawn(
             parts.relays,
             client_keys.clone(),
-            Some(parts.remote_signer_public_key),
+            SessionRemote::Known(parts.remote_signer_public_key),
             Some(cancellation),
             SessionRuntime(runtime),
         )?;
@@ -870,7 +882,7 @@ impl Nip46Signer {
         let session = Session::spawn(
             parts.relays,
             client_keys.clone(),
-            Some(parts.remote_signer_public_key),
+            SessionRemote::Known(parts.remote_signer_public_key),
             cancellation,
             runtime,
         )?;
@@ -1090,11 +1102,64 @@ struct RequestMsg {
     cancellation: Arc<RequestCancellation>,
 }
 
+struct PendingConnect {
+    expected_secret: Zeroizing<String>,
+    completion: SyncSender<Result<PublicKey, Nip46Error>>,
+}
+
+struct PendingBind {
+    remote: PublicKey,
+    transitions: Vec<PendingBindTransition>,
+}
+
+enum PendingBindTransition {
+    Transport(nmp_transport::ReconnectPreambleTransition),
+    #[cfg(test)]
+    Controlled(Receiver<bool>),
+}
+
+impl PendingBindTransition {
+    fn try_result(&self) -> Option<bool> {
+        match self {
+            Self::Transport(transition) => transition.try_result(),
+            #[cfg(test)]
+            Self::Controlled(result) => match result.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => Some(false),
+            },
+        }
+    }
+}
+
+enum SessionRemote {
+    AwaitingConnect(PendingConnect),
+    Known(PublicKey),
+}
+
+impl SessionRemote {
+    fn awaiting_connect(
+        expected_secret: Zeroizing<String>,
+    ) -> (Self, Receiver<Result<PublicKey, Nip46Error>>) {
+        let (completion, result) = mpsc::sync_channel(1);
+        (
+            Self::AwaitingConnect(PendingConnect {
+                expected_secret,
+                completion,
+            }),
+            result,
+        )
+    }
+
+    fn known(&self) -> Option<PublicKey> {
+        match self {
+            Self::AwaitingConnect(_) => None,
+            Self::Known(remote) => Some(*remote),
+        }
+    }
+}
+
 enum WorkerMsg {
-    AcceptInvitation {
-        expected_secret: String,
-        reply: Sender<Result<PublicKey, Nip46Error>>,
-    },
     ReplaceRelays(Vec<RelayUrl>),
 }
 
@@ -1214,7 +1279,7 @@ impl Session {
     fn spawn(
         relays: Vec<RelayUrl>,
         client_keys: Keys,
-        remote: Option<PublicKey>,
+        remote: SessionRemote,
         cancellation: Option<&Nip46Cancellation>,
         runtime: SessionRuntime,
     ) -> Result<Arc<Self>, Nip46Error> {
@@ -1402,26 +1467,6 @@ impl Session {
             .clone()
     }
 
-    fn accept_invitation(&self, expected_secret: &str) -> Receiver<Result<PublicKey, Nip46Error>> {
-        let (tx, rx) = mpsc::channel();
-        let commands = self.commands.clone();
-        let expected_secret = expected_secret.to_string();
-        let failure = tx.clone();
-        self.runtime_handle().spawn(async move {
-            if commands
-                .send(WorkerMsg::AcceptInvitation {
-                    expected_secret,
-                    reply: tx,
-                })
-                .await
-                .is_err()
-            {
-                let _ = failure.send(Err(Nip46Error::Disconnected));
-            }
-        });
-        rx
-    }
-
     fn request_switch_relays(self: &Arc<Self>) {
         let op = request_string(self, "switch_relays", Vec::new());
         let session = Arc::downgrade(self);
@@ -1488,7 +1533,7 @@ impl Drop for Session {
 struct SessionWorker {
     pool: Pool,
     client_keys: Keys,
-    remote: Option<PublicKey>,
+    remote: SessionRemote,
     session: std::sync::Weak<Session>,
     subscribers: Arc<Mutex<Vec<Sender<Nip46ConnectionEvent>>>>,
     event_sinks: Arc<Mutex<Vec<EventSink>>>,
@@ -1496,7 +1541,9 @@ struct SessionWorker {
     handles: HashMap<u32, (nmp_transport::RelayHandle, RelayUrl)>,
     configured: HashMap<RelayUrl, nmp_transport::RelayHandle>,
     pending: HashMap<String, PendingRequest>,
-    invitation: Option<(String, Sender<Result<PublicKey, Nip46Error>>)>,
+    pending_bind: Option<PendingBind>,
+    #[cfg(test)]
+    controlled_bind_transitions: Option<Vec<PendingBindTransition>>,
     subscription_id: SubscriptionId,
 }
 
@@ -1504,7 +1551,7 @@ impl SessionWorker {
     fn new(
         pool: Pool,
         client_keys: Keys,
-        remote: Option<PublicKey>,
+        remote: SessionRemote,
         session: std::sync::Weak<Session>,
         subscribers: Arc<Mutex<Vec<Sender<Nip46ConnectionEvent>>>>,
         event_sinks: Arc<Mutex<Vec<EventSink>>>,
@@ -1522,7 +1569,9 @@ impl SessionWorker {
             handles: HashMap::new(),
             configured: HashMap::new(),
             pending: HashMap::new(),
-            invitation: None,
+            pending_bind: None,
+            #[cfg(test)]
+            controlled_bind_transitions: None,
             subscription_id: SubscriptionId::new(format!(
                 "nmp-nip46-{}",
                 NEXT_SUB.fetch_add(1, Ordering::Relaxed)
@@ -1557,10 +1606,6 @@ impl SessionWorker {
                         break;
                     };
                     match message {
-                        WorkerMsg::AcceptInvitation {
-                            expected_secret,
-                            reply,
-                        } => self.invitation = Some((expected_secret, reply)),
                         WorkerMsg::ReplaceRelays(relays) => self.replace_relays(relays),
                     }
                 }
@@ -1581,6 +1626,9 @@ impl SessionWorker {
                         break;
                     };
                     self.on_pool(event);
+                }
+                _ = tokio::time::sleep(Duration::from_millis(1)), if self.pending_bind.is_some() => {
+                    self.poll_pending_bind();
                 }
             }
         }
@@ -1609,8 +1657,8 @@ impl SessionWorker {
         for (_, pending) in self.pending.drain() {
             let _ = pending.reply.resolve(Err(SignerError::Disconnected));
         }
-        if let Some((_, reply)) = self.invitation.take() {
-            let _ = reply.send(Err(Nip46Error::Disconnected));
+        if let SessionRemote::AwaitingConnect(pending) = &self.remote {
+            let _ = pending.completion.send(Err(Nip46Error::Disconnected));
         }
         self.subscribers
             .lock()
@@ -1665,7 +1713,6 @@ impl SessionWorker {
                 }
                 Err(_) => continue,
             };
-            self.set_preamble(handle);
             self.configured.insert(relay, handle);
             usable += 1;
         }
@@ -1707,29 +1754,94 @@ impl SessionWorker {
         }
     }
 
-    fn filter(&self) -> Filter {
+    fn filter_for(&self, remote: Option<PublicKey>) -> Filter {
         let filter = Filter::new()
             .kind(Kind::NostrConnect)
             .pubkey(self.client_keys.public_key());
-        match self.remote {
+        match remote {
             Some(remote) => filter.author(remote),
             None => filter,
         }
     }
 
+    #[cfg(test)]
+    fn filter(&self) -> Filter {
+        self.filter_for(self.remote.known())
+    }
+
+    fn preamble_for(&self, remote: Option<PublicKey>) -> String {
+        ClientMessage::req(self.subscription_id.clone(), vec![self.filter_for(remote)]).as_json()
+    }
+
     fn preamble(&self) -> String {
-        ClientMessage::req(self.subscription_id.clone(), vec![self.filter()]).as_json()
+        self.preamble_for(self.remote.known())
     }
 
-    fn set_preamble(&self, handle: nmp_transport::RelayHandle) {
-        let _ = self
-            .pool
-            .set_reconnect_preamble(handle, vec![self.preamble()]);
+    fn set_preamble(&self, handle: nmp_transport::RelayHandle, preamble: &str) -> bool {
+        self.pool
+            .set_reconnect_preamble(handle, vec![preamble.to_string()])
     }
 
-    fn refresh_preambles(&self) {
-        for (handle, _) in self.handles.values() {
-            self.set_preamble(*handle);
+    fn refresh_preambles(&mut self, preamble: &str) -> Option<Vec<PendingBindTransition>> {
+        #[cfg(test)]
+        if let Some(transitions) = self.controlled_bind_transitions.take() {
+            return Some(transitions);
+        }
+        let configured: Vec<RelayUrl> = self.configured.keys().cloned().collect();
+        let mut transitions = Vec::with_capacity(configured.len());
+        for relay in configured {
+            let handle = self.pool.live_handle(&relay)?;
+            let transition = self
+                .pool
+                .begin_reconnect_preamble(handle, vec![preamble.to_string()])?;
+            self.configured.insert(relay, handle);
+            transitions.push(PendingBindTransition::Transport(transition));
+        }
+        Some(transitions)
+    }
+
+    fn poll_pending_bind(&mut self) {
+        let Some(pending) = self.pending_bind.as_mut() else {
+            return;
+        };
+        let mut unresolved = Vec::with_capacity(pending.transitions.len());
+        let mut failed = false;
+        for transition in pending.transitions.drain(..) {
+            match transition.try_result() {
+                Some(true) => {}
+                Some(false) => failed = true,
+                None => unresolved.push(transition),
+            }
+        }
+        pending.transitions = unresolved;
+        if failed {
+            self.pending_bind = None;
+            if let Some(session) = self.session.upgrade() {
+                session.control.shutdown();
+            }
+            return;
+        }
+        if !pending.transitions.is_empty() {
+            return;
+        }
+        let pending_bind = self
+            .pending_bind
+            .take()
+            .expect("the completed bind transition remains owned");
+        let SessionRemote::AwaitingConnect(pending_connect) =
+            std::mem::replace(&mut self.remote, SessionRemote::Known(pending_bind.remote))
+        else {
+            unreachable!("a bind transition is owned only while awaiting connect");
+        };
+        if pending_connect
+            .completion
+            .send(Ok(pending_bind.remote))
+            .is_err()
+        {
+            self.remote = SessionRemote::AwaitingConnect(pending_connect);
+            if let Some(session) = self.session.upgrade() {
+                session.control.shutdown();
+            }
         }
     }
 
@@ -1755,8 +1867,9 @@ impl SessionWorker {
                         .connected_relays
                         .store(self.handles.len(), Ordering::Release);
                 }
-                self.set_preamble(handle);
-                let _ = self.pool.send(handle, WireFrame::Text(self.preamble()));
+                let preamble = self.preamble();
+                self.set_preamble(handle, &preamble);
+                let _ = self.pool.replay_reconnect_preamble(handle);
                 for pending in self.pending.values() {
                     let _ = self
                         .pool
@@ -1845,7 +1958,10 @@ impl SessionWorker {
                 .tags
                 .public_keys()
                 .any(|pk| *pk == self.client_keys.public_key())
-            || self.remote.is_some_and(|remote| event.pubkey != remote)
+            || matches!(
+                &self.remote,
+                SessionRemote::Known(remote) if event.pubkey != *remote
+            )
         {
             return;
         }
@@ -1860,10 +1976,10 @@ impl SessionWorker {
             return;
         };
 
-        if self.remote.is_none() {
-            let Some((expected_secret, _)) = self.invitation.as_ref() else {
+        if let SessionRemote::AwaitingConnect(pending) = &self.remote {
+            if self.pending_bind.is_some() {
                 return;
-            };
+            }
             let current_result = envelope
                 .result
                 .as_ref()
@@ -1873,18 +1989,28 @@ impl SessionWorker {
             // secret. That is the only shape accepted: an older request-shaped
             // form was removed rather than carried, because accepting two
             // spellings of one thing is the defect, not the compatibility.
-            if current_result.as_deref() != Some(expected_secret.as_str()) {
+            if current_result.as_deref() != Some(pending.expected_secret.as_str()) {
                 // A forged p-tagged response must not consume the one-shot
                 // invitation and turn the anti-spoofing secret into a DoS.
                 return;
             }
-            let (_, reply) = self
-                .invitation
-                .take()
-                .expect("invitation was just validated");
-            self.remote = Some(event.pubkey);
-            self.refresh_preambles();
-            let _ = reply.send(Ok(event.pubkey));
+            // Update every live/dialing worker's authoritative replay owner
+            // before publishing `Known`. A worker already inside an old
+            // replay write holds that owner lock, so this waits for the write
+            // to finish asynchronously; any snapshotted-but-not-started old
+            // replay observes the new revision before it can write.
+            let bound_preamble = self.preamble_for(Some(event.pubkey));
+            let Some(transitions) = self.refresh_preambles(&bound_preamble) else {
+                if let Some(session) = self.session.upgrade() {
+                    session.control.shutdown();
+                }
+                return;
+            };
+            self.pending_bind = Some(PendingBind {
+                remote: event.pubkey,
+                transitions,
+            });
+            self.poll_pending_bind();
             return;
         }
 
@@ -1932,7 +2058,7 @@ impl SessionWorker {
             let _ = reply.resolve(Err(SignerError::Unavailable));
             return;
         }
-        let Some(remote) = self.remote else {
+        let Some(remote) = self.remote.known() else {
             let _ = reply.resolve(Err(SignerError::Unavailable));
             return;
         };
@@ -2088,6 +2214,71 @@ fn forward_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+    use std::thread;
+
+    use tungstenite::Message;
+
+    fn test_session() -> Arc<Session> {
+        let (requests, _request_inbox) = tokio_mpsc::channel(REQUEST_QUEUE_CAPACITY);
+        let (commands, _command_inbox) = tokio_mpsc::channel(CONTROL_QUEUE_CAPACITY);
+        Arc::new(Session {
+            requests,
+            commands,
+            control: Arc::new(SessionControl::new()),
+            request_cancellation_signal: Arc::new(tokio::sync::Notify::new()),
+            connected_relays: AtomicUsize::new(0),
+            subscribers: Arc::new(Mutex::new(Vec::new())),
+            event_sinks: Arc::new(Mutex::new(Vec::new())),
+            availability_error: Arc::new(Mutex::new(None)),
+            availability_signal: Arc::new(tokio::sync::Notify::new()),
+            runtime: SessionRuntime(standalone_runtime().unwrap()),
+            current_relays: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn test_worker(
+        client_keys: Keys,
+        remote: SessionRemote,
+        session: std::sync::Weak<Session>,
+    ) -> SessionWorker {
+        let (pool_tx, _pool_rx) = mpsc::channel();
+        let pool = Pool::new(PoolConfig::default(), pool_tx).expect("test pool construction");
+        SessionWorker::new(
+            pool,
+            client_keys,
+            remote,
+            session,
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(None)),
+        )
+    }
+
+    fn connect_response(signer: &Keys, client: PublicKey, result: serde_json::Value) -> Event {
+        rpc_response(signer, client, "connect", result)
+    }
+
+    fn rpc_response(
+        signer: &Keys,
+        client: PublicKey,
+        id: &str,
+        result: serde_json::Value,
+    ) -> Event {
+        let plaintext =
+            serde_json::json!({ "id": id, "result": result, "error": null }).to_string();
+        let ciphertext = nip44::encrypt(
+            signer.secret_key(),
+            &client,
+            plaintext,
+            nip44::Version::default(),
+        )
+        .unwrap();
+        EventBuilder::new(Kind::NostrConnect, ciphertext)
+            .tag(Tag::public_key(client))
+            .sign_with_keys(signer)
+            .unwrap()
+    }
 
     #[test]
     fn session_transport_worker_budget_equals_the_protocol_relay_ceiling() {
@@ -2099,14 +2290,431 @@ mod tests {
         );
     }
 
+    #[test]
+    fn connect_response_is_owned_before_the_caller_starts_waiting() {
+        let client = Keys::generate();
+        let signer = Keys::generate();
+        let secret = "response-before-wait".to_string();
+        let (remote, result) = SessionRemote::awaiting_connect(Zeroizing::new(secret.clone()));
+        let mut worker = test_worker(client.clone(), remote, std::sync::Weak::new());
+
+        worker.on_event(&connect_response(
+            &signer,
+            client.public_key(),
+            Value::String(secret),
+        ));
+
+        assert_eq!(
+            result.recv_timeout(Duration::from_millis(100)),
+            Ok(Ok(signer.public_key()))
+        );
+        assert!(matches!(
+            worker.remote,
+            SessionRemote::Known(remote) if remote == signer.public_key()
+        ));
+    }
+
+    #[test]
+    fn session_spawn_installs_connect_owner_before_relay_admission() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let relay = RelayUrl::parse(&format!("ws://{}", listener.local_addr().unwrap())).unwrap();
+        let client = Keys::generate();
+        let signer = Keys::generate();
+        let user = Keys::generate();
+        let secret = "construction-barrier".to_string();
+        let server_client = client.public_key();
+        let server_signer = signer.clone();
+        let server_user = user.public_key();
+        let server_secret = secret.clone();
+        let (response_sent, response_receipt) = mpsc::sync_channel(0);
+        thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            let mut subscription_id = None;
+            let mut connect_response_sent = false;
+            while let Ok(message) = socket.read() {
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                let frame: Value = serde_json::from_str(text.as_ref()).unwrap();
+                let parts = frame.as_array().unwrap();
+                match parts.first().and_then(Value::as_str) {
+                    Some("REQ") => {
+                        subscription_id = parts.get(1).and_then(Value::as_str).map(str::to_string);
+                        if !connect_response_sent {
+                            let response = connect_response(
+                                &server_signer,
+                                server_client,
+                                Value::String(server_secret.clone()),
+                            );
+                            socket
+                                .send(Message::Text(
+                                    serde_json::json!([
+                                        "EVENT",
+                                        subscription_id.as_deref().unwrap(),
+                                        response
+                                    ])
+                                    .to_string()
+                                    .into(),
+                                ))
+                                .unwrap();
+                            response_sent.send(()).unwrap();
+                            connect_response_sent = true;
+                        }
+                    }
+                    Some("EVENT") => {
+                        let event = Event::from_json(parts[1].to_string()).unwrap();
+                        let plaintext = nip44::decrypt(
+                            server_signer.secret_key(),
+                            &event.pubkey,
+                            event.content.as_bytes(),
+                        )
+                        .unwrap();
+                        let request: Value = serde_json::from_str(&plaintext).unwrap();
+                        let id = request["id"].as_str().unwrap();
+                        let method = request["method"].as_str().unwrap();
+                        let response = rpc_response(
+                            &server_signer,
+                            event.pubkey,
+                            id,
+                            match method {
+                                "get_public_key" => Value::String(server_user.to_hex()),
+                                other => panic!("unexpected method {other}"),
+                            },
+                        );
+                        socket
+                            .send(Message::Text(
+                                serde_json::json!([
+                                    "EVENT",
+                                    subscription_id.as_deref().unwrap(),
+                                    response
+                                ])
+                                .to_string()
+                                .into(),
+                            ))
+                            .unwrap();
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let (remote, connect_result) = SessionRemote::awaiting_connect(Zeroizing::new(secret));
+        let session = Session::spawn(
+            vec![relay],
+            client,
+            remote,
+            None,
+            SessionRuntime(standalone_runtime().unwrap()),
+        )
+        .unwrap();
+
+        response_receipt
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the relay returns the response while the caller is held after spawn");
+        session.wait_available(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            connect_result.recv_timeout(Duration::from_secs(5)),
+            Ok(Ok(signer.public_key()))
+        );
+        assert_eq!(
+            request_string(&session, "get_public_key", Vec::new())
+                .wait(Duration::from_secs(5))
+                .unwrap(),
+            user.public_key().to_hex()
+        );
+    }
+
+    #[test]
+    fn forged_connect_noise_does_not_consume_the_pending_secret() {
+        let client = Keys::generate();
+        let attacker = Keys::generate();
+        let signer = Keys::generate();
+        let secret = "one-exact-secret".to_string();
+        let (remote, result) = SessionRemote::awaiting_connect(Zeroizing::new(secret.clone()));
+        let mut worker = test_worker(client.clone(), remote, std::sync::Weak::new());
+
+        worker.on_event(&connect_response(
+            &attacker,
+            client.public_key(),
+            Value::String("wrong-secret".to_string()),
+        ));
+        assert!(matches!(worker.remote, SessionRemote::AwaitingConnect(_)));
+        assert_eq!(result.try_recv(), Err(mpsc::TryRecvError::Empty));
+
+        worker.on_event(&connect_response(
+            &signer,
+            client.public_key(),
+            Value::String(secret),
+        ));
+        assert_eq!(
+            result.recv_timeout(Duration::from_millis(100)),
+            Ok(Ok(signer.public_key()))
+        );
+    }
+
+    #[test]
+    fn connect_binding_waits_for_the_transport_ownership_ack() {
+        let client = Keys::generate();
+        let signer = Keys::generate();
+        let secret = "ack-before-known".to_string();
+        let (remote, result) = SessionRemote::awaiting_connect(Zeroizing::new(secret.clone()));
+        let mut worker = test_worker(client.clone(), remote, std::sync::Weak::new());
+        let (ack_tx, ack_rx) = mpsc::channel();
+        worker.controlled_bind_transitions = Some(vec![PendingBindTransition::Controlled(ack_rx)]);
+
+        worker.on_event(&connect_response(
+            &signer,
+            client.public_key(),
+            Value::String(secret),
+        ));
+        assert!(
+            worker.remote.known().is_none(),
+            "valid wire evidence alone cannot publish Known before transport ownership settles"
+        );
+        assert_eq!(
+            result.recv_timeout(Duration::from_millis(20)),
+            Err(mpsc::RecvTimeoutError::Timeout),
+            "pairing completion must remain pending before the ownership ack"
+        );
+
+        let (_commands_tx, commands_rx) = tokio_mpsc::channel(1);
+        let (_requests_tx, requests_rx) = tokio_mpsc::channel(1);
+        let (_pool_events_tx, pool_events_rx) = tokio_mpsc::channel(1);
+        let control = Arc::new(SessionControl::new());
+        let request_cancellation_signal = Arc::new(tokio::sync::Notify::new());
+        let runtime = standalone_runtime().unwrap();
+        let run_control = Arc::clone(&control);
+        let run_cancellation_signal = Arc::clone(&request_cancellation_signal);
+        let runner = runtime.spawn(async move {
+            worker
+                .run(
+                    commands_rx,
+                    requests_rx,
+                    pool_events_rx,
+                    run_control,
+                    run_cancellation_signal,
+                )
+                .await;
+            worker.remote.known()
+        });
+
+        ack_tx.send(true).unwrap();
+        assert_eq!(
+            result.recv_timeout(Duration::from_secs(1)),
+            Ok(Ok(signer.public_key())),
+            "the existing worker select loop must observe the ack and publish pairing"
+        );
+        control.shutdown();
+        assert_eq!(
+            runtime.block_on(runner).unwrap(),
+            Some(signer.public_key()),
+            "Known becomes reachable only after the ack-driven transition"
+        );
+    }
+
+    #[test]
+    fn connect_binding_refuses_known_when_the_transport_owner_dies() {
+        let session = test_session();
+        let client = Keys::generate();
+        let signer = Keys::generate();
+        let secret = "dead-owner-never-known".to_string();
+        let (remote, result) = SessionRemote::awaiting_connect(Zeroizing::new(secret.clone()));
+        let mut worker = test_worker(client.clone(), remote, Arc::downgrade(&session));
+        let (ack_tx, ack_rx) = mpsc::channel();
+        worker.controlled_bind_transitions = Some(vec![PendingBindTransition::Controlled(ack_rx)]);
+
+        worker.on_event(&connect_response(
+            &signer,
+            client.public_key(),
+            Value::String(secret),
+        ));
+        assert!(worker.remote.known().is_none());
+
+        let (_commands_tx, commands_rx) = tokio_mpsc::channel(1);
+        let (_requests_tx, requests_rx) = tokio_mpsc::channel(1);
+        let (_pool_events_tx, pool_events_rx) = tokio_mpsc::channel(1);
+        let control = Arc::clone(&session.control);
+        let request_cancellation_signal = Arc::clone(&session.request_cancellation_signal);
+        let runtime = standalone_runtime().unwrap();
+        let runner = runtime.spawn(async move {
+            worker
+                .run(
+                    commands_rx,
+                    requests_rx,
+                    pool_events_rx,
+                    control,
+                    request_cancellation_signal,
+                )
+                .await;
+            worker.remote.known()
+        });
+
+        ack_tx.send(false).unwrap();
+        assert_eq!(
+            result.recv_timeout(Duration::from_secs(1)),
+            Ok(Err(Nip46Error::Disconnected)),
+            "terminal worker loss must resolve pairing as disconnected"
+        );
+        assert_eq!(
+            runtime.block_on(runner).unwrap(),
+            None,
+            "a dead transport owner can never publish Known"
+        );
+    }
+
+    #[test]
+    fn first_exact_connect_response_irrevocably_owns_the_remote() {
+        let client = Keys::generate();
+        let first = Keys::generate();
+        let second = Keys::generate();
+        let secret = "first-remote-wins".to_string();
+        let (remote, result) = SessionRemote::awaiting_connect(Zeroizing::new(secret.clone()));
+        let mut worker = test_worker(client.clone(), remote, std::sync::Weak::new());
+
+        worker.on_event(&connect_response(
+            &first,
+            client.public_key(),
+            Value::String(secret.clone()),
+        ));
+        worker.on_event(&connect_response(
+            &second,
+            client.public_key(),
+            Value::String(secret),
+        ));
+
+        assert_eq!(
+            result.recv_timeout(Duration::from_millis(100)),
+            Ok(Ok(first.public_key()))
+        );
+        assert!(matches!(
+            worker.remote,
+            SessionRemote::Known(remote) if remote == first.public_key()
+        ));
+    }
+
+    #[test]
+    fn abandoned_connect_receiver_refuses_binding_and_requests_shutdown() {
+        let session = test_session();
+        let client = Keys::generate();
+        let signer = Keys::generate();
+        let secret = "receiver-was-dropped".to_string();
+        let (remote, result) = SessionRemote::awaiting_connect(Zeroizing::new(secret.clone()));
+        let mut worker = test_worker(client.clone(), remote, Arc::downgrade(&session));
+        drop(result);
+
+        worker.on_event(&connect_response(
+            &signer,
+            client.public_key(),
+            Value::String(secret),
+        ));
+
+        assert!(matches!(worker.remote, SessionRemote::AwaitingConnect(_)));
+        assert!(session.control.is_shutdown());
+    }
+
+    #[test]
+    fn pending_connect_teardown_resolves_disconnected_exactly_once() {
+        let (remote, result) =
+            SessionRemote::awaiting_connect(Zeroizing::new("teardown".to_string()));
+        let worker = test_worker(Keys::generate(), remote, std::sync::Weak::new());
+
+        drop(worker);
+
+        assert_eq!(
+            result.recv_timeout(Duration::from_millis(100)),
+            Ok(Err(Nip46Error::Disconnected))
+        );
+        assert_eq!(result.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+    }
+
+    #[test]
+    fn cancelling_an_awaiting_connect_session_resolves_disconnected() {
+        let cancellation = Nip46Cancellation::default();
+        let (remote, result) =
+            SessionRemote::awaiting_connect(Zeroizing::new("cancelled".to_string()));
+        let session = Session::spawn(
+            Vec::new(),
+            Keys::generate(),
+            remote,
+            Some(&cancellation),
+            SessionRuntime(standalone_runtime().unwrap()),
+        )
+        .unwrap();
+
+        cancellation.cancel();
+
+        assert_eq!(
+            result.recv_timeout(Duration::from_secs(5)),
+            Ok(Err(Nip46Error::Disconnected))
+        );
+        assert!(session.control.is_shutdown());
+        assert_eq!(
+            result.recv_timeout(Duration::from_secs(5)),
+            Err(RecvTimeoutError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn connect_transition_changes_the_filter_from_broad_to_author_bound() {
+        let client = Keys::generate();
+        let signer = Keys::generate();
+        let secret = "filter-transition".to_string();
+        let (remote, result) = SessionRemote::awaiting_connect(Zeroizing::new(secret.clone()));
+        let mut worker = test_worker(client.clone(), remote, std::sync::Weak::new());
+        let broad = serde_json::to_value(worker.filter()).unwrap();
+        assert!(
+            broad.get("authors").is_none(),
+            "an awaiting-connect subscription must admit an unknown signer"
+        );
+
+        worker.on_event(&connect_response(
+            &signer,
+            client.public_key(),
+            Value::String(secret),
+        ));
+        result
+            .recv_timeout(Duration::from_millis(100))
+            .unwrap()
+            .unwrap();
+
+        let bound = serde_json::to_value(worker.filter()).unwrap();
+        assert_eq!(
+            bound["authors"],
+            serde_json::json!([signer.public_key().to_hex()])
+        );
+    }
+
+    #[test]
+    fn connect_ownership_source_has_no_late_install_or_optional_remote_door() {
+        let source = include_str!("nip46.rs");
+        let worker_state = source
+            .split("struct SessionWorker")
+            .nth(1)
+            .and_then(|rest| rest.split("impl SessionWorker").next())
+            .expect("SessionWorker source");
+        assert!(!source.contains(&["Accept", "Invitation"].concat()));
+        assert!(!source.contains(&["accept", "_invitation"].concat()));
+        assert!(!worker_state.contains("remote: Option<PublicKey>"));
+        assert!(!worker_state.contains("invitation:"));
+        assert!(!worker_state.contains("bool"));
+        assert!(source.contains("remote: SessionRemote"));
+        assert!(source.contains("SessionRemote::awaiting_connect(secret)"));
+        let refresh = source
+            .split("fn refresh_preambles")
+            .nth(1)
+            .and_then(|rest| rest.split("fn on_pool").next())
+            .expect("refresh_preambles source");
+        assert!(refresh.contains("self.configured.keys()"));
+        assert!(refresh.contains("self.pool.live_handle"));
+        assert!(!refresh.contains("self.handles.values()"));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn nip46_queue_overload_is_finite_backpressured_and_control_still_progresses() {
-        fn invitation_message() -> WorkerMsg {
-            let (reply, _receiver) = mpsc::channel();
-            WorkerMsg::AcceptInvitation {
-                expected_secret: "bounded".to_string(),
-                reply,
-            }
+        fn relay_update_message() -> WorkerMsg {
+            WorkerMsg::ReplaceRelays(Vec::new())
         }
 
         fn request_message(worker_signal: &Arc<tokio::sync::Notify>) -> RequestMsg {
@@ -2147,7 +2755,7 @@ mod tests {
         assert_eq!(commands.max_capacity(), CONTROL_QUEUE_CAPACITY);
         tokio::time::timeout(
             Duration::from_millis(100),
-            commands.send(invitation_message()),
+            commands.send(relay_update_message()),
         )
         .await
         .expect("control traffic progresses while request admission is saturated")
@@ -2178,11 +2786,11 @@ mod tests {
             .unwrap();
 
         for _ in 0..CONTROL_QUEUE_CAPACITY {
-            commands.try_send(invitation_message()).unwrap();
+            commands.try_send(relay_update_message()).unwrap();
         }
         assert_eq!(commands.capacity(), 0);
         assert!(matches!(
-            commands.try_send(invitation_message()),
+            commands.try_send(relay_update_message()),
             Err(tokio_mpsc::error::TrySendError::Full(_))
         ));
 
@@ -2219,7 +2827,7 @@ mod tests {
         let mut worker = SessionWorker::new(
             pool,
             Keys::generate(),
-            None,
+            SessionRemote::Known(Keys::generate().public_key()),
             std::sync::Weak::<Session>::new(),
             Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(Vec::new())),
@@ -2259,13 +2867,17 @@ mod tests {
             .await
             .unwrap();
 
+        let control_relay = RelayUrl::parse("wss://control-progress.example").unwrap();
+        worker.configured.insert(
+            control_relay.clone(),
+            nmp_transport::RelayHandle {
+                slot: 999,
+                generation: 1,
+            },
+        );
         let (commands, command_inbox) = tokio_mpsc::channel(CONTROL_QUEUE_CAPACITY);
-        let (invitation_reply, invitation_result) = mpsc::channel();
         commands
-            .send(WorkerMsg::AcceptInvitation {
-                expected_secret: "control-progress".to_string(),
-                reply: invitation_reply,
-            })
+            .send(WorkerMsg::ReplaceRelays(Vec::new()))
             .await
             .unwrap();
         let (_pool_events, pool_inbox) = tokio_mpsc::channel(POOL_EVENT_QUEUE_CAPACITY);
@@ -2282,7 +2894,10 @@ mod tests {
                     task_signal,
                 )
                 .await;
-            (worker.pending.len(), worker.invitation.is_some())
+            (
+                worker.pending.len(),
+                !worker.configured.contains_key(&control_relay),
+            )
         });
 
         tokio::task::yield_now().await;
@@ -2298,20 +2913,15 @@ mod tests {
         );
 
         control.shutdown();
-        let (pending, invitation_was_installed) =
+        let (pending, relay_update_was_applied) =
             tokio::time::timeout(Duration::from_millis(100), worker_task)
                 .await
                 .expect("independent shutdown completes")
                 .unwrap();
         assert_eq!(pending, MAX_PENDING_REQUESTS - 1);
         assert!(
-            invitation_was_installed,
+            relay_update_was_applied,
             "control traffic is serviced while the pending RPC envelope is full"
-        );
-        assert_eq!(
-            invitation_result.recv_timeout(Duration::from_millis(100)),
-            Ok(Err(Nip46Error::Disconnected)),
-            "teardown resolves the installed control operation"
         );
         drop(retained_operations);
     }
@@ -2368,7 +2978,7 @@ mod tests {
         let mut worker = SessionWorker::new(
             pool,
             Keys::generate(),
-            None,
+            SessionRemote::Known(Keys::generate().public_key()),
             Arc::downgrade(&session),
             subscribers,
             event_sinks,
@@ -2413,7 +3023,7 @@ mod tests {
         let mut worker = SessionWorker::new(
             pool,
             Keys::generate(),
-            None,
+            SessionRemote::Known(Keys::generate().public_key()),
             std::sync::Weak::new(),
             Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(Vec::new())),
@@ -2455,7 +3065,7 @@ mod tests {
         let mut worker = SessionWorker::new(
             pool,
             Keys::generate(),
-            None,
+            SessionRemote::Known(Keys::generate().public_key()),
             std::sync::Weak::new(),
             Arc::clone(&subscribers),
             Arc::new(Mutex::new(Vec::new())),
