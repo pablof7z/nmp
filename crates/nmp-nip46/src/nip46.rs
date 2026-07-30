@@ -1720,32 +1720,41 @@ impl SessionWorker {
         }
     }
 
-    fn filter(&self) -> Filter {
+    fn filter_for(&self, remote: Option<PublicKey>) -> Filter {
         let filter = Filter::new()
             .kind(Kind::NostrConnect)
             .pubkey(self.client_keys.public_key());
-        match &self.remote {
-            SessionRemote::AwaitingConnect(_) => filter,
-            SessionRemote::Known(remote) => filter.author(*remote),
+        match remote {
+            Some(remote) => filter.author(remote),
+            None => filter,
         }
     }
 
+    #[cfg(test)]
+    fn filter(&self) -> Filter {
+        self.filter_for(self.remote.known())
+    }
+
+    fn preamble_for(&self, remote: Option<PublicKey>) -> String {
+        ClientMessage::req(self.subscription_id.clone(), vec![self.filter_for(remote)]).as_json()
+    }
+
     fn preamble(&self) -> String {
-        ClientMessage::req(self.subscription_id.clone(), vec![self.filter()]).as_json()
+        self.preamble_for(self.remote.known())
     }
 
-    fn set_preamble(&self, handle: nmp_transport::RelayHandle) -> bool {
+    fn set_preamble(&self, handle: nmp_transport::RelayHandle, preamble: &str) -> bool {
         self.pool
-            .set_reconnect_preamble(handle, vec![self.preamble()])
+            .set_reconnect_preamble(handle, vec![preamble.to_string()])
     }
 
-    fn refresh_preambles(&mut self) {
+    fn refresh_preambles(&mut self, preamble: &str) {
         let configured: Vec<RelayUrl> = self.configured.keys().cloned().collect();
         for relay in configured {
             let Some(handle) = self.pool.live_handle(&relay) else {
                 continue;
             };
-            if self.set_preamble(handle) {
+            if self.set_preamble(handle, preamble) {
                 self.configured.insert(relay, handle);
             }
         }
@@ -1773,8 +1782,9 @@ impl SessionWorker {
                         .connected_relays
                         .store(self.handles.len(), Ordering::Release);
                 }
-                self.set_preamble(handle);
-                let _ = self.pool.send(handle, WireFrame::Text(self.preamble()));
+                let preamble = self.preamble();
+                self.set_preamble(handle, &preamble);
+                let _ = self.pool.replay_reconnect_preamble(handle);
                 for pending in self.pending.values() {
                     let _ = self
                         .pool
@@ -1896,12 +1906,18 @@ impl SessionWorker {
                 // invitation and turn the anti-spoofing secret into a DoS.
                 return;
             }
+            // Update every live/dialing worker's authoritative replay owner
+            // before publishing `Known`. A worker already inside an old
+            // replay write holds that owner lock, so this waits for the write
+            // to finish; any snapshotted-but-not-started old replay observes
+            // the new revision and is replaced before it can write.
+            let bound_preamble = self.preamble_for(Some(event.pubkey));
+            self.refresh_preambles(&bound_preamble);
             let SessionRemote::AwaitingConnect(pending) =
                 std::mem::replace(&mut self.remote, SessionRemote::Known(event.pubkey))
             else {
                 unreachable!("the exact connect response was validated while awaiting it");
             };
-            self.refresh_preambles();
             if pending.completion.send(Ok(event.pubkey)).is_err() {
                 // A caller that abandoned the pairing result cannot leave a
                 // live session silently bound to a signer nobody received.

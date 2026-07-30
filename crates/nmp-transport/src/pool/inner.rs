@@ -465,6 +465,19 @@ impl PoolInner {
         }
     }
 
+    pub(super) fn replay_reconnect_preamble_for(&self, h: RelayHandle) -> bool {
+        let Some(state) = self.slots.get(h.slot as usize) else {
+            return false;
+        };
+        if state.generation != h.generation || state.health.state != ConnState::Connected {
+            return false;
+        }
+        match state.worker.as_ref() {
+            Some(worker) => worker.replay_reconnect_preamble(h.generation),
+            None => false,
+        }
+    }
+
     pub(super) fn release_initial_read_for(&self, h: RelayHandle) -> bool {
         match self.command_tx_for(h) {
             Some(worker) => worker.push(WorkerCommand::ReleaseInitialRead {
