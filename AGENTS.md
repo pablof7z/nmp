@@ -11,6 +11,10 @@ Canonical contributor guide for the NMP repo. Every rule here applies to agents 
 5. `docs/known-gaps.md` — the truth-anchor companion: everything built-but-incomplete or deliberately deferred, so nothing hides.
 6. **GitHub Issues** — the single tactical tracker: what is being worked on, what is queued, and the *why* behind each.
 
+## Internal-development skill
+
+For work that changes NMP itself, use `skills/nmp-dev/SKILL.md`. It routes internal implementation, review, and testing work; for behavioral changes, test changes, or user corrections about how NMP should behave, start with `skills/nmp-dev/references/testing/INDEX.md`. `skills/nmp/SKILL.md` is the separate consumer-facing skill for applications that build with NMP; it is not authority for NMP internals.
+
 ## Issue-first, always — capture the why
 
 **Every unit of work traces to a captured GitHub issue before it starts.** No silent side-quests, no code without a tracked reason. If you find work that needs doing and no issue covers it, *file the issue first*, then do the work; the PR references it and closing it is how the tracker stays honest (`docs/known-gaps.md` and a closed issue are the two ways "done" is recorded — mark done by removing it from the open set, don't leave finished work open).
