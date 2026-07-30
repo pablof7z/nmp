@@ -251,7 +251,7 @@ pub use nmp_grammar::{decode_nostr_entity, NostrEntity, NostrEntityError};
 // relay: [user input]" and a crate routing to a group host say the same
 // thing the same way.
 pub use crate::core::ReceiptId;
-pub use crate::outbox::WriteStatus;
+pub use crate::outbox::{AuthDenialSource, RetryCause, WriteStatus};
 pub use crate::runtime::{
     ReceiptReattachment, ReceiptStream, SignEventCancel, SignEventError, SignEventOperation,
     SignerRegistration,

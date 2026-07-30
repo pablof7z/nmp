@@ -19,12 +19,13 @@ use crate::coverage::{
 };
 use crate::{
     AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome, AttemptTransientDetail,
-    CloseIntentOutcome, CompensateOutcome, CoverageInterval, CoverageKey, DeadlineKind, EventStore,
-    GcReport, GcRetentionSet, InFlightPhase, InsertOutcome, IntentId, IntentSigState, LaneDeadline,
-    LaneKey, LaneState, LocalOrigin, PersistenceError, PostHandoffState, PromoteOutcome,
-    Provenance, ReceiptState, RecoveredAttempt, RecoveredAttemptDetails, RecoveredIntent,
-    RecoveredLane, RecoveredReceipt, RecoveredRouteRevision, RefuseReason, RelayObserved,
-    RetiredIntent, RetractReason, SigState, StoredEvent, TransientCause, WriteDurability,
+    AuthDenial, CloseIntentOutcome, CompensateOutcome, CoverageInterval, CoverageKey, DeadlineKind,
+    EventStore, GcReport, GcRetentionSet, InFlightPhase, InsertOutcome, IntentId, IntentSigState,
+    LaneDeadline, LaneKey, LaneState, LaneTerminalOutcome, LocalOrigin, PersistenceError,
+    PostHandoffState, PromoteOutcome, Provenance, ReceiptState, RecoveredAttempt,
+    RecoveredAttemptDetails, RecoveredIntent, RecoveredLane, RecoveredReceipt,
+    RecoveredRouteRevision, RefuseReason, RelayObserved, RetiredIntent, RetractReason, SigState,
+    StoredEvent, TransientCause, WriteDurability,
 };
 
 /// One `OUTBOX_INTENTS` row (M3 durable-outbox unit, crashsafe-accepted-2-3-
@@ -2656,7 +2657,9 @@ impl EventStore for MemoryStore {
                         if existing.state
                             != (LaneState::Terminal {
                                 ordinal: attempt.ordinal,
-                                outcome: attempt.outcome.clone(),
+                                outcome: LaneTerminalOutcome::from_attempt(
+                                    attempt.outcome.clone(),
+                                )?,
                             })
                         {
                             return Err(PersistenceError::invariant(
@@ -2664,6 +2667,13 @@ impl EventStore for MemoryStore {
                             ));
                         }
                     }
+                    _ if matches!(
+                        existing.state,
+                        LaneState::Terminal {
+                            outcome: LaneTerminalOutcome::AuthDenied(_),
+                            ..
+                        }
+                    ) => {}
                     _ if matches!(existing.state, LaneState::Terminal { .. }) => {
                         return Err(PersistenceError::invariant(
                             "terminal lane lacks matching terminal attempt",
@@ -3036,7 +3046,10 @@ impl EventStore for MemoryStore {
                 }
                 details.finished_at = Some(finished_at);
                 details.terminal = Some(outcome.clone());
-                LaneState::Terminal { ordinal, outcome }
+                LaneState::Terminal {
+                    ordinal,
+                    outcome: LaneTerminalOutcome::from_attempt(outcome)?,
+                }
             }
         };
         self.replace_lane(key, expected_revision, state)
@@ -3053,6 +3066,7 @@ impl EventStore for MemoryStore {
         if outcome == AttemptOutcome::Started {
             return Err(PersistenceError::invariant("Started is not terminal"));
         }
+        let lane_outcome = LaneTerminalOutcome::from_attempt(outcome.clone())?;
         let lane = self
             .get_lane(key)
             .cloned()
@@ -3075,7 +3089,7 @@ impl EventStore for MemoryStore {
                     LaneState::Terminal {
                         ordinal: current,
                         outcome: ref current_outcome,
-                    } if current == ordinal && current_outcome == &outcome
+                    } if current == ordinal && current_outcome == &lane_outcome
                 )
             {
                 return Ok(lane);
@@ -3085,11 +3099,58 @@ impl EventStore for MemoryStore {
             ));
         }
         details.finished_at = Some(finished_at);
-        details.terminal = Some(outcome.clone());
+        details.terminal = Some(outcome);
         self.replace_lane(
             key,
             expected_revision,
-            LaneState::Terminal { ordinal, outcome },
+            LaneState::Terminal {
+                ordinal,
+                outcome: lane_outcome,
+            },
+        )
+    }
+
+    fn deny_lane_auth(
+        &mut self,
+        key: &LaneKey,
+        expected_revision: u64,
+        denial: AuthDenial,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        if denial.reason.len() > 4_096 {
+            return Err(PersistenceError::invariant(
+                "authentication denial reason exceeds 4096 bytes",
+            ));
+        }
+        let lane = self
+            .get_lane(key)
+            .cloned()
+            .ok_or_else(|| PersistenceError::invariant("outbox lane not found"))?;
+        if lane.revision != expected_revision {
+            return Err(PersistenceError::invariant(
+                "authentication denial lane revision is stale",
+            ));
+        }
+        if matches!(
+            lane.state,
+            LaneState::Terminal {
+                outcome: LaneTerminalOutcome::AuthDenied(ref current),
+                ..
+            } if current == &denial
+        ) {
+            return Ok(lane);
+        }
+        if !matches!(lane.state, LaneState::WaitingAuth) {
+            return Err(PersistenceError::invariant(
+                "lane is not waiting for authentication",
+            ));
+        }
+        self.replace_lane(
+            key,
+            expected_revision,
+            LaneState::Terminal {
+                ordinal: lane.last_ordinal,
+                outcome: LaneTerminalOutcome::AuthDenied(denial),
+            },
         )
     }
 
@@ -3306,7 +3367,7 @@ mod lane_atomicity_tests {
             .unwrap()
             .state = LaneState::Terminal {
             ordinal: 1,
-            outcome: AttemptOutcome::Acked,
+            outcome: LaneTerminalOutcome::Acked,
         };
         assert!(live
             .bootstrap_outbox_lanes(intent)

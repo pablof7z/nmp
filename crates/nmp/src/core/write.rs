@@ -5,6 +5,25 @@
 
 use super::*;
 
+fn public_retry_cause(cause: TransientCause) -> Option<RetryCause> {
+    match cause {
+        TransientCause::Interrupted => Some(RetryCause::Interrupted),
+        TransientCause::AckTimeout => Some(RetryCause::AckTimeout),
+        TransientCause::ConnectionLost => Some(RetryCause::ConnectionLost),
+        TransientCause::RelayRateLimited => Some(RetryCause::RelayRateLimited),
+        TransientCause::RelayError => Some(RetryCause::RelayError),
+        TransientCause::AuthRequired => None,
+    }
+}
+
+fn public_auth_denial_source(source: StoredAuthDenialSource) -> AuthDenialSource {
+    match source {
+        StoredAuthDenialSource::Policy => AuthDenialSource::Policy,
+        StoredAuthDenialSource::Signer => AuthDenialSource::Signer,
+        StoredAuthDenialSource::Relay => AuthDenialSource::Relay,
+    }
+}
+
 /// The frozen body as a signer sees it. Acceptance decided the author and
 /// the timestamp, so this is the first point at which a complete unsigned
 /// event exists at all — which is exactly why the payload an app hands in
@@ -859,18 +878,36 @@ impl<S: EventStore> EngineCore<S> {
             if !should_wake {
                 continue;
             }
+            let retry_detail = (!auth_only && lane.last_ordinal > 0)
+                .then(|| {
+                    self.resolver
+                        .store()
+                        .recover_attempt_details(lane.key.intent_id)
+                        .ok()?
+                        .into_iter()
+                        .find(|detail| {
+                            detail.relay == lane.key.relay && detail.ordinal == lane.last_ordinal
+                        })?
+                        .transient
+                })
+                .flatten()
+                .and_then(|transient| {
+                    public_retry_cause(transient.cause).map(|cause| (cause, transient.raw_reason))
+                });
             if self
                 .commit_lane_eligible(&lane.key, lane.revision, self.clock)
                 .is_err()
             {
                 self.retry_scheduler_blocked = true;
-            } else if lane.last_ordinal > 0 {
+            } else if let Some((cause, detail)) = retry_detail {
                 self.emit_write_status(
                     id,
                     WriteStatus::RetryEligible {
                         relay: lane.key.relay,
                         attempt: lane.last_ordinal,
                         eligible_at: self.clock,
+                        cause,
+                        detail,
                     },
                     effects,
                 );
@@ -973,6 +1010,8 @@ impl<S: EventStore> EngineCore<S> {
                                             relay: lane.key.relay.clone(),
                                             attempt: ordinal,
                                             eligible_at,
+                                            cause: RetryCause::AckTimeout,
+                                            detail: Some("ack timeout".to_string()),
                                         },
                                         &mut effects,
                                     );
@@ -1585,6 +1624,9 @@ impl<S: EventStore> EngineCore<S> {
                                     relay: attempt.relay.clone(),
                                     attempt: attempt.ordinal,
                                     eligible_at: transient.eligible_at,
+                                    cause: public_retry_cause(transient.cause)
+                                        .expect("AuthRequired handled above"),
+                                    detail: transient.raw_reason,
                                 },
                             ));
                         }
@@ -1636,20 +1678,17 @@ impl<S: EventStore> EngineCore<S> {
                             },
                         ));
                     }
-                    LaneState::Eligible { since }
-                        if lane.last_ordinal > 0
-                            && !retry_eligible.contains(&(
-                                lane.key.relay.clone(),
-                                lane.last_ordinal,
-                                since,
-                            )) =>
-                    {
+                    LaneState::Terminal {
+                        outcome: LaneTerminalOutcome::AuthDenied(denial),
+                        ..
+                    } => {
                         replay.push((
                             replay_key,
-                            WriteStatus::RetryEligible {
+                            WriteStatus::AuthDenied {
                                 relay: lane.key.relay,
-                                attempt: lane.last_ordinal,
-                                eligible_at: since,
+                                pubkey: receipt.expected_pubkey,
+                                source: public_auth_denial_source(denial.source),
+                                reason: denial.reason,
                             },
                         ));
                     }
@@ -1657,7 +1696,7 @@ impl<S: EventStore> EngineCore<S> {
                         ordinal,
                         eligible_at,
                         cause,
-                        ..
+                        raw_reason,
                     } if cause != TransientCause::AuthRequired
                         && !retry_eligible.contains(&(
                             lane.key.relay.clone(),
@@ -1671,6 +1710,9 @@ impl<S: EventStore> EngineCore<S> {
                                 relay: lane.key.relay,
                                 attempt: ordinal,
                                 eligible_at,
+                                cause: public_retry_cause(cause)
+                                    .expect("AuthRequired excluded by guard"),
+                                detail: raw_reason,
                             },
                         ));
                     }
@@ -3449,6 +3491,9 @@ impl<S: EventStore> EngineCore<S> {
                                 relay: relay.clone(),
                                 attempt: ordinal,
                                 eligible_at,
+                                cause: public_retry_cause(*cause)
+                                    .expect("AUTH-required has its own class"),
+                                detail: Some(message.clone()),
                             },
                             effects,
                         );
@@ -3567,6 +3612,8 @@ impl<S: EventStore> EngineCore<S> {
                                     relay: relay.clone(),
                                     attempt: ordinal,
                                     eligible_at,
+                                    cause: RetryCause::ConnectionLost,
+                                    detail: Some("connection lost while awaiting ACK".to_string()),
                                 },
                                 effects,
                             );

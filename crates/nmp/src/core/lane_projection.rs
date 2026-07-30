@@ -300,6 +300,20 @@ impl<S: EventStore> EngineCore<S> {
         .map(|(_, lane)| lane)
     }
 
+    pub(super) fn commit_lane_auth_denied(
+        &mut self,
+        key: &LaneKey,
+        revision: u64,
+        denial: StoredAuthDenial,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        self.commit_lane_transition(key, |store| {
+            store
+                .deny_lane_auth(key, revision, denial)
+                .map(|lane| ((), lane))
+        })
+        .map(|(_, lane)| lane)
+    }
+
     /// Append a durable route revision through the projection door.
     ///
     /// A revision mints no lane by itself today: its paired

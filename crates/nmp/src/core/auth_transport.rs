@@ -111,18 +111,33 @@ impl<S: EventStore> EngineCore<S> {
                 lane.key.relay.clone(),
                 AccessContext::Nip42(pending.signing_pubkey),
             );
-            if &lane_session != session
-                || !matches!(
-                    lane.state,
-                    LaneState::Eligible { .. } | LaneState::WaitingConnection
-                )
-            {
+            if &lane_session != session {
                 continue;
             }
-            if self
-                .commit_lane_waiting(&lane.key, lane.revision, true)
-                .is_err()
-            {
+            let transitioned = match lane.state {
+                LaneState::WaitingAuth | LaneState::Terminal { .. } => continue,
+                LaneState::InFlight { ordinal, .. } => {
+                    let committed = self.commit_lane_suspension(
+                        &lane.key,
+                        lane.revision,
+                        ordinal,
+                        self.clock,
+                        TransientCause::AuthRequired,
+                        Some("AUTH challenge received".to_string()),
+                        true,
+                    );
+                    if committed.is_ok() {
+                        self.remove_active_lane(id, &lane.key.relay);
+                    }
+                    committed
+                }
+                LaneState::WaitingConnection
+                | LaneState::Eligible { .. }
+                | LaneState::Transient { .. } => {
+                    self.commit_lane_waiting(&lane.key, lane.revision, true)
+                }
+            };
+            if transitioned.is_err() {
                 self.retry_scheduler_blocked = true;
                 continue;
             }
@@ -292,6 +307,75 @@ impl<S: EventStore> EngineCore<S> {
         effects
     }
 
+    /// Terminalize only lanes that are durably waiting on this exact
+    /// authenticated session. Subscription `CLOSED` facts never call this
+    /// door: only typed policy/signer denial and an exact-correlated AUTH
+    /// `OK false` do.
+    pub(super) fn deny_write_lanes_for_auth(
+        &mut self,
+        session: &RelaySessionKey,
+        source: StoredAuthDenialSource,
+        reason: String,
+        effects: &mut Vec<Effect>,
+    ) {
+        let AccessContext::Nip42(pubkey) = session.access else {
+            return;
+        };
+        let lanes = match self.recover_all_lanes() {
+            Ok(lanes) => lanes,
+            Err(_) => {
+                self.retry_scheduler_blocked = true;
+                return;
+            }
+        };
+        let public_source = match source {
+            StoredAuthDenialSource::Policy => AuthDenialSource::Policy,
+            StoredAuthDenialSource::Signer => AuthDenialSource::Signer,
+            StoredAuthDenialSource::Relay => AuthDenialSource::Relay,
+        };
+        for (id, lane) in lanes {
+            let exact_session = self
+                .pending
+                .get(&id)
+                .map(|pending| {
+                    RelaySessionKey::new(
+                        lane.key.relay.clone(),
+                        AccessContext::Nip42(pending.signing_pubkey),
+                    )
+                })
+                .is_some_and(|candidate| candidate == *session);
+            if !exact_session || !matches!(lane.state, LaneState::WaitingAuth) {
+                continue;
+            }
+            let denial = StoredAuthDenial {
+                source,
+                reason: reason.clone(),
+            };
+            match self.commit_lane_auth_denied(&lane.key, lane.revision, denial) {
+                Ok(_) => {
+                    self.remove_active_lane(id, &lane.key.relay);
+                    self.emit_write_status(
+                        id,
+                        WriteStatus::AuthDenied {
+                            relay: lane.key.relay.clone(),
+                            pubkey,
+                            source: public_source,
+                            reason: reason.clone(),
+                        },
+                        effects,
+                    );
+                    self.close_if_all_lanes_terminal(id);
+                }
+                Err(_) => {
+                    // Commit-before-emit: the receipt must never claim a
+                    // terminal fact the store did not establish.
+                    self.retry_scheduler_blocked = true;
+                }
+            }
+        }
+        effects.extend(self.schedule_ready(self.clock));
+    }
+
     pub(super) fn on_auth_policy_completed(
         &mut self,
         token: AuthOpToken,
@@ -321,7 +405,7 @@ impl<S: EventStore> EngineCore<S> {
             return Vec::new();
         }
         let mut effects = Vec::new();
-        match outcome {
+        let denial = match outcome {
             AuthPolicyOutcome::Allow => {
                 let AccessContext::Nip42(expected_pubkey) = state.epoch.session.access else {
                     return Vec::new();
@@ -374,13 +458,21 @@ impl<S: EventStore> EngineCore<S> {
                     token: sign_token,
                     unsigned: Box::new(unsigned),
                 }));
+                None
             }
-            AuthPolicyOutcome::Deny { reason: _ } => state.phase = AuthSessionPhase::Denied,
+            AuthPolicyOutcome::Deny { reason } => {
+                state.phase = AuthSessionPhase::Denied;
+                Some((StoredAuthDenialSource::Policy, reason))
+            }
             AuthPolicyOutcome::Unavailable | AuthPolicyOutcome::Error { reason: _ } => {
                 state.phase = AuthSessionPhase::Error;
+                None
             }
+        };
+        self.auth_sessions.insert(session.clone(), state);
+        if let Some((source, reason)) = denial {
+            self.deny_write_lanes_for_auth(&session, source, reason, &mut effects);
         }
-        self.auth_sessions.insert(session, state);
         self.refresh_all_handles(&mut effects);
         effects
     }
@@ -460,7 +552,7 @@ impl<S: EventStore> EngineCore<S> {
             return Vec::new();
         }
         let mut effects = Vec::new();
-        match outcome {
+        let denial = match outcome {
             AuthSignerOutcome::Signed(event)
                 if Self::signed_auth_matches_frozen(&unsigned, &event) =>
             {
@@ -479,15 +571,23 @@ impl<S: EventStore> EngineCore<S> {
                     token: send_token,
                     event: Box::new(event),
                 }));
+                None
             }
-            AuthSignerOutcome::Rejected { reason: _ } => state.phase = AuthSessionPhase::Denied,
+            AuthSignerOutcome::Rejected { reason } => {
+                state.phase = AuthSessionPhase::Denied;
+                Some((StoredAuthDenialSource::Signer, reason))
+            }
             AuthSignerOutcome::Signed(_)
             | AuthSignerOutcome::Unavailable
             | AuthSignerOutcome::Error { .. } => {
                 state.phase = AuthSessionPhase::Error;
+                None
             }
+        };
+        self.auth_sessions.insert(session.clone(), state);
+        if let Some((source, reason)) = denial {
+            self.deny_write_lanes_for_auth(&session, source, reason, &mut effects);
         }
-        self.auth_sessions.insert(session, state);
         self.refresh_all_handles(&mut effects);
         effects
     }
@@ -554,7 +654,7 @@ impl<S: EventStore> EngineCore<S> {
         {
             return Vec::new();
         }
-        let (event_id, early_ok) = (*event_id, *early_ok);
+        let (event_id, early_ok) = (*event_id, early_ok.clone());
         let epoch = token.epoch.clone();
         if !self.exact_current_auth_epoch(&epoch) {
             return Vec::new();
@@ -566,8 +666,8 @@ impl<S: EventStore> EngineCore<S> {
         let mut effects = Vec::new();
         match outcome {
             AuthSendOutcome::Accepted => {
-                if let Some(status) = early_ok {
-                    return self.finish_auth_ok(&session, state, event_id, status);
+                if let Some((status, message)) = early_ok {
+                    return self.finish_auth_ok(&session, state, event_id, status, message);
                 }
                 state.phase = AuthSessionPhase::AwaitingOk { event_id };
             }
@@ -1012,11 +1112,18 @@ impl<S: EventStore> EngineCore<S> {
         mut state: AuthSessionState,
         event_id: EventId,
         status: bool,
+        message: String,
     ) -> Vec<Effect> {
         let mut effects = Vec::new();
         if !status {
             state.phase = AuthSessionPhase::Denied;
             self.auth_sessions.insert(session.clone(), state);
+            self.deny_write_lanes_for_auth(
+                session,
+                StoredAuthDenialSource::Relay,
+                message,
+                &mut effects,
+            );
             self.refresh_all_handles(&mut effects);
             return effects;
         }
@@ -1052,6 +1159,7 @@ impl<S: EventStore> EngineCore<S> {
         session: &RelaySessionKey,
         event_id: EventId,
         status: bool,
+        message: String,
     ) -> Option<Vec<Effect>> {
         let epoch = self.auth_sessions.get(session)?.epoch.clone();
         if !self.exact_current_auth_epoch(&epoch) {
@@ -1066,7 +1174,7 @@ impl<S: EventStore> EngineCore<S> {
                 early_ok,
             } if *current == event_id => {
                 if early_ok.is_none() {
-                    *early_ok = Some(status);
+                    *early_ok = Some((status, message));
                 }
                 self.auth_sessions.insert(session.clone(), state);
                 return Some(Vec::new());
@@ -1081,7 +1189,7 @@ impl<S: EventStore> EngineCore<S> {
             }
         };
 
-        Some(self.finish_auth_ok(session, state, current_event_id, status))
+        Some(self.finish_auth_ok(session, state, current_event_id, status, message))
     }
 
     // ---- inbound relay frame: EVENT/EOSE parsed here (D/E own OK/CLOSED/
@@ -1606,7 +1714,9 @@ impl<S: EventStore> EngineCore<S> {
                 // disjoint (ordinary publish rejects kind:22242), so a hit
                 // here can never starve a real write ack, and a miss falls
                 // through to the ordinary write path unchanged.
-                if let Some(auth_effects) = self.on_auth_ok(&session, event_id, status) {
+                if let Some(auth_effects) =
+                    self.on_auth_ok(&session, event_id, status, message.clone().into_owned())
+                {
                     effects.extend(auth_effects);
                 } else {
                     self.handle_write_ack(

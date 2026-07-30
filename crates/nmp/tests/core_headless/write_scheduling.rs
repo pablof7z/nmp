@@ -472,16 +472,12 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
             session.clone(),
             RelayFrame::from(RelayMessage::ok(auth_event.id, true, "authenticated")),
         ));
-        assert!(second.iter().any(|effect| matches!(
+        assert!(!second.iter().any(|effect| matches!(
             effect,
             Effect::EmitReceipt(
                 _,
-                WriteStatus::RetryEligible {
-                    relay: eligible,
-                    attempt: 1,
-                    eligible_at,
-                }
-            ) if eligible == &relay && *eligible_at == Timestamp::from(100_000)
+                WriteStatus::RetryEligible { relay: eligible, .. }
+            ) if eligible == &relay
         )));
         assert_eq!(
             second
@@ -755,6 +751,7 @@ fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
                         relay,
                         attempt: 1,
                         eligible_at,
+                        ..
                     },
                 ) if relay == &retry => Some(*eligible_at),
                 _ => None,
@@ -817,6 +814,8 @@ fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
         relay: retry.clone(),
         attempt: 1,
         eligible_at: retry_at,
+        cause: RetryCause::RelayRateLimited,
+        detail: Some("rate-limited: slow down".into()),
     }));
     assert!(replay.contains(&WriteStatus::HandoffAmbiguous {
         relay: ambiguous.clone(),
@@ -857,6 +856,8 @@ fn transient_deadline_is_consumed_once_without_polling_or_duplicate_queue() {
             relay: relay.clone(),
             attempt: 1,
             eligible_at: due,
+            cause: RetryCause::RelayRateLimited,
+            detail: Some("rate-limited: slow down".into()),
         })
     );
     let replay = core.reattach_receipt(receipt);
@@ -865,6 +866,8 @@ fn transient_deadline_is_consumed_once_without_polling_or_duplicate_queue() {
         relay: relay.clone(),
         attempt: 1,
         eligible_at: due,
+        cause: RetryCause::RelayRateLimited,
+        detail: Some("rate-limited: slow down".into()),
     }));
 
     assert!(!core
