@@ -151,8 +151,9 @@ fn apply_updates<S: nmp_store::EventStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::Row;
     use nmp_store::MemoryStore;
-    use nostr::Keys;
+    use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
     fn author() -> PublicKey {
         Keys::generate().public_key()
@@ -201,5 +202,50 @@ mod tests {
             "without operator-selected sources there is no exact query to ask"
         );
         assert!(assembly.handle.is_none());
+    }
+
+    #[test]
+    fn provider_rejections_increment_diagnostics_once_per_relay_list_tag() {
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let source = RelayUrl::parse("wss://nip65-source.example").unwrap();
+        let rejected = relay(19_872);
+        let event = EventBuilder::new(Kind::RelayList, "")
+            .tag(
+                Tag::parse(["r".to_string(), rejected.to_string()])
+                    .expect("valid unmarked relay-list tag"),
+            )
+            .custom_created_at(Timestamp::from(1))
+            .sign_with_keys(&keys)
+            .expect("relay-list fixture signs");
+        let row = RowDelta::Added(Row {
+            event,
+            sources: BTreeSet::from([source.clone()]),
+        });
+        let mut core = EngineCore::new(MemoryStore::new(), 8);
+        let mut assembly = RuntimeAssembly::new([source]);
+
+        let _opened = assembly.sync(&mut core, BTreeSet::from([author]));
+        let handle = assembly.handle.expect("provider query handle");
+        let _effects = assembly
+            .consume_rows(&mut core, handle, std::slice::from_ref(&row))
+            .expect("current provider rows are consumed");
+
+        assert_eq!(
+            core.diagnostics_snapshot()
+                .discovered_private_relays_rejected,
+            1,
+            "one rejected unmarked tag counts once before it projects to both directions"
+        );
+
+        let _effects = assembly
+            .consume_rows(&mut core, handle, std::slice::from_ref(&row))
+            .expect("an unchanged current winner is still recognized");
+        assert_eq!(
+            core.diagnostics_snapshot()
+                .discovered_private_relays_rejected,
+            1,
+            "re-delivering the unchanged current winner must not recount it"
+        );
     }
 }

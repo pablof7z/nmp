@@ -5412,7 +5412,7 @@ record Record {
             type_: UInt64,
             default: None,
             docstring: Some(
-                "Network-derived relays rejected by the SSRF admission policy before\nthey could become neutral route facts (issue #121): a\nloopback/RFC-1918/link-local/`.onion` host the operator never opted\nin. Counted per directional admission, so one provider update naming\n`N` rejected hosts can bump this by up to `2N` — a rejection-event\ntally, not a distinct-host count.",
+                "Network-derived relay candidates rejected by the engine's SSRF\nadmission policy (issue #121) before they could become router\ncandidates or neutral route facts. This is a monotonic rejection-\noccurrence tally, not a distinct-host or per-direction count. A\nprovider callback rejection counts once before directional projection;\nrejected selector evidence counts once when that exact\n`(selection, evidence)` first becomes current.",
             ),
         },
         Field {

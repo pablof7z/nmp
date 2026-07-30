@@ -11,7 +11,7 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
     /// `OK`, and feed the relay echo back into the still-live canonical
     /// query. No author route is learned implicitly by native core.
     @MainActor
-    func testDurableWriteToAppRelayProgressesPastAwaitingRelay() async throws {
+    func testDurableAuthorOutboxWriteProgressesPastAwaitingRelay() async throws {
         let relay = try ControlledRelayHarness()
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("nmp-598-swift-host-\(UUID().uuidString)", isDirectory: true)

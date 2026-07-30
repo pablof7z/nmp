@@ -1732,8 +1732,13 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn admits_discovered_route(&self, relay: &RelayUrl) -> bool {
-        self.admission.admits_discovered(relay)
+    pub(crate) fn admits_discovered_route(&mut self, relay: &RelayUrl) -> bool {
+        let admitted = self.admission.admits_discovered(relay);
+        if !admitted {
+            self.discovered_private_relays_rejected =
+                self.discovered_private_relays_rejected.saturating_add(1);
+        }
+        admitted
     }
 
     /// Thread the operator's discovered-relay admission policy through

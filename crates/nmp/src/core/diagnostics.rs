@@ -252,10 +252,13 @@ pub struct DiagnosticsSnapshot {
     pub auth_sessions: Vec<AuthDiagnosticsSnapshot>,
     pub uncovered_author_count: usize,
     pub dropped_merge_rules: Vec<&'static str>,
-    /// DISCOVERED relays rejected by the engine's relay admission policy
-    /// (issue #121) before a protocol component could install neutral routing
-    /// facts: network-sourced loopback/RFC-1918/link-local/`.onion` hosts the
-    /// operator never opted in. Counted per rejected occurrence.
+    /// Network-derived relay candidates rejected by the engine's SSRF
+    /// admission policy (issue #121) before they could become router
+    /// candidates or neutral route facts. This is a monotonic rejection-
+    /// occurrence tally, not a distinct-host or per-direction count. A
+    /// provider callback rejection counts once before directional projection;
+    /// rejected selector evidence counts once when that exact
+    /// `(selection, evidence)` first becomes current.
     pub discovered_private_relays_rejected: u64,
     /// Relay candidates refused by the single whole-demand ceiling, plus
     /// any defense-in-depth dial refusal at the transport boundary. The
