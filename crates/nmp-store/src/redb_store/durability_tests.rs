@@ -427,6 +427,7 @@ fn every_fault_that_is_not_determinate_absent_demands_a_reopen() {
         PersistenceFault::Corrupted,
         PersistenceFault::ValueTooLarge,
         PersistenceFault::LockPoisoned,
+        PersistenceFault::UnknownBackend,
         PersistenceFault::Invariant,
     ] {
         if fault.durability() != DurabilityOutcome::Absent {
@@ -442,7 +443,11 @@ fn every_fault_that_is_not_determinate_absent_demands_a_reopen() {
         DurabilityOutcome::Unknown,
         "`Io` is the conservative union: may be absent, may be durable"
     );
-    for indeterminate in [PersistenceFault::Corrupted, PersistenceFault::LockPoisoned] {
+    for indeterminate in [
+        PersistenceFault::Corrupted,
+        PersistenceFault::LockPoisoned,
+        PersistenceFault::UnknownBackend,
+    ] {
         assert_eq!(
             indeterminate.durability(),
             DurabilityOutcome::Unknown,
@@ -459,17 +464,20 @@ fn every_fault_that_is_not_determinate_absent_demands_a_reopen() {
     // reopen on a bad argument.
     assert!(!PersistenceFault::ValueTooLarge.requires_reopen());
     assert!(!PersistenceFault::Invariant.requires_reopen());
+    assert_eq!(
+        PersistenceFault::UnknownBackend.label(),
+        "unknown-backend",
+        "a future backend state must stay distinguishable from Io and Invariant"
+    );
 }
 
-/// Reachability: every [`PersistenceFault`] variant has a redb error that
-/// produces it at the `persist_err` funnel. The three the fault-injection
-/// tests above cannot reach through a backend — a corrupt file, an
-/// oversized value, a lock poisoned by another thread's panic — are pinned
-/// here against the real `StorageError` values redb would hand over, so no
-/// variant ships as decoration.
+/// Reachability: every fault redb 4.1 can produce has a typed input at the
+/// `persist_err` funnel. `UnknownBackend` is deliberately the exception: it
+/// is reserved for a future non-exhaustive variant and is exercised through
+/// the exact fallback helper plus the source-shape gate.
 #[test]
-fn every_fault_variant_has_a_redb_error_that_produces_it() {
-    use super::schema::persist_err;
+fn every_current_fault_variant_has_a_redb_error_that_produces_it() {
+    use super::schema::{persist_err, unknown_backend_fault};
 
     let cases = [
         (
@@ -510,4 +518,9 @@ fn every_fault_variant_has_a_redb_error_that_produces_it() {
             "the display string must survive classification"
         );
     }
+
+    let future = unknown_backend_fault();
+    assert_eq!(future, PersistenceFault::UnknownBackend);
+    assert_eq!(future.durability(), DurabilityOutcome::Unknown);
+    assert!(future.requires_reopen());
 }

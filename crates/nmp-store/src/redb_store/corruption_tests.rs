@@ -179,6 +179,82 @@ fn assert_typed_refusal<T: std::fmt::Debug>(
 
 // ---------------------------------------------------------------- outbox
 
+/// #909: the complete bootstrap return value must be decoded before commit.
+///
+/// The orphan's storage key sits inside the target intent prefix but names no
+/// routed relay, while its JSON carries a different intent. The former
+/// implementation never touched that row while staging, committed both valid
+/// lanes, then found the mismatch in its fallible post-commit recovery call
+/// and returned `Invariant/Absent`. The fixed door refuses against the same
+/// write transaction, leaving the raw corrupt fixture byte-identical across
+/// two fresh opens.
+#[test]
+fn bootstrap_lane_prefix_invariant_is_absent_across_two_reopens() {
+    let fixture = Fixture::new();
+    let keys = keys();
+    let signed = note(&keys, "bootstrap-prefix-invariant", 990);
+    let intent = {
+        let mut store = fixture.open();
+        let accepted = store
+            .accept_write(accept_of(frozen_from(&signed)))
+            .expect("accept bootstrap fixture");
+        let intent = accepted.journaled_intent_id().expect("durable intent");
+        store
+            .promote_signed(intent, signed.sig)
+            .expect("promote bootstrap fixture");
+        store
+            .record_route_revision(
+                intent,
+                BTreeSet::from([
+                    RelayUrl::parse("wss://a.bootstrap-prefix.example").unwrap(),
+                    RelayUrl::parse("wss://b.bootstrap-prefix.example").unwrap(),
+                ]),
+            )
+            .expect("record two routed relays");
+        intent
+    };
+
+    let orphan_relay = RelayUrl::parse("wss://z.orphan-prefix.example").unwrap();
+    let storage_key = lane_key(&LaneKey {
+        intent_id: intent,
+        relay: orphan_relay.clone(),
+    });
+    let mismatched = RecoveredLane {
+        version: 1,
+        key: LaneKey {
+            intent_id: IntentId(intent.0 + 1_000),
+            relay: orphan_relay,
+        },
+        revision: 1,
+        last_ordinal: 0,
+        state: LaneState::WaitingConnection,
+    };
+    rewrite_str_row(
+        &fixture,
+        OUTBOX_LANES,
+        &storage_key,
+        &encode_json(&mismatched, "mismatched lane").unwrap(),
+    );
+    let before = str_table_digest(&fixture, OUTBOX_LANES);
+
+    for reopen in 1..=2 {
+        let mut store = fixture.open();
+        let error = assert_typed_refusal("bootstrap_outbox_lanes", || {
+            store.bootstrap_outbox_lanes(intent)
+        });
+        assert!(
+            error.message().contains("key does not match value"),
+            "reopen {reopen}: exact seeded mismatch must remain visible: {error}"
+        );
+        drop(store);
+        assert_eq!(
+            str_table_digest(&fixture, OUTBOX_LANES),
+            before,
+            "reopen {reopen}: Absent must mean no valid lane was committed"
+        );
+    }
+}
+
 /// The highest-value single conversion in #790: boot-time journal replay.
 #[test]
 fn recover_outbox_reports_a_corrupt_intent_row() {

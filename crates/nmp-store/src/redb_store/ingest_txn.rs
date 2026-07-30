@@ -72,7 +72,9 @@ impl GovernedWrite {
         Ok(result)
     }
 
-    pub(super) fn commit(mut self) -> Result<(), PersistenceError> {
+    /// Flush every derived structure, commit, and return a value that the
+    /// caller prepared before this transaction exit.
+    pub(super) fn commit_prepared<T>(mut self, prepared: T) -> Result<T, PersistenceError> {
         #[cfg(feature = "bench-instrumentation")]
         let postings_started = std::time::Instant::now();
         self.postings.flush(&self.write_txn)?;
@@ -82,13 +84,12 @@ impl GovernedWrite {
         crash_if_postings("postings-before-commit");
         #[cfg(feature = "bench-instrumentation")]
         let commit_started = std::time::Instant::now();
-        let committed = self.write_txn.commit().map_err(persist_err);
+        self.write_txn.commit().map_err(persist_err)?;
         #[cfg(feature = "bench-instrumentation")]
         crate::ingest_attribution::commit(commit_started.elapsed());
-        committed?;
         #[cfg(test)]
         crash_if_postings("postings-after-commit");
-        Ok(())
+        Ok(prepared)
     }
 }
 
