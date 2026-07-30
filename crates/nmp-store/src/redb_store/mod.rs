@@ -54,12 +54,13 @@ use crate::persistent_store_lifetime::{
 };
 use crate::{
     AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome, AttemptTransientDetail,
-    ClaimSet, CloseIntentOutcome, CompensateOutcome, CoverageInterval, CoverageKey, DeadlineKind,
-    EventCursor, EventStore, GcReport, InFlightPhase, InsertOutcome, IntentId, IntentSigState,
-    LaneDeadline, LaneKey, LaneState, LocalOrigin, PersistenceError, PostHandoffState,
-    PromoteOutcome, Provenance, ReceiptState, RecoveredAttempt, RecoveredAttemptDetails,
-    RecoveredIntent, RecoveredLane, RecoveredReceipt, RecoveredRouteRevision, RefuseReason,
-    RelayObserved, RetractReason, SigState, StoredEvent, TransientCause, WriteDurability,
+    CloseIntentOutcome, CompensateOutcome, CoverageInterval, CoverageKey, DeadlineKind,
+    EventCursor, EventStore, GcReport, GcRetentionSet, InFlightPhase, InsertOutcome, IntentId,
+    IntentSigState, LaneDeadline, LaneKey, LaneState, LocalOrigin, PersistenceError,
+    PostHandoffState, PromoteOutcome, Provenance, ReceiptState, RecoveredAttempt,
+    RecoveredAttemptDetails, RecoveredIntent, RecoveredLane, RecoveredReceipt,
+    RecoveredRouteRevision, RefuseReason, RelayObserved, RetractReason, SigState, StoredEvent,
+    TransientCause, WriteDurability,
 };
 
 #[cfg(feature = "bench-instrumentation")]
@@ -236,7 +237,7 @@ impl EventStore for RedbStore {
         event_ops::get_coverage(self, key, relay)
     }
 
-    fn gc(&mut self, claims: &ClaimSet) -> Result<GcReport, PersistenceError> {
+    fn gc(&mut self, claims: &GcRetentionSet) -> Result<GcReport, PersistenceError> {
         event_ops::gc(self, claims)
     }
 

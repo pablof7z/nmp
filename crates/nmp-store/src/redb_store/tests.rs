@@ -1196,7 +1196,7 @@ fn canonical_integrity_survives_every_governed_event_mutation_class() {
     store
         .insert(gc_candidate, observed(relay1.clone(), 70))
         .unwrap();
-    store.gc(&ClaimSet::new(Vec::new())).unwrap();
+    store.gc(&GcRetentionSet::new(Vec::new())).unwrap();
     assert_canonical_integrity(&store.db);
 
     let signed = EventBuilder::new(Kind::TextNote, "pending")

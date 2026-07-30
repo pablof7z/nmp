@@ -19,8 +19,8 @@ use crate::coverage::{
 };
 use crate::{
     AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome, AttemptTransientDetail,
-    ClaimSet, CloseIntentOutcome, CompensateOutcome, CoverageInterval, CoverageKey, DeadlineKind,
-    EventStore, GcReport, InFlightPhase, InsertOutcome, IntentId, IntentSigState, LaneDeadline,
+    CloseIntentOutcome, CompensateOutcome, CoverageInterval, CoverageKey, DeadlineKind, EventStore,
+    GcReport, GcRetentionSet, InFlightPhase, InsertOutcome, IntentId, IntentSigState, LaneDeadline,
     LaneKey, LaneState, LocalOrigin, PersistenceError, PostHandoffState, PromoteOutcome,
     Provenance, ReceiptState, RecoveredAttempt, RecoveredAttemptDetails, RecoveredIntent,
     RecoveredLane, RecoveredReceipt, RecoveredRouteRevision, RefuseReason, RelayObserved,
@@ -1660,7 +1660,7 @@ impl EventStore for MemoryStore {
             .map(|row| row.interval)
     }
 
-    fn gc(&mut self, claims: &ClaimSet) -> Result<GcReport, PersistenceError> {
+    fn gc(&mut self, claims: &GcRetentionSet) -> Result<GcReport, PersistenceError> {
         let mut report = GcReport::default();
 
         // Pass 1: regular events (no address key) matched by no live
@@ -3674,7 +3674,7 @@ mod query_index_tests {
         store.assert_index_consistent();
 
         // GC the rest (no live claims).
-        store.gc(&ClaimSet::new(Vec::new())).unwrap();
+        store.gc(&GcRetentionSet::new(Vec::new())).unwrap();
         store.assert_index_consistent();
     }
 }

@@ -293,12 +293,12 @@ fn redb_crash_worker() {
         "gc-before-commit" => {
             let mut store = RedbStore::open_with_crash_point(path, RedbCrashPoint::GcBeforeCommit)
                 .expect("open worker store");
-            let _ = store.gc(&ClaimSet::new(Vec::new()));
+            let _ = store.gc(&GcRetentionSet::new(Vec::new()));
         }
         "gc-after-commit" => {
             let mut store = RedbStore::open_with_crash_point(path, RedbCrashPoint::GcAfterCommit)
                 .expect("open worker store");
-            let _ = store.gc(&ClaimSet::new(Vec::new()));
+            let _ = store.gc(&GcRetentionSet::new(Vec::new()));
         }
         "postings-before-segments"
         | "postings-after-segments"
@@ -712,7 +712,7 @@ fn explicit_retention_eviction_and_coverage_lowering_are_atomic_across_process_d
 
     let mut store = RedbStore::open(&path).expect("reopen for successful explicit policy");
     let report = store
-        .gc(&ClaimSet::new(Vec::new()))
+        .gc(&GcRetentionSet::new(Vec::new()))
         .expect("apply explicit retention policy");
     assert_eq!(report.events_evicted, 1);
     assert_eq!(report.coverage_rows_shrunk, 1);

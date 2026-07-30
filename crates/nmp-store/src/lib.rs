@@ -75,7 +75,7 @@ mod semantic_oracle;
 #[cfg(feature = "bench-instrumentation")]
 pub mod ingest_attribution;
 
-pub use coverage::{coverage_key, ClaimSet, CoverageInterval, CoverageKey, GcReport};
+pub use coverage::{coverage_key, CoverageInterval, CoverageKey, GcReport, GcRetentionSet};
 pub use memory_store::MemoryStore;
 pub use persistent_store_lifetime::{RedbStoreOpenError, RedbStoreResetError};
 pub use redb_store::RedbStore;
@@ -1769,7 +1769,7 @@ pub trait EventStore {
     /// This contract does not promise infinite disk. It makes the transition
     /// from retained history to policy-evicted history explicit, reportable,
     /// and coverage-safe.
-    fn gc(&mut self, claims: &ClaimSet) -> Result<GcReport, PersistenceError>;
+    fn gc(&mut self, claims: &GcRetentionSet) -> Result<GcReport, PersistenceError>;
 
     /// Accept a durably-owned local write intent (issues #2/#3): runs the
     /// SAME tombstone-refusal and replaceable/addressable supersession

@@ -619,7 +619,7 @@ logic.
    restart; no publication obligation or retry survives with it.
 5. **R5 — GC claim per open intent.** `gc` evicts regular events matched by no
    claim; an unsigned pending kind:1 row must not be GC-evictable before it ever
-   signs. The engine's `ClaimSet` construction adds a claim per open
+   signs. The engine's `GcRetentionSet` construction adds a claim per open
    `OUTBOX_INTENTS` row (retraction doc §4.1 already prescribes exactly this —
    the plan omitted it).
 6. **R6 — `promote_signed` durably drops the stash.** §4.2's "on promotion: drop
