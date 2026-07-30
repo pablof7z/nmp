@@ -1,15 +1,16 @@
 use std::{borrow::Cow, collections::BTreeSet};
 
 use nmp::mechanism::core::{
-    AcquisitionEvidence, Effect, EngineCore, EngineMsg, HistoryQuery, RowDelta,
+    AcquisitionEvidence, Effect, EngineCore, EngineMsg, HistoryQuery, RowDelta, ShortfallFact,
 };
+use nmp_grammar::Derived;
 use nmp_grammar::{
     AccessContext, Binding, CacheMode, ConcreteFilter, ContextualAtom, Demand, Filter, Freshness,
-    RelaySessionKey, SourceAuthority,
+    RelaySessionKey, Selector, SourceAuthority,
 };
 use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{FixtureRoutingFacts, WireOp};
-use nmp_store::{CoverageInterval, EventStore, MemoryStore, RelayObserved};
+use nmp_store::{CoverageInterval, EventStore, MemoryStore, RedbStore, RelayObserved};
 use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::{Event, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent};
 
@@ -20,6 +21,18 @@ fn event(keys: &Keys, at: u64) -> Event {
         Kind::Metadata,
         Vec::new(),
         "{}",
+    )
+    .sign_with_keys(keys)
+    .unwrap()
+}
+
+fn reaction(keys: &Keys, at: u64) -> Event {
+    UnsignedEvent::new(
+        keys.public_key(),
+        Timestamp::from(at),
+        Kind::from(7u16),
+        Vec::new(),
+        "+",
     )
     .sign_with_keys(keys)
     .unwrap()
@@ -58,6 +71,49 @@ fn query(keys: &Keys, freshness: Freshness) -> LiveQuery {
     LiveQuery(demand)
 }
 
+fn nested_query(
+    keys: &Keys,
+    inner_relay: &RelayUrl,
+    inner_freshness: Freshness,
+    outer_relay: &RelayUrl,
+    outer_freshness: Freshness,
+) -> LiveQuery {
+    let mut inner = Demand::new(
+        filter(keys),
+        SourceAuthority::Pinned(BTreeSet::from([inner_relay.clone()])),
+        AccessContext::Public,
+    )
+    .unwrap();
+    inner.freshness = inner_freshness;
+    let outer_selection = Filter {
+        kinds: Some(BTreeSet::from([7u16])),
+        authors: Some(Binding::Derived(Box::new(Derived {
+            inner,
+            project: Selector::Authors,
+        }))),
+        ..Filter::default()
+    };
+    let mut outer = Demand::new(
+        outer_selection,
+        SourceAuthority::Pinned(BTreeSet::from([outer_relay.clone()])),
+        AccessContext::Public,
+    )
+    .unwrap();
+    outer.freshness = outer_freshness;
+    LiveQuery(outer)
+}
+
+fn seeded_nested_store(keys: &Keys, inner_relay: &RelayUrl) -> MemoryStore {
+    let mut store = MemoryStore::new();
+    store
+        .insert(
+            event(keys, 90_000),
+            RelayObserved::new(inner_relay.clone(), Timestamp::from(90_000u64)),
+        )
+        .unwrap();
+    store
+}
+
 fn core(store: MemoryStore, keys: &Keys, relay: &RelayUrl) -> EngineCore<MemoryStore> {
     EngineCore::new_with_fixture_routing_facts(
         store,
@@ -78,7 +134,7 @@ fn core_with_relays(
     )
 }
 
-fn subscribe(core: &mut EngineCore<MemoryStore>, query: LiveQuery) -> Vec<Effect> {
+fn subscribe<S: EventStore>(core: &mut EngineCore<S>, query: LiveQuery) -> Vec<Effect> {
     core.handle(EngineMsg::Subscribe(query))
 }
 
@@ -158,7 +214,7 @@ fn initial(effects: &[Effect]) -> (HandleId, Vec<RowDelta>, AcquisitionEvidence)
         .unwrap()
 }
 
-fn record(store: &mut MemoryStore, atom: &ContextualAtom, relay: &RelayUrl, through: u64) {
+fn record<S: EventStore>(store: &mut S, atom: &ContextualAtom, relay: &RelayUrl, through: u64) {
     store
         .record_coverage(&[(
             atom.clone(),
@@ -168,7 +224,7 @@ fn record(store: &mut MemoryStore, atom: &ContextualAtom, relay: &RelayUrl, thro
         .unwrap();
 }
 
-fn tick(core: &mut EngineCore<MemoryStore>, now: u64) {
+fn tick<S: EventStore>(core: &mut EngineCore<S>, now: u64) {
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(now)));
 }
 
@@ -301,6 +357,268 @@ fn cache_only_never_opens_wire_with_populated_cache_and_coverage() {
     assert!(
         evidence.sources.is_empty(),
         "CacheOnly claims no acquisition"
+    );
+}
+
+/// QUERIES-DERIVED-FRESHNESS-001: a root Live decision must not overwrite
+/// the independently declared CacheOnly policy at the nested Demand boundary.
+#[test]
+fn nested_cache_only_opens_no_inner_wire_under_live_outer() {
+    let keys = Keys::generate();
+    let inner_relay = RelayUrl::parse("wss://nested-cache-only.example").unwrap();
+    let outer_relay = RelayUrl::parse("wss://outer-live.example").unwrap();
+    let store = seeded_nested_store(&keys, &inner_relay);
+    let mut core = EngineCore::new(store, 10);
+
+    let effects = subscribe(
+        &mut core,
+        nested_query(
+            &keys,
+            &inner_relay,
+            Freshness::CacheOnly,
+            &outer_relay,
+            Freshness::Live,
+        ),
+    );
+
+    assert_eq!(
+        requested_filters(&effects),
+        BTreeSet::from([(
+            RelaySessionKey::public(outer_relay.clone()),
+            ConcreteFilter {
+                kinds: Some(BTreeSet::from([7u16])),
+                authors: Some(BTreeSet::from([keys.public_key().to_hex()])),
+                ..ConcreteFilter::default()
+            },
+        )]),
+        "the outer Live request remains, while the inner CacheOnly atom contributes no wire work"
+    );
+    let (_, _, evidence) = initial(&effects);
+    assert_eq!(
+        evidence
+            .sources
+            .iter()
+            .map(|source| source.relay.clone())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([outer_relay]),
+        "CacheOnly inner evidence must not borrow the outer Live plan"
+    );
+    assert_eq!(
+        evidence.shortfall,
+        vec![ShortfallFact::NoPlannedSource {
+            atom: concrete(&keys),
+        }],
+        "the locally readable inner Demand remains an explicit acquisition shortfall"
+    );
+}
+
+/// The nested Demand's pinned Strict cache policy must not become the root
+/// Demand's cache policy. Strict over Public remains the documented
+/// Agnostic-equivalent root projection.
+#[test]
+fn nested_strict_pins_do_not_contaminate_public_root_cache_projection() {
+    let inner_author = Keys::generate();
+    let inner_relay = RelayUrl::parse("wss://nested-root-isolation-a.example").unwrap();
+    let root_relay = RelayUrl::parse("wss://nested-root-isolation-b.example").unwrap();
+    let inner_row = event(&inner_author, 100);
+    let root_row = reaction(&inner_author, 200);
+    let mut store = MemoryStore::new();
+    store
+        .insert(
+            inner_row,
+            RelayObserved::new(inner_relay.clone(), Timestamp::from(100u64)),
+        )
+        .unwrap();
+    store
+        .insert(
+            root_row.clone(),
+            RelayObserved::new(root_relay, Timestamp::from(200u64)),
+        )
+        .unwrap();
+
+    let mut inner = Demand::new(
+        filter(&inner_author),
+        SourceAuthority::Pinned(BTreeSet::from([inner_relay])),
+        AccessContext::Public,
+    )
+    .unwrap();
+    inner.cache = CacheMode::Strict;
+    inner.freshness = Freshness::CacheOnly;
+    let mut root = Demand::new(
+        Filter {
+            kinds: Some(BTreeSet::from([7u16])),
+            authors: Some(Binding::Derived(Box::new(Derived {
+                inner,
+                project: Selector::Authors,
+            }))),
+            ..Filter::default()
+        },
+        SourceAuthority::Public,
+        AccessContext::Public,
+    )
+    .unwrap();
+    root.cache = CacheMode::Strict;
+    root.freshness = Freshness::CacheOnly;
+    let mut core = EngineCore::new(store, 10);
+    let effects = subscribe(&mut core, LiveQuery(root));
+    let (_, rows, _) = initial(&effects);
+
+    assert!(
+        rows.iter().any(
+            |delta| matches!(delta, RowDelta::Added(row) if row.event.id == root_row.id)
+        ),
+        "Public root Strict is a no-op and must keep the B-observed row; the nested A pin belongs only to the inner projection"
+    );
+}
+
+/// QUERIES-DERIVED-FRESHNESS-002: a root CacheOnly decision must not suppress
+/// an independently Live nested Demand.
+#[test]
+fn nested_live_opens_wire_under_cache_only_outer() {
+    let keys = Keys::generate();
+    let inner_relay = RelayUrl::parse("wss://nested-live.example").unwrap();
+    let outer_relay = RelayUrl::parse("wss://outer-cache-only.example").unwrap();
+    let store = seeded_nested_store(&keys, &inner_relay);
+    let mut core = EngineCore::new(store, 10);
+
+    let effects = subscribe(
+        &mut core,
+        nested_query(
+            &keys,
+            &inner_relay,
+            Freshness::Live,
+            &outer_relay,
+            Freshness::CacheOnly,
+        ),
+    );
+
+    assert_eq!(
+        requested_filters(&effects),
+        BTreeSet::from([(RelaySessionKey::public(inner_relay), concrete(&keys),)]),
+        "the inner Live request remains, while the outer CacheOnly atom contributes no wire work"
+    );
+}
+
+/// QUERIES-DERIVED-FRESHNESS-003/004: MaxAge is decided over the nested
+/// Demand's own atom and pinned source coverage, independently from the outer
+/// Demand's Live participation.
+#[test]
+fn nested_max_age_uses_inner_scoped_coverage_only() {
+    let keys = Keys::generate();
+    let inner_relay = RelayUrl::parse("wss://nested-max-age.example").unwrap();
+    let outer_relay = RelayUrl::parse("wss://outer-live-max-age.example").unwrap();
+    let inner_source = SourceAuthority::Pinned(BTreeSet::from([inner_relay.clone()]));
+    let mut fresh_store = seeded_nested_store(&keys, &inner_relay);
+    record(
+        &mut fresh_store,
+        &atom(&keys, inner_source.clone()),
+        &inner_relay,
+        99_000,
+    );
+    let mut fresh = EngineCore::new(fresh_store, 10);
+    tick(&mut fresh, 100_000);
+
+    let fresh_effects = subscribe(
+        &mut fresh,
+        nested_query(
+            &keys,
+            &inner_relay,
+            Freshness::MaxAge { seconds: 3_600 },
+            &outer_relay,
+            Freshness::Live,
+        ),
+    );
+    assert_eq!(
+        requested_filters(&fresh_effects),
+        BTreeSet::from([(
+            RelaySessionKey::public(outer_relay.clone()),
+            ConcreteFilter {
+                kinds: Some(BTreeSet::from([7u16])),
+                authors: Some(BTreeSet::from([keys.public_key().to_hex()])),
+                ..ConcreteFilter::default()
+            },
+        )]),
+        "fresh inner coverage suppresses only the nested request"
+    );
+
+    let mut stale_store = seeded_nested_store(&keys, &inner_relay);
+    record(
+        &mut stale_store,
+        &atom(&keys, inner_source),
+        &inner_relay,
+        90_000,
+    );
+    let mut stale = EngineCore::new(stale_store, 10);
+    tick(&mut stale, 100_000);
+    let stale_effects = subscribe(
+        &mut stale,
+        nested_query(
+            &keys,
+            &inner_relay,
+            Freshness::MaxAge { seconds: 3_600 },
+            &outer_relay,
+            Freshness::Live,
+        ),
+    );
+    assert_eq!(
+        requested_filters(&stale_effects),
+        BTreeSet::from([
+            (RelaySessionKey::public(inner_relay), concrete(&keys)),
+            (
+                RelaySessionKey::public(outer_relay),
+                ConcreteFilter {
+                    kinds: Some(BTreeSet::from([7u16])),
+                    authors: Some(BTreeSet::from([keys.public_key().to_hex()])),
+                    ..ConcreteFilter::default()
+                },
+            ),
+        ]),
+        "stale inner coverage degrades only the nested request to ordinary Live"
+    );
+}
+
+/// QUERIES-DERIVED-FRESHNESS-005: the coverage fact consulted by a nested
+/// MaxAge Demand is durable store truth, not volatile reducer state.
+#[test]
+fn nested_max_age_scoped_coverage_survives_redb_restart() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let path = tempdir.path().join("nested-max-age.redb");
+    let keys = Keys::generate();
+    let inner_relay = RelayUrl::parse("wss://nested-restart-inner.example").unwrap();
+    let outer_relay = RelayUrl::parse("wss://nested-restart-outer.example").unwrap();
+    let inner_atom = atom(
+        &keys,
+        SourceAuthority::Pinned(BTreeSet::from([inner_relay.clone()])),
+    );
+
+    {
+        let mut store = RedbStore::open(&path).expect("create durable store");
+        store
+            .insert(
+                event(&keys, 90_000),
+                RelayObserved::new(inner_relay.clone(), Timestamp::from(90_000u64)),
+            )
+            .unwrap();
+        record(&mut store, &inner_atom, &inner_relay, 99_000);
+    }
+
+    let mut reopened = EngineCore::new(RedbStore::open(&path).expect("reopen durable store"), 10);
+    assert!(reopened.recover_on_boot().is_empty());
+    tick(&mut reopened, 100_000);
+    let effects = subscribe(
+        &mut reopened,
+        nested_query(
+            &keys,
+            &inner_relay,
+            Freshness::MaxAge { seconds: 3_600 },
+            &outer_relay,
+            Freshness::CacheOnly,
+        ),
+    );
+
+    assert!(
+        requested_filters(&effects).is_empty(),
+        "reopened inner coverage satisfies nested MaxAge while the root independently remains CacheOnly"
     );
 }
 

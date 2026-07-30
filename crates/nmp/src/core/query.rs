@@ -255,22 +255,40 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     /// The exact atom union currently owned by handles whose immutable
-    /// opening-time freshness decision is `Live`. Suppressed handles still
-    /// own their graph and cache projection, but are absent from this wire
-    /// truth.
+    /// per-Demand opening-time freshness decision is `Live`. Suppressed
+    /// Demand scopes still own their graph and cache projection, but their
+    /// atoms are absent from this wire truth.
     pub(super) fn wire_demand(&self) -> BTreeSet<ContextualAtom> {
         let ordinary = self
             .handles
             .iter()
-            .filter(|(_, state)| state.acquisition.contributes_wire())
-            .flat_map(|(id, _)| self.resolver.subtree_atoms(*id));
+            .flat_map(|(id, state)| self.wire_atoms_for_handle(*id, &state.acquisition));
         let history = self
             .histories
             .values()
-            .filter(|state| state.acquisition.contributes_wire())
             .flat_map(|state| state.handle_ids.iter().copied())
-            .flat_map(|id| self.resolver.subtree_atoms(id));
+            .flat_map(|id| {
+                let state = self
+                    .histories
+                    .get(&self.history_by_handle[&id])
+                    .expect("history handle maps to a live session");
+                self.wire_atoms_for_handle(id, &state.acquisition)
+            });
         ordinary.chain(history).collect()
+    }
+
+    fn wire_atoms_for_handle(
+        &self,
+        id: HandleId,
+        acquisition: &HandleAcquisition,
+    ) -> BTreeSet<ContextualAtom> {
+        self.resolver
+            .demand_scopes(id)
+            .into_iter()
+            .zip(&acquisition.scopes)
+            .filter(|(_, decision)| decision.contributes_wire())
+            .flat_map(|((atoms, _), _)| atoms)
+            .collect()
     }
 
     /// Compile an isolated plan through the same router/directory/admission/
@@ -283,7 +301,7 @@ impl<S: EventStore> EngineCore<S> {
     /// `SubId`s collide BY VALUE with the live router's tokens while
     /// identifying entirely unrelated filters. That is benign only because
     /// every consumer of a retained shadow plan (`plan_is_fresh_for`, and
-    /// `acquisition_evidence` via `HandleAcquisition::CoverageSatisfied`)
+    /// `acquisition_evidence` via a scope's retained evaluation plan)
     /// reads sessions, `absorbed`, and `limited` — never `sub_id`. Correlating
     /// a shadow plan's `sub_id` with a live one would alias silently; if that
     /// is ever needed, give this router its own token namespace first.
@@ -305,29 +323,84 @@ impl<S: EventStore> EngineCore<S> {
         router.plan().clone()
     }
 
-    /// Freeze one handle's opening-time wire participation. An unsatisfied
-    /// `MaxAge` becomes `Live` once and stays there; a satisfied one retains
-    /// its exact evaluation plan for evidence and is never re-evaluated.
+    /// Freeze every Demand boundary's opening-time wire participation. Each
+    /// scope checks only its own atoms, while the candidate plan includes all
+    /// non-CacheOnly scopes that could participate in this handle. An
+    /// unsatisfied `MaxAge` becomes `Live` once and stays there; a satisfied
+    /// scope retains the exact evaluation plan for evidence and is never
+    /// re-evaluated.
     pub(super) fn decide_handle_acquisition(
         &self,
         id: HandleId,
-        freshness: Freshness,
+        root_freshness: Freshness,
     ) -> HandleAcquisition {
-        match freshness {
-            Freshness::Live => HandleAcquisition::Live,
-            Freshness::CacheOnly => HandleAcquisition::CacheOnly(RelayPlan::default()),
-            Freshness::MaxAge { seconds } => {
-                let atoms = self.resolver.subtree_atoms(id);
-                let mut candidate_demand = self.wire_demand();
-                candidate_demand.extend(atoms.iter().cloned());
-                let plan = self.shadow_plan_for(candidate_demand);
-                if self.plan_is_fresh_for(&atoms, &plan, seconds) {
-                    HandleAcquisition::CoverageSatisfied(plan)
-                } else {
-                    HandleAcquisition::Live
-                }
-            }
+        let mut scopes = self.resolver.demand_scopes(id);
+        if let Some((_, freshness)) = scopes.first_mut() {
+            *freshness = root_freshness;
         }
+        let candidate_plan = scopes
+            .iter()
+            .any(|(_, freshness)| matches!(freshness, Freshness::MaxAge { .. }))
+            .then(|| {
+                let mut candidate_demand = self.wire_demand();
+                candidate_demand.extend(
+                    scopes
+                        .iter()
+                        .filter(|(_, freshness)| *freshness != Freshness::CacheOnly)
+                        .flat_map(|(atoms, _)| atoms.iter().cloned()),
+                );
+                self.shadow_plan_for(candidate_demand)
+            });
+        let scopes = scopes
+            .into_iter()
+            .map(|(atoms, freshness)| match freshness {
+                Freshness::Live => ScopeAcquisition::Live,
+                Freshness::CacheOnly => ScopeAcquisition::CacheOnly(RelayPlan::default()),
+                Freshness::MaxAge { seconds } => {
+                    let plan = candidate_plan
+                        .as_ref()
+                        .expect("a MaxAge scope built the candidate plan");
+                    if self.plan_is_fresh_for(&atoms, plan, seconds) {
+                        ScopeAcquisition::CoverageSatisfied(plan.clone())
+                    } else {
+                        ScopeAcquisition::Live
+                    }
+                }
+            })
+            .collect();
+        HandleAcquisition { scopes }
+    }
+
+    pub(super) fn acquisition_evidence_for_scopes(
+        &self,
+        scopes: Vec<(BTreeSet<ContextualAtom>, Freshness)>,
+        acquisition: &HandleAcquisition,
+    ) -> AcquisitionEvidence {
+        let auth_status = self.auth_status_map();
+        let parts: Vec<_> = scopes
+            .into_iter()
+            .zip(&acquisition.scopes)
+            .map(|((atoms, _), decision)| {
+                let plan = decision
+                    .evidence_plan()
+                    .unwrap_or_else(|| self.router.plan());
+                evidence::acquisition_evidence(
+                    &atoms,
+                    plan,
+                    self.resolver.store(),
+                    &self.connected_relays,
+                    &auth_status,
+                    &self.ever_connected_relays,
+                )
+            })
+            .collect();
+        if parts.is_empty() {
+            return AcquisitionEvidence {
+                sources: Vec::new(),
+                shortfall: vec![ShortfallFact::NoResolvedDemand],
+            };
+        }
+        evidence::merge_acquisition_evidence(parts)
     }
 
     /// Unanimous current-assignment freshness. Presence of a matching event
@@ -1513,29 +1586,13 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     fn handle_evidence_for(&self, id: HandleId) -> AcquisitionEvidence {
-        let subtree_atoms = self.resolver.subtree_atoms(id);
-        self.handle_evidence_for_atoms(id, &subtree_atoms)
-    }
-
-    fn handle_evidence_for_atoms(
-        &self,
-        id: HandleId,
-        subtree_atoms: &BTreeSet<ContextualAtom>,
-    ) -> AcquisitionEvidence {
-        let auth_status = self.auth_status_map();
-        let evidence_plan = self
-            .handles
-            .get(&id)
-            .and_then(|state| state.acquisition.evidence_plan())
-            .unwrap_or_else(|| self.router.plan());
-        evidence::acquisition_evidence(
-            subtree_atoms,
-            evidence_plan,
-            self.resolver.store(),
-            &self.connected_relays,
-            &auth_status,
-            &self.ever_connected_relays,
-        )
+        let Some(state) = self.handles.get(&id) else {
+            return AcquisitionEvidence {
+                sources: Vec::new(),
+                shortfall: vec![ShortfallFact::NoResolvedDemand],
+            };
+        };
+        self.acquisition_evidence_for_scopes(self.resolver.demand_scopes(id), &state.acquisition)
     }
 
     /// The query's current matching row set (by id) + its
@@ -1576,7 +1633,8 @@ impl<S: EventStore> EngineCore<S> {
     /// discarding it -- the mechanism already exists in `nmp-store`; this is
     /// only its honest projection.
     ///
-    /// #107: `CacheMode::Strict` applies the pinned cache projection here --
+    /// #107: `CacheMode::Strict` applies the root Demand's pinned cache
+    /// projection here --
     /// a cached row is returned only when its unioned provenance set
     /// intersects the handle's own pinned relay set (`Row.sources`, #105's
     /// existing field; no new store mechanism). This is read off THIS
@@ -1584,12 +1642,12 @@ impl<S: EventStore> EngineCore<S> {
     /// two handles sharing the identical (cache-free-deduped) acquisition
     /// key may still disagree on `cache` (Fable's ruling: cache is excluded
     /// from `AcquisitionKey`), so an Agnostic and a Strict handle over the
-    /// same pinned selection MUST project different row sets despite
+    /// same pinned root selection MUST project different row sets despite
     /// sharing one graph/wire/coverage underneath. The pinned relay set
-    /// itself comes from `subtree_atoms`' `source` -- Fable's ruling B
-    /// ("uniform per Demand, not subtree") guarantees every atom in a
-    /// single handle's subtree carries the SAME declared `SourceAuthority`,
-    /// so any one atom's `source` is authoritative for the whole handle.
+    /// itself comes only from `root_atoms`' `source`: every nested
+    /// `Derived.inner` Demand owns an independent source and cache policy,
+    /// so consulting a descendant here would let its pins contaminate the
+    /// caller-owned root projection.
     /// `CacheMode::Strict` is only meaningful over a `SourceAuthority::
     /// Pinned` selection (the Contract: "pinned cache policy is part of
     /// source identity") -- over any other source there is no pinned relay
@@ -1599,19 +1657,23 @@ impl<S: EventStore> EngineCore<S> {
         &self,
         id: HandleId,
     ) -> Result<(BTreeMap<EventId, Row>, AcquisitionEvidence), PersistenceError> {
-        let subtree_atoms = self.resolver.subtree_atoms(id);
-        let pinned_relays: Option<&BTreeSet<RelayUrl>> = self
+        let root_atoms = self.resolver.root_atoms(id);
+        let demand_scopes = self.resolver.demand_scopes(id);
+        let pinned_relays: Option<BTreeSet<RelayUrl>> = self
             .handles
             .get(&id)
             .filter(|state| state._handle.cache() == CacheMode::Strict)
             .and_then(|_| {
-                subtree_atoms.iter().find_map(|atom| match &atom.source {
-                    SourceAuthority::Pinned(relays) => Some(relays),
-                    _ => None,
-                })
+                demand_scopes
+                    .first()
+                    .into_iter()
+                    .flat_map(|(atoms, _)| atoms)
+                    .find_map(|atom| match &atom.source {
+                        SourceAuthority::Pinned(relays) => Some(relays.clone()),
+                        _ => None,
+                    })
             });
 
-        let root_atoms = self.resolver.root_atoms(id);
         let row_limit = effective_row_limit(&root_atoms);
         let mut by_id: BTreeMap<EventId, Row> = BTreeMap::new();
         for atom in &root_atoms {
@@ -1624,7 +1686,7 @@ impl<S: EventStore> EngineCore<S> {
                 None => self.resolver.store().query(&filter)?,
             };
             for se in rows {
-                if let Some(relays) = pinned_relays {
+                if let Some(relays) = &pinned_relays {
                     if !se
                         .provenance
                         .seen
@@ -1658,7 +1720,7 @@ impl<S: EventStore> EngineCore<S> {
                 by_id.retain(|event_id, _| keep.contains(event_id));
             }
         }
-        let evidence = self.handle_evidence_for_atoms(id, &subtree_atoms);
+        let evidence = self.handle_evidence_for(id);
         Ok((by_id, evidence))
     }
 }

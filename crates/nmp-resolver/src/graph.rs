@@ -10,7 +10,9 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
+use nmp_grammar::{
+    AccessContext, CacheMode, ConcreteFilter, ContextualAtom, Freshness, SourceAuthority,
+};
 
 use crate::engine::{ResolutionNodeKind, ResolutionNodeSnapshot, ResolvedValue};
 use crate::eval::merge_element_into;
@@ -36,6 +38,12 @@ pub(crate) struct ReactiveNode {
 pub(crate) struct DerivedNode {
     pub(crate) inner: NodeId,
     pub(crate) project: nmp_grammar::Selector,
+    /// The inner Demand's local-row policy. It belongs to this Derived
+    /// boundary rather than the shared atom identity.
+    pub(crate) cache: CacheMode,
+    /// The inner Demand's opening-time wire policy. The acquisition core
+    /// consumes it against this node's own atom scope.
+    pub(crate) freshness: Freshness,
     pub(crate) cached: ResolvedSet,
 }
 
@@ -251,6 +259,67 @@ impl Graph {
             .iter()
             .map(|atom| atom.filter.clone())
             .collect()
+    }
+
+    /// One acquisition scope per Demand boundary, root first. The root
+    /// policy remains handle-owned, so its placeholder is `Live`; every
+    /// nested scope carries the exact freshness declared by its
+    /// `Derived.inner` Demand. Atom sets are read from the same graph caches
+    /// used for refcounting and wire demand.
+    pub(crate) fn demand_scopes(&self, root: NodeId) -> Vec<(BTreeSet<ContextualAtom>, Freshness)> {
+        let mut scopes = vec![(self.filter_data(root).cached_atoms.clone(), Freshness::Live)];
+        self.collect_nested_demand_scopes(root, &mut scopes);
+        scopes
+    }
+
+    fn collect_nested_demand_scopes(
+        &self,
+        filter_id: NodeId,
+        scopes: &mut Vec<(BTreeSet<ContextualAtom>, Freshness)>,
+    ) {
+        for (_, binding_id) in &self.filter_data(filter_id).bound {
+            self.collect_binding_demand_scopes(*binding_id, scopes);
+        }
+    }
+
+    fn collect_binding_demand_scopes(
+        &self,
+        binding_id: NodeId,
+        scopes: &mut Vec<(BTreeSet<ContextualAtom>, Freshness)>,
+    ) {
+        match self.node(binding_id) {
+            Node::Derived(node) => {
+                scopes.push((
+                    self.filter_data(node.inner).cached_atoms.clone(),
+                    node.freshness,
+                ));
+                self.collect_nested_demand_scopes(node.inner, scopes);
+            }
+            Node::SetOp(node) => {
+                for operand in &node.operands {
+                    self.collect_binding_demand_scopes(*operand, scopes);
+                }
+            }
+            Node::Literal(_) | Node::Reactive(_) => {}
+            Node::Filter(_) => unreachable!("a BindingNode id must never reference a FilterNode"),
+        }
+    }
+
+    /// The exact eligible provenance set for a Strict interior projection.
+    /// Strict is meaningful only for a pinned Demand; every other
+    /// cache/source combination returns `None` and uses the agnostic read.
+    pub(crate) fn strict_projection_relays(
+        &self,
+        filter_id: NodeId,
+        cache: CacheMode,
+    ) -> Option<BTreeSet<nostr::RelayUrl>> {
+        if cache != CacheMode::Strict {
+            return None;
+        }
+        match &self.filter_data(filter_id).source {
+            SourceAuthority::Pinned(relays) => Some(relays.clone()),
+            SourceAuthority::AuthorOutboxes | SourceAuthority::Public => None,
+        }
     }
 
     /// The wide query filter for a FilterNode: base (kinds/since/until/limit)
