@@ -1,10 +1,10 @@
 //! Cross-process exclusive ownership for persistent stores (#489).
 //!
 //! The database door and the destructive-reset door acquire the same durable
-//! sidecar file lock. The lock is owned by the [`RedbStore`](crate::RedbStore)
-//! value itself, so no process-global registry, caller convention, or
-//! engine-only construction path can bypass it: one resolved store target has
-//! exactly one owner at a time, in this process and every other one.
+//! sidecar file lock. Reset also joins redb's target-inode lock before removal,
+//! so a hard-link alias cannot bypass live backend ownership. The locks are
+//! owned by RAII values, so no process-global registry, caller convention, or
+//! engine-only construction path can bypass them.
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -230,6 +230,125 @@ impl StoreOwnership {
             })
         }
     }
+}
+
+/// Reset's ownership of the actual database inode.
+///
+/// `RedbStore` owns this same class of exclusive file lock through redb's
+/// file backend. Reset joins that authoritative inode lock rather than
+/// treating pathname ownership as proof that no hard-link alias is live.
+struct LockedStoreTarget {
+    file: File,
+}
+
+impl LockedStoreTarget {
+    fn require_single_link(&self, target: &Path) -> Result<(), RedbStoreResetError> {
+        let links =
+            hard_link_count(&self.file).map_err(|source| RedbStoreResetError::LockFailed {
+                path: target.to_path_buf(),
+                source,
+            })?;
+        if links > 1 {
+            return Err(RedbStoreResetError::LockFailed {
+                path: target.to_path_buf(),
+                source: io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "persistent store has {links} hard links; reset cannot prove physical erasure"
+                    ),
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl Drop for LockedStoreTarget {
+    fn drop(&mut self) {
+        // Match redb's backend teardown and the sidecar's #936 rule: an
+        // explicit unlock releases the open-file-description lock even if a
+        // concurrent fork transiently inherited a duplicate descriptor.
+        let _ = self.file.unlock();
+    }
+}
+
+#[cfg(unix)]
+fn hard_link_count(file: &File) -> io::Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+
+    Ok(file.metadata()?.nlink())
+}
+
+#[cfg(windows)]
+fn hard_link_count(file: &File) -> io::Result<u64> {
+    use std::mem::MaybeUninit;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    // SAFETY: `file` keeps the handle valid for the call, and the API writes
+    // the complete structure before returning nonzero.
+    let succeeded = unsafe {
+        GetFileInformationByHandle(file.as_raw_handle().cast(), information.as_mut_ptr())
+    };
+    if succeeded == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        // SAFETY: a nonzero result initializes the complete structure.
+        Ok(u64::from(
+            unsafe { information.assume_init() }.nNumberOfLinks,
+        ))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn hard_link_count(_file: &File) -> io::Result<u64> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "persistent store hard-link count is unavailable on this platform",
+    ))
+}
+
+fn acquire_target_for_reset(
+    target: &Path,
+) -> Result<Option<LockedStoreTarget>, RedbStoreResetError> {
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(false)
+        .truncate(false)
+        .open(target)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(RedbStoreResetError::LockFailed {
+                path: target.to_path_buf(),
+                source,
+            });
+        }
+    };
+
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            return Err(RedbStoreResetError::StoreStillOpen {
+                path: target.to_path_buf(),
+            });
+        }
+        Err(std::fs::TryLockError::Error(source)) => {
+            return Err(RedbStoreResetError::LockFailed {
+                path: target.to_path_buf(),
+                source,
+            });
+        }
+    }
+
+    let target_ownership = LockedStoreTarget { file };
+    target_ownership.require_single_link(target)?;
+    Ok(Some(target_ownership))
 }
 
 fn acquire_ownership(path: &Path) -> Result<StoreOwnership, StoreOwnershipError> {
@@ -474,7 +593,8 @@ pub enum RedbStoreResetError {
     PathResolutionFailed { path: PathBuf, source: io::Error },
     /// The durable ownership sidecar could not be created or opened.
     LockFileOpenFailed { path: PathBuf, source: io::Error },
-    /// The OS refused the exclusive lock for a reason other than contention.
+    /// The OS refused an ownership lock or the locked target could not prove
+    /// single-link physical-erasure semantics.
     LockFailed { path: PathBuf, source: io::Error },
     /// The caller path resolved to a different target while reset held its
     /// lock. Nothing was deleted.
@@ -519,7 +639,7 @@ impl std::fmt::Display for RedbStoreResetError {
             ),
             Self::LockFailed { path, source } => write!(
                 f,
-                "could not acquire persistent store ownership lock {}: {source}",
+                "could not establish persistent store ownership for {}: {source}",
                 path.display()
             ),
             Self::TargetChanged { expected, actual } => write!(
@@ -553,17 +673,22 @@ pub(crate) fn reset_store(path: &Path) -> Result<(), RedbStoreResetError> {
     reset_store_with_hooks(path, || {})
 }
 
-/// Reset acquires the SAME exclusive ownership an open would and holds it
-/// through removal. There is no check-then-delete window: the owner token is
-/// still live when `remove_file` runs and is released only afterwards.
+/// Reset first owns the pathname lifecycle, then joins the same target-inode
+/// lock held by redb's live file backend. Both guards remain held through
+/// single-link validation and removal.
 fn reset_store_with_hooks(
     path: &Path,
     before_remove: impl FnOnce(),
 ) -> Result<(), RedbStoreResetError> {
     let ownership = acquire_ownership(path)?;
     ownership.revalidate(path)?;
-    before_remove();
     let target = ownership.target().to_path_buf();
+    let target_ownership = acquire_target_for_reset(&target)?;
+    ownership.revalidate(path)?;
+    before_remove();
+    if let Some(target_ownership) = &target_ownership {
+        target_ownership.require_single_link(&target)?;
+    }
     match std::fs::remove_file(&target) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -1333,7 +1458,7 @@ mod tests {
     /// #723 falsifier: pathname ownership alone cannot protect a live
     /// database opened through another hard link. Reset must join the
     /// database inode's lock before removing either name.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn hard_link_alias_reset_refuses_live_subprocess_owner_without_mutation() {
         let fixture = tempfile::tempdir().unwrap();
@@ -1380,16 +1505,28 @@ mod tests {
 
         drop(child.stdin.take());
         assert!(child.wait().unwrap().success());
+
+        let after_shutdown = std::fs::read(&target).unwrap();
+        assert_eq!(std::fs::read(&alias).unwrap(), after_shutdown);
+        let released = reset_store(&alias);
+        assert!(matches!(
+            released,
+            Err(RedbStoreResetError::LockFailed { ref source, .. })
+                if source.kind() == io::ErrorKind::Unsupported
+        ));
+        assert_eq!(std::fs::read(&target).unwrap(), after_shutdown);
+        assert_eq!(std::fs::read(&alias).unwrap(), after_shutdown);
+        std::fs::remove_file(&alias).unwrap();
+        reset_store(&target).expect("normal owner shutdown must release the backend inode lock");
+        assert!(!target.exists());
     }
 
     /// #723 falsifier: after the live owner is gone, deleting only one of
     /// several names would not perform the physical erasure promised by
     /// reset. The multi-link topology must therefore be refused intact.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn hard_link_alias_reset_refuses_closed_multilink_store_without_mutation() {
-        use std::os::unix::fs::MetadataExt;
-
         let fixture = tempfile::tempdir().unwrap();
         let target = fixture.path().join("closed-hard-link-owner.redb");
         let alias = fixture.path().join("closed-hard-link-alias.redb");
@@ -1398,13 +1535,11 @@ mod tests {
 
         let before = std::fs::read(&target).unwrap();
         let before_digest = blake3::hash(&before);
-        assert_eq!(std::fs::metadata(&target).unwrap().nlink(), 2);
+        let target_handle = OpenOptions::new().read(true).open(&target).unwrap();
+        assert_eq!(hard_link_count(&target_handle).unwrap(), 2);
 
-        assert!(matches!(
-            reset_store(&alias),
-            Err(RedbStoreResetError::LockFailed { .. })
-        ));
-        assert_eq!(std::fs::metadata(&target).unwrap().nlink(), 2);
+        let refusal = reset_store(&alias);
+        assert_eq!(hard_link_count(&target_handle).unwrap(), 2);
         assert_eq!(std::fs::read(&target).unwrap(), before);
         assert_eq!(std::fs::read(&alias).unwrap(), before);
         assert_eq!(
@@ -1412,5 +1547,119 @@ mod tests {
             before_digest
         );
         assert_eq!(blake3::hash(&std::fs::read(&alias).unwrap()), before_digest);
+        assert!(matches!(
+            refusal,
+            Err(RedbStoreResetError::LockFailed { ref source, .. })
+                if source.kind() == io::ErrorKind::Unsupported
+        ));
+    }
+
+    /// The link-count refusal is checked on the locked inode immediately
+    /// before removal, not only when reset first acquires the backend lock.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn hard_link_created_after_target_lock_is_refused_without_mutation() {
+        let fixture = tempfile::tempdir().unwrap();
+        let target = fixture.path().join("late-hard-link-owner.redb");
+        let alias = fixture.path().join("late-hard-link-alias.redb");
+        drop(crate::RedbStore::open(&target).unwrap());
+        let before = std::fs::read(&target).unwrap();
+        let before_digest = blake3::hash(&before);
+
+        let refusal =
+            reset_store_with_hooks(&target, || std::fs::hard_link(&target, &alias).unwrap());
+        let target_handle = OpenOptions::new().read(true).open(&target).unwrap();
+        assert_eq!(hard_link_count(&target_handle).unwrap(), 2);
+        assert_eq!(std::fs::read(&target).unwrap(), before);
+        assert_eq!(std::fs::read(&alias).unwrap(), before);
+        assert_eq!(
+            blake3::hash(&std::fs::read(&target).unwrap()),
+            before_digest
+        );
+        assert_eq!(blake3::hash(&std::fs::read(&alias).unwrap()), before_digest);
+        assert!(matches!(
+            refusal,
+            Err(RedbStoreResetError::LockFailed { ref source, .. })
+                if source.kind() == io::ErrorKind::Unsupported
+        ));
+    }
+
+    /// Failure to open the target for authoritative backend ownership is a
+    /// fail-closed reset result, never permission to unlink it.
+    #[cfg(unix)]
+    #[test]
+    fn target_ownership_open_failure_refuses_reset_without_mutation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let target = fixture.path().join("unopenable-target.redb");
+        drop(crate::RedbStore::open(&target).unwrap());
+        let before = std::fs::read(&target).unwrap();
+        let original_permissions = std::fs::metadata(&target).unwrap().permissions();
+        let mut blocked_permissions = original_permissions.clone();
+        blocked_permissions.set_mode(0o000);
+        std::fs::set_permissions(&target, blocked_permissions).unwrap();
+
+        let refusal = reset_store(&target);
+
+        std::fs::set_permissions(&target, original_permissions).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), before);
+        assert!(matches!(
+            refusal,
+            Err(RedbStoreResetError::LockFailed { ref source, .. })
+                if source.kind() == io::ErrorKind::PermissionDenied
+        ));
+    }
+
+    /// Process death releases redb's inode lock through the OS even though no
+    /// Rust destructor runs. Reset can then acquire that inode, observe the
+    /// still-intact multi-link topology, and proceed after the alias is
+    /// explicitly removed.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn crashed_subprocess_releases_target_ownership_without_mutation() {
+        let fixture = tempfile::tempdir().unwrap();
+        let target = fixture.path().join("crashed-hard-link-owner.redb");
+        let alias = fixture.path().join("crashed-hard-link-alias.redb");
+
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("persistent_store_lifetime::tests::subprocess_owner_helper")
+            .arg("--nocapture")
+            .env("NMP_STORE_OWNER_HELPER_PATH", &target)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let mut lines = std::io::BufReader::new(stdout).lines();
+        loop {
+            let line = lines
+                .next()
+                .expect("child exited before taking ownership")
+                .unwrap();
+            if line.contains("NMP_STORE_OWNER_READY") {
+                break;
+            }
+        }
+
+        std::fs::hard_link(&target, &alias).unwrap();
+        let before = std::fs::read(&target).unwrap();
+        child.kill().unwrap();
+        assert!(!child.wait().unwrap().success());
+
+        let released = reset_store(&alias);
+        assert_eq!(std::fs::read(&target).unwrap(), before);
+        assert_eq!(std::fs::read(&alias).unwrap(), before);
+        assert!(matches!(
+            released,
+            Err(RedbStoreResetError::LockFailed { ref source, .. })
+                if source.kind() == io::ErrorKind::Unsupported
+        ));
+
+        std::fs::remove_file(&alias).unwrap();
+        reset_store(&target).expect("process death must release the backend inode lock");
+        assert!(!target.exists());
     }
 }
