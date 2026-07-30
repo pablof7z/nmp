@@ -1,7 +1,7 @@
 //! Headless `EngineCore` tests (M3 plan §5 tier A, re-expressed at the
 //! `EngineCore` level per the M3-B build brief) + the coverage-attribution
-//! ruling's falsifiers
-//! (`docs/consults/2026-07-11-fable-coverage-attribution.md`). Zero I/O:
+//! request-attribution falsifiers
+//! (`docs/design/query-demand-and-evidence.md`, issue #816). Zero I/O:
 //! every "relay" interaction here is a scripted `EngineMsg::RelayConnected`/
 //! `RelayFrame` fed directly to `EngineCore::handle`, exactly as the ruling's
 //! own reasoning demands (send-time snapshots, the EOSE intersection rule,

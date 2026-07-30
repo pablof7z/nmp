@@ -6,6 +6,13 @@
 
 use super::*;
 
+type AttributedRelayObservation = (
+    SignedEvent,
+    RelayObserved,
+    Option<CommittedObservationCandidate>,
+    Option<(RelaySessionKey, String)>,
+);
+
 impl<S: EventStore> EngineCore<S> {
     // ---- transport wiring (slot bookkeeping only — C owns the pool) -----
 
@@ -1098,12 +1105,7 @@ impl<S: EventStore> EngineCore<S> {
 
     fn ingest_relay_observations(
         &mut self,
-        events: Vec<(
-            SignedEvent,
-            RelayObserved,
-            Option<CommittedObservationCandidate>,
-            Option<(RelaySessionKey, String)>,
-        )>,
+        events: Vec<AttributedRelayObservation>,
         effects: &mut Vec<Effect>,
     ) {
         #[cfg(feature = "bench-instrumentation")]
@@ -1121,12 +1123,7 @@ impl<S: EventStore> EngineCore<S> {
 
     fn ingest_relay_observations_inner(
         &mut self,
-        events: Vec<(
-            SignedEvent,
-            RelayObserved,
-            Option<CommittedObservationCandidate>,
-            Option<(RelaySessionKey, String)>,
-        )>,
+        events: Vec<AttributedRelayObservation>,
         effects: &mut Vec<Effect>,
     ) {
         if events.is_empty() {

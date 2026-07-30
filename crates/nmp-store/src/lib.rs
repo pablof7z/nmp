@@ -9,11 +9,12 @@
 //! — no hand-rolled event matching. A duplicate-id insert now MERGES relay
 //! provenance into the stored row (ledger #5) instead of being a no-op.
 //!
-//! Coverage (`record_coverage`/`get_coverage`) implements
-//! `docs/consults/2026-07-11-fable-coverage-attribution.md` at the store
-//! layer — see [`coverage`] for the full ruling recap. Claim-based bounded
-//! GC (`gc`) evicts only regular (non-addressed) events matched by no live
-//! claim, lowering any coverage row it invalidates in the same step.
+//! Coverage (`record_coverage`/`get_coverage`) implements the store half of
+//! `docs/design/query-demand-and-evidence.md` and issue #816's
+//! facts-before-claims contract — see [`coverage`] for the full recap.
+//! Claim-based bounded GC (`gc`) evicts only regular (non-addressed) events
+//! matched by no live claim, lowering any coverage row it invalidates in the
+//! same step.
 //!
 //! Retraction (`docs/design/retraction-and-negative-deltas.md`, issue #28):
 //! kind:5 (NIP-09) deletion runs inside `insert` and writes PERMANENT

@@ -1,8 +1,9 @@
-//! Coverage-attribution state (implements
-//! `docs/consults/2026-07-11-fable-coverage-attribution.md` §2/§3 EXACTLY):
-//! the per-`SubId` FIFO of send-time snapshots, the wire subscription-id ->
-//! `SubId` reverse lookup, and the `CoverageKey` -> retained window-erased
-//! shape registry `record_coverage` needs (the store only ever sees whatever
+//! Coverage-attribution state for the request-scoped facts-before-claims
+//! contract recorded in issue #816 and
+//! `docs/design/query-demand-and-evidence.md`: the per-`SubId` FIFO of
+//! send-time snapshots, the wire subscription-id -> `SubId` reverse lookup,
+//! and the `CoverageKey` -> retained window-erased shape registry
+//! `record_coverage` needs (the store only ever sees whatever
 //! `ConcreteFilter` it is handed; `EngineCore` is the one place that knows
 //! which shape a given key came from — see `nmp-store`'s own `ShapeRecord`
 //! doc comment for the identical reasoning at the store layer).
@@ -435,19 +436,14 @@ impl AttributionState {
         send_id: AttributionSendId,
         completion_time: Timestamp,
     ) -> Option<CompletedAttribution> {
-        let Some(sub_id) = self
+        let sub_id = self
             .sub_id_by_wire
             .get(&(session.clone(), wire_sub_id.to_string()))
-            .cloned()
-        else {
-            return None;
-        };
-        let Some(fifo) = self.inflight.get_mut(&sub_id) else {
-            return None;
-        };
-        let Some(position) = fifo.iter().position(|snapshot| snapshot.send_id == send_id) else {
-            return None;
-        };
+            .cloned()?;
+        let fifo = self.inflight.get_mut(&sub_id)?;
+        let position = fifo
+            .iter()
+            .position(|snapshot| snapshot.send_id == send_id)?;
         let snapshot = fifo
             .remove(position)
             .expect("position came from this exact attribution FIFO");

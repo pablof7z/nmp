@@ -395,6 +395,268 @@ fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
     assert!(core.get_coverage(&healthy_atom, &healthy_relay).is_some());
 }
 
+/// The event-failure key is the full physical relay session, not the relay
+/// URL. Two identical pinned selections therefore keep independent coverage
+/// authority when one runs on Public and the other on `Nip42(author)`.
+#[test]
+fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
+    let public_author = Keys::generate();
+    let protected_author = Keys::generate();
+    let relay = RelayUrl::parse("wss://access-isolation.example.com").unwrap();
+    let source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    let selection = Filter {
+        kinds: Some(BTreeSet::from([1u16])),
+        ..Filter::default()
+    };
+    let public_query = LiveQuery(
+        nmp_grammar::Demand::new(selection.clone(), source.clone(), AccessContext::Public)
+            .expect("public pinned demand"),
+    );
+    let protected_query = LiveQuery(
+        nmp_grammar::Demand::new(
+            selection,
+            source.clone(),
+            AccessContext::Nip42(protected_author.public_key()),
+        )
+        .expect("protected pinned demand"),
+    );
+    let mut core = EngineCore::new(
+        FailIngestStore::armed(),
+        Box::new(FixtureDirectory::new()),
+        10,
+    );
+
+    let _ = core.handle(EngineMsg::Subscribe(public_query));
+    let _ = core.handle(EngineMsg::Subscribe(protected_query));
+
+    let public_connected = connect(&mut core, 0, &relay);
+    let public_request = public_connected
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Replay(session, requests) if session == &public_session(&relay) => {
+                requests.first().map(|request| request.sub_id.clone())
+            }
+            _ => None,
+        })
+        .expect("public session replays its pinned request");
+
+    let protected_session = signer_session(&relay, protected_author.public_key());
+    let protected_connected = connect_signer(&mut core, 1, &relay, protected_author.public_key());
+    assert_no_protected_req(&protected_connected, &protected_session);
+    let protected_ready = authenticate_signer(&mut core, 1, &relay, &protected_author);
+    let protected_request = protected_ready
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Replay(session, requests) if session == &protected_session => {
+                requests.first().map(|request| request.sub_id.clone())
+            }
+            _ => None,
+        })
+        .expect("authenticated session replays its identical pinned request");
+
+    let public_filter = public_connected
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Replay(session, requests) if session == &public_session(&relay) => {
+                requests.first().map(|request| request.filter.clone())
+            }
+            _ => None,
+        })
+        .expect("public replay carries its filter");
+    let protected_filter = protected_ready
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Replay(session, requests) if session == &protected_session => {
+                requests.first().map(|request| request.filter.clone())
+            }
+            _ => None,
+        })
+        .expect("protected replay carries its filter");
+    assert_eq!(
+        public_filter, protected_filter,
+        "selection and source are identical; access context is the only partition"
+    );
+
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(500u64)));
+    let failed = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        event_frame(
+            &wire_sub_string(&public_request),
+            nmp_resolver::testkit::kind1(&public_author, "the public transaction fails", 100),
+        ),
+    ));
+    assert!(failed
+        .iter()
+        .any(|effect| matches!(effect, Effect::EmitDiagnostics(snapshot)
+            if snapshot.store_degraded.is_some())));
+
+    let protected_event =
+        nmp_resolver::testkit::kind1(&protected_author, "the protected transaction commits", 101);
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 1,
+            generation: 1,
+        },
+        protected_session.clone(),
+        event_frame(&wire_sub_string(&protected_request), protected_event),
+    ));
+
+    let public_completed = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire_sub_string(&public_request)),
+    ));
+    assert!(
+        !public_completed
+            .iter()
+            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+        "the failed Public request must remain poisoned"
+    );
+    let protected_completed = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 1,
+            generation: 1,
+        },
+        protected_session,
+        eose_frame(&wire_sub_string(&protected_request)),
+    ));
+    assert!(
+        protected_completed
+            .iter()
+            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+        "the identical request on another access session remains eligible"
+    );
+
+    let concrete = ConcreteFilter {
+        kinds: Some(BTreeSet::from([1u16])),
+        ..ConcreteFilter::default()
+    };
+    let public_atom = ContextualAtom {
+        filter: concrete.clone(),
+        source: source.clone(),
+        access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    };
+    let protected_atom = ContextualAtom {
+        filter: concrete,
+        source,
+        access: AccessContext::Nip42(protected_author.public_key()),
+        routing_evidence: BTreeSet::new(),
+    };
+    assert_eq!(core.get_coverage(&public_atom, &relay), None);
+    assert!(core.get_coverage(&protected_atom, &relay).is_some());
+}
+
+/// An EVENT on an overwritten wire id cannot identify which outstanding REQ
+/// revision emitted it, so every owner already in that exact FIFO is
+/// poisoned. A revision sent after the failure is not retroactively poisoned.
+#[test]
+fn failed_event_commit_poisons_only_the_then_current_wire_fifo_revisions() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let c = Keys::generate();
+    let relay = RelayUrl::parse("wss://fifo-isolation.example.com").unwrap();
+    let dir = FixtureDirectory::new()
+        .with_write(a.public_key().to_hex(), [relay.clone()])
+        .with_write(b.public_key().to_hex(), [relay.clone()])
+        .with_write(c.public_key().to_hex(), [relay.clone()]);
+    let mut core = EngineCore::new(FailIngestStore::armed(), Box::new(dir), 10);
+    connect(&mut core, 0, &relay);
+
+    let first = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
+    let first_sub = req_for(&first, &relay).0.clone();
+    let second = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &b.public_key().to_hex(),
+    )));
+    let second_sub = req_for(&second, &relay).0.clone();
+    assert_eq!(
+        first_sub, second_sub,
+        "the filter widening reuses one wire FIFO"
+    );
+    let wire = wire_sub_string(&first_sub);
+
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(500u64)));
+    let failed = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        event_frame(
+            &wire,
+            nmp_resolver::testkit::kind1(&a, "ambiguous failed revision", 100),
+        ),
+    ));
+    assert!(failed
+        .iter()
+        .any(|effect| matches!(effect, Effect::EmitDiagnostics(snapshot)
+            if snapshot.store_degraded.is_some())));
+
+    let third = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &c.public_key().to_hex(),
+    )));
+    let third_sub = req_for(&third, &relay).0.clone();
+    assert_eq!(
+        first_sub, third_sub,
+        "the post-failure widening is a later revision of the same wire FIFO"
+    );
+
+    let atom_a = ctx_atom(cf(&[1], &[&a.public_key().to_hex()]));
+    let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
+    let atom_c = ctx_atom(cf(&[1], &[&c.public_key().to_hex()]));
+    for now in [600u64, 700] {
+        let _ = core.handle(EngineMsg::Tick(Timestamp::from(now)));
+        let poisoned = core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            public_session(&relay),
+            eose_frame(&wire),
+        ));
+        assert!(
+            !poisoned
+                .iter()
+                .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+            "both revisions present at the failed EVENT stay poisoned: {poisoned:?}"
+        );
+        assert_eq!(core.get_coverage(&atom_a, &relay), None);
+        assert_eq!(core.get_coverage(&atom_b, &relay), None);
+        assert_eq!(core.get_coverage(&atom_c, &relay), None);
+    }
+
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(800u64)));
+    let later = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire),
+    ));
+    assert!(
+        later
+            .iter()
+            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+        "the revision recorded after the failure remains eligible: {later:?}"
+    );
+    assert!(core.get_coverage(&atom_a, &relay).is_some());
+    assert!(core.get_coverage(&atom_b, &relay).is_some());
+    assert!(core.get_coverage(&atom_c, &relay).is_some());
+}
+
 /// A projection read can fail only after the EVENT transaction has committed.
 /// That phase still degrades diagnostics, but it must not revoke the exact
 /// request's coverage authority: doing so would confuse a failed local view

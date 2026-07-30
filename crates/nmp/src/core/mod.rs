@@ -16,14 +16,14 @@
 //! the whole engine's logic is testable by feeding `EngineMsg`s and
 //! asserting `Effect`s, with zero network (plan §5 tier A).
 //!
-//! Coverage attribution implements
-//! `docs/consults/2026-07-11-fable-coverage-attribution.md` (the ruling)
-//! EXACTLY: send-time snapshots + the FIFO intersection rule live in
-//! [`attribution`]; the per-query, per-source acquisition evidence (`rows +
-//! compact facts, never a collapsed global verdict` —
-//! `docs/design/scoped-evidence-49-12-plan.md`, folding #12 into #49) lives
-//! in [`evidence`]. Both are engine-owned — the store (`nmp-store`) only
-//! stores whatever interval it is handed.
+//! Coverage attribution follows
+//! `docs/design/query-demand-and-evidence.md` plus issue #816's
+//! request-scoped facts-before-claims contract: send-time snapshots + the
+//! FIFO intersection rule live in [`attribution`]; the per-query, per-source
+//! acquisition evidence (`rows + compact facts, never a collapsed global
+//! verdict` — `docs/design/scoped-evidence-49-12-plan.md`, folding #12 into
+//! #49) lives in [`evidence`]. Both are engine-owned — the store
+//! (`nmp-store`) only stores whatever interval it is handed.
 
 mod admission;
 mod attribution;
