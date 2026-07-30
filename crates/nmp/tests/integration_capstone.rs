@@ -30,15 +30,16 @@ use nmp::mechanism::core::{AcquisitionEvidence, RowDelta, SourceStatus};
 use nmp::mechanism::outbox::WriteStatus;
 use nmp::mechanism::runtime::{AuthPolicy, AuthPolicyOp, AuthPolicyRequest};
 use nmp::mechanism::runtime::{EngineThread, FifoReceiver, RowsReceiver};
+use nmp::{Engine, EngineConfig};
 use nmp_grammar::{
-    AccessContext, Binding, Demand, Derived, Filter, IdentityField, Selector, SetAlgebra, SetOp,
-    SourceAuthority,
+    AccessContext, Binding, CacheMode, Demand, Derived, Filter, Freshness, IdentityField, Selector,
+    SetAlgebra, SetOp, SourceAuthority,
 };
 use nmp_grammar::{Durability, Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_local_signer::LocalKeySigner;
 use nmp_resolver::LiveQuery;
 use nmp_router::FixtureRoutingFacts;
-use nmp_store::RedbStore;
+use nmp_store::{EventStore, RedbStore, RelayObserved};
 use nmp_transport::PoolConfig;
 use nostr::filter::MatchEventOptions;
 use nostr::{
@@ -708,6 +709,153 @@ fn auth_relay_oracle_rejects_a_wrong_challenge() {
     let error = validate_auth_event(&wrong, keys.public_key(), &relay, "current-challenge")
         .expect_err("wrong challenge must fail the strict relay oracle");
     assert!(error.contains("wrong AUTH tag order/content"));
+}
+
+/// QUERIES-DERIVED-CACHE-001..004 capstone: the supported public `Engine`
+/// consumes a durable canonical store whose rows carry two independent relay
+/// witnesses. The answer is produced by the real nested resolver path; the
+/// fixture inserts only signed Nostr rows and their observed provenance.
+#[test]
+fn public_engine_nested_strict_cache_uses_independent_relay_witnesses_before_limit() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let path = tempdir.path().join("derived-inner-policy.redb");
+    let relay_a = RelayUrl::parse("wss://facade-witness-a.example").unwrap();
+    let relay_b = RelayUrl::parse("wss://facade-witness-b.example").unwrap();
+    let older_a_author = Keys::generate();
+    let newer_b_author = Keys::generate();
+    let shared_author = Keys::generate();
+
+    let metadata = |keys: &Keys, at| {
+        UnsignedEvent::new(
+            keys.public_key(),
+            Timestamp::from(at),
+            Kind::Metadata,
+            Vec::new(),
+            "{}",
+        )
+        .sign_with_keys(keys)
+        .unwrap()
+    };
+    let reaction = |keys: &Keys, at| {
+        UnsignedEvent::new(
+            keys.public_key(),
+            Timestamp::from(at),
+            Kind::from(7u16),
+            Vec::new(),
+            "+",
+        )
+        .sign_with_keys(keys)
+        .unwrap()
+    };
+    let older_a = metadata(&older_a_author, 100);
+    let newer_b = metadata(&newer_b_author, 300);
+    let shared = metadata(&shared_author, 200);
+    let outer_older = reaction(&older_a_author, 400);
+    let outer_newer = reaction(&newer_b_author, 401);
+    let outer_shared = reaction(&shared_author, 402);
+
+    {
+        let mut store = RedbStore::open(&path).expect("create canonical store");
+        store
+            .insert(
+                older_a,
+                RelayObserved::new(relay_a.clone(), Timestamp::from(100)),
+            )
+            .unwrap();
+        store
+            .insert(
+                newer_b,
+                RelayObserved::new(relay_b.clone(), Timestamp::from(300)),
+            )
+            .unwrap();
+        store
+            .insert(
+                shared.clone(),
+                RelayObserved::new(relay_b.clone(), Timestamp::from(200)),
+            )
+            .unwrap();
+        store
+            .insert(
+                shared,
+                RelayObserved::new(relay_a.clone(), Timestamp::from(201)),
+            )
+            .unwrap();
+        for event in [outer_older.clone(), outer_newer, outer_shared.clone()] {
+            store
+                .insert(
+                    event,
+                    RelayObserved::new(relay_a.clone(), Timestamp::from(500)),
+                )
+                .unwrap();
+        }
+    }
+
+    let mut inner = Demand::new(
+        Filter {
+            kinds: Some(BTreeSet::from([0u16])),
+            limit: Some(2),
+            ..Filter::default()
+        },
+        SourceAuthority::Pinned(BTreeSet::from([relay_a.clone()])),
+        AccessContext::Public,
+    )
+    .unwrap();
+    inner.cache = CacheMode::Strict;
+    inner.freshness = Freshness::CacheOnly;
+    let mut outer = Demand::new(
+        Filter {
+            kinds: Some(BTreeSet::from([7u16])),
+            authors: Some(Binding::Derived(Box::new(Derived {
+                inner,
+                project: Selector::Authors,
+            }))),
+            ..Filter::default()
+        },
+        SourceAuthority::Pinned(BTreeSet::from([relay_a])),
+        AccessContext::Public,
+    )
+    .unwrap();
+    outer.freshness = Freshness::CacheOnly;
+
+    let engine = Engine::new(EngineConfig {
+        store_path: Some(path.to_string_lossy().into_owned()),
+        ..EngineConfig::default()
+    })
+    .expect("open supported public Engine");
+    let subscription = engine
+        .observe(LiveQuery(outer), None)
+        .expect("open public observation");
+    let expected = BTreeSet::from([outer_older.id, outer_shared.id]);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut delivered = BTreeSet::new();
+    while delivered != expected {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let frame = subscription
+            .recv_timeout(remaining)
+            .expect("receive initial local projection");
+        for delta in frame.deltas {
+            match delta {
+                RowDelta::Added(row) => {
+                    delivered.insert(row.event.id);
+                }
+                RowDelta::Removed(event_id) => {
+                    delivered.remove(&event_id);
+                }
+                RowDelta::SourcesGrew { .. } => {}
+            }
+        }
+    }
+    assert_eq!(
+        delivered,
+        expected,
+        "B-only metadata is filtered before limit:2; A-only and A+B witnesses remain eligible through the public facade"
+    );
+
+    drop(subscription);
+    engine.shutdown();
 }
 
 // ===========================================================================

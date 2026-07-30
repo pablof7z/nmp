@@ -1,9 +1,10 @@
 # Query demand and acquisition evidence
 
 - **Status:** BUILT for the full descriptor and scoped evidence contract across
-  Rust, FFI, Swift, and Kotlin (#49/#714). `Demand` identity is
+  Rust, FFI, Swift, and Kotlin (#49/#714/#1106). `Demand` identity is
   `Selection + SourceAuthority + AccessContext`; every `Derived.inner` carries
-  its own complete demand; persisted coverage, wire sharing, and evidence are
+  its own complete demand, and its cache/freshness policy is enforced at that
+  exact boundary; persisted coverage, wire sharing, and evidence are
   context-safe. Broader permanent-diagnostics expansion remains under #51.
 - **Owns:** live-query identity, reusable derived demand, snapshot evidence, and
   the boundary between ordinary observations and diagnostics.
@@ -36,12 +37,15 @@ Freshness := Live | MaxAge(seconds: u64) | CacheOnly
 `Live` is the default and preserves cache-then-live behavior. `CacheOnly`
 projects the canonical cache and contributes no remote work under every
 condition. `MaxAge` performs one opening-time check over existing store
-coverage. It suppresses this handle's remote work only when every atom in the
-full resolved subtree has fresh coverage from every relay session assigned by
+coverage. It suppresses one Demand boundary's remote work only when every atom
+owned by that boundary has fresh coverage from every relay session assigned by
 the same router/directory/admission/cap path that would plan the candidate as
 live. Missing routing, cap shortfall, missing coverage, a coverage floor above
-the atom's requested floor, or any stale assigned relay degrades the handle
-once to ordinary `Live` for its lifetime.
+the atom's requested floor, or any stale assigned relay degrades that boundary
+once to ordinary `Live` for its lifetime. The root and every
+`Derived.inner` boundary decide independently; a parent never overwrites a
+child policy, and a child never lends freshness or cache authority to a
+parent.
 
 The opening check is currently conservative for a query whose `until` is
 already older than the `MaxAge` cutoff: it still requires coverage through the
@@ -71,8 +75,11 @@ a hostile future-dated event cannot manufacture freshness.
   valid for every participating source/access context.
 - Evidence from one source/access context never proves acquisition under
   another.
-- Handles that differ only in cache/freshness policy share acquisition identity
-  but keep independent projection and wire-contribution decisions.
+- Handles that differ only in their root cache/freshness policy share
+  acquisition identity but keep independent projection and wire-contribution
+  decisions. A nested policy remains part of the enclosing selection
+  structure because it changes that `Derived` boundary's projected value or
+  wire participation.
 
 ## 2. Selection remains a closed value language
 
@@ -87,7 +94,11 @@ Selector := Authors | Ids | Tag(name: String) | AddressCoord
 The nested demand is not shorthand for an inherited context. Inner and outer
 source/access identity participate independently in graph construction,
 sharing, routing, coverage, evidence, rerooting, and teardown. Cache and
-freshness remain per-handle policies on each demand.
+freshness remain policies on each exact demand boundary. A Strict pinned
+interior projection filters stored provenance before applying its NIP-01
+result limit; an Agnostic interior projection retains rows from any canonical
+source, and a row observed by both pinned and unpinned sources remains
+eligible.
 
 `Tag`'s `name` is an arbitrary event-tag key (#64): it projects
 already-acquired events locally, so it is never restricted to a single
@@ -155,9 +166,12 @@ include whether a planned source is cached-only, connecting, AUTH-blocked,
 requesting, EOSE-observed, reconciled through a watermark, disconnected, or in
 error. Exact raw wire filters and counters remain diagnostics.
 
-A coverage-satisfied `MaxAge` snapshot retains the exact opening-time plan that
-justified suppression and reports those scoped watermarks. `CacheOnly` does not
-borrow a live sibling's plan or evidence. Neither is relabeled as global truth.
+A coverage-satisfied `MaxAge` boundary retains the exact opening-time plan that
+justified its suppression and reports those scoped watermarks. Evidence is
+computed once per Demand boundary and then merged by physical source; one
+boundary's missing plan remains an explicit shortfall. `CacheOnly` does not
+borrow a live parent, child, or sibling's plan or evidence. None is relabeled
+as global truth.
 
 ### No global completeness claim
 
