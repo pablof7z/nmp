@@ -122,6 +122,27 @@ impl NmpWorld {
         });
     }
 
+    /// The past-tense BDD setup for a write whose background says discovery
+    /// already finished without finding the author's relay list.
+    ///
+    /// `publish_tracked` returns after acceptance, before the real indexer
+    /// EOSE that changes the receipt from `Unknown` to settled `Absent` may
+    /// arrive. A process-boundary scenario must observe that causal revision
+    /// before stopping the engine, or it is testing whether scheduler timing
+    /// happened to persist the revision rather than whether the revision
+    /// survives restart.
+    pub async fn publish_note_after_settled_own_absence(&mut self, text: &str) {
+        self.publish_note(text).await;
+        let me = self.my_pubkey_hex();
+        let wanted = format!("author routes are Absent for {me}");
+        assert!(
+            self.park_reason_contains(&wanted),
+            "nmp-bdd: past-tense publish setup requires the background's settled author-route \
+             absence before a later process boundary; receipt reported {:?}",
+            self.park_reasons()
+        );
+    }
+
     /// `When I publish kind <kind> with d tag <d> saying <text>`.
     ///
     /// The explicit monotonically-increasing timestamp makes the second

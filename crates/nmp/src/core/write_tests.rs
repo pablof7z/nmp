@@ -7,7 +7,7 @@ mod receipt_allocator_tests {
     use super::*;
 
     use nmp_router::FixtureRoutingFacts;
-    use nmp_store::MemoryStore;
+    use nmp_store::{MemoryStore, RedbStore};
     use nostr::{Keys, Kind};
 
     fn rejected_intent(created_at: u64) -> WriteIntent {
@@ -342,5 +342,63 @@ mod receipt_allocator_tests {
             panic!("snapshot restored the wrong routing variant")
         };
         assert_eq!(relays, vec![b, a]);
+    }
+
+    #[test]
+    fn boot_redeclares_recovered_auto_route_needs_to_protocol_assembly() {
+        let keys = Keys::generate();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("route-needs.redb");
+
+        {
+            let mut core = EngineCore::new(RedbStore::open(&path).unwrap(), 10);
+            core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
+            let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+                payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                    kind: Kind::TextNote,
+                    tags: (vec![]).into_iter().collect(),
+                    content: ("recover my route need").into(),
+                    created_at: Some(Timestamp::from(100u64)),
+                }),
+                durability: Durability::Durable,
+                routing: WriteRouting::Auto,
+                identity: Identity::Active,
+                correlation: None,
+            }));
+            let (receipt, generation, unsigned) = accepted
+                .iter()
+                .find_map(|effect| match effect {
+                    Effect::RequestSign(receipt, generation, unsigned) => {
+                        Some((*receipt, *generation, unsigned.clone()))
+                    }
+                    _ => None,
+                })
+                .expect("accepted auto write requests signing");
+            core.handle(EngineMsg::SignerCompleted(
+                receipt,
+                generation,
+                Ok(unsigned.sign_with_keys(&keys).unwrap()),
+            ));
+            assert_eq!(
+                core.author_route_needs(),
+                BTreeSet::from([keys.public_key()])
+            );
+        }
+
+        let mut recovered = EngineCore::new(RedbStore::open(&path).unwrap(), 10);
+        let effects = recovered.recover_on_boot();
+        let replayed = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::AuthorRouteNeedsChanged(needs) => Some(needs.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            replayed,
+            vec![BTreeSet::from([keys.public_key()])],
+            "boot must publish the exact stateless route-need set rebuilt from durable intents"
+        );
     }
 }
