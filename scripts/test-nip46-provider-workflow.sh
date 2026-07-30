@@ -38,7 +38,7 @@ reset_fixture
 bash "$CHECKER" --workflows-only "$FIXTURE_ROOT"
 
 sed -i.bak \
-  's#find Packages/NMPNip46/NMPNip46\.xcframework#find Packages/NMPNip46/removed.xcframework#g' \
+  's#matched_provider=Packages/NMPNip46/NMPNip46\.xcframework/#matched_provider=Packages/NMPNip46/removed.xcframework/#g' \
   "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml"
 rm "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml.bak"
 expect_failure "removed Swift packaged provider output" \
@@ -70,7 +70,7 @@ expect_failure "removed Kotlin inventory proof" \
 
 reset_fixture
 sed -i.bak \
-  's#            "$RUNNER_TEMP/libnmp_ffi-core-only\.a" \\#            target/nmp-component-build/debug/release/libnmp_ffi.a \\#' \
+  's#matched_provider=Packages/NMPNip46/NMPNip46\.xcframework/\$slice_directory/libnmp_nip46_ffi\.a#matched_provider=target/nmp-component-build/nip46/release/libnmp_nip46_ffi.a#' \
   "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml"
 rm "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml.bak"
 expect_failure "mutable Cargo-cache Swift audit" \

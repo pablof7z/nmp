@@ -74,6 +74,7 @@ XCFRAMEWORK_NAME=${NMP_SWIFT_XCFRAMEWORK_NAME:-NMP.xcframework}
 EXTERNAL_SWIFT_MODULE=${NMP_SWIFT_EXTERNAL_MODULE:-}
 LIB_NAME="lib$LIB_STEM.a"
 XCFRAMEWORK_OUT="$SWIFT_PACKAGE_DIR/$XCFRAMEWORK_NAME"
+PAIRED_NIP46=${NMP_SWIFT_PAIRED_NIP46:-0}
 
 # A provider staticlib and the core staticlib must be produced by one Cargo
 # feature-resolution unit. Otherwise each archive can carry a differently
@@ -82,6 +83,11 @@ XCFRAMEWORK_OUT="$SWIFT_PACKAGE_DIR/$XCFRAMEWORK_NAME"
 # Core-only callers keep the one-package default; provider wrappers opt into
 # the exact core + provider package set and refresh both artifacts.
 read -r -a CARGO_PACKAGE_NAMES <<< "${NMP_FFI_CARGO_PACKAGES:-$CRATE}"
+if [[ "$PAIRED_NIP46" == 1 &&
+      "${CARGO_PACKAGE_NAMES[*]}" != "nmp-ffi nmp-nip46-ffi" ]]; then
+  echo "error: paired NIP-46 packaging requires the exact nmp-ffi nmp-nip46-ffi package set" >&2
+  exit 2
+fi
 
 DEVICE_TARGET=aarch64-apple-ios
 SIM_ARM_TARGET=aarch64-apple-ios-sim
@@ -226,6 +232,85 @@ fi
 xcodebuild -create-xcframework \
   "${XCFRAMEWORK_ARGS[@]}" \
   -output "$XCFRAMEWORK_OUT"
+
+if [[ "$PAIRED_NIP46" == 1 ]]; then
+  PAIRED_CRATE=nmp-nip46-ffi
+  PAIRED_LIB_STEM=nmp_nip46_ffi
+  PAIRED_LIB_NAME="lib$PAIRED_LIB_STEM.a"
+  PAIRED_GEN_DIR="$REPO_ROOT/gen-nip46"
+  PAIRED_SWIFT_PACKAGE_DIR="$REPO_ROOT/Packages/NMPNip46"
+  PAIRED_SWIFT_SOURCE_DIR="$PAIRED_SWIFT_PACKAGE_DIR/Sources/NMPNip46FFI"
+  PAIRED_XCFRAMEWORK_OUT="$PAIRED_SWIFT_PACKAGE_DIR/NMPNip46.xcframework"
+  PAIRED_MACOS_LIB="$MACOS_COMPONENT_ARTIFACT_DIR/$PAIRED_LIB_NAME"
+
+  echo "== 5. verify paired provider macOS deployment target ($MACOS_DEPLOYMENT_TARGET) =="
+  "$DEPLOYMENT_CHECKER" "$PAIRED_MACOS_LIB"
+
+  if [[ "$MODE" != macos ]]; then
+    echo "== 6. lipo the paired provider simulator arches =="
+    PAIRED_FAT_SIM_DIR="$TARGET_DIR/ios-sim-fat-nip46"
+    mkdir -p "$PAIRED_FAT_SIM_DIR"
+    PAIRED_FAT_SIM_LIB="$PAIRED_FAT_SIM_DIR/$PAIRED_LIB_NAME"
+    lipo -create \
+      "$SIM_ARM_COMPONENT_ARTIFACT_DIR/$PAIRED_LIB_NAME" \
+      "$SIM_X86_COMPONENT_ARTIFACT_DIR/$PAIRED_LIB_NAME" \
+      -output "$PAIRED_FAT_SIM_LIB"
+    lipo -info "$PAIRED_FAT_SIM_LIB"
+    PAIRED_BINDGEN_LIB="$SIM_ARM_COMPONENT_ARTIFACT_DIR/$PAIRED_LIB_NAME"
+  else
+    echo "== 6. paired provider simulator lipo skipped (macOS only) =="
+    PAIRED_BINDGEN_LIB="$PAIRED_MACOS_LIB"
+  fi
+
+  echo "== 7. paired provider uniffi-bindgen -> Swift bindings =="
+  mkdir -p "$PAIRED_GEN_DIR"
+  env -u MACOSX_DEPLOYMENT_TARGET \
+    cargo run --locked -p "$PAIRED_CRATE" --bin nmp-nip46-uniffi-bindgen -- generate \
+    --library "$PAIRED_BINDGEN_LIB" \
+    --language swift \
+    --out-dir "$PAIRED_GEN_DIR"
+
+  PAIRED_HEADERS_DIR="$TARGET_DIR/ios-nip46-ffi-headers"
+  rm -rf "$PAIRED_HEADERS_DIR"
+  mkdir -p "$PAIRED_HEADERS_DIR"
+  cp "$PAIRED_GEN_DIR/${PAIRED_LIB_STEM}FFI.h" "$PAIRED_HEADERS_DIR/"
+  cp "$PAIRED_GEN_DIR/${PAIRED_LIB_STEM}FFI.modulemap" \
+    "$PAIRED_HEADERS_DIR/module.modulemap"
+
+  mkdir -p "$PAIRED_SWIFT_SOURCE_DIR"
+  awk '
+    { print }
+    $0 == "import Foundation" { print "import NMPFFI" }
+  ' "$PAIRED_GEN_DIR/$PAIRED_LIB_STEM.swift" \
+    > "$PAIRED_SWIFT_SOURCE_DIR/$PAIRED_LIB_STEM.swift.tmp"
+  mv "$PAIRED_SWIFT_SOURCE_DIR/$PAIRED_LIB_STEM.swift.tmp" \
+    "$PAIRED_SWIFT_SOURCE_DIR/$PAIRED_LIB_STEM.swift"
+
+  echo "== 8. paired provider xcodebuild -create-xcframework =="
+  rm -rf "$PAIRED_XCFRAMEWORK_OUT"
+  PAIRED_XCFRAMEWORK_ARGS=(-library "$PAIRED_MACOS_LIB" -headers "$PAIRED_HEADERS_DIR")
+  PAIRED_SLICES=macos-arm64
+  if [[ "$MODE" != macos ]]; then
+    PAIRED_XCFRAMEWORK_ARGS=(
+      -library "$PAIRED_FAT_SIM_LIB" -headers "$PAIRED_HEADERS_DIR"
+      "${PAIRED_XCFRAMEWORK_ARGS[@]}"
+    )
+    PAIRED_SLICES="ios-simulator + $PAIRED_SLICES"
+  fi
+  if [[ "$MODE" == all ]]; then
+    PAIRED_XCFRAMEWORK_ARGS=(
+      -library "$DEVICE_COMPONENT_ARTIFACT_DIR/$PAIRED_LIB_NAME"
+      -headers "$PAIRED_HEADERS_DIR"
+      "${PAIRED_XCFRAMEWORK_ARGS[@]}"
+    )
+    PAIRED_SLICES="ios-device + $PAIRED_SLICES"
+  fi
+
+  xcodebuild -create-xcframework \
+    "${PAIRED_XCFRAMEWORK_ARGS[@]}" \
+    -output "$PAIRED_XCFRAMEWORK_OUT"
+  echo "paired provider xcframework: $PAIRED_XCFRAMEWORK_OUT ($PAIRED_SLICES)"
+fi
 
 echo "== done =="
 echo "Cargo target directory:    $TARGET_DIR"

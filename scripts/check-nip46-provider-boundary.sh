@@ -48,7 +48,9 @@ check_provider_workflows() {
 
   grep -qF 'find Packages/NMP/NMP.xcframework' "$swift_provider_workflow" ||
     fail "Swift provider workflow does not audit the packaged core XCFramework"
-  grep -qF 'find Packages/NMPNip46/NMPNip46.xcframework' "$swift_provider_workflow" ||
+  grep -qF \
+    'matched_provider=Packages/NMPNip46/NMPNip46.xcframework/$slice_directory/libnmp_nip46_ffi.a' \
+    "$swift_provider_workflow" ||
     fail "Swift provider workflow does not audit the packaged provider XCFramework"
   grep -qF 'scripts/check-nip46-component-identity.sh' "$swift_provider_workflow" ||
     fail "Swift provider workflow does not prove matched component identity"

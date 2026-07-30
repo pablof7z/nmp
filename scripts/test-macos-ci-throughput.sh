@@ -16,8 +16,16 @@ fail() {
 
 reset_fixture() {
   rm -rf "$FIXTURE_ROOT"
-  mkdir -p "$FIXTURE_ROOT"
+  mkdir -p \
+    "$FIXTURE_ROOT/Packages/NMP/Tests/NMPTests" \
+    "$FIXTURE_ROOT/apps/Falsifier"
   cp -R "$ROOT/.github" "$FIXTURE_ROOT/.github"
+  cp \
+    "$ROOT/Packages/NMP/Tests/NMPTests/BoundedRelayTimeSharingTests.swift" \
+    "$ROOT/Packages/NMP/Tests/NMPTests/ControlledRelayHarness.swift" \
+    "$ROOT/Packages/NMP/Tests/NMPTests/RelayInformationTests.swift" \
+    "$FIXTURE_ROOT/Packages/NMP/Tests/NMPTests/"
+  cp "$ROOT/apps/Falsifier/project.yml" "$FIXTURE_ROOT/apps/Falsifier/project.yml"
 }
 
 expect_failure() {
@@ -102,4 +110,55 @@ sed -i.bak \
 rm "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml.bak"
 expect_failure "removed PR trigger" "pull_request:"
 
-echo "macOS CI throughput test: baseline and six mutations passed"
+reset_fixture
+sed -i.bak \
+  's/mode=--macos-only/mode=--sim-only/' \
+  "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml"
+rm "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml.bak"
+expect_failure "thick PR scope" 'echo "mode=--macos-only"'
+
+reset_fixture
+sed -i.bak \
+  's/aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-darwin/aarch64-apple-darwin/' \
+  "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml"
+rm "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml.bak"
+expect_failure "removed full master packaging" "aarch64-apple-ios aarch64-apple-ios-sim"
+
+reset_fixture
+sed -i.bak \
+  's#scripts/build-swift-nip46-xcframework.sh#scripts/build-swift-nip46-xcframework.sh; scripts/build-swift-xcframework.sh#' \
+  "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml"
+rm "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml.bak"
+expect_failure "reintroduced standalone core build" "scripts/build-swift-xcframework.sh"
+
+reset_fixture
+sed -i.bak \
+  's/run: swift build/run: swift build \\&\\& xcodebuild test/' \
+  "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml"
+rm "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml.bak"
+expect_failure "reintroduced simulator orchestration" "xcodebuild test"
+
+reset_fixture
+sed -i.bak \
+  's/testDurableAuthorOutboxWriteProgressesPastAwaitingRelay/removedDurableAuthorOutboxProof/' \
+  "$FIXTURE_ROOT/Packages/NMP/Tests/NMPTests/BoundedRelayTimeSharingTests.swift"
+rm "$FIXTURE_ROOT/Packages/NMP/Tests/NMPTests/BoundedRelayTimeSharingTests.swift.bak"
+expect_failure "removed bounded-session Swift proof" "testDurableAuthorOutboxWriteProgressesPastAwaitingRelay"
+
+reset_fixture
+sed -i.bak \
+  's/libnmp_ffi-core-only.so/libnmp_ffi-no-mismatch-proof.so/g' \
+  "$FIXTURE_ROOT/.github/workflows/nip46-provider.yml"
+rm "$FIXTURE_ROOT/.github/workflows/nip46-provider.yml.bak"
+expect_failure "removed cross-package mismatch proof" "libnmp_ffi-core-only.so"
+
+reset_fixture
+sed -i.bak \
+  '/- name: Install pinned Rust toolchain/a\
+      - name: Portable Rust tests drifted onto macOS\
+        run: cargo test' \
+  "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml"
+rm "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml.bak"
+expect_failure "portable work drifted onto macOS" "exactly eight named Apple qualification steps"
+
+echo "macOS CI throughput test: baseline and thirteen mutations passed"
