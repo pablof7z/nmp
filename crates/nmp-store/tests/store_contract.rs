@@ -819,11 +819,11 @@ fn record_coverage_then_get_coverage_roundtrip() {
         let s = shape(&[1], None);
         let r = relay("wss://r1");
         store
-            .record_coverage(
-                &atom(&s),
-                &r,
+            .record_coverage(&[(
+                atom(&s),
+                r.clone(),
                 CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
-            )
+            )])
             .unwrap();
 
         let key = coverage_key(&atom(&s));
@@ -848,11 +848,11 @@ fn coverage_key_is_window_erased_a_floored_refetch_finds_the_same_row() {
         let unfloored = shape(&[1], None);
         let r = relay("wss://r1");
         store
-            .record_coverage(
-                &atom(&unfloored),
-                &r,
+            .record_coverage(&[(
+                atom(&unfloored),
+                r.clone(),
                 CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
-            )
+            )])
             .unwrap();
 
         // Same shape, `since` set (a floored refetch's atom) — must hash to
@@ -897,20 +897,20 @@ fn coverage_merge_extends_across_two_record_coverage_calls() {
         let s = shape(&[1], None);
         let r = relay("wss://r1");
         store
-            .record_coverage(
-                &atom(&s),
-                &r,
+            .record_coverage(&[(
+                atom(&s),
+                r.clone(),
                 CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
-            )
+            )])
             .unwrap();
         // Planner floors the next REQ at covered_through + 1 — the common
         // contiguous-extension path.
         store
-            .record_coverage(
-                &atom(&s),
-                &r,
+            .record_coverage(&[(
+                atom(&s),
+                r.clone(),
                 CoverageInterval::new(Timestamp::from(101u64), Timestamp::from(200u64)),
-            )
+            )])
             .unwrap();
 
         let key = coverage_key(&atom(&s));
@@ -926,19 +926,19 @@ fn coverage_merge_keeps_greater_through_on_disjoint_recording() {
         let s = shape(&[1], None);
         let r = relay("wss://r1");
         store
-            .record_coverage(
-                &atom(&s),
-                &r,
+            .record_coverage(&[(
+                atom(&s),
+                r.clone(),
                 CoverageInterval::new(Timestamp::from(300u64), Timestamp::from(400u64)),
-            )
+            )])
             .unwrap();
         // A disjoint, strictly-older interval must never overwrite it.
         store
-            .record_coverage(
-                &atom(&s),
-                &r,
+            .record_coverage(&[(
+                atom(&s),
+                r.clone(),
                 CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(50u64)),
-            )
+            )])
             .unwrap();
 
         let key = coverage_key(&atom(&s));
@@ -963,11 +963,11 @@ fn explicit_gc_policy_evicts_durable_row_and_lowers_covering_watermark() {
         let s = shape(&[1], Some(&k));
         let r = relay("wss://r1");
         store
-            .record_coverage(
-                &atom(&s),
-                &r,
+            .record_coverage(&[(
+                atom(&s),
+                r.clone(),
                 CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(300u64)),
-            )
+            )])
             .unwrap();
 
         let claims = ClaimSet::new(vec![]); // nothing is live-claimed
@@ -1000,11 +1000,11 @@ fn gc_deletes_watermark_row_when_shrink_empties_it() {
         let s = shape(&[1], Some(&k));
         let r = relay("wss://r1");
         store
-            .record_coverage(
-                &atom(&s),
-                &r,
+            .record_coverage(&[(
+                atom(&s),
+                r.clone(),
                 CoverageInterval::new(Timestamp::from(100u64), Timestamp::from(100u64)),
-            )
+            )])
             .unwrap();
 
         let claims = ClaimSet::new(vec![]);
@@ -1029,11 +1029,11 @@ fn gc_deletes_coverage_when_evicting_the_maximum_timestamp_boundary() {
         let s = shape(&[1], Some(&k));
         let r = relay("wss://r1");
         store
-            .record_coverage(
-                &atom(&s),
-                &r,
+            .record_coverage(&[(
+                atom(&s),
+                r.clone(),
                 CoverageInterval::new(Timestamp::max(), Timestamp::max()),
-            )
+            )])
             .unwrap();
 
         let report = store.gc(&ClaimSet::new(vec![])).unwrap();
@@ -1118,11 +1118,11 @@ fn gc_coverage_shrink_uses_only_the_max_matching_victim_and_counts_once_per_row(
         let s = shape(&[1], Some(&k));
         let r = relay("wss://r1");
         store
-            .record_coverage(
-                &atom(&s),
-                &r,
+            .record_coverage(&[(
+                atom(&s),
+                r.clone(),
                 CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(300u64)),
-            )
+            )])
             .unwrap();
 
         let report = store.gc(&ClaimSet::new(vec![])).unwrap();
@@ -1159,11 +1159,11 @@ fn gc_coverage_shrink_deletes_when_only_the_max_victim_would_empty_the_row() {
         let s = shape(&[1], Some(&k));
         let r = relay("wss://r1");
         store
-            .record_coverage(
-                &atom(&s),
-                &r,
+            .record_coverage(&[(
+                atom(&s),
+                r.clone(),
                 CoverageInterval::new(Timestamp::from(50u64), Timestamp::from(100u64)),
-            )
+            )])
             .unwrap();
 
         let report = store.gc(&ClaimSet::new(vec![])).unwrap();
@@ -1193,11 +1193,11 @@ fn gc_coverage_shrink_ignores_victims_of_a_non_matching_kind() {
         let s = shape(&[1], Some(&k));
         let r = relay("wss://r1");
         store
-            .record_coverage(
-                &atom(&s),
-                &r,
+            .record_coverage(&[(
+                atom(&s),
+                r.clone(),
                 CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
-            )
+            )])
             .unwrap();
 
         let report = store.gc(&ClaimSet::new(vec![])).unwrap();
@@ -1352,11 +1352,11 @@ fn persistence_roundtrip_events_and_coverage_survive_reopen() {
         store.insert(newer, observed("wss://r1", 2)).unwrap();
         store.insert(regular, observed("wss://r1", 3)).unwrap();
         store
-            .record_coverage(
-                &atom(&s),
-                &r,
+            .record_coverage(&[(
+                atom(&s),
+                r.clone(),
                 CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(150u64)),
-            )
+            )])
             .unwrap();
         // `store` dropped here, closing the database file.
     }
@@ -1397,11 +1397,11 @@ fn gc_max_timestamp_coverage_deletion_survives_redb_reopen() {
         let mut store = RedbStore::open(&path).expect("open redb store");
         store.insert(event, observed("wss://r1", 1)).unwrap();
         store
-            .record_coverage(
-                &atom(&s),
-                &r,
+            .record_coverage(&[(
+                atom(&s),
+                r.clone(),
                 CoverageInterval::new(Timestamp::max(), Timestamp::max()),
-            )
+            )])
             .unwrap();
 
         let report = store.gc(&ClaimSet::new(vec![])).unwrap();
@@ -1808,11 +1808,11 @@ fn coverage_is_bit_identical_across_all_retractions_and_only_gc_lowers_it() {
             .insert(old_replaceable, observed("wss://r1", 1))
             .unwrap();
         store
-            .record_coverage(
-                &atom(&s),
-                &r,
+            .record_coverage(&[(
+                atom(&s),
+                r.clone(),
                 CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(300u64)),
-            )
+            )])
             .unwrap();
 
         let key = coverage_key(&atom(&s));

@@ -40,6 +40,25 @@ pub struct RelayIngestResult {
     pub current_after_commit: Vec<bool>,
 }
 
+/// Which phase of detailed relay ingest failed.
+///
+/// The event batch is already durable before projection recomputation begins,
+/// so callers that own facts-before-claims policy must distinguish failure of
+/// the event transaction from failure of the post-commit read/projection step.
+#[derive(Debug)]
+pub enum RelayIngestError {
+    EventCommit(PersistenceError),
+    PostCommitProjection(PersistenceError),
+}
+
+impl RelayIngestError {
+    fn into_persistence_error(self) -> PersistenceError {
+        match self {
+            Self::EventCommit(error) | Self::PostCommitProjection(error) => error,
+        }
+    }
+}
+
 /// Exact live-query consequences of one already-committed canonical store
 /// mutation. The store door remains the sole authority for what became
 /// current; this value only carries those durable facts across the
@@ -162,7 +181,8 @@ impl LiveQuery {
 /// `Demand`s differing ONLY in `cache` or `freshness` dedup onto the SAME graph node, the
 /// SAME atoms, and the SAME wire/coverage history -- `cache` never widens
 /// what's shared, it only selects which cached rows a given HANDLE's own
-/// projection later serves (`nmp-engine`'s `rows_and_evidence_for`, #107).
+/// projection later serves (the `nmp` acquisition core's
+/// `rows_and_evidence_for`, #107).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct AcquisitionKey {
     selection: Filter,
@@ -195,7 +215,7 @@ pub struct QueryHandle {
     id: HandleId,
     /// This handle's OWN `CacheMode` (#106) -- never shared with sibling
     /// handles on the same (cache-free-deduped) graph node; read by
-    /// `nmp-engine`'s row-projection layer (#107), not consumed inside the
+    /// the `nmp` acquisition core's row-projection layer (#107), not consumed inside the
     /// resolver itself.
     cache: nmp_grammar::CacheMode,
     /// This handle's own coverage/wire policy (#565), excluded from the
@@ -412,10 +432,10 @@ impl<S: EventStore> Engine<S> {
     }
 
     /// Mutable access to the underlying store. `EngineCore` needs this to
-    /// call `record_coverage` (the coverage-attribution ruling,
-    /// `docs/consults/2026-07-11-fable-coverage-attribution.md`, is engine-
-    /// owned logic; the resolver has no notion of relays or wire REQs at
-    /// all, so it cannot and must not decide what to record here itself).
+    /// call `record_coverage` (issue #816 and
+    /// `docs/design/query-demand-and-evidence.md` keep this engine-owned;
+    /// the resolver has no notion of relays or wire REQs at all, so it
+    /// cannot and must not decide what to record here itself).
     pub fn store_mut(&mut self) -> &mut S {
         &mut self.store
     }
@@ -700,13 +720,15 @@ impl<S: EventStore> Engine<S> {
         &mut self,
         events: Vec<(nostr::Event, RelayObserved)>,
     ) -> Result<DemandDelta, PersistenceError> {
-        Ok(self.ingest_observed_detailed(events)?.committed.delta)
+        self.ingest_observed_detailed(events)
+            .map(|result| result.committed.delta)
+            .map_err(RelayIngestError::into_persistence_error)
     }
 
     pub fn ingest_observed_detailed(
         &mut self,
         events: Vec<(nostr::Event, RelayObserved)>,
-    ) -> Result<RelayIngestResult, PersistenceError> {
+    ) -> Result<RelayIngestResult, RelayIngestError> {
         #[cfg(feature = "bench-instrumentation")]
         let total_started = std::time::Instant::now();
         #[cfg(feature = "bench-instrumentation")]
@@ -752,7 +774,10 @@ impl<S: EventStore> Engine<S> {
         let store_started = std::time::Instant::now();
         #[cfg(feature = "bench-instrumentation")]
         let store_cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
-        let outcomes = self.store.insert_batch(events)?;
+        let outcomes = self
+            .store
+            .insert_batch(events)
+            .map_err(RelayIngestError::EventCommit)?;
         #[cfg(feature = "bench-instrumentation")]
         {
             crate::ingest_attribution::store(store_started.elapsed());
@@ -870,7 +895,9 @@ impl<S: EventStore> Engine<S> {
         // by one carrying the enlarged source-relay set.
         let mut inserted_or_provenance_changed = inserted;
         inserted_or_provenance_changed.extend(provenance_grew);
-        let delta = self.react(inserted_or_provenance_changed, removed)?;
+        let delta = self
+            .react(inserted_or_provenance_changed, removed)
+            .map_err(RelayIngestError::PostCommitProjection)?;
         let affected_handles = self.affected_handles(&before_shapes, &changed_events);
         #[cfg(feature = "bench-instrumentation")]
         {
@@ -897,7 +924,7 @@ impl<S: EventStore> Engine<S> {
     /// One shape per shared acquisition root. Multiple handles that dedup to
     /// the same root share this snapshot and therefore share the same
     /// invalidation decision; their per-handle cache projection is applied
-    /// later by `nmp-engine`.
+    /// later by the `nmp` acquisition core.
     fn projection_shapes(&self) -> HashMap<NodeId, ProjectionShape> {
         self.handle_to_root
             .values()

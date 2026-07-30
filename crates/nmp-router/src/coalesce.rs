@@ -328,7 +328,7 @@ impl RuleRegistry {
     ///
     /// `absorbed` threading is what discharges the coverage-attribution
     /// ruling's containment rule
-    /// (`docs/consults/2026-07-11-fable-coverage-attribution.md` §2) at
+    /// (`docs/design/query-demand-and-evidence.md`) at
     /// materialization time: because every rule here is proven widen-only
     /// (`matches(merged) ⊇ matches(a) ∪ matches(b)`), the union of two
     /// atoms' `absorbed` sets is still soundly contained in the merged

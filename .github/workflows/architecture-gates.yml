@@ -91,6 +91,21 @@ jobs:
       - name: Forbid derived NIP-51 authority and authoritative-sounding parser names
         run: bash scripts/check-nip51-no-derived-authority.sh
 
+  # #816: an EVENT persistence failure revokes only the exact request owners
+  # named by its relay session and wire FIFO. Ordinary EOSE and NIP-77
+  # completion share one atomic coverage door; the process-wide degradation
+  # diagnostic remains observational.
+  request-coverage-authority:
+    name: Request-scoped coverage authority
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Keep request poison scoped and coverage persistence single-door
+        run: bash scripts/check-request-coverage-authority.sh
+
   # #838: NIP-29 contributes group context to a complete draft whose kind and
   # schema it does not own; NIP-C7 independently owns kind:9/q replies; client
   # mention and notification policy belongs to neither protocol module.

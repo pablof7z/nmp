@@ -9,16 +9,42 @@ use super::*;
 // prove (a) the door surfaces `Err` rather than panicking, and (b) the
 // engine degrades the local cache to read-only and emits a diagnostic
 // instead of crashing the host app on a relay EVENT frame.
-struct FailIngestStore {
+pub(super) struct FailIngestStore {
     inner: MemoryStore,
     fail_insert: bool,
+    fail_coverage: bool,
+    fail_query: Rc<Cell<bool>>,
+    coverage_batch_sizes: Rc<RefCell<Vec<usize>>>,
 }
 
 impl FailIngestStore {
-    fn armed() -> Self {
+    pub(super) fn armed() -> Self {
         Self {
             inner: MemoryStore::new(),
             fail_insert: true,
+            fail_coverage: false,
+            fail_query: Rc::new(Cell::new(false)),
+            coverage_batch_sizes: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+
+    fn coverage_armed(coverage_batch_sizes: Rc<RefCell<Vec<usize>>>) -> Self {
+        Self {
+            inner: MemoryStore::new(),
+            fail_insert: false,
+            fail_coverage: true,
+            fail_query: Rc::new(Cell::new(false)),
+            coverage_batch_sizes,
+        }
+    }
+
+    fn projection_armed(fail_query: Rc<Cell<bool>>) -> Self {
+        Self {
+            inner: MemoryStore::new(),
+            fail_insert: false,
+            fail_coverage: false,
+            fail_query,
+            coverage_batch_sizes: Rc::new(RefCell::new(Vec::new())),
         }
     }
 }
@@ -46,6 +72,7 @@ impl EventStore for FailIngestStore {
         from: RelayObserved,
     ) -> Result<InsertOutcome, PersistenceError> {
         if self.fail_insert {
+            self.fail_insert = false;
             // Classified as the real backend would classify a disk-full
             // write (#895): the originating I/O failure, durability unknown
             // — never `invariant`, which would claim the write is absent.
@@ -57,6 +84,11 @@ impl EventStore for FailIngestStore {
         self.inner.insert(event, from)
     }
     fn query(&self, filter: &nostr::Filter) -> Result<Vec<StoredEvent>, PersistenceError> {
+        if self.fail_query.replace(false) {
+            return Err(PersistenceError::invariant(
+                "injected post-commit projection read failure",
+            ));
+        }
         self.inner.query(filter)
     }
     fn remove(
@@ -74,11 +106,17 @@ impl EventStore for FailIngestStore {
     }
     fn record_coverage(
         &mut self,
-        atom: &nmp_grammar::ContextualAtom,
-        relay: &RelayUrl,
-        proven: CoverageInterval,
+        claims: &[(nmp_grammar::ContextualAtom, RelayUrl, CoverageInterval)],
     ) -> Result<(), PersistenceError> {
-        self.inner.record_coverage(atom, relay, proven)
+        self.coverage_batch_sizes.borrow_mut().push(claims.len());
+        if self.fail_coverage {
+            self.fail_coverage = false;
+            return Err(PersistenceError::new(
+                PersistenceFault::Io,
+                "injected request-level coverage failure",
+            ));
+        }
+        self.inner.record_coverage(claims)
     }
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
         self.inner.get_coverage(key, relay)
@@ -228,6 +266,588 @@ fn ingest_io_failure_degrades_read_only_without_panicking() {
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(1u64)));
 }
 
+/// #816's ordinary-REQ failure falsifier: an EVENT that fails its durable
+/// commit poisons only the exact request revision named by that frame. Its
+/// later EOSE therefore cannot manufacture a coverage fact for data the
+/// store never accepted.
+#[test]
+fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
+    let author = Keys::generate();
+    let healthy_author = Keys::generate();
+    let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
+    let healthy_relay = RelayUrl::parse("wss://healthy-relay.example.com").unwrap();
+    let dir = FixtureDirectory::new()
+        .with_write(author.public_key().to_hex(), [relay.clone()])
+        .with_write(
+            healthy_author.public_key().to_hex(),
+            [healthy_relay.clone()],
+        );
+    let mut core = EngineCore::new(FailIngestStore::armed(), Box::new(dir), 10);
+
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &author.public_key().to_hex(),
+    )));
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+        &[2],
+        &healthy_author.public_key().to_hex(),
+    )));
+    let connected = connect(&mut core, 0, &relay);
+    let request = connected
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Replay(session, requests) if session == &public_session(&relay) => requests
+                .iter()
+                .find(|request| {
+                    request
+                        .filter
+                        .kinds
+                        .as_ref()
+                        .is_some_and(|kinds| kinds.contains(&1))
+                })
+                .map(|request| request.sub_id.clone()),
+            _ => None,
+        })
+        .expect("connect replays the exact kind:1 request");
+    let healthy_connected = connect(&mut core, 1, &healthy_relay);
+    let healthy_request = healthy_connected
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Replay(session, requests) if session == &public_session(&healthy_relay) => {
+                requests
+                    .iter()
+                    .find(|request| {
+                        request
+                            .filter
+                            .kinds
+                            .as_ref()
+                            .is_some_and(|kinds| kinds.contains(&2))
+                    })
+                    .map(|request| request.sub_id.clone())
+            }
+            _ => None,
+        })
+        .expect("healthy connect replays its independent kind:2 request");
+    let wire = wire_sub_string(&request);
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(500u64)));
+
+    let failed = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        event_frame(
+            &wire,
+            nmp_resolver::testkit::kind1(&author, "must not earn coverage", 100),
+        ),
+    ));
+    assert!(failed
+        .iter()
+        .any(|effect| matches!(effect, Effect::EmitDiagnostics(snapshot)
+            if snapshot.store_degraded.is_some())));
+
+    let completed = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire),
+    ));
+    assert!(
+        !completed
+            .iter()
+            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+        "the poisoned request must retire without a coverage effect: {completed:?}"
+    );
+    let atom = ctx_atom(cf(&[1], &[&author.public_key().to_hex()]));
+    assert_eq!(core.get_coverage(&atom, &relay), None);
+
+    let healthy_wire = wire_sub_string(&healthy_request);
+    let healthy_event = nostr::EventBuilder::new(Kind::Custom(2), "healthy")
+        .custom_created_at(Timestamp::from(101u64))
+        .sign_with_keys(&healthy_author)
+        .expect("fixture signing");
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 1,
+            generation: 1,
+        },
+        public_session(&healthy_relay),
+        event_frame(&healthy_wire, healthy_event),
+    ));
+    let healthy_completed = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 1,
+            generation: 1,
+        },
+        public_session(&healthy_relay),
+        eose_frame(&healthy_wire),
+    ));
+    assert!(
+        healthy_completed
+            .iter()
+            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+        "another in-flight request remains eligible after the first fails"
+    );
+    let healthy_atom = ctx_atom(cf(&[2], &[&healthy_author.public_key().to_hex()]));
+    assert!(core.get_coverage(&healthy_atom, &healthy_relay).is_some());
+}
+
+/// The event-failure key is the full physical relay session, not the relay
+/// URL. Two identical pinned selections therefore keep independent coverage
+/// authority when one runs on Public and the other on `Nip42(author)`.
+#[test]
+fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
+    let public_author = Keys::generate();
+    let protected_author = Keys::generate();
+    let relay = RelayUrl::parse("wss://access-isolation.example.com").unwrap();
+    let source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    let selection = Filter {
+        kinds: Some(BTreeSet::from([1u16])),
+        ..Filter::default()
+    };
+    let public_query = LiveQuery(
+        nmp_grammar::Demand::new(selection.clone(), source.clone(), AccessContext::Public)
+            .expect("public pinned demand"),
+    );
+    let protected_query = LiveQuery(
+        nmp_grammar::Demand::new(
+            selection,
+            source.clone(),
+            AccessContext::Nip42(protected_author.public_key()),
+        )
+        .expect("protected pinned demand"),
+    );
+    let mut core = EngineCore::new(
+        FailIngestStore::armed(),
+        Box::new(FixtureDirectory::new()),
+        10,
+    );
+
+    let _ = core.handle(EngineMsg::Subscribe(public_query));
+    let _ = core.handle(EngineMsg::Subscribe(protected_query));
+
+    let public_connected = connect(&mut core, 0, &relay);
+    let public_request = public_connected
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Replay(session, requests) if session == &public_session(&relay) => {
+                requests.first().map(|request| request.sub_id.clone())
+            }
+            _ => None,
+        })
+        .expect("public session replays its pinned request");
+
+    let protected_session = signer_session(&relay, protected_author.public_key());
+    let protected_connected = connect_signer(&mut core, 1, &relay, protected_author.public_key());
+    assert_no_protected_req(&protected_connected, &protected_session);
+    let protected_ready = authenticate_signer(&mut core, 1, &relay, &protected_author);
+    let protected_request = protected_ready
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Replay(session, requests) if session == &protected_session => {
+                requests.first().map(|request| request.sub_id.clone())
+            }
+            _ => None,
+        })
+        .expect("authenticated session replays its identical pinned request");
+
+    let public_filter = public_connected
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Replay(session, requests) if session == &public_session(&relay) => {
+                requests.first().map(|request| request.filter.clone())
+            }
+            _ => None,
+        })
+        .expect("public replay carries its filter");
+    let protected_filter = protected_ready
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Replay(session, requests) if session == &protected_session => {
+                requests.first().map(|request| request.filter.clone())
+            }
+            _ => None,
+        })
+        .expect("protected replay carries its filter");
+    assert_eq!(
+        public_filter, protected_filter,
+        "selection and source are identical; access context is the only partition"
+    );
+
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(500u64)));
+    let failed = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        event_frame(
+            &wire_sub_string(&public_request),
+            nmp_resolver::testkit::kind1(&public_author, "the public transaction fails", 100),
+        ),
+    ));
+    assert!(failed
+        .iter()
+        .any(|effect| matches!(effect, Effect::EmitDiagnostics(snapshot)
+            if snapshot.store_degraded.is_some())));
+
+    let protected_event =
+        nmp_resolver::testkit::kind1(&protected_author, "the protected transaction commits", 101);
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 1,
+            generation: 1,
+        },
+        protected_session.clone(),
+        event_frame(&wire_sub_string(&protected_request), protected_event),
+    ));
+
+    let public_completed = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire_sub_string(&public_request)),
+    ));
+    assert!(
+        !public_completed
+            .iter()
+            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+        "the failed Public request must remain poisoned"
+    );
+    let protected_completed = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 1,
+            generation: 1,
+        },
+        protected_session,
+        eose_frame(&wire_sub_string(&protected_request)),
+    ));
+    assert!(
+        protected_completed
+            .iter()
+            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+        "the identical request on another access session remains eligible"
+    );
+
+    let concrete = ConcreteFilter {
+        kinds: Some(BTreeSet::from([1u16])),
+        ..ConcreteFilter::default()
+    };
+    let public_atom = ContextualAtom {
+        filter: concrete.clone(),
+        source: source.clone(),
+        access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    };
+    let protected_atom = ContextualAtom {
+        filter: concrete,
+        source,
+        access: AccessContext::Nip42(protected_author.public_key()),
+        routing_evidence: BTreeSet::new(),
+    };
+    assert_eq!(core.get_coverage(&public_atom, &relay), None);
+    assert!(core.get_coverage(&protected_atom, &relay).is_some());
+}
+
+/// An EVENT on an overwritten wire id cannot identify which outstanding REQ
+/// revision emitted it, so every owner already in that exact FIFO is
+/// poisoned. A revision sent after the failure is not retroactively poisoned.
+#[test]
+fn failed_event_commit_poisons_only_the_then_current_wire_fifo_revisions() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let c = Keys::generate();
+    let relay = RelayUrl::parse("wss://fifo-isolation.example.com").unwrap();
+    let dir = FixtureDirectory::new()
+        .with_write(a.public_key().to_hex(), [relay.clone()])
+        .with_write(b.public_key().to_hex(), [relay.clone()])
+        .with_write(c.public_key().to_hex(), [relay.clone()]);
+    let mut core = EngineCore::new(FailIngestStore::armed(), Box::new(dir), 10);
+    connect(&mut core, 0, &relay);
+
+    let first = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
+    let first_sub = req_for(&first, &relay).0.clone();
+    let second = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &b.public_key().to_hex(),
+    )));
+    let second_sub = req_for(&second, &relay).0.clone();
+    assert_eq!(
+        first_sub, second_sub,
+        "the filter widening reuses one wire FIFO"
+    );
+    let wire = wire_sub_string(&first_sub);
+
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(500u64)));
+    let failed = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        event_frame(
+            &wire,
+            nmp_resolver::testkit::kind1(&a, "ambiguous failed revision", 100),
+        ),
+    ));
+    assert!(failed
+        .iter()
+        .any(|effect| matches!(effect, Effect::EmitDiagnostics(snapshot)
+            if snapshot.store_degraded.is_some())));
+
+    let third = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &c.public_key().to_hex(),
+    )));
+    let third_sub = req_for(&third, &relay).0.clone();
+    assert_eq!(
+        first_sub, third_sub,
+        "the post-failure widening is a later revision of the same wire FIFO"
+    );
+
+    let atom_a = ctx_atom(cf(&[1], &[&a.public_key().to_hex()]));
+    let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
+    let atom_c = ctx_atom(cf(&[1], &[&c.public_key().to_hex()]));
+    for now in [600u64, 700] {
+        let _ = core.handle(EngineMsg::Tick(Timestamp::from(now)));
+        let poisoned = core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            public_session(&relay),
+            eose_frame(&wire),
+        ));
+        assert!(
+            !poisoned
+                .iter()
+                .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+            "both revisions present at the failed EVENT stay poisoned: {poisoned:?}"
+        );
+        assert_eq!(core.get_coverage(&atom_a, &relay), None);
+        assert_eq!(core.get_coverage(&atom_b, &relay), None);
+        assert_eq!(core.get_coverage(&atom_c, &relay), None);
+    }
+
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(800u64)));
+    let later = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire),
+    ));
+    assert!(
+        later
+            .iter()
+            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+        "the revision recorded after the failure remains eligible: {later:?}"
+    );
+    assert!(core.get_coverage(&atom_a, &relay).is_some());
+    assert!(core.get_coverage(&atom_b, &relay).is_some());
+    assert!(core.get_coverage(&atom_c, &relay).is_some());
+}
+
+/// A projection read can fail only after the EVENT transaction has committed.
+/// That phase still degrades diagnostics, but it must not revoke the exact
+/// request's coverage authority: doing so would confuse a failed local view
+/// refresh with a missing durable fact.
+#[test]
+fn post_commit_projection_failure_does_not_poison_request_coverage() {
+    let author = Keys::generate();
+    let followed = Keys::generate();
+    let relay = RelayUrl::parse("wss://projection-failure.example.com").unwrap();
+    let dir = FixtureDirectory::new().with_write(author.public_key().to_hex(), [relay.clone()]);
+    let fail_query = Rc::new(Cell::new(false));
+    let store = FailIngestStore::projection_armed(fail_query.clone());
+    let mut core = EngineCore::new(store, Box::new(dir), 10);
+    let _ = core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
+    let my_follows = LiveQuery::from_filter(Filter {
+        kinds: Some(BTreeSet::from([1u16])),
+        authors: Some(Binding::Derived(Box::new(nmp_grammar::Derived {
+            inner: nmp_grammar::Demand::from_filter(Filter {
+                kinds: Some(BTreeSet::from([3u16])),
+                authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
+                ..Filter::default()
+            }),
+            project: nmp_grammar::Selector::Tag("p".to_string()),
+        }))),
+        ..Filter::default()
+    });
+    let _ = core.handle(EngineMsg::Subscribe(my_follows));
+    let connected = connect(&mut core, 0, &relay);
+    let request = connected
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Replay(session, requests) if session == &public_session(&relay) => requests
+                .iter()
+                .find(|request| {
+                    request
+                        .filter
+                        .kinds
+                        .as_ref()
+                        .is_some_and(|kinds| kinds.contains(&3))
+                })
+                .map(|request| request.sub_id.clone()),
+            _ => None,
+        })
+        .expect("connect replays the derived query's kind:3 request");
+    let wire = wire_sub_string(&request);
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(500u64)));
+
+    fail_query.set(true);
+    let event = nmp_resolver::testkit::kind3(&author, &[followed.public_key()], 100);
+    let failed_projection = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        event_frame(&wire, event),
+    ));
+    assert!(failed_projection
+        .iter()
+        .any(|effect| matches!(effect, Effect::EmitDiagnostics(snapshot)
+            if snapshot.store_degraded.is_some())));
+
+    let completed = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire),
+    ));
+    assert!(
+        completed
+            .iter()
+            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+        "the committed event's request remains eligible despite projection failure"
+    );
+    let atom = ctx_atom(cf(&[3], &[&author.public_key().to_hex()]));
+    assert!(core.get_coverage(&atom, &relay).is_some());
+}
+
+/// #816's request-atomic coverage falsifier. Two narrow atoms coalesced into
+/// one wire request cross the store boundary as one batch; an injected
+/// failure leaves neither claim visible and emits no success effect. A
+/// separate request that was already in flight remains eligible and commits
+/// normally afterward, proving the failure is not a process-wide latch.
+#[test]
+fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let healthy = Keys::generate();
+    let failed_relay = RelayUrl::parse("wss://failed-coverage.example.com").unwrap();
+    let healthy_relay = RelayUrl::parse("wss://healthy-coverage.example.com").unwrap();
+    let dir = FixtureDirectory::new()
+        .with_write(a.public_key().to_hex(), [failed_relay.clone()])
+        .with_write(b.public_key().to_hex(), [failed_relay.clone()])
+        .with_write(healthy.public_key().to_hex(), [healthy_relay.clone()]);
+    let batch_sizes = Rc::new(RefCell::new(Vec::new()));
+    let store = FailIngestStore::coverage_armed(batch_sizes.clone());
+    let mut core = EngineCore::new(store, Box::new(dir), 10);
+
+    for author in [&a, &b, &healthy] {
+        let _ = core.handle(EngineMsg::Subscribe(literal_query(
+            &[1],
+            &author.public_key().to_hex(),
+        )));
+    }
+    let failed_connect = connect(&mut core, 0, &failed_relay);
+    let failed_request = failed_connect
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Replay(session, requests) if session == &public_session(&failed_relay) => {
+                requests
+                    .iter()
+                    .find(|request| {
+                        request
+                            .filter
+                            .kinds
+                            .as_ref()
+                            .is_some_and(|kinds| kinds.contains(&1))
+                    })
+                    .cloned()
+            }
+            _ => None,
+        })
+        .expect("failed relay replays its coalesced request");
+    assert_eq!(
+        failed_request.absorbed.len(),
+        2,
+        "the one request must carry both narrow coverage atoms"
+    );
+
+    let healthy_connect = connect(&mut core, 1, &healthy_relay);
+    let healthy_request = healthy_connect
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Replay(session, requests) if session == &public_session(&healthy_relay) => {
+                requests
+                    .iter()
+                    .find(|request| {
+                        request
+                            .filter
+                            .kinds
+                            .as_ref()
+                            .is_some_and(|kinds| kinds.contains(&1))
+                    })
+                    .map(|request| request.sub_id.clone())
+            }
+            _ => None,
+        })
+        .expect("healthy relay replays its independent request");
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(500u64)));
+
+    let failed = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&failed_relay),
+        eose_frame(&wire_sub_string(&failed_request.sub_id)),
+    ));
+    assert!(
+        !failed
+            .iter()
+            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+        "a failed request-level batch emits no per-claim success effect: {failed:?}"
+    );
+    let atom_a = ctx_atom(cf(&[1], &[&a.public_key().to_hex()]));
+    let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
+    assert_eq!(core.get_coverage(&atom_a, &failed_relay), None);
+    assert_eq!(core.get_coverage(&atom_b, &failed_relay), None);
+
+    let succeeded = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 1,
+            generation: 1,
+        },
+        public_session(&healthy_relay),
+        eose_frame(&wire_sub_string(&healthy_request)),
+    ));
+    assert!(succeeded
+        .iter()
+        .any(|effect| matches!(effect, Effect::RecordCoverage(..))));
+    let healthy_atom = ctx_atom(cf(&[1], &[&healthy.public_key().to_hex()]));
+    assert!(core.get_coverage(&healthy_atom, &healthy_relay).is_some());
+    assert_eq!(
+        batch_sizes.borrow().as_slice(),
+        &[2, 1],
+        "one store call per completed request, never one call per atom"
+    );
+}
+
 // ---- epic #507 finding E5: wake_relay_lanes lane-relay index -----------
 //
 // `EngineCore::recover_all_lanes` used to be the ONLY way `wake_relay_lanes`
@@ -312,11 +932,9 @@ impl EventStore for WakeLaneProbeStore {
     }
     fn record_coverage(
         &mut self,
-        atom: &nmp_grammar::ContextualAtom,
-        relay: &RelayUrl,
-        proven: CoverageInterval,
+        claims: &[(nmp_grammar::ContextualAtom, RelayUrl, CoverageInterval)],
     ) -> Result<(), PersistenceError> {
-        self.inner.record_coverage(atom, relay, proven)
+        self.inner.record_coverage(claims)
     }
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
         self.inner.get_coverage(key, relay)

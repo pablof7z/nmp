@@ -6,7 +6,7 @@ use nmp_transport::RelayHandle as TransportRelayHandle;
 use nostr::{RelayUrl, Timestamp};
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{AttributionSendId, Effect, EngineCore};
+use super::{AttributionSendId, Effect, EngineCore, EventFailureTarget};
 
 /// Ordered execution evidence for one live observation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,15 +242,20 @@ impl<S: EventStore> EngineCore<S> {
         filter: &ConcreteFilter,
         absorbed: BTreeSet<nmp_store::CoverageKey>,
         replay: bool,
+        event_failure_target: EventFailureTarget,
     ) -> AttributionSendId {
         // Every outgoing REQ this engine ever places -- planned, replayed,
         // NIP-77 live candidate, backlog and backfill alike -- passes through
         // here, which is why the relay-list QUESTION is recorded here too
         // (#1019) rather than off the plan the answer will outlive.
         self.note_relay_list_ask(sub_id, filter);
-        let send = self
-            .attribution
-            .record_send(session, sub_id, filter, absorbed.clone());
+        let send = self.attribution.record_send(
+            session,
+            sub_id,
+            filter,
+            absorbed.clone(),
+            event_failure_target,
+        );
         let targets = self
             .handles
             .iter()

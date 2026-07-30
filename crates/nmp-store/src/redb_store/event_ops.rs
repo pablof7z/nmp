@@ -58,7 +58,10 @@ pub(super) fn insert(
     let outcome = write.apply(|tables, _write_txn| insert_with_tables(tables, event, from))?;
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::ObservationBeforeCommit);
-    write.commit_prepared(outcome)
+    let outcome = write.commit_prepared(outcome)?;
+    #[cfg(test)]
+    store.crash_if(RedbCrashPoint::ObservationAfterCommit);
+    Ok(outcome)
 }
 
 pub(super) fn insert_batch(
@@ -91,6 +94,8 @@ pub(super) fn insert_batch(
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::ObservationBeforeCommit);
     let outcomes = write.commit_prepared(outcomes)?;
+    #[cfg(test)]
+    store.crash_if(RedbCrashPoint::ObservationAfterCommit);
     #[cfg(feature = "bench-instrumentation")]
     {
         crate::ingest_attribution::transaction_total(transaction_started.elapsed());
@@ -482,35 +487,42 @@ pub(super) fn next_expiration(store: &RedbStore) -> Option<Timestamp> {
 
 pub(super) fn record_coverage(
     store: &mut RedbStore,
-    atom: &ContextualAtom,
-    relay: &RelayUrl,
-    proven: CoverageInterval,
+    claims: &[(ContextualAtom, RelayUrl, CoverageInterval)],
 ) -> Result<(), PersistenceError> {
-    let key = compute_coverage_key(atom);
-    let shape = window_erase(&atom.filter);
-    let row_key = RedbStore::coverage_row_key(key, relay);
-
+    if claims.is_empty() {
+        return Ok(());
+    }
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     {
         let mut coverage = write_txn.open_table(COVERAGE).map_err(persist_err)?;
-        let existing = coverage
-            .get(row_key.as_str())
-            .map_err(persist_err)?
-            .map(|guard| decode_interval(guard.value()))
-            .transpose()?;
+        for (atom, relay, proven) in claims {
+            let key = compute_coverage_key(atom);
+            let shape = window_erase(&atom.filter);
+            let row_key = RedbStore::coverage_row_key(key, relay);
+            let existing = coverage
+                .get(row_key.as_str())
+                .map_err(persist_err)?
+                .map(|guard| decode_interval(guard.value()))
+                .transpose()?;
 
-        let merged = merge_interval(existing, proven);
-        let record = CoverageRowRecord {
-            shape: ShapeRecord::from(&shape),
-            from: merged.from.as_secs(),
-            through: merged.through.as_secs(),
-        };
-        let encoded = serde_json::to_string(&record).expect("redb: encode coverage row");
-        coverage
-            .insert(row_key.as_str(), encoded.as_str())
-            .map_err(persist_err)?;
+            let merged = merge_interval(existing, *proven);
+            let record = CoverageRowRecord {
+                shape: ShapeRecord::from(&shape),
+                from: merged.from.as_secs(),
+                through: merged.through.as_secs(),
+            };
+            let encoded = serde_json::to_string(&record).expect("redb: encode coverage row");
+            coverage
+                .insert(row_key.as_str(), encoded.as_str())
+                .map_err(persist_err)?;
+        }
     }
-    commit_prepared(write_txn, ())
+    #[cfg(test)]
+    store.crash_if(RedbCrashPoint::CoverageBeforeCommit);
+    commit_prepared(write_txn, ())?;
+    #[cfg(test)]
+    store.crash_if(RedbCrashPoint::CoverageAfterCommit);
+    Ok(())
 }
 
 pub(super) fn get_coverage(

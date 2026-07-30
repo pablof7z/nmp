@@ -160,11 +160,11 @@ fn initial(effects: &[Effect]) -> (HandleId, Vec<RowDelta>, AcquisitionEvidence)
 
 fn record(store: &mut MemoryStore, atom: &ContextualAtom, relay: &RelayUrl, through: u64) {
     store
-        .record_coverage(
-            atom,
-            relay,
+        .record_coverage(&[(
+            atom.clone(),
+            relay.clone(),
             CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(through)),
-        )
+        )])
         .unwrap();
 }
 

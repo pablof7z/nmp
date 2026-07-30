@@ -95,7 +95,7 @@ fn bounded_runtime_working_sets_do_not_delete_default_durable_history() {
                 .expect("persist verified history");
         }
         store
-            .record_coverage(&atom, &relay, coverage)
+            .record_coverage(&[(atom.clone(), relay.clone(), coverage)])
             .expect("persist acquisition evidence");
     }
 

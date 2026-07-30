@@ -16,14 +16,14 @@
 //! the whole engine's logic is testable by feeding `EngineMsg`s and
 //! asserting `Effect`s, with zero network (plan §5 tier A).
 //!
-//! Coverage attribution implements
-//! `docs/consults/2026-07-11-fable-coverage-attribution.md` (the ruling)
-//! EXACTLY: send-time snapshots + the FIFO intersection rule live in
-//! [`attribution`]; the per-query, per-source acquisition evidence (`rows +
-//! compact facts, never a collapsed global verdict` —
-//! `docs/design/scoped-evidence-49-12-plan.md`, folding #12 into #49) lives
-//! in [`evidence`]. Both are engine-owned — the store (`nmp-store`) only
-//! stores whatever interval it is handed.
+//! Coverage attribution follows
+//! `docs/design/query-demand-and-evidence.md` plus issue #816's
+//! request-scoped facts-before-claims contract: send-time snapshots + the
+//! FIFO intersection rule live in [`attribution`]; the per-query, per-source
+//! acquisition evidence (`rows + compact facts, never a collapsed global
+//! verdict` — `docs/design/scoped-evidence-49-12-plan.md`, folding #12 into
+//! #49) lives in [`evidence`]. Both are engine-owned — the store
+//! (`nmp-store`) only stores whatever interval it is handed.
 
 mod admission;
 mod attribution;
@@ -66,7 +66,7 @@ use nmp_grammar::{
 };
 use nmp_resolver::{
     CommittedMutationResult, CommittedRowChanges, Engine as ResolverEngine, HandleId, LiveQuery,
-    LocalAcceptResult, QueryHandle,
+    LocalAcceptResult, QueryHandle, RelayIngestError,
 };
 use nmp_router::{
     AdvertisedRelayLimits, CompileBudget, DiscoveryKinds, Lane, LanedRelay, PubkeyHex,
@@ -230,7 +230,9 @@ fn classify_relay_ack(status: bool, message: &str) -> RelayAckClass {
 const NIP65_RELAY_LIST_KIND: u16 = 10_002;
 
 pub use admission::RelayAdmissionPolicy;
-use attribution::{AttributionSendId, AttributionState};
+use attribution::{
+    AttributionSendId, AttributionState, CompletedAttribution, CoveragePoison, EventFailureTarget,
+};
 use diagnostics::{stalled_write_id, STALLED_WRITE_DETAIL_LIMIT};
 pub use diagnostics::{
     AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, DiagnosticsSnapshot, FilterCoverageEntry,

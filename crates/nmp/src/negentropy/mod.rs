@@ -41,7 +41,7 @@
 //! surfaces that moment as [`NegStep::Done`]; `core::mod`'s
 //! `finish_neg_session` then attributes coverage through the EXACT SAME
 //! `AttributionState::attribute_eose` call the real EOSE path already
-//! uses (`docs/consults/2026-07-11-fable-coverage-attribution.md`: "attribute
+//! uses (`docs/design/query-demand-and-evidence.md`: "attribute
 //! coverage via the same absorbed-snapshot mechanism EngineCore already
 //! uses for EOSE; feed a NEG-DONE the same way") — this module never
 //! invents a second coverage mechanism, it only drives the protocol and
