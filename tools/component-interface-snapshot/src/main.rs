@@ -1,4 +1,4 @@
-//! Print the UniFFI component interface embedded in an NMP native library.
+//! Print one named UniFFI component interface embedded in a native library.
 //!
 //! This standalone governance tool is deliberately outside the NMP workspace
 //! and product crate. Its source, manifest, and lockfile are trusted from the
@@ -9,27 +9,49 @@ use std::{env, io};
 use uniffi_bindgen::{library_mode, EmptyCrateConfigSupplier};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let library = env::args()
-        .nth(1)
-        .ok_or_else(|| io::Error::other("usage: nmp-component-interface-snapshot <library>"))?;
+    let args = env::args().collect::<Vec<_>>();
+    if args.len() != 4 {
+        return Err(io::Error::other(
+            "usage: nmp-component-interface-snapshot <library> <component-key> <uniffi-namespace>",
+        )
+        .into());
+    }
+    let library = &args[1];
+    let component_key = &args[2];
+    let namespace = &args[3];
 
-    let mut components =
+    let components =
         library_mode::find_components(library.as_str().into(), &EmptyCrateConfigSupplier)?;
-    let component = components
-        .iter_mut()
-        .find(|component| component.ci.crate_name() == "nmp_ffi")
-        .ok_or_else(|| io::Error::other("nmp_ffi component metadata not found"))?;
+    let matches = components
+        .iter()
+        .filter(|component| component.ci.namespace() == namespace)
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return Err(io::Error::other(format!(
+            "expected exactly one UniFFI component namespace {namespace:?} for {component_key}; found {}",
+            matches.len()
+        ))
+        .into());
+    }
+    let component = matches[0];
     let ci = &component.ci;
 
     println!("# NMP UniFFI component interface");
     println!("# source: proc-macro metadata extracted in library mode (not UDL)");
     println!("# uniffi: 0.29.5");
+    println!("component {:?}", component_key);
+    println!("crate {:?}", ci.crate_name());
     println!("namespace {:?}", ci.namespace());
 
-    for definition in ci.enum_definitions() {
+    let mut enums = ci.enum_definitions().collect::<Vec<_>>();
+    enums.sort_by_key(|definition| definition.name());
+    for definition in enums {
         println!("\nenum {:#?}", definition);
     }
-    for definition in ci.record_definitions() {
+
+    let mut records = ci.record_definitions().collect::<Vec<_>>();
+    records.sort_by_key(|definition| definition.name());
+    for definition in records {
         println!("\nrecord {:#?}", definition);
     }
 

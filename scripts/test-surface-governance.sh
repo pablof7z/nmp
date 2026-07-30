@@ -1,92 +1,202 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CHECK=$(cd "$(dirname "$0")" && pwd)/check-surface-governance.sh
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+CHECK="$SCRIPT_DIR/check-surface-governance.sh"
+PARITY="$SCRIPT_DIR/check-sdk-parity.sh"
+ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+
+CATALOG_BIN=${SURFACE_CATALOG_BIN:-}
+if [[ -z "$CATALOG_BIN" ]]; then
+  # shellcheck source=tools/surface-toolchain.env
+  source "${SURFACE_TOOLCHAIN_ENV:-$ROOT/tools/surface-toolchain.env}"
+  target=${SURFACE_CATALOG_TARGET_DIR:-$TMP/catalog-target}
+  cargo "+$SURFACE_RUST_TOOLCHAIN" build --quiet --locked \
+    --manifest-path "${SURFACE_CATALOG_TOOL_DIR:-$ROOT/tools/surface-component-catalog}/Cargo.toml" \
+    --target-dir "$target"
+  CATALOG_BIN="$target/debug/nmp-surface-component-catalog"
+fi
+[[ -x "$CATALOG_BIN" ]]
+
+commit_case() {
+  git -C "$1" add -A
+  git -C "$1" commit -qm "$2"
+}
+
+descriptor() {
+  local repo=$1 key=$2 owner=$3
+  mkdir -p "$repo/docs/surface/components/$key" "$repo/crates/$key-ffi/src"
+  printf 'pub fn %s_fixture() {}\n' "${key//-/_}" > "$repo/crates/$key-ffi/src/lib.rs"
+  if [[ $key == "$owner" ]]; then
+    printf '[package]\nname = "%s-ffi"\nversion = "0.0.0"\n' "$key" \
+      > "$repo/crates/$key-ffi/Cargo.toml"
+  fi
+  cat > "$repo/docs/surface/components/$key/component.toml" <<EOF
+schema = 1
+key = "$key"
+state = "active"
+uniffi_namespace = "${key//-/_}_ffi"
+artifact_owner = "$owner"
+EOF
+  if [[ $key == "$owner" ]]; then
+    cat >> "$repo/docs/surface/components/$key/component.toml" <<EOF
+ffi_package = "$key-ffi"
+ffi_manifest = "crates/$key-ffi/Cargo.toml"
+library_stem = "${key//-/_}_ffi"
+EOF
+  fi
+  cat >> "$repo/docs/surface/components/$key/component.toml" <<EOF
+ffi_sources = ["crates/$key-ffi/src"]
+swift_manifests = []
+swift_sources = []
+swift_omission_reason = "This fixture has no Swift ergonomic API."
+kotlin_manifests = []
+kotlin_sources = []
+kotlin_omission_reason = "This fixture has no Kotlin ergonomic API."
+EOF
+  printf 'component "%s"\nnamespace "%s_ffi"\n' "$key" "${key//-/_}" \
+    > "$repo/docs/surface/components/$key/uniffi.txt"
+}
 
 new_repo() {
   local repo=$1
   mkdir -p \
     "$repo/.github/workflows" \
-    "$repo/docs/surface" \
+    "$repo/docs/surface/components" \
     "$repo/scripts" \
-    "$repo/tools" \
     "$repo/tools/component-interface-snapshot/src" \
     "$repo/tools/rust-facade-snapshot/src" \
-    "$repo/tools/rust-facade-snapshot/tests/fixtures" \
-    "$repo/actual" \
-    "$repo/crates/nmp-ffi/src" \
-    "$repo/crates/nmp-engine/src/outbox" \
-    "$repo/Packages/NMP/Sources/NMP" \
-    "$repo/Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk"
-  cp "$CHECK" "$repo/scripts/check-surface-governance.sh"
-  for path in install-surface-tools.sh regenerate-surface-snapshots.sh \
+    "$repo/tools/surface-component-catalog/src" \
+    "$repo/actual/components/alpha"
+  printf '# Fixture component catalog\n' > "$repo/docs/surface/components/README.md"
+  descriptor "$repo" alpha alpha
+  mkdir -p "$repo/Packages/Alpha/Sources/Alpha" "$repo/Packages/AlphaKotlin/src/main/kotlin"
+  printf '// package\n' > "$repo/Packages/Alpha/Package.swift"
+  printf '// swift AlphaWidget\n' > "$repo/Packages/Alpha/Sources/Alpha/Alpha.swift"
+  printf '// kotlin AlphaWidget\n' > "$repo/Packages/AlphaKotlin/build.gradle.kts"
+  printf 'class AlphaWidget\n' > "$repo/Packages/AlphaKotlin/src/main/kotlin/Alpha.kt"
+  cat > "$repo/docs/surface/components/alpha/component.toml" <<'EOF'
+schema = 1
+key = "alpha"
+state = "active"
+uniffi_namespace = "alpha_ffi"
+artifact_owner = "alpha"
+ffi_package = "alpha-ffi"
+ffi_manifest = "crates/alpha-ffi/Cargo.toml"
+library_stem = "alpha_ffi"
+ffi_sources = ["crates/alpha-ffi/src"]
+swift_manifests = ["Packages/Alpha/Package.swift"]
+swift_sources = ["Packages/Alpha/Sources/Alpha"]
+kotlin_manifests = ["Packages/AlphaKotlin/build.gradle.kts"]
+kotlin_sources = ["Packages/AlphaKotlin/src/main/kotlin"]
+EOF
+  cat > "$repo/crates/alpha-ffi/src/lib.rs" <<'EOF'
+#[derive(uniffi::Record)]
+pub struct FfiAlphaWidget {
+    pub value: String,
+}
+EOF
+  printf 'schema = 1\n' > "$repo/scripts/check-sdk-parity-allowlist.toml"
+  printf 'facade-v1\n' > "$repo/docs/surface/nmp-facade.txt"
+  cp "$repo/docs/surface/nmp-facade.txt" "$repo/actual/nmp-facade.txt"
+  cp "$repo/docs/surface/components/alpha/uniffi.txt" \
+    "$repo/actual/components/alpha/uniffi.txt"
+  cat > "$repo/docs/surface-change-log.md" <<'EOF'
+# Surface change log
+
+## Historical fixture
+
+seed
+EOF
+  cat > "$repo/scripts/regen.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $1 == --output-dir && $# == 2 ]]
+root=$(git rev-parse --show-toplevel)
+mkdir -p "$2"
+cp -R "$root/actual/." "$2"
+EOF
+  for path in check-sdk-parity.sh check-surface-governance.sh \
+    install-surface-tools.sh regenerate-surface-snapshots.sh \
     test-install-surface-tools.sh test-surface-governance.sh; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/scripts/$path"
   done
-  printf 'name: trusted fixture\n' > "$repo/.github/workflows/surface-governance.yml"
-  printf 'name: ordinary fixture\n' > "$repo/.github/workflows/ci.yml"
-  printf 'fixture pins\n' > "$repo/tools/surface-toolchain.env"
-  printf '[package]\nname="fixture-extractor"\n' > "$repo/tools/component-interface-snapshot/Cargo.toml"
-  printf 'fixture lock\n' > "$repo/tools/component-interface-snapshot/Cargo.lock"
-  cat > "$repo/tools/component-interface-snapshot/src/main.rs" <<'EXTRACTOR'
-#!/usr/bin/env bash
-set -euo pipefail
-cat "$1/crates/nmp-ffi/src/types.rs" > "$2"
-EXTRACTOR
-  printf 'ffi-v1\n' > "$repo/crates/nmp-ffi/src/types.rs"
-  printf 'WriteStatus::Accepted\n' > "$repo/crates/nmp-engine/src/outbox/mod.rs"
-  printf '[package]\nname="fixture-rust-extractor"\n' > "$repo/tools/rust-facade-snapshot/Cargo.toml"
-  printf 'fixture rust lock\n' > "$repo/tools/rust-facade-snapshot/Cargo.lock"
-  printf 'fixture compiler workspace\n' > "$repo/tools/rust-facade-snapshot/tests/fixtures/fixture.txt"
-  cat > "$repo/tools/rust-facade-snapshot/src/main.rs" <<'RUST_EXTRACTOR'
-#!/usr/bin/env bash
-set -euo pipefail
-cat "$1/crates/nmp-engine/src/outbox/mod.rs" > "$2"
-RUST_EXTRACTOR
-  printf '// swift package v1\n' > "$repo/Packages/NMP/Package.swift"
-  printf '// kotlin build v1\n' > "$repo/Packages/NMPKotlin/build.gradle.kts"
-  printf '// kotlin settings v1\n' > "$repo/Packages/NMPKotlin/settings.gradle.kts"
-  printf 'facade-v1\n' > "$repo/actual/nmp-facade.txt"
-  printf 'ffi-v1\n' > "$repo/actual/nmp-ffi-component.txt"
-  cp "$repo/actual/"* "$repo/docs/surface/"
-  cat > "$repo/docs/surface-change-log.md" <<'LOG'
-# Surface change log
-
-Historical bytes below are append-only.
-
-## Historical entry A
-
-seed A
-
-## Historical entry B
-
-seed B
-LOG
-  cat > "$repo/scripts/regen.sh" <<'REGEN'
-#!/usr/bin/env bash
-set -euo pipefail
-[[ $1 == --output-dir && $# -eq 2 ]]
-mkdir -p "$2"
-cp actual/nmp-facade.txt actual/nmp-ffi-component.txt "$2/"
-REGEN
+  printf 'name: fixture\n' > "$repo/.github/workflows/ci.yml"
+  printf 'name: fixture\n' > "$repo/.github/workflows/surface-governance.yml"
+  printf 'name: fixture\n' > "$repo/.github/workflows/architecture-gates.yml"
+  for tool in component-interface-snapshot rust-facade-snapshot surface-component-catalog; do
+    printf '[package]\nname="%s"\n' "$tool" > "$repo/tools/$tool/Cargo.toml"
+    printf 'lock\n' > "$repo/tools/$tool/Cargo.lock"
+    printf 'fn main() {}\n' > "$repo/tools/$tool/src/main.rs"
+  done
+  printf 'toolchain\n' > "$repo/tools/surface-toolchain.env"
   chmod +x "$repo/scripts/"*.sh
   git -C "$repo" init -q
   git -C "$repo" config user.email surface@example.invalid
   git -C "$repo" config user.name SurfaceTest
-  git -C "$repo" add .
-  git -C "$repo" commit -qm base
+  commit_case "$repo" base
 }
 
-fixture_projections() {
-  SURFACE_ROOT=$1 SURFACE_BASE_REF=$2 SURFACE_HEAD_REF=HEAD \
+append_entry() {
+  local repo=$1 projections=$2 pr=${3:-999}
+  cat >> "$repo/docs/surface-change-log.md" <<EOF
+
+## 2026-07-30 — Fixture change ([PR #$pr](https://github.com/pablof7z/nmp/pull/$pr))
+
+- **Failure evidence:** fixture failure.
+- **Changed projections:** $projections
+- **Rust / FFI / Swift / Kotlin impact:** fixture impact.
+- **Persistence impact:** none.
+- **Diagnostics impact:** none.
+- **Updated falsifiers:** scripts/test-surface-governance.sh.
+- **Superseded path removed:** fixture path.
+- **Human signoff:** Fixture Reviewer, PR #$pr, 2026-07-30.
+EOF
+}
+
+catalog_validate() {
+  "$CATALOG_BIN" validate "$1" "${2:-HEAD}"
+}
+
+expect_fail() {
+  local label=$1
+  shift
+  if "$@" >/dev/null 2>&1; then
+    echo "FAIL: $label unexpectedly passed" >&2
+    exit 1
+  fi
+  echo "ok - $label"
+}
+
+expect_pass() {
+  local label=$1
+  shift
+  "$@" >/dev/null
+  echo "ok - $label"
+}
+
+expect_catalog_mutation_fail() {
+  local label=$1 mutate=$2
+  local repo="$TMP/catalog-${label//[^a-zA-Z0-9]/-}"
+  new_repo "$repo"
+  eval "$mutate"
+  commit_case "$repo" mutation
+  expect_fail "$label" catalog_validate "$repo"
+}
+
+checker_projections() {
+  SURFACE_CATALOG_BIN="$CATALOG_BIN" \
+    SURFACE_ROOT="$1" SURFACE_BASE_REF="$2" SURFACE_HEAD_REF=HEAD \
     "$CHECK" --print-projections
 }
 
-run_check() {
-  local repo=$1 base=$2 projections=${3:-}
-  [[ -n "$projections" ]] || projections=$(fixture_projections "$repo" "$base")
+run_checker() {
+  local repo=$1 base=$2 owner_bootstrap=${3:-0}
+  local projections
+  projections=$(checker_projections "$repo" "$base")
+  SURFACE_CATALOG_BIN="$CATALOG_BIN" \
   SURFACE_ROOT="$repo" \
   SURFACE_BASE_REF="$base" \
   SURFACE_HEAD_REF=HEAD \
@@ -94,210 +204,367 @@ run_check() {
   SURFACE_PR_URL=https://github.com/pablof7z/nmp/pull/999 \
   SURFACE_CHANGED_PROJECTIONS="$projections" \
   SURFACE_REGEN_CMD=scripts/regen.sh \
-  "$CHECK"
+  SURFACE_OWNER_BOOTSTRAP="$owner_bootstrap" \
+    "$CHECK"
 }
 
-expect_fail() {
-  local label=$1 repo=$2 base=$3 projections=${4:-}
-  if run_check "$repo" "$base" "$projections" >/dev/null 2>&1; then
-    echo "FAIL: $label unexpectedly passed" >&2
-    exit 1
+# Baseline and exact root-or-omission/co-location rules.
+repo="$TMP/baseline"; new_repo "$repo"
+expect_pass "valid active catalog" catalog_validate "$repo"
+
+repo="$TMP/omission"; new_repo "$repo"
+sed -i.bak \
+  's#^swift_manifests = .*#swift_manifests = []#; s#^swift_sources = .*#swift_sources = []#' \
+  "$repo/docs/surface/components/alpha/component.toml"
+rm "$repo/docs/surface/components/alpha/component.toml.bak"
+printf 'swift_omission_reason = "No Swift API in this fixture."\n' \
+  >> "$repo/docs/surface/components/alpha/component.toml"
+commit_case "$repo" omission
+expect_pass "explicit platform omission" catalog_validate "$repo"
+
+repo="$TMP/colocated"; new_repo "$repo"; descriptor "$repo" beta alpha
+commit_case "$repo" colocated
+expect_pass "co-located namespace without library fields" catalog_validate "$repo"
+
+expect_catalog_mutation_fail "missing omission reason" \
+  "sed -i.bak 's#^swift_manifests = .*#swift_manifests = []#; s#^swift_sources = .*#swift_sources = []#' '$TMP/catalog-missing-omission-reason/docs/surface/components/alpha/component.toml'; rm '$TMP/catalog-missing-omission-reason/docs/surface/components/alpha/component.toml.bak'"
+expect_catalog_mutation_fail "unknown descriptor field" \
+  "printf 'invented = true\\n' >> '$TMP/catalog-unknown-descriptor-field/docs/surface/components/alpha/component.toml'"
+expect_catalog_mutation_fail "legacy snapshot resurrection" \
+  "printf 'old\\n' > '$TMP/catalog-legacy-snapshot-resurrection/docs/surface/nmp-ffi-component.txt'"
+expect_catalog_mutation_fail "orphan catalog file" \
+  "printf 'orphan\\n' > '$TMP/catalog-orphan-catalog-file/docs/surface/components/orphan.txt'"
+expect_catalog_mutation_fail "path traversal" \
+  "sed -i.bak 's#crates/alpha-ffi/src#../alpha#' '$TMP/catalog-path-traversal/docs/surface/components/alpha/component.toml'; rm '$TMP/catalog-path-traversal/docs/surface/components/alpha/component.toml.bak'"
+expect_catalog_mutation_fail "missing declared source root" \
+  "rm -r '$TMP/catalog-missing-declared-source-root/crates/alpha-ffi/src'"
+expect_catalog_mutation_fail "duplicate namespace" \
+  "descriptor '$TMP/catalog-duplicate-namespace' beta beta; sed -i.bak 's/beta_ffi/alpha_ffi/' '$TMP/catalog-duplicate-namespace/docs/surface/components/beta/component.toml'; rm '$TMP/catalog-duplicate-namespace/docs/surface/components/beta/component.toml.bak'"
+expect_catalog_mutation_fail "duplicate package identity" \
+  "descriptor '$TMP/catalog-duplicate-package-identity' beta beta; sed -i.bak 's/beta-ffi/alpha-ffi/' '$TMP/catalog-duplicate-package-identity/docs/surface/components/beta/component.toml'; rm '$TMP/catalog-duplicate-package-identity/docs/surface/components/beta/component.toml.bak'"
+expect_catalog_mutation_fail "duplicate library identity" \
+  "descriptor '$TMP/catalog-duplicate-library-identity' beta beta; sed -i.bak 's/library_stem = \"beta_ffi\"/library_stem = \"alpha_ffi\"/' '$TMP/catalog-duplicate-library-identity/docs/surface/components/beta/component.toml'; rm '$TMP/catalog-duplicate-library-identity/docs/surface/components/beta/component.toml.bak'"
+expect_catalog_mutation_fail "overlapping source roots" \
+  "descriptor '$TMP/catalog-overlapping-source-roots' beta beta; sed -i.bak 's#crates/beta-ffi/src#crates/alpha-ffi/src#' '$TMP/catalog-overlapping-source-roots/docs/surface/components/beta/component.toml'; rm '$TMP/catalog-overlapping-source-roots/docs/surface/components/beta/component.toml.bak'"
+expect_catalog_mutation_fail "co-located library fields" \
+  "descriptor '$TMP/catalog-co-located-library-fields' beta alpha; printf 'ffi_package = \"beta-ffi\"\\nffi_manifest = \"crates/alpha-ffi/Cargo.toml\"\\nlibrary_stem = \"beta_ffi\"\\n' >> '$TMP/catalog-co-located-library-fields/docs/surface/components/beta/component.toml'"
+expect_catalog_mutation_fail "unknown artifact owner" \
+  "sed -i.bak 's/artifact_owner = \"alpha\"/artifact_owner = \"missing\"/' '$TMP/catalog-unknown-artifact-owner/docs/surface/components/alpha/component.toml'; rm '$TMP/catalog-unknown-artifact-owner/docs/surface/components/alpha/component.toml.bak'"
+
+# Git-mode and exact size ceilings (boundary passes, +1 fails).
+repo="$TMP/symlink"; new_repo "$repo"
+rm "$repo/docs/surface/components/alpha/component.toml"
+ln -s ../../../surface-change-log.md "$repo/docs/surface/components/alpha/component.toml"
+commit_case "$repo" symlink
+expect_fail "descriptor symlink" catalog_validate "$repo"
+
+repo="$TMP/descriptor-size"; new_repo "$repo"
+file="$repo/docs/surface/components/alpha/component.toml"
+bytes=$(wc -c < "$file" | tr -d ' ')
+printf '\n#' >> "$file"
+head -c "$((32768 - bytes - 2))" /dev/zero | tr '\0' x >> "$file"
+commit_case "$repo" exact-descriptor
+expect_pass "descriptor 32768-byte boundary" catalog_validate "$repo"
+printf x >> "$file"; commit_case "$repo" descriptor-plus-one
+expect_fail "descriptor 32769-byte refusal" catalog_validate "$repo"
+
+repo="$TMP/snapshot-lines"; new_repo "$repo"
+yes x | head -n 20000 > "$repo/docs/surface/components/alpha/uniffi.txt" || true
+commit_case "$repo" exact-lines
+expect_pass "snapshot 20000-line boundary" catalog_validate "$repo"
+printf 'x\n' >> "$repo/docs/surface/components/alpha/uniffi.txt"
+commit_case "$repo" lines-plus-one
+expect_fail "snapshot 20001-line refusal" catalog_validate "$repo"
+
+repo="$TMP/snapshot-bytes"; new_repo "$repo"
+head -c 2000000 /dev/zero | tr '\0' x > "$repo/docs/surface/components/alpha/uniffi.txt"
+commit_case "$repo" exact-bytes
+expect_pass "snapshot 2000000-byte boundary" catalog_validate "$repo"
+printf x >> "$repo/docs/surface/components/alpha/uniffi.txt"
+commit_case "$repo" bytes-plus-one
+expect_fail "snapshot 2000001-byte refusal" catalog_validate "$repo"
+
+repo="$TMP/records"; new_repo "$repo"
+for n in $(seq 2 128); do descriptor "$repo" "component-$n" alpha; done
+commit_case "$repo" records-128
+expect_pass "catalog 128-record boundary" catalog_validate "$repo"
+descriptor "$repo" component-129 alpha
+commit_case "$repo" records-129
+expect_fail "catalog 129-record refusal" catalog_validate "$repo"
+
+# Android is closed/all-required and identities are globally unique.
+repo="$TMP/android"; new_repo "$repo"
+mkdir -p "$repo/android/alpha/src"
+printf 'android\n' > "$repo/android/alpha/build.gradle.kts"
+printf 'class Alpha\n' > "$repo/android/alpha/src/Alpha.kt"
+cat >> "$repo/docs/surface/components/alpha/component.toml" <<'EOF'
+
+[android]
+gradle_project = ":alpha"
+namespace = "dev.nmp.alpha"
+maven_coordinate = "dev.nmp:alpha"
+manifests = ["android/alpha/build.gradle.kts"]
+sources = ["android/alpha/src"]
+EOF
+commit_case "$repo" android
+expect_pass "complete Android record" catalog_validate "$repo"
+
+repo="$TMP/android-duplicate"; new_repo "$repo"; descriptor "$repo" beta beta
+for key in alpha beta; do
+  mkdir -p "$repo/android/$key/src"
+  printf 'android\n' > "$repo/android/$key/build.gradle.kts"
+  printf 'class Fixture\n' > "$repo/android/$key/src/Fixture.kt"
+  cat >> "$repo/docs/surface/components/$key/component.toml" <<EOF
+
+[android]
+gradle_project = ":same"
+namespace = "dev.nmp.same"
+maven_coordinate = "dev.nmp:same"
+manifests = ["android/$key/build.gradle.kts"]
+sources = ["android/$key/src"]
+EOF
+done
+commit_case "$repo" duplicate-android
+expect_fail "duplicate Android identities" catalog_validate "$repo"
+
+repo="$TMP/android-incomplete"; new_repo "$repo"
+cat >> "$repo/docs/surface/components/alpha/component.toml" <<'EOF'
+
+[android]
+gradle_project = ":alpha"
+namespace = "dev.nmp.alpha"
+maven_coordinate = "dev.nmp:alpha"
+manifests = []
+sources = []
+EOF
+commit_case "$repo" incomplete-android
+expect_fail "incomplete Android paths" catalog_validate "$repo"
+
+# Transition invariants: stable identities, exact tombstones, reservations,
+# path resurrection, owner/child order, and immutable retirement.
+repo="$TMP/retire"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
+"$CATALOG_BIN" render-tombstone "$repo" "$base" alpha 999 \
+  https://github.com/pablof7z/nmp/pull/999 \
+  > "$repo/docs/surface/components/alpha/component.toml"
+rm -r "$repo/crates/alpha-ffi" "$repo/Packages/Alpha" "$repo/Packages/AlphaKotlin"
+rm "$repo/docs/surface/components/alpha/uniffi.txt"
+commit_case "$repo" retire
+expect_pass "exact retirement tombstone" "$CATALOG_BIN" transition "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
+retired=$(git -C "$repo" rev-parse HEAD)
+printf '\n# mutation\n' >> "$repo/docs/surface/components/alpha/component.toml"
+commit_case "$repo" mutate-tombstone
+expect_fail "retired tombstone byte mutation" "$CATALOG_BIN" transition "$repo" "$retired" HEAD 999 https://github.com/pablof7z/nmp/pull/999
+
+repo="$TMP/resurrection"; new_repo "$repo"; active=$(git -C "$repo" rev-parse HEAD)
+"$CATALOG_BIN" render-tombstone "$repo" "$active" alpha 999 \
+  https://github.com/pablof7z/nmp/pull/999 \
+  > "$repo/docs/surface/components/alpha/component.toml"
+rm -r "$repo/crates/alpha-ffi" "$repo/Packages/Alpha" "$repo/Packages/AlphaKotlin"
+rm "$repo/docs/surface/components/alpha/uniffi.txt"
+commit_case "$repo" retired
+retired=$(git -C "$repo" rev-parse HEAD)
+mkdir -p "$repo/crates/alpha-ffi/src"
+printf 'resurrected\n' > "$repo/crates/alpha-ffi/src/lib.rs"
+commit_case "$repo" resurrect-path
+expect_fail "retired path resurrection" "$CATALOG_BIN" transition "$repo" "$retired" HEAD 999 https://github.com/pablof7z/nmp/pull/999
+
+repo="$TMP/reserved-reuse"; new_repo "$repo"; active=$(git -C "$repo" rev-parse HEAD)
+"$CATALOG_BIN" render-tombstone "$repo" "$active" alpha 999 \
+  https://github.com/pablof7z/nmp/pull/999 \
+  > "$repo/docs/surface/components/alpha/component.toml"
+rm -r "$repo/crates/alpha-ffi" "$repo/Packages/Alpha" "$repo/Packages/AlphaKotlin"
+rm "$repo/docs/surface/components/alpha/uniffi.txt"
+commit_case "$repo" retired
+retired=$(git -C "$repo" rev-parse HEAD)
+descriptor "$repo" beta beta
+sed -i.bak 's/ffi_package = "beta-ffi"/ffi_package = "alpha-ffi"/' \
+  "$repo/docs/surface/components/beta/component.toml"
+rm "$repo/docs/surface/components/beta/component.toml.bak"
+commit_case "$repo" reuse-package
+expect_fail "reserved identity reuse" "$CATALOG_BIN" transition "$repo" "$retired" HEAD 999 https://github.com/pablof7z/nmp/pull/999
+
+repo="$TMP/reactivate"; new_repo "$repo"; active=$(git -C "$repo" rev-parse HEAD)
+"$CATALOG_BIN" render-tombstone "$repo" "$active" alpha 999 \
+  https://github.com/pablof7z/nmp/pull/999 \
+  > "$repo/docs/surface/components/alpha/component.toml"
+rm -r "$repo/crates/alpha-ffi" "$repo/Packages/Alpha" "$repo/Packages/AlphaKotlin"
+rm "$repo/docs/surface/components/alpha/uniffi.txt"
+commit_case "$repo" retired
+retired=$(git -C "$repo" rev-parse HEAD)
+for path in \
+  docs/surface/components/alpha/component.toml \
+  docs/surface/components/alpha/uniffi.txt \
+  crates/alpha-ffi/Cargo.toml \
+  crates/alpha-ffi/src/lib.rs \
+  Packages/Alpha/Package.swift \
+  Packages/Alpha/Sources/Alpha/Alpha.swift \
+  Packages/AlphaKotlin/build.gradle.kts \
+  Packages/AlphaKotlin/src/main/kotlin/Alpha.kt; do
+  mkdir -p "$repo/$(dirname "$path")"
+  git -C "$repo" show "$active:$path" > "$repo/$path"
+done
+commit_case "$repo" reactivate
+expect_fail "retired component reactivation" "$CATALOG_BIN" transition "$repo" "$retired" HEAD 999 https://github.com/pablof7z/nmp/pull/999
+
+repo="$TMP/retire-incomplete"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
+"$CATALOG_BIN" render-tombstone "$repo" "$base" alpha 999 \
+  https://github.com/pablof7z/nmp/pull/999 \
+  > "$repo/docs/surface/components/alpha/component.toml"
+rm "$repo/docs/surface/components/alpha/uniffi.txt"
+commit_case "$repo" incomplete-retire
+expect_fail "retirement retains derived paths" "$CATALOG_BIN" transition "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
+
+repo="$TMP/retire-owner"; new_repo "$repo"; descriptor "$repo" beta alpha
+commit_case "$repo" child; base=$(git -C "$repo" rev-parse HEAD)
+"$CATALOG_BIN" render-tombstone "$repo" "$base" alpha 999 \
+  https://github.com/pablof7z/nmp/pull/999 \
+  > "$repo/docs/surface/components/alpha/component.toml"
+rm -r "$repo/crates/alpha-ffi" "$repo/Packages/Alpha" "$repo/Packages/AlphaKotlin"
+rm "$repo/docs/surface/components/alpha/uniffi.txt"
+commit_case "$repo" retire-owner
+expect_fail "owner retirement with live child" "$CATALOG_BIN" transition "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
+
+repo="$TMP/stable"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
+sed -i.bak 's/ffi_package = "alpha-ffi"/ffi_package = "renamed-ffi"/' \
+  "$repo/docs/surface/components/alpha/component.toml"
+rm "$repo/docs/surface/components/alpha/component.toml.bak"
+commit_case "$repo" rename-identity
+expect_fail "active package identity mutation" "$CATALOG_BIN" transition "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
+
+repo="$TMP/delete"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
+rm -r "$repo/docs/surface/components/alpha"
+commit_case "$repo" delete-record
+expect_fail "descriptor deletion" "$CATALOG_BIN" transition "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
+
+repo="$TMP/new-retired"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
+descriptor "$repo" beta beta
+commit_case "$repo" beta-active
+middle=$(git -C "$repo" rev-parse HEAD)
+"$CATALOG_BIN" render-tombstone "$repo" "$middle" beta 999 \
+  https://github.com/pablof7z/nmp/pull/999 \
+  > "$repo/docs/surface/components/beta/component.toml"
+rm -r "$repo/crates/beta-ffi"
+rm "$repo/docs/surface/components/beta/uniffi.txt"
+commit_case "$repo" beta-retired
+expect_fail "new record cannot begin retired" "$CATALOG_BIN" transition "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
+
+# Allowlist schema is exact and component-scoped.
+allowlist_fail() {
+  local label=$1 body=$2 repo="$TMP/allow-${label//[^a-zA-Z0-9]/-}"
+  new_repo "$repo"
+  printf '%s\n' "$body" > "$repo/scripts/check-sdk-parity-allowlist.toml"
+  commit_case "$repo" allowlist
+  expect_fail "$label" "$CATALOG_BIN" allowlist-rows "$repo" HEAD
+}
+allowlist_fail "allowlist unknown field" $'schema = 1\nunknown = true'
+allowlist_fail "allowlist unknown component" $'schema = 1\n[[exception]]\ncomponent="missing"\nconcept="widget"\nplatform="swift"\njustification="fixture"'
+allowlist_fail "allowlist malformed concept" $'schema = 1\n[[exception]]\ncomponent="alpha"\nconcept="Bad-Word"\nplatform="swift"\njustification="fixture"'
+allowlist_fail "allowlist malformed platform" $'schema = 1\n[[exception]]\ncomponent="alpha"\nconcept="widget"\nplatform="rust"\njustification="fixture"'
+allowlist_fail "allowlist empty reason" $'schema = 1\n[[exception]]\ncomponent="alpha"\nconcept="widget"\nplatform="swift"\njustification=" "'
+allowlist_fail "allowlist duplicate tuple" $'schema = 1\n[[exception]]\ncomponent="alpha"\nconcept="widget"\nplatform="swift"\njustification="one"\n[[exception]]\ncomponent="alpha"\nconcept="widget"\nplatform="swift"\njustification="two"'
+
+# A concept in beta cannot mask alpha's absent Swift concept.
+repo="$TMP/parity"; new_repo "$repo"; descriptor "$repo" beta beta
+mkdir -p "$repo/Packages/Beta/Sources/Beta" "$repo/Packages/BetaKotlin/src/main/kotlin"
+printf '// package\n' > "$repo/Packages/Beta/Package.swift"
+printf '// Widget BetaThing\n' > "$repo/Packages/Beta/Sources/Beta/Beta.swift"
+printf '// gradle\n' > "$repo/Packages/BetaKotlin/build.gradle.kts"
+printf 'class BetaThing\n' > "$repo/Packages/BetaKotlin/src/main/kotlin/Beta.kt"
+cat > "$repo/crates/beta-ffi/src/lib.rs" <<'EOF'
+#[derive(uniffi::Record)]
+pub struct FfiBetaThing {
+    pub value: String,
+}
+EOF
+cat > "$repo/docs/surface/components/beta/component.toml" <<'EOF'
+schema = 1
+key = "beta"
+state = "active"
+uniffi_namespace = "beta_ffi"
+artifact_owner = "beta"
+ffi_package = "beta-ffi"
+ffi_manifest = "crates/beta-ffi/Cargo.toml"
+library_stem = "beta_ffi"
+ffi_sources = ["crates/beta-ffi/src"]
+swift_manifests = ["Packages/Beta/Package.swift"]
+swift_sources = ["Packages/Beta/Sources/Beta"]
+kotlin_manifests = ["Packages/BetaKotlin/build.gradle.kts"]
+kotlin_sources = ["Packages/BetaKotlin/src/main/kotlin"]
+EOF
+printf '// Alpha only.\n' \
+  > "$repo/Packages/Alpha/Sources/Alpha/Alpha.swift"
+commit_case "$repo" parity-cross-mask
+expect_fail "cross-component parity masking" env \
+  SDK_PARITY_ROOT="$repo" SDK_PARITY_HEAD_REF=HEAD \
+  SDK_PARITY_CATALOG_BIN="$CATALOG_BIN" bash "$PARITY" --quiet
+cat > "$repo/scripts/check-sdk-parity-allowlist.toml" <<'EOF'
+schema = 1
+[[exception]]
+component = "alpha"
+concept = "widget"
+platform = "swift"
+justification = "Fixture deliberately omits alpha's Swift widget."
+EOF
+commit_case "$repo" exact-exception
+expect_pass "exact component parity exception" env \
+  SDK_PARITY_ROOT="$repo" SDK_PARITY_HEAD_REF=HEAD \
+  SDK_PARITY_CATALOG_BIN="$CATALOG_BIN" bash "$PARITY" --quiet
+
+# End-to-end checker: regeneration, evidence, projections, protected program,
+# bootstrap refusal in steady state, and dirty checkout behavior.
+repo="$TMP/checker-valid"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
+printf 'component "alpha"\nnamespace "alpha_ffi"\nrecord "v2"\n' \
+  > "$repo/actual/components/alpha/uniffi.txt"
+cp "$repo/actual/components/alpha/uniffi.txt" \
+  "$repo/docs/surface/components/alpha/uniffi.txt"
+append_entry "$repo" ffi
+commit_case "$repo" valid-change
+expect_pass "complete governed change" run_checker "$repo" "$base"
+
+repo="$TMP/checker-stale"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
+printf 'stale delta\n' >> "$repo/actual/components/alpha/uniffi.txt"
+append_entry "$repo" ffi
+commit_case "$repo" stale
+expect_fail "stale component snapshot" run_checker "$repo" "$base"
+
+repo="$TMP/checker-no-log"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
+printf '// changed\n' >> "$repo/Packages/Alpha/Sources/Alpha/Alpha.swift"
+commit_case "$repo" no-log
+expect_fail "governed SDK change without evidence" run_checker "$repo" "$base"
+
+repo="$TMP/checker-history"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
+sed -i.bak 's/seed/rewritten/' "$repo/docs/surface-change-log.md"
+rm "$repo/docs/surface-change-log.md.bak"
+printf 'component "alpha"\nnamespace "alpha_ffi"\nrecord "v2"\n' \
+  > "$repo/actual/components/alpha/uniffi.txt"
+cp "$repo/actual/components/alpha/uniffi.txt" \
+  "$repo/docs/surface/components/alpha/uniffi.txt"
+append_entry "$repo" ffi
+commit_case "$repo" history
+expect_fail "append-only history rewrite" run_checker "$repo" "$base"
+
+for protected in \
+  scripts/check-surface-governance.sh \
+  scripts/check-sdk-parity.sh \
+  scripts/lib/require-commands.sh \
+  .github/workflows/ci.yml \
+  tools/surface-component-catalog/src/main.rs; do
+  repo="$TMP/checker-protected-$(basename "$protected")"
+  new_repo "$repo"
+  mkdir -p "$repo/$(dirname "$protected")"
+  if [[ ! -f "$repo/$protected" ]]; then
+    printf 'fixture\n' > "$repo/$protected"
+    commit_case "$repo" protected-base
   fi
-  echo "ok - $label"
-}
-
-append_valid_entry() {
-  local repo=$1 projections=$2 pr=${3:-999}
-  cat >> "$repo/docs/surface-change-log.md" <<ENTRY
-
-## 2026-07-11 — Test surface change ([PR #$pr](https://github.com/pablof7z/nmp/pull/$pr))
-
-- **Failure evidence:** test fixture proves the old shape fails.
-- **Changed projections:** $projections
-- **Rust / FFI / Swift / Kotlin impact:** affected projections are exercised; others are unchanged.
-- **Persistence impact:** none.
-- **Diagnostics impact:** none.
-- **Updated falsifiers:** scripts/test-surface-governance.sh.
-- **Superseded path removed:** old test shape removed.
-- **Human signoff:** Test Reviewer, PR #$pr, 2026-07-11.
-ENTRY
-}
-
-commit_case() { git -C "$1" add . && git -C "$1" commit -qm "$2"; }
-
-# Derived Rust output changed but the committed snapshot did not.
-repo="$TMP/rust-no-snapshot"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
-printf 'facade-v2\n' > "$repo/actual/nmp-facade.txt"; commit_case "$repo" rust-only
-expect_fail "Rust surface change without snapshot" "$repo" "$base"
-
-# The concrete #89 regression: compiler-resolved WriteStatus gains a variant,
-# so the derived Rust surface moves and a stale committed snapshot fails.
-repo="$TMP/write-status-no-snapshot"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
-printf 'WriteStatus::Accepted\nWriteStatus::PersistenceBlocked\n' > "$repo/actual/nmp-facade.txt"
-commit_case "$repo" write-status-variant-only
-expect_fail "WriteStatus dependency variant without Rust snapshot" "$repo" "$base"
-
-# Snapshot moved without its append-only evidence entry.
-repo="$TMP/snapshot-no-log"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
-printf 'facade-v2\n' > "$repo/actual/nmp-facade.txt"; cp "$repo/actual/nmp-facade.txt" "$repo/docs/surface/"
-commit_case "$repo" snapshot-only
-expect_fail "snapshot update without appended entry" "$repo" "$base"
-
-# Both native ergonomic wrapper directories are governed even without a
-# generated snapshot delta.
-for projection in swift kotlin; do
-  repo="$TMP/$projection-no-log"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
-  if [[ $projection == swift ]]; then
-    printf 'public struct NewSurface {}\n' > "$repo/Packages/NMP/Sources/NMP/NewSurface.swift"
-  else
-    printf 'class NewSurface\n' > "$repo/Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NewSurface.kt"
-  fi
-  commit_case "$repo" "$projection-wrapper-only"
-  expect_fail "$projection wrapper change without log" "$repo" "$base"
+  base=$(git -C "$repo" rev-parse HEAD)
+  printf '# tamper\n' >> "$repo/$protected"
+  commit_case "$repo" tamper
+  expect_fail "protected program tamper: $protected" run_checker "$repo" "$base"
 done
+expect_fail "bootstrap flag cannot bypass steady state" run_checker "$repo" "$base" 1
 
-# Consumer-visible package manifests are governed even when wrapper source and
-# generated snapshots do not move.
-for manifest in Packages/NMP/Package.swift \
-  Packages/NMPKotlin/build.gradle.kts Packages/NMPKotlin/settings.gradle.kts; do
-  repo="$TMP/manifest-$(basename "$manifest")"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
-  printf '\n// public package change\n' >> "$repo/$manifest"; commit_case "$repo" manifest-only
-  expect_fail "package manifest change without log: $manifest" "$repo" "$base"
-done
+repo="$TMP/checker-dirty"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
+printf 'dirty\n' >> "$repo/actual/components/alpha/uniffi.txt"
+expect_fail "dirty checkout cannot hide stale generation" run_checker "$repo" "$base"
 
-# Historical edits, deletion, and reorder all violate exact-prefix history.
-repo="$TMP/history-edit"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
-printf 'facade-v2\n' > "$repo/actual/nmp-facade.txt"; cp "$repo/actual/nmp-facade.txt" "$repo/docs/surface/"
-sed -i.bak 's/seed A/rewritten A/' "$repo/docs/surface-change-log.md"; rm "$repo/docs/surface-change-log.md.bak"
-append_valid_entry "$repo" rust; commit_case "$repo" history-edit
-expect_fail "historical log rewrite" "$repo" "$base"
-
-repo="$TMP/history-delete"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
-printf 'facade-v2\n' > "$repo/actual/nmp-facade.txt"; cp "$repo/actual/nmp-facade.txt" "$repo/docs/surface/"
-sed -i.bak '/seed A/d' "$repo/docs/surface-change-log.md"; rm "$repo/docs/surface-change-log.md.bak"
-append_valid_entry "$repo" rust; commit_case "$repo" history-delete
-expect_fail "historical log deletion" "$repo" "$base"
-
-repo="$TMP/history-reorder"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
-printf 'facade-v2\n' > "$repo/actual/nmp-facade.txt"; cp "$repo/actual/nmp-facade.txt" "$repo/docs/surface/"
-cat > "$repo/docs/surface-change-log.md" <<'REORDERED'
-# Surface change log
-
-Historical bytes below are append-only.
-
-## Historical entry B
-
-seed B
-
-## Historical entry A
-
-seed A
-REORDERED
-append_valid_entry "$repo" rust; commit_case "$repo" history-reorder
-expect_fail "historical log reorder" "$repo" "$base"
-
-# Empty required evidence cannot satisfy the schema.
-repo="$TMP/empty-field"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
-printf 'facade-v2\n' > "$repo/actual/nmp-facade.txt"; cp "$repo/actual/nmp-facade.txt" "$repo/docs/surface/"
-append_valid_entry "$repo" rust
-sed -i.bak 's/- \*\*Diagnostics impact:\*\* none\./- **Diagnostics impact:** /' "$repo/docs/surface-change-log.md"; rm "$repo/docs/surface-change-log.md.bak"
-commit_case "$repo" empty-field
-expect_fail "empty required field" "$repo" "$base"
-
-# A non-empty placeholder is still not human signoff.
-repo="$TMP/pending-signoff"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
-printf 'facade-v2\n' > "$repo/actual/nmp-facade.txt"; cp "$repo/actual/nmp-facade.txt" "$repo/docs/surface/"
-append_valid_entry "$repo" rust
-sed -i.bak 's/Test Reviewer, PR #999, 2026-07-11/pending review on PR #999/' "$repo/docs/surface-change-log.md"; rm "$repo/docs/surface-change-log.md.bak"
-commit_case "$repo" pending-signoff
-expect_fail "placeholder human signoff" "$repo" "$base"
-
-# Exact runtime PR context is mandatory; a different/unrelated link fails
-# without any network lookup.
-repo="$TMP/wrong-pr"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
-printf 'facade-v2\n' > "$repo/actual/nmp-facade.txt"; cp "$repo/actual/nmp-facade.txt" "$repo/docs/surface/"
-append_valid_entry "$repo" rust 998; commit_case "$repo" wrong-pr
-expect_fail "wrong or unrelated PR link" "$repo" "$base"
-
-# The trusted base checker rejects attempts to replace itself or its workflow.
-for protected in scripts/check-surface-governance.sh .github/workflows/ci.yml \
-  .github/workflows/surface-governance.yml \
-  tools/rust-facade-snapshot/src/main.rs \
-  tools/rust-facade-snapshot/tests/fixtures/fixture.txt; do
-  repo="$TMP/tamper-$(basename "$protected")"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
-  printf '\n# bypass attempt\n' >> "$repo/$protected"; commit_case "$repo" protected-tamper
-  expect_fail "protected governance tamper: $protected" "$repo" "$base"
-done
-if SURFACE_BOOTSTRAP=1 run_check "$repo" "$base" >/dev/null 2>&1; then
-  echo "FAIL: bootstrap flag bypassed an established trusted base" >&2
-  exit 1
-fi
-echo "ok - bootstrap flag cannot bypass an established base"
-
-# Even if a head changes the public FFI and replaces its extractor with a
-# program that prints the old baseline, the extractor recovered from base sees
-# the new interface data and the protected-tool change is rejected.
-repo="$TMP/extractor-bypass"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
-printf 'ffi-v2\n' > "$repo/crates/nmp-ffi/src/types.rs"
-printf 'ffi-v2\n' > "$repo/actual/nmp-ffi-component.txt"
-cat > "$repo/tools/component-interface-snapshot/src/main.rs" <<'BYPASS'
-#!/usr/bin/env bash
-printf 'ffi-v1\n' > "$2"
-BYPASS
-commit_case "$repo" extractor-bypass
-git -C "$repo" show "$base:tools/component-interface-snapshot/src/main.rs" > "$TMP/trusted-extractor"
-chmod +x "$TMP/trusted-extractor"
-"$TMP/trusted-extractor" "$repo" "$TMP/trusted-ffi-output"
-grep -Fxq 'ffi-v2' "$TMP/trusted-ffi-output"
-expect_fail "head extractor cannot hide public FFI delta" "$repo" "$base"
-
-# The same trust proof covers the new Rust resolver: a head-controlled tool
-# printing the old WriteStatus cannot hide the compiler-visible new variant.
-repo="$TMP/rust-extractor-bypass"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
-printf 'WriteStatus::Accepted\nWriteStatus::PersistenceBlocked\n' > \
-  "$repo/crates/nmp-engine/src/outbox/mod.rs"
-cat > "$repo/tools/rust-facade-snapshot/src/main.rs" <<'RUST_BYPASS'
-#!/usr/bin/env bash
-printf 'WriteStatus::Accepted\n' > "$2"
-RUST_BYPASS
-commit_case "$repo" rust-extractor-bypass
-git -C "$repo" show "$base:tools/rust-facade-snapshot/src/main.rs" > "$TMP/trusted-rust-extractor"
-chmod +x "$TMP/trusted-rust-extractor"
-"$TMP/trusted-rust-extractor" "$repo" "$TMP/trusted-rust-output"
-grep -Fxq 'WriteStatus::PersistenceBlocked' "$TMP/trusted-rust-output"
-expect_fail "lying head Rust extractor cannot hide WriteStatus delta" "$repo" "$base"
-
-# Wrapper + log (without snapshot movement) is valid.
-repo="$TMP/wrapper-valid"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
-printf 'public struct NewSurface {}\n' > "$repo/Packages/NMP/Sources/NMP/NewSurface.swift"
-printf 'class NewSurface\n' > "$repo/Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NewSurface.kt"
-append_valid_entry "$repo" kotlin,swift; commit_case "$repo" wrapper-valid
-run_check "$repo" "$base" >/dev/null
-echo "ok - wrapper change plus valid append"
-
-# Valid manifest-only changes pass with the exact affected projection entry.
-repo="$TMP/swift-manifest-valid"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
-printf '\n// public package change\n' >> "$repo/Packages/NMP/Package.swift"
-append_valid_entry "$repo" swift; commit_case "$repo" swift-manifest-valid
-run_check "$repo" "$base" >/dev/null
-echo "ok - Swift manifest plus valid append"
-
-repo="$TMP/kotlin-manifest-valid"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
-printf '\n// public build change\n' >> "$repo/Packages/NMPKotlin/build.gradle.kts"
-printf '\n// public settings change\n' >> "$repo/Packages/NMPKotlin/settings.gradle.kts"
-append_valid_entry "$repo" kotlin; commit_case "$repo" kotlin-manifest-valid
-run_check "$repo" "$base" >/dev/null
-echo "ok - Kotlin manifests plus valid append"
-
-# A correction-only append is allowed and explicitly identified.
-repo="$TMP/correction-valid"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
-append_valid_entry "$repo" correction; commit_case "$repo" correction-valid
-run_check "$repo" "$base" >/dev/null
-echo "ok - correction-only append"
-
-# Truthful snapshot plus a complete, context-matched append is valid.
-repo="$TMP/snapshot-valid"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
-printf 'facade-v2\n' > "$repo/actual/nmp-facade.txt"; cp "$repo/actual/nmp-facade.txt" "$repo/docs/surface/"
-append_valid_entry "$repo" rust; commit_case "$repo" snapshot-valid
-run_check "$repo" "$base" >/dev/null
-echo "ok - snapshot plus valid append"
+echo "surface governance adversarial tests passed"

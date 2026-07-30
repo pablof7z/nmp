@@ -4,6 +4,8 @@
 # NMP UniFFI component interface
 # source: proc-macro metadata extracted in library mode (not UDL)
 # uniffi: 0.29.5
+component "nmp-core"
+crate "nmp_ffi"
 namespace "nmp_ffi"
 
 enum Enum {

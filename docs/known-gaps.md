@@ -166,11 +166,10 @@ about current code:
   diagnostics. The existing NIP-46 teardown, foreign-capability mailbox,
   pull-delivery, and process-global-runtime corrections remain separately
   tracked by #770/#783/#784/#871; this ownership split does not claim them.
-  The governed UniFFI component snapshot still covers only core `nmp-ffi`;
-  the separately selectable `nmp-nip46-ffi` provider namespace has no
-  committed surface snapshot yet. #954 owns adding it through the protected
-  governance bootstrap before the provider is published independently by
-  #831.
+  The governed component catalog and distinct snapshots cover both core
+  `nmp-ffi` and the separately selectable `nmp-nip46-ffi` provider namespace.
+  This is catalog/snapshot truth, not an independent-publication claim: #831
+  still owns Android packaging and qualification.
   The sign-only operation now projects across Rust, FFI, Swift, and Kotlin:
   it binds an immutable request to the active registered signer, validates the
   exact returned event, remains bounded/cancellable, and creates no
@@ -375,18 +374,19 @@ about current code:
   retargeting of the containing directory (as opposed to the final component,
   which fails closed) is still a deployment concern callers must coordinate.
 - **Public syntax remains provisional; its promotion protocol is now enforced.**
-  Pinned snapshots cover the canonical `nmp` Rust facade and the
-  language-independent UniFFI proc-macro component metadata. CI requires exact
+  Pinned snapshots cover the canonical `nmp` Rust facade and every active
+  language-independent UniFFI proc-macro component in the closed-schema
+  `docs/surface/components` catalog. CI requires exact
   regeneration and a schema-complete append to `docs/surface-change-log.md`
   whenever either baseline moves, and rejects historical log edits/deletions.
   Hand-written Swift/Kotlin public wrapper paths and their consumer-visible
   package/build/settings manifests are governed directly even when generated
-  snapshots do not move. The component extractor is a separately locked,
-  base-trusted tool outside the product workspace. The trusted checker/workflow
-  is loaded from the PR base so a proposed head cannot replace its judge. This first
-  introduction is necessarily a manually reviewed bootstrap because no such
-  default-branch workflow exists yet; after merge, enabling its required status
-  is repository-settings issue #81.
+  snapshots do not move. Per-component parity cannot be masked by vocabulary
+  in another component. The catalog and component extractor are separately
+  locked, base-trusted tools outside the product workspace. The trusted
+  checker/workflow is loaded from the PR base so a proposed head cannot replace
+  its judge. Governance-program changes still require the explicit
+  owner-controlled bootstrap procedure.
   The Rust baseline also resolves definitions of dependency-owned types
   explicitly re-exported by `nmp` (#89), recursively including dependency-owned
   types reachable through variants, fields, aliases, and signatures, so those

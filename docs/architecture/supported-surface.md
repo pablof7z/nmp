@@ -48,9 +48,23 @@ over generated bindings without becoming independent semantic engines.
   dependency-owned definition closure reachable through its public shape.
   Discovery comes from rustdoc JSON `use` items and follows only exact Cargo
   package/library identities; unrelated engine APIs are never traversed.
-- `docs/surface/nmp-ffi-component.txt` is a deterministic,
-  language-independent rendering of UniFFI proc-macro component metadata
-  extracted in library mode.
+- `docs/surface/components/<key>/component.toml` is the closed-schema catalog
+  record for one UniFFI namespace. Every active record has a sibling
+  `uniffi.txt`, a deterministic language-independent rendering of that exact
+  namespace's proc-macro metadata extracted in library mode. The former
+  aggregate `docs/surface/nmp-ffi-component.txt` path is forbidden.
+- A self-owning record declares its Cargo package/manifest/library stem and is
+  built once. A co-located interface names that owner and declares no library
+  fields; regeneration extracts each namespace from the one owner build.
+  Swift and Kotlin each declare both manifest and source roots or an explicit
+  omission reason. The optional Android table is all-or-nothing and records
+  Gradle project, namespace, Maven coordinate, manifests, and sources.
+- Active identities and retired reservations are globally unique. Retirement
+  is the checker's exact derived tombstone: the snapshot and every derived
+  owned path disappear, package/library/namespace/Android identities stay
+  reserved, tombstone bytes are immutable, and an owner cannot retire while a
+  live child names it. The catalog is capped at 128 records, descriptors at
+  32 KiB, and each component snapshot at 20,000 lines / 2,000,000 bytes.
 - The extractor is a standalone locked program under
   `tools/component-interface-snapshot`, outside the NMP workspace and product
   crate. Steady-state regeneration copies its manifest, lockfile, and source
@@ -75,8 +89,10 @@ over generated bindings without becoming independent semantic engines.
   and lockfile drift fails closed. Regeneration also enforces a 30,000-line /
   8,000,000-byte ceiling: deliberately generous for the explicit facade roots,
   but small enough to catch accidental recursive helper-method expansion.
-- `scripts/regenerate-surface-snapshots.sh` regenerates both from a clean
-  checkout; `scripts/check-surface-governance.sh` verifies them.
+- `scripts/regenerate-surface-snapshots.sh` regenerates the facade and every
+  active component from a clean checkout;
+  `scripts/check-surface-governance.sh` verifies the catalog transition and
+  every output.
 - Any baseline change, any change below the public Swift/Kotlin wrapper paths,
   or a change to their consumer package/build/settings manifests must append a
   schema-complete entry to
@@ -96,8 +112,8 @@ credentials under a read-only token and no secrets. That trusted-target job
 treats the head strictly as git data: it never compiles head code and never
 executes a head file. The base checker rejects changes to its own workflow,
 ordinary regeneration workflow, scripts, and tool pins, preventing a PR from
-replacing its judge, companion regeneration check, or component extractor with
-an `exit 0`/stale-output program.
+replacing its judge, companion regeneration check, catalog, or component
+extractor with an `exit 0`/stale-output program.
 
 Deterministic cargo-public-api/component regeneration runs separately in the
 ordinary `pull_request` trust domain, where compiling proposed code belongs.
@@ -106,21 +122,21 @@ proves its workflow and invoked scripts are byte-identical to the base. Issue
 #81 must require both stable checks: `surface-governance` and
 `surface-regeneration`.
 
-This change is the unavoidable one-time bootstrap: the workflow cannot run
-from a base on which it does not yet exist. It therefore seeds only the
-historical #67/#73/#77 trail and must merge under the repository's existing CI
-plus manual review. After merge, #81 enables both checks as required
-branch-protection statuses. Governance-program updates then require an
-explicit owner-controlled bootstrap/update rather than an ordinary
-self-approved PR.
+The component-catalog introduction is an explicit two-phase bootstrap. While
+the base has the legacy aggregate snapshot and no catalog tool, credential-free
+ordinary CI runs the complete proposed catalog/checker/regenerator and requires
+the exact two-record `nmp-core` + `nmp-nip46` transition. The existing
+base-trusted target checker necessarily rejects replacement of its own program,
+so only the repository owner's protected update procedure can land that exact
+reviewed bootstrap. Once the catalog tool is on the default branch, both
+workflows always extract the program from the base; the bootstrap flag is
+refused for every steady-state transition.
 
-Issue #89 is the first owner-controlled update to this governance program. The
-old trusted checker is expected to reject its protected workflow/script/tool
-changes. Because #81 has not enabled those checks administratively, #89 must
-merge through existing non-governance CI plus exhaustive local and independent
-review; the resulting default branch then protects the resolver. Its change-log
-entry is appended only after the real PR number, URL, reviewer, and signoff
-exist—never fabricated in a pre-PR implementation commit.
+The bootstrap checkpoint intentionally contains no fabricated change-log
+entry. The real PR number/URL, independent reviewer, and signoff can only be
+appended after those facts exist. Future component records for #952 and #824
+are ordinary later catalog obligations, not prerequisites for the current
+two-record bootstrap.
 
 The checker receives the actual PR number/URL and independently derived changed
 projection set from the trusted workflow. Entries must link that exact PR,
