@@ -1017,11 +1017,7 @@ pub(super) fn dispatch(
                 },
             );
         }
-        AuthEffect::Send {
-            token,
-            epoch,
-            event,
-        } => {
+        AuthEffect::Send { token, event } => {
             // Issue #883: the pool takes an opaque operation token, never a
             // closure. An accepted operation resolves through the ordinary
             // `PoolEvent::EphemeralHandoff` path (see
@@ -1029,8 +1025,8 @@ pub(super) fn dispatch(
             // reported from here, and the two are mutually exclusive by
             // `EphemeralSendStart`'s construction.
             let start = pool.send_ephemeral_exact(
-                &epoch.session,
-                epoch.handle,
+                &token.epoch.session,
+                token.epoch.handle,
                 EphemeralOperation(token.sequence),
                 WireFrame::Text(ClientMessage::auth(*event).as_json()),
             );
@@ -1711,7 +1707,6 @@ mod tests {
         dispatch(
             AuthEffect::Send {
                 token: send_token.clone(),
-                epoch: send_token.epoch.clone(),
                 event: Box::new(event),
             },
             &pool,
@@ -1808,7 +1803,6 @@ mod tests {
         dispatch(
             AuthEffect::Send {
                 token: token.clone(),
-                epoch: token.epoch.clone(),
                 event: Box::new(event),
             },
             &pool,

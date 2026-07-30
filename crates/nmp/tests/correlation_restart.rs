@@ -381,7 +381,7 @@ fn authenticate(
     let (send_token, auth_event) = send
         .into_iter()
         .find_map(|effect| match effect {
-            Effect::RelayAuth(AuthEffect::Send { token, event, .. }) => Some((token, event)),
+            Effect::RelayAuth(AuthEffect::Send { token, event }) => Some((token, event)),
             _ => None,
         })
         .expect("signed AUTH requests exact-generation send");
