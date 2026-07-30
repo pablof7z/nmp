@@ -944,6 +944,122 @@ fn client_invitation_ignores_forged_secret_then_accepts_valid_signer() {
 }
 
 #[test]
+fn client_invitation_reconnect_preamble_binds_the_accepted_signer() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let relay = format!("ws://{}", listener.local_addr().unwrap());
+    let invitation = Nip46Invitation::new(
+        vec![nostr::RelayUrl::parse(&relay).unwrap()],
+        None,
+        Nip46ClientMetadata::default(),
+    )
+    .unwrap();
+    let uri = url::Url::parse(&invitation.uri()).unwrap();
+    let client = PublicKey::from_hex(uri.host_str().unwrap()).unwrap();
+    let secret = uri
+        .query_pairs()
+        .find(|(key, _)| key == "secret")
+        .map(|(_, value)| value.into_owned())
+        .unwrap();
+    let remote = Keys::generate();
+    let user = Keys::generate();
+    let expected_remote = remote.public_key();
+    let expected_user = user.public_key();
+    let remote_thread = remote.clone();
+    let user_thread = user.clone();
+    let (reconnect_filter_tx, reconnect_filter_rx) = mpsc::sync_channel(1);
+
+    thread::spawn(move || {
+        let (first_stream, _) = listener.accept().unwrap();
+        let mut first = tungstenite::accept(first_stream).unwrap();
+        let mut subscription_id = None;
+        while let Ok(message) = first.read() {
+            let Message::Text(text) = message else {
+                continue;
+            };
+            let frame: Value = serde_json::from_str(text.as_ref()).unwrap();
+            let parts = frame.as_array().unwrap();
+            match parts.first().and_then(Value::as_str) {
+                Some("REQ") => {
+                    subscription_id = parts.get(1).and_then(Value::as_str).map(str::to_string);
+                    assert!(
+                        parts[2].get("authors").is_none(),
+                        "the pre-pairing filter must admit the not-yet-known signer"
+                    );
+                    let response = response_event(
+                        &remote_thread,
+                        client,
+                        "connect-valid",
+                        Some(secret.clone()),
+                        None,
+                    );
+                    first
+                        .send(Message::Text(
+                            event_frame(subscription_id.as_deref().unwrap(), response).into(),
+                        ))
+                        .unwrap();
+                }
+                Some("EVENT") => {
+                    let event = Event::from_json(parts[1].to_string()).unwrap();
+                    let plaintext = nip44::decrypt(
+                        remote_thread.secret_key(),
+                        &event.pubkey,
+                        event.content.as_bytes(),
+                    )
+                    .unwrap();
+                    let request: Value = serde_json::from_str(&plaintext).unwrap();
+                    let id = request["id"].as_str().unwrap();
+                    let method = request["method"].as_str().unwrap();
+                    if method != "get_public_key" {
+                        continue;
+                    }
+                    let response = response_event(
+                        &remote_thread,
+                        event.pubkey,
+                        id,
+                        Some(user_thread.public_key().to_hex()),
+                        None,
+                    );
+                    first
+                        .send(Message::Text(
+                            event_frame(subscription_id.as_deref().unwrap(), response).into(),
+                        ))
+                        .unwrap();
+                    first.close(None).unwrap();
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        let (second_stream, _) = listener.accept().unwrap();
+        let mut second = tungstenite::accept(second_stream).unwrap();
+        while let Ok(message) = second.read() {
+            let Message::Text(text) = message else {
+                continue;
+            };
+            let frame: Value = serde_json::from_str(text.as_ref()).unwrap();
+            let parts = frame.as_array().unwrap();
+            if parts.first().and_then(Value::as_str) == Some("REQ") {
+                reconnect_filter_tx.send(parts[2].clone()).unwrap();
+                break;
+            }
+        }
+    });
+
+    let signer = invitation.connect(REMOTE_OPERATION).unwrap();
+    assert_eq!(signer.remote_signer_public_key(), expected_remote);
+    assert_eq!(signer.user_public_key(), expected_user);
+    let reconnect_filter = reconnect_filter_rx
+        .recv_timeout(OBSERVATION)
+        .expect("the session reconnects with a refreshed subscription preamble");
+    assert_eq!(
+        reconnect_filter["authors"],
+        json!([expected_remote.to_hex()]),
+        "the refreshed reconnect preamble must reject every other author"
+    );
+}
+
+#[test]
 fn unavailable_signer_operation_is_retryable() {
     let (sender, operation) = SignerOp::<String>::pending_channel();
     drop(sender);
