@@ -142,7 +142,7 @@ async fn frozen_body_unchanged(w: &mut NmpWorld) {
 #[then(regex = r#"^the write is refused for having no identity to publish as$"#)]
 async fn refused_for_having_no_identity(w: &mut NmpWorld) {
     nothing_to_observe!(
-        !w.identity_receipt_statuses(None).is_empty(),
+        w.identity_receipt_reported_anything(None),
         "the publish reported no status at all, so it was neither refused nor accepted"
     );
     assert!(
