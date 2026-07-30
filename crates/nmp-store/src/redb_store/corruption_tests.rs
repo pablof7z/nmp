@@ -586,7 +586,7 @@ fn record_coverage_and_gc_report_a_corrupt_coverage_row() {
 
     {
         let mut store = fixture.open();
-        assert_typed_refusal("gc", || store.gc(&ClaimSet::default()));
+        assert_typed_refusal("gc", || store.gc(&GcRetentionSet::default()));
     }
     assert_eq!(
         str_table_digest(&fixture, COVERAGE),

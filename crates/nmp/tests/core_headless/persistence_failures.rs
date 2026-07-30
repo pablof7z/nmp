@@ -121,7 +121,7 @@ impl EventStore for FailIngestStore {
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
         self.inner.get_coverage(key, relay)
     }
-    fn gc(&mut self, claims: &ClaimSet) -> Result<GcReport, PersistenceError> {
+    fn gc(&mut self, claims: &GcRetentionSet) -> Result<GcReport, PersistenceError> {
         self.inner.gc(claims)
     }
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
@@ -968,7 +968,7 @@ impl EventStore for WakeLaneProbeStore {
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
         self.inner.get_coverage(key, relay)
     }
-    fn gc(&mut self, claims: &ClaimSet) -> Result<GcReport, PersistenceError> {
+    fn gc(&mut self, claims: &GcRetentionSet) -> Result<GcReport, PersistenceError> {
         self.inner.gc(claims)
     }
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {

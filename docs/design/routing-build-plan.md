@@ -646,7 +646,7 @@ paragraph above in two ways worth recording:**
   enrolled in `nmp-audit`'s registry** (as `Claims(...)` or an explicit
   `DeclaresNoClaims { rationale }`), asserted exactly-equal in both directions
   against `cargo metadata`.
-- **Landed:** `nmp_ownership::ClaimSet::build` (layer 1's fold: typed
+- **Landed:** the `nmp_ownership` registry fold (layer 1: typed
   `ClaimOverlap` naming both owners + a witness kind; `exclusive_owner`/
   `route_policy` lookups for the future layer-3 gate), the
   `KindClaim::discovery_ack` field (check (c), enforced in both directions),

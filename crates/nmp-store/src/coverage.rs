@@ -69,7 +69,7 @@ impl CoverageKey {
 
 /// Erase `since`/`until`/`limit` from `filter`, leaving `kinds`/`authors`/
 /// `ids`/`tags` untouched. This is the ONE erasure rule shared by
-/// [`coverage_key`] (identity) and [`ClaimSet`] (GC matching) — both must
+/// [`coverage_key`] (identity) and [`GcRetentionSet`] (GC matching) — both must
 /// erase identically or the two notions of "shape" would silently diverge.
 pub(crate) fn window_erase(filter: &ConcreteFilter) -> ConcreteFilter {
     ConcreteFilter {
@@ -324,12 +324,12 @@ impl<'a> GcVictimIndex<'a> {
 /// every replaceable/addressable current winner (never a GC candidate at
 /// all — see [`crate::EventStore::gc`]), are retained.
 #[derive(Debug, Clone, Default)]
-pub struct ClaimSet {
+pub struct GcRetentionSet {
     claims: Vec<ConcreteFilter>,
 }
 
-impl ClaimSet {
-    /// Build a `ClaimSet` from the caller's demand skeletons. Defensively
+impl GcRetentionSet {
+    /// Build a `GcRetentionSet` from the caller's demand skeletons. Defensively
     /// window-erases every claim itself (never trusts the caller to have
     /// already done so) — the invariant holds even if a caller forgets.
     pub fn new(claims: Vec<ConcreteFilter>) -> Self {

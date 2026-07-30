@@ -13,10 +13,11 @@ use super::store::RedbCrashPoint;
 use super::store::RedbStore;
 use super::{
     address_key_for, binary_event, compute_coverage_key, merge_interval, shrink_after_eviction,
-    window_erase, BTreeMap, BTreeSet, ClaimSet, ConcreteFilter, ContextualAtom, CoverageInterval,
-    CoverageKey, Event, EventCursor, EventId, EventStore, Filter, GcReport, GcVictimIndex, HashMap,
-    IndexedMatch, InsertOutcome, LocalOrigin, PersistenceError, PreparedFilter, RelayObserved,
-    RelayUrl, RetractReason, ShapeRecord, SigState, StoredEvent, StoredEventView, Timestamp,
+    window_erase, BTreeMap, BTreeSet, ConcreteFilter, ContextualAtom, CoverageInterval,
+    CoverageKey, Event, EventCursor, EventId, EventStore, Filter, GcReport, GcRetentionSet,
+    GcVictimIndex, HashMap, IndexedMatch, InsertOutcome, LocalOrigin, PersistenceError,
+    PreparedFilter, RelayObserved, RelayUrl, RetractReason, ShapeRecord, SigState, StoredEvent,
+    StoredEventView, Timestamp,
 };
 use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
@@ -548,7 +549,10 @@ pub(super) fn get_coverage(
         })
 }
 
-pub(super) fn gc(store: &mut RedbStore, claims: &ClaimSet) -> Result<GcReport, PersistenceError> {
+pub(super) fn gc(
+    store: &mut RedbStore,
+    claims: &GcRetentionSet,
+) -> Result<GcReport, PersistenceError> {
     let mut report = GcReport::default();
 
     let mut write = GovernedWrite::begin(store)?;

@@ -26,11 +26,11 @@ use nmp_grammar::{
 use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{FixtureRoutingFacts, SubId, WireOp};
 use nmp_store::{
-    AcceptOutcome, AcceptWrite, AttemptOutcome, CancelEphemeralOutcome, ClaimSet,
-    CompensateOutcome, CompensationReason, CoverageInterval, CoverageKey, DurabilityOutcome,
-    EventStore, GcReport, InsertOutcome, MemoryStore, PersistenceError, PersistenceFault,
-    PromoteOutcome, RecoveredAttempt, RecoveredIntent, RecoveredReceipt, RecoveredRouteRevision,
-    RedbStore, RelayObserved, RetractReason, StoredEvent,
+    AcceptOutcome, AcceptWrite, AttemptOutcome, CancelEphemeralOutcome, CompensateOutcome,
+    CompensationReason, CoverageInterval, CoverageKey, DurabilityOutcome, EventStore, GcReport,
+    GcRetentionSet, InsertOutcome, MemoryStore, PersistenceError, PersistenceFault, PromoteOutcome,
+    RecoveredAttempt, RecoveredIntent, RecoveredReceipt, RecoveredRouteRevision, RedbStore,
+    RelayObserved, RetractReason, StoredEvent,
 };
 use nmp_transport::{DisconnectReason, HandoffResult, RelayFrame, RelayHandle};
 use nostr::{Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent};
@@ -261,7 +261,7 @@ impl EventStore for FailOnceCompensationStore {
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
         self.inner.get_coverage(key, relay)
     }
-    fn gc(&mut self, claims: &ClaimSet) -> Result<GcReport, PersistenceError> {
+    fn gc(&mut self, claims: &GcRetentionSet) -> Result<GcReport, PersistenceError> {
         self.inner.gc(claims)
     }
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
@@ -441,7 +441,7 @@ impl EventStore for SharedFailStartStore {
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
         self.inner.get_coverage(key, relay)
     }
-    fn gc(&mut self, claims: &ClaimSet) -> Result<GcReport, PersistenceError> {
+    fn gc(&mut self, claims: &GcRetentionSet) -> Result<GcReport, PersistenceError> {
         self.inner.gc(claims)
     }
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
@@ -600,7 +600,7 @@ impl EventStore for RedbFailStartStore {
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
         self.inner.get_coverage(key, relay)
     }
-    fn gc(&mut self, claims: &ClaimSet) -> Result<GcReport, PersistenceError> {
+    fn gc(&mut self, claims: &GcRetentionSet) -> Result<GcReport, PersistenceError> {
         self.inner.gc(claims)
     }
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {

@@ -300,7 +300,7 @@ different semantics — the framework-reborn shape Brainstorm's UNDO probe warne
   row to `Signed(signature)`; there is no remove/add churn and no second write
   path.
 - GC: pending rows must survive collection — the engine (which already constructs the
-  `ClaimSet`) adds a claim per in-flight `PendingWrite`. An engine-composed claim, not
+  `GcRetentionSet`) adds a claim per in-flight `PendingWrite`. An engine-composed claim, not
   a store concept.
 
 **Pre-signature termination** (explicit cancellation, signer denial, an
@@ -407,7 +407,7 @@ The rule, stated as the invariant it already almost is: **`record_coverage` merg
 - `tick()` + `EngineMsg::Tick` + the neg-liveness/expiry mechanism (the live
   deadline driver remains separate).
 - `PendingWrite` registry, receipt terminals (`Rejected`/`Failed`), dedup-first
-  provenance merge (the echo-reconciliation path), `ClaimSet`.
+  provenance merge (the echo-reconciliation path), `GcRetentionSet`.
 
 **Remaining under the promoted contract:**
 

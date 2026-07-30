@@ -18,7 +18,7 @@ use std::path::Path;
 
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AttemptOutcome, CancelEphemeralOutcome,
-    ClaimSet, CompensateOutcome, EventCursor, EventStore, InsertOutcome, IntentSigState,
+    CompensateOutcome, EventCursor, EventStore, GcRetentionSet, InsertOutcome, IntentSigState,
     LocalOrigin, MemoryStore, PromoteOutcome, ReceiptState, RedbStore, RefuseReason, RelayObserved,
     RetractReason, SigState, WriteDurability,
 };
@@ -502,7 +502,7 @@ fn pending_row_is_not_gc_evicted_while_intent_open() {
         // checkpoint R5). A regular (non-addressable) kind, so it would be
         // an ordinary GC candidate the moment it stops being an open
         // intent.
-        let claims = ClaimSet::new(Vec::new());
+        let claims = GcRetentionSet::new(Vec::new());
         let report = store.gc(&claims).unwrap();
         assert_eq!(
             report.events_evicted, 0,
@@ -3243,7 +3243,7 @@ fn suppressed_target_is_gc_pinned_but_nip40_expiry_still_removes_it() {
         );
         let gc_intent = gc_outcome.journaled_intent_id().expect("journaled");
 
-        let gc_report = store.gc(&ClaimSet::new(vec![])).unwrap();
+        let gc_report = store.gc(&GcRetentionSet::new(vec![])).unwrap();
         assert_eq!(gc_report.events_evicted, 0);
         let cancelled = store
             .compensate_write(gc_intent)
@@ -3257,7 +3257,7 @@ fn suppressed_target_is_gc_pinned_but_nip40_expiry_still_removes_it() {
             store.query(&Filter::new().id(gc_target_id)).unwrap().len(),
             1
         );
-        let post_cancel_gc = store.gc(&ClaimSet::new(vec![])).unwrap();
+        let post_cancel_gc = store.gc(&GcRetentionSet::new(vec![])).unwrap();
         assert_eq!(post_cancel_gc.events_evicted, 1);
         assert!(store
             .query(&Filter::new().id(gc_target_id))

@@ -95,7 +95,7 @@ pub trait EventStore {
     fn query(&self, filter: &nostr::Filter) -> Vec<StoredEvent>;   // current winners, WITH provenance
     fn record_coverage(&mut self, hash: DescriptorHash, relay: &RelayUrl, covered_through: Timestamp);
     fn get_coverage(&self, hash: DescriptorHash, relay: &RelayUrl) -> Option<Timestamp>; // None = REFUSE floor
-    fn gc(&mut self, claims: &ClaimSet) -> GcReport;               // claim-based bounded GC
+    fn gc(&mut self, claims: &GcRetentionSet) -> GcReport;               // claim-based bounded GC
 }
 pub struct RedbStore { /* by_id, addr_index, author_idx, kind_idx, tag_idx, coverage tbl */ }
 pub struct MemoryStore { /* M1 store + provenance map + coverage map — updated in lockstep */ }
@@ -103,8 +103,8 @@ pub struct MemoryStore { /* M1 store + provenance map + coverage map — updated
 /// Claim = the union of every live query's demand skeletons (what a live handle
 /// still needs). GC may evict only rows matched by NO claim; claimed rows and
 /// all replaceable current-winners are retained. Bounded: cap + LRU within
-/// unclaimed. (`ClaimSet` is derived from `resolver.active_demand()`.)
-pub struct ClaimSet { /* set of ConcreteFilter skeletons */ }
+/// unclaimed. (`GcRetentionSet` is derived from `resolver.active_demand()`.)
+pub struct GcRetentionSet { /* set of ConcreteFilter skeletons */ }
 ```
 
 Insert order (ledger #1 + #5, both inside the one door): dedup-by-id FIRST → on hit, **merge `from` into provenance and return `Duplicate{provenance_grew}` with no index churn**; else supersession (M1's newest-wins / lexical-tiebreak, unchanged). No public index/coverage setter beyond `record_coverage`, which only advances (never lowers, except eviction).

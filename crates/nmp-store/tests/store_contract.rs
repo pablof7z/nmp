@@ -14,9 +14,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
 use nmp_store::{
-    coverage_key, sentinel_signature, AcceptWrite, ClaimSet, CoverageInterval, EventCursor,
-    EventStore, InsertOutcome, IntentSigState, MemoryStore, Provenance, RedbStore, RefuseReason,
-    RelayObserved, RetractReason, StoredEvent, WriteDurability,
+    coverage_key, sentinel_signature, AcceptWrite, CoverageInterval, EventCursor, EventStore,
+    GcRetentionSet, InsertOutcome, IntentSigState, MemoryStore, Provenance, RedbStore,
+    RefuseReason, RelayObserved, RetractReason, StoredEvent, WriteDurability,
 };
 use nostr::nips::nip01::Coordinate;
 use nostr::{Event, EventBuilder, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
@@ -970,7 +970,7 @@ fn explicit_gc_policy_evicts_durable_row_and_lowers_covering_watermark() {
             )])
             .unwrap();
 
-        let claims = ClaimSet::new(vec![]); // nothing is live-claimed
+        let claims = GcRetentionSet::new(vec![]); // nothing is live-claimed
         let report = store.gc(&claims).unwrap();
         assert_eq!(report.events_evicted, 1);
         assert_eq!(report.coverage_rows_shrunk, 1);
@@ -1007,7 +1007,7 @@ fn gc_deletes_watermark_row_when_shrink_empties_it() {
             )])
             .unwrap();
 
-        let claims = ClaimSet::new(vec![]);
+        let claims = GcRetentionSet::new(vec![]);
         let report = store.gc(&claims).unwrap();
         assert_eq!(report.events_evicted, 1);
         assert_eq!(report.coverage_rows_deleted, 1);
@@ -1036,7 +1036,7 @@ fn gc_deletes_coverage_when_evicting_the_maximum_timestamp_boundary() {
             )])
             .unwrap();
 
-        let report = store.gc(&ClaimSet::new(vec![])).unwrap();
+        let report = store.gc(&GcRetentionSet::new(vec![])).unwrap();
         assert_eq!(report.events_evicted, 1);
         assert_eq!(report.coverage_rows_deleted, 1);
         assert_eq!(report.coverage_rows_shrunk, 0);
@@ -1066,7 +1066,7 @@ fn gc_retains_claimed_event_and_replaceable_current_winner() {
         let winner_id = winner.id;
         store.insert(winner, observed("wss://r1", 1)).unwrap();
 
-        let claims = ClaimSet::new(vec![shape(&[1], Some(&k))]);
+        let claims = GcRetentionSet::new(vec![shape(&[1], Some(&k))]);
 
         let report = store.gc(&claims).unwrap();
         assert_eq!(report.events_evicted, 0);
@@ -1087,7 +1087,7 @@ fn gc_evicts_unclaimed_event_even_when_unrelated_claims_exist() {
         store.insert(e, observed("wss://r1", 1)).unwrap();
 
         // A claim for an unrelated author's kind:1 shape does not protect e.
-        let claims = ClaimSet::new(vec![shape(&[1], Some(&other))]);
+        let claims = GcRetentionSet::new(vec![shape(&[1], Some(&other))]);
 
         let report = store.gc(&claims).unwrap();
         assert_eq!(report.events_evicted, 1);
@@ -1125,7 +1125,7 @@ fn gc_coverage_shrink_uses_only_the_max_matching_victim_and_counts_once_per_row(
             )])
             .unwrap();
 
-        let report = store.gc(&ClaimSet::new(vec![])).unwrap();
+        let report = store.gc(&GcRetentionSet::new(vec![])).unwrap();
         assert_eq!(report.events_evicted, 2);
         // Both victims fall inside the SAME row's interval and both match
         // its shape -- if the row were (incorrectly) shrunk once per
@@ -1166,7 +1166,7 @@ fn gc_coverage_shrink_deletes_when_only_the_max_victim_would_empty_the_row() {
             )])
             .unwrap();
 
-        let report = store.gc(&ClaimSet::new(vec![])).unwrap();
+        let report = store.gc(&GcRetentionSet::new(vec![])).unwrap();
         assert_eq!(report.events_evicted, 2);
         assert_eq!(report.coverage_rows_deleted, 1);
         assert_eq!(report.coverage_rows_shrunk, 0);
@@ -1200,7 +1200,7 @@ fn gc_coverage_shrink_ignores_victims_of_a_non_matching_kind() {
             )])
             .unwrap();
 
-        let report = store.gc(&ClaimSet::new(vec![])).unwrap();
+        let report = store.gc(&GcRetentionSet::new(vec![])).unwrap();
         assert_eq!(
             report.events_evicted, 1,
             "the kind:9 event is still an unclaimed victim"
@@ -1404,7 +1404,7 @@ fn gc_max_timestamp_coverage_deletion_survives_redb_reopen() {
             )])
             .unwrap();
 
-        let report = store.gc(&ClaimSet::new(vec![])).unwrap();
+        let report = store.gc(&GcRetentionSet::new(vec![])).unwrap();
         assert_eq!(report.events_evicted, 1);
         assert_eq!(report.coverage_rows_deleted, 1);
         assert_eq!(report.coverage_rows_shrunk, 0);
@@ -1874,7 +1874,7 @@ fn coverage_is_bit_identical_across_all_retractions_and_only_gc_lowers_it() {
 
         let gc_target = regular_event_at(&k, "gc me", 250);
         store.insert(gc_target, observed("wss://r1", 3)).unwrap();
-        let report = store.gc(&ClaimSet::new(vec![])).unwrap();
+        let report = store.gc(&GcRetentionSet::new(vec![])).unwrap();
         assert!(report.coverage_rows_shrunk + report.coverage_rows_deleted > 0);
         assert_ne!(
             store.get_coverage(key, &r),
