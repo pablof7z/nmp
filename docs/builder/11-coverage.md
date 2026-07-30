@@ -130,6 +130,24 @@ The choice belongs to the component or app observation that owns the handle.
 Equal `live`, `maxAge`, and `cacheOnly` demands may share graph/cache state, but
 one handle's policy never opens, closes, or lends evidence to another.
 
+A coverage-satisfied `maxAge` handle freezes its acquisition decision and
+evidence boundary, not its row set:
+
+- `AcquisitionEvidence` continues to report the exact opening-time plan and
+  scoped watermarks that justified suppressing wire work.
+- Later changes to neutral routing facts or relay admission neither rewrite
+  that evidence nor restart the existing handle.
+- The handle still observes the canonical store, so matching rows may arrive,
+  be superseded, expire, or be retracted because of other engine work.
+
+The retained evidence is a historical justification scoped to that descriptor,
+source authority, and access context. It is not a claim about global
+completeness or the routing plan NMP would choose now. To ask how the same
+demand would plan now, open a new `live` observation or a newly evaluated
+`maxAge` observation. Global diagnostics describe only the actually active
+wire plan; because a coverage-satisfied handle contributes no wire work, they
+do not compute a hypothetical replan for it.
+
 ## Durable history and resident bounds
 
 NMP retains fetched, verified events in its durable store by default. Ordinary
@@ -195,8 +213,12 @@ proof trail:
 - watermarks, caps, and queue pressure; and
 - the local reason for each shortfall.
 
-Both surfaces project the same engine state. The app does not reconstruct one
-from transport callbacks.
+Both surfaces project engine-owned facts, but answer different scoped
+questions. Ordinary evidence tells a component what justified this handle's
+acquisition decision, including the retained opening plan for a
+coverage-satisfied `maxAge` handle. Diagnostics explain the current work NMP is
+actually executing; they do not replace that retained evidence with a
+hypothetical current plan for a suppressed handle.
 
 ---
 
