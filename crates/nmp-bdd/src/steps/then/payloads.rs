@@ -261,7 +261,7 @@ async fn received_event_keeps_its_own_fields(w: &mut NmpWorld) {
 #[then(regex = r#"^the write is refused for failing verification$"#)]
 async fn refused_for_failing_verification(w: &mut NmpWorld) {
     nothing_to_observe!(
-        !w.identity_receipt_statuses(None).is_empty(),
+        w.identity_receipt_reported_anything(None),
         "the publish reported no status at all, so it was neither refused nor accepted"
     );
     assert!(
@@ -292,7 +292,7 @@ async fn nothing_refused_for_want_of_an_account(w: &mut NmpWorld) {
 #[then(regex = r#"^the write is refused as a consent and author contradiction$"#)]
 async fn refused_as_a_consent_contradiction(w: &mut NmpWorld) {
     nothing_to_observe!(
-        !w.identity_receipt_statuses(None).is_empty(),
+        w.identity_receipt_reported_anything(None),
         "the publish reported no status at all, so it was neither refused nor accepted"
     );
     assert!(
