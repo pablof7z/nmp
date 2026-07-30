@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 use nmp_grammar::ContextualAtom;
 use nmp_store::{
     AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome, CancelEphemeralOutcome,
-    ClaimSet, CloseIntentOutcome, CompensateOutcome, CompensationReason, CoverageInterval,
-    CoverageKey, EventStore, GcReport, InsertOutcome, IntentId, LaneDeadline, LaneKey,
+    CloseIntentOutcome, CompensateOutcome, CompensationReason, CoverageInterval, CoverageKey,
+    EventStore, GcReport, GcRetentionSet, InsertOutcome, IntentId, LaneDeadline, LaneKey,
     PersistenceError, PersistenceFault, PostHandoffState, PromoteOutcome, RecoveredAttempt,
     RecoveredAttemptDetails, RecoveredIntent, RecoveredLane, RecoveredReceipt,
     RecoveredRouteRevision, RelayObserved, RetractReason, StoredEvent, TransientCause,
@@ -258,7 +258,7 @@ impl<S: EventStore> EventStore for FaultyLaneStore<S> {
     fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
         self.inner.get_coverage(key, relay)
     }
-    fn gc(&mut self, claims: &ClaimSet) -> Result<GcReport, PersistenceError> {
+    fn gc(&mut self, claims: &GcRetentionSet) -> Result<GcReport, PersistenceError> {
         self.inner.gc(claims)
     }
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
