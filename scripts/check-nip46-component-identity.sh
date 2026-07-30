@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# #952 artifact falsifier. A core-only build and a matched core/provider build
-# must use different identities, while both artifacts from the matched Cargo
-# package set must embed exactly the same per-target identity set.
+# #952 artifact falsifier. The ordinary three-library mode proves a core-only
+# build differs from a matched package set and that the matched pair agrees.
+# Apple PR qualification may use --matched-only because the Ubuntu provider
+# gate retains the real package-set mismatch proof.
 
 set -euo pipefail
 
@@ -11,18 +12,35 @@ SCRIPT_DIR=${SCRIPT_PATH%/*}
 source "$SCRIPT_DIR/lib/require-commands.sh" || exit 2
 require_commands cmp comm grep mktemp rm sort strings tr wc || exit 2
 
-if [[ $# -ne 3 ]]; then
-  echo "usage: $0 CORE_ONLY_LIBRARY MATCHED_CORE_LIBRARY MATCHED_PROVIDER_LIBRARY" >&2
-  exit 2
+MODE=full
+if [[ ${1:-} == --matched-only ]]; then
+  MODE=matched
+  shift
 fi
-
-CORE_ONLY_LIBRARY=$1
-MATCHED_CORE_LIBRARY=$2
-MATCHED_PROVIDER_LIBRARY=$3
+if [[ "$MODE" == matched ]]; then
+  if [[ $# -ne 2 ]]; then
+    echo "usage: $0 --matched-only MATCHED_CORE_LIBRARY MATCHED_PROVIDER_LIBRARY" >&2
+    exit 2
+  fi
+  MATCHED_CORE_LIBRARY=$1
+  MATCHED_PROVIDER_LIBRARY=$2
+else
+  if [[ $# -ne 3 ]]; then
+    echo "usage: $0 CORE_ONLY_LIBRARY MATCHED_CORE_LIBRARY MATCHED_PROVIDER_LIBRARY" >&2
+    exit 2
+  fi
+  CORE_ONLY_LIBRARY=$1
+  MATCHED_CORE_LIBRARY=$2
+  MATCHED_PROVIDER_LIBRARY=$3
+fi
 
 fail() { echo "nip46-component-identity: $*" >&2; exit 1; }
 
-for library in "$CORE_ONLY_LIBRARY" "$MATCHED_CORE_LIBRARY" "$MATCHED_PROVIDER_LIBRARY"; do
+libraries=("$MATCHED_CORE_LIBRARY" "$MATCHED_PROVIDER_LIBRARY")
+if [[ "$MODE" == full ]]; then
+  libraries=("$CORE_ONLY_LIBRARY" "${libraries[@]}")
+fi
+for library in "${libraries[@]}"; do
   [[ -f "$library" ]] || fail "library is missing: $library"
 done
 
@@ -37,14 +55,18 @@ identity_set() {
   [[ -s "$output" ]] || fail "no component identity embedded in $library"
 }
 
-identity_set "$CORE_ONLY_LIBRARY" "$TMP/core-only"
 identity_set "$MATCHED_CORE_LIBRARY" "$TMP/matched-core"
 identity_set "$MATCHED_PROVIDER_LIBRARY" "$TMP/matched-provider"
 
-if [[ -n $(comm -12 "$TMP/core-only" "$TMP/matched-core") ]]; then
-  fail "core-only and matched package-set identities overlap"
-fi
 cmp -s "$TMP/matched-core" "$TMP/matched-provider" ||
   fail "matched core and provider identity sets differ"
 
-echo "nip46-component-identity: core-only=$(wc -l < "$TMP/core-only" | tr -d ' ') matched=$(wc -l < "$TMP/matched-core" | tr -d ' ') shared; package-set mismatch refused"
+if [[ "$MODE" == full ]]; then
+  identity_set "$CORE_ONLY_LIBRARY" "$TMP/core-only"
+  if [[ -n $(comm -12 "$TMP/core-only" "$TMP/matched-core") ]]; then
+    fail "core-only and matched package-set identities overlap"
+  fi
+  echo "nip46-component-identity: core-only=$(wc -l < "$TMP/core-only" | tr -d ' ') matched=$(wc -l < "$TMP/matched-core" | tr -d ' ') shared; package-set mismatch refused"
+else
+  echo "nip46-component-identity: matched=$(wc -l < "$TMP/matched-core" | tr -d ' ') shared"
+fi

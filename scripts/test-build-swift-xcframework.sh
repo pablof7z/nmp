@@ -5,13 +5,15 @@ SCRIPT=$(cd "$(dirname "$0")" && pwd)/build-swift-xcframework.sh
 CHECKER=$(cd "$(dirname "$0")" && pwd)/check-macos-deployment-target.sh
 TOOL_HELPER=$(cd "$(dirname "$0")" && pwd)/lib/require-commands.sh
 COMPONENT_BUILDER=$(cd "$(dirname "$0")" && pwd)/build-component-release.sh
+PAIR_BUILDER=$(cd "$(dirname "$0")" && pwd)/build-swift-nip46-xcframework.sh
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 REPO="$TMP/repo"
 BIN="$TMP/bin"
-mkdir -p "$REPO/scripts/lib" "$REPO/Packages/NMP" "$BIN"
+mkdir -p "$REPO/scripts/lib" "$REPO/Packages/NMP" "$REPO/Packages/NMPNip46" "$BIN"
 cp "$SCRIPT" "$REPO/scripts/"
+cp "$PAIR_BUILDER" "$REPO/scripts/"
 cp "$CHECKER" "$REPO/scripts/"
 cp "$TOOL_HELPER" "$REPO/scripts/lib/"
 cp "$COMPONENT_BUILDER" "$REPO/scripts/"
@@ -42,6 +44,7 @@ case "${1:-}" in
   fetch)
     ;;
   build)
+    all_args=" $* "
     target=
     while [[ $# -gt 0 ]]; do
       if [[ $1 == --target ]]; then
@@ -53,8 +56,14 @@ case "${1:-}" in
     [[ -n $target ]]
     mkdir -p "$CARGO_TARGET_DIR/$target/release"
     : > "$CARGO_TARGET_DIR/$target/release/libnmp_ffi.a"
+    if [[ "$all_args" == *" nmp-nip46-ffi "* ]]; then
+      : > "$CARGO_TARGET_DIR/$target/release/libnmp_nip46_ffi.a"
+    fi
     ;;
   run)
+    if [[ " $* " == *" nmp-nip46-metadata-audit "* ]]; then
+      exit 0
+    fi
     out_dir=
     library=
     while [[ $# -gt 0 ]]; do
@@ -65,10 +74,13 @@ case "${1:-}" in
       esac
     done
     [[ -f $library ]]
+    stem=$(basename "$library")
+    stem=${stem#lib}
+    stem=${stem%.*}
     mkdir -p "$out_dir"
-    : > "$out_dir/nmp_ffi.swift"
-    : > "$out_dir/nmp_ffiFFI.h"
-    : > "$out_dir/nmp_ffiFFI.modulemap"
+    printf '%s\n' 'import Foundation' > "$out_dir/$stem.swift"
+    : > "$out_dir/${stem}FFI.h"
+    : > "$out_dir/${stem}FFI.modulemap"
     ;;
   *) exit 64 ;;
 esac
@@ -239,6 +251,33 @@ relative_log="$TMP/relative.log"
 run_script "$relative_log" relative-target --macos-only >/dev/null
 grep -Fq "$REPO/relative-target/nmp-component-artifacts/core/aarch64-apple-darwin." "$relative_log"
 echo 'ok - relative CARGO_TARGET_DIR artifact lookup matches Cargo'
+
+# The paired builder gets both matched libraries from one managed build for
+# the selected target, then packages two XCFrameworks from those same sealed
+# snapshots. A second core Cargo build or simulator target would defeat the
+# per-PR design this path exists to support.
+pair_log="$TMP/pair.log"
+pair_target="$TMP/pair-target"
+: > "$pair_log"
+(
+  cd "$REPO"
+  PATH="$BIN:$PATH" \
+    CALL_LOG="$pair_log" \
+    CARGO_TARGET_DIR="$pair_target" \
+    scripts/build-swift-nip46-xcframework.sh --macos-only
+) >/dev/null
+[[ $(grep -c 'cargo build .*--target aarch64-apple-darwin' "$pair_log") -eq 1 ]]
+grep -Fq 'cargo build --frozen -p nmp-ffi -p nmp-nip46-ffi --release --target aarch64-apple-darwin' \
+  "$pair_log"
+grep -Fq "$pair_target/nmp-component-artifacts/nip46/aarch64-apple-darwin." \
+  "$pair_log"
+grep -Fq 'libnmp_ffi.a' "$pair_log"
+grep -Fq 'libnmp_nip46_ffi.a' "$pair_log"
+[[ $(grep -c '^xcodebuild ' "$pair_log") -eq 2 ]]
+! grep -Fq 'apple-ios' "$pair_log"
+grep -Fq 'import NMPFFI' \
+  "$REPO/Packages/NMPNip46/Sources/NMPNip46FFI/nmp_nip46_ffi.swift"
+echo 'ok - paired macOS-only build compiles once and packages both components'
 
 # Preserve the historical sim-only and default target sets.
 sim_log="$TMP/sim.log"

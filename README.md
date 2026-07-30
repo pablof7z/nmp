@@ -134,7 +134,7 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 
 **Platforms**
 - ✅ Rust core (the source of truth)
-- 🧪 Swift SDK — qualified on the macOS host; XCFramework simulator slices compile, and the repository-owned Falsifier target runs NIP-11 hostname qualification on a real iOS Simulator ([#465](https://github.com/pablof7z/nmp/issues/465), [#601](https://github.com/pablof7z/nmp/pull/601)). Physical-device qualification remains separate.
+- 🧪 Swift SDK — public-wrapper behavior is qualified by macOS-host XCTest. Every master build packages the full device + simulator + macOS XCFramework slice set, while pull requests use only the host slice needed by XCTest. iOS runtime and physical-device qualification remain separate.
 - 🧪 Kotlin SDK — desktop-JVM projection; **no Android AAR** qualified yet
 
 ## Status / maturity
@@ -188,13 +188,13 @@ Built for **bounded memory and streaming — never first-N truncation.** Measure
 
 ## Platforms in one line
 
-Rust core is the truth · **Swift** qualified on macOS host (iOS-sim runtime pending) · **Kotlin** desktop-JVM only (no Android AAR yet).
+Rust core is the truth · **Swift** behavior qualified on the macOS host (full Apple slices packaged on master; iOS runtime pending) · **Kotlin** desktop-JVM only (no Android AAR yet).
 
 ## Roadmap / where it's heading
 
 - Govern the provisional demand / receipt / signer shapes toward a **v2 freeze**
 - Encode lifecycle invariants **as types**, not conventions
-- Close **platform qualification** — an iOS-Simulator test target, an Android AAR
+- Close **platform qualification** — physical iOS runtime evidence, an Android AAR
 - Finish **bounded delivery** with an explicit shortfall contract everywhere
 - Land NIP-51 list editing; broaden opt-in protocol modules
 - Project NIP-68 + `nmp-media` composition through FFI/Swift/Kotlin, batched together (currently Rust-only)
