@@ -49,6 +49,26 @@ pub use nmp::WritePayload
 pub use nmp::WriteRouting
 pub use nmp::decode_nostr_entity
 pub use nmp::nip29
+pub enum nmp::AuthDenialSource
+pub nmp::AuthDenialSource::Policy
+pub nmp::AuthDenialSource::Relay
+pub nmp::AuthDenialSource::Signer
+impl core::clone::Clone for nmp::AuthDenialSource
+pub fn nmp::AuthDenialSource::clone(&self) -> nmp::AuthDenialSource
+impl core::cmp::Eq for nmp::AuthDenialSource
+impl core::cmp::PartialEq for nmp::AuthDenialSource
+pub fn nmp::AuthDenialSource::eq(&self, &nmp::AuthDenialSource) -> bool
+impl core::fmt::Debug for nmp::AuthDenialSource
+pub fn nmp::AuthDenialSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nmp::AuthDenialSource
+impl core::marker::StructuralPartialEq for nmp::AuthDenialSource
+impl core::marker::Freeze for nmp::AuthDenialSource
+impl core::marker::Send for nmp::AuthDenialSource
+impl core::marker::Sync for nmp::AuthDenialSource
+impl core::marker::Unpin for nmp::AuthDenialSource
+impl core::marker::UnsafeUnpin for nmp::AuthDenialSource
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::AuthDenialSource
+impl core::panic::unwind_safe::UnwindSafe for nmp::AuthDenialSource
 pub enum nmp::AuthDiagnosticsPhase
 pub nmp::AuthDiagnosticsPhase::AwaitingChallenge
 pub nmp::AuthDiagnosticsPhase::AwaitingPolicy
@@ -394,6 +414,28 @@ impl core::marker::Unpin for nmp::RequestRowsError
 impl core::marker::UnsafeUnpin for nmp::RequestRowsError
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::RequestRowsError
 impl core::panic::unwind_safe::UnwindSafe for nmp::RequestRowsError
+pub enum nmp::RetryCause
+pub nmp::RetryCause::AckTimeout
+pub nmp::RetryCause::ConnectionLost
+pub nmp::RetryCause::Interrupted
+pub nmp::RetryCause::RelayError
+pub nmp::RetryCause::RelayRateLimited
+impl core::clone::Clone for nmp::RetryCause
+pub fn nmp::RetryCause::clone(&self) -> nmp::RetryCause
+impl core::cmp::Eq for nmp::RetryCause
+impl core::cmp::PartialEq for nmp::RetryCause
+pub fn nmp::RetryCause::eq(&self, &nmp::RetryCause) -> bool
+impl core::fmt::Debug for nmp::RetryCause
+pub fn nmp::RetryCause::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nmp::RetryCause
+impl core::marker::StructuralPartialEq for nmp::RetryCause
+impl core::marker::Freeze for nmp::RetryCause
+impl core::marker::Send for nmp::RetryCause
+impl core::marker::Sync for nmp::RetryCause
+impl core::marker::Unpin for nmp::RetryCause
+impl core::marker::UnsafeUnpin for nmp::RetryCause
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::RetryCause
+impl core::panic::unwind_safe::UnwindSafe for nmp::RetryCause
 pub enum nmp::RowDelta
 pub nmp::RowDelta::Added(nmp::Row)
 pub nmp::RowDelta::Removed(nostr::event::id::EventId)
@@ -559,6 +601,11 @@ impl core::panic::unwind_safe::UnwindSafe for nmp::WindowLoad
 pub enum nmp::WriteStatus
 pub nmp::WriteStatus::Accepted
 pub nmp::WriteStatus::Acked(nostr::types::url::RelayUrl)
+pub nmp::WriteStatus::AuthDenied
+pub nmp::WriteStatus::AuthDenied::pubkey: nostr::key::public_key::PublicKey
+pub nmp::WriteStatus::AuthDenied::reason: alloc::string::String
+pub nmp::WriteStatus::AuthDenied::relay: nostr::types::url::RelayUrl
+pub nmp::WriteStatus::AuthDenied::source: nmp::AuthDenialSource
 pub nmp::WriteStatus::AwaitingAuth
 pub nmp::WriteStatus::AwaitingAuth::relay: nostr::types::url::RelayUrl
 pub nmp::WriteStatus::AwaitingCapability
@@ -582,6 +629,8 @@ pub nmp::WriteStatus::ReplaceableConflict::actual: core::option::Option<nostr::e
 pub nmp::WriteStatus::ReplaceableConflict::expected: core::option::Option<nostr::event::id::EventId>
 pub nmp::WriteStatus::RetryEligible
 pub nmp::WriteStatus::RetryEligible::attempt: u64
+pub nmp::WriteStatus::RetryEligible::cause: nmp::RetryCause
+pub nmp::WriteStatus::RetryEligible::detail: core::option::Option<alloc::string::String>
 pub nmp::WriteStatus::RetryEligible::eligible_at: nostr::types::time::Timestamp
 pub nmp::WriteStatus::RetryEligible::relay: nostr::types::url::RelayUrl
 pub nmp::WriteStatus::RoutePersistenceBlocked(nostr::types::url::RelayUrl)

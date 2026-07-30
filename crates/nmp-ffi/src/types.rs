@@ -888,9 +888,7 @@ pub struct FfiDiagnosticsSnapshot {
     pub stalled_write_totals: FfiStalledWriteTotals,
 }
 
-/// The receipt STREAM (`nmp::WriteStatus` mirror; ledger #9 — enqueue is
-/// not converged, the app's `NmpReceiptStream` may yield many of these per
-/// publish).
+/// Exact authority whose typed answer terminally denied a write AUTH lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub enum FfiAuthDenialSource {
     Policy,
@@ -907,6 +905,9 @@ pub enum FfiRetryCause {
     RelayError,
 }
 
+/// The receipt STREAM (`nmp::WriteStatus` mirror; ledger #9 — enqueue is
+/// not converged, the app's `NmpReceiptStream` may yield many of these per
+/// publish).
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiWriteStatus {
     Accepted,
