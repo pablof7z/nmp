@@ -5,10 +5,60 @@
 
 set -euo pipefail
 
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+MODE=all
+if [[ ${1:-} == "--workflows-only" ]]; then
+  MODE=workflows
+  shift
+fi
+
+ROOT=${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 cd "$ROOT"
 
 fail() { echo "nip46-provider-boundary: $*" >&2; exit 1; }
+
+swift_provider_workflow=.github/workflows/macos-qualification.yml
+kotlin_provider_workflow=.github/workflows/nip46-provider.yml
+
+check_provider_workflows() {
+  [[ -f "$swift_provider_workflow" ]] ||
+    fail "Swift provider workflow is missing: $swift_provider_workflow"
+  [[ -f "$kotlin_provider_workflow" ]] ||
+    fail "Kotlin provider workflow is missing: $kotlin_provider_workflow"
+
+  if grep -qE 'target/nmp-component-build/.*/release/libnmp' \
+    "$swift_provider_workflow" "$kotlin_provider_workflow"
+  then
+    fail "provider workflow still audits mutable Cargo-cache libraries instead of packaged outputs"
+  fi
+
+  grep -qF 'find Packages/NMP/NMP.xcframework' "$swift_provider_workflow" ||
+    fail "Swift provider workflow does not audit the packaged core XCFramework"
+  grep -qF 'find Packages/NMPNip46/NMPNip46.xcframework' "$swift_provider_workflow" ||
+    fail "Swift provider workflow does not audit the packaged provider XCFramework"
+  grep -qF 'scripts/check-nip46-component-identity.sh' "$swift_provider_workflow" ||
+    fail "Swift provider workflow does not prove matched component identity"
+  grep -qF 'scripts/check-nip46-artifact-inventory.sh' "$swift_provider_workflow" ||
+    fail "Swift provider workflow does not audit packaged component inventory"
+
+  grep -qF 'scripts/test-component-identity-build.sh' "$kotlin_provider_workflow" ||
+    fail "Kotlin provider workflow does not prove unmanaged release identity is refused"
+  grep -qF 'Packages/NMPKotlin/src/main/resources/linux-x86-64/libnmp_ffi.so' \
+    "$kotlin_provider_workflow" ||
+    fail "Kotlin provider workflow does not audit the packaged core resource"
+  grep -qF 'Packages/NMPKotlin/nip46/src/main/resources/linux-x86-64/libnmp_nip46_ffi.so' \
+    "$kotlin_provider_workflow" ||
+    fail "Kotlin provider workflow does not audit the packaged provider resource"
+  grep -qF 'scripts/check-nip46-component-identity.sh' "$kotlin_provider_workflow" ||
+    fail "Kotlin provider workflow does not prove matched component identity"
+  grep -qF 'scripts/check-nip46-artifact-inventory.sh' "$kotlin_provider_workflow" ||
+    fail "Kotlin provider workflow does not audit packaged component inventory"
+}
+
+check_provider_workflows
+if [[ "$MODE" == workflows ]]; then
+  echo "nip46-provider-boundary: provider workflow ownership ok"
+  exit 0
+fi
 
 required_paths=(
   crates/nmp-signer/src/capability.rs
@@ -94,8 +144,6 @@ grep -qF 'NMP_FFI_COMPONENT_AUTH' crates/nmp-ffi/build.rs ||
   fail "isolated component target lacks per-build builder authorization"
 grep -qF 'features = ["nip46-provider-component"]' crates/nmp-nip46-ffi/Cargo.toml ||
   fail "NIP-46 provider does not make its presence observable to the nmp-ffi build"
-grep -qF 'scripts/test-component-identity-build.sh' .github/workflows/nip46-provider.yml ||
-  fail "provider CI does not prove unmanaged release identity is refused"
 grep -qF 'pub fn verify_nip46_core_component_identity(' crates/nmp-nip46-ffi/src/signer.rs ||
   fail "NIP-46 provider does not verify plain core identity before object exchange"
 grep -qF 'compatibility: Arc<FfiNip46CoreCompatibility>' crates/nmp-nip46-ffi/src/signer.rs ||
@@ -154,16 +202,6 @@ grep -qF 'rm -f "$AUTHORIZATION"' scripts/build-component-release.sh ||
   fail "managed component build does not revoke its authorization before returning"
 grep -qF 'nmp-component-artifacts' scripts/build-component-release.sh ||
   fail "managed component build does not seal package inputs outside the reusable Cargo target"
-if grep -qE 'target/nmp-component-build/.*/release/libnmp' \
-  .github/workflows/nip46-provider.yml
-then
-  fail "provider workflow still audits mutable Cargo-cache libraries instead of packaged outputs"
-fi
-grep -qF 'Packages/NMPKotlin/src/main/resources/linux-x86-64/libnmp_ffi.so' \
-  .github/workflows/nip46-provider.yml ||
-  fail "Kotlin provider workflow does not audit the packaged core resource"
-grep -qF 'find Packages/NMP/NMP.xcframework' .github/workflows/nip46-provider.yml ||
-  fail "Swift provider workflow does not audit the packaged XCFramework slice"
 if grep -qF 'NMP_FFI_CARGO_UNIT_GRAPH' crates/nmp-ffi/build.rs; then
   fail "build script still accepts caller-declared graph content"
 fi

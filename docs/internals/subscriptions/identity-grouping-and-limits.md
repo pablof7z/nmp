@@ -653,10 +653,43 @@ already exhibits (an 8-author filter shrinking one value at a time, never a
 CLOSE). Explicit closure is needed only where the demand is genuinely gone, not
 merely narrower.
 
-### 8.1c OPEN — in-place replacement is not deterministic under a live engine
+### 8.1c PARTIAL (#1004) — ordinary-plan assertions raced NIP-77 capability proof
 
-Found while un-`@wip`ing the BDD scenarios, and reported rather than fixed
-because fixing it is a bigger change than the collapse it was found under.
+Found while un-`@wip`ing the BDD scenarios and originally attributed to an
+indeterminate live-engine recompile boundary. Issue #1004 captured the
+recurring active-suite failure and its full wire trace identified the actual
+interleaving.
+
+The relay's behavioral NIP-77 probe sometimes resolved between two watch
+mutations. The first mutations therefore emitted ordinary planned REQs; the
+next broad Public recompile correctly opened a distinct `limit:0` NIP-77 live
+candidate. Once that candidate's exact EOSE arrived, the gap-free handoff
+correctly closed the overlapped ordinary predecessor. The failing record was
+unambiguous: two in-place ordinary replacements, then a fresh `limit:0`
+candidate covering the enlarged author set, then the predecessor CLOSE.
+
+That is not a router-plan CLOSE and not an observation race. It is a harness
+capability race: the assertion claimed to measure ordinary NIP-01 plan
+replacement while allowing the relay to change acquisition protocol midway
+through the stimulus.
+
+The subscription-collapse feature now drives an explicit NIP-11 document
+whose `supported_nips` excludes 77, so the engine deterministically suppresses
+the behavioral probe and the scenario observes only the ordinary router plan.
+The no-CLOSE assertions additionally reject any `limit:0` live candidate by
+its exact wire shape before evaluating the plan invariant, so losing that
+isolation fails with the real cause rather than reviving the flaky
+misclassification. `nmp-test-support` separately pins that wire-shape
+classification.
+
+That closes #1004's active ordinary tag/author failure. One separate residue
+remains `@wip`: the derived-group stimulus is downstream of an inbound EVENT,
+so outbound-wire quiet cannot establish that ingestion, resolution, and
+recompilation reached a named generation. It has an engine-level falsifier but
+the live BDD harness still lacks that generation boundary. The earlier
+investigation below is retained for that residue; its claim that the ordinary
+author/tag scenarios demonstrated the same recompile race is superseded by
+the complete #1004 wire trace above.
 
 The wire `Then` steps read the relay's socket ONCE, after the client wire has
 been quiet for a window. That is not sufficient for any assertion whose subject
@@ -666,21 +699,23 @@ re-resolves the derived set, recompiles, emits a REQ" has a genuinely quiet
 client wire in the middle of it. The read lands in that gap and reports what
 had happened by then.
 
-Making those steps poll (`nmp_bdd::world::wire_record_when`) was tried. It is
-more honest, and what it honestly showed is that the **in-place-replacement
-family of claims does not hold on every interleaving, on EITHER axis**.
-Measured over eight consecutive suite runs against real in-process relays:
+Making those steps poll (`nmp_bdd::world::wire_record_when`) was tried. It
+exposed two effects which the original investigation conflated. The ordinary
+tag/author CLOSEs were NIP-77 handoffs, now deterministically excluded by
+#1004. The derived-group scenario still crosses an inbound pipeline for which
+the harness cannot name a completed plan generation. Measured over eight
+consecutive suite runs against real in-process relays:
 
 - a three-value `#p` watch then dropping one closed **two** subscriptions;
 - the derived five-groups-then-one `#d` sequence closed **one**, and in another
   run opened a second subscription instead of widening;
-- **the pre-existing author-axis regression guards flaked identically** — they
-  had been green only because the one-shot read landed before the CLOSE.
+- the pre-existing author-axis regression guards also showed a CLOSE; #1004's
+  complete record later proved that CLOSE was a NIP-77 handoff, not the
+  derived recompile-boundary residue.
 
 The end state was correct every time: one subscription carrying every value,
-nothing under-fetching. So this is CHURN, not a correctness defect, and it is
-not something the structural rule introduced — the author axis has behaved this
-way for as long as those scenarios have existed.
+nothing under-fetching. The remaining derived observation is therefore churn,
+not a demonstrated correctness defect.
 
 The mechanism is interleaving. `tag_fanout_churn.rs` presents every growth step
 as one recompile over the whole demand set and measures ZERO closes,
@@ -689,11 +724,10 @@ two can land in separate compiles, the coalescer's grouping can differ between
 them, and a token that no longer names any filter is retired rather than
 replaced.
 
-Fixing it properly means either making the recompile boundary deterministic, or
-giving the harness a way to await a specific plan generation rather than a
-quiet socket. Until then the polling helper stays, used only to SEQUENCE a
-stimulus (so "one more group" arrives after the first subscription is genuinely
-live), never to take an assertion.
+Proving the derived case live requires giving the harness a way to await a
+specific plan generation rather than a quiet socket. Until then the polling
+helper stays, used only to SEQUENCE a stimulus (so "one more group" arrives
+after the first subscription is genuinely live), never to take an assertion.
 
 **It reaches further than the scenarios it was found on, and §6's own feature
 is in it.** Measured 2026-07-27 over NINE completed `cargo test -p nmp-bdd
@@ -1159,8 +1193,9 @@ Widening the recompile boundary moves the `1`×20 row onto the `5,3,…` row at
 **zero** extra subscriptions, zero coverage rework, and no new identity
 namespace. It touches one thing (when a recompile fires) instead of five
 (floors, coverage intervals, an out-of-plan emission path, diagnostics, and
-the negentropy loop). §8.1c is already asking for a deterministic recompile
-boundary for an unrelated reason, so the two want the same seam.
+the negentropy loop). The remaining derived-live residue in §8.1c is already
+asking for a deterministic recompile boundary for an unrelated reason, so the
+two want the same seam.
 
 **But it only reaches growth that arrives inside the window.** The engine
 already collapses same-batch bursts (§11.1), so the reachable ground is
