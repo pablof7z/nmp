@@ -28,8 +28,8 @@ use super::Ordering;
 use super::{
     acquire_for_open, binary_event, reset_store, BTreeMap, BTreeSet, CoverageKey, Database,
     EventCursor, EventId, Filter, HashMap, LaneKey, LaneState, Path, PersistenceError,
-    PreparedFilter, Provenance, RecoveredLane, RedbStoreOpenError, RelayUrl, StoreOwnership,
-    StoredEvent, StoredEventView, Timestamp,
+    PreparedFilter, Provenance, RecoveredLane, RedbStoreOpenError, RelayUrl,
+    RequiredLockedFileBackend, StoreOwnership, StoredEvent, StoredEventView, Timestamp,
 };
 use redb::{ReadableDatabase, ReadableTableMetadata, TableHandle};
 
@@ -101,6 +101,52 @@ pub(super) enum BenchmarkDurability {
     NoneThenImmediateCheckpoint,
 }
 
+#[cfg(test)]
+type RequiredDatabaseInitTestHook = Box<dyn FnMut()>;
+
+#[cfg(test)]
+std::thread_local! {
+    static REQUIRED_DATABASE_INIT_TEST_HOOK:
+        std::cell::RefCell<Option<RequiredDatabaseInitTestHook>> =
+            const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+struct ClearRequiredDatabaseInitTestHook;
+
+#[cfg(test)]
+impl Drop for ClearRequiredDatabaseInitTestHook {
+    fn drop(&mut self) {
+        REQUIRED_DATABASE_INIT_TEST_HOOK.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn with_required_database_init_test_hook<T>(
+    hook: impl FnMut() + 'static,
+    operation: impl FnOnce() -> T,
+) -> T {
+    REQUIRED_DATABASE_INIT_TEST_HOOK.with(|slot| {
+        assert!(
+            slot.borrow_mut().replace(Box::new(hook)).is_none(),
+            "one open cannot install two database-init hooks"
+        );
+    });
+    let _clear = ClearRequiredDatabaseInitTestHook;
+    operation()
+}
+
+#[cfg(test)]
+fn call_required_database_init_test_hook() {
+    REQUIRED_DATABASE_INIT_TEST_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().as_mut() {
+            hook();
+        }
+    });
+}
+
 #[cfg(feature = "bench-instrumentation")]
 impl Drop for RedbStore {
     fn drop(&mut self) {
@@ -162,10 +208,10 @@ impl RedbStore {
     /// metadata count tells us whether crash-abandoned ephemeral receipts need
     /// recovery.
     ///
-    /// The returned store owns one nonblocking cross-process exclusive lock
-    /// on the resolved target for as long as it lives; a second owner —
-    /// through this path, a relative alias, or any symlink alias, in this
-    /// process or another — is refused with
+    /// The returned store owns one nonblocking cross-process exclusive
+    /// pathname lock plus one required lock on the resolved target inode for
+    /// as long as it lives. A second owner — through this path, a relative,
+    /// symlink, or hard-link alias, in this process or another — is refused with
     /// [`RedbStoreOpenError::StoreAlreadyOpen`] before a second database
     /// handle exists.
     ///
@@ -179,9 +225,13 @@ impl RedbStore {
     /// (`docs/internals/conventions/schema-epoch-discard.md`).
     pub fn open(path: impl AsRef<Path>) -> Result<Self, RedbStoreOpenError> {
         Self::open_inner(path, BenchmarkDurability::Immediate, |path| {
+            let backend = RequiredLockedFileBackend::open(path)?;
+            #[cfg(test)]
+            call_required_database_init_test_hook();
             Database::builder()
                 .set_cache_size(REDB_CACHE_BYTES)
-                .create(path)
+                .create_with_backend(backend)
+                .map_err(|error| RedbStoreOpenError::database(error.into(), path))
         })
     }
 
@@ -213,6 +263,7 @@ impl RedbStore {
                         .take()
                         .expect("open_inner calls the database factory exactly once"),
                 )
+                .map_err(|error| RedbStoreOpenError::Database(error.into()))
         })
     }
 
@@ -230,9 +281,11 @@ impl RedbStore {
             path,
             BenchmarkDurability::NoneThenImmediateCheckpoint,
             |path| {
+                let backend = RequiredLockedFileBackend::open(path)?;
                 Database::builder()
                     .set_cache_size(REDB_CACHE_BYTES)
-                    .create(path)
+                    .create_with_backend(backend)
+                    .map_err(|error| RedbStoreOpenError::database(error.into(), path))
             },
         )
     }
@@ -240,7 +293,7 @@ impl RedbStore {
     fn open_inner(
         path: impl AsRef<Path>,
         _benchmark_durability: BenchmarkDurability,
-        create: impl FnOnce(&Path) -> Result<Database, redb::DatabaseError>,
+        create: impl FnOnce(&Path) -> Result<Database, RedbStoreOpenError>,
     ) -> Result<Self, RedbStoreOpenError> {
         let path = path.as_ref();
         // Ownership first: nothing may create, expose, or mutate the database
@@ -251,8 +304,7 @@ impl RedbStore {
         // Create through the RESOLVED target, never the possibly-retargeted
         // alias the caller supplied — the same canonical identity selected
         // the sidecar lock above.
-        let db = create(ownership.target())
-            .map_err(|error| RedbStoreOpenError::database(error.into(), ownership.target()))?;
+        let db = create(ownership.target())?;
         // A retarget racing the create fails closed: `db` and `ownership`
         // both drop here, so nothing is exposed and the lock is released.
         ownership.revalidate(path)?;
