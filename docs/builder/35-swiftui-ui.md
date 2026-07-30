@@ -11,7 +11,7 @@ import NMPContent
 import NMPUI
 
 let engine = try NMPEngine(
-    config: .init(indexerRelays: [
+    config: .init(appRelays: [
         "wss://purplepag.es",
         "wss://relay.primal.net",
     ])
@@ -381,10 +381,10 @@ xcodegen generate
 
 Build and run `NMPUIGallery`. The app imports the exact package components and
 uses `NMPReferenceObservationFactory.live(engine:resolve:)` with an explicit
-Gallery-owned profile/event/address mapping, configures only `purplepag.es` and
-`relay.primal.net`, and hardcodes real profile/article/note entities. Its
-article and note seeds carry no relay URL; the Live proof shows ordinary
-kind:10002 discovery and outbox routing.
+Gallery-owned profile/event/address mapping, configures `purplepag.es` and
+`relay.primal.net` as operator-provided app relays, and hardcodes real
+profile/article/note entities. Its article and note seeds carry no relay URL;
+the native package makes no NIP-65 discovery or learned-author-route claim.
 
 The conformance surfaces include literal references with zero acquisition,
 standard profile/event components, misleading-kind dispatch, cycle/depth

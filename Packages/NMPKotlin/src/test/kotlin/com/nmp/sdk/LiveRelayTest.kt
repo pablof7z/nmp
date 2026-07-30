@@ -32,7 +32,7 @@ class LiveRelayTest {
          * `setActiveAccount` may re-root reads onto an account this
          * process holds no key for (read-only browsing is legal). */
         const val FIATJAF_HEX = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"
-        val INDEXER_RELAYS = listOf("wss://purplepag.es", "wss://relay.primal.net")
+        val OPERATOR_RELAYS = listOf("wss://purplepag.es", "wss://relay.primal.net")
 
         suspend fun firstNonEmptyBatch(flow: Flow<RowBatch>, timeoutMs: Long): List<Row>? =
             withTimeoutOrNull(timeoutMs) {
@@ -68,25 +68,22 @@ class LiveRelayTest {
         }
     }
 
-    /** THE headline live proof: construct the engine from ONLY the two
-     * operator indexer relays (no write-relay map -- there is no such field
-     * anymore), add a read-only account for fiatjaf, and observe the
-     * reactive follow-feed. This app never resolves a single relay itself
-     * -- the engine discovers fiatjaf's own write relays live and re-routes
-     * the content atom to them on its own. */
+    /** Construct the core native engine with two operator app relays, add a
+     * read-only account for fiatjaf, and observe the reactive follow-feed.
+     * Both the inner and projected demands use only this explicit neutral
+     * operator policy; no author-route provider is assembled. */
     @Test
-    fun followFeedResolvesFromIndexerRelaysAlone() =
+    fun followFeedUsesOperatorAppRelays() =
         runBlocking {
-            NMPEngine(NMPConfig(indexerRelays = INDEXER_RELAYS)).use { engine ->
+            NMPEngine(NMPConfig(appRelays = OPERATOR_RELAYS)).use { engine ->
                 engine.setActiveAccount(FIATJAF_HEX)
 
                 val rows = firstNonEmptyBatch(engine.observe(followFeed()), timeoutMs = 30_000)
                 assumeTrue(
                     rows != null,
-                    "Observed no follow-feed rows within 30s from $INDEXER_RELAYS alone -- the " +
-                        "indexers, or fiatjaf's follows' write relays, may be unreachable from this " +
-                        "test environment. Package build + construction tests still pass " +
-                        "independently of this network condition.",
+                    "Observed no follow-feed rows within 30s from $OPERATOR_RELAYS -- the " +
+                        "operator relays may be unreachable from this test environment. Package " +
+                        "build + construction tests still pass independently of this network condition.",
                 )
 
                 assertTrue(rows!!.isNotEmpty(), "expected at least one real note")
@@ -105,7 +102,7 @@ class LiveRelayTest {
     @Test
     fun diagnosticsSnapshotShowsRealEventsByKindForTheFollowFeed() =
         runBlocking {
-            NMPEngine(NMPConfig(indexerRelays = INDEXER_RELAYS)).use { engine ->
+            NMPEngine(NMPConfig(appRelays = OPERATOR_RELAYS)).use { engine ->
                 engine.setActiveAccount(FIATJAF_HEX)
 
                 val queryFlow = engine.observe(followFeed())
@@ -121,7 +118,7 @@ class LiveRelayTest {
                     val rows = withTimeoutOrNull(30_000) { rowsReady.await() }
                     assumeTrue(
                         rows != null,
-                        "Observed no follow-feed rows within 30s from $INDEXER_RELAYS alone -- " +
+                        "Observed no follow-feed rows within 30s from $OPERATOR_RELAYS -- " +
                             "diagnostics has nothing real to report in this test environment.",
                     )
 
@@ -163,21 +160,20 @@ class LiveRelayTest {
             }
         }
 
-    /** The same self-bootstrapping proof for a LITERAL author set (no
-     * derived binding involved at all): fiatjaf's own kind:1 notes, from a
-     * fresh engine configured with ONLY the indexer relays. */
+    /** The same operator-policy proof for a literal author set (no derived
+     * binding involved at all): fiatjaf's own kind:1 notes. */
     @Test
-    fun authorsOwnNotesArriveWithNoWriteRelayConfigured() =
+    fun authorsOwnNotesArriveThroughOperatorAppRelays() =
         runBlocking {
-            NMPEngine(NMPConfig(indexerRelays = INDEXER_RELAYS)).use { engine ->
+            NMPEngine(NMPConfig(appRelays = OPERATOR_RELAYS)).use { engine ->
                 val notesFilter =
                     NMPFilter(kinds = listOf(1u), authors = NMPBinding.Literal(setOf(FIATJAF_HEX)), limit = 20u)
 
                 val rows = firstNonEmptyBatch(engine.observe(notesFilter), timeoutMs = 30_000)
                 assumeTrue(
                     rows != null,
-                    "Observed no kind:1 notes for fiatjaf within 30s from $INDEXER_RELAYS alone -- " +
-                        "his resolved write relays may be unreachable from this test environment.",
+                    "Observed no kind:1 notes for fiatjaf within 30s from $OPERATOR_RELAYS -- " +
+                        "the operator relays may be unreachable from this test environment.",
                 )
 
                 assertTrue(rows!!.isNotEmpty(), "expected at least one real note")

@@ -4,8 +4,7 @@ use super::*;
 
 #[cfg(test)]
 mod history_mutation_tests {
-    use nmp_grammar::{Derived, IdentityField, IndexedTagName, Selector};
-    use nmp_router::FixtureDirectory;
+    use nmp_grammar::{Binding, Derived, Filter, IdentityField, IndexedTagName, Selector};
     use nmp_store::MemoryStore;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
@@ -58,7 +57,7 @@ mod history_mutation_tests {
                     .collect(),
             )
             .unwrap();
-        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(store, 20);
         let opened = core.handle(EngineMsg::SubscribeHistory(history_query(47, kinds)));
         let id = opened
             .iter()
@@ -262,7 +261,7 @@ mod history_mutation_tests {
             2,
             4,
         );
-        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(store, 20);
         let opened = core.handle(EngineMsg::SubscribeHistory(query));
         let id = opened
             .iter()
@@ -341,7 +340,7 @@ mod history_mutation_tests {
             3,
             3,
         );
-        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(store, 20);
         let strict_id = core
             .handle(EngineMsg::SubscribeHistory(strict_query))
             .iter()
@@ -509,7 +508,7 @@ mod history_mutation_tests {
                     .collect(),
             )
             .unwrap();
-        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(store, 20);
         core.active_pubkey = Some(keys.public_key());
         let opened = core.handle(EngineMsg::SubscribeHistory(history_query(
             47,
@@ -681,7 +680,7 @@ mod history_mutation_tests {
             ..nmp_grammar::Filter::default()
         };
         let query = HistoryQuery::new(LiveQuery::from_filter(selection), 3, 6);
-        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(store, 20);
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
         let opened = core.handle(EngineMsg::SubscribeHistory(query));
         let id = opened
@@ -772,7 +771,7 @@ mod history_mutation_tests {
                     .collect(),
             )
             .unwrap();
-        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(store, 20);
         let opened = core.handle(EngineMsg::SubscribeHistory(history_query(
             47,
             BTreeSet::from([9]),
@@ -828,7 +827,7 @@ mod history_mutation_tests {
                     .collect(),
             )
             .unwrap();
-        let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 20);
+        let mut core = EngineCore::new(store, 20);
         let opened = core.handle(EngineMsg::SubscribeHistory(history_query(
             47,
             BTreeSet::from([9]),

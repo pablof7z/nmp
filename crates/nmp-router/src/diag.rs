@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use nmp_grammar::{ConcreteFilter, RelaySessionKey};
 
 use crate::budget::CompileBudget;
-use crate::facts::{Lane, PubkeyHex};
+use crate::facts::{Lane, PublicKey};
 use crate::plan::RelayPlan;
 use crate::solver::Shortfall;
 
@@ -45,7 +45,7 @@ pub struct RelayDiagnostics {
 #[derive(Clone, Debug, Default)]
 pub struct Diagnostics {
     pub per_session: BTreeMap<RelaySessionKey, RelayDiagnostics>,
-    pub uncovered_authors: BTreeMap<PubkeyHex, Shortfall>,
+    pub uncovered_authors: BTreeMap<PublicKey, Shortfall>,
     /// Distinct candidates rejected by the one whole-demand relay ceiling.
     /// They are absent from `per_session` by construction.
     pub sessions_refused_by_cap: usize,
@@ -63,13 +63,13 @@ pub struct Diagnostics {
 pub(crate) fn build(
     plan: &RelayPlan,
     budget: &CompileBudget,
-    uncovered_authors: BTreeMap<PubkeyHex, Shortfall>,
+    uncovered_authors: BTreeMap<PublicKey, Shortfall>,
     dropped_merge_rules: Vec<&'static str>,
 ) -> Diagnostics {
     let mut per_session = BTreeMap::new();
     for (session, reqs) in &plan.reqs {
         let mut by_lane: BTreeMap<Lane, usize> = BTreeMap::new();
-        let mut authors_served: BTreeSet<PubkeyHex> = BTreeSet::new();
+        let mut authors_served: BTreeSet<PublicKey> = BTreeSet::new();
         let mut filters = Vec::new();
         for req in reqs {
             filters.push(req.filter.clone());

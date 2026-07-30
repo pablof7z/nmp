@@ -47,7 +47,8 @@ cd nmp
 cargo run -p nmp-demo -- --secs 20
 ```
 
-- Connects to two public indexers, **discovers author relays**, streams real events.
+- Opts into the NIP-65 module, queries two exact operator sources, discovers
+  neutral author-route facts, and streams real events.
 - Prints the relay plan and wire activity it observed.
 - No Nostr key required. It's a running falsifier, not the shape of the public API.
 
@@ -68,7 +69,9 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 - ✅ Full connection lifecycle behind **one finite fan-out ceiling** over the whole read plan
 - ✅ Local / private / link-local / `.onion` targets **rejected by default** — resolved-IP admission is pinned per connection, closing a DNS-rebinding gap where a re-resolve could point an already-approved host somewhere internal
 - ✅ Permanently-failing relays retire cleanly instead of wedging a connection slot; the send queue behind them is bounded
-- ✅ **Self-bootstrapping NIP-65 outbox routing** — configure only indexers; the engine discovers each author's write/inbox relays
+- ✅ **Optional NIP-65 routing assembly** — core declares neutral unknown
+  author-route needs; the `nip65` feature owns exact source queries, canonical
+  kind:10002 winners, marker parsing, settlement, and atomic fact replacement
 - ✅ Parse-once typed ingest with bounded parallel signature verification
 - ✅ NIP-11 relay metadata (single-flight, LRU-bounded, proven raw-body ceiling)
 - ✅ NIP-77 negentropy with a gap-free live handoff — a distinct `REQ {limit:0}` reaches EOSE first, remains open through reconciliation/backfill, and reconnect repeats the same order; deterministic boundary/timeout/error falsifiers plus a genuine NIP-77 relay prove the flow. A follow-up ([#579](https://github.com/pablof7z/nmp/pull/579)) closed a subscription leak in the live-EOSE-timeout fallback path, where an orphaned `limit:0` candidate REQ could linger and mint phantom coverage.
@@ -93,12 +96,10 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 
 **Protocol modules** (opt-in — core stays kind-agnostic)
 - ✅ NIP-02 following — canonical kind:3, guarded tag-preserving follow/unfollow, on **Swift + Kotlin**
-- ✅ NIP-65 new-account bootstrap — `nmp-nip65` validates a finite exact
-  bootstrap set, composes the first kind:10002, and returns the ordinary
-  tracked write receipt. It never injects relay-directory facts: subsequent
-  author-outbox writes become routable only after the relay list returns
-  through ordinary live observation/ingest. Direct Rust today; native
-  projection remains explicit follow-up work.
+- ✅ NIP-65 Rust module — engine-free values validate and compose the first
+  kind:10002; the optional `nmp/nip65` facade publishes it through the ordinary
+  tracked write door and privately assembles automatic route discovery.
+  Native projection remains explicit follow-up work.
 - ✅ NIP-22 comments over NIP-73 targets — typed root/parent validation,
   thread demand, decode, and deterministic composition across Rust, FFI,
   Swift, and Kotlin. Composition is an engine-free protocol function returning

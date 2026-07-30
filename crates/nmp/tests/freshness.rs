@@ -8,7 +8,7 @@ use nmp_grammar::{
     RelaySessionKey, SourceAuthority,
 };
 use nmp_resolver::{HandleId, LiveQuery};
-use nmp_router::{FixtureDirectory, WireOp};
+use nmp_router::{FixtureRoutingFacts, WireOp};
 use nmp_store::{CoverageInterval, EventStore, MemoryStore, RelayObserved};
 use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::{Event, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent};
@@ -59,9 +59,9 @@ fn query(keys: &Keys, freshness: Freshness) -> LiveQuery {
 }
 
 fn core(store: MemoryStore, keys: &Keys, relay: &RelayUrl) -> EngineCore<MemoryStore> {
-    EngineCore::new(
+    EngineCore::new_with_fixture_routing_facts(
         store,
-        Box::new(FixtureDirectory::new().with_write(keys.public_key().to_hex(), [relay.clone()])),
+        FixtureRoutingFacts::new().with_outbound_routes(keys.public_key(), [relay.clone()]),
         10,
     )
 }
@@ -71,9 +71,9 @@ fn core_with_relays(
     keys: &Keys,
     relays: impl IntoIterator<Item = RelayUrl>,
 ) -> EngineCore<MemoryStore> {
-    EngineCore::new(
+    EngineCore::new_with_fixture_routing_facts(
         store,
-        Box::new(FixtureDirectory::new().with_write(keys.public_key().to_hex(), relays)),
+        FixtureRoutingFacts::new().with_outbound_routes(keys.public_key(), relays),
         10,
     )
 }
@@ -451,7 +451,7 @@ fn pinned_strict_max_age_uses_pinned_scope_for_coverage_and_rows() {
     let mut demand = Demand::new(filter(&keys), source, AccessContext::Public).unwrap();
     demand.cache = CacheMode::Strict;
     demand.freshness = Freshness::MaxAge { seconds: 3_600 };
-    let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+    let mut core = EngineCore::new(store, 10);
     tick(&mut core, 100_000);
     let effects = subscribe(&mut core, LiveQuery(demand));
     let (_, rows, evidence) = initial(&effects);

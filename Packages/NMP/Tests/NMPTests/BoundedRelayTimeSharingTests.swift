@@ -5,11 +5,11 @@ import XCTest
 
 final class BoundedRelayTimeSharingTests: XCTestCase {
     /// Issue #598's original public-API reproduction, promoted into NMP's
-    /// host Swift XCTest gate: the same hostname relay is already serving
-    /// live read demand and has supplied the author's kind:10002 write route.
-    /// A durable author-outbox write must therefore advance beyond
-    /// `.awaitingRelay`, reach the relay exactly once, consume its `OK`, and
-    /// feed the relay echo back into the still-live canonical query.
+    /// host Swift XCTest gate: one operator-provided app relay serves live reads
+    /// and is also an honest Auto destination. A durable write must advance
+    /// beyond `.awaitingRelay`, reach the relay exactly once, consume its
+    /// `OK`, and feed the relay echo back into the still-live canonical
+    /// query. No author route is learned implicitly by native core.
     @MainActor
     func testDurableAuthorOutboxWriteProgressesPastAwaitingRelay() async throws {
         let relay = try ControlledRelayHarness()
@@ -20,7 +20,6 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
         let engine = try NMPEngine(
             config: NMPConfig(
                 storePath: storePath,
-                indexerRelays: [relay.relayURL],
                 appRelays: [relay.relayURL],
                 fallbackRelays: [],
                 allowedLocalRelayHosts: ["localhost"],

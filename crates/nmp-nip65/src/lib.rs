@@ -1,28 +1,28 @@
 //! Protocol-owned NIP-65 account bootstrap.
 //!
-//! A brand-new author has no kind:10002 in NMP's relay directory, so an
-//! ordinary [`nmp::WriteRouting::Auto`] publication correctly fails
-//! closed. [`publish_relay_list_bootstrap`] publishes the author's first
+//! A brand-new author has no neutral route fact yet, so an ordinary automatic
+//! publication parks while its destinations are unknown.
+//! [`BootstrapRelayList::into_write_intent`] composes the author's first
 //! relay list to a validated exact relay set instead — an
-//! [`nmp::WriteRouting::Explicit`] minted by this crate, the same "protocol
+//! [`WriteRouting::Explicit`] minted by this crate, the same "protocol
 //! crate mints an exact route" pattern any other crate uses, running through
 //! the ordinary durable acceptance, signer, outbox, and tracked receipt
 //! pipeline. No dedicated routing variant is involved, and none is needed.
 //!
-//! The operation never mutates NMP's relay directory and never inserts a
+//! The operation never mutates NMP's neutral fact store and never inserts a
 //! synthetic network row or provenance fact. The new kind:10002 becomes a
-//! routing fact only after it returns through an ordinary relay subscription
-//! and the existing network-ingest path selects it as the canonical
-//! replaceable winner. Every later write uses ordinary
-//! [`nmp::WriteRouting::Auto`].
+//! routing fact only after it returns through the optional facade's ordinary
+//! query and this crate selects it as the canonical replaceable winner. Every
+//! later write uses ordinary automatic routing.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use nmp::{
-    CorrelationToken, Durability, Engine, EngineError, EventBuilder, Identity, Kind, PublicKey,
-    ReceiptStream, RelayUrl, Tag, WriteIntent, WritePayload, WriteRouting,
+use nmp_grammar::{
+    AccessContext, Binding, CorrelationToken, Demand, Durability, EventBuilder, Filter, Identity,
+    SourceAuthority, WriteIntent, WritePayload, WriteRouting,
 };
 use nostr::nips::nip65::RelayMetadata;
+use nostr::{Event, EventId, Kind, PublicKey, RelayUrl, Tag};
 
 /// Maximum number of exact relays the bootstrap publication may contact.
 ///
@@ -167,11 +167,15 @@ impl BootstrapRelayList {
     pub fn relay_list(&self) -> &[RelayListEntry] {
         &self.relay_list
     }
+
+    /// Mint the ordinary exact write intent. Engine binding belongs to the
+    /// optional facade assembly, not this protocol crate.
+    pub fn into_write_intent(self) -> WriteIntent {
+        compose_relay_list_bootstrap(self)
+    }
 }
 
-/// Refusals that occur before or while handing the ordinary write intent to
-/// the engine. Signer, route, and relay outcomes after handoff remain normal
-/// [`nmp::WriteStatus`] facts on the returned receipt.
+/// Refusals while validating the pure operation value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BootstrapRelayListError {
     EmptyBootstrapRelays,
@@ -181,7 +185,6 @@ pub enum BootstrapRelayListError {
     TooManyRelayListEntries { actual: usize, max: usize },
     DuplicateRelayListRelay { relay: RelayUrl },
     NoWriteCapableRelay,
-    Engine(EngineError),
 }
 
 impl std::fmt::Display for BootstrapRelayListError {
@@ -214,34 +217,11 @@ impl std::fmt::Display for BootstrapRelayListError {
             Self::NoWriteCapableRelay => {
                 f.write_str("the first NIP-65 relay list must name a write-capable relay")
             }
-            Self::Engine(error) => error.fmt(f),
         }
     }
 }
 
 impl std::error::Error for BootstrapRelayListError {}
-
-impl From<EngineError> for BootstrapRelayListError {
-    fn from(value: EngineError) -> Self {
-        Self::Engine(value)
-    }
-}
-
-/// Publish a brand-new account's first kind:10002 and return its ordinary
-/// stable-id tracked receipt.
-///
-/// The request's author must equal the engine's active account. A mismatch is
-/// deliberately reported by the normal receipt as a pre-acceptance
-/// [`nmp::WriteStatus::Failed`] fact; this function neither restamps the author
-/// nor installs a signer itself.
-pub fn publish_relay_list_bootstrap(
-    engine: &Engine,
-    request: BootstrapRelayList,
-) -> Result<ReceiptStream, BootstrapRelayListError> {
-    engine
-        .publish_tracked(compose_relay_list_bootstrap(request))
-        .map_err(Into::into)
-}
 
 fn compose_relay_list_bootstrap(request: BootstrapRelayList) -> WriteIntent {
     let BootstrapRelayList {
@@ -272,12 +252,251 @@ fn compose_relay_list_bootstrap(request: BootstrapRelayList) -> WriteIntent {
     }
 }
 
+/// NIP-65 Relay List Metadata.
+pub const RELAY_LIST_KIND: u16 = 10_002;
+
+/// Build the coordinator's ordinary exact-source query.
+///
+/// No sources means no question was asked, so this returns `None` rather
+/// than creating a source-less query that could later be mistaken for
+/// absence.
+pub fn relay_list_demand(
+    authors: &BTreeSet<PublicKey>,
+    sources: &BTreeSet<RelayUrl>,
+) -> Option<Demand> {
+    if authors.is_empty() || sources.is_empty() {
+        return None;
+    }
+    Demand::new(
+        Filter {
+            kinds: Some(BTreeSet::from([RELAY_LIST_KIND])),
+            authors: Some(Binding::Literal(
+                authors.iter().map(PublicKey::to_hex).collect(),
+            )),
+            ..Filter::default()
+        },
+        SourceAuthority::Pinned(sources.clone()),
+        AccessContext::Public,
+    )
+    .ok()
+}
+
+/// The directional meaning of one admitted current relay-list winner.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParsedAuthorRoutes {
+    pub outbound: BTreeSet<RelayUrl>,
+    pub inbound: BTreeSet<RelayUrl>,
+}
+
+/// Parse one winner after winner selection and before neutral fact mutation.
+///
+/// Unmarked rows enter both sets; `read` and `write` markers enter exactly
+/// one. Unknown markers, malformed URLs, and URLs refused by `admits` enter
+/// neither set. Sets deduplicate repeated URLs.
+pub fn parse_relay_list(
+    event: &Event,
+    mut admits: impl FnMut(&RelayUrl) -> bool,
+) -> ParsedAuthorRoutes {
+    let mut routes = ParsedAuthorRoutes::default();
+    for tag in event.tags.iter() {
+        let values = tag.as_slice();
+        if values.first().map(String::as_str) != Some("r") {
+            continue;
+        }
+        let Some(value) = values.get(1) else {
+            continue;
+        };
+        let Ok(relay) = RelayUrl::parse(value) else {
+            continue;
+        };
+        if !admits(&relay) {
+            continue;
+        }
+        match values.get(2).map(String::as_str) {
+            None => {
+                routes.outbound.insert(relay.clone());
+                routes.inbound.insert(relay);
+            }
+            Some("read") => {
+                routes.inbound.insert(relay);
+            }
+            Some("write") => {
+                routes.outbound.insert(relay);
+            }
+            Some(_) => {}
+        }
+    }
+    routes
+}
+
+/// One private-neutral replacement the facade must apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoordinatorUpdate {
+    Present {
+        author: PublicKey,
+        routes: ParsedAuthorRoutes,
+    },
+    Absent {
+        author: PublicKey,
+    },
+}
+
+/// A rerooted ordinary query and the revision settlements must cite.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoordinatorQuery {
+    pub revision: u64,
+    pub demand: Demand,
+}
+
+/// Pure owner of NIP-65 demand, winner, marker, and absence semantics.
+pub struct Nip65Coordinator {
+    sources: BTreeSet<RelayUrl>,
+    authors: BTreeSet<PublicKey>,
+    revision: u64,
+    winners: BTreeMap<PublicKey, Event>,
+    settled_sources: BTreeSet<RelayUrl>,
+    absent_emitted: BTreeSet<PublicKey>,
+}
+
+impl Nip65Coordinator {
+    pub fn new(sources: impl IntoIterator<Item = RelayUrl>) -> Self {
+        Self {
+            sources: sources.into_iter().collect(),
+            authors: BTreeSet::new(),
+            revision: 0,
+            winners: BTreeMap::new(),
+            settled_sources: BTreeSet::new(),
+            absent_emitted: BTreeSet::new(),
+        }
+    }
+
+    pub fn sources(&self) -> &BTreeSet<RelayUrl> {
+        &self.sources
+    }
+
+    pub fn authors(&self) -> &BTreeSet<PublicKey> {
+        &self.authors
+    }
+
+    /// Re-root over the current generic provider needs. An unchanged set does
+    /// not reopen. Zero sources opens no query and changes no author fact.
+    pub fn reroot(&mut self, authors: BTreeSet<PublicKey>) -> Option<CoordinatorQuery> {
+        if authors == self.authors {
+            return None;
+        }
+        self.authors = authors;
+        self.revision = self.revision.saturating_add(1);
+        self.winners
+            .retain(|author, _| self.authors.contains(author));
+        self.settled_sources.clear();
+        self.absent_emitted.clear();
+        relay_list_demand(&self.authors, &self.sources).map(|demand| CoordinatorQuery {
+            revision: self.revision,
+            demand,
+        })
+    }
+
+    /// Select canonical replaceable winners before parsing/admission.
+    pub fn observe(
+        &mut self,
+        events: impl IntoIterator<Item = Event>,
+        admits: impl FnMut(&RelayUrl) -> bool,
+    ) -> Vec<CoordinatorUpdate> {
+        self.observe_current_delta([], events, admits)
+    }
+
+    /// Apply one atomic delta from the authoritative current-row projection.
+    ///
+    /// Removals are applied before additions irrespective of delivery order.
+    /// This lets a replaceable winner's removal reveal an older current row
+    /// in the same batch without emitting a transient absence. A removed
+    /// winner with no replacement is forgotten immediately; if every exact
+    /// source has already settled, that cleared author becomes
+    /// [`CoordinatorUpdate::Absent`].
+    pub fn observe_current_delta(
+        &mut self,
+        removed: impl IntoIterator<Item = EventId>,
+        events: impl IntoIterator<Item = Event>,
+        mut admits: impl FnMut(&RelayUrl) -> bool,
+    ) -> Vec<CoordinatorUpdate> {
+        let removed: BTreeSet<EventId> = removed.into_iter().collect();
+        let mut changed = BTreeSet::new();
+        self.winners.retain(|author, event| {
+            let keep = !removed.contains(&event.id);
+            if !keep {
+                changed.insert(*author);
+            }
+            keep
+        });
+
+        for event in events {
+            if event.kind.as_u16() != RELAY_LIST_KIND || !self.authors.contains(&event.pubkey) {
+                continue;
+            }
+            let wins = self
+                .winners
+                .get(&event.pubkey)
+                .is_none_or(|current| candidate_wins(&event, current));
+            if !wins {
+                continue;
+            }
+            changed.insert(event.pubkey);
+            self.winners.insert(event.pubkey, event);
+        }
+
+        changed
+            .into_iter()
+            .filter_map(|author| {
+                if let Some(event) = self.winners.get(&author) {
+                    self.absent_emitted.remove(&author);
+                    return Some(CoordinatorUpdate::Present {
+                        author,
+                        routes: parse_relay_list(event, &mut admits),
+                    });
+                }
+                (self.settled_sources.len() == self.sources.len()
+                    && self.absent_emitted.insert(author))
+                .then_some(CoordinatorUpdate::Absent { author })
+            })
+            .collect()
+    }
+
+    /// Consume a settlement of the exact current request. One-of-N sources,
+    /// stale revisions, and undeclared relays settle nothing.
+    pub fn settle(&mut self, revision: u64, relay: &RelayUrl) -> Vec<CoordinatorUpdate> {
+        if revision != self.revision || !self.sources.contains(relay) {
+            return Vec::new();
+        }
+        self.settled_sources.insert(relay.clone());
+        if self.settled_sources.len() != self.sources.len() {
+            return Vec::new();
+        }
+        let absent: Vec<PublicKey> = self
+            .authors
+            .iter()
+            .filter(|author| {
+                !self.winners.contains_key(author) && !self.absent_emitted.contains(author)
+            })
+            .copied()
+            .collect();
+        absent
+            .into_iter()
+            .map(|author| {
+                self.absent_emitted.insert(author);
+                CoordinatorUpdate::Absent { author }
+            })
+            .collect()
+    }
+}
+
+fn candidate_wins(candidate: &Event, current: &Event) -> bool {
+    candidate.created_at > current.created_at
+        || (candidate.created_at == current.created_at && candidate.id < current.id)
+}
+
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use nmp::{EngineConfig, WriteStatus};
-    use nostr::Keys;
+    use nostr::{Keys, Timestamp};
 
     use super::*;
 
@@ -287,6 +506,21 @@ mod tests {
 
     fn entry(name: &str, usage: RelayUsage) -> RelayListEntry {
         RelayListEntry::new(relay(name), usage)
+    }
+
+    fn relay_list_event(keys: &Keys, created_at: u64, rows: &[(&str, Option<&str>)]) -> Event {
+        let tags = rows.iter().map(|(url, marker)| {
+            let mut row = vec!["r".to_string(), (*url).to_string()];
+            if let Some(marker) = marker {
+                row.push((*marker).to_string());
+            }
+            Tag::parse(row).unwrap()
+        });
+        nostr::EventBuilder::new(Kind::RelayList, "")
+            .tags(tags)
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .unwrap()
     }
 
     #[test]
@@ -376,7 +610,7 @@ mod tests {
         )
         .unwrap();
 
-        let intent = compose_relay_list_bootstrap(request);
+        let intent = request.into_write_intent();
         assert_eq!(intent.identity, Identity::Explicit(author));
         let WritePayload::Event(builder) = &intent.payload else {
             panic!("bootstrap must compose one builder")
@@ -402,65 +636,160 @@ mod tests {
         assert_eq!(relays, vec![bootstrap_a, bootstrap_b]);
     }
 
-    /// The request names the account the bootstrap is FOR, and that name is
-    /// now what selects the signing identity -- so bootstrapping a DIFFERENT
-    /// account than the active one is a legitimate write, not a mismatch.
-    /// With no signer registered for it, it parks on that exact key rather
-    /// than failing or drifting onto the active account.
     #[test]
-    fn a_bootstrap_for_another_account_parks_on_that_exact_key() {
-        let active = Keys::generate();
-        let different = Keys::generate();
-        let engine = Engine::new(EngineConfig::default()).unwrap();
-        let _registration = engine
-            .add_account(&active.secret_key().to_secret_hex())
-            .unwrap();
-        engine
-            .set_active_account(Some(active.public_key()))
-            .unwrap();
-        let request = BootstrapRelayList::new(
-            different.public_key(),
-            vec![relay("bootstrap")],
-            vec![entry("write", RelayUsage::Write)],
-        )
-        .unwrap();
-
-        let receipt = publish_relay_list_bootstrap(&engine, request).unwrap();
-        let mut awaited = None;
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while std::time::Instant::now() < deadline {
-            match receipt.statuses.recv_timeout(Duration::from_millis(100)) {
-                Ok(WriteStatus::AwaitingCapability { pubkey }) => {
-                    awaited = Some(pubkey);
-                    break;
-                }
-                Ok(_) => continue,
-                Err(_) => break,
-            }
-        }
-        assert_eq!(awaited, Some(different.public_key()));
-        engine.shutdown();
+    fn parser_preserves_unmarked_read_write_and_refuses_before_output() {
+        let keys = Keys::generate();
+        let both = relay("both");
+        let read = relay("read");
+        let write = relay("write");
+        let refused = relay("refused");
+        let event = relay_list_event(
+            &keys,
+            1,
+            &[
+                (both.as_str(), None),
+                (read.as_str(), Some("read")),
+                (write.as_str(), Some("write")),
+                (refused.as_str(), None),
+                ("not a relay", None),
+                ("wss://ignored.example", Some("future-marker")),
+            ],
+        );
+        let routes = parse_relay_list(&event, |url| url != &refused);
+        assert_eq!(routes.outbound, BTreeSet::from([both.clone(), write]));
+        assert_eq!(routes.inbound, BTreeSet::from([both, read]));
     }
 
     #[test]
-    fn engine_shutdown_remains_a_typed_synchronous_handoff_failure() {
+    fn coordinator_selects_winner_before_parse_and_settles_only_all_sources() {
         let keys = Keys::generate();
-        let engine = Engine::new(EngineConfig::default()).unwrap();
-        engine.shutdown();
-        let request = BootstrapRelayList::new(
-            keys.public_key(),
-            vec![relay("bootstrap")],
-            vec![entry("write", RelayUsage::Write)],
-        )
-        .unwrap();
+        let author = keys.public_key();
+        let source_a = relay("source-a");
+        let source_b = relay("source-b");
+        let mut coordinator = Nip65Coordinator::new([source_a.clone(), source_b.clone()]);
+        let query = coordinator
+            .reroot(BTreeSet::from([author]))
+            .expect("new need opens exact query");
+        assert_eq!(
+            query.demand.source,
+            SourceAuthority::Pinned(BTreeSet::from([source_a.clone(), source_b.clone()]))
+        );
 
-        let error = match publish_relay_list_bootstrap(&engine, request) {
-            Ok(_) => panic!("a shut down engine must not return a receipt"),
-            Err(error) => error,
+        let newer = relay_list_event(&keys, 2, &[("wss://new.example", None)]);
+        let older = relay_list_event(&keys, 1, &[("wss://old.example", None)]);
+        let updates = coordinator.observe([newer, older], |_| true);
+        assert_eq!(updates.len(), 1, "older arrival cannot overwrite winner");
+        let CoordinatorUpdate::Present { routes, .. } = &updates[0] else {
+            panic!("positive winner")
         };
         assert_eq!(
-            error,
-            BootstrapRelayListError::Engine(EngineError::EngineClosed)
+            routes.outbound,
+            BTreeSet::from([RelayUrl::parse("wss://new.example").unwrap()])
+        );
+        assert!(coordinator.settle(query.revision, &source_a).is_empty());
+        assert!(
+            coordinator.settle(query.revision, &source_b).is_empty(),
+            "a winner prevents absence"
+        );
+    }
+
+    #[test]
+    fn zero_sources_and_stale_or_partial_settlement_never_mint_absence() {
+        let author = Keys::generate().public_key();
+        let mut zero = Nip65Coordinator::new([]);
+        assert!(zero.reroot(BTreeSet::from([author])).is_none());
+
+        let source_a = relay("source-a");
+        let source_b = relay("source-b");
+        let mut coordinator = Nip65Coordinator::new([source_a.clone(), source_b.clone()]);
+        let query = coordinator.reroot(BTreeSet::from([author])).expect("query");
+        assert!(coordinator
+            .settle(query.revision.saturating_sub(1), &source_a)
+            .is_empty());
+        assert!(coordinator.settle(query.revision, &source_a).is_empty());
+        assert_eq!(
+            coordinator.settle(query.revision, &source_b),
+            vec![CoordinatorUpdate::Absent { author }]
+        );
+        assert!(
+            coordinator.settle(query.revision, &source_b).is_empty(),
+            "absence emits once"
+        );
+    }
+
+    #[test]
+    fn authoritative_winner_removal_reveals_predecessor_atomically() {
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let source = relay("source");
+        let mut coordinator = Nip65Coordinator::new([source.clone()]);
+        let query = coordinator.reroot(BTreeSet::from([author])).expect("query");
+        let older = relay_list_event(&keys, 1, &[("wss://old.example", None)]);
+        let newer = relay_list_event(&keys, 2, &[("wss://new.example", None)]);
+
+        assert_eq!(coordinator.observe([newer.clone()], |_| true).len(), 1);
+        assert!(coordinator.settle(query.revision, &source).is_empty());
+
+        let updates = coordinator.observe_current_delta([newer.id], [older.clone()], |_| true);
+        assert_eq!(
+            updates,
+            vec![CoordinatorUpdate::Present {
+                author,
+                routes: ParsedAuthorRoutes {
+                    outbound: BTreeSet::from([RelayUrl::parse("wss://old.example").unwrap()]),
+                    inbound: BTreeSet::from([RelayUrl::parse("wss://old.example").unwrap()]),
+                },
+            }],
+            "same-batch replacement must never expose transient absence"
+        );
+    }
+
+    #[test]
+    fn authoritative_winner_removal_clears_winner_and_settles_absent() {
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let source = relay("source");
+        let mut coordinator = Nip65Coordinator::new([source.clone()]);
+        let query = coordinator.reroot(BTreeSet::from([author])).expect("query");
+        let winner = relay_list_event(&keys, 2, &[("wss://winner.example", None)]);
+        assert_eq!(coordinator.observe([winner.clone()], |_| true).len(), 1);
+        assert!(coordinator.settle(query.revision, &source).is_empty());
+
+        assert_eq!(
+            coordinator.observe_current_delta([winner.id], [], |_| true),
+            vec![CoordinatorUpdate::Absent { author }]
+        );
+
+        let later = relay_list_event(&keys, 3, &[("wss://later.example", None)]);
+        assert!(
+            matches!(
+                coordinator.observe([later], |_| true).as_slice(),
+                [CoordinatorUpdate::Present { author: updated, .. }] if updated == &author
+            ),
+            "a later positive row must overwrite session-derived absence"
+        );
+    }
+
+    #[test]
+    fn removing_a_non_winner_does_not_clear_the_current_row() {
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let mut coordinator = Nip65Coordinator::new([relay("source")]);
+        coordinator.reroot(BTreeSet::from([author])).expect("query");
+        let older = relay_list_event(&keys, 1, &[("wss://old.example", None)]);
+        let newer = relay_list_event(&keys, 2, &[("wss://new.example", None)]);
+        assert_eq!(
+            coordinator
+                .observe([newer.clone(), older.clone()], |_| true)
+                .len(),
+            1
+        );
+
+        assert!(
+            coordinator
+                .observe_current_delta([older.id], [], |_| true)
+                .is_empty(),
+            "a removed row that was never the winner cannot affect the fact"
         );
     }
 }

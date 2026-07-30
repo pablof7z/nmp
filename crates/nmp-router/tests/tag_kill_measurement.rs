@@ -29,15 +29,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, SourceAuthority};
 use nmp_router::{
-    test_relay, DiscoveryKinds, FixtureDirectory, RelayUrl, Router, RuleRegistry,
-    MAX_TAG_VALUES_PER_FILTER,
+    test_relay, FixtureRoutingFacts, RelayUrl, Router, RuleRegistry, MAX_TAG_VALUES_PER_FILTER,
 };
 
 /// A realistic mid-size mosaico channel catalog.
 const NUM_GROUPS: usize = 300;
 
-/// Group state is pinned to the NIP-29 host set — mosaico pins every
-/// observation to its configured relays rather than routing by outbox.
+/// Channel state is pinned to an exact host set — every observation names
+/// its configured relays rather than routing by author coverage.
 const NUM_HOSTS: usize = 2;
 
 /// Relay admission thresholds, carried over verbatim from
@@ -127,19 +126,18 @@ fn print_measurement(label: &str, m: &Measurement) {
 /// `MAX_TAG_VALUES_PER_FILTER`. Reported honestly, not hidden.
 #[test]
 fn tag_axis_stays_within_relay_subscription_limits_once_coalesced() {
-    let dir = FixtureDirectory::new();
+    let dir = FixtureRoutingFacts::new();
     let demand = falsifier_demand();
-    let discovery = DiscoveryKinds::default();
     let cap = NUM_HOSTS;
 
     // ---- Tier 1: dedup-only floor (registry EMPTY) ----------------------
-    let mut router_dedup_only = Router::new(discovery.clone(), RuleRegistry::dedup_only());
+    let mut router_dedup_only = Router::new(RuleRegistry::dedup_only());
     router_dedup_only.compile(&demand, &dir, cap);
     let m_dedup = measure(&router_dedup_only);
     print_measurement("dedup-only floor", &m_dedup);
 
     // ---- Tier 2: the full proven-widening registry -----------------------
-    let mut router_with_union = Router::new(discovery, RuleRegistry::default_widen_only());
+    let mut router_with_union = Router::new(RuleRegistry::default_widen_only());
     router_with_union.compile(&demand, &dir, cap);
     let m_union = measure(&router_with_union);
     print_measurement("with default_widen_only()", &m_union);

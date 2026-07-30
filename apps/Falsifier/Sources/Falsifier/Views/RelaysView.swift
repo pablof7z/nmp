@@ -1,9 +1,8 @@
 // Relays derived from follows' kind:10002, ranked app-side by frequency
 // (M5 plan §3 table row 4). Proves a depth-1 derived read of a DIFFERENT
-// kind, and makes outbox discovery legible: this screen can only ever
-// DISPLAY relays -- there is no `relays:` parameter on `NMPFilter` for it to
-// feed back into routing (ledger #3). That missing knob is itself the
-// thesis evidence, not a limitation of this screen.
+// kind. This screen can only ever DISPLAY relays from protocol events; it
+// cannot install them as core routing facts. Native core has no implicit
+// NIP-65 provider or protocol-kind routing lane.
 
 import SwiftUI
 import NMP

@@ -13,23 +13,14 @@
 use super::*;
 
 use nmp::mechanism::core::{StalledWrite, StalledWriteStage};
-use nmp_router::{Lane, LanedRelay, LiveDirectory, RelayDirectory};
+use nmp_router::FixtureRoutingFacts;
 
-fn directory_knowing(author: &Keys, relay: &RelayUrl) -> LiveDirectory {
-    let mut directory = LiveDirectory::builder()
-        .indexers([RelayUrl::parse("wss://indexer.example").unwrap()])
-        .build();
-    directory.ingest_write_relays(
-        author.public_key().to_hex(),
-        vec![LanedRelay::new(relay.clone(), Lane::Nip65Write)],
-    );
-    directory
+fn directory_knowing(author: &Keys, relay: &RelayUrl) -> FixtureRoutingFacts {
+    FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()])
 }
 
-fn empty_directory() -> LiveDirectory {
-    LiveDirectory::builder()
-        .indexers([RelayUrl::parse("wss://indexer.example").unwrap()])
-        .build()
+fn empty_directory() -> FixtureRoutingFacts {
+    FixtureRoutingFacts::new()
 }
 
 fn stalled<S: EventStore>(core: &EngineCore<S>) -> Vec<StalledWrite> {
@@ -62,7 +53,8 @@ fn publish_signed<S: EventStore>(
 #[test]
 fn an_unroutable_write_is_listed_with_the_reason_its_receipt_was_parked_with() {
     let author = Keys::generate();
-    let mut core = EngineCore::new(MemoryStore::new(), Box::new(empty_directory()), 10);
+    let mut core =
+        EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), empty_directory(), 10);
     activate(&mut core, &author);
 
     let accepted = core.handle(EngineMsg::Publish(WriteIntent {
@@ -114,7 +106,8 @@ fn an_unroutable_write_is_listed_with_the_reason_its_receipt_was_parked_with() {
 fn an_unsignable_write_names_the_frozen_author_across_an_account_switch() {
     let author = Keys::generate();
     let someone_else = Keys::generate();
-    let mut core = EngineCore::new(MemoryStore::new(), Box::new(empty_directory()), 10);
+    let mut core =
+        EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), empty_directory(), 10);
     activate(&mut core, &author);
 
     let accepted = core.handle(EngineMsg::Publish(WriteIntent {
@@ -159,9 +152,9 @@ fn an_unsignable_write_names_the_frozen_author_across_an_account_switch() {
 fn a_routed_write_is_undeliverable_only_while_no_destination_is_connected() {
     let author = Keys::generate();
     let relay = RelayUrl::parse("wss://non-existent.example").unwrap();
-    let mut core = EngineCore::new(
+    let mut core = EngineCore::new_with_fixture_routing_facts(
         MemoryStore::new(),
-        Box::new(directory_knowing(&author, &relay)),
+        directory_knowing(&author, &relay),
         10,
     );
     activate(&mut core, &author);
@@ -218,7 +211,8 @@ fn a_routed_write_is_undeliverable_only_while_no_destination_is_connected() {
 fn the_detail_window_is_bounded_while_the_census_stays_exact() {
     const PARKED: u64 = 200;
     let author = Keys::generate();
-    let mut core = EngineCore::new(MemoryStore::new(), Box::new(empty_directory()), 10);
+    let mut core =
+        EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), empty_directory(), 10);
     activate(&mut core, &author);
 
     for i in 0..PARKED {
@@ -271,7 +265,8 @@ fn the_detail_window_is_bounded_while_the_census_stays_exact() {
 #[test]
 fn two_receipts_for_the_same_bytes_get_distinct_descriptors() {
     let author = Keys::generate();
-    let mut core = EngineCore::new(MemoryStore::new(), Box::new(empty_directory()), 10);
+    let mut core =
+        EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), empty_directory(), 10);
     activate(&mut core, &author);
 
     for _ in 0..2 {
@@ -316,9 +311,9 @@ fn a_reopen_reproduces_the_same_descriptor_and_acceptance_instant() {
     let relay = RelayUrl::parse("wss://non-existent.example").unwrap();
 
     let before = {
-        let mut core = EngineCore::new(
+        let mut core = EngineCore::new_with_fixture_routing_facts(
             RedbStore::open(&path).unwrap(),
-            Box::new(directory_knowing(&author, &relay)),
+            directory_knowing(&author, &relay),
             10,
         );
         activate(&mut core, &author);
@@ -336,9 +331,9 @@ fn a_reopen_reproduces_the_same_descriptor_and_acceptance_instant() {
         rows
     };
 
-    let mut reopened = EngineCore::new(
+    let mut reopened = EngineCore::new_with_fixture_routing_facts(
         RedbStore::open(&path).unwrap(),
-        Box::new(directory_knowing(&author, &relay)),
+        directory_knowing(&author, &relay),
         10,
     );
     activate(&mut reopened, &author);
@@ -364,9 +359,9 @@ fn a_reopen_reproduces_the_same_descriptor_and_acceptance_instant() {
 fn reading_the_list_changes_no_scheduler_state() {
     let author = Keys::generate();
     let relay = RelayUrl::parse("wss://non-existent.example").unwrap();
-    let mut core = EngineCore::new(
+    let mut core = EngineCore::new_with_fixture_routing_facts(
         MemoryStore::new(),
-        Box::new(directory_knowing(&author, &relay)),
+        directory_knowing(&author, &relay),
         10,
     );
     activate(&mut core, &author);

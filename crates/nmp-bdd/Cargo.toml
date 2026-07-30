@@ -30,10 +30,11 @@ nmp-local-signer.workspace = true
 nmp-signer.workspace = true
 # `unstable-mechanism` is #52 Q3's sanctioned injection hatch and this crate
 # is the consumer it exists for: it builds the REAL engine over an
-# in-memory store and a fixture directory of scripted in-process relays,
+# in-memory store and a static neutral fact snapshot of scripted relays,
 # and takes the same engine's `Handle` back out to fold the raw delta and
-# diagnostics channels its `Then` steps assert on.
-nmp = { workspace = true, features = ["unstable-mechanism"] }
+# diagnostics channels its `Then` steps assert on. `nip65` drives the
+# feature-on coordinator scenarios through ordinary pinned queries.
+nmp = { workspace = true, features = ["unstable-mechanism", "nip65"] }
 nmp-test-support.workspace = true
 
 cucumber = "0.21"

@@ -6,7 +6,7 @@ import NMPUI
 
 @MainActor
 final class GalleryModel: ObservableObject {
-    static let indexers = ["wss://purplepag.es", "wss://relay.primal.net"]
+    static let appRelays = ["wss://purplepag.es", "wss://relay.primal.net"]
     static let profile = "nprofile1qqsrhuxx8l9ex335q7he0f09aej04zpazpl0ne2cgukyawd24mayt8gpzfmhxue69uhhqatjwpkx2urpvuhx2ucl9q7qz"
     static let article = "naddr1qq3xummnw3ez6atw94shqupdv9kz6emfdaexumedwa5xjar994hx76tnv5pzpqlkerf45wg3uht9d22ym7hdj9xlnklpryzk5px0hd8nc8xu4j6aqvzqqqr4guzrk365"
     static let note = "nevent1qqsvgksrcarvjcltp7a20s3ux9d626zdj8xsdmyduqpz8dudvldl25gzyqalp33lewf5vdq847t6te0wvnags0gs0mu72kz8938tn24wlfze6fh6mfe"
@@ -27,7 +27,7 @@ final class GalleryModel: ObservableObject {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
         let store = caches?.appendingPathComponent("nmp-ui-gallery-v7.redb").path
         engine = try NMPEngine(
-            config: NMPConfig(storePath: store, indexerRelays: Self.indexers)
+            config: NMPConfig(storePath: store, appRelays: Self.appRelays)
         )
         following = try NMPFollowing(engine: engine, target: Self.profilePubkey)
         observationFactory = .live(engine: engine, resolve: Self.referenceDemand)

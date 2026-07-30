@@ -29,8 +29,7 @@ use proptest::prelude::*;
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, SourceAuthority};
 use nmp_router::{
-    DiscoveryKinds, FixtureDirectory, RelayUrl, Router, RuleRegistry, SubId, WireDelta, WireOp,
-    WireReq,
+    FixtureRoutingFacts, RelayUrl, Router, RuleRegistry, SubId, WireDelta, WireOp, WireReq,
 };
 
 const CAP: usize = 64;
@@ -68,13 +67,10 @@ fn atom(author_n: u32, limit: Option<usize>) -> ContextualAtom {
     pinned_atom(kind1(&[author_n], limit))
 }
 
-fn router() -> (FixtureDirectory, Router) {
+fn router() -> (FixtureRoutingFacts, Router) {
     (
-        FixtureDirectory::new(),
-        Router::new(
-            DiscoveryKinds::default(),
-            RuleRegistry::default_widen_only(),
-        ),
+        FixtureRoutingFacts::new(),
+        Router::new(RuleRegistry::default_widen_only()),
     )
 }
 
@@ -222,8 +218,8 @@ fn churning_a_limited_atoms_author_set_overwrites_in_place() {
 /// which registry produced the survivors.
 #[test]
 fn a_registry_without_author_union_still_keeps_sub_ids_distinct() {
-    let dir = FixtureDirectory::new();
-    let mut router = Router::new(DiscoveryKinds::default(), RuleRegistry::dedup_only());
+    let dir = FixtureRoutingFacts::new();
+    let mut router = Router::new(RuleRegistry::dedup_only());
     let demand = BTreeSet::from([atom(0xaa, None), atom(0xbb, None)]);
     let delta = router.compile(&demand, &dir, CAP);
 
@@ -869,13 +865,13 @@ fn same_id_implies_merged_or_the_assignment_kept_them_distinct() {
         second in prop::collection::vec(arb_filter(), 1..5),
         widen in any::<bool>(),
     )| {
-        let dir = FixtureDirectory::new();
+        let dir = FixtureRoutingFacts::new();
         let rules = if widen {
             RuleRegistry::default_widen_only()
         } else {
             RuleRegistry::dedup_only()
         };
-        let mut router = Router::new(DiscoveryKinds::default(), rules);
+        let mut router = Router::new(rules);
         let mut wire = WireState::new();
 
         let demand: BTreeSet<ContextualAtom> = with_author_siblings(first);

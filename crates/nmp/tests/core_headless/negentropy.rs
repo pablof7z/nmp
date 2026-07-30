@@ -97,6 +97,21 @@ fn finish_neg_with_remote_event<S: EventStore>(
     }
 }
 
+fn has_request_terminal(effects: &[Effect], terminal: RequestTerminal) -> bool {
+    effects.iter().any(|effect| match effect {
+        Effect::EmitObservationEvidence(_, evidence) => evidence.iter().any(|item| {
+            matches!(
+                item.fact,
+                ObservationFact::RequestSettled {
+                    terminal: candidate,
+                    ..
+                } if candidate == terminal
+            )
+        }),
+        _ => false,
+    })
+}
+
 /// Test 3 (ledger #8) first half: an unprobed relay (never even connected,
 /// so its `Prober` state stays `Unknown`) must never see `Effect::NegOpen`
 /// -- only a plain REQ.
@@ -104,7 +119,7 @@ fn finish_neg_with_remote_event<S: EventStore>(
 fn unprobed_relay_never_routes_to_negentropy() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
 
     let effects = core.handle(EngineMsg::Subscribe(literal_query(
@@ -123,7 +138,7 @@ fn unprobed_relay_never_routes_to_negentropy() {
 fn explicit_nip11_negative_suppresses_probe_without_minting_behavioral_proof() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
     let subscribed = core.handle(EngineMsg::Subscribe(literal_query(
         &[1],
@@ -193,7 +208,7 @@ fn explicit_nip11_negative_suppresses_probe_without_minting_behavioral_proof() {
 fn positive_nip11_advertisement_starts_probe_but_is_not_behavioral_proof() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
     let _ = core.handle(EngineMsg::Subscribe(literal_query(
         &[1],
@@ -231,7 +246,7 @@ fn positive_nip11_advertisement_starts_probe_but_is_not_behavioral_proof() {
 fn absent_supported_nips_is_proven_document_unknown_not_explicit_negative() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
     let _ = core.handle(EngineMsg::Subscribe(literal_query(
         &[1],
@@ -271,7 +286,7 @@ fn absent_supported_nips_is_proven_document_unknown_not_explicit_negative() {
 fn nip11_diagnostics_freshness_expires_from_engine_clock_without_another_acquisition() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
     let _ = core.handle(EngineMsg::Subscribe(literal_query(
         &[1],
@@ -310,7 +325,7 @@ fn nip11_diagnostics_freshness_expires_from_engine_clock_without_another_acquisi
 /// compiled plan may be replayed or capability-probed.
 #[test]
 fn connected_relay_outside_the_compiled_plan_emits_no_read_wire_effect() {
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     let unplanned = RelayUrl::parse("wss://unplanned.example.com").unwrap();
 
     let effects = core.handle(EngineMsg::RelayConnected(
@@ -338,9 +353,9 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
     let a = Keys::generate();
     let b = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [relay0.clone()])
-        .with_write(b.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [relay0.clone()])
+        .with_outbound_routes(b.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
 
     // Bootstrap: a's kind:1 atom -- the relay is `Unknown` at this point
@@ -421,13 +436,19 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
         public_session(&relay0),
         eose_frame(&wire_sub_string(&live_sub_id)),
     ));
-    let neg_sub_id = effects
+    let (neg_sub_id, initial_neg_hex) = effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::NegOpen(_, sub_id, ..) => Some(sub_id),
+            Effect::NegOpen(_, sub_id, _, initial_hex) => {
+                Some((sub_id.clone(), initial_hex.clone()))
+            }
             _ => None,
         })
         .expect("the live EOSE barrier must open Negentropy");
+    assert!(
+        !has_request_terminal(&effects, RequestTerminal::Eose),
+        "the limit:0 barrier opens NEG but does not settle the request"
+    );
     assert!(
         !effects
             .iter()
@@ -435,7 +456,7 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
         "a limit:0 EOSE must never mint coverage even when the relay overdelivered"
     );
     assert_ne!(
-        neg_sub_id, &live_sub_id,
+        &neg_sub_id, &live_sub_id,
         "REQ and NEG ids are separate namespaces"
     );
     assert_eq!(
@@ -470,6 +491,148 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
         "the live-first handoff must deliver a backdated boundary event"
     );
 
+    // The relay has one stored event the local snapshot lacks. Completing
+    // NEG must not settle until that exact id returns through the ordinary
+    // backfill EVENT + EOSE path.
+    use ::negentropy::{Id as NegId, Negentropy as RawNegentropy, NegentropyStorageVector};
+    let missing = nmp_resolver::testkit::kind1(&b, "missing at NEG snapshot", 2);
+    let mut relay_storage = NegentropyStorageVector::new();
+    relay_storage
+        .insert(
+            missing.created_at.as_secs(),
+            NegId::from_byte_array(*missing.id.as_bytes()),
+        )
+        .unwrap();
+    relay_storage.seal().unwrap();
+    let mut relay_side = RawNegentropy::owned(relay_storage, 0).unwrap();
+    let mut client_message = initial_neg_hex;
+    let completed = loop {
+        let relay_reply = relay_side
+            .reconcile(&hex::decode(&client_message).unwrap())
+            .unwrap();
+        let round = core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            public_session(&relay0),
+            neg_msg_frame(&wire_sub_string(&neg_sub_id), &hex::encode(relay_reply)),
+        ));
+        if let Some(next) = round.iter().find_map(|effect| match effect {
+            Effect::NegMsg(url, id, next) if url == &relay0 && id == &neg_sub_id => {
+                Some(next.clone())
+            }
+            _ => None,
+        }) {
+            client_message = next;
+            continue;
+        }
+        break round;
+    };
+    assert!(
+        !has_request_terminal(&completed, RequestTerminal::Nip77),
+        "NEG with missing ids is not settled before backfill"
+    );
+    let (backfill_id, backfill_filter) = req_for(&completed, &relay0);
+    let backfill_id = backfill_id.clone();
+    assert_eq!(
+        backfill_filter.ids,
+        Some(BTreeSet::from([missing.id.to_hex()])),
+        "the backfill asks for exactly the missing relay id"
+    );
+    let ingested = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay0),
+        event_frame(&wire_sub_string(&backfill_id), missing.clone()),
+    ));
+    assert!(
+        ingested.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitRows(_, rows, _) if rows.iter().any(|delta|
+                matches!(delta, RowDelta::Added(row) if row.event.id == missing.id))
+        )),
+        "missing event is ingested before its backfill settles"
+    );
+    assert!(!has_request_terminal(&ingested, RequestTerminal::Nip77));
+    let settled = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay0),
+        eose_frame(&wire_sub_string(&backfill_id)),
+    ));
+    assert!(
+        has_request_terminal(&settled, RequestTerminal::Nip77),
+        "successful NIP-77 settles only after missing-id ingestion and EOSE"
+    );
+
+    // A second broad shape where both sides are empty settles directly at
+    // NEG completion: no backfill REQ is invented, and the terminal is still
+    // NIP-77 rather than the live-first barrier's EOSE.
+    let empty_shape = core.handle(EngineMsg::Subscribe(literal_query(
+        &[2],
+        &b.public_key().to_hex(),
+    )));
+    let (empty_live_id, empty_live_filter) = req_for(&empty_shape, &relay0);
+    let empty_live_id = empty_live_id.clone();
+    assert_eq!(empty_live_filter.limit, Some(0));
+    let opened_empty = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay0),
+        eose_frame(&wire_sub_string(&empty_live_id)),
+    ));
+    assert!(!has_request_terminal(&opened_empty, RequestTerminal::Eose));
+    let (empty_neg_id, mut empty_client_message) = opened_empty
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::NegOpen(_, id, _, initial) => Some((id.clone(), initial.clone())),
+            _ => None,
+        })
+        .expect("empty broad shape opens NEG after its live barrier");
+    let mut empty_storage = NegentropyStorageVector::new();
+    empty_storage.seal().unwrap();
+    let mut empty_relay = RawNegentropy::owned(empty_storage, 0).unwrap();
+    let empty_settled = loop {
+        let reply = empty_relay
+            .reconcile(&hex::decode(&empty_client_message).unwrap())
+            .unwrap();
+        let round = core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            public_session(&relay0),
+            neg_msg_frame(&wire_sub_string(&empty_neg_id), &hex::encode(reply)),
+        ));
+        if let Some(next) = round.iter().find_map(|effect| match effect {
+            Effect::NegMsg(url, id, next) if url == &relay0 && id == &empty_neg_id => {
+                Some(next.clone())
+            }
+            _ => None,
+        }) {
+            empty_client_message = next;
+            continue;
+        }
+        break round;
+    };
+    assert!(
+        has_request_terminal(&empty_settled, RequestTerminal::Nip77),
+        "NIP-77 with no missing ids settles at reconciliation completion"
+    );
+    assert!(
+        empty_settled
+            .iter()
+            .all(|effect| !matches!(effect, Effect::Wire(_))),
+        "no-missing completion opens no backfill request"
+    );
+
     // A LIMITED (small-exact-result) query on the SAME relay stays on plain
     // REQ even though the relay is Supported -- ledger #8's REQ-fallback
     // selection rule (a different skeleton -- kind:7 -- so it is a brand
@@ -499,11 +662,11 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
     let healthy = Keys::generate();
     let relay = RelayUrl::parse("wss://neg-failure.example.com").unwrap();
     let healthy_relay = RelayUrl::parse("wss://neg-healthy.example.com").unwrap();
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [relay.clone()])
-        .with_write(b.public_key().to_hex(), [relay.clone()])
-        .with_write(healthy.public_key().to_hex(), [healthy_relay.clone()]);
-    let mut core = EngineCore::new(FailIngestStore::armed(), Box::new(dir), 10);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [relay.clone()])
+        .with_outbound_routes(b.public_key(), [relay.clone()])
+        .with_outbound_routes(healthy.public_key(), [healthy_relay.clone()]);
+    let mut core = EngineCore::new_with_fixture_routing_facts(FailIngestStore::armed(), dir, 10);
 
     let _ = core.handle(EngineMsg::Subscribe(literal_query(
         &[1],
@@ -589,6 +752,10 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
             .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
         "the backfill EOSE must retire the poisoned NEG owner without coverage: {completed:?}"
     );
+    assert!(
+        !has_request_terminal(&completed, RequestTerminal::Nip77),
+        "a failed backfill commit must not become NIP-77 absence evidence"
+    );
     let atom_a = ctx_atom(cf(&[1], &[&a.public_key().to_hex()]));
     let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
     assert_eq!(core.get_coverage(&atom_a, &relay), None);
@@ -631,7 +798,7 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
 fn relay_that_rejects_the_probe_is_classified_unsupported_and_stays_on_req() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
 
     let effects = core.handle(EngineMsg::Subscribe(literal_query(
@@ -702,9 +869,9 @@ fn stale_negentropy_session_falls_back_to_req_after_the_liveness_deadline() {
     let a = Keys::generate();
     let b = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [relay0.clone()])
-        .with_write(b.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [relay0.clone()])
+        .with_outbound_routes(b.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
 
     let effects = core.handle(EngineMsg::Subscribe(literal_query(
@@ -787,9 +954,9 @@ fn neg_err_falls_back_without_closing_the_active_live_req() {
     let a = Keys::generate();
     let b = Keys::generate();
     let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [relay.clone()])
-        .with_write(b.public_key().to_hex(), [relay.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [relay.clone()])
+        .with_outbound_routes(b.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
 
     let initial = core.handle(EngineMsg::Subscribe(literal_query(
@@ -858,9 +1025,9 @@ fn live_eose_timeout_uses_a_distinct_backlog_and_keeps_overlap_until_proven() {
     let a = Keys::generate();
     let b = Keys::generate();
     let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [relay.clone()])
-        .with_write(b.public_key().to_hex(), [relay.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [relay.clone()])
+        .with_outbound_routes(b.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
 
     let initial = core.handle(EngineMsg::Subscribe(literal_query(
@@ -931,9 +1098,9 @@ fn reconnect_repeats_live_first_and_only_the_fresh_generation_eose_opens_neg() {
     let a = Keys::generate();
     let b = Keys::generate();
     let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [relay.clone()])
-        .with_write(b.public_key().to_hex(), [relay.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [relay.clone()])
+        .with_outbound_routes(b.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
 
     let _ = core.handle(EngineMsg::Subscribe(literal_query(
@@ -1008,9 +1175,9 @@ fn withdrawing_all_demand_closes_live_candidate_and_every_repair_owner() {
     let a = Keys::generate();
     let b = Keys::generate();
     let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [relay.clone()])
-        .with_write(b.public_key().to_hex(), [relay.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [relay.clone()])
+        .with_outbound_routes(b.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
 
     let initial = core.handle(EngineMsg::Subscribe(literal_query(
@@ -1081,7 +1248,7 @@ fn withdrawing_all_demand_closes_live_candidate_and_every_repair_owner() {
 fn live_eose_timeout_fallback_then_full_withdrawal_closes_orphaned_candidate() {
     let a = Keys::generate();
     let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
 
     let subscribed = core.handle(EngineMsg::Subscribe(literal_query(
@@ -1181,9 +1348,9 @@ fn live_eose_timeout_fallback_then_supersession_closes_orphaned_candidate() {
     let a = Keys::generate();
     let b = Keys::generate();
     let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [relay.clone()])
-        .with_write(b.public_key().to_hex(), [relay.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [relay.clone()])
+        .with_outbound_routes(b.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
 
     let initial = core.handle(EngineMsg::Subscribe(literal_query(
@@ -1286,9 +1453,9 @@ fn a_reopened_backlog_req_never_inherits_a_closed_incarnations_eose() {
     let a = Keys::generate();
     let b = Keys::generate();
     let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [relay.clone()])
-        .with_write(b.public_key().to_hex(), [relay.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [relay.clone()])
+        .with_outbound_routes(b.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
 
     let initial = core.handle(EngineMsg::Subscribe(literal_query(
@@ -1398,9 +1565,9 @@ fn a_reopened_live_candidate_never_inherits_a_closed_incarnations_eose() {
     let a = Keys::generate();
     let b = Keys::generate();
     let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [relay.clone()])
-        .with_write(b.public_key().to_hex(), [relay.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [relay.clone()])
+        .with_outbound_routes(b.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
 
     let initial = core.handle(EngineMsg::Subscribe(literal_query(

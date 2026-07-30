@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 use nmp::mechanism::core::{
     AcquisitionEvidence, AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome,
     AuthSendCompletion, AuthSendOutcome, AuthSignerOutcome, Effect, EngineCore, EngineMsg,
-    ReceiptId, RowDelta, ShortfallFact, SourceEvidence, SourceStatus,
+    ObservationFact, ReceiptId, RequestTerminal, RowDelta, ShortfallFact, SourceEvidence,
+    SourceStatus,
 };
 use nmp::mechanism::outbox::WriteStatus;
 use nmp_grammar::{
@@ -23,7 +24,7 @@ use nmp_grammar::{
     RelaySessionKey, SourceAuthority, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_resolver::{HandleId, LiveQuery};
-use nmp_router::{FixtureDirectory, SubId, WireOp};
+use nmp_router::{FixtureRoutingFacts, SubId, WireOp};
 use nmp_store::{
     AcceptOutcome, AcceptWrite, AttemptOutcome, CancelEphemeralOutcome, ClaimSet,
     CompensateOutcome, CompensationReason, CoverageInterval, CoverageKey, DurabilityOutcome,
@@ -104,8 +105,8 @@ fn literal_query(kinds: &[u16], author_hex: &str) -> LiveQuery {
     })
 }
 
-fn new_core(dir: FixtureDirectory) -> EngineCore<MemoryStore> {
-    EngineCore::new(MemoryStore::new(), Box::new(dir), 10)
+fn new_core(dir: FixtureRoutingFacts) -> EngineCore<MemoryStore> {
+    EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), dir, 10)
 }
 
 fn activate<S: EventStore>(core: &mut EngineCore<S>, keys: &Keys) {
@@ -1100,8 +1101,6 @@ mod negentropy;
 mod persistence_failures;
 #[path = "real_corpus_benchmark.rs"]
 mod real_corpus_benchmark;
-#[path = "route_lifecycle.rs"]
-mod route_lifecycle;
 #[path = "stalled_writes.rs"]
 mod stalled_writes;
 #[path = "state_maintenance.rs"]

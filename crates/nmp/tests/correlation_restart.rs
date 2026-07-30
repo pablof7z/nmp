@@ -21,7 +21,7 @@ use nmp_grammar::{
     AccessContext, CorrelationToken, Durability, Identity, RelaySessionKey, WriteIntent,
     WritePayload, WriteRouting,
 };
-use nmp_router::FixtureDirectory;
+use nmp_router::FixtureRoutingFacts;
 use nmp_store::{EventStore, RedbStore};
 use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::{
@@ -38,8 +38,8 @@ fn receipt_id(effects: &[Effect]) -> ReceiptId {
         .expect("every publish emits a receipt id")
 }
 
-fn directory(pk: PublicKey, relay: RelayUrl) -> FixtureDirectory {
-    FixtureDirectory::new().with_write(pk.to_hex(), [relay])
+fn directory(pk: PublicKey, relay: RelayUrl) -> FixtureRoutingFacts {
+    FixtureRoutingFacts::new().with_outbound_routes(pk, [relay])
 }
 
 fn token(value: &str) -> CorrelationToken {
@@ -67,9 +67,9 @@ fn kill_before_acceptance_leaves_the_token_unresolved() {
 
     {
         let store = RedbStore::open(&path).unwrap();
-        let mut core = EngineCore::new(
+        let mut core = EngineCore::new_with_fixture_routing_facts(
             store,
-            Box::new(directory(keys.public_key(), relay.clone())),
+            directory(keys.public_key(), relay.clone()),
             10,
         );
         let (outcome, resolved_id) = core.reattach_by_correlation("never-accepted".to_string());
@@ -80,7 +80,8 @@ fn kill_before_acceptance_leaves_the_token_unresolved() {
     // Reopen -- still nothing to find, and reopening itself must not
     // fabricate a mapping.
     let store = RedbStore::open(&path).unwrap();
-    let mut core = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
+    let mut core =
+        EngineCore::new_with_fixture_routing_facts(store, directory(keys.public_key(), relay), 10);
     let (outcome, resolved_id) = core.reattach_by_correlation("never-accepted".to_string());
     assert_eq!(outcome.outcome, ReattachOutcome::NotFound);
     assert_eq!(resolved_id, None);
@@ -101,9 +102,9 @@ fn kill_after_durable_acceptance_reattaches_by_token_alone_after_restart() {
 
     let original_id = {
         let store = RedbStore::open(&path).unwrap();
-        let mut core = EngineCore::new(
+        let mut core = EngineCore::new_with_fixture_routing_facts(
             store,
-            Box::new(directory(keys.public_key(), relay.clone())),
+            directory(keys.public_key(), relay.clone()),
             10,
         );
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
@@ -129,7 +130,8 @@ fn kill_after_durable_acceptance_reattaches_by_token_alone_after_restart() {
     };
 
     let store = RedbStore::open(&path).unwrap();
-    let mut core = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
+    let mut core =
+        EngineCore::new_with_fixture_routing_facts(store, directory(keys.public_key(), relay), 10);
     core.recover_on_boot();
     let (replay, resolved_id) = core.reattach_by_correlation(tok.to_string());
     assert_eq!(replay.outcome, ReattachOutcome::Attached);
@@ -165,9 +167,9 @@ fn terminal_convergence_survives_restart_and_replays_by_token() {
 
     {
         let store = RedbStore::open(&path).unwrap();
-        let mut core = EngineCore::new(
+        let mut core = EngineCore::new_with_fixture_routing_facts(
             store,
-            Box::new(directory(keys.public_key(), relay.clone())),
+            directory(keys.public_key(), relay.clone()),
             10,
         );
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
@@ -187,7 +189,8 @@ fn terminal_convergence_survives_restart_and_replays_by_token() {
     }
 
     let store = RedbStore::open(&path).unwrap();
-    let mut core = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
+    let mut core =
+        EngineCore::new_with_fixture_routing_facts(store, directory(keys.public_key(), relay), 10);
     let (replay, resolved_id) = core.reattach_by_correlation(tok.to_string());
     assert_eq!(replay.outcome, ReattachOutcome::Attached);
     assert!(resolved_id.is_some());
@@ -209,9 +212,9 @@ fn double_submit_same_token_across_a_restart_mints_no_second_obligation() {
 
     let first_id = {
         let store = RedbStore::open(&path).unwrap();
-        let mut core = EngineCore::new(
+        let mut core = EngineCore::new_with_fixture_routing_facts(
             store,
-            Box::new(directory(keys.public_key(), relay.clone())),
+            directory(keys.public_key(), relay.clone()),
             10,
         );
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
@@ -232,7 +235,8 @@ fn double_submit_same_token_across_a_restart_mints_no_second_obligation() {
     // Restart, then retry with a DIFFERENT body/timestamp under the SAME
     // token -- the exact "re-composed draft" scenario the token exists for.
     let store = RedbStore::open(&path).unwrap();
-    let mut core = EngineCore::new(store, Box::new(directory(keys.public_key(), relay)), 10);
+    let mut core =
+        EngineCore::new_with_fixture_routing_facts(store, directory(keys.public_key(), relay), 10);
     core.recover_on_boot();
     core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
@@ -411,9 +415,9 @@ fn partial_relay_ack_survives_restart_and_replays_by_token() {
 
     {
         let store = RedbStore::open(&path).unwrap();
-        let mut core = EngineCore::new(
+        let mut core = EngineCore::new_with_fixture_routing_facts(
             store,
-            Box::new(directory(keys.public_key(), relay.clone())),
+            directory(keys.public_key(), relay.clone()),
             10,
         );
         let handle = RelayHandle {
@@ -456,9 +460,9 @@ fn partial_relay_ack_survives_restart_and_replays_by_token() {
     }
 
     let store = RedbStore::open(&path).unwrap();
-    let mut core = EngineCore::new(
+    let mut core = EngineCore::new_with_fixture_routing_facts(
         store,
-        Box::new(directory(keys.public_key(), relay.clone())),
+        directory(keys.public_key(), relay.clone()),
         10,
     );
     core.recover_on_boot();
@@ -495,9 +499,9 @@ fn partial_relay_reject_survives_restart_and_replays_by_token() {
 
     {
         let store = RedbStore::open(&path).unwrap();
-        let mut core = EngineCore::new(
+        let mut core = EngineCore::new_with_fixture_routing_facts(
             store,
-            Box::new(directory(keys.public_key(), relay.clone())),
+            directory(keys.public_key(), relay.clone()),
             10,
         );
         let handle = RelayHandle {
@@ -541,9 +545,9 @@ fn partial_relay_reject_survives_restart_and_replays_by_token() {
     }
 
     let store = RedbStore::open(&path).unwrap();
-    let mut core = EngineCore::new(
+    let mut core = EngineCore::new_with_fixture_routing_facts(
         store,
-        Box::new(directory(keys.public_key(), relay.clone())),
+        directory(keys.public_key(), relay.clone()),
         10,
     );
     core.recover_on_boot();

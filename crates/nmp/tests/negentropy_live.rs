@@ -24,7 +24,7 @@ use nmp::mechanism::runtime::{EngineThread, RowsReceiver};
 use nmp_grammar::{Binding, Filter};
 use nmp_local_signer::LocalKeySigner;
 use nmp_resolver::LiveQuery;
-use nmp_router::FixtureDirectory;
+use nmp_router::FixtureRoutingFacts;
 use nmp_store::MemoryStore;
 use nmp_transport::PoolConfig;
 use nostr::{EventId, Keys, RelayUrl};
@@ -151,11 +151,11 @@ async fn subscribe_widens_via_negentropy_and_surfaces_the_backfilled_post() {
         .await
         .expect("seed b's post into the relay");
 
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [url.clone()])
-        .with_write(b.public_key().to_hex(), [url.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [url.clone()])
+        .with_outbound_routes(b.public_key(), [url.clone()]);
 
-    let (engine_thread, handle) = EngineThread::spawn(
+    let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
         MemoryStore::new(),
         dir,
         10,

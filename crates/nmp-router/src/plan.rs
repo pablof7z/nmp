@@ -261,10 +261,14 @@ pub fn diff_plans(prev: &RelayPlan, next: &RelayPlan) -> WireDelta {
 mod tests {
     use super::*;
 
+    fn author(label: &str) -> String {
+        label.repeat(32)
+    }
+
     fn cf(kind: u16, authors: &[&str]) -> ConcreteFilter {
         ConcreteFilter {
             kinds: Some(BTreeSet::from([kind])),
-            authors: Some(authors.iter().map(|s| s.to_string()).collect()),
+            authors: Some(authors.iter().map(|label| author(label)).collect()),
             ..ConcreteFilter::default()
         }
     }
@@ -310,7 +314,7 @@ mod tests {
         assert_eq!(r, &RelaySessionKey::public(relay(0)));
         assert_eq!(ops.len(), 1);
         assert!(
-            matches!(&ops[0], WireOp::Req(_, f) if f.authors == Some(BTreeSet::from(["aa".to_string(), "cc".to_string()])))
+            matches!(&ops[0], WireOp::Req(_, f) if f.authors == Some(BTreeSet::from([author("aa"), author("cc")])))
         );
     }
 

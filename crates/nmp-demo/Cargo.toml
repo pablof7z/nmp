@@ -11,4 +11,4 @@ path = "src/main.rs"
 
 [dependencies]
 nostr.workspace = true
-nmp.workspace = true
+nmp = { workspace = true, features = ["nip65"] }

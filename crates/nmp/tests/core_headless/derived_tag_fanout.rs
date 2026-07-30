@@ -250,7 +250,7 @@ impl Study {
     /// A study with `relays` connected on ascending slots and an active
     /// pubkey set, but NOT yet subscribed.
     fn new(relays: &[RelayUrl]) -> Self {
-        let mut core = new_core(FixtureDirectory::new());
+        let mut core = new_core(FixtureRoutingFacts::new());
         for (slot, relay) in relays.iter().enumerate() {
             connect(&mut core, slot as u32, relay);
         }
@@ -796,7 +796,7 @@ fn g_a_derived_set_collapses_the_same_way_in_the_authors_slot_and_a_tag_slot() {
     let r0 = relay(0);
 
     // --- authors slot ---
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     connect(&mut core, 0, &r0);
     let me = Keys::generate();
     core.handle(EngineMsg::SetActivePubkey(Some(me.public_key())));
@@ -903,7 +903,7 @@ fn g_a_derived_set_collapses_the_same_way_in_the_authors_slot_and_a_tag_slot() {
 #[test]
 fn i_re_served_events_after_a_replacement_cost_bandwidth_but_never_rows() {
     let r0 = relay(0);
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     connect(&mut core, 0, &r0);
     let me = Keys::generate();
     core.handle(EngineMsg::SetActivePubkey(Some(me.public_key())));

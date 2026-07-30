@@ -55,19 +55,22 @@ pub enum WriteStatus {
     /// is waiting for.
     ///
     /// `detail` is a CONTRACT, not decoration: it names every exhausted source
-    /// and keeps the two shapes of nothing apart, because "stuck" and "stuck
-    /// because X" are different messages and only the second one can be acted
-    /// on. Two forms, and the difference between them is the whole point —
-    /// one is worth waiting for and the other never will be:
+    /// and keeps the three neutral fact states apart, because "stuck" and
+    /// "stuck because X" are different messages and only the second one can
+    /// be acted on. Representative forms are:
     ///
-    /// - `no relay list known yet for <pubkey>` — discovery has not finished
-    ///   for them. Waiting is exactly the right response.
-    /// - `no destination could be determined: no relay list exists for
-    ///   <pubkey>; no app relays are configured; no fallback relays are
-    ///   configured` — every source is exhausted and settled. Waiting will
-    ///   never help; the clauses double as the list of ways to fix it,
-    ///   because configuring any single one of them would have produced a
-    ///   route.
+    /// - `no destination could be determined: author routes are Unknown for
+    ///   <pubkey>; ...` — no exact source has settled yet.
+    /// - `no destination could be determined: author routes are Absent for
+    ///   <pubkey>; ...` — every current exact source settled without a row.
+    /// - `no destination could be determined: Present outbound routes for
+    ///   <pubkey> are empty; ...` — an authoritative row exists but names no
+    ///   outbound destination.
+    ///
+    /// All three remain provider needs when the whole resolution has zero
+    /// destinations: a later positive replacement is the only signal that
+    /// can unpark the write. The clauses also name operator configuration
+    /// that would make the route immediately executable.
     ///
     /// The routing sibling of [`Self::AwaitingCapability`]'s durable park:
     /// retained, NOT terminal, and re-emitted verbatim on receipt

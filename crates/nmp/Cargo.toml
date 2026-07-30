@@ -7,8 +7,8 @@ publish.workspace = true
 
 [features]
 # #52 Q3 (Fable checkpoint): the ONLY sanctioned way to inject a pre-built
-# store/directory pair, needed by `nmp-bdd` (spawns the real `EngineThread`
-# against scripted in-process relays -- world.rs). Off by default; enabling
+# store plus a static neutral fact snapshot, needed by `nmp-bdd` (spawns the
+# real `EngineThread` against scripted in-process relays). Off by default; enabling
 # it in a consumer's `Cargo.toml` is a greppable, reviewable line -- a
 # stability exception, not a security one (the acceptance-boundary verify in
 # `crate::core` covers every path regardless, Unit A0/#56).
@@ -21,6 +21,10 @@ unstable-mechanism = []
 # second direct dependency alongside the facade. Non-default, so the governed
 # default-feature surface snapshot is unchanged.
 nip22 = ["dep:nmp-nip22"]
+
+# Pure Rust NIP-65 values plus the private automatic coordinator assembly.
+# Off by default: core-only builds contain no protocol dependency or symbols.
+nip65 = ["dep:nmp-nip65"]
 
 # #827: both instrumentation features came in with the folded engine modules
 # (`core`, `runtime`, `outbox`, `negentropy`). They stay non-default, so the
@@ -45,6 +49,7 @@ required-features = ["bench-instrumentation"]
 nostr.workspace = true
 nmp-grammar.workspace = true
 nmp-nip22 = { workspace = true, optional = true }
+nmp-nip65 = { workspace = true, optional = true }
 # #977: the NIP-29 `Group` door. The dependency runs THIS WAY ROUND and
 # only this way round -- `Group` is pure composition over `nostr` +
 # `nmp-grammar`, and `crate::nip29`'s extension trait is what binds it to

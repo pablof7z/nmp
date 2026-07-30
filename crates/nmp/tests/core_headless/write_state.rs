@@ -6,7 +6,7 @@ use super::*;
 fn durable_pending_row_is_visible_before_signer_and_tamper_compensates() {
     let a = Keys::generate();
     let relay = RelayUrl::parse("wss://write.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay]);
     let mut core = new_core(dir);
     activate(&mut core, &a);
     core.handle(EngineMsg::Subscribe(literal_query(
@@ -46,7 +46,7 @@ fn durable_pending_row_is_visible_before_signer_and_tamper_compensates() {
 fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
     let a = Keys::generate();
     let relay = RelayUrl::parse("wss://write.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay]);
     let mut core = new_core(dir);
     activate(&mut core, &a);
     core.handle(EngineMsg::Subscribe(literal_query(
@@ -111,7 +111,7 @@ fn cancellation_outcomes_are_typed_idempotent_and_late_signers_are_inert() {
     let a = Keys::generate();
     let relay = RelayUrl::parse("wss://write.example.com").unwrap();
     let mut core =
-        new_core(FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]));
+        new_core(FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay.clone()]));
     activate(&mut core, &a);
 
     let published = core.handle(EngineMsg::Publish(WriteIntent {
@@ -171,7 +171,7 @@ fn cancellation_outcomes_are_typed_idempotent_and_late_signers_are_inert() {
 #[test]
 fn signer_unavailable_keeps_accepted_row_visible() {
     let a = Keys::generate();
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     activate(&mut core, &a);
     core.handle(EngineMsg::Subscribe(literal_query(
         &[1],
@@ -212,7 +212,7 @@ fn signer_unavailable_keeps_accepted_row_visible() {
 fn an_explicit_identity_selects_a_secondary_author_and_pins_it_through_signing() {
     let a = Keys::generate();
     let b = Keys::generate();
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     activate(&mut core, &a);
 
     let as_b = draft(47, "published as b while a is active");
@@ -270,7 +270,7 @@ fn an_explicit_identity_selects_a_secondary_author_and_pins_it_through_signing()
 #[test]
 fn a_builder_publishes_as_the_active_account_and_refuses_when_there_is_none() {
     let a = Keys::generate();
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     activate(&mut core, &a);
 
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
@@ -322,7 +322,7 @@ fn a_builder_publishes_as_the_active_account_and_refuses_when_there_is_none() {
 fn identity_selects_on_a_builder_and_may_only_restate_on_a_signed_event() {
     let a = Keys::generate();
     let b = Keys::generate();
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     activate(&mut core, &a);
 
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
@@ -366,7 +366,7 @@ fn identity_selects_on_a_builder_and_may_only_restate_on_a_signed_event() {
 fn ephemeral_is_receipt_only_and_never_creates_a_pending_row() {
     let a = Keys::generate();
     let relay = RelayUrl::parse("wss://write.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay]);
     let mut core = new_core(dir);
     activate(&mut core, &a);
     core.handle(EngineMsg::Subscribe(literal_query(
@@ -396,7 +396,7 @@ fn ephemeral_is_receipt_only_and_never_creates_a_pending_row() {
 fn relay_rejection_after_promotion_does_not_retract_the_signed_row() {
     let a = Keys::generate();
     let relay = RelayUrl::parse("wss://write.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
     core.handle(EngineMsg::RelayConnected(
         RelayHandle {
@@ -436,7 +436,7 @@ fn relay_rejection_after_promotion_does_not_retract_the_signed_row() {
 #[test]
 fn cancelling_newest_restores_valid_base_but_never_retired_pending_middle() {
     let a = Keys::generate();
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     activate(&mut core, &a);
     core.handle(EngineMsg::Subscribe(literal_query(
         &[0],
@@ -519,7 +519,7 @@ fn cancelling_newest_restores_valid_base_but_never_retired_pending_middle() {
 fn expired_local_acceptance_is_first_and_only_failed_with_no_side_effects() {
     let a = Keys::generate();
     let relay = RelayUrl::parse("wss://write.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay]);
     let mut core = new_core(dir);
     core.handle(EngineMsg::Subscribe(literal_query(
         &[1],
@@ -544,7 +544,7 @@ fn expired_local_acceptance_is_first_and_only_failed_with_no_side_effects() {
 fn exact_duplicate_intents_get_distinct_store_ids_and_one_promotion_advances_both() {
     let a = Keys::generate();
     let relay = RelayUrl::parse("wss://write.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay]);
     let mut core = new_core(dir);
     activate(&mut core, &a);
     let template = draft(1, "same body");
@@ -604,7 +604,7 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
     let ack = RelayUrl::parse("wss://ack.example.com").unwrap();
     let nack = RelayUrl::parse("wss://nack.example.com").unwrap();
     let drop_relay = RelayUrl::parse("wss://drop.example.com").unwrap();
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     activate(&mut core, &a);
     connect_signer(&mut core, 0, &ack, a.public_key());
     connect_signer(&mut core, 1, &nack, a.public_key());
@@ -703,7 +703,7 @@ fn relay_signature_satisfies_all_pending_coowners_and_late_signers_are_ignored()
     let a = Keys::generate();
     let source = RelayUrl::parse("wss://source.example.com").unwrap();
     let out = RelayUrl::parse("wss://out.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [out.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [out.clone()]);
     let mut core = new_core(dir);
     activate(&mut core, &a);
     connect_signer(&mut core, 0, &source, a.public_key());
@@ -793,7 +793,7 @@ fn relay_signature_satisfies_all_pending_coowners_and_late_signers_are_ignored()
 #[test]
 fn repeated_signer_notifications_never_start_concurrent_operations() {
     let a = Keys::generate();
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     activate(&mut core, &a);
     let published = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(1, "one operation")),
@@ -847,7 +847,7 @@ fn retryable_signer_errors_retain_and_rearm_the_exact_write() {
         nmp_signer::SignerError::Disconnected,
     ] {
         let a = Keys::generate();
-        let mut core = new_core(FixtureDirectory::new());
+        let mut core = new_core(FixtureRoutingFacts::new());
         activate(&mut core, &a);
         let published = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Event(draft(1, "survives signer loss")),
@@ -899,7 +899,7 @@ fn terminal_signer_errors_compensate_the_write() {
         nmp_signer::SignerError::InvalidResponse("body mismatch".to_string()),
     ] {
         let a = Keys::generate();
-        let mut core = new_core(FixtureDirectory::new());
+        let mut core = new_core(FixtureRoutingFacts::new());
         activate(&mut core, &a);
         let published = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Event(draft(1, "terminal signer answer")),
@@ -925,11 +925,7 @@ fn terminal_signer_errors_compensate_the_write() {
 #[test]
 fn compensation_persistence_failure_is_nonterminal_and_retryable() {
     let a = Keys::generate();
-    let mut core = EngineCore::new(
-        FailOnceCompensationStore::new(),
-        Box::new(FixtureDirectory::new()),
-        10,
-    );
+    let mut core = EngineCore::new(FailOnceCompensationStore::new(), 10);
     activate(&mut core, &a);
     core.handle(EngineMsg::Subscribe(literal_query(
         &[1],
@@ -978,11 +974,7 @@ fn compensation_persistence_failure_is_nonterminal_and_retryable() {
 #[test]
 fn explicit_cancellation_persistence_failure_keeps_the_obligation_live_until_retry() {
     let a = Keys::generate();
-    let mut core = EngineCore::new(
-        FailOnceCompensationStore::new(),
-        Box::new(FixtureDirectory::new()),
-        10,
-    );
+    let mut core = EngineCore::new(FailOnceCompensationStore::new(), 10);
     activate(&mut core, &a);
     core.handle(EngineMsg::Subscribe(literal_query(
         &[1],
@@ -1047,7 +1039,7 @@ fn explicit_cancellation_persistence_failure_keeps_the_obligation_live_until_ret
 fn direct_publish_of_forged_signed_event_is_rejected_before_acceptance() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
     connect_signer(&mut core, 0, &relay0, a.public_key());
 
@@ -1106,7 +1098,7 @@ fn direct_publish_of_forged_signed_event_is_rejected_before_acceptance() {
 fn direct_publish_of_valid_signed_event_still_publishes() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
     connect_signer(&mut core, 0, &relay0, a.public_key());
     authenticate_signer(&mut core, 0, &relay0, &a);

@@ -322,11 +322,9 @@ impl NmpWorld {
     /// brand-new identity never seen before this point in the scenario, so
     /// an account-switch scenario doesn't need every future account
     /// pre-declared as a `Given`. Seeds the new account's kind:3 directly at
-    /// every configured indexer (kind:3 is a discovery atom, and this
-    /// pubkey has never been resolved before, so that's exactly where the
-    /// engine's freshly re-rooted discovery REQ will look) BEFORE flipping
-    /// the active account, so the backlog is already there when the engine
-    /// asks.
+    /// every configured operator app relay before flipping the active
+    /// account, so the backlog is already there when the engine asks through
+    /// its neutral routing policy.
     pub async fn switch_to_new_account_following(&mut self, follows: &[String]) {
         self.ensure_started().await;
         self.switch_counter += 1;
@@ -337,8 +335,8 @@ impl NmpWorld {
             .map(|f| self.person(f).public_key())
             .collect();
         let created_at = self.next_created_at();
-        for indexer in self.indexer_names.clone() {
-            self.relays[&indexer]
+        for app_relay in self.app_relay_names.clone() {
+            self.relays[&app_relay]
                 .seed_contact_list(&keys, &follow_pks, created_at)
                 .await;
         }

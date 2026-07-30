@@ -17,8 +17,8 @@ public struct KindCount: Sendable, Hashable {
     }
 }
 
-/// One (lane, count) pair -- how many of a relay's wire subs trace to each
-/// routing lane (NIP-65 write, hint, indexer discovery, ...).
+/// One (lane, count) pair -- how many of a relay's wire subscriptions trace
+/// to each neutral routing source (author outbound, hint, operator app, ...).
 public struct LaneCount: Sendable, Hashable {
     public let lane: String
     public let count: UInt32

@@ -13,13 +13,13 @@ use nmp::mechanism::core::{Effect, EngineCore, EngineMsg};
 use nmp_grammar::{Binding, Filter, RelaySessionKey};
 use nmp_resolver::testkit::{kind1, kind3};
 use nmp_resolver::LiveQuery;
-use nmp_router::{FixtureDirectory, SubId, WireOp};
+use nmp_router::{FixtureRoutingFacts, SubId, WireOp};
 use nmp_store::MemoryStore;
 use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::{EventBuilder, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp};
 
-fn new_core(dir: FixtureDirectory) -> EngineCore<MemoryStore> {
-    EngineCore::new(MemoryStore::new(), Box::new(dir), 10)
+fn new_core(dir: FixtureRoutingFacts) -> EngineCore<MemoryStore> {
+    EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), dir, 10)
 }
 
 fn literal_query(kinds: &[u16], author_hex: &str) -> LiveQuery {
@@ -98,9 +98,9 @@ fn diagnostics_snapshot_reports_real_per_relay_subs_filters_and_per_kind_event_c
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let relay1 = RelayUrl::parse("wss://relay1.example.com").unwrap();
 
-    let dir = FixtureDirectory::new()
-        .with_write(me_hex.clone(), [relay0.clone()])
-        .with_write(friend_hex.clone(), [relay1.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(me.public_key(), [relay0.clone()])
+        .with_outbound_routes(friend.public_key(), [relay1.clone()]);
     let mut core = new_core(dir);
 
     connect(&mut core, 0, &relay0);
@@ -246,7 +246,7 @@ fn diagnostics_coverage_flips_none_to_proven_interval_on_eose_and_pushes_reactiv
     let me_hex = me.public_key().to_hex();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
 
-    let dir = FixtureDirectory::new().with_write(me_hex.clone(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(me.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
@@ -292,9 +292,9 @@ fn coalesced_wire_diagnostics_reads_absorbed_atom_evidence() {
     let a_hex = a.public_key().to_hex();
     let b_hex = b.public_key().to_hex();
     let relay = RelayUrl::parse("wss://coalesced.example.com").unwrap();
-    let dir = FixtureDirectory::new()
-        .with_write(a_hex.clone(), [relay.clone()])
-        .with_write(b_hex.clone(), [relay.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [relay.clone()])
+        .with_outbound_routes(b.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay);
 

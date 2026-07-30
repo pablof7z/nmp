@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use nmp::mechanism::core::{Effect, EngineCore, EngineMsg, RowDelta};
 use nmp_grammar::{Binding, Filter, RelaySessionKey};
 use nmp_resolver::LiveQuery;
-use nmp_router::FixtureDirectory;
+use nmp_router::FixtureRoutingFacts;
 use nmp_store::{EventStore, MemoryStore, RedbStore};
 use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::{Keys, RelayMessage, RelayUrl, SubscriptionId, Timestamp};
@@ -69,11 +69,9 @@ fn same_event_id_from_two_relays_unions_into_one_row_with_both_sources() {
     let author = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let relay1 = RelayUrl::parse("wss://relay1.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(
-        author.public_key().to_hex(),
-        [relay0.clone(), relay1.clone()],
-    );
-    let mut core = EngineCore::new(MemoryStore::new(), Box::new(dir), 10);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(author.public_key(), [relay0.clone(), relay1.clone()]);
+    let mut core = EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), dir, 10);
     connect(&mut core, 0, &relay0);
     connect(&mut core, 1, &relay1);
 
@@ -187,11 +185,9 @@ fn unrelated_handle_lifecycle_never_spuriously_emits_sources_grew() {
     let author = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let relay1 = RelayUrl::parse("wss://relay1.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(
-        author.public_key().to_hex(),
-        [relay0.clone(), relay1.clone()],
-    );
-    let mut core = EngineCore::new(MemoryStore::new(), Box::new(dir), 10);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(author.public_key(), [relay0.clone(), relay1.clone()]);
+    let mut core = EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), dir, 10);
     connect(&mut core, 0, &relay0);
     connect(&mut core, 1, &relay1);
 
@@ -288,11 +284,9 @@ fn projected_sources_survive_a_real_redb_reopen() {
     }
 
     let store = RedbStore::open(&path).expect("redb: reopen");
-    let dir = FixtureDirectory::new().with_write(
-        author.public_key().to_hex(),
-        [relay0.clone(), relay1.clone()],
-    );
-    let mut core = EngineCore::new(store, Box::new(dir), 10);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(author.public_key(), [relay0.clone(), relay1.clone()]);
+    let mut core = EngineCore::new_with_fixture_routing_facts(store, dir, 10);
     assert!(core.recover_on_boot().is_empty());
 
     let effects = core.handle(EngineMsg::Subscribe(literal_kind_query(

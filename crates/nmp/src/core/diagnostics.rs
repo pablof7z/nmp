@@ -252,18 +252,13 @@ pub struct DiagnosticsSnapshot {
     pub auth_sessions: Vec<AuthDiagnosticsSnapshot>,
     pub uncovered_author_count: usize,
     pub dropped_merge_rules: Vec<&'static str>,
-    /// DISCOVERED relays rejected by the engine's relay admission policy
-    /// (issue #121) before they could become routable lanes: a network-
-    /// sourced kind:10002 naming a loopback/RFC-1918/link-local/`.onion` host
-    /// the operator never opted in. The provenance-aware half of admission —
-    /// owned by `EngineCore` (`discovered_private_relays_rejected`).
-    ///
-    /// Counted PER LANE, not per host: one kind:10002 is parsed twice (its
-    /// write lane and its read lane, `routing-and-ownership.md` §2.4), so a
-    /// single hostile event naming `N` rejected hosts increments this by up
-    /// to `2N` (exactly `2N` when every rejected host is an unmarked r-tag,
-    /// which is both read and write). This is a rejection-EVENT tally for a
-    /// diagnostics screen, not a distinct-host count.
+    /// Network-derived relay candidates rejected by the engine's SSRF
+    /// admission policy (issue #121) before they could become router
+    /// candidates or neutral route facts. This is a monotonic rejection-
+    /// occurrence tally, not a distinct-host or per-direction count. A
+    /// provider callback rejection counts once before directional projection;
+    /// rejected selector evidence counts once when that exact
+    /// `(selection, evidence)` first becomes current.
     pub discovered_private_relays_rejected: u64,
     /// Relay candidates refused by the single whole-demand ceiling, plus
     /// any defense-in-depth dial refusal at the transport boundary. The

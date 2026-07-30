@@ -1,12 +1,9 @@
 //! Host-scoped NIP-29 read constructors (#108) -- the selected host rides
 //! ENTIRELY as `SourceAuthority::Pinned({host})` on the `Demand` itself
-//! (#107's primitive), never as a directory-fact `Lane::GroupHost` pinned
-//! lookup (`nmp-router`'s `RelayDirectory::pinned_relays`/
-//! `FixtureDirectory::with_group_host`) -- that path is a DIFFERENT,
-//! test-fixture-only mechanism for operator/directory-discovered facts,
-//! and reusing it here would launder a query-declared selection (the user
-//! explicitly picked which host to browse) as if it were operator-
-//! configured relay state, exactly what #108 warns against. Because the
+//! (#107's primitive), never as a routing fact or router-side pinned lookup.
+//! Doing so would launder a query-declared selection (the user explicitly
+//! picked which host to browse) as if it were operator-configured relay
+//! state, exactly what #108 warns against. Because the
 //! host lives in `Demand::source`, it already flows through
 //! `ContextualAtom` identity, per-source `AcquisitionEvidence`, and
 //! diagnostics for free -- no new mechanism needed.

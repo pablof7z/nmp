@@ -254,12 +254,12 @@ async fn reports_no_destination(w: &mut NmpWorld) {
 #[then(regex = r#"^the reason (?:still )?names that my own relay list is absent$"#)]
 async fn reason_names_my_absent_relay_list(w: &mut NmpWorld) {
     let me = w.my_pubkey_hex();
-    let wanted = format!("no relay list exists for {me}");
+    let wanted = format!("author routes are Absent for {me}");
     assert!(
         w.park_reason_contains(&wanted),
         "\"stuck\" and \"stuck because X\" are different messages, and only the second \
-         one names a thing to fix -- a relay list settled ABSENT is a final answer, not \
-         a young directory. The write reported {:?}",
+         one names a thing to fix -- neutral author routes settled Absent are a final \
+         answer, not an Unknown provider need. The write reported {:?}",
         w.park_reasons()
     );
 }

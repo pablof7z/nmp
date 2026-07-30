@@ -29,7 +29,7 @@
 //! (§2, P1). `EngineCore` itself is `!Send`-friendly (M1's resolver keeps an
 //! `Rc<RefCell<>>`) — it is constructed INSIDE the engine thread's closure
 //! and never crosses a thread boundary; only `Send + 'static` VALUES (the
-//! store, the directory, the signer) are moved into that closure at spawn
+//! store, the neutral routing facts, the signer) are moved into that closure at spawn
 //! time.
 //!
 //! ## One reducer-to-runtime delivery path
@@ -80,7 +80,7 @@ use crossbeam_channel as cb;
 use nmp_grammar::{ConcreteFilter, DescriptorHash};
 use nmp_network_policy::DestinationPolicy;
 use nmp_resolver::{HandleId, LiveQuery};
-use nmp_router::{RelayDirectory, SubId, WireDelta, WireOp, WireReq};
+use nmp_router::{SubId, WireDelta, WireOp, WireReq};
 use nmp_signer::{
     PendingSignerOp, SignerOp, SignerPublicKey, SignerSignedEvent, SignerSignedEventParts,
     SignerUnsignedEvent, SigningCapability,
@@ -142,6 +142,8 @@ struct EnginePoolRuntime {
     runtime: Arc<tokio::runtime::Runtime>,
     relay_information: RelayInformationService,
     max_auth_capabilities: usize,
+    #[cfg(feature = "nip65")]
+    nip65_sources: Vec<RelayUrl>,
 }
 
 impl nmp_transport::PoolEventSink for EnginePoolSink {
@@ -282,7 +284,6 @@ mod history_mailbox_tests {
     use std::time::{Duration, Instant};
 
     use nmp_grammar::{Binding, Filter};
-    use nmp_router::FixtureDirectory;
     use nmp_store::{EventStore, MemoryStore, RelayObserved};
     use nostr::{Keys, Kind};
 
@@ -511,7 +512,6 @@ mod history_mailbox_tests {
         );
         let (engine_thread, handle) = EngineThread::spawn(
             store,
-            FixtureDirectory::new(),
             4,
             PoolConfig::default(),
             RelayAdmissionPolicy::default(),
@@ -1486,23 +1486,26 @@ const ADAPTER_RUNTIME_WORKERS: usize = 2;
 /// Finite admission limit for live AUTH policy/signer registrations. Unlike
 /// legacy zero-valued relay settings, zero AUTH capabilities intentionally
 /// admits none.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfig {
     pub max_auth_capabilities: usize,
+    #[cfg(feature = "nip65")]
+    pub(crate) nip65_sources: Vec<RelayUrl>,
 }
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             max_auth_capabilities: DEFAULT_MAX_AUTH_CAPABILITIES,
+            #[cfg(feature = "nip65")]
+            nip65_sources: Vec::new(),
         }
     }
 }
 
 impl EngineThread {
     /// Spawn the engine thread, pool bridge, and fixed adapter runtime.
-    /// `store`/`directory`
-    /// are constructed by the CALLER but moved whole into the engine
+    /// The `store` is constructed by the caller but moved whole into the engine
     /// thread's closure and built into `EngineCore` there — they never cross
     /// back out, which is what lets `EngineCore` itself stay `!Send`-friendly
     /// (only `Send + 'static` values ever cross the thread boundary, exactly
@@ -1510,20 +1513,17 @@ impl EngineThread {
     /// (zero accounts, read-only) — matching a logged-out launch (M4 §5);
     /// the caller registers accounts afterward via [`Handle::add_signer`] and
     /// picks one via [`Handle::set_active_account`].
-    pub fn spawn<S, D>(
+    pub fn spawn<S>(
         store: S,
-        directory: D,
         cap: usize,
         pool_config: PoolConfig,
         admission: RelayAdmissionPolicy,
     ) -> Result<(Self, Handle), EngineThreadError>
     where
         S: EventStore + Send + 'static,
-        D: RelayDirectory + Send + 'static,
     {
         Self::spawn_with_runtime_config(
             store,
-            directory,
             cap,
             pool_config,
             admission,
@@ -1531,9 +1531,54 @@ impl EngineThread {
         )
     }
 
-    pub fn spawn_with_runtime_config<S, D>(
+    /// Spawn a headless runtime over a static fact snapshot.
+    ///
+    /// This exists for deterministic falsifiers. Production assembly owns
+    /// the private mutable fact store and uses [`Self::spawn`].
+    #[doc(hidden)]
+    pub fn spawn_with_fixture_routing_facts<S>(
         store: S,
-        directory: D,
+        facts: nmp_router::FixtureRoutingFacts,
+        cap: usize,
+        pool_config: PoolConfig,
+        admission: RelayAdmissionPolicy,
+    ) -> Result<(Self, Handle), EngineThreadError>
+    where
+        S: EventStore + Send + 'static,
+    {
+        Self::spawn_with_routing_facts_and_runtime_config(
+            store,
+            crate::core::RoutingFactStore::from_fixture(facts),
+            cap,
+            pool_config,
+            admission,
+            RuntimeConfig::default(),
+        )
+    }
+
+    pub fn spawn_with_runtime_config<S>(
+        store: S,
+        cap: usize,
+        pool_config: PoolConfig,
+        admission: RelayAdmissionPolicy,
+        runtime_config: RuntimeConfig,
+    ) -> Result<(Self, Handle), EngineThreadError>
+    where
+        S: EventStore + Send + 'static,
+    {
+        Self::spawn_with_routing_facts_and_runtime_config(
+            store,
+            crate::core::RoutingFactStore::default(),
+            cap,
+            pool_config,
+            admission,
+            runtime_config,
+        )
+    }
+
+    pub(crate) fn spawn_with_routing_facts_and_runtime_config<S>(
+        store: S,
+        routing_facts: crate::core::RoutingFactStore,
         cap: usize,
         mut pool_config: PoolConfig,
         admission: RelayAdmissionPolicy,
@@ -1541,7 +1586,6 @@ impl EngineThread {
     ) -> Result<(Self, Handle), EngineThreadError>
     where
         S: EventStore + Send + 'static,
-        D: RelayDirectory + Send + 'static,
     {
         // #704: the ONE engine-owned adapter runtime. A fixed 2-worker
         // multi-thread tokio runtime hosts every adapter task; each worker
@@ -1658,7 +1702,7 @@ impl EngineThread {
                         let _thread_count = RuntimeThreadCountGuard::enter(engine_runtime_threads);
                         engine_loop(
                             store,
-                            directory,
+                            routing_facts,
                             cap,
                             admission,
                             EnginePoolRuntime {
@@ -1667,6 +1711,8 @@ impl EngineThread {
                                 runtime: engine_runtime,
                                 relay_information: engine_relay_information,
                                 max_auth_capabilities: runtime_config.max_auth_capabilities,
+                                #[cfg(feature = "nip65")]
+                                nip65_sources: runtime_config.nip65_sources,
                             },
                             EngineWiring {
                                 clock: &engine_clock,
@@ -1775,7 +1821,6 @@ impl EngineThread {
 mod receipt_delivery_lifecycle_tests {
     use super::*;
     use nmp_grammar::{Durability, Identity, WriteIntent, WritePayload, WriteRouting};
-    use nmp_router::FixtureDirectory;
     use nmp_store::MemoryStore;
     use nostr::{Keys, Kind};
 
@@ -1804,7 +1849,6 @@ mod receipt_delivery_lifecycle_tests {
     fn parked_awaiting_capability_reattach_cancel_does_not_retain_deliveries() {
         let (thread, handle) = EngineThread::spawn(
             MemoryStore::new(),
-            FixtureDirectory::new(),
             10,
             PoolConfig::default(),
             RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
@@ -1861,7 +1905,6 @@ mod receipt_delivery_lifecycle_tests {
 mod reentrant_shutdown_tests {
     use super::*;
     use nmp_local_signer::LocalKeySigner;
-    use nmp_router::FixtureDirectory;
     use nmp_store::MemoryStore;
     use nostr::{Keys, Kind};
 
@@ -1878,7 +1921,6 @@ mod reentrant_shutdown_tests {
         // pool is a fixed internal capacity, so spawn takes no limit argument.
         EngineThread::spawn(
             MemoryStore::new(),
-            FixtureDirectory::new(),
             1,
             PoolConfig::default(),
             RelayAdmissionPolicy::default(),
@@ -2763,7 +2805,7 @@ mod relay_worker_reconciliation_tests {
         AccessContext, Binding, Demand, Durability, Filter, Identity, SourceAuthority, WriteIntent,
         WritePayload, WriteRouting,
     };
-    use nmp_router::FixtureDirectory;
+    use nmp_router::FixtureRoutingFacts;
     use nmp_store::MemoryStore;
     use nostr::{Keys, Kind};
 
@@ -2832,7 +2874,7 @@ mod relay_worker_reconciliation_tests {
         let public = RelaySessionKey::public(relay.clone());
         let signer = Keys::generate().public_key();
         let protected_read = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer));
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 1);
+        let mut core = EngineCore::new(MemoryStore::new(), 1);
         let effects = core.handle(EngineMsg::Subscribe(protected_query(&relay, signer, 1)));
         assert!(effects.iter().any(
             |effect| matches!(effect, Effect::EnsureReadRelay(session) if session == &protected_read)
@@ -2863,7 +2905,7 @@ mod relay_worker_reconciliation_tests {
         let signer = Keys::generate().public_key();
         let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
         let session = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer));
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 1);
+        let mut core = EngineCore::new(MemoryStore::new(), 1);
         let (pool_tx, _pool_rx) = mpsc::channel();
         let mut config = PoolConfig::default();
         config.max_relays = 1;
@@ -2884,6 +2926,8 @@ mod relay_worker_reconciliation_tests {
         let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
+        #[cfg(feature = "nip65")]
+        let nip65 = RefCell::new(crate::nip65::RuntimeAssembly::new([]));
         let dispatch_runtime = DispatchRuntime {
             self_inbox: &self_inbox,
             relay_information: &relay_information,
@@ -2892,6 +2936,8 @@ mod relay_worker_reconciliation_tests {
             auth_policies: &auth_policies,
             auth_tasks: &auth_tasks,
             receipt_deliveries: &receipt_deliveries,
+            #[cfg(feature = "nip65")]
+            nip65: &nip65,
         };
 
         let first = core.handle(EngineMsg::Subscribe(protected_query(&relay, signer, 1)));
@@ -2991,7 +3037,7 @@ mod relay_worker_reconciliation_tests {
         let signer = Keys::generate().public_key();
         let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
         let session = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer));
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 1);
+        let mut core = EngineCore::new(MemoryStore::new(), 1);
         let (pool_tx, _pool_rx) = mpsc::channel();
         let mut config = PoolConfig::default();
         config.max_relays = 1;
@@ -3012,6 +3058,8 @@ mod relay_worker_reconciliation_tests {
         let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
+        #[cfg(feature = "nip65")]
+        let nip65 = RefCell::new(crate::nip65::RuntimeAssembly::new([]));
         let dispatch_runtime = DispatchRuntime {
             self_inbox: &self_inbox,
             relay_information: &relay_information,
@@ -3020,6 +3068,8 @@ mod relay_worker_reconciliation_tests {
             auth_policies: &auth_policies,
             auth_tasks: &auth_tasks,
             receipt_deliveries: &receipt_deliveries,
+            #[cfg(feature = "nip65")]
+            nip65: &nip65,
         };
 
         let effects = core.handle(EngineMsg::Subscribe(protected_query(&relay, signer, 1)));
@@ -3104,7 +3154,6 @@ mod relay_worker_reconciliation_tests {
         for _ in 0..16 {
             let (engine, handle) = EngineThread::spawn(
                 MemoryStore::new(),
-                FixtureDirectory::new(),
                 1,
                 PoolConfig::default(),
                 RelayAdmissionPolicy::default(),
@@ -3147,10 +3196,10 @@ mod relay_worker_reconciliation_tests {
         let author_b = "bb".repeat(32);
         let relay_a = RelayUrl::parse("wss://relay-a.example").unwrap();
         let relay_b = RelayUrl::parse("wss://relay-b.example").unwrap();
-        let directory = FixtureDirectory::new()
-            .with_write(author_a.clone(), [relay_a.clone()])
-            .with_write(author_b.clone(), [relay_b.clone()]);
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(directory), 1);
+        let directory = FixtureRoutingFacts::new()
+            .with_outbound_routes(PublicKey::from_hex(&author_a).unwrap(), [relay_a.clone()])
+            .with_outbound_routes(PublicKey::from_hex(&author_b).unwrap(), [relay_b.clone()]);
+        let mut core = EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), directory, 1);
         let (pool_tx, _pool_rx) = mpsc::channel();
         let mut config = PoolConfig::default();
         config.max_relays = 1;
@@ -3171,6 +3220,8 @@ mod relay_worker_reconciliation_tests {
         let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
+        #[cfg(feature = "nip65")]
+        let nip65 = RefCell::new(crate::nip65::RuntimeAssembly::new([]));
         let dispatch_runtime = DispatchRuntime {
             self_inbox: &self_inbox,
             relay_information: &relay_information,
@@ -3179,6 +3230,8 @@ mod relay_worker_reconciliation_tests {
             auth_policies: &auth_policies,
             auth_tasks: &auth_tasks,
             receipt_deliveries: &receipt_deliveries,
+            #[cfg(feature = "nip65")]
+            nip65: &nip65,
         };
 
         let first = core.handle(EngineMsg::Subscribe(query(&author_a)));
@@ -3260,8 +3313,8 @@ mod relay_worker_reconciliation_tests {
             nmp_grammar::AccessContext::Nip42(author.public_key()),
         );
         let directory =
-            FixtureDirectory::new().with_write(author.public_key().to_hex(), [relay.clone()]);
-        let mut core = EngineCore::new(MemoryStore::new(), Box::new(directory), 1);
+            FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()]);
+        let mut core = EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), directory, 1);
         core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
 
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
@@ -3309,6 +3362,8 @@ mod relay_worker_reconciliation_tests {
         let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
+        #[cfg(feature = "nip65")]
+        let nip65 = RefCell::new(crate::nip65::RuntimeAssembly::new([]));
         let dispatch_runtime = DispatchRuntime {
             self_inbox: &self_inbox,
             relay_information: &relay_information,
@@ -3317,6 +3372,8 @@ mod relay_worker_reconciliation_tests {
             auth_policies: &auth_policies,
             auth_tasks: &auth_tasks,
             receipt_deliveries: &receipt_deliveries,
+            #[cfg(feature = "nip65")]
+            nip65: &nip65,
         };
 
         dispatch_core_effects(
@@ -3356,7 +3413,6 @@ mod relay_worker_reconciliation_tests {
 mod auth_registry_admission_tests {
     use super::*;
     use nmp_local_signer::LocalKeySigner;
-    use nmp_router::FixtureDirectory;
     use nmp_store::MemoryStore;
     use nmp_transport::RelayFrame;
     use nostr::{Keys, RelayMessage};
@@ -3435,12 +3491,12 @@ mod auth_registry_admission_tests {
     fn runtime(limit: usize) -> (EngineThread, Handle) {
         EngineThread::spawn_with_runtime_config(
             MemoryStore::new(),
-            FixtureDirectory::new(),
             1,
             PoolConfig::default(),
             RelayAdmissionPolicy::default(),
             RuntimeConfig {
                 max_auth_capabilities: limit,
+                ..RuntimeConfig::default()
             },
         )
         .unwrap()
@@ -3792,6 +3848,8 @@ struct DispatchRuntime<'a> {
     auth_policies: &'a RefCell<auth::AuthPolicyRegistry>,
     auth_tasks: &'a RefCell<auth::AuthTaskRegistry>,
     receipt_deliveries: &'a RefCell<ReceiptDeliveryRegistry>,
+    #[cfg(feature = "nip65")]
+    nip65: &'a RefCell<crate::nip65::RuntimeAssembly>,
 }
 
 #[derive(Default)]
@@ -3915,16 +3973,15 @@ struct EngineWiring<'a> {
 /// iteration; there is no polling or sleeper. `None` blocks on plain
 /// `recv()`. A timeout fires only the due owners: reducer `Tick` for
 /// persisted deadlines and/or NIP-11 fallback, then recomputes the minimum.
-fn engine_loop<S, D>(
+fn engine_loop<S>(
     store: S,
-    directory: D,
+    routing_facts: crate::core::RoutingFactStore,
     cap: usize,
     admission: RelayAdmissionPolicy,
     pool_runtime: EnginePoolRuntime,
     wiring: EngineWiring<'_>,
 ) where
     S: EventStore,
-    D: RelayDirectory + 'static,
 {
     let EngineWiring {
         clock,
@@ -3937,10 +3994,13 @@ fn engine_loop<S, D>(
         runtime,
         relay_information,
         max_auth_capabilities,
+        #[cfg(feature = "nip65")]
+        nip65_sources,
     } = pool_runtime;
     let runtime_handle = runtime.handle().clone();
     let runtime_handle = &runtime_handle;
-    let mut core = EngineCore::new(store, Box::new(directory), cap).with_relay_admission(admission);
+    let mut core = EngineCore::new_with_routing_facts(store, routing_facts, cap)
+        .with_relay_admission(admission);
     let mut row_channels: HashMap<HandleId, RowsSender> = HashMap::new();
     let mut history_channels: HashMap<HistorySessionId, LatestSender<HistoryMsg>> = HashMap::new();
     let mut diag_channels: HashMap<u64, LatestSender<DiagnosticsSnapshot>> = HashMap::new();
@@ -3950,6 +4010,8 @@ fn engine_loop<S, D>(
     let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
     let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
     let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
+    #[cfg(feature = "nip65")]
+    let nip65 = RefCell::new(crate::nip65::RuntimeAssembly::new(nip65_sources));
     let mut auth_instances = auth::AuthCapabilityInstances::default();
     let mut active_pubkey = None;
     let mut next_sign_event_id = 1u64;
@@ -3963,6 +4025,8 @@ fn engine_loop<S, D>(
         auth_policies: &auth_policies,
         auth_tasks: &auth_tasks,
         receipt_deliveries: &receipt_deliveries,
+        #[cfg(feature = "nip65")]
+        nip65: &nip65,
     };
 
     // Recovery happens before the first externally-issued command. Pending
@@ -5468,6 +5532,25 @@ fn dispatch_effect(
     runtime: DispatchRuntime<'_>,
 ) {
     match effect {
+        Effect::AuthorRouteNeedsChanged(needs) => {
+            #[cfg(feature = "nip65")]
+            {
+                let followups = { runtime.nip65.borrow_mut().sync(core, needs) };
+                dispatch_effects(
+                    core,
+                    followups,
+                    pool,
+                    row_channels,
+                    history_channels,
+                    diag_channels,
+                    preambles,
+                    registry,
+                    runtime,
+                );
+            }
+            #[cfg(not(feature = "nip65"))]
+            let _ = needs;
+        }
         Effect::UpdateCommittedObservations {
             invalidated,
             published,
@@ -5703,11 +5786,50 @@ fn dispatch_effect(
             // on.
         }
         Effect::EmitRows(id, rows, evidence) => {
+            #[cfg(feature = "nip65")]
+            let nip65_followups = { runtime.nip65.borrow_mut().consume_rows(core, id, &rows) };
+            #[cfg(feature = "nip65")]
+            if let Some(followups) = nip65_followups {
+                dispatch_effects(
+                    core,
+                    followups,
+                    pool,
+                    row_channels,
+                    history_channels,
+                    diag_channels,
+                    preambles,
+                    registry,
+                    runtime,
+                );
+                return;
+            }
             if let Some(tx) = row_channels.get(&id) {
                 tx.send((rows, evidence, Vec::new()));
             }
         }
         Effect::EmitObservationEvidence(id, evidence) => {
+            #[cfg(feature = "nip65")]
+            let nip65_followups = {
+                runtime
+                    .nip65
+                    .borrow_mut()
+                    .consume_evidence(core, id, &evidence)
+            };
+            #[cfg(feature = "nip65")]
+            if let Some(followups) = nip65_followups {
+                dispatch_effects(
+                    core,
+                    followups,
+                    pool,
+                    row_channels,
+                    history_channels,
+                    diag_channels,
+                    preambles,
+                    registry,
+                    runtime,
+                );
+                return;
+            }
             if let Some(tx) = row_channels.get(&id) {
                 tx.send_evidence(evidence);
             }

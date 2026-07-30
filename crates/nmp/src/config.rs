@@ -4,11 +4,8 @@
 //! `uniffi::Record` derive -- that boundary now converts into this type
 //! instead of assembling the engine itself (Unit B).
 //!
-//! Everything past these three relay lanes is discovered live by the engine
-//! itself, via its own internal kind:10002 auto-discovery against the
-//! configured indexers (M5's self-bootstrapping outbox) -- there is no
-//! bootstrap phase and no pre-resolved write-relay map for a caller to
-//! supply.
+//! Author routes are not configuration. They are neutral, session-owned
+//! facts populated only by an attached protocol component.
 
 use nostr::RelayUrl;
 
@@ -25,15 +22,12 @@ pub struct EngineConfig {
     /// has acquired, never `synced`/`authoritativeEmpty` (ledger #7 is
     /// still TARGET).
     pub store_path: Option<String>,
-    /// Operator indexer relay set (`Lane::IndexerDiscovery`) -- eligible
-    /// only for discovery-kind atoms. This, plus `app_relays`/
-    /// `fallback_relays` below, is the entire relay fact set a caller ever
-    /// supplies; every author's write relays (including the app's own
-    /// account) are discovered live from here.
+    /// Exact operator sources handed to the optional NIP-65 coordinator.
+    /// Generic routing never reads or adds these relays.
     pub indexer_relays: Vec<String>,
-    /// Operator app relay set (`Lane::AppRelay`). Default empty.
+    /// Operator app relay set (`Lane::OperatorApp`). Default empty.
     pub app_relays: Vec<String>,
-    /// Operator fallback relay set (`Lane::Fallback`). Default empty.
+    /// Operator fallback relay set (`Lane::OperatorFallback`). Default empty.
     pub fallback_relays: Vec<String>,
     /// Local/private relay HOSTS the operator EXPLICITLY opts into despite
     /// the SSRF admission policy (issue #121). Discovered (network-sourced
@@ -92,14 +86,15 @@ pub(crate) fn build_admission_policy(config: &EngineConfig) -> crate::core::Rela
     crate::core::RelayAdmissionPolicy::new(config.allowed_local_relay_hosts.iter().cloned())
 }
 
-pub(crate) fn build_directory(
+pub(crate) fn build_routing_facts(
     config: &EngineConfig,
-) -> Result<nmp_router::LiveDirectory, EngineError> {
-    let indexers = config
-        .indexer_relays
-        .iter()
-        .map(|u| parse_relay_url(u))
-        .collect::<Result<Vec<_>, _>>()?;
+) -> Result<crate::core::RoutingFactStore, EngineError> {
+    // Validate optional-component configuration even when that component is
+    // not compiled in. Feature selection must not turn malformed input into
+    // a silently accepted configuration.
+    for url in &config.indexer_relays {
+        parse_relay_url(url)?;
+    }
     let app_relays = config
         .app_relays
         .iter()
@@ -110,9 +105,17 @@ pub(crate) fn build_directory(
         .iter()
         .map(|u| parse_relay_url(u))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(nmp_router::LiveDirectory::builder()
-        .indexers(indexers)
-        .app_relays(app_relays)
-        .fallback_relays(fallback_relays)
-        .build())
+    Ok(crate::core::RoutingFactStore::new(
+        app_relays,
+        fallback_relays,
+    ))
+}
+
+#[cfg(feature = "nip65")]
+pub(crate) fn build_nip65_sources(config: &EngineConfig) -> Result<Vec<RelayUrl>, EngineError> {
+    config
+        .indexer_relays
+        .iter()
+        .map(|url| parse_relay_url(url))
+        .collect()
 }

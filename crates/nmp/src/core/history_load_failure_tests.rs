@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
 use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
-use nmp_router::FixtureDirectory;
+use nmp_router::FixtureRoutingFacts;
 use nmp_store::{
     AcceptOutcome, AcceptWrite, CancelEphemeralOutcome, ClaimSet, CompensateOutcome,
     CompensationReason, CoverageInterval, CoverageKey, EventCursor, EventStore, GcReport,
@@ -216,7 +216,6 @@ fn production_runtime_projection_failure_is_the_observation_refusal() {
     let store = FailingReadStore::new(MemoryStore::new(), control);
     let (engine, handle) = crate::runtime::EngineThread::spawn(
         store,
-        FixtureDirectory::new(),
         4,
         nmp_transport::PoolConfig::default(),
         RelayAdmissionPolicy::default(),
@@ -345,11 +344,7 @@ fn open_history(
     query: HistoryQuery,
     active_pubkey: Option<PublicKey>,
 ) -> (EngineCore<FailingReadStore>, HistorySessionId) {
-    let mut core = EngineCore::new(
-        FailingReadStore::new(store, control),
-        Box::new(FixtureDirectory::new()),
-        20,
-    );
+    let mut core = EngineCore::new(FailingReadStore::new(store, control), 20);
     if let Some(active_pubkey) = active_pubkey {
         core.handle(EngineMsg::SetActivePubkey(Some(active_pubkey)));
     }
@@ -512,11 +507,12 @@ fn under_return_keeps_limit_and_disconnect_evidence_without_false_end() {
         2,
         6,
     );
-    let directory = FixtureDirectory::new().with_write(keys.public_key().to_hex(), [first, second]);
+    let directory =
+        FixtureRoutingFacts::new().with_outbound_routes(keys.public_key(), [first, second]);
     let control = ReadFailureControl::default();
-    let mut core = EngineCore::new(
+    let mut core = EngineCore::new_with_fixture_routing_facts(
         FailingReadStore::new(store, control),
-        Box::new(directory),
+        directory,
         1,
     );
     let opened = core.handle(EngineMsg::SubscribeHistory(query));

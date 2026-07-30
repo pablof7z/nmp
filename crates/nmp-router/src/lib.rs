@@ -2,7 +2,7 @@
 //! (M2). See `docs/plans/M2-compiler-router-plan.md` for the full spec this
 //! crate implements.
 //!
-//! The compiler is a **pure function of `(demand set, injected relay
+//! The compiler is a **pure function of `(demand set, neutral routing
 //! facts)`** — this crate depends only on `nmp-grammar` (for
 //! `ConcreteFilter`/`DescriptorHash`) and `nostr` (for `RelayUrl` and
 //! `Filter::match_event`). It does NOT depend on `nmp-resolver` or
@@ -11,8 +11,8 @@
 //! measurement) that wire the real resolver into the router.
 //!
 //! Module layout:
-//! - `facts` — `Lane`, `LanedRelay`, `RelayDirectory` trait, `FixtureDirectory`,
-//!   `DiscoveryKinds`.
+//! - `facts` — the closed neutral route vocabulary, the read-only
+//!   `RoutingFacts` view, and static test facts.
 //! - `budget` — `CompileBudget`: the whole-demand relay ceiling plus each
 //!   relay's own advertised NIP-11 limits, the bounds `compile` plans within.
 //! - `route` — atom classification (outbox vs pinned) + candidate assembly +
@@ -53,8 +53,8 @@ pub use coalesce::{
 pub use deliver::deliver;
 pub use diag::{Diagnostics, RelayDiagnostics};
 pub use facts::{
-    test_relay, DiscoveryKinds, FixtureDirectory, Lane, LanedRelay, LiveDirectory, PubkeyHex,
-    RelayDirectory, RelayListKnowledge, RelayUrl,
+    test_relay, AuthorRouteState, AuthorRoutes, FixtureRoutingFacts, Lane, LanedRelay, PublicKey,
+    RelayUrl, RoutingFacts,
 };
 pub use plan::{diff_plans, BudgetShortfall, RelayPlan, SubId, WireDelta, WireOp, WireReq};
 pub use route::{RouteKind, RouteProvenance, Skeleton};

@@ -1,15 +1,9 @@
 Feature: App relays are additive for every kind, every author, always
   The operator configures a set of relays the app itself wants everything to
   reach -- its own indexer, its own archive, the relay its search runs over.
-  `RelayDirectory::app_relays`'s shipped doc comment
-  (`crates/nmp-router/src/facts.rs:81-91`) states the policy in six words that
-  leave nothing to interpret:
-
-  > Operator-configured app relay set (`Lane::AppRelay`, §2.1 of `routing-and-ownership.md`) -- every kind, every author, always, additive, never counted toward the 2-relay-min.
-
-  The read path honours that today. The write path does not call the accessor
-  at all. So this is not a new policy being invented for writes; it is the
-  policy already written down, applied on the side that ignores it.
+  `RoutingFacts::operator_app_relays` keeps the policy independent of author
+  facts: every kind, every author, always additive, never counted toward the
+  two-relay coverage minimum.
 
   "Additive" is the word doing the work. App relays are not a fallback for a
   thin relay list, not a substitute when discovery is cold, and not a
@@ -24,8 +18,6 @@ Feature: App relays are additive for every kind, every author, always
   the app ever names. Recorded here so nobody re-adds a kind:0-shaped special
   path; if a future change makes profiles reach the app relays by some
   dedicated mechanism, the model has been broken and patched rather than used.
-
-  Every scenario here is @designed.
 
   Background:
     Given I am logged in as my own account

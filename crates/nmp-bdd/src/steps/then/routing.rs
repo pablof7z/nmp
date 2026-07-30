@@ -32,12 +32,10 @@ fn filter_kinds(json: &str) -> Vec<u16> {
         .unwrap_or_default()
 }
 
-/// The default discovery-kind set (`nmp_router::DiscoveryKinds::default`,
-/// re-derived here rather than depending on that crate's internal type just
-/// for this one check): kind:0, kind:3, and the whole NIP-01 REPLACEABLE
-/// range 10000..=19999.
-fn is_discovery_kind(k: u16) -> bool {
-    k == 0 || k == 3 || (10_000..=19_999).contains(&k)
+/// The optional NIP-65 assembly's exact protocol query. Generic routing has
+/// no discovery-kind class and cannot widen these sources to content.
+fn is_nip65_kind(k: u16) -> bool {
+    k == 10_002
 }
 
 fn parse_relay_list_tail(tail: &str) -> Vec<String> {
@@ -80,12 +78,8 @@ async fn subscriptions_untouched(w: &mut NmpWorld, list: String) {
 
 #[then(regex = r#"^the indexers are asked only for relay lists and profiles$"#)]
 async fn indexers_discovery_only(w: &mut NmpWorld) {
-    // "relay lists and profiles" is this scenario's plain-language gloss of
-    // the structural invariant actually being asserted: an indexer relay
-    // (`Lane::IndexerDiscovery`) may carry kind:0/3/1xxxx (relay lists,
-    // profiles, contact lists, mute lists, ...) but NEVER a content atom
-    // (kind:1) -- see `nmp_router::DiscoveryKinds`'s doc ("indexers are
-    // never a content fallback").
+    // The structural invariant: an operator-selected NIP-65 source carries
+    // only the assembly's exact kind:10002 query, never generic content.
     let names: Vec<String> = w.indexer_names().to_vec();
     let urls: Vec<_> = names.iter().map(|n| w.relay_url(n)).collect();
     // Polled through the predicate rather than read off the first snapshot
@@ -114,8 +108,8 @@ async fn indexers_discovery_only(w: &mut NmpWorld) {
         for filter_json in &relay_diag.filters {
             for kind in filter_kinds(filter_json) {
                 assert!(
-                    is_discovery_kind(kind),
-                    "indexer {name:?} carries a non-discovery filter (kind {kind}): {filter_json}"
+                    is_nip65_kind(kind),
+                    "NIP-65 source {name:?} carries a non-NIP-65 filter (kind {kind}): {filter_json}"
                 );
             }
         }

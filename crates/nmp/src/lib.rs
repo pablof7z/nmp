@@ -8,7 +8,7 @@
 //! Two nouns, one construction call:
 //!
 //! - [`Engine::new`] -- config in, a running engine out. Owns
-//!   config -> store/directory selection and the router cap that
+//!   config -> store/neutral-routing-fact selection and the router cap that
 //!   `nmp-ffi`/`nmp-demo` used to each assemble by hand.
 //! - [`Engine::observe`] -- a live query (and an optional [`Window`]) in, a
 //!   [`Subscription`] streaming [`Frame`]s out.
@@ -30,7 +30,7 @@
 //! engine using the same canonical path; cross-process exclusion remains a
 //! separate deployment concern.
 //!
-//! Everything below `Engine` -- `EngineThread`, `Handle`, `LiveDirectory`,
+//! Everything below `Engine` -- `EngineThread`, `Handle`,
 //! `RedbStore`/`MemoryStore`, `PoolConfig`, `LocalKeySigner` -- is no longer
 //! an app contract (#52's "internal or explicitly unstable"). Two things
 //! stay behind the `unstable-mechanism` cargo feature, off by default and
@@ -146,6 +146,9 @@ pub mod mechanism {
 // not link the mechanism crate.
 #[cfg(feature = "nip22")]
 pub mod nip22;
+
+#[cfg(feature = "nip65")]
+pub mod nip65;
 
 // #977: the engine binding for the NIP-29 `Group` door. Unconditional, unlike
 // `nip22` above: `nmp-nip29` is pure composition over `nostr` +
@@ -320,14 +323,12 @@ pub use nmp_signer::{
 
 // The concrete mechanism types are internal by default (#52's "internal or
 // explicitly unstable"). `Engine::from_parts` needs `EventStore`/
-// `RelayDirectory`/`PoolConfig` in a caller's signature to be usable at
-// all, so those three -- and ONLY those three -- are re-exported behind the
+// `PoolConfig` in a caller's signature to be usable at
+// all, so the needed mechanism types are re-exported behind the
 // same feature that unlocks the constructor itself. This hatch is an
 // in-workspace/test exception (`nmp-bdd`), not required to be usable from
 // an `nmp`-only dependency -- it may legitimately need further
 // mechanism-crate types that this crate does not re-export.
-#[cfg(feature = "unstable-mechanism")]
-pub use nmp_router::RelayDirectory;
 #[cfg(feature = "unstable-mechanism")]
 pub use nmp_store::EventStore;
 #[cfg(feature = "unstable-mechanism")]

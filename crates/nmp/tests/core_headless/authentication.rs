@@ -7,7 +7,7 @@ fn fresh_protected_read_ensures_one_worker_and_replays_only_current_demand_after
     let signer = Keys::generate();
     let relay = RelayUrl::parse("wss://fresh-protected-read.example").unwrap();
     let session = signer_session(&relay, signer.public_key());
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
 
     let first = core.handle(EngineMsg::Subscribe(protected_pinned_query(
         &relay,
