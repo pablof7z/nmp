@@ -5,6 +5,12 @@
 
 set -euo pipefail
 
+SCRIPT_PATH=${BASH_SOURCE[0]}
+SCRIPT_DIR=${SCRIPT_PATH%/*}
+[[ $SCRIPT_DIR != "$SCRIPT_PATH" ]] || SCRIPT_DIR=.
+source "$SCRIPT_DIR/lib/require-commands.sh" || exit 2
+require_commands git mktemp rm || exit 2
+
 if [[ $# -ne 2 ]]; then
   echo "usage: $0 BASE_REF HEAD_REF" >&2
   exit 2
