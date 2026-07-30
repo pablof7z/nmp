@@ -76,4 +76,36 @@ rm "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml.bak"
 expect_failure "mutable Cargo-cache Swift audit" \
   "provider workflow still audits mutable Cargo-cache libraries"
 
-echo "NIP-46 provider workflow test: baseline and five mutations passed"
+reset_fixture
+sed -i.bak \
+  's#scripts/check-nip46-provider-changes\.sh#scripts/removed-provider-change-router.sh#' \
+  "$FIXTURE_ROOT/.github/workflows/nip46-provider.yml"
+rm "$FIXTURE_ROOT/.github/workflows/nip46-provider.yml.bak"
+expect_failure "removed pull-request change router" \
+  "Kotlin provider workflow does not classify pull-request changes"
+
+reset_fixture
+sed -i.bak \
+  's/required=true/required=false/g' \
+  "$FIXTURE_ROOT/.github/workflows/nip46-provider.yml"
+rm "$FIXTURE_ROOT/.github/workflows/nip46-provider.yml.bak"
+expect_failure "fail-open routing default" \
+  "Kotlin provider workflow does not default classification to running proofs"
+
+reset_fixture
+sed -i.bak \
+  's/    needs: change-routing/    needs: removed-change-routing/g' \
+  "$FIXTURE_ROOT/.github/workflows/nip46-provider.yml"
+rm "$FIXTURE_ROOT/.github/workflows/nip46-provider.yml.bak"
+expect_failure "package proof detached from routing" \
+  "both expensive NIP-46 jobs must depend on change routing"
+
+reset_fixture
+sed -i.bak \
+  "s/    if: needs.change-routing.outputs.required == 'true'/    if: always()/g" \
+  "$FIXTURE_ROOT/.github/workflows/nip46-provider.yml"
+rm "$FIXTURE_ROOT/.github/workflows/nip46-provider.yml.bak"
+expect_failure "package proof made unconditional" \
+  "both expensive NIP-46 jobs must skip when change routing proves them unaffected"
+
+echo "NIP-46 provider workflow test: baseline and nine mutations passed"

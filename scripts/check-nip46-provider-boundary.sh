@@ -69,6 +69,23 @@ check_provider_workflows() {
     fail "Kotlin provider workflow does not prove matched component identity"
   grep -qF 'scripts/check-nip46-artifact-inventory.sh' "$kotlin_provider_workflow" ||
     fail "Kotlin provider workflow does not audit packaged component inventory"
+
+  grep -qF '  change-routing:' "$kotlin_provider_workflow" ||
+    fail "Kotlin provider workflow has no cheap change-routing job"
+  grep -qF 'scripts/check-nip46-provider-changes.sh "$BASE_SHA" "$HEAD_SHA"' \
+    "$kotlin_provider_workflow" ||
+    fail "Kotlin provider workflow does not classify pull-request changes"
+  grep -qF '          required=true' "$kotlin_provider_workflow" ||
+    fail "Kotlin provider workflow does not default classification to running proofs"
+  grep -qF '          fetch-depth: 0' "$kotlin_provider_workflow" ||
+    fail "Kotlin provider workflow cannot compare the complete pull-request range"
+  if [[ $(grep -cF '    needs: change-routing' "$kotlin_provider_workflow") -ne 2 ]]; then
+    fail "both expensive NIP-46 jobs must depend on change routing"
+  fi
+  if [[ $(grep -cF "    if: needs.change-routing.outputs.required == 'true'" \
+    "$kotlin_provider_workflow") -ne 2 ]]; then
+    fail "both expensive NIP-46 jobs must skip when change routing proves them unaffected"
+  fi
 }
 
 check_provider_workflows
