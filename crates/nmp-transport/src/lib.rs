@@ -24,7 +24,8 @@
 //! ## Surface
 //!
 //! [`Pool::ensure_open`] / [`Pool::send`] / [`Pool::close`] /
-//! [`Pool::set_reconnect_preamble`] / [`Pool::health`] / [`Pool::shutdown`].
+//! [`Pool::set_reconnect_preamble`] / [`Pool::replay_reconnect_preamble`] /
+//! [`Pool::health`] / [`Pool::shutdown`].
 //! Push-model only: there is no "send to all" — the caller iterates its own
 //! routing plan and issues one `send` per (relay, current handle).
 
@@ -37,7 +38,10 @@ mod pool;
 pub use handle::RelayHandle;
 pub use health::{ConnState, RelayHealth};
 #[cfg(feature = "bench-instrumentation")]
-pub use pool::{configure_diagnostic_duplicate_ceiling, configure_diagnostic_preparsed_ceiling};
+pub use pool::{
+    configure_diagnostic_duplicate_ceiling, configure_diagnostic_preparsed_ceiling,
+    install_reconnect_preamble_snapshot_barrier, ReconnectPreambleSnapshotBarrier,
+};
 pub use pool::{
     AttemptCorrelation, CommittedObservationCandidate, CommittedObservationHit,
     CommittedObservationPublication, DisconnectReason, DurableSendOutcome, EphemeralOperation,

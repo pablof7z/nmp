@@ -1060,15 +1060,16 @@ fn client_invitation_reconnect_preamble_binds_the_accepted_signer() {
 }
 
 #[test]
-fn dormant_secondary_relay_reconnects_with_the_bound_signer_as_its_first_req() {
+fn snapshotted_secondary_preamble_is_revoked_before_its_post_binding_write() {
     let primary_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let primary_relay = format!("ws://{}", primary_listener.local_addr().unwrap());
     let secondary_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let secondary_relay = format!("ws://{}", secondary_listener.local_addr().unwrap());
+    let secondary_url = nostr::RelayUrl::parse(&secondary_relay).unwrap();
     let invitation = Nip46Invitation::new(
         vec![
             nostr::RelayUrl::parse(&primary_relay).unwrap(),
-            nostr::RelayUrl::parse(&secondary_relay).unwrap(),
+            secondary_url.clone(),
         ],
         None,
         Nip46ClientMetadata::default(),
@@ -1156,7 +1157,6 @@ fn dormant_secondary_relay_reconnects_with_the_bound_signer_as_its_first_req() {
 
     let (secondary_broad_tx, secondary_broad_rx) = mpsc::sync_channel(1);
     let (close_secondary_tx, close_secondary_rx) = mpsc::channel();
-    let (allow_secondary_reconnect_tx, allow_secondary_reconnect_rx) = mpsc::channel();
     let (secondary_first_req_tx, secondary_first_req_rx) = mpsc::sync_channel(1);
     thread::spawn(move || {
         let (first_stream, _) = secondary_listener.accept().unwrap();
@@ -1183,9 +1183,6 @@ fn dormant_secondary_relay_reconnects_with_the_bound_signer_as_its_first_req() {
         drop(first);
 
         let (second_stream, _) = secondary_listener.accept().unwrap();
-        allow_secondary_reconnect_rx
-            .recv_timeout(OBSERVATION)
-            .expect("the test releases the dormant relay only after pairing completes");
         let mut second = tungstenite::accept(second_stream).unwrap();
         loop {
             let Message::Text(text) = second.read().unwrap() else {
@@ -1223,6 +1220,8 @@ fn dormant_secondary_relay_reconnects_with_the_bound_signer_as_its_first_req() {
     secondary_broad_rx
         .recv_timeout(OBSERVATION)
         .expect("the secondary relay observed its startup broad REQ");
+    let secondary_snapshot =
+        nmp_transport::install_reconnect_preamble_snapshot_barrier(&secondary_url);
     close_secondary_tx.send(()).unwrap();
     loop {
         match events_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
@@ -1233,6 +1232,10 @@ fn dormant_secondary_relay_reconnects_with_the_bound_signer_as_its_first_req() {
             }
         }
     }
+    assert!(
+        secondary_snapshot.wait_until_observed(OBSERVATION),
+        "relay B must snapshot the broad reconnect preamble before relay A binds"
+    );
 
     allow_primary_handshake_tx.send(()).unwrap();
     let signer = connect_rx
@@ -1241,7 +1244,10 @@ fn dormant_secondary_relay_reconnects_with_the_bound_signer_as_its_first_req() {
         .expect("pairing succeeds");
     assert_eq!(signer.remote_signer_public_key(), expected_remote);
 
-    allow_secondary_reconnect_tx.send(()).unwrap();
+    // This release creates the exact historical race: B snapshotted the broad
+    // frame before binding, but cannot attempt its write until after the
+    // ownership transition completed on A.
+    secondary_snapshot.release();
     let first_post_binding_req = secondary_first_req_rx
         .recv_timeout(OBSERVATION)
         .expect("the dormant secondary relay reconnects");
