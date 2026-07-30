@@ -11,6 +11,7 @@ owns:
 related:
   - docs/internals/conventions/bech32-boundary.md
   - docs/internals/conventions/naming-no-invented-categories.md
+  - docs/internals/conventions/schema-epoch-discard.md
   - docs/internals/writes/event-builder.md
   - docs/internals/nip29/group-publication.md
 issues: []
@@ -42,6 +43,12 @@ The workspace, the FFI layer, Swift, Kotlin, the governed surface snapshots,
 and every test move to the new spelling in the same change. "Temporary"
 compatibility surfaces are not temporary; they are a second surface with a
 maintenance bill and no deletion date.
+
+The same rule applies to durable bytes. A `SCHEMA_VERSION` bump makes every
+non-current store unsupported; the consumer discards and recreates it instead
+of NMP carrying a decoder, migration, adoption, alias, or outbox-drain path.
+That action loses more than a read cache. The complete policy and operator cost
+live in [`schema-epoch-discard.md`](schema-epoch-discard.md).
 
 ## 2. Consequences for how proposals are presented — POLICY
 
