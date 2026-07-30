@@ -1,14 +1,16 @@
 //! Cross-process exclusive ownership for persistent stores (#489).
 //!
 //! The database door and the destructive-reset door acquire the same durable
-//! sidecar file lock. Reset also joins redb's target-inode lock before removal,
-//! so a hard-link alias cannot bypass live backend ownership. The locks are
-//! owned by RAII values, so no process-global registry, caller convention, or
-//! engine-only construction path can bypass them.
+//! sidecar file lock. A production database open then acquires NMP's required
+//! target-inode lock; reset joins that same lock before removal, so a hard-link
+//! alias cannot bypass live backend ownership. The locks are owned by RAII
+//! values, so no process-global registry, caller convention, or engine-only
+//! construction path can bypass them.
 
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// How many times resolution may follow a symlink or re-read a component that
 /// changed under it before giving up. It bounds progress, not link depth
@@ -189,9 +191,10 @@ pub(crate) struct StoreOwnership {
 /// because an unrelated concurrent spawn was holding a duplicate descriptor.
 ///
 /// An explicit unlock releases the lock on the shared description itself, so
-/// it takes effect no matter how many inherited duplicates exist. `redb` does
-/// exactly this for the database file it locks alongside this sidecar; without
-/// it, only half of the pair was fork-safe.
+/// it takes effect no matter how many inherited duplicates exist. NMP's
+/// required target-inode backend does exactly this for the database file it
+/// locks alongside this sidecar; without it, only half of the pair would be
+/// fork-safe.
 ///
 /// Nothing wants a forked child to inherit ownership: a child that means to
 /// own the target opens the sidecar itself and takes its own lock.
@@ -232,10 +235,275 @@ impl StoreOwnership {
     }
 }
 
+/// NMP's one required, long-lived owner of the actual database inode.
+///
+/// Redb's built-in file backend deliberately continues when file locking is
+/// unsupported. That is unsafe for NMP's destructive reset contract: hard-link
+/// aliases have different pathname sidecars, so the target inode is the only
+/// shared authority. NMP therefore acquires the target lock itself and passes
+/// this backend to `create_with_backend`.
+///
+/// `Option::take` is the release state machine. Redb's required single
+/// [`redb::StorageBackend::close`] call and a construction-failure `Drop` race
+/// through the same door, so exactly one path explicitly unlocks and owns the
+/// file. There is no adjacent lifecycle boolean.
+#[derive(Debug)]
+struct RequiredTargetLock {
+    file: Arc<File>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RequiredLockedFileBackend {
+    file: Arc<File>,
+    target_lock: Mutex<Option<RequiredTargetLock>>,
+    #[cfg(not(any(unix, windows)))]
+    position: Mutex<()>,
+}
+
+impl RequiredLockedFileBackend {
+    pub(crate) fn open(target: &Path) -> Result<Self, RedbStoreOpenError> {
+        let file = Arc::new(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(target)
+                .map_err(|source| RedbStoreOpenError::LockFailed {
+                    path: target.to_path_buf(),
+                    source,
+                })?,
+        );
+
+        match try_lock_required_target(&file) {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(RedbStoreOpenError::StoreAlreadyOpen {
+                    path: target.to_path_buf(),
+                });
+            }
+            Err(std::fs::TryLockError::Error(source)) => {
+                return Err(RedbStoreOpenError::LockFailed {
+                    path: target.to_path_buf(),
+                    source,
+                });
+            }
+        }
+
+        // Ownership is represented immediately after the successful syscall,
+        // before redb initialization or any other fallible work. Every later
+        // return therefore runs the same exactly-once release door.
+        Ok(Self {
+            target_lock: Mutex::new(Some(RequiredTargetLock {
+                file: Arc::clone(&file),
+            })),
+            file,
+            #[cfg(not(any(unix, windows)))]
+            position: Mutex::new(()),
+        })
+    }
+
+    fn release(&self) -> io::Result<()> {
+        let target_lock = self
+            .target_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        match target_lock {
+            Some(target_lock) => unlock_required_target(&target_lock.file),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for RequiredLockedFileBackend {
+    fn drop(&mut self) {
+        let target_lock = self
+            .target_lock
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(target_lock) = target_lock {
+            let _ = unlock_required_target(&target_lock.file);
+        }
+    }
+}
+
+impl redb::StorageBackend for RequiredLockedFileBackend {
+    fn len(&self) -> io::Result<u64> {
+        Ok(self.file.metadata()?.len())
+    }
+
+    #[cfg(unix)]
+    fn read(&self, offset: u64, out: &mut [u8]) -> io::Result<()> {
+        use std::os::unix::fs::FileExt;
+
+        self.file.read_exact_at(out, offset)
+    }
+
+    #[cfg(windows)]
+    fn read(&self, mut offset: u64, out: &mut [u8]) -> io::Result<()> {
+        use std::os::windows::fs::FileExt;
+
+        let mut data_offset = 0;
+        while data_offset < out.len() {
+            let read = self.file.seek_read(&mut out[data_offset..], offset)?;
+            if read == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "failed to fill persistent-store buffer",
+                ));
+            }
+            offset += read as u64;
+            data_offset += read;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn read(&self, offset: u64, out: &mut [u8]) -> io::Result<()> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let _position = self
+            .position
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut file = self.file.as_ref();
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(out)
+    }
+
+    fn set_len(&self, len: u64) -> io::Result<()> {
+        self.file.set_len(len)
+    }
+
+    fn sync_data(&self) -> io::Result<()> {
+        self.file.sync_data()
+    }
+
+    #[cfg(unix)]
+    fn write(&self, offset: u64, data: &[u8]) -> io::Result<()> {
+        use std::os::unix::fs::FileExt;
+
+        self.file.write_all_at(data, offset)
+    }
+
+    #[cfg(windows)]
+    fn write(&self, mut offset: u64, data: &[u8]) -> io::Result<()> {
+        use std::os::windows::fs::FileExt;
+
+        let mut data_offset = 0;
+        while data_offset < data.len() {
+            let written = self.file.seek_write(&data[data_offset..], offset)?;
+            if written == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write persistent-store buffer",
+                ));
+            }
+            offset += written as u64;
+            data_offset += written;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn write(&self, offset: u64, data: &[u8]) -> io::Result<()> {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let _position = self
+            .position
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut file = self.file.as_ref();
+        file.seek(SeekFrom::Start(offset))?;
+        file.write_all(data)
+    }
+
+    fn close(&self) -> io::Result<()> {
+        self.release()
+    }
+}
+
+fn try_lock_required_target(file: &File) -> Result<(), std::fs::TryLockError> {
+    #[cfg(test)]
+    if let Some(kind) = REQUIRED_TARGET_LOCK_ERROR.with(|slot| slot.borrow_mut().take()) {
+        return Err(std::fs::TryLockError::Error(io::Error::from(kind)));
+    }
+    file.try_lock()
+}
+
+fn unlock_required_target(file: &File) -> io::Result<()> {
+    #[cfg(test)]
+    REQUIRED_TARGET_UNLOCK_COUNT.with(|slot| {
+        if let Some(count) = slot.get() {
+            slot.set(Some(count + 1));
+        }
+    });
+    file.unlock()
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static REQUIRED_TARGET_LOCK_ERROR: std::cell::RefCell<Option<io::ErrorKind>> =
+        const { std::cell::RefCell::new(None) };
+    static REQUIRED_TARGET_UNLOCK_COUNT: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+struct ClearRequiredTargetLockError;
+
+#[cfg(test)]
+impl Drop for ClearRequiredTargetLockError {
+    fn drop(&mut self) {
+        REQUIRED_TARGET_LOCK_ERROR.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+
+#[cfg(test)]
+fn with_required_target_lock_error<T>(kind: io::ErrorKind, operation: impl FnOnce() -> T) -> T {
+    REQUIRED_TARGET_LOCK_ERROR.with(|slot| {
+        assert!(
+            slot.borrow_mut().replace(kind).is_none(),
+            "one open cannot inject two required-target lock outcomes"
+        );
+    });
+    let _clear = ClearRequiredTargetLockError;
+    operation()
+}
+
+#[cfg(test)]
+struct ClearRequiredTargetUnlockCount;
+
+#[cfg(test)]
+impl Drop for ClearRequiredTargetUnlockCount {
+    fn drop(&mut self) {
+        REQUIRED_TARGET_UNLOCK_COUNT.with(|slot| slot.set(None));
+    }
+}
+
+#[cfg(test)]
+fn with_required_target_unlock_count<T>(operation: impl FnOnce() -> T) -> (T, u64) {
+    REQUIRED_TARGET_UNLOCK_COUNT.with(|slot| {
+        assert!(
+            slot.replace(Some(0)).is_none(),
+            "one test cannot install two required-target unlock counters"
+        );
+    });
+    let clear = ClearRequiredTargetUnlockCount;
+    let result = operation();
+    let count = REQUIRED_TARGET_UNLOCK_COUNT.with(|slot| slot.get().unwrap_or(0));
+    drop(clear);
+    (result, count)
+}
+
 /// Reset's ownership of the actual database inode.
 ///
-/// `RedbStore` owns this same class of exclusive file lock through redb's
-/// file backend. Reset joins that authoritative inode lock rather than
+/// `RedbStore` owns this same class of exclusive file lock through NMP's
+/// required file backend. Reset joins that authoritative inode lock rather than
 /// treating pathname ownership as proof that no hard-link alias is live.
 struct LockedStoreTarget {
     file: File,
@@ -265,7 +533,7 @@ impl LockedStoreTarget {
 
 impl Drop for LockedStoreTarget {
     fn drop(&mut self) {
-        // Match redb's backend teardown and the sidecar's #936 rule: an
+        // Match NMP's required backend teardown and the sidecar's #936 rule: an
         // explicit unlock releases the open-file-description lock even if a
         // concurrent fork transiently inherited a duplicate descriptor.
         let _ = self.file.unlock();
@@ -674,8 +942,8 @@ pub(crate) fn reset_store(path: &Path) -> Result<(), RedbStoreResetError> {
 }
 
 /// Reset first owns the pathname lifecycle, then joins the same target-inode
-/// lock held by redb's live file backend. Both guards remain held through
-/// single-link validation and removal.
+/// lock held by NMP's live required file backend. Both guards remain held
+/// through single-link validation and removal.
 fn reset_store_with_hooks(
     path: &Path,
     before_remove: impl FnOnce(),
@@ -1357,12 +1625,117 @@ mod tests {
         // The exact current epoch is pinned by `redb_store::tests`; this test
         // owns only the lifetime consequence of the unsupported-schema
         // refusal, so it deliberately does not restate the version number.
+        let (refusal, unlocks) =
+            with_required_target_unlock_count(|| crate::RedbStore::open(&path));
         assert!(matches!(
-            crate::RedbStore::open(&path),
+            refusal,
             Err(RedbStoreOpenError::UnsupportedSchema { .. })
         ));
+        assert_eq!(
+            unlocks, 1,
+            "UnsupportedSchema must explicitly unlock the target exactly once"
+        );
+        let relocked = RequiredLockedFileBackend::open(&path)
+            .expect("UnsupportedSchema refusal must release the required target lock");
+        redb::StorageBackend::close(&relocked).unwrap();
         reset_store(&path).expect("schema refusal must release database then sidecar ownership");
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn database_constructor_failure_releases_required_target_and_sidecar_ownership() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("constructor-failure.redb");
+        let before = b"not a redb database";
+        std::fs::write(&path, before).unwrap();
+
+        let (refusal, unlocks) =
+            with_required_target_unlock_count(|| crate::RedbStore::open(&path));
+        assert!(matches!(refusal, Err(RedbStoreOpenError::Database(_))));
+        assert_eq!(
+            unlocks, 1,
+            "database-constructor failure must explicitly unlock the target exactly once"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "failed database initialization must not mutate caller bytes"
+        );
+
+        let relocked = RequiredLockedFileBackend::open(&path)
+            .expect("constructor failure must release the required target lock");
+        redb::StorageBackend::close(&relocked).unwrap();
+        reset_store(&path)
+            .expect("constructor failure must release target then sidecar ownership exactly once");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn unsupported_required_target_lock_fails_before_database_initialization_without_mutation() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("unsupported-required-target-lock.redb");
+        drop(crate::RedbStore::open(&path).unwrap());
+        let before = std::fs::read(&path).unwrap();
+        let before_digest = blake3::hash(&before);
+        let database_initialized = Arc::new(AtomicBool::new(false));
+        let hook_initialized = Arc::clone(&database_initialized);
+
+        let refusal = with_required_target_lock_error(io::ErrorKind::Unsupported, || {
+            crate::redb_store::with_required_database_init_test_hook(
+                move || hook_initialized.store(true, Ordering::SeqCst),
+                || crate::RedbStore::open(&path),
+            )
+        });
+
+        assert!(matches!(
+            refusal,
+            Err(RedbStoreOpenError::LockFailed { ref source, .. })
+                if source.kind() == io::ErrorKind::Unsupported
+        ));
+        assert!(
+            !database_initialized.load(Ordering::SeqCst),
+            "redb initialization must not begin after the required target lock was refused"
+        );
+        assert!(path.exists(), "failed open must preserve the target name");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(blake3::hash(&std::fs::read(&path).unwrap()), before_digest);
+
+        let reopened =
+            crate::RedbStore::open(&path).expect("failed lock acquisition released pathname state");
+        drop(reopened);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn hard_link_alias_double_open_is_refused_by_the_shared_target_lock() {
+        let fixture = tempfile::tempdir().unwrap();
+        let target = fixture.path().join("hard-link-double-open.redb");
+        let alias = fixture.path().join("hard-link-double-open-alias.redb");
+        let owner = crate::RedbStore::open(&target).unwrap();
+        std::fs::hard_link(&target, &alias).unwrap();
+        let before = std::fs::read(&target).unwrap();
+
+        assert!(matches!(
+            crate::RedbStore::open(&alias),
+            Err(RedbStoreOpenError::StoreAlreadyOpen { .. })
+        ));
+        assert_eq!(std::fs::read(&target).unwrap(), before);
+        assert_eq!(std::fs::read(&alias).unwrap(), before);
+
+        drop(owner);
+        let alias_owner = crate::RedbStore::open(&alias)
+            .expect("dropping the owner must explicitly release the shared target lock");
+        assert!(matches!(
+            crate::RedbStore::open(&target),
+            Err(RedbStoreOpenError::StoreAlreadyOpen { .. })
+        ));
+        drop(alias_owner);
+
+        let reopened = crate::RedbStore::open(&target)
+            .expect("the second owner must also release the target lock exactly once");
+        drop(reopened);
+        std::fs::remove_file(&alias).unwrap();
+        reset_store(&target).unwrap();
     }
 
     /// Child-only body driven by

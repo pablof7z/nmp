@@ -363,9 +363,11 @@ about current code:
   instead of returning stale `ENOENT`. It never retries the whole store open
   or accepts a third outcome; deterministic resolver and eight-opener
   falsifiers prove one owner and seven typed refusals.
-  Reset acquires that SAME pathname ownership, then joins the exclusive lock
-  on the actual database inode that redb's live file backend owns, and holds
-  both through removal. A live hard-link alias therefore returns typed
+  Production open acquires a second, required lock on the actual database
+  inode; unlike redb's permissive default backend, an unsupported target lock
+  fails before database initialization. Reset acquires that SAME pathname
+  ownership, then joins NMP's target-inode lock and holds both through removal.
+  A live hard-link alias therefore returns typed
   `StoreStillOpen { path }` without touching either name. A closed target with
   more than one hard link fails as `StoreResetFailed` before mutation because
   unlinking one name cannot prove the promised physical erasure. Existing and
