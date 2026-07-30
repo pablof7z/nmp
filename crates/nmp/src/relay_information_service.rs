@@ -2295,22 +2295,23 @@ mod tests {
             },
         )
         .unwrap();
-        let mut state = service.shared.state.lock().unwrap();
-        let State::Open { entries } = &mut *state else {
-            panic!("a new service starts open");
-        };
-        entries.insert(
-            cached_relay.clone(),
-            Entry {
-                cached: Some(Cached {
-                    fresh_until: cached_snapshot.fresh_until(),
-                    snapshot: cached_snapshot,
-                }),
-                flight: None,
-                last_access: 0,
-            },
-        );
-        drop(state);
+        {
+            let mut state = service.shared.state.lock().unwrap();
+            let State::Open { entries } = &mut *state else {
+                panic!("a new service starts open");
+            };
+            entries.insert(
+                cached_relay.clone(),
+                Entry {
+                    cached: Some(Cached {
+                        fresh_until: cached_snapshot.fresh_until(),
+                        snapshot: cached_snapshot,
+                    }),
+                    flight: None,
+                    last_access: 0,
+                },
+            );
+        }
 
         let mut callers = Vec::new();
         for index in 0..CALLERS {
