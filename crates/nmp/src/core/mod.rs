@@ -375,7 +375,9 @@ pub use diagnostics::{
 };
 pub use evidence::{AcquisitionEvidence, AuthPhase, ShortfallFact, SourceEvidence, SourceStatus};
 pub use history::{HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, WindowLoad};
-use observation::{ActiveRequestEvidence, ObservationExecutionState, PendingRequestEvidence};
+use observation::{
+    ActiveRequestEvidence, LiveWireRequest, ObservationExecutionState, PendingRequestEvidence,
+};
 pub use observation::{
     ObservationEvidence, ObservationFact, RequestTerminal, ResolutionCause, ResolvedBindingValue,
 };
@@ -1364,6 +1366,10 @@ pub struct EngineCore<S: EventStore> {
     attribution: AttributionState,
     pending_request_evidence: HashMap<(RelaySessionKey, SubId), VecDeque<PendingRequestEvidence>>,
     active_request_evidence: HashMap<u64, ActiveRequestEvidence>,
+    /// Exact REQs accepted by a live transport generation. Unlike request
+    /// evidence, this survives EOSE because EOSE settles a request without
+    /// closing its subscription.
+    live_wire_requests: HashMap<(RelaySessionKey, SubId), LiveWireRequest>,
     /// EngineCore's memory of the exact connection generation and SESSION
     /// that currently occupy each pool slot. Disconnects are asynchronous;
     /// the generation prevents a delayed old disconnect from erasing a slot
@@ -1665,6 +1671,7 @@ impl<S: EventStore> EngineCore<S> {
             attribution: AttributionState::new(),
             pending_request_evidence: HashMap::new(),
             active_request_evidence: HashMap::new(),
+            live_wire_requests: HashMap::new(),
             slot_to_relay: HashMap::new(),
             connected_relays: BTreeSet::new(),
             ever_connected_relays: BTreeSet::new(),

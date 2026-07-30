@@ -159,6 +159,18 @@ pub(super) struct ActiveRequestEvidence {
     pub(super) handle: TransportRelayHandle,
 }
 
+/// One REQ accepted by the exact live transport generation.
+///
+/// This is deliberately separate from [`ActiveRequestEvidence`]: an EOSE
+/// settles request evidence, but it does not close the relay subscription.
+/// The wire owner remains live until replacement, CLOSE, or exact-session
+/// disconnect.
+#[derive(Debug, Clone)]
+pub(super) struct LiveWireRequest {
+    pub(super) filter: ConcreteFilter,
+    pub(super) handle: TransportRelayHandle,
+}
+
 impl ObservationExecutionState {
     fn issue(&mut self, fact: ObservationFact) -> ObservationEvidence {
         self.next_sequence = self.next_sequence.saturating_add(1);
@@ -335,6 +347,13 @@ impl<S: EventStore> EngineCore<S> {
                         &mut effects,
                     );
                 }
+                self.live_wire_requests.insert(
+                    (request.session.clone(), request.sub_id.clone()),
+                    LiveWireRequest {
+                        filter: request.filter.clone(),
+                        handle,
+                    },
+                );
                 self.active_request_evidence.insert(
                     request.request_revision,
                     ActiveRequestEvidence {
@@ -413,6 +432,10 @@ impl<S: EventStore> EngineCore<S> {
         reason: String,
         effects: &mut Vec<Effect>,
     ) {
+        self.live_wire_requests
+            .retain(|(request_session, _), request| {
+                request_session != session || request.handle != handle
+            });
         let revisions: Vec<_> = self
             .active_request_evidence
             .iter()
@@ -450,6 +473,14 @@ impl<S: EventStore> EngineCore<S> {
         reason: String,
         effects: &mut Vec<Effect>,
     ) {
+        let key = (session.clone(), sub_id.clone());
+        if self
+            .live_wire_requests
+            .get(&key)
+            .is_some_and(|request| request.handle == handle)
+        {
+            self.live_wire_requests.remove(&key);
+        }
         let revisions: Vec<_> = self
             .active_request_evidence
             .iter()

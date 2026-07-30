@@ -242,13 +242,14 @@ The reducer makes the scheduling authority explicit:
 - no admission path evicts a different relay or raises the physical-session
   ceiling.
 
-Releasing the Public session does not withdraw its query demand or erase its
-reconnect preamble. The ordinary reducer receives the exact closed-session
-fact, the write's access-scoped worker runs through its normal AUTH and outbox
-path, and terminal write reconciliation releases it. The next real worker
-retirement restores any still-required Public session and replays its current
-preamble. Retry ordering derives from one coherent reducer snapshot whose
-`writes` set is a typed subset of the exact retained worker set.
+Releasing the Public session does not withdraw its query demand. The ordinary
+reducer receives the exact closed-session fact, the write's access-scoped
+worker runs through its normal AUTH and outbox path, and terminal write
+reconciliation releases it. The next real worker retirement restores any
+still-required Public session; the reducer replays its current request set once
+after the fresh Connected edge. Retry ordering derives from one coherent
+reducer snapshot whose `writes` set is a typed subset of the exact retained
+worker set.
 
 This is bounded time-sharing, not socket-context coalescing and not public
 saturation. It closes the `max_relays = 1` deadlock where the Public read could
