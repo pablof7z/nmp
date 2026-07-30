@@ -31,6 +31,23 @@ on:
   pull_request:
 
 jobs:
+  rust-toolchain-reproducibility:
+    name: Reproducible Rust toolchain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install the exact repository Rust toolchain
+        run: rustup show
+
+      - name: Match compiler, Cargo, Clippy, and rustfmt to the committed oracle
+        run: bash scripts/check-rust-toolchain.sh
+
+      - name: Falsify floating, mismatched, and incomplete pins
+        run: bash scripts/test-rust-toolchain.sh
+
   tool-requirements:
     name: Verification tools fail closed
     runs-on: ubuntu-latest
