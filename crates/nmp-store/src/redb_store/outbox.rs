@@ -3,11 +3,11 @@ use super::schema::{
     PENDING_EPHEMERAL_RECEIPTS_KEY,
 };
 use super::{
-    address_key_for, AttemptOutcome, BTreeSet, DeadlineKind, Deserialize, Event, EventId,
-    InFlightPhase, IntentId, IntentSigState, LaneDeadline, LaneKey, LaneState, PersistenceError,
-    PublicKey, ReadableTable, ReceiptState, RecoveredAttempt, RecoveredAttemptDetails,
-    RecoveredLane, RecoveredRouteRevision, RelayUrl, Serialize, TableDefinition, Timestamp,
-    WriteDurability,
+    address_key_for, AttemptOutcome, AuthDenial, BTreeSet, DeadlineKind, Deserialize, Event,
+    EventId, InFlightPhase, IntentId, IntentSigState, LaneDeadline, LaneKey, LaneState,
+    LaneTerminalOutcome, PersistenceError, PublicKey, ReadableTable, ReceiptState,
+    RecoveredAttempt, RecoveredAttemptDetails, RecoveredLane, RecoveredRouteRevision, RelayUrl,
+    Serialize, TableDefinition, Timestamp, WriteDurability,
 };
 use nostr::JsonUtil;
 
@@ -117,14 +117,14 @@ pub(super) fn decode_lane(key: &str, json: &str) -> Result<RecoveredLane, Persis
         ));
     }
     if matches!(
-        lane.state,
+        &lane.state,
         LaneState::Terminal {
-            outcome: AttemptOutcome::Started,
+            outcome: LaneTerminalOutcome::AuthDenied(AuthDenial { reason, .. }),
             ..
-        }
+        } if reason.len() > 4_096
     ) {
         return Err(PersistenceError::invariant(
-            "terminal lane cannot contain Started",
+            "authentication denial reason exceeds 4096 bytes",
         ));
     }
     if matches!(

@@ -52,12 +52,14 @@ use crate::coverage::{
 use crate::persistent_store_lifetime::{
     acquire_for_open, reset_store, RedbStoreOpenError, RequiredLockedFileBackend, StoreOwnership,
 };
+#[cfg(test)]
+use crate::AuthDenialSource;
 use crate::{
     AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome, AttemptTransientDetail,
-    CloseIntentOutcome, CompensateOutcome, CoverageInterval, CoverageKey, DeadlineKind,
+    AuthDenial, CloseIntentOutcome, CompensateOutcome, CoverageInterval, CoverageKey, DeadlineKind,
     EventCursor, EventStore, GcReport, GcRetentionSet, InFlightPhase, InsertOutcome, IntentId,
-    IntentSigState, LaneDeadline, LaneKey, LaneState, LocalOrigin, PersistenceError,
-    PostHandoffState, PromoteOutcome, Provenance, ReceiptState, RecoveredAttempt,
+    IntentSigState, LaneDeadline, LaneKey, LaneState, LaneTerminalOutcome, LocalOrigin,
+    PersistenceError, PostHandoffState, PromoteOutcome, Provenance, ReceiptState, RecoveredAttempt,
     RecoveredAttemptDetails, RecoveredIntent, RecoveredLane, RecoveredReceipt,
     RecoveredRouteRevision, RefuseReason, RelayObserved, RetractReason, SigState, StoredEvent,
     TransientCause, WriteDurability,
@@ -427,6 +429,15 @@ impl EventStore for RedbStore {
         finished_at: Timestamp,
     ) -> Result<RecoveredLane, PersistenceError> {
         outbox_ops::finish_lane_attempt(self, key, expected_revision, ordinal, outcome, finished_at)
+    }
+
+    fn deny_lane_auth(
+        &mut self,
+        key: &LaneKey,
+        expected_revision: u64,
+        denial: AuthDenial,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        outbox_ops::deny_lane_auth(self, key, expected_revision, denial)
     }
 
     fn recover_attempt_details(

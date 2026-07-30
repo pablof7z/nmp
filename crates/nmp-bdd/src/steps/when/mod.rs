@@ -443,6 +443,11 @@ async fn write_accepted_then_process_stops(w: &mut NmpWorld) {
     );
 }
 
+#[when(regex = r#"^the process stops immediately$"#)]
+async fn process_stops_immediately(w: &mut NmpWorld) {
+    w.stop_process().await;
+}
+
 #[when(regex = r#"^I reconstruct the engine from the same durable store$"#)]
 async fn reconstruct_engine(w: &mut NmpWorld) {
     let active = w.active_identity_label();
@@ -455,6 +460,14 @@ async fn reconstruct_engine(w: &mut NmpWorld) {
 async fn reconstruct_engine_with_active(w: &mut NmpWorld, pubkey: String) {
     w.person(&pubkey);
     w.restart_engine(Some(pubkey)).await;
+}
+
+#[when(regex = r#"^I reattach to the receipt by its stable id$"#)]
+async fn reattach_receipt_by_stable_id(w: &mut NmpWorld) {
+    assert!(
+        w.restarted_receipt_is_reattached(),
+        "the reconstructed engine did not reattach the durable receipt by its stable id"
+    );
 }
 
 #[when(regex = r#"^the podcast identity's signer answers$"#)]

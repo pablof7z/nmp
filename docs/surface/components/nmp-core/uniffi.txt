@@ -42,6 +42,38 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiAuthDenialSource",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Policy",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Signer",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Relay",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "Exact authority whose typed answer terminally denied a write AUTH lane.",
+    ),
+}
+
+enum Enum {
     name: "FfiAuthPhase",
     module_path: "nmp_ffi",
     remote: false,
@@ -3871,6 +3903,48 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiRetryCause",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Interrupted",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "AckTimeout",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "ConnectionLost",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "RelayRateLimited",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "RelayError",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: None,
+}
+
+enum Enum {
     name: "FfiRowDelta",
     module_path: "nmp_ffi",
     remote: false,
@@ -4591,6 +4665,40 @@ enum Enum {
             docstring: None,
         },
         Variant {
+            name: "AuthDenied",
+            discr: None,
+            fields: [
+                Field {
+                    name: "relay",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "pubkey",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "source",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiAuthDenialSource",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
             name: "RetryEligible",
             discr: None,
             fields: [
@@ -4609,6 +4717,23 @@ enum Enum {
                 Field {
                     name: "eligible_at",
                     type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "cause",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiRetryCause",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "detail",
+                    type_: Optional {
+                        inner_type: String,
+                    },
                     default: None,
                     docstring: None,
                 },

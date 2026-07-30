@@ -80,10 +80,15 @@ about current code:
   AtMostOnce ambiguity becomes terminal `OutcomeUnknown`. The deadline exposed
   by `next_deadline()` is consumed before it can be rearmed, including bounded
   batch draining, so there is no zero-timeout busy-spin. Rust, UniFFI, Swift,
-  and Kotlin receipts distinguish relay/AUTH waits, retry eligibility with the
-  persisted attempt ordinal and time, ambiguous handoff, and proven socket
-  write/flush persisted against an exact lane ordinal; `Sent` is never emitted
-  for queue acceptance, ambiguity, or an ephemeral handoff with no outbox fact.
+  and Kotlin receipts distinguish relay/AUTH waits, exact-session terminal
+  authentication denial with typed policy/signer/relay source, retry
+  eligibility with the persisted non-AUTH cause, relay detail, attempt ordinal,
+  and time, ambiguous handoff, and proven socket write/flush persisted against
+  an exact lane ordinal. AUTH-required remains resumable and cannot appear as a
+  retry cause; subscription closure cannot terminalize a write; denial commits
+  before receipt emission and replays with the same source/reason. `Sent` is
+  never emitted for queue acceptance, ambiguity, or an ephemeral handoff with
+  no outbox fact.
 - **The optional NIP-46 provider and governed sign-only paths are built; standard platform vault providers are not.**
   A current NIP-46 client now owns its independent signer-relay connection,
   NIP-42 AUTH, exact request correlation, `auth_url`, `switch_relays`, distinct

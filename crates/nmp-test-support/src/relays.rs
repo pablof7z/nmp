@@ -388,6 +388,11 @@ impl WireReq {
 pub struct WireRecord {
     pub reqs: Vec<WireReq>,
     pub closes: Vec<String>,
+    /// Event ids from every literal `EVENT` frame, including attempts the
+    /// relay rejected before its write-policy admission hook. This is the
+    /// independent socket witness for durable terminal-write scenarios:
+    /// `admitted_events` cannot see an unauthenticated attempt by design.
+    pub event_ids: Vec<String>,
 }
 
 impl WireRecord {
@@ -523,7 +528,7 @@ impl WireRecord {
     }
 }
 
-/// Decoded REQ/CLOSE log plus a monotonic frame counter (the quiescence
+/// Decoded REQ/CLOSE/EVENT log plus a monotonic frame counter (the quiescence
 /// signal every count-shaped assertion settles against) and a fault list.
 #[derive(Debug, Default)]
 struct WireLog {
@@ -534,6 +539,7 @@ struct WireLog {
 struct WireLogInner {
     reqs: Vec<WireReq>,
     closes: Vec<String>,
+    event_ids: Vec<String>,
     live: BTreeSet<String>,
     frames: u64,
     /// Anything the decoder could not honestly account for. Surfaced as a
@@ -580,8 +586,22 @@ impl WireLog {
                 inner.frames += 1;
                 inner.closes.push(sub_id.to_string());
             }
-            // EVENT/AUTH/COUNT are already witnessed by the contacted-log;
-            // nothing in this crate asserts on their wire shape.
+            "EVENT" => {
+                let Some(event_id) = array
+                    .get(1)
+                    .and_then(serde_json::Value::as_object)
+                    .and_then(|event| event.get("id"))
+                    .and_then(serde_json::Value::as_str)
+                else {
+                    inner
+                        .faults
+                        .push(format!("EVENT without an event id: {message}"));
+                    return;
+                };
+                inner.frames += 1;
+                inner.event_ids.push(event_id.to_string());
+            }
+            // AUTH/COUNT are not asserted on by this fixture.
             _ => {}
         }
     }
@@ -609,6 +629,7 @@ impl WireLog {
         WireRecord {
             reqs: inner.reqs.clone(),
             closes: inner.closes.clone(),
+            event_ids: inner.event_ids.clone(),
         }
     }
 }

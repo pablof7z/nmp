@@ -5,9 +5,9 @@ use std::path::Path;
 
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome,
-    CloseIntentOutcome, DeadlineKind, EventStore, HandoffEvidence, InFlightPhase, IntentId,
-    IntentSigState, LaneDeadline, LaneKey, LaneState, MemoryStore, PostHandoffState, RecoveredLane,
-    RedbStore, TransientCause, WriteDurability,
+    AuthDenial, AuthDenialSource, CloseIntentOutcome, DeadlineKind, EventStore, HandoffEvidence,
+    InFlightPhase, IntentId, IntentSigState, LaneDeadline, LaneKey, LaneState, LaneTerminalOutcome,
+    MemoryStore, PostHandoffState, RecoveredLane, RedbStore, TransientCause, WriteDurability,
 };
 use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, RelayUrl, Timestamp};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
@@ -230,7 +230,7 @@ fn lane_lifecycle_is_exact_and_backend_identical() {
             terminal.state,
             LaneState::Terminal {
                 ordinal: 2,
-                outcome: AttemptOutcome::Acked
+                outcome: LaneTerminalOutcome::Acked
             }
         );
         let details = store.recover_attempt_details(intent).unwrap();
@@ -302,6 +302,51 @@ fn suspended_attempt_is_atomic_deadline_free_and_resumes_with_the_next_ordinal()
             .start_lane_attempt(&key, 5, signed, Timestamp::from(200))
             .unwrap();
         assert_eq!(second.ordinal, 2);
+    });
+}
+
+#[test]
+fn auth_denial_is_a_durable_terminal_lane_fact_and_revision_precedes_idempotence() {
+    for_each_backend(|store| {
+        let relay = RelayUrl::parse("wss://auth-denial.example").unwrap();
+        let (intent, _, _, key, seeded) = seed(store, "auth denial", 175, relay);
+        let waiting = store.set_lane_waiting(&key, seeded.revision, true).unwrap();
+        let denial = AuthDenial {
+            source: AuthDenialSource::Policy,
+            reason: "account not permitted".into(),
+        };
+
+        let terminal = store
+            .deny_lane_auth(&key, waiting.revision, denial.clone())
+            .unwrap();
+        assert_eq!(terminal.revision, waiting.revision + 1);
+        assert_eq!(terminal.last_ordinal, 0);
+        assert_eq!(
+            terminal.state,
+            LaneState::Terminal {
+                ordinal: 0,
+                outcome: LaneTerminalOutcome::AuthDenied(denial.clone()),
+            }
+        );
+        assert_eq!(
+            store.recover_outbox_lanes(intent).unwrap(),
+            vec![terminal.clone()]
+        );
+        assert!(store.recover_attempts(intent).unwrap().is_empty());
+        assert!(store.recover_attempt_details(intent).unwrap().is_empty());
+
+        let idempotent = store
+            .deny_lane_auth(&key, terminal.revision, denial.clone())
+            .unwrap();
+        assert_eq!(idempotent, terminal);
+
+        let stale = store
+            .deny_lane_auth(&key, waiting.revision, denial)
+            .unwrap_err();
+        assert!(
+            stale.to_string().contains("revision"),
+            "stale denial must be refused before idempotence: {stale}"
+        );
     });
 }
 

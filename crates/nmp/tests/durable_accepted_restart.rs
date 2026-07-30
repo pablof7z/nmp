@@ -15,8 +15,8 @@ use nmp_grammar::{
 };
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{
-    sentinel_signature, AcceptWrite, AttemptOutcome, EventStore, IntentSigState, RedbStore,
-    SigState, WriteDurability,
+    sentinel_signature, AcceptWrite, AttemptOutcome, EventStore, IntentSigState,
+    LaneTerminalOutcome, RedbStore, SigState, WriteDurability,
 };
 use nmp_transport::{HandoffResult, RelayFrame, RelayHandle};
 use nostr::{
@@ -287,7 +287,7 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
         original_lane.state,
         nmp_store::LaneState::Terminal {
             ordinal: 2,
-            outcome: AttemptOutcome::Acked,
+            outcome: LaneTerminalOutcome::Acked,
         }
     );
 }

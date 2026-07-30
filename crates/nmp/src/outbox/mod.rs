@@ -26,6 +26,28 @@ use nostr::{EventId, PublicKey, RelayUrl, Timestamp};
 
 use crate::core::ReceiptId;
 
+/// Which exact AUTH actor refused a write session.
+///
+/// The distinction prevents a local policy or signer choice from being
+/// mislabeled as a relay rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthDenialSource {
+    Policy,
+    Signer,
+    Relay,
+}
+
+/// Public retry vocabulary. AUTH-required is deliberately absent: waiting
+/// for AUTH is [`WriteStatus::AwaitingAuth`], not a retryable EVENT outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryCause {
+    Interrupted,
+    AckTimeout,
+    ConnectionLost,
+    RelayRateLimited,
+    RelayError,
+}
+
 /// The receipt STREAM (never bool/void on the durable path, ledger #9:
 /// enqueue is not converged).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +134,17 @@ pub enum WriteStatus {
     AwaitingAuth {
         relay: RelayUrl,
     },
+    /// The exact authenticated write session was permanently refused.
+    ///
+    /// This fact is emitted only after the lane terminal commits, is replayed
+    /// from that durable lane state, and names the identity so two sessions on
+    /// one relay URL remain distinguishable.
+    AuthDenied {
+        relay: RelayUrl,
+        pubkey: PublicKey,
+        source: AuthDenialSource,
+        reason: String,
+    },
     /// The last attempt made this lane retryable at `eligible_at`. `attempt`
     /// is the persisted ordinal whose outcome established this eligibility;
     /// the next wire attempt, if one is made, receives a fresh ordinal.
@@ -119,6 +152,8 @@ pub enum WriteStatus {
         relay: RelayUrl,
         attempt: u64,
         eligible_at: Timestamp,
+        cause: RetryCause,
+        detail: Option<String>,
     },
     /// Transport accepted a write for this persisted attempt but could not
     /// prove that it flushed. This is never a `Sent` fact. Durable delivery

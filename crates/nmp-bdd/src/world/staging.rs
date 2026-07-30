@@ -125,6 +125,21 @@ impl NmpWorld {
         self.relay_config_mut(relay).reject_queries = true;
     }
 
+    /// Require a genuine NIP-42 challenge before this relay admits writes.
+    pub fn require_write_auth(&mut self, relay: &str) {
+        self.relay_config_mut(relay).auth_required_writes = true;
+    }
+
+    /// Stage the active account's app-owned denial for one named relay.
+    ///
+    /// The name cannot become a policy request URL until the relay binds, so
+    /// registration happens in `spawn_engine` on every fresh construction.
+    pub fn deny_write_auth_by_policy(&mut self, relay: &str, reason: &str) {
+        self.relay_config_mut(relay);
+        self.auth_policy_denials
+            .insert(relay.to_string(), reason.to_string());
+    }
+
     /// `Given relay <name> allows at most <n> subscriptions at a time` --
     /// the relay publishes a NIP-11 document saying so, served over plain
     /// HTTP on its own address exactly as a real relay does. The engine
@@ -443,6 +458,33 @@ impl NmpWorld {
                     .expect("local signer has a public key");
             }
             self.handle().set_active_account(Some(keys.public_key()));
+
+            self.auth_policy_registrations.clear();
+            if !self.auth_policy_denials.is_empty() {
+                let denied = self
+                    .auth_policy_denials
+                    .iter()
+                    .map(|(relay, reason)| {
+                        (
+                            self.relays
+                                .get(relay)
+                                .unwrap_or_else(|| {
+                                    panic!("nmp-bdd: unknown AUTH-policy relay {relay:?}")
+                                })
+                                .url
+                                .clone(),
+                            reason.clone(),
+                        )
+                    })
+                    .collect();
+                let registration = self
+                    .engine
+                    .as_ref()
+                    .expect("nmp-bdd: engine exists before policy registration")
+                    .add_auth_policy(keys.public_key(), super::StagedAuthPolicy { denied })
+                    .expect("nmp-bdd: staged AUTH policy must register");
+                self.auth_policy_registrations.push(registration);
+            }
         }
 
         let (diag_handle, diag_rx) = self.handle().observe_diagnostics();

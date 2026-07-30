@@ -75,10 +75,11 @@ use nmp_router::{
 use nmp_signer::SignerError;
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome,
+    AuthDenial as StoredAuthDenial, AuthDenialSource as StoredAuthDenialSource,
     CancelEphemeralOutcome, CloseIntentOutcome, CompensateOutcome, CoverageKey, DeadlineKind,
     DurabilityOutcome, EventStore, HandoffEvidence, InFlightPhase, IntentId, IntentSigState,
-    LaneKey, LaneState, PersistenceError, PostHandoffState, PromoteOutcome, ReceiptState,
-    RecoveredLane, RelayObserved, TransientCause, WriteDurability,
+    LaneKey, LaneState, LaneTerminalOutcome, PersistenceError, PostHandoffState, PromoteOutcome,
+    ReceiptState, RecoveredLane, RelayObserved, TransientCause, WriteDurability,
 };
 use nmp_transport::{
     AttemptCorrelation, CommittedObservationCandidate, CommittedObservationHit,
@@ -87,7 +88,9 @@ use nmp_transport::{
 };
 
 use crate::negentropy::{NegStep, ProbedRelay, Prober, Reconciler};
-use crate::outbox::{CancelWriteError, CancelWriteOutcome, WriteStatus};
+use crate::outbox::{
+    AuthDenialSource, CancelWriteError, CancelWriteOutcome, RetryCause, WriteStatus,
+};
 use crate::relay_information_service::RelayInformationCapabilityEvidence;
 
 /// The liveness deadline (plan §4/harvest `nmp-nip77`) past which an open
@@ -1336,7 +1339,7 @@ enum AuthSessionPhase {
     AwaitingSend {
         token: AuthOpToken,
         event_id: EventId,
-        early_ok: Option<bool>,
+        early_ok: Option<(bool, String)>,
     },
     AwaitingOk {
         event_id: EventId,

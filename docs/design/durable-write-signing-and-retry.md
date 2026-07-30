@@ -153,8 +153,9 @@ cancels it; NMP must not silently discard or re-author it.
 Receipt facts are persisted and reattachable by intent/receipt id. Dropping an
 observer does not cancel the write or lose its history. `Accepted`, signer
 waiting, signature promotion, replaceable supersession, route revisions,
-attempts, ACKs, rejections, expiry, cancellation, and ambiguous at-most-once
-outcomes remain inspectable after restart.
+attempts, ACKs, rejections, exact-session authentication denials, expiry,
+cancellation, and ambiguous at-most-once outcomes remain inspectable after
+restart.
 
 The canonical facade operation is `cancel(receipt_id)`. It commits only for a
 still-unsigned accepted obligation, returns `CancelWriteOutcome::Cancelled`,
@@ -190,10 +191,24 @@ deterministic jitter and explicit caps so restart does not reset or synchronize
 the fleet.
 
 - Offline and AUTH-blocked time do not consume attempts.
+- `AuthRequired` is a resumable `AwaitingAuth` state, never a retry outcome.
+  It arms no EVENT deadline and is absent from the public `RetryCause` type.
+- Only three exact answers can terminalize an authenticated write lane:
+  `AuthPolicyDecision::Deny`, `SignerError::Rejected` while signing its
+  kind:22242 challenge, and an `OK false` correlated to that exact AUTH event.
+  Policy execution errors, unavailable signers, and subscription `CLOSED`
+  auth-required/restricted frames do not have that authority.
+- An authentication denial first commits
+  `LaneTerminalOutcome::AuthDenied { source, reason }` against the lane's
+  exact expected revision, then emits `WriteStatus::AuthDenied`. Idempotent
+  success is considered only after that revision check, so a stale caller
+  cannot mistake a newer equal-looking terminal fact for its own transition.
+  Persistence failure emits no terminal receipt fact.
 - A newer same-coordinate winner retires an older lane only while its attempt
   ordinal is still zero; attempted delivery remains owned until terminal.
 - Recovery wakes work whose persisted eligibility time has passed.
-- A transient delivery failure advances backoff.
+- A transient delivery failure advances backoff and replays its exact
+  persisted non-AUTH `RetryCause` plus optional relay detail.
 - A relay ACK closes its lane.
 - A route revision may add a new lane without reopening completed lanes.
 - A permanent relay rejection is terminal evidence for that lane, not row
@@ -210,6 +225,12 @@ identity-scoped `Nip42(author)` work are distinct `RelaySessionKey`s and never
 share authentication state. `max_relays` is nevertheless a ceiling on physical
 sessions, not on distinct URLs. At a ceiling of one, a live Public read and a
 durable write to that same relay therefore cannot coexist.
+
+The same identity rule governs denial. A terminal AUTH decision applies only
+to lanes whose `RelaySessionKey` exactly equals the challenged
+`(relay, Nip42(pubkey))`; another identity on the same URL remains live.
+Read-side subscription closure is not a write-session decision and cannot
+terminalize any write lane.
 
 The reducer makes the scheduling authority explicit:
 
@@ -260,4 +281,14 @@ Required proofs include:
 - a protected read emits only read admission and cannot claim the write's
   same-relay time-sharing authority;
 - restart preserves attempt ordinal and next eligibility;
-- at-most-once ambiguity never emits a second send.
+- at-most-once ambiguity never emits a second send;
+- exact policy, signer, and correlated relay AUTH denials commit before emit
+  and replay with the same source/reason after a real Redb reconstruction;
+- `AuthRequired`, policy `Error`/`Unavailable`, and unrelated subscription
+  `CLOSED` frames never create terminal write facts;
+- a stale denial revision is refused even when the current terminal denial has
+  equal source/reason, while a committed same-revision retry is idempotent;
+- same-URL sessions for another identity and other lanes on the same receipt
+  continue independently after one lane is AUTH-denied;
+- the real-websocket BDD facade proof observes the first unauthenticated EVENT
+  at the relay's raw socket and observes no further EVENT after restart.
