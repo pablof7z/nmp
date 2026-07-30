@@ -729,7 +729,6 @@ pub enum AuthEffect {
     },
     Send {
         token: AuthOpToken,
-        epoch: AuthEpoch,
         event: Box<SignedEvent>,
     },
 }
