@@ -1107,6 +1107,31 @@ struct PendingConnect {
     completion: SyncSender<Result<PublicKey, Nip46Error>>,
 }
 
+struct PendingBind {
+    remote: PublicKey,
+    transitions: Vec<PendingBindTransition>,
+}
+
+enum PendingBindTransition {
+    Transport(nmp_transport::ReconnectPreambleTransition),
+    #[cfg(test)]
+    Controlled(Receiver<bool>),
+}
+
+impl PendingBindTransition {
+    fn try_result(&self) -> Option<bool> {
+        match self {
+            Self::Transport(transition) => transition.try_result(),
+            #[cfg(test)]
+            Self::Controlled(result) => match result.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => Some(false),
+            },
+        }
+    }
+}
+
 enum SessionRemote {
     AwaitingConnect(PendingConnect),
     Known(PublicKey),
@@ -1516,6 +1541,9 @@ struct SessionWorker {
     handles: HashMap<u32, (nmp_transport::RelayHandle, RelayUrl)>,
     configured: HashMap<RelayUrl, nmp_transport::RelayHandle>,
     pending: HashMap<String, PendingRequest>,
+    pending_bind: Option<PendingBind>,
+    #[cfg(test)]
+    controlled_bind_transitions: Option<Vec<PendingBindTransition>>,
     subscription_id: SubscriptionId,
 }
 
@@ -1541,6 +1569,9 @@ impl SessionWorker {
             handles: HashMap::new(),
             configured: HashMap::new(),
             pending: HashMap::new(),
+            pending_bind: None,
+            #[cfg(test)]
+            controlled_bind_transitions: None,
             subscription_id: SubscriptionId::new(format!(
                 "nmp-nip46-{}",
                 NEXT_SUB.fetch_add(1, Ordering::Relaxed)
@@ -1595,6 +1626,9 @@ impl SessionWorker {
                         break;
                     };
                     self.on_pool(event);
+                }
+                _ = tokio::time::sleep(Duration::from_millis(1)), if self.pending_bind.is_some() => {
+                    self.poll_pending_bind();
                 }
             }
         }
@@ -1748,14 +1782,65 @@ impl SessionWorker {
             .set_reconnect_preamble(handle, vec![preamble.to_string()])
     }
 
-    fn refresh_preambles(&mut self, preamble: &str) {
+    fn refresh_preambles(&mut self, preamble: &str) -> Option<Vec<PendingBindTransition>> {
+        #[cfg(test)]
+        if let Some(transitions) = self.controlled_bind_transitions.take() {
+            return Some(transitions);
+        }
         let configured: Vec<RelayUrl> = self.configured.keys().cloned().collect();
+        let mut transitions = Vec::with_capacity(configured.len());
         for relay in configured {
-            let Some(handle) = self.pool.live_handle(&relay) else {
-                continue;
-            };
-            if self.set_preamble(handle, preamble) {
-                self.configured.insert(relay, handle);
+            let handle = self.pool.live_handle(&relay)?;
+            let transition = self
+                .pool
+                .begin_reconnect_preamble(handle, vec![preamble.to_string()])?;
+            self.configured.insert(relay, handle);
+            transitions.push(PendingBindTransition::Transport(transition));
+        }
+        Some(transitions)
+    }
+
+    fn poll_pending_bind(&mut self) {
+        let Some(pending) = self.pending_bind.as_mut() else {
+            return;
+        };
+        let mut unresolved = Vec::with_capacity(pending.transitions.len());
+        let mut failed = false;
+        for transition in pending.transitions.drain(..) {
+            match transition.try_result() {
+                Some(true) => {}
+                Some(false) => failed = true,
+                None => unresolved.push(transition),
+            }
+        }
+        pending.transitions = unresolved;
+        if failed {
+            self.pending_bind = None;
+            if let Some(session) = self.session.upgrade() {
+                session.control.shutdown();
+            }
+            return;
+        }
+        if !pending.transitions.is_empty() {
+            return;
+        }
+        let pending_bind = self
+            .pending_bind
+            .take()
+            .expect("the completed bind transition remains owned");
+        let SessionRemote::AwaitingConnect(pending_connect) =
+            std::mem::replace(&mut self.remote, SessionRemote::Known(pending_bind.remote))
+        else {
+            unreachable!("a bind transition is owned only while awaiting connect");
+        };
+        if pending_connect
+            .completion
+            .send(Ok(pending_bind.remote))
+            .is_err()
+        {
+            self.remote = SessionRemote::AwaitingConnect(pending_connect);
+            if let Some(session) = self.session.upgrade() {
+                session.control.shutdown();
             }
         }
     }
@@ -1892,6 +1977,9 @@ impl SessionWorker {
         };
 
         if let SessionRemote::AwaitingConnect(pending) = &self.remote {
+            if self.pending_bind.is_some() {
+                return;
+            }
             let current_result = envelope
                 .result
                 .as_ref()
@@ -1909,24 +1997,20 @@ impl SessionWorker {
             // Update every live/dialing worker's authoritative replay owner
             // before publishing `Known`. A worker already inside an old
             // replay write holds that owner lock, so this waits for the write
-            // to finish; any snapshotted-but-not-started old replay observes
-            // the new revision and is replaced before it can write.
+            // to finish asynchronously; any snapshotted-but-not-started old
+            // replay observes the new revision before it can write.
             let bound_preamble = self.preamble_for(Some(event.pubkey));
-            self.refresh_preambles(&bound_preamble);
-            let SessionRemote::AwaitingConnect(pending) =
-                std::mem::replace(&mut self.remote, SessionRemote::Known(event.pubkey))
-            else {
-                unreachable!("the exact connect response was validated while awaiting it");
-            };
-            if pending.completion.send(Ok(event.pubkey)).is_err() {
-                // A caller that abandoned the pairing result cannot leave a
-                // live session silently bound to a signer nobody received.
-                self.remote = SessionRemote::AwaitingConnect(pending);
+            let Some(transitions) = self.refresh_preambles(&bound_preamble) else {
                 if let Some(session) = self.session.upgrade() {
                     session.control.shutdown();
                 }
                 return;
-            }
+            };
+            self.pending_bind = Some(PendingBind {
+                remote: event.pubkey,
+                transitions,
+            });
+            self.poll_pending_bind();
             return;
         }
 
@@ -2247,6 +2331,7 @@ mod tests {
             let (stream, _) = listener.accept().unwrap();
             let mut socket = tungstenite::accept(stream).unwrap();
             let mut subscription_id = None;
+            let mut connect_response_sent = false;
             while let Ok(message) = socket.read() {
                 let Message::Text(text) = message else {
                     continue;
@@ -2256,23 +2341,26 @@ mod tests {
                 match parts.first().and_then(Value::as_str) {
                     Some("REQ") => {
                         subscription_id = parts.get(1).and_then(Value::as_str).map(str::to_string);
-                        let response = connect_response(
-                            &server_signer,
-                            server_client,
-                            Value::String(server_secret.clone()),
-                        );
-                        socket
-                            .send(Message::Text(
-                                serde_json::json!([
-                                    "EVENT",
-                                    subscription_id.as_deref().unwrap(),
-                                    response
-                                ])
-                                .to_string()
-                                .into(),
-                            ))
-                            .unwrap();
-                        response_sent.send(()).unwrap();
+                        if !connect_response_sent {
+                            let response = connect_response(
+                                &server_signer,
+                                server_client,
+                                Value::String(server_secret.clone()),
+                            );
+                            socket
+                                .send(Message::Text(
+                                    serde_json::json!([
+                                        "EVENT",
+                                        subscription_id.as_deref().unwrap(),
+                                        response
+                                    ])
+                                    .to_string()
+                                    .into(),
+                                ))
+                                .unwrap();
+                            response_sent.send(()).unwrap();
+                            connect_response_sent = true;
+                        }
                     }
                     Some("EVENT") => {
                         let event = Event::from_json(parts[1].to_string()).unwrap();
@@ -2363,6 +2451,116 @@ mod tests {
         assert_eq!(
             result.recv_timeout(Duration::from_millis(100)),
             Ok(Ok(signer.public_key()))
+        );
+    }
+
+    #[test]
+    fn connect_binding_waits_for_the_transport_ownership_ack() {
+        let client = Keys::generate();
+        let signer = Keys::generate();
+        let secret = "ack-before-known".to_string();
+        let (remote, result) = SessionRemote::awaiting_connect(Zeroizing::new(secret.clone()));
+        let mut worker = test_worker(client.clone(), remote, std::sync::Weak::new());
+        let (ack_tx, ack_rx) = mpsc::channel();
+        worker.controlled_bind_transitions = Some(vec![PendingBindTransition::Controlled(ack_rx)]);
+
+        worker.on_event(&connect_response(
+            &signer,
+            client.public_key(),
+            Value::String(secret),
+        ));
+        assert!(
+            worker.remote.known().is_none(),
+            "valid wire evidence alone cannot publish Known before transport ownership settles"
+        );
+        assert_eq!(
+            result.recv_timeout(Duration::from_millis(20)),
+            Err(mpsc::RecvTimeoutError::Timeout),
+            "pairing completion must remain pending before the ownership ack"
+        );
+
+        let (_commands_tx, commands_rx) = tokio_mpsc::channel(1);
+        let (_requests_tx, requests_rx) = tokio_mpsc::channel(1);
+        let (_pool_events_tx, pool_events_rx) = tokio_mpsc::channel(1);
+        let control = Arc::new(SessionControl::new());
+        let request_cancellation_signal = Arc::new(tokio::sync::Notify::new());
+        let runtime = standalone_runtime().unwrap();
+        let run_control = Arc::clone(&control);
+        let run_cancellation_signal = Arc::clone(&request_cancellation_signal);
+        let runner = runtime.spawn(async move {
+            worker
+                .run(
+                    commands_rx,
+                    requests_rx,
+                    pool_events_rx,
+                    run_control,
+                    run_cancellation_signal,
+                )
+                .await;
+            worker.remote.known()
+        });
+
+        ack_tx.send(true).unwrap();
+        assert_eq!(
+            result.recv_timeout(Duration::from_secs(1)),
+            Ok(Ok(signer.public_key())),
+            "the existing worker select loop must observe the ack and publish pairing"
+        );
+        control.shutdown();
+        assert_eq!(
+            runtime.block_on(runner).unwrap(),
+            Some(signer.public_key()),
+            "Known becomes reachable only after the ack-driven transition"
+        );
+    }
+
+    #[test]
+    fn connect_binding_refuses_known_when_the_transport_owner_dies() {
+        let session = test_session();
+        let client = Keys::generate();
+        let signer = Keys::generate();
+        let secret = "dead-owner-never-known".to_string();
+        let (remote, result) = SessionRemote::awaiting_connect(Zeroizing::new(secret.clone()));
+        let mut worker = test_worker(client.clone(), remote, Arc::downgrade(&session));
+        let (ack_tx, ack_rx) = mpsc::channel();
+        worker.controlled_bind_transitions = Some(vec![PendingBindTransition::Controlled(ack_rx)]);
+
+        worker.on_event(&connect_response(
+            &signer,
+            client.public_key(),
+            Value::String(secret),
+        ));
+        assert!(worker.remote.known().is_none());
+
+        let (_commands_tx, commands_rx) = tokio_mpsc::channel(1);
+        let (_requests_tx, requests_rx) = tokio_mpsc::channel(1);
+        let (_pool_events_tx, pool_events_rx) = tokio_mpsc::channel(1);
+        let control = Arc::clone(&session.control);
+        let request_cancellation_signal = Arc::clone(&session.request_cancellation_signal);
+        let runtime = standalone_runtime().unwrap();
+        let runner = runtime.spawn(async move {
+            worker
+                .run(
+                    commands_rx,
+                    requests_rx,
+                    pool_events_rx,
+                    control,
+                    request_cancellation_signal,
+                )
+                .await;
+            worker.remote.known()
+        });
+
+        ack_tx.send(false).unwrap();
+        assert_eq!(
+            result.recv_timeout(Duration::from_secs(1)),
+            Ok(Err(Nip46Error::Disconnected)),
+            "terminal worker loss must resolve pairing as disconnected"
+        );
+        assert_eq!(
+            runtime.block_on(runner).unwrap(),
+            None,
+            "a dead transport owner can never publish Known"
         );
     }
 

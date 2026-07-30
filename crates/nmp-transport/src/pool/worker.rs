@@ -109,12 +109,113 @@ struct ReconnectPreamble {
     /// replayed. This finite latest-state request lives beside the frames it
     /// names rather than in the bounded ordinary command lane.
     replay_generation: Option<u64>,
+    /// Completion of the latest ownership transition. Recording a desired
+    /// revision is nonblocking; the worker resolves this after any
+    /// socket-accepted predecessor is flushed or its generation ends.
+    transition: Option<(u64, mpsc::Sender<bool>)>,
 }
 
 #[derive(Debug, Default)]
 struct ReconnectPreambleOwner {
     state: Mutex<ReconnectPreamble>,
-    settled: std::sync::Condvar,
+}
+
+pub struct ReconnectPreambleTransition {
+    result_rx: Receiver<bool>,
+}
+
+impl ReconnectPreambleTransition {
+    #[must_use]
+    pub fn try_result(&self) -> Option<bool> {
+        match self.result_rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => Some(false),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct ReconnectPreambleRegistration {
+    reconnect_preamble: Arc<ReconnectPreambleOwner>,
+    shutdown: Arc<AtomicBool>,
+    waker: Arc<Mutex<Option<Waker>>>,
+}
+
+impl ReconnectPreambleRegistration {
+    pub(super) fn replace(&self, frames: Vec<String>) -> ReconnectPreambleTransition {
+        replace_reconnect_preamble(
+            &self.reconnect_preamble,
+            &self.shutdown,
+            &self.waker,
+            frames,
+        )
+    }
+}
+
+fn replace_transition_waiter(
+    owner: &mut ReconnectPreamble,
+    revision: u64,
+    waiter: mpsc::Sender<bool>,
+) {
+    if let Some((_superseded_revision, superseded)) = owner.transition.replace((revision, waiter)) {
+        let _ = superseded.send(false);
+    }
+}
+
+fn resolve_current_transition(owner: &mut ReconnectPreamble) {
+    let Some((revision, _)) = owner.transition.as_ref() else {
+        return;
+    };
+    if owner.unflushed_revision.is_some() || *revision != owner.revision {
+        return;
+    }
+    if let Some((_revision, waiter)) = owner.transition.take() {
+        let _ = waiter.send(true);
+    }
+}
+
+fn replace_reconnect_preamble(
+    reconnect_preamble_owner: &ReconnectPreambleOwner,
+    shutdown: &AtomicBool,
+    waker: &Mutex<Option<Waker>>,
+    frames: Vec<String>,
+) -> ReconnectPreambleTransition {
+    let (result_tx, result_rx) = mpsc::channel();
+    let transition = ReconnectPreambleTransition { result_rx };
+    if shutdown_requested(shutdown) {
+        let _ = result_tx.send(false);
+        return transition;
+    }
+    let Ok(mut reconnect_preamble) = reconnect_preamble_owner.state.lock() else {
+        let _ = result_tx.send(false);
+        return transition;
+    };
+    if reconnect_preamble.frames == frames {
+        if reconnect_preamble.unflushed_revision.is_none() {
+            let _ = result_tx.send(true);
+        } else {
+            let revision = reconnect_preamble.revision;
+            replace_transition_waiter(&mut reconnect_preamble, revision, result_tx);
+        }
+        return transition;
+    }
+    reconnect_preamble.revision = reconnect_preamble.revision.wrapping_add(1);
+    reconnect_preamble.frames = frames;
+    if reconnect_preamble.unflushed_revision.is_none() {
+        let _ = result_tx.send(true);
+    } else {
+        let revision = reconnect_preamble.revision;
+        replace_transition_waiter(&mut reconnect_preamble, revision, result_tx);
+    }
+    drop(reconnect_preamble);
+
+    if let Ok(guard) = waker.lock() {
+        if let Some(waker) = guard.as_ref() {
+            let _ = waker.wake();
+        }
+    }
+    transition
 }
 
 /// One connected generation's still-revocable reconnect replay.
@@ -273,42 +374,20 @@ pub(super) struct WorkerHandle {
 }
 
 impl WorkerHandle {
-    pub(super) fn replace_reconnect_preamble(&self, frames: Vec<String>) -> bool {
-        if shutdown_requested(&self.shutdown) {
-            return false;
+    pub(super) fn reconnect_preamble_registration(&self) -> ReconnectPreambleRegistration {
+        ReconnectPreambleRegistration {
+            reconnect_preamble: Arc::clone(&self.reconnect_preamble),
+            shutdown: Arc::clone(&self.shutdown),
+            waker: Arc::clone(&self.waker),
         }
-        let Ok(mut reconnect_preamble) = self.reconnect_preamble.state.lock() else {
-            return false;
-        };
-        while reconnect_preamble.unflushed_revision.is_some() {
-            if shutdown_requested(&self.shutdown) {
-                return false;
-            }
-            let Ok((next, _)) = self
-                .reconnect_preamble
-                .settled
-                .wait_timeout(reconnect_preamble, Duration::from_millis(50))
-            else {
-                return false;
-            };
-            reconnect_preamble = next;
-        }
-        if shutdown_requested(&self.shutdown) {
-            return false;
-        }
-        if reconnect_preamble.frames == frames {
-            return true;
-        }
-        reconnect_preamble.revision = reconnect_preamble.revision.wrapping_add(1);
-        reconnect_preamble.frames = frames;
-        drop(reconnect_preamble);
+    }
 
-        // Wake a live poller directly so a pending replay promptly
-        // revalidates. The shared value above is authoritative, so a
-        // saturated ordinary command queue cannot make the finite
-        // replacement fail.
-        self.wake();
-        true
+    #[cfg(test)]
+    pub(super) fn replace_reconnect_preamble(
+        &self,
+        frames: Vec<String>,
+    ) -> ReconnectPreambleTransition {
+        self.reconnect_preamble_registration().replace(frames)
     }
 
     pub(super) fn replay_reconnect_preamble(&self, generation: u64) -> bool {
@@ -614,7 +693,16 @@ fn run_worker(
                 // releasing its owner marker so a binding transition cannot
                 // complete while stale buffered bytes remain writable.
                 drop(socket);
-                clear_unflushed_reconnect_preamble(&reconnect_preamble);
+                clear_unflushed_reconnect_preamble(
+                    &reconnect_preamble,
+                    matches!(
+                        outcome,
+                        ConnectedOutcome::Reconnect {
+                            permanent: false,
+                            ..
+                        }
+                    ),
+                );
                 match outcome {
                     ConnectedOutcome::Shutdown => return,
                     ConnectedOutcome::Reconnect { message, permanent } => {
@@ -1550,7 +1638,7 @@ fn flush_reconnect_preamble(
             match socket.flush_replay() {
                 Ok(()) => {
                     owner.unflushed_revision = None;
-                    reconnect_preamble.settled.notify_all();
+                    resolve_current_transition(&mut owner);
                 }
                 Err(error) if is_nonblocking_io(&error) => return FlushResult::Blocked,
                 Err(error) => return FlushResult::Broken(error.to_string()),
@@ -1564,9 +1652,10 @@ fn flush_reconnect_preamble(
             }
             owner.replay_generation = None;
         }
-        if !pending.frames.is_empty() && pending.revision != owner.revision {
+        if pending.revision != owner.revision {
             pending.revision = owner.revision;
             pending.frames = owner.frames.iter().cloned().collect();
+            pending.scheduled = !pending.frames.is_empty();
         }
         let Some(text) = pending.frames.pop_front() else {
             pending.scheduled = false;
@@ -1578,7 +1667,7 @@ fn flush_reconnect_preamble(
                 match socket.flush_replay() {
                     Ok(()) => {
                         owner.unflushed_revision = None;
-                        reconnect_preamble.settled.notify_all();
+                        resolve_current_transition(&mut owner);
                     }
                     Err(error) if is_nonblocking_io(&error) => return FlushResult::Blocked,
                     Err(error) => return FlushResult::Broken(error.to_string()),
@@ -1593,10 +1682,17 @@ fn flush_reconnect_preamble(
     }
 }
 
-fn clear_unflushed_reconnect_preamble(reconnect_preamble: &ReconnectPreambleOwner) {
+fn clear_unflushed_reconnect_preamble(
+    reconnect_preamble: &ReconnectPreambleOwner,
+    owner_survives: bool,
+) {
     if let Ok(mut owner) = reconnect_preamble.state.lock() {
         owner.unflushed_revision = None;
-        reconnect_preamble.settled.notify_all();
+        if owner_survives {
+            resolve_current_transition(&mut owner);
+        } else if let Some((_revision, waiter)) = owner.transition.take() {
+            let _ = waiter.send(false);
+        }
     }
 }
 
@@ -1896,8 +1992,8 @@ mod tests {
                 frames,
                 unflushed_revision: None,
                 replay_generation: None,
+                transition: None,
             }),
-            settled: std::sync::Condvar::new(),
         });
         let pending = PendingReconnectPreamble::snapshot(0, &owner.state.lock().unwrap());
         (owner, pending)
@@ -2842,8 +2938,11 @@ mod tests {
         let (handle, _waker_slot, _shutdown) = test_worker_handle(command_tx);
         assert!(handle.push(WorkerCommand::Send("fills-the-data-lane".into())));
 
-        assert!(
-            handle.replace_reconnect_preamble(vec!["author-bound".to_string()]),
+        assert_eq!(
+            handle
+                .replace_reconnect_preamble(vec!["author-bound".to_string()])
+                .try_result(),
+            Some(true),
             "the finite reconnect owner is independent of ordinary queue pressure"
         );
         assert_eq!(
@@ -2868,7 +2967,12 @@ mod tests {
             test_worker_handle_with_reconnect_preamble(command_tx, Arc::clone(&owner));
         assert!(handle.push(WorkerCommand::Send("fills-the-data-lane".into())));
 
-        assert!(handle.replace_reconnect_preamble(vec!["author-bound".to_string()]));
+        assert_eq!(
+            handle
+                .replace_reconnect_preamble(vec!["author-bound".to_string()])
+                .try_result(),
+            Some(true)
+        );
         assert!(
             handle.replay_reconnect_preamble(7),
             "the exact-generation replay request is finite owner state, not bounded data"
@@ -2947,7 +3051,7 @@ mod tests {
     }
 
     #[test]
-    fn ownership_replacement_waits_for_an_accepted_preamble_to_flush() {
+    fn ownership_replacement_ack_waits_for_an_accepted_preamble_to_flush() {
         let (owner, mut pending) = test_reconnect_preamble(vec!["broad".to_string()]);
         let mut socket = WouldBlockOncePreambleIo::default();
         assert!(matches!(
@@ -2964,22 +3068,11 @@ mod tests {
         let (command_tx, command_rx) = mpsc::sync_channel(1);
         let (handle, _waker, _shutdown) =
             test_worker_handle_with_reconnect_preamble(command_tx, Arc::clone(&owner));
-        let (replacement_started_tx, replacement_started_rx) = mpsc::sync_channel(1);
-        let (replacement_done_tx, replacement_done_rx) = mpsc::sync_channel(1);
-        let replacement = std::thread::spawn(move || {
-            replacement_started_tx.send(()).unwrap();
-            let accepted = handle.replace_reconnect_preamble(vec!["author-bound".to_string()]);
-            replacement_done_tx.send(accepted).unwrap();
-            handle
-        });
-        replacement_started_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("the replacement thread reached the production setter");
-        assert!(
-            replacement_done_rx
-                .recv_timeout(Duration::from_millis(100))
-                .is_err(),
-            "the ownership transition cannot complete while an accepted old replay is unflushed"
+        let transition = handle.replace_reconnect_preamble(vec!["author-bound".to_string()]);
+        assert_eq!(
+            transition.try_result(),
+            None,
+            "registration is nonblocking but its acknowledgement waits for the old flush"
         );
 
         assert!(matches!(
@@ -2988,16 +3081,14 @@ mod tests {
         ));
         assert_eq!(
             socket.written,
-            ["broad"],
-            "retrying the flush must not enqueue the accepted old revision again"
+            ["broad", "author-bound"],
+            "retrying the flush must not repeat the accepted old revision and must advance to the desired revision"
         );
-        assert!(
-            replacement_done_rx
-                .recv_timeout(Duration::from_secs(1))
-                .expect("replacement completes after the old write releases"),
-            "the still-live worker accepts the replacement"
+        assert_eq!(
+            transition.try_result(),
+            Some(true),
+            "the acknowledgement resolves after the old write releases"
         );
-        let handle = replacement.join().unwrap();
         assert_eq!(
             owner.state.lock().unwrap().frames.as_slice(),
             ["author-bound"],
@@ -3005,6 +3096,94 @@ mod tests {
         );
         drop(command_rx);
         handle.join.expect("join handle retained").join().unwrap();
+    }
+
+    #[test]
+    fn reconnect_revision_registration_does_not_lock_cycle_behind_flush_ack() {
+        let (owner, mut pending) = test_reconnect_preamble(vec!["broad".to_string()]);
+        let mut socket = WouldBlockOncePreambleIo::default();
+        assert!(matches!(
+            flush_reconnect_preamble(&owner, &mut pending, &mut socket),
+            FlushResult::Blocked
+        ));
+        assert_eq!(
+            owner.state.lock().unwrap().unflushed_revision,
+            Some(0),
+            "setup must own one socket-accepted old replay whose flush would block"
+        );
+
+        let (command_tx, command_rx) = mpsc::sync_channel(1);
+        let (handle, _waker, _shutdown) =
+            test_worker_handle_with_reconnect_preamble(command_tx, Arc::clone(&owner));
+
+        // Model the production PoolInner edge exactly: replacement runs while
+        // holding the one pool mutex, while the bounded worker-event lane is
+        // already pressured and its translator needs that same mutex before
+        // it can drain.
+        let pool_inner = Arc::new(Mutex::new(()));
+        let (worker_event_tx, worker_event_rx) = mpsc::sync_channel(1);
+        worker_event_tx.send("pressured").unwrap();
+        let (translated_tx, translated_rx) = mpsc::sync_channel(1);
+        let translator_lock = Arc::clone(&pool_inner);
+        let translator = std::thread::spawn(move || {
+            let _guard = translator_lock.lock().unwrap();
+            let event = worker_event_rx.recv().unwrap();
+            translated_tx.send(event).unwrap();
+        });
+
+        let (registered_tx, registered_rx) = mpsc::sync_channel(1);
+        let replacement_lock = Arc::clone(&pool_inner);
+        let replacement = std::thread::spawn(move || {
+            let _guard = replacement_lock.lock().unwrap();
+            let registered = handle.replace_reconnect_preamble(vec!["author-bound".to_string()]);
+            registered_tx.send(registered).unwrap();
+            handle
+        });
+
+        let transition = registered_rx.recv_timeout(Duration::from_millis(100)).ok();
+        let registration_completed = transition.is_some();
+        let translation_continued = translated_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_ok();
+        assert_eq!(
+            transition
+                .as_ref()
+                .and_then(ReconnectPreambleTransition::try_result),
+            None,
+            "the ownership acknowledgement must remain pending before the old flush"
+        );
+
+        // Always release the old implementation's waiter before asserting so
+        // a red run remains terminal and leaves no detached blocked thread.
+        assert!(matches!(
+            flush_reconnect_preamble(&owner, &mut pending, &mut socket),
+            FlushResult::Flushed
+        ));
+        assert_eq!(
+            transition
+                .as_ref()
+                .and_then(ReconnectPreambleTransition::try_result),
+            Some(true),
+            "the ownership acknowledgement resolves exactly after the old flush"
+        );
+        assert_eq!(
+            socket.written,
+            ["broad", "author-bound"],
+            "the old revision is never repeated and the desired revision follows it"
+        );
+        let handle = replacement.join().unwrap();
+        translator.join().unwrap();
+        drop(command_rx);
+        handle.join.expect("join handle retained").join().unwrap();
+
+        assert!(
+            registration_completed,
+            "recording a desired revision must complete before the old revision flushes"
+        );
+        assert!(
+            translation_continued,
+            "the worker-event translator must keep draining while flush acknowledgement is pending"
+        );
     }
 
     #[test]
@@ -3025,6 +3204,8 @@ mod tests {
         let (command_tx, command_rx) = mpsc::sync_channel(1);
         let (handle, _waker, shutdown) =
             test_worker_handle_with_reconnect_preamble(command_tx, Arc::clone(&owner));
+        let transition = handle.replace_reconnect_preamble(vec!["author-bound".to_string()]);
+        assert_eq!(transition.try_result(), None);
         let (retired_tx, retired_rx) = mpsc::sync_channel(1);
         std::thread::spawn(move || {
             retired_tx.send(handle.retire()).unwrap();
@@ -3034,7 +3215,12 @@ mod tests {
             .expect("retirement is out of band and cannot wait for the replay-owner lock");
         assert!(shutdown.load(Ordering::SeqCst));
 
-        clear_unflushed_reconnect_preamble(&owner);
+        clear_unflushed_reconnect_preamble(&owner, false);
+        assert_eq!(
+            transition.try_result(),
+            Some(false),
+            "terminal worker retirement must not acknowledge a dead handle as bound"
+        );
         assert_eq!(
             owner.state.lock().unwrap().unflushed_revision,
             None,
@@ -3042,6 +3228,35 @@ mod tests {
         );
         drop(command_rx);
         join.join().unwrap();
+    }
+
+    #[test]
+    fn reconnect_generation_end_accepts_the_surviving_desired_revision() {
+        let (owner, mut pending) = test_reconnect_preamble(vec!["broad".to_string()]);
+        let mut socket = WouldBlockFlushPreambleIo::default();
+        assert!(matches!(
+            flush_reconnect_preamble(&owner, &mut pending, &mut socket),
+            FlushResult::Blocked
+        ));
+        let (command_tx, command_rx) = mpsc::sync_channel(1);
+        let (handle, _waker, _shutdown) =
+            test_worker_handle_with_reconnect_preamble(command_tx, Arc::clone(&owner));
+        let transition = handle.replace_reconnect_preamble(vec!["author-bound".to_string()]);
+        assert_eq!(transition.try_result(), None);
+
+        clear_unflushed_reconnect_preamble(&owner, true);
+        assert_eq!(
+            transition.try_result(),
+            Some(true),
+            "a reconnecting worker keeps the desired owner for its next generation"
+        );
+        assert_eq!(
+            owner.state.lock().unwrap().frames,
+            ["author-bound"],
+            "the next generation snapshots the acknowledged desired revision"
+        );
+        drop(command_rx);
+        handle.join.expect("join handle retained").join().unwrap();
     }
 
     /// The deadlock falsifier (issue #506 Fix 2): `retire` must be

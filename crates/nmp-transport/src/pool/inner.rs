@@ -31,7 +31,8 @@ use crate::health::{ConnState, RelayHealth};
 use super::spawn::ThreadSpawner;
 use super::verify::{self, VerificationOutcome, VerifierPool};
 use super::worker::{
-    pack_generation, worker_id_of, WorkerCommand, WorkerEvent, WorkerEventKind, WorkerHandle,
+    pack_generation, worker_id_of, ReconnectPreambleRegistration, WorkerCommand, WorkerEvent,
+    WorkerEventKind, WorkerHandle,
 };
 use super::{
     committed_observations::CommittedObservationCache, DisconnectReason, PoolBuildError,
@@ -452,17 +453,18 @@ impl PoolInner {
         state.worker.as_ref()
     }
 
-    pub(super) fn set_reconnect_preamble_for(&self, h: RelayHandle, frames: Vec<String>) -> bool {
-        let Some(state) = self.slots.get(h.slot as usize) else {
-            return false;
-        };
+    pub(super) fn reconnect_preamble_registration_for(
+        &self,
+        h: RelayHandle,
+    ) -> Option<ReconnectPreambleRegistration> {
+        let state = self.slots.get(h.slot as usize)?;
         if state.generation != h.generation {
-            return false;
+            return None;
         }
-        match state.worker.as_ref() {
-            Some(worker) => worker.replace_reconnect_preamble(frames),
-            None => false,
-        }
+        state
+            .worker
+            .as_ref()
+            .map(WorkerHandle::reconnect_preamble_registration)
     }
 
     pub(super) fn replay_reconnect_preamble_for(&self, h: RelayHandle) -> bool {
