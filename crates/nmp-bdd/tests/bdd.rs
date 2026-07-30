@@ -4,9 +4,13 @@
 //! `NmpWorld` -- a REAL `nmp::mechanism::runtime::EngineThread` driven against
 //! real in-process scripted relays, never a mocked engine.
 //!
-//! Two tiers (approach doc §2.2):
+//! Transitional execution (approach doc §2.2):
+//! - **governed canonical behavior** (any scenario in its file carries
+//!   `nmp:*` metadata): NEVER runs here. The supported-facade acceptance
+//!   target belongs to #1077; executing mechanism steps here would create a
+//!   second truth.
 //! - **wire tier** (default, CI, every push): every scenario except `@live`
-//!   and `@wip`.
+//!   and legacy `@wip`/`@designed`, but only in unchanged ungoverned files.
 //! - **live tier** (`@live`, opt-in): enabled only by `NMP_BDD_LIVE=1` --
 //!   NOT exercised by this repo's CI; budget-capped, reuses the exact same
 //!   steps against real network relays. None are staged yet (§2.2's
@@ -32,6 +36,10 @@ use cucumber::World as _;
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     let features_dir = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../features"));
+    let governed_features =
+        nmp_bdd::governed_feature_paths(&features_dir).unwrap_or_else(|error| {
+            panic!("cannot conservatively classify governed behavior: {error}");
+        });
     let run_live = std::env::var("NMP_BDD_LIVE").as_deref() == Ok("1");
 
     nmp_bdd::NmpWorld::cucumber()
@@ -51,7 +59,21 @@ async fn main() {
                 }
             })
         })
-        .filter_run_and_exit(features_dir, move |_feature, _rule, scenario| {
+        .filter_run_and_exit(features_dir, move |feature, _rule, scenario| {
+            let feature_path = feature
+                .path
+                .as_ref()
+                .unwrap_or_else(|| panic!("parsed feature `{}` has no source path", feature.name));
+            let canonical_path = feature_path.canonicalize().unwrap_or_else(|error| {
+                panic!(
+                    "cannot classify parsed feature {}: {error}",
+                    feature_path.display()
+                )
+            });
+            let governed = governed_features.contains(&canonical_path);
+            if governed {
+                return false;
+            }
             let is_live = scenario.tags.iter().any(|t| t == "live");
             let is_wip = scenario.tags.iter().any(|t| t == "wip");
             let is_designed = scenario.tags.iter().any(|t| t == "designed");

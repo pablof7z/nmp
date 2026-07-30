@@ -205,6 +205,92 @@ jobs:
       - name: Falsify runner ownership, suite coverage, and cancellation isolation
         run: bash scripts/test-macos-ci-throughput.sh
 
+  # #1074: canonical behavior stays organized by domain while executable
+  # evidence stays with its contract owner. This separate lane validates both
+  # maps without making the transitional nmp-bdd runner their authority.
+  behavior-traceability:
+    name: Behavioral status and evidence traceability
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    env:
+      TRACE_MANIFEST: ${{ github.workspace }}/tools/behavior-traceability/Cargo.toml
+      TRACE_TOOLCHAIN: nightly-2026-07-07
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the exact trusted checker toolchain
+        working-directory: ${{ runner.temp }}
+        run: rustup toolchain install "$TRACE_TOOLCHAIN" --profile minimal
+
+      # This protected workflow step reads untrusted feature text only as data.
+      # The token is scoped to this step and never reaches the head-built Rust
+      # checker. The snapshot is sorted, deduplicated, and exact.
+      - name: Resolve governed issue state without exposing credentials to head code
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRACE_ISSUES: ${{ runner.temp }}/nmp-behavior-issues.tsv
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          {
+            git -C "$GITHUB_WORKSPACE" grep -h -E \
+              '^[[:space:]]*#[[:space:]]*nmp:issue=#?[1-9][0-9]*[[:space:]]*$' \
+              -- 'features/**/*.feature' || true
+          } |
+            sed -E 's/.*nmp:issue=#?([1-9][0-9]*).*/\1/' |
+            sort -nu > nmp-behavior-issue-numbers
+          printf 'nmp-behavior-issue-snapshot-v1\n' > "$TRACE_ISSUES"
+          while IFS= read -r issue; do
+            state=$(gh api "repos/$GITHUB_REPOSITORY/issues/$issue" \
+              --jq 'if has("pull_request") then error("number names a pull request") else .state end')
+            case "$state" in
+              open|closed) printf '%s\t%s\n' "$issue" "$state" >> "$TRACE_ISSUES" ;;
+              *) echo "issue #$issue returned unreadable state: $state" >&2; exit 1 ;;
+            esac
+          done < nmp-behavior-issue-numbers
+
+      - name: Falsify detached target and repository Cargo-config isolation
+        env:
+          TRACE_CARGO_HOME: ${{ runner.temp }}/nmp-behavior-cargo-home
+        working-directory: ${{ runner.temp }}
+        run: >-
+          bash "${{ github.workspace }}/tools/behavior-traceability/test-isolation.sh"
+          "$TRACE_TOOLCHAIN"
+
+      - name: Falsify the parser, status model, locators, issue state, and diff
+        env:
+          TRACE_CARGO_HOME: ${{ runner.temp }}/nmp-behavior-cargo-home
+          TRACE_TARGET_DIR: ${{ runner.temp }}/nmp-behavior-target
+        working-directory: ${{ runner.temp }}
+        run: >-
+          CARGO_HOME="$TRACE_CARGO_HOME"
+          CARGO_TARGET_DIR="$TRACE_TARGET_DIR"
+          cargo "+$TRACE_TOOLCHAIN" test --locked --manifest-path "$TRACE_MANIFEST"
+
+      - name: Validate canonical behavior against explicit base and head trees
+        env:
+          TRACE_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          TRACE_CARGO_HOME: ${{ runner.temp }}/nmp-behavior-cargo-home
+          TRACE_HEAD: ${{ github.sha }}
+          TRACE_ISSUES: ${{ runner.temp }}/nmp-behavior-issues.tsv
+          TRACE_TARGET_DIR: ${{ runner.temp }}/nmp-behavior-target
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          [[ -z ${GH_TOKEN:-} && -z ${GITHUB_TOKEN:-} ]]
+          CARGO_HOME="$TRACE_CARGO_HOME" \
+          CARGO_TARGET_DIR="$TRACE_TARGET_DIR" \
+            cargo "+$TRACE_TOOLCHAIN" run --locked --quiet \
+              --manifest-path "$TRACE_MANIFEST" -- \
+              check --root "$GITHUB_WORKSPACE" \
+              --base "$TRACE_BASE" --head "$TRACE_HEAD" \
+              --issues "$TRACE_ISSUES"
+
   falsifier-honesty:
     name: Falsifier honesty (gate 6)
     if: github.event_name == 'pull_request'

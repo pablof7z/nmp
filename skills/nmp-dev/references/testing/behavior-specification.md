@@ -142,7 +142,10 @@ Ask of every `Given`:
 
 ## Scenario metadata
 
-Every scenario uses a structured comment block immediately above it.
+Every governed scenario uses a structured comment block immediately above it.
+Once one scenario in a file carries `nmp:*`, the whole file is governed. New,
+changed, or moved behavior must be governed; unchanged ungoverned legacy is
+temporary migration debt.
 
 ```gherkin
 # nmp:id=ROUTING-DISCOVERY-003
@@ -173,7 +176,6 @@ For `specified`:
 For `known-violation`:
 
 - `nmp:issue=#N`;
-- preferably evidence pointing to the reproducer.
 
 ### Status meaning
 
@@ -183,7 +185,9 @@ For `known-violation`:
 | `specified` | Behavior is agreed, but implementation or sufficient evidence has not been promoted |
 | `known-violation` | The scenario states the intended current contract, and current code is known to contradict it |
 
-Do not use an ambiguous `@wip` state. The exact gap must be stated.
+Do not use ambiguous `@wip`, `@designed`, or `@requires-*`
+lifecycle/capability tags in governed files, including tags inherited from a
+Feature, Rule, Scenario, or Examples block. The exact gap must be stated.
 
 `@acceptance` means the scenario itself is executed as a facade-level acceptance capstone. It is not a status. An `@acceptance` scenario must be `built`.
 
