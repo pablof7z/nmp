@@ -50,7 +50,7 @@ use crate::coverage::{
     GcVictimIndex, ShapeRecord,
 };
 use crate::persistent_store_lifetime::{
-    acquire_for_open, reset_store, RedbStoreOpenError, StoreOwnership,
+    acquire_for_open, reset_store, RedbStoreOpenError, RequiredLockedFileBackend, StoreOwnership,
 };
 use crate::{
     AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome, AttemptTransientDetail,
@@ -119,6 +119,8 @@ use query::*;
 mod ingest_txn;
 mod mutation;
 mod store;
+#[cfg(test)]
+pub(crate) use store::with_required_database_init_test_hook;
 #[cfg(test)]
 use store::RedbCrashPoint;
 pub use store::RedbStore;

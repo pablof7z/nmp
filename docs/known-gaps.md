@@ -363,16 +363,22 @@ about current code:
   instead of returning stale `ENOENT`. It never retries the whole store open
   or accepts a third outcome; deterministic resolver and eight-opener
   falsifiers prove one owner and seven typed refusals.
-  Reset
-  acquires the SAME ownership and holds it through removal, returning typed
-  `StoreStillOpen { path }` without touching a live store; there is no
-  check-then-delete gap. Existing and dangling final symlink paths resolve to
-  the store target; reset never unlinks the alias inode. Reset clears cached
+  Production open acquires a second, required lock on the actual database
+  inode; unlike redb's permissive default backend, an unsupported target lock
+  fails before database initialization. Reset acquires that SAME pathname
+  ownership, then joins NMP's target-inode lock and holds both through removal.
+  A live hard-link alias therefore returns typed
+  `StoreStillOpen { path }` without touching either name. A closed target with
+  more than one hard link fails as `StoreResetFailed` before mutation because
+  unlinking one name cannot prove the promised physical erasure. Existing and
+  dangling final symlink paths resolve to the store target; reset never
+  unlinks the alias inode. Reset clears cached
   events, pending writes, receipts, coverage/evidence, and related persisted
   state. Separately configured platform account checkpoints remain outside the
   store path and untouched. **Remaining boundary:** arbitrary external
-  retargeting of the containing directory (as opposed to the final component,
-  which fails closed) is still a deployment concern callers must coordinate.
+  retargeting of the containing directory, or an uncooperative process creating
+  another hard link after the locked final validation, is still a deployment
+  concern callers must coordinate.
 - **Public syntax remains provisional; its promotion protocol is now enforced.**
   Pinned snapshots cover the canonical `nmp` Rust facade and every active
   language-independent UniFFI proc-macro component in the closed-schema

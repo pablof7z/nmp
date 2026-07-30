@@ -49,6 +49,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 blake3 = "1"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 libc = "0.2"
 syn = { version = "2", features = ["full", "visit"] }
