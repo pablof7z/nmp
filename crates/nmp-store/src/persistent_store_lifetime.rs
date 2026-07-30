@@ -1329,4 +1329,56 @@ mod tests {
         reset_store(&target).unwrap();
         assert!(!target.exists());
     }
+
+    /// #723 falsifier: pathname ownership alone cannot protect a live
+    /// database opened through another hard link. Reset must join the
+    /// database inode's lock before removing either name.
+    #[cfg(unix)]
+    #[test]
+    fn hard_link_alias_reset_refuses_live_subprocess_owner_without_mutation() {
+        let fixture = tempfile::tempdir().unwrap();
+        let target = fixture.path().join("hard-link-owner.redb");
+        let alias = fixture.path().join("hard-link-alias.redb");
+
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("persistent_store_lifetime::tests::subprocess_owner_helper")
+            .arg("--nocapture")
+            .env("NMP_STORE_OWNER_HELPER_PATH", &target)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let mut lines = std::io::BufReader::new(stdout).lines();
+        loop {
+            let line = lines
+                .next()
+                .expect("child exited before taking ownership")
+                .unwrap();
+            if line.contains("NMP_STORE_OWNER_READY") {
+                break;
+            }
+        }
+
+        std::fs::hard_link(&target, &alias).unwrap();
+        let before = std::fs::read(&target).unwrap();
+        let before_digest = blake3::hash(&before);
+
+        assert!(matches!(
+            reset_store(&alias),
+            Err(RedbStoreResetError::StoreStillOpen { .. })
+        ));
+        assert_eq!(std::fs::read(&target).unwrap(), before);
+        assert_eq!(std::fs::read(&alias).unwrap(), before);
+        assert_eq!(
+            blake3::hash(&std::fs::read(&target).unwrap()),
+            before_digest
+        );
+        assert_eq!(blake3::hash(&std::fs::read(&alias).unwrap()), before_digest);
+
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+    }
 }
