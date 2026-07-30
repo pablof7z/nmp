@@ -52,10 +52,10 @@ about current code:
   same relay's Public slot under the finite ceiling (#598): reducer-issued
   read/write admission effects make the authority explicit, only write
   ownership may release Public, and terminal reconciliation restores any
-  still-required read preamble. A protected read has no such authority, no
-  different relay is evicted, and the configured physical-session envelope is
-  never exceeded. Discovered local,
-  private, link-local, and `.onion` targets remain rejected by default, while
+  still-required read demand on the fresh generation. A protected read has no
+  such authority, no different relay is evicted, and the configured
+  physical-session envelope is never exceeded. Discovered local, private,
+  link-local, and `.onion` targets remain rejected by default, while
   operator-configured and explicit contextual authority keep their separate
   trusted path. Other non-relay limit classes remain open under ledger #17.
 - **Crash-safe acceptance, restart reattachment, bounded retry execution, and

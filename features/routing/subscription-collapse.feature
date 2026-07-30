@@ -322,18 +322,15 @@ Feature: One subscription per relay, not one per thing you asked about
     And relay "hub" was never asked to close a "d" subscription
     And every "d" value I watch is covered by some subscription on relay "hub"
 
-  @wip
+  # nmp:id=ROUTING-SUBSCRIPTIONCOLLAPSE-020
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::unchanged_same_generation_req_is_suppressed_and_reconnect_replays_once
+  # nmp:falsifier=forcing the exact accepted-request predicate false makes the independent relay witness observe a byte-identical duplicate
   Scenario: Nothing already asked for is asked for again
-    # STILL OPEN, and confirmed independent of the collapse: recompiling
-    # re-sends REQs whose subscription id AND filter are byte-identical to
-    # what is already live. Re-measured after the collapse landed: the two tag
-    # watches below now cost ONE redundant REQ (the widened
-    # `{#p:[alice,bob]}` filter, sent twice) rather than two, so the collapse
-    # reduced this without removing it. It is `apply_replay` resending
-    # `EngineCore`'s full req list on `RelayConnected`
-    # (`docs/internals/subscriptions/identity-grouping-and-limits.md` §5.4),
-    # which is wire cost on top of the fan-out rather than a consequence of
-    # it, and it needs its own fix.
+    # `EngineCore` owns the exact accepted request on one transport generation.
+    # A byte-identical request therefore mints neither another request
+    # incarnation nor another wire frame. A changed filter remains a real
+    # replacement, and a fresh generation receives the current request once.
     When I watch for notes tagged "p" as "alice"
     And I watch for notes tagged "p" as "bob"
     Then relay "hub" was never asked for the same thing twice

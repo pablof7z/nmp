@@ -409,6 +409,8 @@ impl<S: EventStore> EngineCore<S> {
         self.attribution.discard_sub(sub_id);
         self.active_request_evidence
             .retain(|_, request| request.sub_id != *sub_id);
+        self.live_wire_requests
+            .retain(|(_, candidate), _| candidate != sub_id);
     }
 
     /// A session dropped. Every attributed request on it is dead; replay
@@ -417,6 +419,35 @@ impl<S: EventStore> EngineCore<S> {
         self.attribution.clear_session(session);
         self.active_request_evidence
             .retain(|_, request| request.session != *session);
+        self.live_wire_requests
+            .retain(|(candidate, _), _| candidate != session);
+    }
+
+    /// Whether the exact accepted wire subscription is already live.
+    ///
+    /// Full filter equality is deliberate: a changed filter on the same
+    /// NIP-01 subscription id remains a real replacement. Exact handle
+    /// equality prevents an earlier socket from authorizing a fresh one.
+    pub(super) fn wire_request_is_live(
+        &self,
+        session: &RelaySessionKey,
+        sub_id: &SubId,
+        filter: &ConcreteFilter,
+        handle: TransportRelayHandle,
+    ) -> bool {
+        self.live_wire_requests
+            .get(&(session.clone(), sub_id.clone()))
+            .is_some_and(|live| live.filter == *filter && live.handle == handle)
+    }
+
+    pub(super) fn session_has_live_generation(
+        &self,
+        session: &RelaySessionKey,
+        handle: TransportRelayHandle,
+    ) -> bool {
+        self.live_wire_requests
+            .iter()
+            .any(|((candidate, _), live)| candidate == session && live.handle == handle)
     }
 
     /// Start the gap-free NIP-77 handoff (#563). This function can only be
