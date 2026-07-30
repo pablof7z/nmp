@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Structural contract for issue #1050. actionlint owns generic workflow syntax;
-# this checker owns the repository-specific invariants a YAML linter cannot
-# know: one PR macOS runner, three preserved suites, and an isolated key.
+# Structural contract for issue #1058. actionlint owns generic workflow syntax;
+# this checker owns repository-specific boundaries a YAML linter cannot know:
+# one PR macOS runner, one paired build, thin PR packaging, full master
+# packaging, and preservation of every behavior the removed simulator ran.
 
 set -euo pipefail
 
@@ -22,6 +23,10 @@ MACOS_WORKFLOW="$WORKFLOW_DIR/macos-qualification.yml"
 CI_WORKFLOW="$WORKFLOW_DIR/ci.yml"
 PROVIDER_WORKFLOW="$WORKFLOW_DIR/nip46-provider.yml"
 OLD_IOS_WORKFLOW="$WORKFLOW_DIR/ios-simulator-nip11.yml"
+BOUNDED_RELAY_TEST="$ROOT/Packages/NMP/Tests/NMPTests/BoundedRelayTimeSharingTests.swift"
+CONTROLLED_RELAY="$ROOT/Packages/NMP/Tests/NMPTests/ControlledRelayHarness.swift"
+RELAY_INFORMATION_TEST="$ROOT/Packages/NMP/Tests/NMPTests/RelayInformationTests.swift"
+FALSIFIER_PROJECT="$ROOT/apps/Falsifier/project.yml"
 
 fail() {
   echo "macOS CI throughput contract: $*" >&2
@@ -29,7 +34,7 @@ fail() {
 }
 
 require_file() {
-  [[ -f "$1" ]] || fail "missing workflow: ${1#"$ROOT/"}"
+  [[ -f "$1" ]] || fail "missing required file: ${1#"$ROOT/"}"
 }
 
 require_text() {
@@ -58,6 +63,10 @@ require_triggers() {
 require_file "$MACOS_WORKFLOW"
 require_file "$CI_WORKFLOW"
 require_file "$PROVIDER_WORKFLOW"
+require_file "$BOUNDED_RELAY_TEST"
+require_file "$CONTROLLED_RELAY"
+require_file "$RELAY_INFORMATION_TEST"
+require_file "$FALSIFIER_PROJECT"
 [[ ! -e "$OLD_IOS_WORKFLOW" ]] ||
   fail "the standalone iOS macOS workflow still exists"
 require_triggers "$MACOS_WORKFLOW"
@@ -92,29 +101,65 @@ require_text "$MACOS_WORKFLOW" "  macos-qualification:"
 require_text "$MACOS_WORKFLOW" "    name: macOS qualification"
 require_text "$MACOS_WORKFLOW" '  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}'
 require_text "$MACOS_WORKFLOW" "  cancel-in-progress: true"
+macos_named_step_count=$(grep -E -c '^[[:space:]]+- name:' "$MACOS_WORKFLOW" || true)
+[[ "$macos_named_step_count" -eq 8 ]] ||
+  fail "expected exactly eight named Apple qualification steps, found $macos_named_step_count"
 
-# Suite 1: clean-clone Swift package.
-require_text "$MACOS_WORKFLOW" "scripts/build-swift-xcframework.sh --sim-only"
+# One resolution unit produces both Apple components. Pull requests need only
+# the macOS host architecture exercised by SwiftPM/XCTest; master remains the
+# least-frequent trustworthy full package/inventory gate.
+require_text "$MACOS_WORKFLOW" "      - name: Select thin PR or full master Apple scope"
+require_text "$MACOS_WORKFLOW" 'if [[ "$EVENT_NAME" == pull_request ]]; then'
+require_text "$MACOS_WORKFLOW" 'echo "mode=--macos-only"'
+require_text "$MACOS_WORKFLOW" 'echo "targets=aarch64-apple-darwin"'
+require_text "$MACOS_WORKFLOW" 'echo "mode="'
+require_text "$MACOS_WORKFLOW" 'echo "targets=aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-darwin"'
+paired_build_count=$(
+  grep -F -c "scripts/build-swift-nip46-xcframework.sh" "$MACOS_WORKFLOW" || true
+)
+[[ "$paired_build_count" -eq 1 ]] ||
+  fail "expected exactly one paired Apple component build, found $paired_build_count"
+forbid_text "$MACOS_WORKFLOW" "scripts/build-swift-xcframework.sh"
+forbid_text "$MACOS_WORKFLOW" "--sim-only"
+
+# Core Swift package and public host-XCTest behavior.
 require_text "$MACOS_WORKFLOW" "      - name: Build the Swift package"
 require_text "$MACOS_WORKFLOW" "      - name: Test the Swift package"
 require_text "$MACOS_WORKFLOW" "        run: swift build"
 require_text "$MACOS_WORKFLOW" "working-directory: Packages/NMP"
-swift_test_count=$(grep -F -c "        run: swift test" "$MACOS_WORKFLOW")
+swift_test_count=$(grep -F -c "        run: swift test" "$MACOS_WORKFLOW" || true)
 [[ "$swift_test_count" -eq 2 ]] ||
   fail "expected Swift tests for core and NIP-46, found $swift_test_count"
 
-# Suite 2: optional Swift NIP-46 provider.
-require_text "$MACOS_WORKFLOW" "scripts/build-swift-nip46-xcframework.sh --sim-only"
+# Optional Swift NIP-46 provider from the same build.
 require_text "$MACOS_WORKFLOW" "scripts/check-nip46-component-identity.sh"
+require_text "$MACOS_WORKFLOW" "--matched-only"
 require_text "$MACOS_WORKFLOW" "scripts/check-nip46-artifact-inventory.sh"
+require_text "$MACOS_WORKFLOW" "      - name: Prove identity and clean inventory for every packaged slice"
+require_text "$MACOS_WORKFLOW" 'relative_path=${matched_core#Packages/NMP/NMP.xcframework/}'
+require_text "$MACOS_WORKFLOW" 'slice_directory=${relative_path%/libnmp_ffi.a}'
 require_text "$MACOS_WORKFLOW" "      - name: Test the selectable NIP-46 provider package"
 require_text "$MACOS_WORKFLOW" "working-directory: Packages/NMPNip46"
 
-# Suite 3: iOS Simulator NIP-11 runtime.
-require_text "$MACOS_WORKFLOW" "scripts/pick-ios-simulator-destination.py"
-require_text "$MACOS_WORKFLOW" "xcodebuild test (iOS Simulator NIP-11 runtime qualification)"
-require_text "$MACOS_WORKFLOW" "          xcodebuild test \\"
-require_text "$MACOS_WORKFLOW" "-test-iterations 3"
+# Simulator-only orchestration is removed because it owned no unique product
+# behavior. The unique #598 proof runs through the public Swift API on the host;
+# the NIP-11 success/error cases remain in the existing host suite.
+forbid_text "$MACOS_WORKFLOW" "xcodegen"
+forbid_text "$MACOS_WORKFLOW" "simctl"
+forbid_text "$MACOS_WORKFLOW" "xcodebuild test"
+forbid_text "$MACOS_WORKFLOW" "pick-ios-simulator-destination.py"
+forbid_text "$MACOS_WORKFLOW" "cargo test"
+forbid_text "$MACOS_WORKFLOW" "cargo clippy"
+forbid_text "$MACOS_WORKFLOW" "cargo fmt"
+forbid_text "$MACOS_WORKFLOW" "gradlew"
+forbid_text "$FALSIFIER_PROJECT" "FalsifierTests:"
+require_text "$BOUNDED_RELAY_TEST" "final class BoundedRelayTimeSharingTests"
+require_text "$BOUNDED_RELAY_TEST" "testDurableAuthorOutboxWriteProgressesPastAwaitingRelay"
+require_text "$BOUNDED_RELAY_TEST" "peakActiveWebSockets"
+require_text "$BOUNDED_RELAY_TEST" "testEventDrivenWaitersWithdrawExactlyOnTimeout"
+require_text "$CONTROLLED_RELAY" '"NMP Swift Test Relay"'
+require_text "$RELAY_INFORMATION_TEST" "testPublicAsyncCallSuspendsMainActorAndDeliversSuccess"
+require_text "$RELAY_INFORMATION_TEST" "testPublicAsyncCallDeliversTypedAcquisitionError"
 
 forbid_text "$CI_WORKFLOW" "  swift-package:"
 forbid_text "$CI_WORKFLOW" "runs-on: macos-"
@@ -129,6 +174,9 @@ require_text "$PROVIDER_WORKFLOW" "  package-removal:"
 require_text "$PROVIDER_WORKFLOW" "    name: NIP-46 package removal"
 require_text "$PROVIDER_WORKFLOW" "  kotlin-provider:"
 require_text "$PROVIDER_WORKFLOW" "    name: Kotlin NIP-46 component"
+require_text "$PROVIDER_WORKFLOW" 'libnmp_ffi-core-only.so'
+require_text "$PROVIDER_WORKFLOW" "scripts/check-nip46-component-identity.sh"
+forbid_text "$PROVIDER_WORKFLOW" "--matched-only"
 require_triggers "$PROVIDER_WORKFLOW"
 
-echo "macOS CI throughput contract: one stable job owns all three suites"
+echo "macOS CI throughput contract: one paired thin PR job, full master packaging, and host behavior preserved"

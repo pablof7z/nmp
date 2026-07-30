@@ -256,7 +256,7 @@ Required proofs include:
 - transport reconnect cannot duplicate durable buffering ownership;
 - at `max_relays = 1`, an ordinary public route-discovery query plus a durable
   write to the same relay progresses through exact single publish, ACK, and
-  public-query restoration on a real iOS Simulator;
+  public-query restoration through the public Swift API on the macOS host;
 - a protected read emits only read admission and cannot claim the write's
   same-relay time-sharing authority;
 - restart preserves attempt ordinal and next eligibility;

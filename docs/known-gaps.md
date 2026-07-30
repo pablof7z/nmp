@@ -320,12 +320,13 @@ about current code:
   displays only caller-supplied query-scoped runtime status. Advertised icon
   text is exposed without dereferencing it; applications apply their own media
   policy and pass a SwiftUI `Image` or Compose `Painter`. The
-  Swift wrapper tests run on the macOS host, and a runnable iOS Simulator test
-  target now executes a hostname NIP-11 acquisition through the governed
-  Hickory resolver path at iOS runtime as a required CI gate
-  ([#465](https://github.com/pablof7z/nmp/issues/465) closed). The Kotlin
-  package remains a desktop-JVM projection; this work does not add or qualify
-  an Android AAR. **The hidden cache/flight/waiter copy amplification is closed
+  Swift wrapper tests run on the macOS host and exercise hostname NIP-11
+  acquisition, async MainActor progress, and typed malformed-document refusal
+  through the public API. Master packages the complete device + simulator +
+  macOS XCFramework slice set, but no headless gate claims iOS runtime behavior;
+  physical-device qualification remains separate. The Kotlin package remains a
+  desktop-JVM projection; this work does not add or qualify an Android AAR.
+  **The hidden cache/flight/waiter copy amplification is closed
   (#467).** One immutable payload owns the parsed document (including
   structured maps), exact raw JSON, and revision; cache entries, refreshing
   workers, 304/stale metadata versions, and all waiters share that payload.
