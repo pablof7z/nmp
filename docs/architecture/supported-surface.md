@@ -56,7 +56,11 @@ over generated bindings without becoming independent semantic engines.
 - A self-owning record declares its Cargo package/manifest/library stem and is
   built once in a target directory isolated to that artifact owner. A
   co-located interface names that owner and declares no library fields;
-  regeneration extracts each namespace from the one owner build.
+  regeneration extracts each namespace from the one owner build. The catalog
+  checks the declared package and library stem against the exact Cargo
+  manifest. Active package/build ownership may move through a governed
+  transition; the UniFFI namespace and declared Swift/Kotlin manifest/source
+  roots remain stable.
   Swift and Kotlin each declare both manifest and source roots or an explicit
   omission reason. The optional Android table is all-or-nothing and records
   Gradle project, namespace, Maven coordinate, manifests, and sources.
@@ -70,7 +74,10 @@ over generated bindings without becoming independent semantic engines.
 - The extractor is a standalone locked program under
   `tools/component-interface-snapshot`, outside the NMP workspace and product
   crate. Steady-state regeneration copies its manifest, lockfile, and source
-  from the PR base before inspecting the head-built native library.
+  from the PR base before inspecting the head-built native library. It refuses
+  an undeclared namespace anywhere in that library and requires the requested
+  catalog namespace exactly once; declared dependency namespaces may therefore
+  coexist without becoming an ungoverned extra.
 - The Rust re-export resolver is likewise a standalone locked program under
   `tools/rust-facade-snapshot`. It checks rustdoc JSON format 60, resolves
   renamed extern aliases through Cargo's exact `PackageId` and library target,
@@ -92,9 +99,9 @@ over generated bindings without becoming independent semantic engines.
   8,000,000-byte ceiling: deliberately generous for the explicit facade roots,
   but small enough to catch accidental recursive helper-method expansion.
 - `scripts/regenerate-surface-snapshots.sh` regenerates the facade and every
-  active component from a clean checkout;
-  `scripts/check-surface-governance.sh` verifies the catalog transition and
-  every output.
+  active component from a clean checkout. The ordinary checker runs it in both
+  catalog and reverse component order, requires byte-identical output, then
+  compares every generated file with the committed head.
 - Cross-SDK exceptions use one closed TOML record per exact
   `(component, concept, platform)` tuple in canonical tuple order. The parity
   report keeps both active suppressions and currently unused exceptions

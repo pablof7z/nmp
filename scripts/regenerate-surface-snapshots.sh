@@ -93,7 +93,50 @@ if grep -Eq '"impls"|"blanket_impl"|"id": [0-9]|local-item:' "$TMP/nmp-facade.tx
 fi
 
 "$CATALOG_BIN" active-rows "$ROOT" "$HEAD_REF" > "$TMP/active-rows"
+mkdir -p "$TMP/rows"
+: > "$TMP/allowed-namespaces"
+row_count=0
 exec 3< "$TMP/active-rows"
+while IFS= read -r -d '' key <&3; do
+  IFS= read -r -d '' owner <&3
+  IFS= read -r -d '' namespace <&3
+  IFS= read -r -d '' package <&3
+  IFS= read -r -d '' manifest <&3
+  IFS= read -r -d '' library_stem <&3
+  IFS= read -r -d '' snapshot <&3
+  row_count=$((row_count + 1))
+  row_file=$(printf '%s/%06d' "$TMP/rows" "$row_count")
+  printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0' \
+    "$key" "$owner" "$namespace" "$package" "$manifest" "$library_stem" "$snapshot" \
+    > "$row_file"
+  printf '%s\0' "$namespace" >> "$TMP/allowed-namespaces"
+done
+exec 3<&-
+(( row_count > 0 )) || {
+  echo "component catalog returned no active rows" >&2
+  exit 1
+}
+
+case "${SURFACE_COMPONENT_ORDER:-catalog}" in
+  catalog)
+    cp "$TMP/active-rows" "$TMP/ordered-active-rows"
+    ;;
+  reverse)
+    : > "$TMP/ordered-active-rows"
+    row_index=$row_count
+    while (( row_index > 0 )); do
+      row_file=$(printf '%s/%06d' "$TMP/rows" "$row_index")
+      cat "$row_file" >> "$TMP/ordered-active-rows"
+      row_index=$((row_index - 1))
+    done
+    ;;
+  *)
+    echo "SURFACE_COMPONENT_ORDER must be catalog or reverse" >&2
+    exit 2
+    ;;
+esac
+
+exec 3< "$TMP/ordered-active-rows"
 while IFS= read -r -d '' key <&3; do
   IFS= read -r -d '' owner <&3
   IFS= read -r -d '' namespace <&3
@@ -138,7 +181,7 @@ while IFS= read -r -d '' key <&3; do
       CARGO_TARGET_DIR="$BUILD_TARGET/component-tool" \
         cargo "+$SURFACE_RUST_TOOLCHAIN" run --quiet --locked \
           --manifest-path Cargo.toml -- \
-          "$library" "$key" "$namespace"
+          "$library" "$key" "$namespace" "$TMP/allowed-namespaces"
     )
   } > "$generated"
 

@@ -265,8 +265,14 @@ expect_catalog_mutation_fail "path traversal" \
   "sed -i.bak 's#crates/alpha-ffi/src#../alpha#' '$TMP/catalog-path-traversal/docs/surface/components/alpha/component.toml'; rm '$TMP/catalog-path-traversal/docs/surface/components/alpha/component.toml.bak'"
 expect_catalog_mutation_fail "missing declared source root" \
   "rm -r '$TMP/catalog-missing-declared-source-root/crates/alpha-ffi/src'"
+expect_catalog_mutation_fail "manifest package mismatch" \
+  "sed -i.bak 's/ffi_package = \"alpha-ffi\"/ffi_package = \"wrong-ffi\"/' '$TMP/catalog-manifest-package-mismatch/docs/surface/components/alpha/component.toml'; rm '$TMP/catalog-manifest-package-mismatch/docs/surface/components/alpha/component.toml.bak'"
+expect_catalog_mutation_fail "manifest library mismatch" \
+  "sed -i.bak 's/library_stem = \"alpha_ffi\"/library_stem = \"wrong_ffi\"/' '$TMP/catalog-manifest-library-mismatch/docs/surface/components/alpha/component.toml'; rm '$TMP/catalog-manifest-library-mismatch/docs/surface/components/alpha/component.toml.bak'"
 expect_catalog_mutation_fail "duplicate namespace" \
   "descriptor '$TMP/catalog-duplicate-namespace' beta beta; sed -i.bak 's/beta_ffi/alpha_ffi/' '$TMP/catalog-duplicate-namespace/docs/surface/components/beta/component.toml'; rm '$TMP/catalog-duplicate-namespace/docs/surface/components/beta/component.toml.bak'"
+expect_catalog_mutation_fail "duplicate component key" \
+  "descriptor '$TMP/catalog-duplicate-component-key' beta beta; sed -i.bak 's/key = \"beta\"/key = \"alpha\"/' '$TMP/catalog-duplicate-component-key/docs/surface/components/beta/component.toml'; rm '$TMP/catalog-duplicate-component-key/docs/surface/components/beta/component.toml.bak'"
 expect_catalog_mutation_fail "duplicate package identity" \
   "descriptor '$TMP/catalog-duplicate-package-identity' beta beta; sed -i.bak 's/beta-ffi/alpha-ffi/' '$TMP/catalog-duplicate-package-identity/docs/surface/components/beta/component.toml'; rm '$TMP/catalog-duplicate-package-identity/docs/surface/components/beta/component.toml.bak'"
 expect_catalog_mutation_fail "duplicate library identity" \
@@ -277,6 +283,13 @@ expect_catalog_mutation_fail "co-located library fields" \
   "descriptor '$TMP/catalog-co-located-library-fields' beta alpha; printf 'ffi_package = \"beta-ffi\"\\nffi_manifest = \"crates/alpha-ffi/Cargo.toml\"\\nlibrary_stem = \"beta_ffi\"\\n' >> '$TMP/catalog-co-located-library-fields/docs/surface/components/beta/component.toml'"
 expect_catalog_mutation_fail "unknown artifact owner" \
   "sed -i.bak 's/artifact_owner = \"alpha\"/artifact_owner = \"missing\"/' '$TMP/catalog-unknown-artifact-owner/docs/surface/components/alpha/component.toml'; rm '$TMP/catalog-unknown-artifact-owner/docs/surface/components/alpha/component.toml.bak'"
+
+repo="$TMP/catalog-submodule-source-root"; new_repo "$repo"
+gitlink=$(git -C "$repo" rev-parse HEAD)
+git -C "$repo" rm -qr crates/alpha-ffi/src
+git -C "$repo" update-index --add --cacheinfo "160000,$gitlink,crates/alpha-ffi/src"
+git -C "$repo" commit -qm submodule-source-root
+expect_fail "declared source root cannot be a submodule" catalog_validate "$repo"
 
 # Git-mode and exact size ceilings (boundary passes, +1 fails).
 repo="$TMP/symlink"; new_repo "$repo"
@@ -451,12 +464,48 @@ rm "$repo/docs/surface/components/alpha/uniffi.txt"
 commit_case "$repo" retire-owner
 expect_fail "owner retirement with live child" "$CATALOG_BIN" transition "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
 
-repo="$TMP/stable"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
+repo="$TMP/package-move"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
 sed -i.bak 's/ffi_package = "alpha-ffi"/ffi_package = "renamed-ffi"/' \
   "$repo/docs/surface/components/alpha/component.toml"
 rm "$repo/docs/surface/components/alpha/component.toml.bak"
-commit_case "$repo" rename-identity
-expect_fail "active package identity mutation" "$CATALOG_BIN" transition "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
+sed -i.bak 's/name = "alpha-ffi"/name = "renamed-ffi"/' \
+  "$repo/crates/alpha-ffi/Cargo.toml"
+rm "$repo/crates/alpha-ffi/Cargo.toml.bak"
+printf '\n[lib]\nname = "alpha_ffi"\n' >> "$repo/crates/alpha-ffi/Cargo.toml"
+commit_case "$repo" move-package
+expect_pass "governed active package movement" "$CATALOG_BIN" transition "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
+
+repo="$TMP/owner-move"; new_repo "$repo"; descriptor "$repo" beta beta
+commit_case "$repo" second-owner
+base=$(git -C "$repo" rev-parse HEAD)
+sed -i.bak \
+  '/^ffi_package = /d; /^ffi_manifest = /d; /^library_stem = /d; s/artifact_owner = "alpha"/artifact_owner = "beta"/' \
+  "$repo/docs/surface/components/alpha/component.toml"
+rm "$repo/docs/surface/components/alpha/component.toml.bak"
+commit_case "$repo" move-build-owner
+expect_pass "governed active build-owner movement" "$CATALOG_BIN" transition "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
+
+repo="$TMP/stable-swift-root"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
+mkdir -p "$repo/Packages/AlphaV2/Sources/Alpha"
+printf '// package\n' > "$repo/Packages/AlphaV2/Package.swift"
+printf '// swift AlphaWidget\n' > "$repo/Packages/AlphaV2/Sources/Alpha/Alpha.swift"
+sed -i.bak \
+  's#Packages/Alpha/Package.swift#Packages/AlphaV2/Package.swift#; s#Packages/Alpha/Sources/Alpha#Packages/AlphaV2/Sources/Alpha#' \
+  "$repo/docs/surface/components/alpha/component.toml"
+rm "$repo/docs/surface/components/alpha/component.toml.bak"
+commit_case "$repo" move-swift-root
+expect_fail "active Swift package roots are stable" "$CATALOG_BIN" transition "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
+
+repo="$TMP/stable-kotlin-root"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
+mkdir -p "$repo/Packages/AlphaKotlinV2/src/main/kotlin"
+printf '// gradle\n' > "$repo/Packages/AlphaKotlinV2/build.gradle.kts"
+printf 'class AlphaWidget\n' > "$repo/Packages/AlphaKotlinV2/src/main/kotlin/Alpha.kt"
+sed -i.bak \
+  's#Packages/AlphaKotlin/build.gradle.kts#Packages/AlphaKotlinV2/build.gradle.kts#; s#Packages/AlphaKotlin/src/main/kotlin#Packages/AlphaKotlinV2/src/main/kotlin#' \
+  "$repo/docs/surface/components/alpha/component.toml"
+rm "$repo/docs/surface/components/alpha/component.toml.bak"
+commit_case "$repo" move-kotlin-root
+expect_fail "active Kotlin package roots are stable" "$CATALOG_BIN" transition "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
 
 repo="$TMP/delete"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
 rm -r "$repo/docs/surface/components/alpha"
@@ -614,6 +663,26 @@ grep -Fq 'CURRENTLY-UNUSED ALLOWLIST ENTRIES FOR SWIFT (alpha)' \
 }
 echo "ok - stale parity exception is visible"
 
+# Retiring one component cannot make parity for the survivors vacuous.
+repo="$TMP/parity-after-removal"; new_repo "$repo"; descriptor "$repo" beta beta
+commit_case "$repo" second-component
+active=$(git -C "$repo" rev-parse HEAD)
+"$CATALOG_BIN" render-tombstone "$repo" "$active" beta 999 \
+  https://github.com/pablof7z/nmp/pull/999 \
+  > "$repo/docs/surface/components/beta/component.toml"
+rm -r "$repo/crates/beta-ffi"
+rm "$repo/docs/surface/components/beta/uniffi.txt"
+commit_case "$repo" retire-beta
+expect_pass "component removal preserves remaining parity" env \
+  SDK_PARITY_ROOT="$repo" SDK_PARITY_HEAD_REF=HEAD \
+  SDK_PARITY_CATALOG_BIN="$CATALOG_BIN" bash "$PARITY" --quiet
+printf '// Alpha wrapper removed.\n' \
+  > "$repo/Packages/Alpha/Sources/Alpha/Alpha.swift"
+commit_case "$repo" break-surviving-component
+expect_fail "component removal cannot mask surviving parity failure" env \
+  SDK_PARITY_ROOT="$repo" SDK_PARITY_HEAD_REF=HEAD \
+  SDK_PARITY_CATALOG_BIN="$CATALOG_BIN" bash "$PARITY" --quiet
+
 # End-to-end checker: regeneration, evidence, projections, protected program,
 # bootstrap refusal in steady state, and dirty checkout behavior.
 repo="$TMP/checker-valid"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
@@ -635,6 +704,30 @@ repo="$TMP/checker-no-log"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HE
 printf '// changed\n' >> "$repo/Packages/Alpha/Sources/Alpha/Alpha.swift"
 commit_case "$repo" no-log
 expect_fail "governed SDK change without evidence" run_checker "$repo" "$base"
+
+repo="$TMP/checker-swift-manifest"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
+printf '// changed Swift manifest\n' >> "$repo/Packages/Alpha/Package.swift"
+append_entry "$repo" swift
+commit_case "$repo" swift-manifest
+expect_pass "Swift-only manifest evidence" run_checker "$repo" "$base"
+
+repo="$TMP/checker-kotlin-manifest"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
+printf '// changed Kotlin manifest\n' >> "$repo/Packages/AlphaKotlin/build.gradle.kts"
+append_entry "$repo" kotlin
+commit_case "$repo" kotlin-manifest
+expect_pass "Kotlin-only manifest evidence" run_checker "$repo" "$base"
+
+repo="$TMP/checker-both-manifest"; new_repo "$repo"
+sed -i.bak \
+  's#Packages/AlphaKotlin/build.gradle.kts#Packages/Alpha/Package.swift#' \
+  "$repo/docs/surface/components/alpha/component.toml"
+rm "$repo/docs/surface/components/alpha/component.toml.bak"
+commit_case "$repo" shared-manifest-base
+base=$(git -C "$repo" rev-parse HEAD)
+printf '// changed shared manifest\n' >> "$repo/Packages/Alpha/Package.swift"
+append_entry "$repo" kotlin,swift
+commit_case "$repo" shared-manifest
+expect_pass "shared Swift/Kotlin manifest evidence" run_checker "$repo" "$base"
 
 repo="$TMP/checker-history"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
 sed -i.bak 's/seed/rewritten/' "$repo/docs/surface-change-log.md"

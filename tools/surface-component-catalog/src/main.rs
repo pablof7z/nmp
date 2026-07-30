@@ -671,6 +671,56 @@ fn check_declared_paths(repo: &Path, reference: &str, descriptor: &Descriptor) -
     Ok(())
 }
 
+fn validate_owner_manifest(repo: &Path, reference: &str, descriptor: &Descriptor) -> Result<()> {
+    if descriptor.state != State::Active || descriptor.artifact_owner != descriptor.key {
+        return Ok(());
+    }
+    let path = descriptor
+        .ffi_manifest
+        .as_deref()
+        .ok_or_else(|| invalid("validated artifact owner has no ffi_manifest"))?;
+    let entry = exact_entry(repo, reference, path)?
+        .ok_or_else(|| invalid(format!("FFI manifest is absent at {reference}: {path}")))?;
+    let bytes = blob(repo, &entry.oid)?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| invalid(format!("FFI manifest is not UTF-8: {path}")))?;
+    let manifest: toml::Value =
+        toml::from_str(text).map_err(|error| invalid(format!("{path}: {error}")))?;
+    let package_name = manifest
+        .get("package")
+        .and_then(|value| value.get("name"))
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| invalid(format!("{path}: [package].name must be an exact string")))?;
+    let declared_package = descriptor
+        .ffi_package
+        .as_deref()
+        .ok_or_else(|| invalid("validated artifact owner has no ffi_package"))?;
+    if package_name != declared_package {
+        return Err(invalid(format!(
+            "{} ffi_package does not match {path}: {declared_package:?} != {package_name:?}",
+            descriptor.key
+        )));
+    }
+
+    let default_library = package_name.replace('-', "_");
+    let manifest_library = manifest
+        .get("lib")
+        .and_then(|value| value.get("name"))
+        .and_then(toml::Value::as_str)
+        .unwrap_or(&default_library);
+    let declared_library = descriptor
+        .library_stem
+        .as_deref()
+        .ok_or_else(|| invalid("validated artifact owner has no library_stem"))?;
+    if manifest_library != declared_library {
+        return Err(invalid(format!(
+            "{} library_stem does not match {path}: {declared_library:?} != {manifest_library:?}",
+            descriptor.key
+        )));
+    }
+    Ok(())
+}
+
 fn descriptor_path(key: &str) -> String {
     format!("{CATALOG_ROOT}/{key}/component.toml")
 }
@@ -811,6 +861,7 @@ fn validate_catalog(repo: &Path, reference: &str) -> Result<Catalog> {
             State::Retired => validate_retired_shape(&descriptor)?,
         }
         check_declared_paths(repo, reference, &descriptor)?;
+        validate_owner_manifest(repo, reference, &descriptor)?;
         let key = descriptor.key.clone();
         if records
             .insert(
@@ -1090,7 +1141,6 @@ fn check_stable_active(base: &Descriptor, head: &Descriptor) -> Result<()> {
             &base.uniffi_namespace,
             &head.uniffi_namespace,
         ),
-        ("artifact_owner", &base.artifact_owner, &head.artifact_owner),
     ] {
         if base_value != head_value {
             return Err(invalid(format!(
@@ -1099,17 +1149,26 @@ fn check_stable_active(base: &Descriptor, head: &Descriptor) -> Result<()> {
             )));
         }
     }
-    if base.library_stem != head.library_stem {
-        return Err(invalid(format!(
-            "active component {} changed stable library_stem",
-            base.key
-        )));
-    }
-    if base.ffi_package != head.ffi_package {
-        return Err(invalid(format!(
-            "active component {} changed stable ffi_package",
-            base.key
-        )));
+    for (label, base_value, head_value) in [
+        (
+            "swift_manifests",
+            &base.swift_manifests,
+            &head.swift_manifests,
+        ),
+        ("swift_sources", &base.swift_sources, &head.swift_sources),
+        (
+            "kotlin_manifests",
+            &base.kotlin_manifests,
+            &head.kotlin_manifests,
+        ),
+        ("kotlin_sources", &base.kotlin_sources, &head.kotlin_sources),
+    ] {
+        if base_value != head_value {
+            return Err(invalid(format!(
+                "active component {} changed stable {label}",
+                base.key
+            )));
+        }
     }
     let base_android = base.android.as_ref();
     let head_android = head.android.as_ref();

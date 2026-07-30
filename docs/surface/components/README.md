@@ -11,7 +11,8 @@ fail. Every record names the namespace and the artifact owner that physically
 contains it:
 
 - A self-owning record has `artifact_owner = key` and alone declares
-  `ffi_package`, `ffi_manifest`, and `library_stem`.
+  `ffi_package`, `ffi_manifest`, and `library_stem`. The package and library
+  names must match that manifest's `[package].name` and effective `[lib].name`.
 - A co-located namespace points `artifact_owner` at an active self-owning
   record and declares none of those three library fields. Ownership is depth
   one. Regeneration gives each owner an isolated Cargo target, builds it once,
@@ -19,7 +20,10 @@ contains it:
 - Every active record declares `ffi_sources`. Swift and Kotlin each declare
   both manifest/source roots, or two empty arrays plus a non-empty omission
   reason. A generated-only internal namespace is not falsely presented as an
-  ergonomic app surface.
+  ergonomic app surface. Once declared, those Swift/Kotlin native package
+  roots are stable. An active component may move to another build owner or
+  Cargo package only through an ordinary governed transition whose head is
+  otherwise a valid catalog and regenerates exactly.
 - The optional `[android]` table is all-or-nothing: `gradle_project`,
   `namespace`, `maven_coordinate`, `manifests`, and `sources`. These stable
   package identities are catalog data; versions and per-target ABI identities
@@ -31,6 +35,12 @@ and cannot contain NUL bytes. Paths are relative, canonical, and backed by
 regular files or trees in the exact Git revision.
 Namespaces, library/package identities, Android identities, and source roots
 cannot collide.
+
+The compiled-library extractor also sees the complete active namespace set.
+Every namespace present in a built library must be declared somewhere in the
+active catalog, and the namespace requested for one snapshot must occur exactly
+once. This permits a provider library to carry its separately governed core
+dependency while refusing an undeclared or duplicate component.
 
 Retirement is the one-way `active -> retired` transition. The trusted tool
 renders the exact tombstone from the base record and actual PR identity:

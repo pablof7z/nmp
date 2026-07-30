@@ -137,6 +137,12 @@ if [[ ${SURFACE_SKIP_REGEN:-0} != 1 ]]; then
   SURFACE_HEAD_REF="$HEAD_REF" \
     SURFACE_CATALOG_BIN="$CATALOG_BIN" \
     "$REGEN_CMD" --output-dir "$TMP/generated"
+  SURFACE_HEAD_REF="$HEAD_REF" \
+    SURFACE_CATALOG_BIN="$CATALOG_BIN" \
+    SURFACE_COMPONENT_ORDER=reverse \
+    "$REGEN_CMD" --output-dir "$TMP/generated-reverse"
+  diff -ru "$TMP/generated" "$TMP/generated-reverse" >/dev/null ||
+    fail "catalog-order and reverse-order regeneration differ"
 
   git show "$HEAD_REF:$SNAPSHOT_DIR/nmp-facade.txt" > "$TMP/committed-facade" 2>/dev/null ||
     fail "head snapshot is unavailable: $SNAPSHOT_DIR/nmp-facade.txt"
