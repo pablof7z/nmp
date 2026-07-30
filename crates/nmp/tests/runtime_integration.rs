@@ -146,14 +146,14 @@ fn subscribe_ticks_wall_clock_before_the_one_time_max_age_decision() {
     let now = Timestamp::now().as_secs();
     let mut store = MemoryStore::new();
     store
-        .record_coverage(
-            &atom,
-            &relay,
+        .record_coverage(&[(
+            atom.clone(),
+            relay.clone(),
             CoverageInterval::new(
                 Timestamp::from(0u64),
                 Timestamp::from(now.saturating_sub(60)),
             ),
-        )
+        )])
         .expect("seed stale coverage");
     let directory = FixtureDirectory::new().with_write(author, std::iter::once(relay.clone()));
     let (engine_thread, handle) = EngineThread::spawn(

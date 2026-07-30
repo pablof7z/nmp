@@ -70,6 +70,23 @@ fn retention_atom() -> ContextualAtom {
     }
 }
 
+fn request_coverage_batch() -> Vec<(ContextualAtom, RelayUrl, CoverageInterval)> {
+    let atom = retention_atom();
+    let interval = CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(2_000u64));
+    vec![
+        (
+            atom.clone(),
+            RelayUrl::parse(RELAY).expect("first relay"),
+            interval,
+        ),
+        (
+            atom,
+            RelayUrl::parse(RELAY_TWO).expect("second relay"),
+            interval,
+        ),
+    ]
+}
+
 fn accept(frozen: Event) -> AcceptWrite {
     AcceptWrite {
         frozen,
@@ -254,6 +271,25 @@ fn redb_crash_worker() {
             let relay = RelayUrl::parse(RELAY_TWO).expect("second relay");
             let _ = store.insert(signed, RelayObserved::new(relay, Timestamp::from(2_000u64)));
         }
+        "observation-after-commit" => {
+            let mut store =
+                RedbStore::open_with_crash_point(path, RedbCrashPoint::ObservationAfterCommit)
+                    .expect("open worker store");
+            let relay = RelayUrl::parse(RELAY).expect("relay");
+            let _ = store.insert(signed, RelayObserved::new(relay, Timestamp::from(2_000u64)));
+        }
+        "coverage-before-commit" => {
+            let mut store =
+                RedbStore::open_with_crash_point(path, RedbCrashPoint::CoverageBeforeCommit)
+                    .expect("open worker store");
+            let _ = store.record_coverage(&request_coverage_batch());
+        }
+        "coverage-after-commit" => {
+            let mut store =
+                RedbStore::open_with_crash_point(path, RedbCrashPoint::CoverageAfterCommit)
+                    .expect("open worker store");
+            let _ = store.record_coverage(&request_coverage_batch());
+        }
         "gc-before-commit" => {
             let mut store = RedbStore::open_with_crash_point(path, RedbCrashPoint::GcBeforeCommit)
                 .expect("open worker store");
@@ -417,6 +453,68 @@ fn accept_is_all_or_nothing_at_both_internal_transaction_boundaries() {
         assert_eq!(reopened.recover_outbox().expect("recover outbox").len(), 1);
         drop(reopened);
         assert_path_canonical_integrity(&path);
+    }
+}
+
+fn event_and_request_coverage_state(path: &Path) -> (bool, bool, bool) {
+    let (_, signed) = event_pair();
+    let atom = retention_atom();
+    let first = RelayUrl::parse(RELAY).expect("first relay");
+    let second = RelayUrl::parse(RELAY_TWO).expect("second relay");
+    let store = RedbStore::open(path).expect("reopen coverage-ordering fixture");
+    let event_present = !store
+        .query(&Filter::new().id(signed.id))
+        .expect("query event after crash")
+        .is_empty();
+    let key = compute_coverage_key(&atom);
+    (
+        event_present,
+        store.get_coverage(key, &first).is_some(),
+        store.get_coverage(key, &second).is_some(),
+    )
+}
+
+#[test]
+fn event_then_multi_claim_coverage_has_only_allowed_restart_states() {
+    for (point, seed_event, expected) in [
+        ("observation-before-commit", false, (false, false, false)),
+        ("observation-after-commit", false, (true, false, false)),
+        ("coverage-before-commit", true, (true, false, false)),
+        ("coverage-after-commit", true, (true, true, true)),
+    ] {
+        let (_dir, path) = fixture();
+        if seed_event {
+            let (_, signed) = event_pair();
+            let mut store = RedbStore::open(&path).expect("initialize coverage-ordering fixture");
+            store
+                .insert(
+                    signed,
+                    RelayObserved::new(
+                        RelayUrl::parse(RELAY).expect("relay"),
+                        Timestamp::from(2_000u64),
+                    ),
+                )
+                .expect("seed durable event");
+        } else {
+            RedbStore::open(&path).expect("initialize empty coverage-ordering fixture");
+        }
+
+        crash(&path, point);
+        let first = event_and_request_coverage_state(&path);
+        assert_eq!(first, expected, "unexpected recovered state at {point}");
+        let second = event_and_request_coverage_state(&path);
+        assert_eq!(
+            second, first,
+            "semantic state changed on second reopen at {point}"
+        );
+        assert_eq!(
+            second.1, second.2,
+            "one request-level coverage claim became visible without the other at {point}"
+        );
+        assert!(
+            second.0 || (!second.1 && !second.2),
+            "coverage became visible without its event at {point}"
+        );
     }
 }
 
@@ -588,7 +686,7 @@ fn explicit_retention_eviction_and_coverage_lowering_are_atomic_across_process_d
             )
             .expect("insert durable row");
         store
-            .record_coverage(&atom, &relay, before)
+            .record_coverage(&[(atom.clone(), relay.clone(), before)])
             .expect("record covering evidence");
     }
 
@@ -650,7 +748,7 @@ fn committed_retention_eviction_and_coverage_lowering_survive_process_death() {
             )
             .expect("insert durable row");
         store
-            .record_coverage(&atom, &relay, before)
+            .record_coverage(&[(atom.clone(), relay.clone(), before)])
             .expect("record covering evidence");
     }
 

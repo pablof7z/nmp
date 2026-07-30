@@ -25,8 +25,12 @@ use separate stores. A split implementation must satisfy all of these rules:
    deletion, expiry, and local ownership effects.
 4. Reconcile every unapplied projection before ordinary query or transport
    service starts.
-5. Persist event facts before advancing coverage claims. Temporary underclaim
-   may refetch; overclaim can hide absent data and is forbidden.
+5. Persist event facts before advancing coverage claims. Coverage authority is
+   owned by the exact request/session/wire FIFO whose EVENT facts were
+   observed; an event-transaction failure revokes only the owners the wire
+   evidence can name. Every claim earned by one request commits as one atomic
+   batch. Temporary underclaim may refetch; overclaim or a visible prefix of a
+   multi-claim request can hide absent data and is forbidden.
 6. Treat an operation as successful only when the authority that owns its fact
    has durably committed it. Recovery may expose a declared pre-operation,
    post-operation, or reconciled state—never an unclassified mixture.
@@ -42,7 +46,7 @@ reading backend tables or file bytes. It covers:
 - duplicate ingest and relay-provenance growth;
 - replaceable and addressable conflicts;
 - deletion and deletion-before-target tombstones;
-- expiry and coverage-safe GC;
+- expiry, request-level multi-claim coverage, and coverage-safe GC;
 - pending acceptance, signature promotion, and pre-signature cancellation;
 - durable routes, a transient retry, transport handoff, ACK, retained receipt,
   and terminal obligation cleanup.
@@ -57,8 +61,12 @@ compares both the semantic snapshot and recovery-only journal state before and
 after reopen. Every existing SIGABRT failpoint additionally computes a
 backend-independent recovery digest and proves it is stable across a second
 reopen; each failpoint's focused test remains responsible for classifying the
-result as the allowed pre- or post-operation state. This combination replaces
-row-count recovery claims with content and ordering evidence.
+result as the allowed pre- or post-operation state. The request-coverage crash
+falsifier uses the real event-before/after-commit and coverage-before/after-
+commit seams with a two-claim batch. Reopen may expose `{no fact, no claim}`,
+`{fact, no claim}`, or `{fact, all claims}`—never `{no fact, claim}` or a
+one-of-two prefix. This combination replaces row-count recovery claims with
+content, atomicity, and ordering evidence.
 
 ## Qualification sequence
 

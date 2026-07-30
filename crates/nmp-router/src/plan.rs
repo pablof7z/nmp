@@ -118,7 +118,7 @@ impl SubId {
 /// it exists.
 ///
 /// `absorbed` (coverage-attribution ruling
-/// `docs/consults/2026-07-11-fable-coverage-attribution.md` §2) is every
+/// `docs/design/query-demand-and-evidence.md`) is every
 /// narrow demand atom's window-erased [`CoverageKey`] this (possibly
 /// coalesced) wire filter supersets — populated at materialization (one key
 /// per pre-coalesce atom entry) and concatenated through every

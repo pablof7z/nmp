@@ -9,11 +9,12 @@
 //! — no hand-rolled event matching. A duplicate-id insert now MERGES relay
 //! provenance into the stored row (ledger #5) instead of being a no-op.
 //!
-//! Coverage (`record_coverage`/`get_coverage`) implements
-//! `docs/consults/2026-07-11-fable-coverage-attribution.md` at the store
-//! layer — see [`coverage`] for the full ruling recap. Claim-based bounded
-//! GC (`gc`) evicts only regular (non-addressed) events matched by no live
-//! claim, lowering any coverage row it invalidates in the same step.
+//! Coverage (`record_coverage`/`get_coverage`) implements the store half of
+//! `docs/design/query-demand-and-evidence.md` and issue #816's
+//! facts-before-claims contract — see [`coverage`] for the full recap.
+//! Claim-based bounded GC (`gc`) evicts only regular (non-addressed) events
+//! matched by no live claim, lowering any coverage row it invalidates in the
+//! same step.
 //!
 //! Retraction (`docs/design/retraction-and-negative-deltas.md`, issue #28):
 //! kind:5 (NIP-09) deletion runs inside `insert` and writes PERMANENT
@@ -1721,18 +1722,17 @@ pub trait EventStore {
     /// minimum of the same persistent expiration index `expire_due` drains.
     fn next_expiration(&self) -> Option<Timestamp>;
 
-    /// Record that `relay` has proven `proven` for `atom`'s window-erased
-    /// shape UNDER its declared `source`/`access` (ruling §1/§3, #106-
-    /// widened: the coverage identity is now the full [`ContextualAtom`],
-    /// never a bare `ConcreteFilter` alone -- the caller, which knows the
-    /// atom's `Demand` context, must supply it; the store has no notion of
-    /// `SourceAuthority`/`AccessContext` of its own). Merge-only: no public
-    /// lowering path exists outside `gc`.
+    /// Atomically record every coverage claim earned by one completed
+    /// request. Each tuple is `(atom, relay, proven interval)`. The coverage
+    /// identity is the full [`ContextualAtom`], never a bare
+    /// `ConcreteFilter`; the caller that owns request attribution supplies
+    /// the complete batch. A successful return makes every merged claim
+    /// visible, while an error may make none or the entire batch visible but
+    /// never a prefix. Merge-only: no public lowering path exists outside
+    /// `gc`.
     fn record_coverage(
         &mut self,
-        atom: &ContextualAtom,
-        relay: &RelayUrl,
-        proven: CoverageInterval,
+        claims: &[(ContextualAtom, RelayUrl, CoverageInterval)],
     ) -> Result<(), PersistenceError>;
 
     /// The proven interval for `key` at `relay`, or `None` if no row exists.

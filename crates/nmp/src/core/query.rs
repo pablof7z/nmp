@@ -235,7 +235,12 @@ impl<S: EventStore> EngineCore<S> {
                             }
                             _ => {
                                 self.record_observed_request(
-                                    session, sub_id, filter, absorbed, false,
+                                    session,
+                                    sub_id,
+                                    filter,
+                                    absorbed,
+                                    false,
+                                    EventFailureTarget::ThisSend,
                                 );
                                 kept_ops.push(op.clone());
                             }
@@ -783,6 +788,7 @@ impl<S: EventStore> EngineCore<S> {
             &live_filter,
             absorbed.clone(),
             false,
+            EventFailureTarget::ThisSend,
         );
         self.pending_neg_handoffs.insert(
             live_sub_id.clone(),
@@ -1027,6 +1033,7 @@ impl<S: EventStore> EngineCore<S> {
             &neg_sub_id,
             &neg_filter,
             absorbed.clone(),
+            EventFailureTarget::ThisSend,
         );
         self.neg_sessions.insert(
             neg_sub_id.clone(),
@@ -1173,6 +1180,7 @@ impl<S: EventStore> EngineCore<S> {
                 &backfill,
                 BTreeSet::new(),
                 false,
+                EventFailureTarget::Correlated(attribution_send),
             );
             effects.push(Effect::Wire(WireDelta {
                 ops: vec![(
@@ -1205,24 +1213,49 @@ impl<S: EventStore> EngineCore<S> {
             attribution_send,
             completed_at,
         );
-        for (key, interval) in attributed {
-            if let Some(shape) = self.attribution.shape_of(key) {
-                if let Err(e) = self
-                    .resolver
-                    .store_mut()
-                    .record_coverage(&shape, relay, interval)
-                {
-                    // Coverage-watermark persistence failed (issue #122):
-                    // degrade to read-only, claim no watermark that did not
-                    // land, and do not panic.
-                    self.degrade_store(e, effects);
-                    continue;
-                }
-                effects.push(Effect::RecordCoverage(key, relay.clone(), interval));
-            }
+        if let Some(completed) = attributed {
+            self.persist_attributed_completion(completed, relay, effects);
         }
         self.refresh_all_handle_evidence(effects);
         self.refresh_all_history_evidence(effects);
+    }
+
+    /// The one facts-before-claims persistence door shared by ordinary EOSE
+    /// and NEG completion. A poisoned completion performs no store I/O.
+    /// Every retained shape is resolved before one atomic request-level
+    /// coverage transaction starts, and success effects are emitted only
+    /// after that whole transaction commits.
+    pub(super) fn persist_attributed_completion(
+        &mut self,
+        mut completed: CompletedAttribution,
+        relay: &RelayUrl,
+        effects: &mut Vec<Effect>,
+    ) {
+        let Some(claims) = completed.eligible_claims().map(|claims| claims.to_vec()) else {
+            return;
+        };
+        if claims.is_empty() {
+            return;
+        }
+
+        let mut batch = Vec::with_capacity(claims.len());
+        for (key, interval) in &claims {
+            let Some(atom) = self.attribution.shape_of(*key) else {
+                completed.poison(CoveragePoison::MissingShape);
+                return;
+            };
+            batch.push((atom, relay.clone(), *interval));
+        }
+
+        if let Err(error) = self.resolver.store_mut().record_coverage(&batch) {
+            completed.poison(CoveragePoison::CoverageCommitFailed);
+            self.degrade_store(error, effects);
+            return;
+        }
+
+        for (key, interval) in claims {
+            effects.push(Effect::RecordCoverage(key, relay.clone(), interval));
+        }
     }
 
     /// Start one unlimited one-shot backlog REQ under a role-separated id.
@@ -1266,6 +1299,7 @@ impl<S: EventStore> EngineCore<S> {
             &filter,
             absorbed,
             false,
+            EventFailureTarget::ThisSend,
         );
         ops.push(WireOp::Req(backlog_sub_id, filter));
         effects.push(Effect::Wire(WireDelta {
