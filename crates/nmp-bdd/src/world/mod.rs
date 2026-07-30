@@ -51,6 +51,9 @@
 //!   lazy `ensure_started` that turns all of it into a running world.
 //! - `actions` -- `When`-time acts: open a feed, publish, switch account,
 //!   another user posts, a relay drops or comes back.
+//! - `facts` -- immediate name-to-fixture lookups. These are staged-world
+//!   facts rather than folded runtime observations, so they do not belong in
+//!   `observe`.
 //! - `identity` -- the identity plane: accounts named by pubkey, and the
 //!   write that named one.
 //! - `restart` -- the process boundary: stopping the engine and rebuilding
@@ -85,6 +88,11 @@
 //!   for, and the two acts a scenario about it performs (publishing to a
 //!   destination this world deliberately never starts, and reading the list
 //!   repeatedly to prove that reading is not part of what it describes).
+//! - `provenance` -- WHICH RELAYS served a row the app is looking at, and the
+//!   host-signed fixtures that make two relays disagree about one addressable
+//!   coordinate. Its own module because every other module here is about what
+//!   a row IS or how it got asked for; this one is about who delivered it,
+//!   which is a fact carried alongside every row and asserted by none of them.
 //! - `watches` -- watching one named relay directly, which is a separate
 //!   concern from the feed: it exists to observe what NMP puts on a SOCKET,
 //!   so it owns the watch bookkeeping, the group fixtures that feed it, and
@@ -98,6 +106,7 @@ mod actions;
 mod budgets;
 mod clock;
 mod contacts;
+mod facts;
 mod group_fixtures;
 mod group_surface;
 mod groups;
@@ -106,6 +115,7 @@ mod identity;
 mod identity_tests;
 mod observe;
 mod outbox;
+mod provenance;
 mod queries;
 mod replaceable;
 mod restart;
@@ -265,6 +275,11 @@ pub struct NmpWorld {
     /// relay (see [`NmpWorld::stage_administered_groups`]).
     pending_groups: Vec<String>,
     group_counter: usize,
+    /// Kind-39000 group metadata staged for a NAMED HOST to sign
+    /// (relay, group id, name), seeded once every relay is bound. See
+    /// [`world::provenance`](self::provenance) for why the host, not a
+    /// member, is the signer.
+    pending_group_metadata: Vec<(String, String, String)>,
 
     active_person: Option<String>,
     ts_counter: u64,

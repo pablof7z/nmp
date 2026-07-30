@@ -10,16 +10,6 @@
 //! its observer in one file is what stops a `Then` step from ever reaching
 //! past the fold into a raw receiver.
 //!
-//! The trailing read accessors (`relay_url`, `pubkey_hex`, ...) are here for
-//! the same reason: they are the non-waiting half of the same read surface --
-//! plain facts a `Then` step needs to phrase an assertion against a name a
-//! scenario used.
-//!
-//! What is NOT here is the relay's own contact log ([`super::contacts`]).
-//! These three channels are all things the ENGINE reported; that one is the
-//! independent witness a "never contacted" claim needs so it cannot be made
-//! vacuous by the very component under test.
-
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex};
@@ -28,23 +18,29 @@ use std::time::{Duration, Instant};
 
 use nostr::EventId;
 
-use nmp::mechanism::core::{AcquisitionEvidence, DiagnosticsSnapshot, RowDelta, ShortfallFact};
+use nmp::mechanism::core::{
+    AcquisitionEvidence, DiagnosticsSnapshot, Row, RowDelta, ShortfallFact,
+};
 use nmp::mechanism::outbox::WriteStatus;
 use nmp::mechanism::runtime::{DiagnosticsHandle, QueryHandle, RowsReceiver};
-use nmp_router::RelayUrl;
 
 use super::budgets::{EVENTUALLY, NEVER};
 use super::NmpWorld;
 
-/// One accumulated feed: folds every `Added`/`Removed` delta this channel
-/// has delivered so far into a live row set + the query's latest acquisition
-/// evidence -- exactly what a real app must do (`Handle::subscribe`'s wire is
-/// deltas, never snapshots). Persists across multiple `Then` steps in one
-/// scenario.
+/// One accumulated feed: folds every `Added`/`SourcesGrew`/`Removed` delta
+/// this channel has delivered so far into a live row set + the query's latest
+/// acquisition evidence -- exactly what a real app must do
+/// (`Handle::subscribe`'s wire is deltas, never snapshots). Persists across
+/// multiple `Then` steps in one scenario.
+///
+/// The fold keeps the WHOLE [`Row`], not just its event, because the row's
+/// relay-provenance set is half of what the delta stream carries and an app
+/// that dropped it could not tell one relay's copy of an event from two
+/// relays' (see [`super::provenance`]).
 pub(super) struct FeedState {
     pub(super) handle: QueryHandle,
     pub(super) rx: RowsReceiver,
-    pub(super) rows: BTreeMap<EventId, nostr::Event>,
+    pub(super) rows: BTreeMap<EventId, Row>,
     pub(super) evidence: AcquisitionEvidence,
 }
 
@@ -69,12 +65,18 @@ impl FeedState {
         for delta in deltas {
             match delta {
                 RowDelta::Added(row) => {
-                    self.rows.insert(row.event.id, row.event);
+                    self.rows.insert(row.event.id, row);
                 }
-                // #105: no scenario in this catalog asserts on relay
-                // provenance yet -- the row's event/membership is unchanged,
-                // so there is nothing for this world to update.
-                RowDelta::SourcesGrew { .. } => {}
+                // #105: the event body is unchanged, so this replaces the
+                // row's source set and nothing else -- the "whole value, not
+                // a patch" shape the delta itself carries. A row this handle
+                // has never been `Added` cannot grow sources, so an unknown
+                // id is dropped rather than invented.
+                RowDelta::SourcesGrew { id, sources } => {
+                    if let Some(row) = self.rows.get_mut(&id) {
+                        row.sources = sources;
+                    }
+                }
                 RowDelta::Removed(id) => {
                     self.rows.remove(&id);
                 }
@@ -87,7 +89,7 @@ impl FeedState {
     /// draining every message that arrives in the meantime. Checks the
     /// CURRENT state first (no waiting) since a prior step's activity may
     /// already satisfy `pred`.
-    fn eventually(&mut self, timeout: Duration, pred: impl Fn(&Self) -> bool) -> bool {
+    pub(super) fn eventually(&mut self, timeout: Duration, pred: impl Fn(&Self) -> bool) -> bool {
         self.drain_available();
         if pred(self) {
             return true;
@@ -284,7 +286,7 @@ impl NmpWorld {
     ) -> bool {
         let feed = self.feed.as_mut().expect("nmp-bdd: no feed is open");
         feed.eventually(EVENTUALLY, |f| {
-            let rows: Vec<nostr::Event> = f.rows.values().cloned().collect();
+            let rows: Vec<nostr::Event> = f.rows.values().map(|r| r.event.clone()).collect();
             pred(&rows, &f.evidence)
         })
     }
@@ -323,7 +325,7 @@ impl NmpWorld {
     pub fn feed_never(&mut self, pred: impl Fn(&[nostr::Event]) -> bool) -> bool {
         let feed = self.feed.as_mut().expect("nmp-bdd: no feed is open");
         feed.never(NEVER, |f| {
-            let rows: Vec<nostr::Event> = f.rows.values().cloned().collect();
+            let rows: Vec<nostr::Event> = f.rows.values().map(|r| r.event.clone()).collect();
             pred(&rows)
         })
     }
@@ -455,35 +457,5 @@ impl NmpWorld {
     ) -> Option<DiagnosticsSnapshot> {
         let diag = self.diag.as_ref().expect("nmp-bdd: diagnostics not open");
         diag.get(EVENTUALLY, pred)
-    }
-
-    // ---- plain facts about the staged world ----------------------------
-
-    pub fn indexer_names(&self) -> &[String] {
-        &self.indexer_names
-    }
-
-    pub fn relay_names(&self) -> impl Iterator<Item = &String> {
-        self.relay_order.iter()
-    }
-
-    pub fn relay_url(&self, name: &str) -> RelayUrl {
-        self.relays
-            .get(name)
-            .unwrap_or_else(|| panic!("nmp-bdd: unknown relay {name:?}"))
-            .url
-            .clone()
-    }
-
-    pub fn write_relay_of(&self, person: &str) -> Vec<String> {
-        self.write_relay_of.get(person).cloned().unwrap_or_default()
-    }
-
-    pub fn pubkey_hex(&self, person: &str) -> String {
-        self.people
-            .get(person)
-            .unwrap_or_else(|| panic!("nmp-bdd: unknown person {person:?}"))
-            .public_key()
-            .to_hex()
     }
 }
