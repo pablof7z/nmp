@@ -71,6 +71,70 @@ fn outbound_facts_form_coverage_routes() {
     }
 }
 
+fn assert_feasible_two_source_coverage(author_count: usize, cap: usize) {
+    let authors: Vec<_> = (0..author_count).map(|_| author()).collect();
+    let shared_relays = [test_relay(0), test_relay(1)];
+    let facts = authors
+        .iter()
+        .fold(FixtureRoutingFacts::new(), |facts, author| {
+            facts.with_author_routes(*author, shared_relays.clone(), [])
+        });
+    let demand: BTreeSet<_> = authors.iter().map(|author| outbox(1, &[*author])).collect();
+    let mut router = router();
+
+    router.compile(&demand, &facts, cap);
+
+    assert!(
+        router.plan().reqs.len() <= cap,
+        "{author_count} authors must stay within the whole-demand cap of {cap}"
+    );
+    assert_eq!(
+        router.plan().reqs.keys().cloned().collect::<BTreeSet<_>>(),
+        shared_relays
+            .iter()
+            .cloned()
+            .map(session)
+            .collect::<BTreeSet<_>>(),
+        "a feasible shared-source objective must contact exactly its two sources"
+    );
+    assert!(
+        router.diagnostics().uncovered_authors.is_empty(),
+        "feasible two-source coverage must not report author shortfall"
+    );
+    assert!(
+        router.plan().limited.is_empty(),
+        "a non-binding cap must not report demand as locally limited"
+    );
+
+    for author in authors {
+        let author_hex = author.to_hex();
+        let serving_relays = shared_relays
+            .iter()
+            .filter(|relay| {
+                router.plan().reqs[&session((*relay).clone())]
+                    .iter()
+                    .any(|request| {
+                        request
+                            .filter
+                            .authors
+                            .as_ref()
+                            .is_some_and(|authors| authors.contains(&author_hex))
+                    })
+            })
+            .count();
+        assert_eq!(
+            serving_relays, 2,
+            "author {author_hex} must be present on both planned relay sessions"
+        );
+    }
+}
+
+#[test]
+fn feasible_two_source_author_coverage_stays_under_the_whole_demand_cap() {
+    assert_feasible_two_source_coverage(5, 10);
+    assert_feasible_two_source_coverage(50, 15);
+}
+
 #[test]
 fn coverage_respects_whole_demand_cap() {
     let authors: Vec<_> = (0..10).map(|_| author()).collect();
