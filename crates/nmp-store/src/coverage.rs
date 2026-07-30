@@ -1,6 +1,6 @@
-//! Coverage watermarks — implements the Fable ruling
-//! (`docs/consults/2026-07-11-fable-coverage-attribution.md`) EXACTLY at the
-//! store layer:
+//! Coverage watermarks — the store half of
+//! `docs/design/query-demand-and-evidence.md` and issue #816's
+//! facts-before-claims contract:
 //!
 //! - Coverage is keyed by the NARROW atom's **window-erased** shape hash
 //!   ([`CoverageKey`]) — never by a wide wire filter. `since`/`until`/`limit`

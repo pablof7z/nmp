@@ -496,17 +496,43 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
 fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
     let a = Keys::generate();
     let b = Keys::generate();
+    let healthy = Keys::generate();
     let relay = RelayUrl::parse("wss://neg-failure.example.com").unwrap();
+    let healthy_relay = RelayUrl::parse("wss://neg-healthy.example.com").unwrap();
     let dir = FixtureDirectory::new()
         .with_write(a.public_key().to_hex(), [relay.clone()])
-        .with_write(b.public_key().to_hex(), [relay.clone()]);
+        .with_write(b.public_key().to_hex(), [relay.clone()])
+        .with_write(healthy.public_key().to_hex(), [healthy_relay.clone()]);
     let mut core = EngineCore::new(FailIngestStore::armed(), Box::new(dir), 10);
 
     let _ = core.handle(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+        &[2],
+        &healthy.public_key().to_hex(),
+    )));
     connect_and_prove_nip77(&mut core, &relay);
+    let healthy_connected = connect(&mut core, 1, &healthy_relay);
+    let healthy_request = healthy_connected
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Replay(session, requests) if session == &public_session(&healthy_relay) => {
+                requests
+                    .iter()
+                    .find(|request| {
+                        request
+                            .filter
+                            .kinds
+                            .as_ref()
+                            .is_some_and(|kinds| kinds.contains(&2))
+                    })
+                    .map(|request| request.sub_id.clone())
+            }
+            _ => None,
+        })
+        .expect("the concurrent healthy request is already in flight");
 
     let widened = core.handle(EngineMsg::Subscribe(literal_query(
         &[1],
@@ -567,6 +593,35 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
     let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
     assert_eq!(core.get_coverage(&atom_a, &relay), None);
     assert_eq!(core.get_coverage(&atom_b, &relay), None);
+
+    let healthy_event = nostr::EventBuilder::new(Kind::Custom(2), "healthy concurrent request")
+        .custom_created_at(Timestamp::from(101u64))
+        .sign_with_keys(&healthy)
+        .expect("fixture signing");
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 1,
+            generation: 1,
+        },
+        public_session(&healthy_relay),
+        event_frame(&wire_sub_string(&healthy_request), healthy_event),
+    ));
+    let healthy_completed = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 1,
+            generation: 1,
+        },
+        public_session(&healthy_relay),
+        eose_frame(&wire_sub_string(&healthy_request)),
+    ));
+    assert!(
+        healthy_completed
+            .iter()
+            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+        "the missing-id failure must not poison a concurrent healthy request"
+    );
+    let healthy_atom = ctx_atom(cf(&[2], &[&healthy.public_key().to_hex()]));
+    assert!(core.get_coverage(&healthy_atom, &healthy_relay).is_some());
 }
 
 /// A relay that answers the capability probe with `NEG-ERR` is classified

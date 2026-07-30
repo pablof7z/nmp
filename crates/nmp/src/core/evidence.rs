@@ -2,7 +2,7 @@
 //! (`docs/design/scoped-evidence-49-12-plan.md` §2/§3/§4, folding #12 into
 //! #49). Replaces the old `QueryCoverage::CompleteUpTo(T) | Unknown`
 //! aggregate (the original ruling §6 sketch,
-//! `docs/consults/2026-07-11-fable-coverage-attribution.md`): that type
+//! `docs/design/query-demand-and-evidence.md`): that type
 //! collapsed every planned source's per-relay evidence into ONE
 //! query-global verdict via a min-over-everything aggregation. #12 found
 //! the resulting lie firsthand — a `Derived` query's OUTER atoms could all
