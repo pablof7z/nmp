@@ -1381,4 +1381,36 @@ mod tests {
         drop(child.stdin.take());
         assert!(child.wait().unwrap().success());
     }
+
+    /// #723 falsifier: after the live owner is gone, deleting only one of
+    /// several names would not perform the physical erasure promised by
+    /// reset. The multi-link topology must therefore be refused intact.
+    #[cfg(unix)]
+    #[test]
+    fn hard_link_alias_reset_refuses_closed_multilink_store_without_mutation() {
+        use std::os::unix::fs::MetadataExt;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let target = fixture.path().join("closed-hard-link-owner.redb");
+        let alias = fixture.path().join("closed-hard-link-alias.redb");
+        drop(crate::RedbStore::open(&target).unwrap());
+        std::fs::hard_link(&target, &alias).unwrap();
+
+        let before = std::fs::read(&target).unwrap();
+        let before_digest = blake3::hash(&before);
+        assert_eq!(std::fs::metadata(&target).unwrap().nlink(), 2);
+
+        assert!(matches!(
+            reset_store(&alias),
+            Err(RedbStoreResetError::LockFailed { .. })
+        ));
+        assert_eq!(std::fs::metadata(&target).unwrap().nlink(), 2);
+        assert_eq!(std::fs::read(&target).unwrap(), before);
+        assert_eq!(std::fs::read(&alias).unwrap(), before);
+        assert_eq!(
+            blake3::hash(&std::fs::read(&target).unwrap()),
+            before_digest
+        );
+        assert_eq!(blake3::hash(&std::fs::read(&alias).unwrap()), before_digest);
+    }
 }
