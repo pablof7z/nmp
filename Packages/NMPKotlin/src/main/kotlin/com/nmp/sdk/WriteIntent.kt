@@ -3,12 +3,50 @@
 package com.nmp.sdk
 
 import uniffi.nmp_ffi.FfiDurability
+import uniffi.nmp_ffi.FfiAuthDenialSource
 import uniffi.nmp_ffi.FfiEventBuilder
 import uniffi.nmp_ffi.FfiIdentity
+import uniffi.nmp_ffi.FfiRetryCause
 import uniffi.nmp_ffi.FfiWriteIntent
 import uniffi.nmp_ffi.FfiWritePayload
 import uniffi.nmp_ffi.FfiWriteRouting
 import uniffi.nmp_ffi.FfiWriteStatus
+
+enum class AuthDenialSource {
+    Policy,
+    Signer,
+    Relay,
+    ;
+
+    companion object {
+        internal fun from(ffi: FfiAuthDenialSource): AuthDenialSource =
+            when (ffi) {
+                FfiAuthDenialSource.POLICY -> Policy
+                FfiAuthDenialSource.SIGNER -> Signer
+                FfiAuthDenialSource.RELAY -> Relay
+            }
+    }
+}
+
+enum class RetryCause {
+    Interrupted,
+    AckTimeout,
+    ConnectionLost,
+    RelayRateLimited,
+    RelayError,
+    ;
+
+    companion object {
+        internal fun from(ffi: FfiRetryCause): RetryCause =
+            when (ffi) {
+                FfiRetryCause.INTERRUPTED -> Interrupted
+                FfiRetryCause.ACK_TIMEOUT -> AckTimeout
+                FfiRetryCause.CONNECTION_LOST -> ConnectionLost
+                FfiRetryCause.RELAY_RATE_LIMITED -> RelayRateLimited
+                FfiRetryCause.RELAY_ERROR -> RelayError
+            }
+    }
+}
 
 /** A durability PROPERTY of a write (not a routing choice). */
 enum class Durability {
@@ -261,7 +299,20 @@ sealed class WriteStatus {
 
     data class AwaitingAuth(val relay: String) : WriteStatus()
 
-    data class RetryEligible(val relay: String, val attempt: ULong, val eligibleAt: ULong) : WriteStatus()
+    data class AuthDenied(
+        val relay: String,
+        val pubkey: String,
+        val source: AuthDenialSource,
+        val reason: String,
+    ) : WriteStatus()
+
+    data class RetryEligible(
+        val relay: String,
+        val attempt: ULong,
+        val eligibleAt: ULong,
+        val cause: RetryCause,
+        val detail: String?,
+    ) : WriteStatus()
 
     data class HandoffAmbiguous(val relay: String, val attempt: ULong, val observedAt: ULong) : WriteStatus()
 
@@ -295,8 +346,21 @@ sealed class WriteStatus {
                 is FfiWriteStatus.Routed -> Routed(ffi.relays, ffi.complete)
                 is FfiWriteStatus.AwaitingRelay -> AwaitingRelay(ffi.relay)
                 is FfiWriteStatus.AwaitingAuth -> AwaitingAuth(ffi.relay)
+                is FfiWriteStatus.AuthDenied ->
+                    AuthDenied(
+                        ffi.relay,
+                        ffi.pubkey,
+                        AuthDenialSource.from(ffi.source),
+                        ffi.reason,
+                    )
                 is FfiWriteStatus.RetryEligible ->
-                    RetryEligible(ffi.relay, ffi.attempt, ffi.eligibleAt)
+                    RetryEligible(
+                        ffi.relay,
+                        ffi.attempt,
+                        ffi.eligibleAt,
+                        RetryCause.from(ffi.cause),
+                        ffi.detail,
+                    )
                 is FfiWriteStatus.HandoffAmbiguous ->
                     HandoffAmbiguous(ffi.relay, ffi.attempt, ffi.observedAt)
                 is FfiWriteStatus.Sent -> Sent(ffi.relay, ffi.attempt, ffi.writtenAt)

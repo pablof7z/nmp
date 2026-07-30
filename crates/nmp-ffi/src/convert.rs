@@ -12,32 +12,33 @@ use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
 
 use nmp::{
-    AccessContext as GAccessContext, AcquisitionEvidence, AuthDiagnosticsPhase,
-    AuthDiagnosticsSnapshot, AuthPhase, Binding as GBinding, CacheMode as GCacheMode,
-    CancelWriteError, CancelWriteOutcome, CorrelationToken, CoverageInterval, Demand as GDemand,
-    DemandError as GDemandError, Derived as GDerived, DiagnosticsSnapshot,
-    Durability as GDurability, EventBuilder as GEventBuilder, Filter as GFilter,
-    FilterCoverageEntry, Frame, Freshness as GFreshness, Identity as GIdentity,
+    AccessContext as GAccessContext, AcquisitionEvidence, AuthDenialSource as GAuthDenialSource,
+    AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, AuthPhase, Binding as GBinding,
+    CacheMode as GCacheMode, CancelWriteError, CancelWriteOutcome, CorrelationToken,
+    CoverageInterval, Demand as GDemand, DemandError as GDemandError, Derived as GDerived,
+    DiagnosticsSnapshot, Durability as GDurability, EventBuilder as GEventBuilder,
+    Filter as GFilter, FilterCoverageEntry, Frame, Freshness as GFreshness, Identity as GIdentity,
     IdentityField as GIdentityField, IndexedTagName, Lane, RelayDiagnosticsSnapshot,
-    RequestRowsError, Row, RowDelta, Selector as GSelector, SetAlgebra as GSetAlgebra,
-    SetOp as GSetOp, ShortfallFact, SourceAuthority as GSourceAuthority, SourceEvidence,
-    SourceStatus, StalledWrite, StalledWriteStage, StalledWriteTotals, Window, WindowLoad,
-    WriteIntent as GWriteIntent, WritePayload as GWritePayload, WriteRouting as GWriteRouting,
-    WriteStatus as GWriteStatus,
+    RequestRowsError, RetryCause as GRetryCause, Row, RowDelta, Selector as GSelector,
+    SetAlgebra as GSetAlgebra, SetOp as GSetOp, ShortfallFact, SourceAuthority as GSourceAuthority,
+    SourceEvidence, SourceStatus, StalledWrite, StalledWriteStage, StalledWriteTotals, Window,
+    WindowLoad, WriteIntent as GWriteIntent, WritePayload as GWritePayload,
+    WriteRouting as GWriteRouting, WriteStatus as GWriteStatus,
 };
 use nostr::secp256k1::schnorr::Signature;
 use nostr::{Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayUrl, Tag, Timestamp};
 
 use crate::types::{
-    FfiAccessContext, FfiAcquisitionEvidence, FfiAuthDiagnostics, FfiAuthPhase, FfiBinding,
-    FfiCacheMode, FfiCancelWriteError, FfiCancelWriteOutcome, FfiCoverageInterval, FfiDemand,
-    FfiDerived, FfiDiagnosticsSnapshot, FfiDurability, FfiEventBuilder, FfiFilter,
-    FfiFilterCoverage, FfiFrame, FfiFreshness, FfiIdentity, FfiIdentityField, FfiKindCount,
-    FfiLaneCount, FfiRelayDiagnostics, FfiRelayInformationErrorKind, FfiRow, FfiRowDelta,
-    FfiSelector, FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSignEventFailure,
-    FfiSignEventRequest, FfiSignedEvent, FfiSourceAuthority, FfiSourceEvidence, FfiSourceStatus,
-    FfiStalledWrite, FfiStalledWriteStage, FfiStalledWriteTotals, FfiWindow, FfiWindowContents,
-    FfiWindowLoad, FfiWriteIntent, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
+    FfiAccessContext, FfiAcquisitionEvidence, FfiAuthDenialSource, FfiAuthDiagnostics,
+    FfiAuthPhase, FfiBinding, FfiCacheMode, FfiCancelWriteError, FfiCancelWriteOutcome,
+    FfiCoverageInterval, FfiDemand, FfiDerived, FfiDiagnosticsSnapshot, FfiDurability,
+    FfiEventBuilder, FfiFilter, FfiFilterCoverage, FfiFrame, FfiFreshness, FfiIdentity,
+    FfiIdentityField, FfiKindCount, FfiLaneCount, FfiRelayDiagnostics,
+    FfiRelayInformationErrorKind, FfiRetryCause, FfiRow, FfiRowDelta, FfiSelector, FfiSetAlgebra,
+    FfiSetOp, FfiShortfallFact, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent,
+    FfiSourceAuthority, FfiSourceEvidence, FfiSourceStatus, FfiStalledWrite, FfiStalledWriteStage,
+    FfiStalledWriteTotals, FfiWindow, FfiWindowContents, FfiWindowLoad, FfiWriteIntent,
+    FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
 };
 
 /// Every typed failure crossing this boundary -- parse, lifecycle, storage,
@@ -1229,14 +1230,39 @@ pub fn write_status_to_ffi(s: WriteStatusRef<'_>) -> FfiWriteStatus {
         GWriteStatus::AwaitingAuth { relay } => FfiWriteStatus::AwaitingAuth {
             relay: relay.to_string(),
         },
+        GWriteStatus::AuthDenied {
+            relay,
+            pubkey,
+            source,
+            reason,
+        } => FfiWriteStatus::AuthDenied {
+            relay: relay.to_string(),
+            pubkey: pubkey.to_hex(),
+            source: match source {
+                GAuthDenialSource::Policy => FfiAuthDenialSource::Policy,
+                GAuthDenialSource::Signer => FfiAuthDenialSource::Signer,
+                GAuthDenialSource::Relay => FfiAuthDenialSource::Relay,
+            },
+            reason: reason.clone(),
+        },
         GWriteStatus::RetryEligible {
             relay,
             attempt,
             eligible_at,
+            cause,
+            detail,
         } => FfiWriteStatus::RetryEligible {
             relay: relay.to_string(),
             attempt: *attempt,
             eligible_at: eligible_at.as_secs(),
+            cause: match cause {
+                GRetryCause::Interrupted => FfiRetryCause::Interrupted,
+                GRetryCause::AckTimeout => FfiRetryCause::AckTimeout,
+                GRetryCause::ConnectionLost => FfiRetryCause::ConnectionLost,
+                GRetryCause::RelayRateLimited => FfiRetryCause::RelayRateLimited,
+                GRetryCause::RelayError => FfiRetryCause::RelayError,
+            },
+            detail: detail.clone(),
         },
         GWriteStatus::HandoffAmbiguous {
             relay,
@@ -1546,15 +1572,33 @@ mod write_status_tests {
                 },
             ),
             (
+                GWriteStatus::AuthDenied {
+                    relay: relay.clone(),
+                    pubkey,
+                    source: GAuthDenialSource::Policy,
+                    reason: "account not permitted".into(),
+                },
+                FfiWriteStatus::AuthDenied {
+                    relay: relay.to_string(),
+                    pubkey: pubkey.to_hex(),
+                    source: FfiAuthDenialSource::Policy,
+                    reason: "account not permitted".into(),
+                },
+            ),
+            (
                 GWriteStatus::RetryEligible {
                     relay: relay.clone(),
                     attempt: 3,
                     eligible_at: Timestamp::from(41),
+                    cause: GRetryCause::RelayRateLimited,
+                    detail: Some("rate-limited: slow down".into()),
                 },
                 FfiWriteStatus::RetryEligible {
                     relay: relay.to_string(),
                     attempt: 3,
                     eligible_at: 41,
+                    cause: FfiRetryCause::RelayRateLimited,
+                    detail: Some("rate-limited: slow down".into()),
                 },
             ),
             (

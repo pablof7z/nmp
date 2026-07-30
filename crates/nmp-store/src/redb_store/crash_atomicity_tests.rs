@@ -408,6 +408,23 @@ fn redb_crash_worker() {
                 )
                 .expect("lane finish reaches crash seam");
         }
+        "lane-auth-denial-before-commit" => {
+            let mut store =
+                RedbStore::open_with_crash_point(path, RedbCrashPoint::DenyLaneAuthBeforeCommit)
+                    .expect("open worker store");
+            let intent = store.recover_outbox().expect("recover outbox")[0].intent_id;
+            let lane = store.recover_outbox_lanes(intent).unwrap().remove(0);
+            store
+                .deny_lane_auth(
+                    &lane.key,
+                    lane.revision,
+                    AuthDenial {
+                        source: AuthDenialSource::Policy,
+                        reason: "account not permitted".into(),
+                    },
+                )
+                .expect("AUTH denial reaches crash seam");
+        }
         other => panic!("unknown crash point {other}"),
     }
     panic!("crash seam did not abort at {point}");
@@ -1107,6 +1124,48 @@ fn lane_cursor_detail_deadline_and_close_are_atomic_across_process_death() {
         AttemptOutcome::Acked
     );
     assert_eq!(store.recover_attempt_details(intent).unwrap().len(), 1);
+}
+
+#[test]
+fn auth_denial_is_not_observable_after_process_death_before_commit() {
+    let (_dir, path) = fixture();
+    let (_, signed) = event_pair();
+    let relay = RelayUrl::parse(RELAY).expect("relay");
+    let intent = {
+        let mut store = RedbStore::open(&path).expect("open");
+        let (intent, _) = accepted(&mut store);
+        store.promote_signed(intent, signed.sig).expect("promote");
+        store
+            .record_route_revision(intent, BTreeSet::from([relay]))
+            .expect("route");
+        let lane = store.bootstrap_outbox_lanes(intent).unwrap().remove(0);
+        store
+            .set_lane_waiting(&lane.key, lane.revision, true)
+            .expect("wait for AUTH");
+        intent
+    };
+
+    crash(&path, "lane-auth-denial-before-commit");
+    let mut store = RedbStore::open(&path).expect("reopen after denial crash");
+    let waiting = store.recover_outbox_lanes(intent).unwrap().remove(0);
+    assert_eq!(waiting.state, LaneState::WaitingAuth);
+    let denial = AuthDenial {
+        source: AuthDenialSource::Policy,
+        reason: "account not permitted".into(),
+    };
+    store
+        .deny_lane_auth(&waiting.key, waiting.revision, denial.clone())
+        .expect("commit AUTH denial");
+    drop(store);
+
+    let store = RedbStore::open(&path).expect("reopen committed denial");
+    assert!(matches!(
+        store.recover_outbox_lanes(intent).unwrap()[0].state,
+        LaneState::Terminal {
+            outcome: LaneTerminalOutcome::AuthDenied(ref current),
+            ordinal: 0,
+        } if current == &denial
+    ));
 }
 
 #[test]

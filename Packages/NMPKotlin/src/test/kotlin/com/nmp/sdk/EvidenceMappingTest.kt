@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test
 import uniffi.nmp_ffi.FfiAccessContext
 import uniffi.nmp_ffi.FfiAcquisitionEvidence
 import uniffi.nmp_ffi.FfiAuthPhase
+import uniffi.nmp_ffi.FfiAuthDenialSource
 import uniffi.nmp_ffi.FfiCoverageInterval
 import uniffi.nmp_ffi.FfiFilterCoverage
 import uniffi.nmp_ffi.FfiException
@@ -16,6 +17,7 @@ import uniffi.nmp_ffi.FfiSourceStatus
 import uniffi.nmp_ffi.FfiWriteStatus
 import uniffi.nmp_ffi.FfiCancelWriteException
 import uniffi.nmp_ffi.FfiReceiptReattachment
+import uniffi.nmp_ffi.FfiRetryCause
 import uniffi.nmp_ffi.FfiRow
 import uniffi.nmp_ffi.FfiRowDelta
 
@@ -163,8 +165,38 @@ class EvidenceMappingTest {
             WriteStatus.from(FfiWriteStatus.AwaitingAuth("wss://auth.example")),
         )
         assertEquals(
-            WriteStatus.RetryEligible("wss://retry.example", 2uL, 123uL),
-            WriteStatus.from(FfiWriteStatus.RetryEligible("wss://retry.example", 2uL, 123uL)),
+            WriteStatus.AuthDenied(
+                "wss://auth.example",
+                "a".repeat(64),
+                AuthDenialSource.Policy,
+                "account not permitted",
+            ),
+            WriteStatus.from(
+                FfiWriteStatus.AuthDenied(
+                    "wss://auth.example",
+                    "a".repeat(64),
+                    FfiAuthDenialSource.POLICY,
+                    "account not permitted",
+                ),
+            ),
+        )
+        assertEquals(
+            WriteStatus.RetryEligible(
+                "wss://retry.example",
+                2uL,
+                123uL,
+                RetryCause.RelayRateLimited,
+                "rate-limited: slow down",
+            ),
+            WriteStatus.from(
+                FfiWriteStatus.RetryEligible(
+                    "wss://retry.example",
+                    2uL,
+                    123uL,
+                    FfiRetryCause.RELAY_RATE_LIMITED,
+                    "rate-limited: slow down",
+                ),
+            ),
         )
         assertEquals(
             WriteStatus.HandoffAmbiguous("wss://ambiguous.example", 3uL, 124uL),

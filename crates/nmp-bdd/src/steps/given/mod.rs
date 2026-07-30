@@ -591,4 +591,5 @@ async fn observing_that_id(w: &mut NmpWorld) {
 // directory: this catalog is shared by every feature, and one family's whole
 // vocabulary is readable on its own only when it has a name. See
 // `given::outbox`.
+mod auth;
 mod outbox;

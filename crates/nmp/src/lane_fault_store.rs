@@ -10,11 +10,11 @@ use std::sync::{Arc, Mutex};
 
 use nmp_grammar::ContextualAtom;
 use nmp_store::{
-    AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome, CancelEphemeralOutcome,
-    CloseIntentOutcome, CompensateOutcome, CompensationReason, CoverageInterval, CoverageKey,
-    EventStore, GcReport, GcRetentionSet, InsertOutcome, IntentId, LaneDeadline, LaneKey,
-    PersistenceError, PersistenceFault, PostHandoffState, PromoteOutcome, RecoveredAttempt,
-    RecoveredAttemptDetails, RecoveredIntent, RecoveredLane, RecoveredReceipt,
+    AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome, AuthDenial,
+    CancelEphemeralOutcome, CloseIntentOutcome, CompensateOutcome, CompensationReason,
+    CoverageInterval, CoverageKey, EventStore, GcReport, GcRetentionSet, InsertOutcome, IntentId,
+    LaneDeadline, LaneKey, PersistenceError, PersistenceFault, PostHandoffState, PromoteOutcome,
+    RecoveredAttempt, RecoveredAttemptDetails, RecoveredIntent, RecoveredLane, RecoveredReceipt,
     RecoveredRouteRevision, RelayObserved, RetractReason, StoredEvent, TransientCause,
 };
 use nostr::{Event, Event as SignedEvent, EventId, PublicKey, RelayUrl, Timestamp};
@@ -30,6 +30,7 @@ use nostr::{Event, Event as SignedEvent, EventId, PublicKey, RelayUrl, Timestamp
 pub(crate) struct LaneFaultState {
     bootstrap: Option<PersistenceFault>,
     route_revisions: bool,
+    auth_denial: Option<PersistenceFault>,
     bootstrap_calls: u32,
 }
 
@@ -45,10 +46,15 @@ impl LaneFaults {
         self.0.lock().unwrap().route_revisions = true;
     }
 
+    pub(crate) fn fail_auth_denial(&self, fault: PersistenceFault) {
+        self.0.lock().unwrap().auth_denial = Some(fault);
+    }
+
     pub(crate) fn heal(&self) {
         let mut state = self.0.lock().unwrap();
         state.bootstrap = None;
         state.route_revisions = false;
+        state.auth_denial = None;
     }
 
     pub(crate) fn bootstrap_calls(&self) -> u32 {
@@ -70,6 +76,14 @@ impl LaneFaults {
                 "injected route revision read failure".to_string(),
             )
         })
+    }
+
+    fn take_auth_denial_failure(&self) -> Option<PersistenceError> {
+        self.0
+            .lock()
+            .unwrap()
+            .auth_denial
+            .map(|fault| PersistenceError::new(fault, "injected AUTH denial failure".to_string()))
     }
 }
 
@@ -196,6 +210,17 @@ impl<S: EventStore> EventStore for FaultyLaneStore<S> {
     ) -> Result<RecoveredLane, PersistenceError> {
         self.inner
             .finish_lane_attempt(key, revision, ordinal, outcome, finished_at)
+    }
+    fn deny_lane_auth(
+        &mut self,
+        key: &LaneKey,
+        revision: u64,
+        denial: AuthDenial,
+    ) -> Result<RecoveredLane, PersistenceError> {
+        if let Some(error) = self.faults.take_auth_denial_failure() {
+            return Err(error);
+        }
+        self.inner.deny_lane_auth(key, revision, denial)
     }
     fn recover_attempt_details(
         &self,

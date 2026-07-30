@@ -2,6 +2,38 @@
 
 import NMPFFI
 
+public enum AuthDenialSource: Sendable, Hashable {
+    case policy
+    case signer
+    case relay
+
+    init(_ ffi: FfiAuthDenialSource) {
+        switch ffi {
+        case .policy: self = .policy
+        case .signer: self = .signer
+        case .relay: self = .relay
+        }
+    }
+}
+
+public enum RetryCause: Sendable, Hashable {
+    case interrupted
+    case ackTimeout
+    case connectionLost
+    case relayRateLimited
+    case relayError
+
+    init(_ ffi: FfiRetryCause) {
+        switch ffi {
+        case .interrupted: self = .interrupted
+        case .ackTimeout: self = .ackTimeout
+        case .connectionLost: self = .connectionLost
+        case .relayRateLimited: self = .relayRateLimited
+        case .relayError: self = .relayError
+        }
+    }
+}
+
 /// A durability PROPERTY of a write (not a routing choice).
 public enum Durability: Sendable, Hashable {
     case durable
@@ -245,7 +277,19 @@ public enum WriteStatus: Sendable, Hashable {
     case routed(relays: [String], complete: Bool)
     case awaitingRelay(relay: String)
     case awaitingAuth(relay: String)
-    case retryEligible(relay: String, attempt: UInt64, eligibleAt: UInt64)
+    case authDenied(
+        relay: String,
+        pubkey: String,
+        source: AuthDenialSource,
+        reason: String
+    )
+    case retryEligible(
+        relay: String,
+        attempt: UInt64,
+        eligibleAt: UInt64,
+        cause: RetryCause,
+        detail: String?
+    )
     case handoffAmbiguous(relay: String, attempt: UInt64, observedAt: UInt64)
     case sent(relay: String, attempt: UInt64, writtenAt: UInt64)
     case acked(relay: String)
@@ -269,8 +313,21 @@ public enum WriteStatus: Sendable, Hashable {
             self = .routed(relays: relays, complete: complete)
         case .awaitingRelay(let relay): self = .awaitingRelay(relay: relay)
         case .awaitingAuth(let relay): self = .awaitingAuth(relay: relay)
-        case .retryEligible(let relay, let attempt, let eligibleAt):
-            self = .retryEligible(relay: relay, attempt: attempt, eligibleAt: eligibleAt)
+        case .authDenied(let relay, let pubkey, let source, let reason):
+            self = .authDenied(
+                relay: relay,
+                pubkey: pubkey,
+                source: AuthDenialSource(source),
+                reason: reason
+            )
+        case .retryEligible(let relay, let attempt, let eligibleAt, let cause, let detail):
+            self = .retryEligible(
+                relay: relay,
+                attempt: attempt,
+                eligibleAt: eligibleAt,
+                cause: RetryCause(cause),
+                detail: detail
+            )
         case .handoffAmbiguous(let relay, let attempt, let observedAt):
             self = .handoffAmbiguous(relay: relay, attempt: attempt, observedAt: observedAt)
         case .sent(let relay, let attempt, let writtenAt):

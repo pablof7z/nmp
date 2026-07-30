@@ -19,11 +19,11 @@ use super::store::RedbStore;
 #[cfg(test)]
 use super::Ordering;
 use super::{
-    AttemptHandoffDetail, AttemptOutcome, AttemptTransientDetail, BTreeMap, BTreeSet,
+    AttemptHandoffDetail, AttemptOutcome, AttemptTransientDetail, AuthDenial, BTreeMap, BTreeSet,
     CloseIntentOutcome, Event, EventId, InFlightPhase, IntentId, IntentSigState, LaneDeadline,
-    LaneKey, LaneState, PersistenceError, PostHandoffState, PublicKey, ReceiptState,
-    RecoveredAttempt, RecoveredAttemptDetails, RecoveredIntent, RecoveredLane, RecoveredReceipt,
-    RecoveredRouteRevision, RelayUrl, Timestamp, TransientCause,
+    LaneKey, LaneState, LaneTerminalOutcome, PersistenceError, PostHandoffState, PublicKey,
+    ReceiptState, RecoveredAttempt, RecoveredAttemptDetails, RecoveredIntent, RecoveredLane,
+    RecoveredReceipt, RecoveredRouteRevision, RelayUrl, Timestamp, TransientCause,
 };
 use nostr::JsonUtil;
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
@@ -425,7 +425,9 @@ pub(super) fn bootstrap_outbox_lanes(
                         if lane.state
                             != (LaneState::Terminal {
                                 ordinal: attempt.ordinal,
-                                outcome: attempt.outcome.clone(),
+                                outcome: LaneTerminalOutcome::from_attempt(
+                                    attempt.outcome.clone(),
+                                )?,
                             })
                         {
                             return Err(PersistenceError::invariant(
@@ -433,6 +435,13 @@ pub(super) fn bootstrap_outbox_lanes(
                             ));
                         }
                     }
+                    _ if matches!(
+                        lane.state,
+                        LaneState::Terminal {
+                            outcome: LaneTerminalOutcome::AuthDenied(_),
+                            ..
+                        }
+                    ) => {}
                     _ if matches!(lane.state, LaneState::Terminal { .. }) => {
                         return Err(PersistenceError::invariant(
                             "terminal lane lacks matching terminal attempt",
@@ -1013,7 +1022,10 @@ pub(super) fn record_lane_handoff(
                 }
                 recovered_detail.finished_at = Some(finished_at);
                 recovered_detail.terminal = Some(outcome.clone());
-                LaneState::Terminal { ordinal, outcome }
+                LaneState::Terminal {
+                    ordinal,
+                    outcome: LaneTerminalOutcome::from_attempt(outcome)?,
+                }
             }
         };
         let lane = replace_lane_in_txn(
@@ -1051,6 +1063,7 @@ pub(super) fn finish_lane_attempt(
     if outcome == AttemptOutcome::Started {
         return Err(PersistenceError::invariant("Started is not terminal"));
     }
+    let lane_outcome = LaneTerminalOutcome::from_attempt(outcome.clone())?;
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let lane = {
         let mut details = write_txn
@@ -1088,7 +1101,7 @@ pub(super) fn finish_lane_attempt(
                     LaneState::Terminal {
                         ordinal: current_ordinal,
                         outcome: ref current_outcome,
-                    } if current_ordinal == ordinal && current_outcome == &outcome
+                    } if current_ordinal == ordinal && current_outcome == &lane_outcome
                 )
             {
                 current
@@ -1112,12 +1125,79 @@ pub(super) fn finish_lane_attempt(
                 &mut deadlines_by_intent,
                 key,
                 expected_revision,
-                LaneState::Terminal { ordinal, outcome },
+                LaneState::Terminal {
+                    ordinal,
+                    outcome: lane_outcome,
+                },
             )?
         }
     };
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::FinishAttemptBeforeCommit);
+    commit_prepared(write_txn, lane)
+}
+
+pub(super) fn deny_lane_auth(
+    store: &mut RedbStore,
+    key: &LaneKey,
+    expected_revision: u64,
+    denial: AuthDenial,
+) -> Result<RecoveredLane, PersistenceError> {
+    if denial.reason.len() > 4_096 {
+        return Err(PersistenceError::invariant(
+            "authentication denial reason exceeds 4096 bytes",
+        ));
+    }
+    let write_txn = store.db.begin_write().map_err(persist_err)?;
+    let lane = {
+        let mut lanes = write_txn.open_table(OUTBOX_LANES).map_err(persist_err)?;
+        let mut deadlines = write_txn
+            .open_table(OUTBOX_DEADLINES)
+            .map_err(persist_err)?;
+        let mut deadlines_by_intent = write_txn
+            .open_table(OUTBOX_DEADLINES_BY_INTENT)
+            .map_err(persist_err)?;
+        let storage_key = lane_key(key);
+        let lane_json = lanes
+            .get(storage_key.as_str())
+            .map_err(persist_err)?
+            .map(|guard| guard.value().to_string())
+            .ok_or_else(|| PersistenceError::invariant("outbox lane not found"))?;
+        let current = decode_lane(&storage_key, &lane_json)?;
+        if current.revision != expected_revision {
+            return Err(PersistenceError::invariant(
+                "authentication denial lane revision is stale",
+            ));
+        }
+        if matches!(
+            current.state,
+            LaneState::Terminal {
+                outcome: LaneTerminalOutcome::AuthDenied(ref existing),
+                ..
+            } if existing == &denial
+        ) {
+            current
+        } else {
+            if !matches!(current.state, LaneState::WaitingAuth) {
+                return Err(PersistenceError::invariant(
+                    "lane is not waiting for authentication",
+                ));
+            }
+            replace_lane_in_txn(
+                &mut lanes,
+                &mut deadlines,
+                &mut deadlines_by_intent,
+                key,
+                expected_revision,
+                LaneState::Terminal {
+                    ordinal: current.last_ordinal,
+                    outcome: LaneTerminalOutcome::AuthDenied(denial),
+                },
+            )?
+        }
+    };
+    #[cfg(test)]
+    store.crash_if(RedbCrashPoint::DenyLaneAuthBeforeCommit);
     commit_prepared(write_txn, lane)
 }
 

@@ -7,6 +7,7 @@
 //! other path to commit. These tests pin both halves — retention while the
 //! projection is genuinely unknown, AND release once the store answers.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use nmp_store::{EventStore, MemoryStore, PersistenceFault, RedbStore};
@@ -217,6 +218,67 @@ fn transient_io_bootstrap_failure_leaves_no_pinned_worker_behind() {
 #[test]
 fn transient_invariant_bootstrap_failure_leaves_no_pinned_worker_behind() {
     transient_bootstrap_failure_is_fully_reversible(PersistenceFault::Invariant, 701);
+}
+
+#[test]
+fn failed_auth_denial_commit_emits_no_terminal_receipt_fact() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://auth-denial-commit.example.com").unwrap();
+    let session = session_for(&relay, &author);
+    let handle = TransportRelayHandle {
+        slot: 8,
+        generation: 1,
+    };
+    let faults = LaneFaults::default();
+    faults.fail_auth_denial(PersistenceFault::Invariant);
+    let mut core = EngineCore::new(FaultyLaneStore::new(MemoryStore::new(), faults), 10);
+    core.handle(EngineMsg::RelayConnected(handle, session.clone()));
+    let (receipt, _, parked) =
+        publish_narrow(&mut core, &author, std::slice::from_ref(&relay), 705);
+    assert!(parked.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(id, WriteStatus::AwaitingAuth { .. }) if *id == receipt
+    )));
+
+    let challenged = core.handle(EngineMsg::RelayFrame(
+        handle,
+        session,
+        RelayFrame::from(RelayMessage::Auth {
+            challenge: Cow::Borrowed("commit-before-emit"),
+        }),
+    ));
+    let token = challenged
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::RelayAuth(AuthEffect::RequestPolicy { token, .. }) => Some(token),
+            _ => None,
+        })
+        .expect("challenge requests policy");
+    let instance = AuthCapabilityInstance(705);
+    core.handle(EngineMsg::AuthCapabilityBound {
+        token: token.clone(),
+        capability: AuthCapability::Policy,
+        instance,
+    });
+    let denied = core.handle(EngineMsg::AuthPolicyCompleted(
+        token,
+        Some(instance),
+        AuthPolicyOutcome::Deny {
+            reason: "account not permitted".into(),
+        },
+    ));
+    assert!(
+        !denied.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(id, WriteStatus::AuthDenied { .. }) if *id == receipt
+        )),
+        "a terminal receipt fact must not precede its failed commit: {denied:?}"
+    );
+    let intent = core.pending[&receipt].intent_id.unwrap();
+    assert_eq!(
+        core.resolver.store().recover_outbox_lanes(intent).unwrap()[0].state,
+        LaneState::WaitingAuth
+    );
 }
 
 /// An intent whose bootstrap failed must PROGRESS or TERMINATE. It may not

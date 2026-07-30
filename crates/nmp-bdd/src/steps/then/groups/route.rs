@@ -202,6 +202,7 @@ fn named_relays(status: &WriteStatus) -> Vec<nostr::RelayUrl> {
         WriteStatus::Routed { relays, .. } => relays.iter().cloned().collect(),
         WriteStatus::AwaitingRelay { relay }
         | WriteStatus::AwaitingAuth { relay }
+        | WriteStatus::AuthDenied { relay, .. }
         | WriteStatus::RetryEligible { relay, .. }
         | WriteStatus::HandoffAmbiguous { relay, .. }
         | WriteStatus::Sent { relay, .. }

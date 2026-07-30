@@ -43,13 +43,72 @@ Feature: Which destination failed, and why, one destination at a time
     Then the receipt reports "wss://one.example" rejected the note
     And the reason is the relay's own words "blocked: not admitted"
 
+  # ---- authentication denial is not authentication waiting -------------
+
+  @ledger-9 @ledger-16
+  Scenario: A policy denial finishes the exact write lane and survives restart
+    Given relay "wss://one.example" requires authentication for writes
+    And my authentication policy denies "wss://one.example" with "account not permitted"
+    When I publish a note saying "hello"
+    Then the receipt reports "wss://one.example" as authentication denied by policy
+    And the reason is the policy's own words "account not permitted"
+    When the process stops immediately
+    And I reconstruct the engine from the same durable store
+    And I reattach to the receipt by its stable id
+    Then the receipt reports "wss://one.example" as authentication denied by policy
+    And the reason is the same reason it was denied with
+    And no further event attempt is made against "wss://one.example"
+
+  @designed @ledger-9
+  Scenario: Authentication required is resumable rather than terminal
+    Given relay "wss://one.example" requires authentication for writes
+    And my authentication policy allows "wss://one.example"
+    When I publish a note saying "hello"
+    Then the receipt reports "wss://one.example" as awaiting authentication
+    And "wss://one.example" is not reported as authentication denied
+    And "wss://one.example" is not reported as retry-eligible
+    When authentication succeeds for "wss://one.example"
+    Then the same write is delivered -- not a second copy of it
+
+  @designed @ledger-9
+  Scenario: A subscription authentication closure cannot deny a write
+    Given I have a pending write for "wss://one.example"
+    And I have a separate subscription on "wss://one.example"
+    When that subscription is closed as "auth-required"
+    Then the write remains nonterminal
+    And "wss://one.example" is not reported as authentication denied
+    When exact-session authentication succeeds for the write
+    Then the same write is delivered -- not a second copy of it
+
+  @designed @ledger-9
+  Scenario: Authentication denial is isolated by exact session identity
+    Given Alice and Bob each have a pending authenticated write for "wss://one.example"
+    When Alice's exact authentication session is denied
+    Then only Alice's write is reported as authentication denied
+    And Bob's write remains live
+    And Bob's write can still be delivered
+
+  @designed @ledger-9
+  Scenario Outline: A non-denial authentication outcome cannot deny a write
+    Given relay "wss://one.example" requires authentication for writes
+    And my authentication policy returns "<outcome>" for "wss://one.example"
+    When I publish a note saying "hello"
+    Then the write remains nonterminal
+    And "wss://one.example" is not reported as authentication denied
+
+    Examples:
+      | outcome     |
+      | error       |
+      | unavailable |
+
   @designed @ledger-16
-  Scenario: A transient failure says it will be retried, and when
+  Scenario: A transient failure says why it will be retried, and when
     Given relay "wss://one.example" fails the first attempt transiently
     When I publish a note saying "hello"
     Then the receipt reports "wss://one.example" as retry-eligible
     And it reports which attempt that was
     And it reports when the next attempt becomes eligible
+    And it reports the persisted non-authentication cause and relay detail
     And "wss://one.example" is not reported as failed
 
   @designed @ledger-16

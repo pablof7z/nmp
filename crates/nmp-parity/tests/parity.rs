@@ -10,11 +10,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use nmp::{
-    AcquisitionEvidence, AuthPhase, Binding, CancelWriteOutcome, CorrelationToken,
-    DiagnosticsSnapshot, Durability, Engine, EngineConfig, FifoReceiver, FifoRecvTimeoutError,
-    Filter, Identity, Lane, LiveQuery, ReceiptId, ReceiptReattachment, Row, RowDelta,
-    ShortfallFact, SourceStatus, StalledWriteStage, Subscription, Timestamp, UnsignedEvent,
-    WriteIntent, WritePayload, WriteRouting, WriteStatus,
+    AcquisitionEvidence, AuthDenialSource, AuthPhase, Binding, CancelWriteOutcome,
+    CorrelationToken, DiagnosticsSnapshot, Durability, Engine, EngineConfig, FifoReceiver,
+    FifoRecvTimeoutError, Filter, Identity, Lane, LiveQuery, ReceiptId, ReceiptReattachment,
+    RetryCause, Row, RowDelta, ShortfallFact, SourceStatus, StalledWriteStage, Subscription,
+    Timestamp, UnsignedEvent, WriteIntent, WritePayload, WriteRouting, WriteStatus,
 };
 use nmp_ffi::convert::{write_status_to_ffi, WriteStatusRef};
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
@@ -30,10 +30,10 @@ use nmp_ffi::nip02::{
 };
 use nmp_ffi::nip22::{FfiCommentParent, FfiCommentRoot};
 use nmp_ffi::types::{
-    FfiAcquisitionEvidence, FfiAuthPhase, FfiBinding, FfiCancelWriteOutcome,
+    FfiAcquisitionEvidence, FfiAuthDenialSource, FfiAuthPhase, FfiBinding, FfiCancelWriteOutcome,
     FfiDiagnosticsSnapshot, FfiDurability, FfiFilter, FfiIdentity, FfiReceiptReattachment,
-    FfiRowDelta, FfiShortfallFact, FfiSourceStatus, FfiStalledWriteStage, FfiWriteIntent,
-    FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
+    FfiRetryCause, FfiRowDelta, FfiShortfallFact, FfiSourceStatus, FfiStalledWriteStage,
+    FfiWriteIntent, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
 };
 use nmp_nip02::{
     observe_following, set_following, FollowAction, FollowActionStatus, FollowAvailability,
@@ -151,6 +151,7 @@ fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
 #[test]
 fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
     let relay = nostr::RelayUrl::parse("wss://receipt-parity.example").unwrap();
+    let pubkey = nostr::Keys::generate().public_key();
     let cases = [
         (
             WriteStatus::AwaitingRelay {
@@ -169,15 +170,33 @@ fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
             },
         ),
         (
+            WriteStatus::AuthDenied {
+                relay: relay.clone(),
+                pubkey,
+                source: AuthDenialSource::Policy,
+                reason: "account not permitted".into(),
+            },
+            FfiWriteStatus::AuthDenied {
+                relay: relay.to_string(),
+                pubkey: pubkey.to_hex(),
+                source: FfiAuthDenialSource::Policy,
+                reason: "account not permitted".into(),
+            },
+        ),
+        (
             WriteStatus::RetryEligible {
                 relay: relay.clone(),
                 attempt: 7,
                 eligible_at: Timestamp::from(123),
+                cause: RetryCause::RelayRateLimited,
+                detail: Some("rate-limited: slow down".into()),
             },
             FfiWriteStatus::RetryEligible {
                 relay: relay.to_string(),
                 attempt: 7,
                 eligible_at: 123,
+                cause: FfiRetryCause::RelayRateLimited,
+                detail: Some("rate-limited: slow down".into()),
             },
         ),
         (
@@ -264,7 +283,8 @@ enum NormStatus {
     Routed(Vec<String>, bool),
     AwaitingRelay(String),
     AwaitingAuth(String),
-    RetryEligible(String, u64, u64),
+    AuthDenied(String, String, String, String),
+    RetryEligible(String, u64, u64, String, Option<String>),
     HandoffAmbiguous(String, u64, u64),
     Sent(String),
     Acked(String),
@@ -573,6 +593,42 @@ fn normalize_ffi_evidence(evidence: FfiAcquisitionEvidence, relay: &str) -> Norm
     NormEvidence { sources, shortfall }
 }
 
+fn auth_denial_source_name(source: AuthDenialSource) -> &'static str {
+    match source {
+        AuthDenialSource::Policy => "policy",
+        AuthDenialSource::Signer => "signer",
+        AuthDenialSource::Relay => "relay",
+    }
+}
+
+fn ffi_auth_denial_source_name(source: FfiAuthDenialSource) -> &'static str {
+    match source {
+        FfiAuthDenialSource::Policy => "policy",
+        FfiAuthDenialSource::Signer => "signer",
+        FfiAuthDenialSource::Relay => "relay",
+    }
+}
+
+fn retry_cause_name(cause: RetryCause) -> &'static str {
+    match cause {
+        RetryCause::Interrupted => "interrupted",
+        RetryCause::AckTimeout => "ack_timeout",
+        RetryCause::ConnectionLost => "connection_lost",
+        RetryCause::RelayRateLimited => "relay_rate_limited",
+        RetryCause::RelayError => "relay_error",
+    }
+}
+
+fn ffi_retry_cause_name(cause: FfiRetryCause) -> &'static str {
+    match cause {
+        FfiRetryCause::Interrupted => "interrupted",
+        FfiRetryCause::AckTimeout => "ack_timeout",
+        FfiRetryCause::ConnectionLost => "connection_lost",
+        FfiRetryCause::RelayRateLimited => "relay_rate_limited",
+        FfiRetryCause::RelayError => "relay_error",
+    }
+}
+
 fn normalize_direct_status(status: WriteStatus, relay: &str) -> NormStatus {
     match status {
         WriteStatus::Accepted => NormStatus::Accepted,
@@ -596,14 +652,29 @@ fn normalize_direct_status(status: WriteStatus, relay: &str) -> NormStatus {
         WriteStatus::AwaitingAuth { relay: url } => {
             NormStatus::AwaitingAuth(normalize_url(url.as_str(), relay))
         }
+        WriteStatus::AuthDenied {
+            relay: url,
+            pubkey,
+            source,
+            reason,
+        } => NormStatus::AuthDenied(
+            normalize_url(url.as_str(), relay),
+            pubkey.to_hex(),
+            auth_denial_source_name(source).into(),
+            reason,
+        ),
         WriteStatus::RetryEligible {
             relay: url,
             attempt,
             eligible_at,
+            cause,
+            detail,
         } => NormStatus::RetryEligible(
             normalize_url(url.as_str(), relay),
             attempt,
             eligible_at.as_secs(),
+            retry_cause_name(cause).into(),
+            detail,
         ),
         WriteStatus::HandoffAmbiguous {
             relay: url,
@@ -663,11 +734,30 @@ fn normalize_ffi_status(status: FfiWriteStatus, relay: &str) -> NormStatus {
         FfiWriteStatus::AwaitingAuth { relay: url } => {
             NormStatus::AwaitingAuth(normalize_url(&url, relay))
         }
+        FfiWriteStatus::AuthDenied {
+            relay: url,
+            pubkey,
+            source,
+            reason,
+        } => NormStatus::AuthDenied(
+            normalize_url(&url, relay),
+            pubkey,
+            ffi_auth_denial_source_name(source).into(),
+            reason,
+        ),
         FfiWriteStatus::RetryEligible {
             relay: url,
             attempt,
             eligible_at,
-        } => NormStatus::RetryEligible(normalize_url(&url, relay), attempt, eligible_at),
+            cause,
+            detail,
+        } => NormStatus::RetryEligible(
+            normalize_url(&url, relay),
+            attempt,
+            eligible_at,
+            ffi_retry_cause_name(cause).into(),
+            detail,
+        ),
         FfiWriteStatus::HandoffAmbiguous {
             relay: url,
             attempt,
@@ -1360,6 +1450,7 @@ fn direct_follow_receipt_name(status: &WriteStatus) -> &'static str {
         WriteStatus::Routed { .. } => "routed",
         WriteStatus::AwaitingRelay { .. } => "awaiting_relay",
         WriteStatus::AwaitingAuth { .. } => "awaiting_auth",
+        WriteStatus::AuthDenied { .. } => "auth_denied",
         WriteStatus::RetryEligible { .. } => "retry_eligible",
         WriteStatus::HandoffAmbiguous { .. } => "handoff_ambiguous",
         WriteStatus::Sent { .. } => "sent",
@@ -1386,6 +1477,7 @@ fn ffi_follow_receipt_name(status: &FfiWriteStatus) -> &'static str {
         FfiWriteStatus::Routed { .. } => "routed",
         FfiWriteStatus::AwaitingRelay { .. } => "awaiting_relay",
         FfiWriteStatus::AwaitingAuth { .. } => "awaiting_auth",
+        FfiWriteStatus::AuthDenied { .. } => "auth_denied",
         FfiWriteStatus::RetryEligible { .. } => "retry_eligible",
         FfiWriteStatus::HandoffAmbiguous { .. } => "handoff_ambiguous",
         FfiWriteStatus::Sent { .. } => "sent",
