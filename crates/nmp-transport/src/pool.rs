@@ -38,6 +38,7 @@ pub use committed_observations::{
     CommittedObservationCandidate, CommittedObservationHit, CommittedObservationPublication,
 };
 use inner::PoolInner;
+pub use worker::ReconnectPreambleTransition;
 
 #[cfg(feature = "bench-instrumentation")]
 pub fn configure_diagnostic_duplicate_ceiling(capacity: usize, event_payload_only: bool) {
@@ -51,6 +52,119 @@ pub fn configure_diagnostic_preparsed_ceiling(
     events: Vec<Arc<Event>>,
 ) {
     frame::configure_diagnostic_preparsed_ceiling(subscription_id, events);
+}
+
+#[cfg(feature = "bench-instrumentation")]
+struct ReconnectPreambleSnapshotBarrierInner {
+    relay: String,
+    state: Mutex<ReconnectPreambleSnapshotBarrierState>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(feature = "bench-instrumentation")]
+#[derive(Default)]
+struct ReconnectPreambleSnapshotBarrierState {
+    observed: bool,
+    released: bool,
+}
+
+#[cfg(feature = "bench-instrumentation")]
+static RECONNECT_PREAMBLE_SNAPSHOT_BARRIER: std::sync::OnceLock<
+    Mutex<Option<Arc<ReconnectPreambleSnapshotBarrierInner>>>,
+> = std::sync::OnceLock::new();
+
+/// Deterministic falsifier instrumentation: pause the next worker handshake
+/// for `relay` after it snapshots the reconnect preamble but before it can
+/// emit `Connected` or write that snapshot.
+#[cfg(feature = "bench-instrumentation")]
+#[doc(hidden)]
+pub struct ReconnectPreambleSnapshotBarrier {
+    inner: Arc<ReconnectPreambleSnapshotBarrierInner>,
+}
+
+#[cfg(feature = "bench-instrumentation")]
+impl ReconnectPreambleSnapshotBarrier {
+    pub fn wait_until_observed(&self, timeout: Duration) -> bool {
+        let Ok(state) = self.inner.state.lock() else {
+            return false;
+        };
+        self.inner
+            .changed
+            .wait_timeout_while(state, timeout, |state| !state.observed)
+            .map(|(state, _)| state.observed)
+            .unwrap_or(false)
+    }
+
+    pub fn release(&self) {
+        if let Ok(mut state) = self.inner.state.lock() {
+            state.released = true;
+            self.inner.changed.notify_all();
+        }
+    }
+}
+
+#[cfg(feature = "bench-instrumentation")]
+impl Drop for ReconnectPreambleSnapshotBarrier {
+    fn drop(&mut self) {
+        self.release();
+        let registry = RECONNECT_PREAMBLE_SNAPSHOT_BARRIER.get_or_init(Default::default);
+        if let Ok(mut installed) = registry.lock() {
+            if installed
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &self.inner))
+            {
+                installed.take();
+            }
+        }
+    }
+}
+
+#[cfg(feature = "bench-instrumentation")]
+#[doc(hidden)]
+pub fn install_reconnect_preamble_snapshot_barrier(
+    relay: &RelayUrl,
+) -> ReconnectPreambleSnapshotBarrier {
+    let inner = Arc::new(ReconnectPreambleSnapshotBarrierInner {
+        relay: relay.as_str().to_string(),
+        state: Mutex::new(ReconnectPreambleSnapshotBarrierState::default()),
+        changed: std::sync::Condvar::new(),
+    });
+    let registry = RECONNECT_PREAMBLE_SNAPSHOT_BARRIER.get_or_init(Default::default);
+    let mut installed = registry
+        .lock()
+        .expect("reconnect-preamble snapshot barrier registry lock");
+    assert!(
+        installed.is_none(),
+        "only one reconnect-preamble snapshot barrier may be installed"
+    );
+    *installed = Some(Arc::clone(&inner));
+    ReconnectPreambleSnapshotBarrier { inner }
+}
+
+#[cfg(feature = "bench-instrumentation")]
+fn pause_after_reconnect_preamble_snapshot(relay: &RelayUrl) {
+    let registry = RECONNECT_PREAMBLE_SNAPSHOT_BARRIER.get_or_init(Default::default);
+    let barrier = registry
+        .lock()
+        .ok()
+        .and_then(|installed| installed.as_ref().cloned());
+    let Some(barrier) = barrier.filter(|barrier| barrier.relay == relay.as_str()) else {
+        return;
+    };
+    let Ok(mut state) = barrier.state.lock() else {
+        return;
+    };
+    if state.observed {
+        return;
+    }
+    state.observed = true;
+    barrier.changed.notify_all();
+    while !state.released {
+        let Ok(next) = barrier.changed.wait(state) else {
+            return;
+        };
+        state = next;
+    }
 }
 
 /// Safe default for the single engine/transport relay ceiling. Zero is
@@ -580,17 +694,18 @@ pub struct PoolConfig {
     /// Maximum worker events waiting for the translator. A full queue blocks
     /// the socket worker, propagating pressure back to TCP reads.
     pub ingest_queue_capacity: usize,
-    /// Maximum outbound commands (`Send`/`SendDurable`/reconnect-preamble
-    /// updates) queued per relay worker (issue #506's HIGH finding). This is
-    /// the one pool queue that was historically unbounded: a stalled-but-
+    /// Maximum ordinary outbound commands (`Send`/`SendDurable`) queued per
+    /// relay worker (issue #506's HIGH finding). This is the one pool queue
+    /// that was historically unbounded: a stalled-but-
     /// connected socket (TCP send window full, so `flush_writes` keeps
     /// returning `Blocked`) could accumulate an unbounded backlog while
     /// `Pool::send`/`send_durable` kept reporting success. `pool::worker::
     /// WorkerHandle::push` now uses `try_send` against this bound, so a
     /// saturated queue surfaces as the EXISTING "not handed off" backpressure
-    /// signal instead of unbounded memory growth. `Shutdown`/retire is exempt
-    /// from this cap by construction (see that type's `retire` doc), so a
-    /// full data queue can never block a worker from being torn down.
+    /// signal instead of unbounded memory growth. Reconnect-preamble
+    /// replacement and `Shutdown`/retire are exempt from this cap by
+    /// construction (see those methods' docs), so a full data queue can
+    /// neither retain stale reconnect ownership nor block teardown.
     pub command_queue_capacity: usize,
     /// Maximum translated pool events waiting for the engine bridge.
     pub event_sink_queue_capacity: usize,
@@ -941,11 +1056,45 @@ impl Pool {
     /// EVENT the caller enqueues after observing `PoolEvent::Connected`.
     ///
     /// The preamble survives every reconnect (not cleared after use); the
-    /// last call wins. Returns `true` iff enqueued; a stale or closed
-    /// handle returns `false`.
+    /// last call wins, including while the current worker is disconnected or
+    /// dialing. Its finite replacement is independent of the bounded ordinary
+    /// command lane. Returns `true` iff the current worker recorded the
+    /// replacement; a stale or closed handle returns `false`.
     pub fn set_reconnect_preamble(&self, h: RelayHandle, frames: Vec<String>) -> bool {
+        self.begin_reconnect_preamble(h, frames).is_some()
+    }
+
+    /// Begin a reconnect-preamble ownership transition without holding the
+    /// pool mutex while a previously accepted socket write settles.
+    ///
+    /// The returned finite transition is immediately `Some(true)` when no
+    /// old replay is unflushed, remains pending while one is, and resolves
+    /// after that old write flushes or its generation ends. A stale or closed
+    /// handle returns `None`.
+    pub fn begin_reconnect_preamble(
+        &self,
+        h: RelayHandle,
+        frames: Vec<String>,
+    ) -> Option<ReconnectPreambleTransition> {
+        let registration = self
+            .inner
+            .lock()
+            .ok()?
+            .reconnect_preamble_registration_for(h)?;
+        Some(registration.replace(frames))
+    }
+
+    /// Schedule the registered reconnect preamble on this exact connected
+    /// generation.
+    ///
+    /// Unlike [`Pool::send`], the scheduled frames remain revision-aware
+    /// until their individual socket writes. Replacing the registered
+    /// preamble before a write starts revokes the stale pending replay. The
+    /// finite replay request is independent of the bounded ordinary command
+    /// lane; a stale or disconnected handle returns `false`.
+    pub fn replay_reconnect_preamble(&self, h: RelayHandle) -> bool {
         match self.inner.lock() {
-            Ok(guard) => guard.set_reconnect_preamble_for(h, frames),
+            Ok(guard) => guard.replay_reconnect_preamble_for(h),
             Err(_) => false,
         }
     }
