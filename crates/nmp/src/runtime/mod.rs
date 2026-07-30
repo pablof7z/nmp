@@ -3496,7 +3496,8 @@ mod auth_registry_admission_tests {
             RelayAdmissionPolicy::default(),
             RuntimeConfig {
                 max_auth_capabilities: limit,
-                ..RuntimeConfig::default()
+                #[cfg(feature = "nip65")]
+                nip65_sources: Vec::new(),
             },
         )
         .unwrap()
