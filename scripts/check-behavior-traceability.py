@@ -83,12 +83,21 @@ def is_acceptance_path(path: Path) -> bool:
     return "/crates/nmp/tests/acceptance/" in f"/{path.as_posix().lstrip('/')}"
 
 
-def metadata_before(lines: list[str], scenario_index: int) -> tuple[dict[str, str], set[str], list[str]]:
-    """Read the contiguous metadata/tag block immediately above a scenario."""
-    cursor = scenario_index - 1
+def tags_before_node(lines: list[str], node_index: int) -> set[str]:
+    """Read the contiguous Gherkin tag block owned by one syntax node."""
+    cursor = node_index - 1
     tags: set[str] = set()
     while cursor >= 0 and lines[cursor].lstrip().startswith("@"):
         tags.update(TAG_RE.findall(lines[cursor]))
+        cursor -= 1
+    return tags
+
+
+def metadata_before(lines: list[str], scenario_index: int) -> tuple[dict[str, str], set[str], list[str]]:
+    """Read the contiguous metadata/tag block immediately above a scenario."""
+    cursor = scenario_index - 1
+    scenario_tags = tags_before_node(lines, scenario_index)
+    while cursor >= 0 and lines[cursor].lstrip().startswith("@"):
         cursor -= 1
 
     metadata_lines: list[str] = []
@@ -106,7 +115,7 @@ def metadata_before(lines: list[str], scenario_index: int) -> tuple[dict[str, st
         if key in metadata:
             duplicates.append(key)
         metadata[key] = value.strip()
-    return metadata, tags, duplicates
+    return metadata, scenario_tags, duplicates
 
 
 def parse_file(path: Path) -> tuple[list[ScenarioRecord], list[Problem]]:
@@ -122,8 +131,19 @@ def parse_file(path: Path) -> tuple[list[ScenarioRecord], list[Problem]]:
             Problem(path, 1, f"expected exactly one Feature block, found {len(feature_lines)}")
         )
 
+    feature_tags = (
+        tags_before_node(lines, feature_lines[0]) if len(feature_lines) == 1 else set()
+    )
+    active_rule_tags: set[str] = set()
     records: list[ScenarioRecord] = []
     for index, line in enumerate(lines):
+        if FEATURE_RE.match(line):
+            active_rule_tags = set()
+            continue
+        if RULE_RE.match(line):
+            active_rule_tags = tags_before_node(lines, index)
+            continue
+
         scenario = SCENARIO_RE.match(line)
         if scenario is None:
             continue
@@ -131,7 +151,7 @@ def parse_file(path: Path) -> tuple[list[ScenarioRecord], list[Problem]]:
         if not feature_lines or feature_lines[0] > index:
             problems.append(Problem(path, line_number, "Scenario appears before its Feature"))
 
-        metadata, tags, duplicates = metadata_before(lines, index)
+        metadata, scenario_tags, duplicates = metadata_before(lines, index)
         for key in duplicates:
             problems.append(Problem(path, line_number, f"duplicate nmp:{key} metadata"))
         records.append(
@@ -140,7 +160,7 @@ def parse_file(path: Path) -> tuple[list[ScenarioRecord], list[Problem]]:
                 line=line_number,
                 title=scenario.group(1),
                 metadata=metadata,
-                tags=frozenset(tags),
+                tags=frozenset(feature_tags | active_rule_tags | scenario_tags),
             )
         )
 

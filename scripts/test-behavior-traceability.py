@@ -148,6 +148,64 @@ class TraceabilityTests(unittest.TestCase):
             BUILT.replace("@ledger-4", "@live"),
         )
 
+    def test_feature_level_tags_are_inherited_by_the_scenario(self):
+        self.assert_problem(
+            "@wip is forbidden",
+            BUILT.replace("Feature:", "@wip\nFeature:", 1),
+        )
+        self.assert_problem(
+            "@acceptance is allowed only",
+            SPECIFIED.replace("Feature:", "@acceptance\nFeature:", 1),
+        )
+        self.assert_problem(
+            "@acceptance scenario must live under",
+            BUILT.replace("Feature:", "@acceptance\nFeature:", 1),
+        )
+
+    def test_rule_level_tags_are_inherited_by_the_scenario(self):
+        self.assert_problem(
+            "@requires-nip17 is forbidden",
+            BUILT.replace(
+                "  Rule: One semantic owner",
+                "  @requires-nip17\n  Rule: One semantic owner",
+            ),
+        )
+
+        inherited_acceptance = BUILT.replace(
+            "  Rule: One semantic owner",
+            "  @acceptance\n  Rule: One semantic owner",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            behavior = root / "crates/nmp/tests/acceptance/cap.feature"
+            behavior.parent.mkdir(parents=True)
+            behavior.write_text(inherited_acceptance, encoding="utf-8")
+            _records, problems = CHECKER.validate([behavior], root, resolve=False)
+            self.assertTrue(
+                any(
+                    "@acceptance evidence must be owned by the nmp" in problem.message
+                    for problem in problems
+                ),
+                problems,
+            )
+
+    def test_effective_tags_are_the_feature_rule_and_scenario_union(self):
+        inherited = (
+            BUILT.replace("Feature:", "@feature-map\nFeature:", 1)
+            .replace(
+                "  Rule: One semantic owner",
+                "  @rule-map\n  Rule: One semantic owner",
+            )
+            .replace("@ledger-4", "@ledger-4 @scenario-map")
+        )
+        records, problems = self.validate(inherited)
+        self.assertEqual([], problems)
+        self.assertEqual(1, len(records))
+        self.assertEqual(
+            frozenset({"feature-map", "rule-map", "ledger-4", "scenario-map"}),
+            records[0].tags,
+        )
+
     def test_acceptance_requires_built(self):
         self.assert_problem(
             "@acceptance is allowed only",

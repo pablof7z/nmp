@@ -58,7 +58,10 @@ New behavior must not be added to the legacy root during migration.
 ## 3. Status is explicit metadata
 
 Machine-readable comments sit contiguously above every governed `Scenario` or
-`Scenario Outline`. Tags may follow the metadata block.
+`Scenario Outline`. Tags may follow the metadata block. Gherkin tags attached
+to a `Feature` or `Rule` are inherited by every scenario in that scope, so the
+validator applies the same lifecycle and acceptance rules to the effective
+union of Feature, Rule, and Scenario tags.
 
 ```gherkin
 # nmp:id=ROUTING-DISCOVERY-003
