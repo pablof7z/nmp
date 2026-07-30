@@ -53,6 +53,61 @@ fn assert_refuses_without_mutation(path: &std::path::Path, what: &str) {
     );
 }
 
+/// #1017: an operator must learn the full cost from the reachable refusal,
+/// before choosing the deliberate discard. Calling this file a cache would
+/// hide the accepted-but-unpublished obligations that recreation destroys.
+#[test]
+fn unsupported_schema_refusal_states_reacquirable_cache_and_permanent_outbox_loss() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("unsupported-schema-cost.redb");
+    drop(RedbStore::open(&path).unwrap());
+
+    let db = Database::create(&path).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut schema_meta = write_txn.open_table(SCHEMA_META).unwrap();
+        schema_meta
+            .insert(SCHEMA_VERSION_KEY, SCHEMA_VERSION + 1)
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+    drop(db);
+
+    let error = match RedbStore::open(&path) {
+        Ok(_) => panic!("a non-current epoch must refuse"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            &error,
+            RedbStoreOpenError::UnsupportedSchema {
+                expected,
+                found: Some(found),
+                ..
+            } if *expected == SCHEMA_VERSION && *found == SCHEMA_VERSION + 1
+        ),
+        "the discard contract belongs only to the typed schema refusal: {error:?}"
+    );
+
+    let rendered = error.to_string();
+    for required in [
+        "discard and recreate this store to continue",
+        "NMP can reacquire the relay-backed read cache",
+        "durable write outbox",
+        "accepted but unpublished writes",
+        "receipts",
+        "correlation tokens",
+        "route revisions",
+        "attempt evidence",
+        "will be permanently lost",
+    ] {
+        assert!(
+            rendered.contains(required),
+            "unsupported-schema refusal omitted {required:?}: {rendered}"
+        );
+    }
+}
+
 /// #867 x #489: ownership is acquired BEFORE the epoch is inspected, so a
 /// store that would be refused for its schema is never read by a process that
 /// does not own it. If the order were reversed, this would surface the schema

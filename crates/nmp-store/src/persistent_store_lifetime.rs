@@ -303,8 +303,12 @@ pub enum RedbStoreOpenError {
     /// this architecture cut: there is no pre-current decoder to fall back on,
     /// so this is the ONE outcome for any nonempty non-current store, raised
     /// before a `RedbStore` is exposed and before a single byte is mutated.
-    /// Nothing was migrated, adopted, aliased, or reset — the caller decides
-    /// whether to recreate the store.
+    /// Nothing was migrated, adopted, aliased, drained, or reset. The caller
+    /// must discard and recreate the store to continue. Relay-backed cache
+    /// rows can be reacquired; the durable outbox cannot, so accepted but
+    /// unpublished writes and their receipts, correlation tokens, route
+    /// revisions, and attempt evidence are permanently lost
+    /// (`docs/internals/conventions/schema-epoch-discard.md`).
     ///
     /// It is deliberately NOT a `Database` error: corruption of the CURRENT
     /// epoch stays `Database(redb::Error::Corrupted(..))`, so an operator can
@@ -418,13 +422,20 @@ impl std::fmt::Display for RedbStoreOpenError {
                 Some(found) => write!(
                     f,
                     "persistent store {} is schema epoch {found}, not the one supported epoch {expected}; \
-                     it was not migrated, adopted, or reset",
+                     it was not migrated, adopted, drained, or reset; discard and recreate this \
+                     store to continue; NMP can reacquire the relay-backed read cache, but the \
+                     durable write outbox (accepted but unpublished writes, receipts, correlation \
+                     tokens, route revisions, and attempt evidence) will be permanently lost",
                     path.display()
                 ),
                 None => write!(
                     f,
                     "persistent store {} predates the schema marker and is not the one supported \
-                     epoch {expected}; it was not migrated, adopted, or reset",
+                     epoch {expected}; it was not migrated, adopted, drained, or reset; discard and \
+                     recreate this store to continue; NMP can reacquire the relay-backed read cache, \
+                     but the durable write outbox (accepted but unpublished writes, receipts, \
+                     correlation tokens, route revisions, and attempt evidence) will be permanently \
+                     lost",
                     path.display()
                 ),
             },
