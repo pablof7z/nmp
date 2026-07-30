@@ -112,13 +112,9 @@ impl Fixture {
         effects
             .into_iter()
             .find_map(|effect| match effect {
-                Effect::RelayAuth(AuthEffect::Send {
-                    token,
-                    epoch,
-                    event,
-                }) => {
-                    assert_eq!(epoch.session, self.session);
-                    assert_eq!(epoch.handle, self.handle);
+                Effect::RelayAuth(AuthEffect::Send { token, event }) => {
+                    assert_eq!(token.epoch.session, self.session);
+                    assert_eq!(token.epoch.handle, self.handle);
                     Some((token, *event))
                 }
                 _ => None,
@@ -988,11 +984,40 @@ fn every_frozen_auth_field_id_signature_and_tag_order_are_validated() {
             Some(SIGNER),
             AuthSignerOutcome::Signed(bad),
         ));
-        assert!(!effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::RelayAuth(AuthEffect::Send { .. }))));
+        assert!(!effects.iter().any(|effect| matches!(
+            effect,
+            Effect::RelayAuth(AuthEffect::Send { token: _, event: _ })
+        )));
         assert!(matches!(auth_phase(&fixture), AuthSessionPhase::Error));
     }
+}
+
+/// #924 source-census falsifier: `AuthOpToken::epoch` is the only epoch on
+/// `AuthEffect::Send`, so no producer can pair one operation token with a
+/// different physical session or handle.
+#[test]
+fn auth_send_source_census_has_no_parallel_epoch_field() {
+    let auth_effect = include_str!("mod.rs")
+        .split_once("pub enum AuthEffect {")
+        .expect("AuthEffect definition")
+        .1
+        .split_once("/// The read/write/frame vocabulary")
+        .expect("end of AuthEffect definition")
+        .0;
+    let send_fields = auth_effect
+        .split_once("Send {")
+        .expect("AuthEffect::Send definition")
+        .1
+        .split_once("},")
+        .expect("end of AuthEffect::Send definition")
+        .0;
+
+    assert!(send_fields.contains("token: AuthOpToken"));
+    assert!(send_fields.contains("event: Box<SignedEvent>"));
+    assert!(
+        !send_fields.contains("epoch:"),
+        "AuthEffect::Send must not duplicate AuthOpToken::epoch"
+    );
 }
 
 #[test]
