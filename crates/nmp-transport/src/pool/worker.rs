@@ -207,6 +207,15 @@ pub(super) fn worker_id_of(generation: u64) -> u32 {
 /// its backoff wait between sockets, where it just blocks on `recv_timeout`).
 pub(super) struct WorkerHandle {
     command_tx: SyncSender<WorkerCommand>,
+    /// The one reconnect-preamble owner shared with the worker.
+    ///
+    /// Unlike the bounded ordinary command lane, replacing this finite value
+    /// cannot be refused merely because a relay is disconnected or its data
+    /// queue is full. The worker snapshots it after each socket handshake and
+    /// before injecting that generation's preamble, so an owner transition
+    /// can update a dormant or currently-dialing worker without waiting for a
+    /// later `Connected` edge.
+    reconnect_preamble: Arc<Mutex<Vec<String>>>,
     /// Out-of-band terminal signal (issue #506). Retirement must NEVER travel
     /// through the bounded `command_tx` data lane: a caller retires a worker
     /// while holding the pool `Mutex<PoolInner>` (every `retire` call site
@@ -222,6 +231,28 @@ pub(super) struct WorkerHandle {
 }
 
 impl WorkerHandle {
+    pub(super) fn replace_reconnect_preamble(&self, frames: Vec<String>) -> bool {
+        if shutdown_requested(&self.shutdown) {
+            return false;
+        }
+        let Ok(mut reconnect_preamble) = self.reconnect_preamble.lock() else {
+            return false;
+        };
+        if shutdown_requested(&self.shutdown) {
+            return false;
+        }
+        reconnect_preamble.clone_from(&frames);
+        drop(reconnect_preamble);
+
+        // Keep the worker-local copy current when it is already polling or
+        // parked in backoff. The shared value above is authoritative, so a
+        // saturated data queue cannot make this finite replacement fail: the
+        // next successful socket handshake snapshots the replacement before
+        // injecting any reconnect preamble.
+        let _ = self.push(WorkerCommand::SetReconnectPreamble(frames));
+        true
+    }
+
     /// Enqueue `command` and wake the worker if it is currently parked in
     /// `mio::Poll::poll`. Returns `false` if the worker thread is already
     /// gone (channel disconnected) OR — issue #506's HIGH finding — if the
@@ -321,6 +352,8 @@ pub(super) fn spawn(
     // caller (`PoolInner::spawn_worker`) the same way every other queue
     // knob is.
     let (command_tx, command_rx) = mpsc::sync_channel::<WorkerCommand>(command_queue_capacity);
+    let reconnect_preamble = Arc::new(Mutex::new(Vec::new()));
+    let reconnect_preamble_for_thread = Arc::clone(&reconnect_preamble);
     let waker_slot: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
     let waker_for_thread = Arc::clone(&waker_slot);
     // Out-of-band terminal signal (issue #506 Fix 2). Shared with the
@@ -340,6 +373,7 @@ pub(super) fn spawn(
                     initial_gate_required,
                     event_tx,
                     command_rx,
+                    reconnect_preamble_for_thread,
                     waker_for_thread,
                     &shutdown_for_thread,
                     keepalive_idle,
@@ -357,6 +391,7 @@ pub(super) fn spawn(
         })?;
     Ok(WorkerHandle {
         command_tx,
+        reconnect_preamble,
         shutdown,
         waker: waker_slot,
         join: Some(join),
@@ -387,6 +422,7 @@ fn run_worker(
     initial_gate_required: bool,
     event_tx: SyncSender<WorkerEvent>,
     command_rx: Receiver<WorkerCommand>,
+    reconnect_preamble: Arc<Mutex<Vec<String>>>,
     waker_slot: Arc<Mutex<Option<Waker>>>,
     shutdown: &AtomicBool,
     keepalive_idle: Duration,
@@ -435,6 +471,11 @@ fn run_worker(
         match open_relay_socket(url.as_str(), destination_policy) {
             Ok(mut socket) => {
                 let connected_at = Instant::now();
+                let Ok(current_preamble) = reconnect_preamble.lock() else {
+                    return;
+                };
+                preamble.clone_from(&current_preamble);
+                drop(current_preamble);
                 // REQ-before-EVENT: inject the registered preamble at the
                 // FRONT of the outbound queue before any newly-posted Send
                 // commands can be drained.
@@ -2487,6 +2528,7 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let handle = WorkerHandle {
             command_tx,
+            reconnect_preamble: Arc::new(Mutex::new(Vec::new())),
             shutdown: Arc::clone(&shutdown),
             waker: Arc::clone(&waker_slot),
             // No real worker thread backs this handle in these tests --
@@ -2529,6 +2571,24 @@ mod tests {
 
         drop(command_rx);
         handle.join.expect("join handle retained").join().unwrap();
+    }
+
+    #[test]
+    fn reconnect_preamble_replacement_survives_a_full_data_queue() {
+        let (command_tx, _command_rx) = mpsc::sync_channel::<WorkerCommand>(1);
+        let (handle, _waker_slot, _shutdown) = test_worker_handle(command_tx);
+        assert!(handle.push(WorkerCommand::Send("fills-the-data-lane".into())));
+
+        assert!(
+            handle.replace_reconnect_preamble(vec!["author-bound".to_string()]),
+            "the finite reconnect owner is independent of ordinary queue pressure"
+        );
+        assert_eq!(
+            *handle.reconnect_preamble.lock().unwrap(),
+            ["author-bound"],
+            "the next socket handshake reads the replacement even though its best-effort wake \
+             command was refused"
+        );
     }
 
     /// The deadlock falsifier (issue #506 Fix 2): `retire` must be

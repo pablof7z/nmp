@@ -453,8 +453,14 @@ impl PoolInner {
     }
 
     pub(super) fn set_reconnect_preamble_for(&self, h: RelayHandle, frames: Vec<String>) -> bool {
-        match self.command_tx_for(h) {
-            Some(worker) => worker.push(WorkerCommand::SetReconnectPreamble(frames)),
+        let Some(state) = self.slots.get(h.slot as usize) else {
+            return false;
+        };
+        if state.generation != h.generation {
+            return false;
+        }
+        match state.worker.as_ref() {
+            Some(worker) => worker.replace_reconnect_preamble(frames),
             None => false,
         }
     }

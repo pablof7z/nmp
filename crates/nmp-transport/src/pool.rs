@@ -580,17 +580,18 @@ pub struct PoolConfig {
     /// Maximum worker events waiting for the translator. A full queue blocks
     /// the socket worker, propagating pressure back to TCP reads.
     pub ingest_queue_capacity: usize,
-    /// Maximum outbound commands (`Send`/`SendDurable`/reconnect-preamble
-    /// updates) queued per relay worker (issue #506's HIGH finding). This is
-    /// the one pool queue that was historically unbounded: a stalled-but-
+    /// Maximum ordinary outbound commands (`Send`/`SendDurable`) queued per
+    /// relay worker (issue #506's HIGH finding). This is the one pool queue
+    /// that was historically unbounded: a stalled-but-
     /// connected socket (TCP send window full, so `flush_writes` keeps
     /// returning `Blocked`) could accumulate an unbounded backlog while
     /// `Pool::send`/`send_durable` kept reporting success. `pool::worker::
     /// WorkerHandle::push` now uses `try_send` against this bound, so a
     /// saturated queue surfaces as the EXISTING "not handed off" backpressure
-    /// signal instead of unbounded memory growth. `Shutdown`/retire is exempt
-    /// from this cap by construction (see that type's `retire` doc), so a
-    /// full data queue can never block a worker from being torn down.
+    /// signal instead of unbounded memory growth. Reconnect-preamble
+    /// replacement and `Shutdown`/retire are exempt from this cap by
+    /// construction (see those methods' docs), so a full data queue can
+    /// neither retain stale reconnect ownership nor block teardown.
     pub command_queue_capacity: usize,
     /// Maximum translated pool events waiting for the engine bridge.
     pub event_sink_queue_capacity: usize,
@@ -941,8 +942,10 @@ impl Pool {
     /// EVENT the caller enqueues after observing `PoolEvent::Connected`.
     ///
     /// The preamble survives every reconnect (not cleared after use); the
-    /// last call wins. Returns `true` iff enqueued; a stale or closed
-    /// handle returns `false`.
+    /// last call wins, including while the current worker is disconnected or
+    /// dialing. Its finite replacement is independent of the bounded ordinary
+    /// command lane. Returns `true` iff the current worker accepted the
+    /// replacement; a stale or closed handle returns `false`.
     pub fn set_reconnect_preamble(&self, h: RelayHandle, frames: Vec<String>) -> bool {
         match self.inner.lock() {
             Ok(guard) => guard.set_reconnect_preamble_for(h, frames),
