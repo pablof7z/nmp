@@ -104,6 +104,9 @@ over generated bindings without becoming independent semantic engines.
   schema-complete entry to
   `docs/surface-change-log.md`. Correction-only appends are allowed; previously
   merged bytes cannot be edited, deleted, rewritten, or reordered.
+- Evidence-path recognition belongs to `scripts/check-surface-governance.sh`
+  through its configured `SURFACE_CHANGE_LOG`; the component catalog tool
+  classifies public projections only and does not hard-code an evidence path.
 - The pull-request checklist makes failure evidence and cross-surface,
   persistence, diagnostics, falsifier, removal, and signoff consequences
   explicit.
@@ -136,7 +139,9 @@ base-trusted target checker necessarily rejects replacement of its own program,
 so only the repository owner's protected update procedure can land that exact
 reviewed bootstrap. Once the catalog tool is on the default branch, both
 workflows always extract the program from the base; the bootstrap flag is
-refused for every steady-state transition.
+removed by the ordinary regeneration wrapper before every steady-state
+transition, and the checker independently refuses any signal that survives
+outside the exact bootstrap.
 
 The bootstrap checkpoint intentionally contains no fabricated change-log
 entry. The real PR number/URL, independent reviewer, and signoff can only be

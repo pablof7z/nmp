@@ -12,7 +12,6 @@ const CATALOG_ROOT: &str = "docs/surface/components";
 const CATALOG_README: &str = "docs/surface/components/README.md";
 const LEGACY_SNAPSHOT: &str = "docs/surface/nmp-ffi-component.txt";
 const RUST_FACADE_SNAPSHOT: &str = "docs/surface/nmp-facade.txt";
-const CHANGE_LOG: &str = "docs/surface-change-log.md";
 const ALLOWLIST: &str = "scripts/check-sdk-parity-allowlist.toml";
 const MAX_DESCRIPTOR_BYTES: usize = 32_768;
 const MAX_SNAPSHOT_LINES: usize = 20_000;
@@ -1317,7 +1316,6 @@ fn projections(repo: &Path, base_ref: &str, head_ref: &str) -> Result<String> {
     let mut ffi = false;
     let mut swift = false;
     let mut kotlin = false;
-    let mut log = false;
     for path in paths {
         rust |= path == RUST_FACADE_SNAPSHOT;
         ffi |= path == LEGACY_SNAPSHOT
@@ -1326,7 +1324,6 @@ fn projections(repo: &Path, base_ref: &str, head_ref: &str) -> Result<String> {
                 .is_some_and(|suffix| {
                     suffix.ends_with("/component.toml") || suffix.ends_with("/uniffi.txt")
                 });
-        log |= path == CHANGE_LOG;
         for descriptor in &records {
             for root in descriptor
                 .swift_manifests
@@ -1366,13 +1363,11 @@ fn projections(repo: &Path, base_ref: &str, head_ref: &str) -> Result<String> {
     if swift {
         values.push("swift");
     }
-    if !values.is_empty() {
-        Ok(values.join(","))
-    } else if log {
-        Ok("correction".to_owned())
+    Ok(if values.is_empty() {
+        "none".to_owned()
     } else {
-        Ok("none".to_owned())
-    }
+        values.join(",")
+    })
 }
 
 fn write_nul_fields(fields: &[&str]) -> Result<()> {

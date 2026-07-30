@@ -32,7 +32,15 @@ fi
 [[ -x "$CATALOG_BIN" ]] || fail "component catalog tool is unavailable: $CATALOG_BIN"
 
 projection_set() {
-  "$CATALOG_BIN" projections "$ROOT" "$BASE_REF" "$HEAD_REF"
+  local value
+  value=$("$CATALOG_BIN" projections "$ROOT" "$BASE_REF" "$HEAD_REF")
+  if [[ $value != none ]]; then
+    printf '%s\n' "$value"
+  elif git diff --quiet "$BASE_REF...$HEAD_REF" -- "$CHANGE_LOG"; then
+    printf 'none\n'
+  else
+    printf 'correction\n'
+  fi
 }
 
 if [[ ${1:-} == "--print-projections" ]]; then
@@ -96,6 +104,7 @@ while IFS= read -r -d '' path; do
     scripts/install-surface-tools.sh|\
     scripts/lib/require-commands.sh|\
     scripts/regenerate-surface-snapshots.sh|\
+    scripts/run-surface-regeneration-governance.sh|\
     scripts/test-install-surface-tools.sh|\
     scripts/test-surface-governance.sh|\
     tools/component-interface-snapshot/Cargo.lock|\

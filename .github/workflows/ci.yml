@@ -39,6 +39,7 @@ jobs:
             scripts/lib/require-commands.sh
             scripts/install-surface-tools.sh
             scripts/regenerate-surface-snapshots.sh
+            scripts/run-surface-regeneration-governance.sh
             scripts/test-install-surface-tools.sh
             scripts/test-surface-governance.sh
             tools/surface-toolchain.env
@@ -122,9 +123,8 @@ jobs:
           SURFACE_CATALOG_TARGET_DIR: ${{ runner.temp }}/nmp-surface-regeneration-target/catalog
           SURFACE_BUILD_TARGET_DIR: ${{ runner.temp }}/nmp-surface-regeneration-target/build
           SURFACE_RUST_FACADE_TOOL_DIR: ${{ runner.temp }}/nmp-surface-regeneration/tools/rust-facade-snapshot
-          # Only effective for the exact legacy -> nmp-core+nmp-nip46 transition.
-          SURFACE_OWNER_BOOTSTRAP: 1
-        run: ${{ runner.temp }}/nmp-surface-regeneration/scripts/check-surface-governance.sh
+          SURFACE_CHECKER: ${{ runner.temp }}/nmp-surface-regeneration/scripts/check-surface-governance.sh
+        run: ${{ runner.temp }}/nmp-surface-regeneration/scripts/run-surface-regeneration-governance.sh
 
   test:
     runs-on: ubuntu-latest

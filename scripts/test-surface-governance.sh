@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 CHECK="$SCRIPT_DIR/check-surface-governance.sh"
 PARITY="$SCRIPT_DIR/check-sdk-parity.sh"
+WORKFLOW_CHECK="$SCRIPT_DIR/run-surface-regeneration-governance.sh"
 [[ $# -eq 1 ]] || {
   echo "usage: $0 <workspace-root>" >&2
   exit 2
@@ -128,6 +129,7 @@ cp -R "$root/actual/." "$2"
 EOF
   for path in check-sdk-parity.sh check-surface-governance.sh \
     install-surface-tools.sh regenerate-surface-snapshots.sh \
+    run-surface-regeneration-governance.sh \
     test-install-surface-tools.sh test-surface-governance.sh; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/scripts/$path"
   done
@@ -149,7 +151,8 @@ EOF
 
 append_entry() {
   local repo=$1 projections=$2 pr=${3:-999}
-  cat >> "$repo/docs/surface-change-log.md" <<EOF
+  local evidence=${4:-docs/surface-change-log.md}
+  cat >> "$repo/$evidence" <<EOF
 
 ## 2026-07-30 — Fixture change ([PR #$pr](https://github.com/pablof7z/nmp/pull/$pr))
 
@@ -214,6 +217,18 @@ run_checker() {
   SURFACE_REGEN_CMD=scripts/regen.sh \
   SURFACE_OWNER_BOOTSTRAP="$owner_bootstrap" \
     "$CHECK"
+}
+
+workflow_bootstrap_signal() {
+  local repo=$1 base=$2
+  local witness="$repo/workflow-signal"
+  cat > "$witness" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "${SURFACE_OWNER_BOOTSTRAP-unset}"
+EOF
+  chmod +x "$witness"
+  SURFACE_ROOT="$repo" SURFACE_BASE_REF="$base" SURFACE_CHECKER="$witness" \
+    "$WORKFLOW_CHECK"
 }
 
 # Baseline and exact root-or-omission/co-location rules.
@@ -466,6 +481,7 @@ bootstrap_repo() {
   local repo=$1
   new_repo "$repo"
   rm -r "$repo/docs/surface/components"
+  rm -r "$repo/tools/surface-component-catalog"
   printf 'legacy core snapshot\n' > "$repo/docs/surface/nmp-ffi-component.txt"
   commit_case "$repo" legacy-base
 }
@@ -504,6 +520,22 @@ descriptor "$repo" nmp-nip46 nmp-nip46
 commit_case "$repo" bootstrap-without-legacy
 expect_fail "bootstrap missing legacy snapshot" "$CATALOG_BIN" transition \
   "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
+
+repo="$TMP/workflow-bootstrap-signal"; bootstrap_repo "$repo"
+base=$(git -C "$repo" rev-parse HEAD)
+[[ $(workflow_bootstrap_signal "$repo" "$base") == 1 ]] || {
+  echo "FAIL: legacy workflow did not set the owner bootstrap signal" >&2
+  exit 1
+}
+echo "ok - workflow sets bootstrap signal on legacy base"
+
+repo="$TMP/workflow-steady-signal"; new_repo "$repo"
+base=$(git -C "$repo" rev-parse HEAD)
+[[ $(SURFACE_OWNER_BOOTSTRAP=1 workflow_bootstrap_signal "$repo" "$base") == unset ]] || {
+  echo "FAIL: steady-state workflow retained the owner bootstrap signal" >&2
+  exit 1
+}
+echo "ok - workflow removes bootstrap signal in steady state"
 
 # Allowlist schema is exact, canonical, and component-scoped.
 allowlist_fail() {
@@ -614,10 +646,43 @@ append_entry "$repo" ffi
 commit_case "$repo" history
 expect_fail "append-only history rewrite" run_checker "$repo" "$base"
 
+repo="$TMP/checker-configured-evidence"; new_repo "$repo"
+mv "$repo/docs/surface-change-log.md" "$repo/docs/surface-evidence.md"
+commit_case "$repo" configured-evidence-base
+base=$(git -C "$repo" rev-parse HEAD)
+append_entry "$repo" correction 999 docs/surface-evidence.md
+commit_case "$repo" configured-evidence-append
+[[ $("$CATALOG_BIN" projections "$repo" "$base" HEAD) == none ]] || {
+  echo "FAIL: catalog tool inferred an evidence path" >&2
+  exit 1
+}
+projections=$(
+  SURFACE_CATALOG_BIN="$CATALOG_BIN" \
+    SURFACE_ROOT="$repo" SURFACE_BASE_REF="$base" SURFACE_HEAD_REF=HEAD \
+    SURFACE_CHANGE_LOG=docs/surface-evidence.md \
+    "$CHECK" --print-projections
+)
+[[ $projections == correction ]] || {
+  echo "FAIL: configured evidence path was not recognized" >&2
+  exit 1
+}
+SURFACE_CATALOG_BIN="$CATALOG_BIN" \
+SURFACE_ROOT="$repo" \
+SURFACE_BASE_REF="$base" \
+SURFACE_HEAD_REF=HEAD \
+SURFACE_CHANGE_LOG=docs/surface-evidence.md \
+SURFACE_PR_NUMBER=999 \
+SURFACE_PR_URL=https://github.com/pablof7z/nmp/pull/999 \
+SURFACE_CHANGED_PROJECTIONS=correction \
+SURFACE_REGEN_CMD=scripts/regen.sh \
+  "$CHECK" >/dev/null
+echo "ok - configured evidence path owns correction recognition"
+
 for protected in \
   scripts/check-surface-governance.sh \
   scripts/check-sdk-parity.sh \
   scripts/lib/require-commands.sh \
+  scripts/run-surface-regeneration-governance.sh \
   .github/workflows/ci.yml \
   tools/component-interface-snapshot/Cargo.lock \
   tools/component-interface-snapshot/Cargo.toml \
