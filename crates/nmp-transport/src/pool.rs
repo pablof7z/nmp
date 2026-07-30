@@ -1071,8 +1071,9 @@ impl Pool {
     ///
     /// Unlike [`Pool::send`], the scheduled frames remain revision-aware
     /// until their individual socket writes. Replacing the registered
-    /// preamble before a write starts revokes the stale pending replay. A
-    /// stale, disconnected, or saturated handle returns `false`.
+    /// preamble before a write starts revokes the stale pending replay. The
+    /// finite replay request is independent of the bounded ordinary command
+    /// lane; a stale or disconnected handle returns `false`.
     pub fn replay_reconnect_preamble(&self, h: RelayHandle) -> bool {
         match self.inner.lock() {
             Ok(guard) => guard.replay_reconnect_preamble_for(h),
