@@ -181,16 +181,40 @@ fn replace_reconnect_preamble(
     waker: &Mutex<Option<Waker>>,
     frames: Vec<String>,
 ) -> ReconnectPreambleTransition {
+    replace_reconnect_preamble_after_initial_shutdown_check(
+        reconnect_preamble_owner,
+        shutdown,
+        waker,
+        frames,
+        || {},
+    )
+}
+
+fn replace_reconnect_preamble_after_initial_shutdown_check<F>(
+    reconnect_preamble_owner: &ReconnectPreambleOwner,
+    shutdown: &AtomicBool,
+    waker: &Mutex<Option<Waker>>,
+    frames: Vec<String>,
+    after_initial_shutdown_check: F,
+) -> ReconnectPreambleTransition
+where
+    F: FnOnce(),
+{
     let (result_tx, result_rx) = mpsc::channel();
     let transition = ReconnectPreambleTransition { result_rx };
     if shutdown_requested(shutdown) {
         let _ = result_tx.send(false);
         return transition;
     }
+    after_initial_shutdown_check();
     let Ok(mut reconnect_preamble) = reconnect_preamble_owner.state.lock() else {
         let _ = result_tx.send(false);
         return transition;
     };
+    if shutdown_requested(shutdown) {
+        let _ = result_tx.send(false);
+        return transition;
+    }
     if reconnect_preamble.frames == frames {
         if reconnect_preamble.unflushed_revision.is_none() {
             let _ = result_tx.send(true);
@@ -3228,6 +3252,76 @@ mod tests {
         );
         drop(command_rx);
         join.join().unwrap();
+    }
+
+    #[test]
+    fn replacement_blocked_on_owner_lock_refuses_retirement_without_mutation() {
+        let (owner, _pending) = test_reconnect_preamble(vec!["broad".to_string()]);
+        let (command_tx, command_rx) = mpsc::sync_channel(1);
+        let (handle, waker, shutdown) =
+            test_worker_handle_with_reconnect_preamble(command_tx, Arc::clone(&owner));
+
+        let owner_guard = owner
+            .state
+            .lock()
+            .expect("the test owns the reconnect-preamble state rendezvous");
+        let owner_for_replacement = Arc::clone(&owner);
+        let shutdown_for_replacement = Arc::clone(&shutdown);
+        let waker_for_replacement = Arc::clone(&waker);
+        let (passed_check_tx, passed_check_rx) = mpsc::sync_channel(1);
+        let replacement = thread::spawn(move || {
+            replace_reconnect_preamble_after_initial_shutdown_check(
+                &owner_for_replacement,
+                &shutdown_for_replacement,
+                &waker_for_replacement,
+                vec!["author-bound".to_string()],
+                || {
+                    passed_check_tx
+                        .send(())
+                        .expect("the test receives the exact first-check edge");
+                },
+            )
+        });
+
+        passed_check_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("replacement passes the first shutdown check before retirement");
+        let join = handle.retire();
+        assert!(
+            shutdown.load(Ordering::SeqCst),
+            "retirement publishes terminal state before releasing the owner lock"
+        );
+        drop(owner_guard);
+
+        let transition = replacement
+            .join()
+            .expect("the replacement exits after the owner lock is released");
+        assert_eq!(
+            transition.try_result(),
+            Some(false),
+            "a replacement that acquires the owner after retirement must refuse ownership"
+        );
+        let state = owner
+            .state
+            .lock()
+            .expect("the retired owner state remains inspectable through its registration");
+        assert_eq!(state.revision, 0, "retirement must not mint a revision");
+        assert_eq!(
+            state.frames.as_slice(),
+            ["broad"],
+            "retirement must not replace the reconnect frames"
+        );
+        assert_eq!(state.unflushed_revision, None);
+        assert_eq!(state.replay_generation, None);
+        assert!(
+            state.transition.is_none(),
+            "retirement must not install a waiter on the dead owner"
+        );
+        drop(state);
+
+        drop(command_rx);
+        join.join()
+            .expect("retirement completes after refusing the blocked replacement");
     }
 
     #[test]
