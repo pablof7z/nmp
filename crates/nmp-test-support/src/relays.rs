@@ -74,6 +74,11 @@ pub struct RelayConfig {
     /// accept-but-never-EOSE relay (that behavior is not a plugin point
     /// `nostr-relay-builder` 0.45.0-alpha.3 exposes).
     pub reject_queries: bool,
+    /// Delay admission of each query before the relay serves stored events
+    /// and EOSE. Test-only timing control for proving that a fixture waits
+    /// for the causal EOSE it claims has already happened, rather than
+    /// passing because a local relay happened to answer immediately.
+    pub query_delay: Option<Duration>,
     /// NIP-42 write gating (`LocalRelayBuilderNip42::write()`). Verified
     /// behavior of `LocalRelay` 0.45.0-alpha.3 in this mode: it does NOT
     /// challenge on connect; on an unauthenticated EVENT it sends
@@ -807,6 +812,7 @@ impl ScriptedRelay {
                 contacted: contacted.clone(),
                 queries: queries.clone(),
                 reject: config.reject_queries,
+                delay: config.query_delay,
             });
         if config.auth_required_writes {
             builder = builder.nip42(LocalRelayBuilderNip42::write());
@@ -1175,6 +1181,7 @@ struct LoggingQueryPolicy {
     contacted: Arc<ContactLog>,
     queries: Arc<QueryLog>,
     reject: bool,
+    delay: Option<Duration>,
 }
 
 impl QueryPolicy for LoggingQueryPolicy {
@@ -1186,7 +1193,11 @@ impl QueryPolicy for LoggingQueryPolicy {
         self.contacted.record();
         self.queries.record(query);
         let reject = self.reject;
+        let delay = self.delay;
         Box::pin(async move {
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
             if reject {
                 QueryPolicyResult::reject(
                     MachineReadablePrefix::Error,
