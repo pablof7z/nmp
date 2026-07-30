@@ -388,9 +388,9 @@ pub struct RelayInformationRetentionCensus {
     pub max_active_flights: usize,
 }
 
-struct State {
-    closed: bool,
-    entries: HashMap<RelayUrl, Entry>,
+enum State {
+    Open { entries: HashMap<RelayUrl, Entry> },
+    Closed,
 }
 
 #[derive(Default)]
@@ -927,8 +927,7 @@ impl RelayInformationService {
     ) -> Self {
         assert!(cache_capacity > 0, "NIP-11 cache capacity must be non-zero");
         let shared = Arc::new(Shared {
-            state: Mutex::new(State {
-                closed: false,
+            state: Mutex::new(State::Open {
                 entries: HashMap::new(),
             }),
             access_clock: AtomicU64::new(0),
@@ -987,14 +986,14 @@ impl RelayInformationService {
         policy: RelayInformationCachePolicy,
         callback: impl FnOnce(Result<RelayInformationSnapshot, RelayInformationError>) + Send + 'static,
     ) -> Result<(), RelayInformationError> {
-        if self
+        match &*self
             .shared
             .state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
-            .closed
         {
-            return Err(RelayInformationError::ServiceClosed);
+            State::Open { .. } => {}
+            State::Closed => return Err(RelayInformationError::ServiceClosed),
         }
         let service = self.clone();
         self.runtime.spawn(async move {
@@ -1014,11 +1013,12 @@ impl RelayInformationService {
             .state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if state.closed {
-            return Err(RelayInformationError::ServiceClosed);
-        }
+        let entries = match &mut *state {
+            State::Open { entries } => entries,
+            State::Closed => return Err(RelayInformationError::ServiceClosed),
+        };
         let access = self.shared.access_clock.fetch_add(1, Ordering::Relaxed);
-        let entry = state.entries.entry(relay.clone()).or_default();
+        let entry = entries.entry(relay.clone()).or_default();
         entry.last_access = access;
         if policy == RelayInformationCachePolicy::UseCache {
             if let Some(cached) = &entry.cached {
@@ -1092,8 +1092,12 @@ impl RelayInformationService {
             .state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        let entries = match &mut *state {
+            State::Open { entries } => entries,
+            State::Closed => return None,
+        };
         let access = self.shared.access_clock.fetch_add(1, Ordering::Relaxed);
-        let entry = state.entries.get_mut(relay)?;
+        let entry = entries.get_mut(relay)?;
         entry.last_access = access;
         let cached = entry.cached.as_ref()?;
         let freshness = if now_secs() < cached.fresh_until {
@@ -1115,12 +1119,25 @@ impl RelayInformationService {
             .state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        let entries = match &*state {
+            State::Open { entries } => entries,
+            State::Closed => {
+                return RelayInformationRetentionCensus {
+                    cached_entries: 0,
+                    cached_payloads: 0,
+                    cached_raw_body_bytes: 0,
+                    active_flights: 0,
+                    subscribed_callers: 0,
+                    max_active_flights: MAX_ACTIVE_FETCHES,
+                };
+            }
+        };
         let mut payloads = std::collections::HashSet::new();
         let mut cached_raw_body_bytes = 0usize;
         let mut cached_entries = 0usize;
         let mut active_flights = 0usize;
         let mut subscribed_callers = 0usize;
-        for entry in state.entries.values() {
+        for entry in entries.values() {
             if let Some(cached) = &entry.cached {
                 cached_entries += 1;
                 if payloads.insert(cached.snapshot.payload_identity_value()) {
@@ -1149,25 +1166,21 @@ impl RelayInformationService {
     /// independently; their exact-generation late completion is ignored.
     pub(crate) fn close(&self) {
         self.shared.fetch_slots.close();
-        let flights = {
+        let entries = {
             let mut state = self
                 .shared
                 .state
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            if state.closed {
-                return;
+            match std::mem::replace(&mut *state, State::Closed) {
+                State::Open { entries } => entries,
+                State::Closed => return,
             }
-            state.closed = true;
-            let mut flights = Vec::new();
-            for entry in state.entries.values_mut() {
-                if let Some(flight) = entry.flight.take() {
-                    flights.push(flight);
-                }
-            }
-            state.entries.retain(|_, entry| entry.cached.is_some());
-            flights
         };
+        let flights = entries
+            .into_values()
+            .filter_map(|entry| entry.flight)
+            .collect::<Vec<_>>();
         for flight in flights {
             flight.cancellation.cancel();
             flight
@@ -1189,7 +1202,11 @@ async fn worker(
             .state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let Some(entry) = state.entries.get(&relay) else {
+        let entries = match &*state {
+            State::Open { entries } => entries,
+            State::Closed => return,
+        };
+        let Some(entry) = entries.get(&relay) else {
             return;
         };
         if !entry
@@ -1371,7 +1388,11 @@ fn cancel_unobserved_flight(shared: &Shared, relay: &RelayUrl, generation: u64) 
             .state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let Some(entry) = state.entries.get_mut(relay) else {
+        let entries = match &mut *state {
+            State::Open { entries } => entries,
+            State::Closed => return,
+        };
+        let Some(entry) = entries.get_mut(relay) else {
             return;
         };
         let Some(flight) = entry.flight.as_mut() else {
@@ -1389,7 +1410,7 @@ fn cancel_unobserved_flight(shared: &Shared, relay: &RelayUrl, generation: u64) 
             .expect("the exact unobserved flight is present")
             .cancellation;
         if entry.cached.is_none() {
-            state.entries.remove(relay);
+            entries.remove(relay);
         }
         cancellation
     };
@@ -1434,7 +1455,11 @@ fn complete(
             .state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let Some(entry) = state.entries.get(relay) else {
+        let entries = match &mut *state {
+            State::Open { entries } => entries,
+            State::Closed => return,
+        };
+        let Some(entry) = entries.get(relay) else {
             return;
         };
         if !entry
@@ -1445,22 +1470,19 @@ fn complete(
             return;
         }
 
-        let flight = state
-            .entries
+        let flight = entries
             .get_mut(relay)
             .and_then(|entry| entry.flight.take())
             .expect("the exact flight is present");
         let access = shared.access_clock.fetch_add(1, Ordering::Relaxed);
         let delivered = match result {
             Ok(snapshot) => {
-                let needs_slot = state
-                    .entries
+                let needs_slot = entries
                     .get(relay)
                     .is_none_or(|entry| entry.cached.is_none());
                 let mut retain_snapshot = true;
                 if needs_slot
-                    && state
-                        .entries
+                    && entries
                         .values()
                         .filter(|entry| entry.cached.is_some())
                         .count()
@@ -1471,8 +1493,7 @@ fn complete(
                     // authority. Only an idle cached victim is evictable. If
                     // every cached value is refreshing, the fresh completion
                     // is delivered but deliberately not retained.
-                    let eviction = state
-                        .entries
+                    let eviction = entries
                         .iter()
                         .filter(|(candidate, entry)| {
                             *candidate != relay && entry.cached.is_some() && entry.flight.is_none()
@@ -1480,13 +1501,13 @@ fn complete(
                         .min_by_key(|(_, entry)| entry.last_access)
                         .map(|(candidate, _)| candidate.clone());
                     if let Some(eviction) = eviction {
-                        state.entries.remove(&eviction);
+                        entries.remove(&eviction);
                     } else {
                         retain_snapshot = false;
                     }
                 }
                 if retain_snapshot {
-                    let entry = state.entries.entry(relay.clone()).or_default();
+                    let entry = entries.entry(relay.clone()).or_default();
                     entry.last_access = access;
                     entry.cached = Some(Cached {
                         snapshot: snapshot.clone(),
@@ -1501,13 +1522,7 @@ fn complete(
                     RelayInformationError::ServiceClosed
                         | RelayInformationError::CredentialedRelayUrl
                 );
-                match state
-                    .entries
-                    .entry(relay.clone())
-                    .or_default()
-                    .cached
-                    .as_mut()
-                {
+                match entries.entry(relay.clone()).or_default().cached.as_mut() {
                     Some(cached) if allows_stale => {
                         // A failed explicit refresh is new evidence that the
                         // last-good representation cannot keep using its prior
@@ -1531,12 +1546,9 @@ fn complete(
                 }
             }
         };
-        state
-            .entries
-            .retain(|_, entry| entry.cached.is_some() || entry.flight.is_some());
+        entries.retain(|_, entry| entry.cached.is_some() || entry.flight.is_some());
         debug_assert!(
-            state
-                .entries
+            entries
                 .values()
                 .filter(|entry| entry.cached.is_some())
                 .count()
@@ -1719,6 +1731,12 @@ mod tests {
         maximum: Arc<AtomicUsize>,
     }
 
+    struct CloseTrackingFetcher {
+        cached_relay: RelayUrl,
+        started: Sender<RelayUrl>,
+        cancelled: Sender<RelayUrl>,
+    }
+
     struct ActiveFetchGuard(Arc<AtomicUsize>);
 
     impl Drop for ActiveFetchGuard {
@@ -1742,6 +1760,40 @@ mod tests {
                 maximum.fetch_max(current, Ordering::SeqCst);
                 let _guard = ActiveFetchGuard(active);
                 let _ = cancellation.receiver.await;
+                Err(RelayInformationError::ServiceClosed)
+            })
+        }
+    }
+
+    impl Fetcher for CloseTrackingFetcher {
+        fn fetch_cancellable_async<'a>(
+            &'a self,
+            relay: RelayUrl,
+            _validators: Option<(String, String)>,
+            cancellation: FetchCancellation,
+        ) -> Pin<Box<dyn Future<Output = Result<FetchResult, RelayInformationError>> + Send + 'a>>
+        {
+            if relay == self.cached_relay {
+                return Box::pin(async {
+                    Ok(FetchResult {
+                        raw_json: Some(r#"{"name":"terminal cache"}"#.to_string()),
+                        etag: None,
+                        last_modified: None,
+                        cache_control: None,
+                        expires: None,
+                        fresh_for: Some(DEFAULT_FRESH_FOR),
+                    })
+                });
+            }
+            let started = self.started.clone();
+            let cancelled = self.cancelled.clone();
+            Box::pin(async move {
+                started
+                    .send(relay.clone())
+                    .map_err(|_| RelayInformationError::ServiceClosed)?;
+                if cancellation.receiver.await.is_ok() {
+                    let _ = cancelled.send(relay);
+                }
                 Err(RelayInformationError::ServiceClosed)
             })
         }
@@ -2243,17 +2295,23 @@ mod tests {
             },
         )
         .unwrap();
-        service.shared.state.lock().unwrap().entries.insert(
-            cached_relay.clone(),
-            Entry {
-                cached: Some(Cached {
-                    fresh_until: cached_snapshot.fresh_until(),
-                    snapshot: cached_snapshot,
-                }),
-                flight: None,
-                last_access: 0,
-            },
-        );
+        {
+            let mut state = service.shared.state.lock().unwrap();
+            let State::Open { entries } = &mut *state else {
+                panic!("a new service starts open");
+            };
+            entries.insert(
+                cached_relay.clone(),
+                Entry {
+                    cached: Some(Cached {
+                        fresh_until: cached_snapshot.fresh_until(),
+                        snapshot: cached_snapshot,
+                    }),
+                    flight: None,
+                    last_access: 0,
+                },
+            );
+        }
 
         let mut callers = Vec::new();
         for index in 0..CALLERS {
@@ -2332,13 +2390,10 @@ mod tests {
         assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
         started_rx.recv().unwrap();
         drop(future);
-        assert!(!service
-            .shared
-            .state
-            .lock()
-            .unwrap()
-            .entries
-            .contains_key(&relay));
+        assert!(matches!(
+            &*service.shared.state.lock().unwrap(),
+            State::Open { entries } if !entries.contains_key(&relay)
+        ));
         // Release the gated worker so its runtime task can finish before the
         // runtime is dropped (the fetcher blocks on this recv, ignoring the
         // generation cancellation the dropped waiter fired).
@@ -2370,10 +2425,7 @@ mod tests {
             },
         );
         let shared = Shared {
-            state: Mutex::new(State {
-                closed: false,
-                entries,
-            }),
+            state: Mutex::new(State::Open { entries }),
             access_clock: AtomicU64::new(0),
             next_flight: AtomicU64::new(3),
             cache_capacity: 2,
@@ -2399,20 +2451,14 @@ mod tests {
             "an ignored late generation must not retain its immutable payload"
         );
         assert!(receiver.borrow().is_none());
-        assert_eq!(
-            shared
-                .state
-                .lock()
-                .unwrap()
-                .entries
-                .get(&relay)
-                .unwrap()
-                .flight
-                .as_ref()
-                .unwrap()
-                .generation,
-            2
-        );
+        assert!(matches!(
+            &*shared.state.lock().unwrap(),
+            State::Open { entries }
+                if entries
+                    .get(&relay)
+                    .and_then(|entry| entry.flight.as_ref())
+                    .is_some_and(|flight| flight.generation == 2)
+        ));
 
         let new = finish_fetch(
             &relay,
@@ -2439,6 +2485,202 @@ mod tests {
                 .as_deref(),
             Some("new")
         );
+    }
+
+    #[test]
+    fn close_consumes_all_service_owned_work_and_late_completion_is_inert() {
+        let cached_relay = RelayUrl::parse("wss://terminal-cache.example").unwrap();
+        let active_a = RelayUrl::parse("wss://terminal-active-a.example").unwrap();
+        let active_b = RelayUrl::parse("wss://terminal-active-b.example").unwrap();
+        let (started_tx, started_rx) = bounded(2);
+        let (cancelled_tx, cancelled_rx) = bounded(2);
+        let service = RelayInformationService::try_with_fetcher(Arc::new(CloseTrackingFetcher {
+            cached_relay: cached_relay.clone(),
+            started: started_tx,
+            cancelled: cancelled_tx,
+        }))
+        .unwrap();
+        let snapshot = service
+            .get(cached_relay.clone(), RelayInformationCachePolicy::Refresh)
+            .unwrap();
+        let payload = Arc::downgrade(&snapshot.inner.payload);
+        drop(snapshot);
+
+        assert_eq!(service.retention_census().cached_entries, 1);
+        let waiter_a = spawn_test_get(
+            service.clone(),
+            active_a.clone(),
+            RelayInformationCachePolicy::Refresh,
+        );
+        assert_eq!(
+            started_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            active_a
+        );
+        let coalesced_a = spawn_test_get(
+            service.clone(),
+            active_a.clone(),
+            RelayInformationCachePolicy::Refresh,
+        );
+        let waiter_b = spawn_test_get(
+            service.clone(),
+            active_b.clone(),
+            RelayInformationCachePolicy::Refresh,
+        );
+        assert_eq!(
+            started_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            active_b
+        );
+        let subscription_deadline = Instant::now() + Duration::from_secs(1);
+        while service.retention_census().subscribed_callers != 3 {
+            assert!(
+                Instant::now() < subscription_deadline,
+                "the coalesced caller subscribes before close"
+            );
+            std::thread::yield_now();
+        }
+        let generation = {
+            let state = service.shared.state.lock().unwrap();
+            let State::Open { entries } = &*state else {
+                panic!("the service remains open before close");
+            };
+            entries
+                .get(&active_a)
+                .and_then(|entry| entry.flight.as_ref())
+                .map(|flight| flight.generation)
+                .expect("the active generation is service-owned before close")
+        };
+
+        service.close();
+
+        for waiter in [waiter_a, coalesced_a, waiter_b] {
+            assert_eq!(
+                waiter.recv_timeout(Duration::from_secs(1)).unwrap(),
+                Err(RelayInformationError::ServiceClosed)
+            );
+        }
+        let cancelled = [
+            cancelled_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            cancelled_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        ]
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            cancelled,
+            std::collections::HashSet::from([active_a.clone(), active_b])
+        );
+        assert!(
+            cancelled_rx.try_recv().is_err(),
+            "each physical flight receives one cancellation signal"
+        );
+        let census = service.retention_census();
+        assert_eq!(census.cached_entries, 0);
+        assert_eq!(census.cached_payloads, 0);
+        assert_eq!(census.cached_raw_body_bytes, 0);
+        assert_eq!(census.active_flights, 0);
+        assert_eq!(census.subscribed_callers, 0);
+        assert_eq!(
+            service.shared.fetch_slots.available_permits(),
+            MAX_ACTIVE_FETCHES
+        );
+        assert!(service.cached(&cached_relay).is_none());
+        assert!(
+            payload.upgrade().is_none(),
+            "closed service retains no last-good payload ownership"
+        );
+
+        let late = finish_fetch(
+            &active_a,
+            None,
+            FetchResult {
+                raw_json: Some(r#"{"name":"late"}"#.to_string()),
+                etag: None,
+                last_modified: None,
+                cache_control: None,
+                expires: None,
+                fresh_for: Some(DEFAULT_FRESH_FOR),
+            },
+        )
+        .unwrap();
+        let late_payload = Arc::downgrade(&late.inner.payload);
+        complete(&service.shared, &active_a, generation, Ok(late));
+        assert!(
+            late_payload.upgrade().is_none(),
+            "late exact-generation completion against Closed retains nothing"
+        );
+
+        service.close();
+        assert!(matches!(
+            &*service.shared.state.lock().unwrap(),
+            State::Closed
+        ));
+        assert_eq!(
+            service.get(active_a.clone(), RelayInformationCachePolicy::Refresh),
+            Err(RelayInformationError::ServiceClosed)
+        );
+        assert_eq!(
+            service.request_callback(active_a, RelayInformationCachePolicy::Refresh, |_| {}),
+            Err(RelayInformationError::ServiceClosed)
+        );
+        assert_eq!(service.retention_census(), census);
+    }
+
+    #[test]
+    fn concurrent_close_and_register_converge_on_one_terminal_owner() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let service = RelayInformationService::try_with_fetcher(Arc::new(HoldingFetcher {
+            active: Arc::clone(&active),
+            maximum: Arc::new(AtomicUsize::new(0)),
+        }))
+        .unwrap();
+        let relay = RelayUrl::parse("wss://close-register-race.example").unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let (result_tx, result_rx) = bounded(1);
+
+        let getter = {
+            let service = service.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                result_tx
+                    .send(service.get(relay, RelayInformationCachePolicy::Refresh))
+                    .unwrap();
+            })
+        };
+        let closer = {
+            let service = service.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                service.close();
+                service.close();
+            })
+        };
+        barrier.wait();
+
+        assert_eq!(
+            result_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Err(RelayInformationError::ServiceClosed)
+        );
+        getter.join().unwrap();
+        closer.join().unwrap();
+        let cancellation_deadline = Instant::now() + Duration::from_secs(1);
+        while active.load(Ordering::SeqCst) != 0 {
+            assert!(
+                Instant::now() < cancellation_deadline,
+                "a racing admitted fetch observes terminal cancellation"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(service.retention_census().active_flights, 0);
+        assert_eq!(
+            service.shared.fetch_slots.available_permits(),
+            MAX_ACTIVE_FETCHES
+        );
+        assert!(matches!(
+            &*service.shared.state.lock().unwrap(),
+            State::Closed
+        ));
     }
 
     #[test]
