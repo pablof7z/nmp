@@ -382,8 +382,14 @@ about current code:
   Hand-written Swift/Kotlin public wrapper paths and their consumer-visible
   package/build/settings manifests are governed directly even when generated
   snapshots do not move. Per-component parity cannot be masked by vocabulary
-  in another component. The catalog and component extractor are separately
-  locked, base-trusted tools outside the product workspace. The trusted
+  in another component. Declared Swift/Kotlin package roots and UniFFI
+  namespaces are stable, while a valid active component can move Cargo package
+  or build owner through the same governed regeneration. The catalog checks
+  package/library names against the exact manifest; the extractor refuses
+  undeclared or duplicate compiled namespaces. Catalog-order and reverse-order
+  regeneration must produce byte-identical facade and component snapshots.
+  The catalog and component extractor are separately locked, base-trusted tools
+  outside the product workspace. The trusted
   checker/workflow is loaded from the PR base so a proposed head cannot replace
   its judge. Governance-program changes still require the explicit
   owner-controlled bootstrap procedure.
