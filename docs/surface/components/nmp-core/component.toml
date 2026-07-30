@@ -1,0 +1,21 @@
+schema = 1
+key = "nmp-core"
+state = "active"
+uniffi_namespace = "nmp_ffi"
+artifact_owner = "nmp-core"
+
+ffi_package = "nmp-ffi"
+ffi_manifest = "crates/nmp-ffi/Cargo.toml"
+library_stem = "nmp_ffi"
+ffi_sources = ["crates/nmp-ffi/src"]
+
+swift_manifests = ["Packages/NMP/Package.swift"]
+swift_sources = [
+  "Packages/NMP/Sources/NMP",
+  "Packages/NMP/Sources/NMPContent",
+]
+kotlin_manifests = [
+  "Packages/NMPKotlin/build.gradle.kts",
+  "Packages/NMPKotlin/settings.gradle.kts",
+]
+kotlin_sources = ["Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk"]

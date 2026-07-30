@@ -1,0 +1,15 @@
+schema = 1
+key = "nmp-nip46"
+state = "active"
+uniffi_namespace = "nmp_nip46_ffi"
+artifact_owner = "nmp-nip46"
+
+ffi_package = "nmp-nip46-ffi"
+ffi_manifest = "crates/nmp-nip46-ffi/Cargo.toml"
+library_stem = "nmp_nip46_ffi"
+ffi_sources = ["crates/nmp-nip46-ffi/src"]
+
+swift_manifests = ["Packages/NMPNip46/Package.swift"]
+swift_sources = ["Packages/NMPNip46/Sources/NMPNip46"]
+kotlin_manifests = ["Packages/NMPKotlin/nip46/build.gradle.kts"]
+kotlin_sources = ["Packages/NMPKotlin/nip46/src/main/kotlin"]

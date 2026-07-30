@@ -29,18 +29,26 @@ jobs:
         run: |
           mkdir -p \
             "$TRUSTED_DIR/scripts" \
+            "$TRUSTED_DIR/scripts/lib" \
             "$TRUSTED_DIR/tools/component-interface-snapshot/src" \
-            "$TRUSTED_DIR/tools/rust-facade-snapshot/src"
+            "$TRUSTED_DIR/tools/rust-facade-snapshot/src" \
+            "$TRUSTED_DIR/tools/surface-component-catalog/src"
           for path in \
             scripts/check-surface-governance.sh \
+            scripts/check-sdk-parity.sh \
             scripts/install-surface-tools.sh \
+            scripts/lib/require-commands.sh \
             scripts/regenerate-surface-snapshots.sh \
+            scripts/run-surface-regeneration-governance.sh \
             scripts/test-install-surface-tools.sh \
             scripts/test-surface-governance.sh \
             tools/surface-toolchain.env \
             tools/component-interface-snapshot/Cargo.toml \
             tools/component-interface-snapshot/Cargo.lock \
             tools/component-interface-snapshot/src/main.rs \
+            tools/surface-component-catalog/Cargo.toml \
+            tools/surface-component-catalog/Cargo.lock \
+            tools/surface-component-catalog/src/main.rs \
             tools/rust-facade-snapshot/Cargo.toml \
             tools/rust-facade-snapshot/Cargo.lock \
             tools/rust-facade-snapshot/src/main.rs; do
@@ -56,8 +64,11 @@ jobs:
         run: ${{ runner.temp }}/nmp-surface-governance/scripts/install-surface-tools.sh
 
       - name: Falsify trusted governance and installer
+        env:
+          SURFACE_CATALOG_TOOL_DIR: ${{ runner.temp }}/nmp-surface-governance/tools/surface-component-catalog
+          SURFACE_CATALOG_TARGET_DIR: ${{ runner.temp }}/nmp-surface-governance-target/catalog
         run: |
-          ${{ runner.temp }}/nmp-surface-governance/scripts/test-surface-governance.sh
+          ${{ runner.temp }}/nmp-surface-governance/scripts/test-surface-governance.sh "${{ github.workspace }}"
           ${{ runner.temp }}/nmp-surface-governance/scripts/test-install-surface-tools.sh
 
       - name: Compute changed projection context with trusted base checker
@@ -66,6 +77,8 @@ jobs:
           SURFACE_ROOT: ${{ github.workspace }}
           SURFACE_BASE_REF: ${{ github.event.pull_request.base.sha }}
           SURFACE_HEAD_REF: ${{ github.event.pull_request.head.sha }}
+          SURFACE_CATALOG_TOOL_DIR: ${{ runner.temp }}/nmp-surface-governance/tools/surface-component-catalog
+          SURFACE_CATALOG_TARGET_DIR: ${{ runner.temp }}/nmp-surface-governance-target/catalog
         run: |
           value=$(${{ runner.temp }}/nmp-surface-governance/scripts/check-surface-governance.sh --print-projections)
           echo "value=$value" >> "$GITHUB_OUTPUT"
@@ -75,6 +88,8 @@ jobs:
           SURFACE_ROOT: ${{ github.workspace }}
           SURFACE_BASE_REF: ${{ github.event.pull_request.base.sha }}
           SURFACE_HEAD_REF: ${{ github.event.pull_request.head.sha }}
+          SURFACE_CATALOG_TOOL_DIR: ${{ runner.temp }}/nmp-surface-governance/tools/surface-component-catalog
+          SURFACE_CATALOG_TARGET_DIR: ${{ runner.temp }}/nmp-surface-governance-target/catalog
           SURFACE_PR_NUMBER: ${{ github.event.pull_request.number }}
           SURFACE_PR_URL: ${{ github.event.pull_request.html_url }}
           SURFACE_CHANGED_PROJECTIONS: ${{ steps.projections.outputs.value }}

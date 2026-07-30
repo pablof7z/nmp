@@ -65,9 +65,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
 
-      - name: Diff Swift/Kotlin SDK vocabulary against the Rust FFI export surface
+      - name: Diff each component's Swift/Kotlin vocabulary against its Rust FFI surface
         run: bash scripts/check-sdk-parity.sh
 
   # #879: NIP-19/NIP-21 decoding preserves exact authored locator data and
