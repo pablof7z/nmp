@@ -164,6 +164,11 @@ async fn i_published_a_note(w: &mut NmpWorld, text: String) {
     w.publish_note(&text).await;
 }
 
+#[given(regex = r#"^I published a note saying "([^"]+)" after my relay lookup settled absent$"#)]
+async fn i_published_a_note_after_settled_absence(w: &mut NmpWorld, text: String) {
+    w.publish_note_after_settled_own_absence(&text).await;
+}
+
 #[given(regex = r#"^I published a note saying "([^"]+)" that p-tags (.+)$"#)]
 async fn i_published_a_note_p_tagging(w: &mut NmpWorld, text: String, people: String) {
     w.publish_note_mentioning(&text, &parse_people(&people))

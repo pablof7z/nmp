@@ -119,6 +119,8 @@ mod provenance;
 mod queries;
 mod replaceable;
 mod restart;
+#[cfg(test)]
+mod restart_tests;
 mod routes;
 mod signers;
 mod staging;

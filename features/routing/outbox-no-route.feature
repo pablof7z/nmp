@@ -116,7 +116,7 @@ Feature: When there is nowhere to publish, say so
     # message nobody received. The reason has to survive the process that
     # produced it, because the common way to find out about this is to open
     # the app later and wonder why a note never appeared anywhere.
-    Given I published a note saying "into the void"
+    Given I published a note saying "into the void" after my relay lookup settled absent
     When I reconstruct the engine from the same durable store
     Then the publish still reports that no destination could be determined
     And the reason still names that my own relay list is absent
