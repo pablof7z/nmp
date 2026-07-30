@@ -2,7 +2,8 @@
 
 - **Status:** active PR-review checklist (gates 1-4) plus two mechanical CI
   checks: gate 5 (`scripts/check-sdk-parity.sh`, with the documented
-  exception list `scripts/check-sdk-parity-allowlist.txt`) and gate 6
+  per-component exception catalog
+  `scripts/check-sdk-parity-allowlist.toml`) and gate 6
   (`scripts/check-falsifier-honesty.sh`). Both run as blocking jobs in
   `.github/workflows/architecture-gates.yml` on every PR; making them
   branch-protection *required* checks is a repo-admin setting the workflow
@@ -226,13 +227,16 @@ Two decisions harden the raw scan into an enforceable check:
   the whole check vacuously green (and disagree with a clean CI checkout).
   Only the hand-written SDK surface counts as "present."
 - **Intentional per-platform modeling differences use a documented
-  allowlist**, `scripts/check-sdk-parity-allowlist.txt`: one concept word on
-  one side per entry, each with a reviewable one-line justification, format
-  validated by the checker, suppressed words still printed, unused entries
-  reported. The file is currently empty of entries. Its former `decision` /
-  Swift exception named the removed content-session/claim surface; #561
-  deleted the surface and the exception rather than retaining a justification
-  for symbols that no longer exist.
+  allowlist**, `scripts/check-sdk-parity-allowlist.toml`: each closed-schema
+  record names one active component, one lowercase concept word, one platform,
+  and one reviewable justification. Unknown components, duplicate tuples,
+  malformed concepts/platforms, and empty reasons fail. The file is currently
+  empty of entries.
+
+The scan is component-scoped. A concept found in `nmp-core` cannot satisfy a
+missing `nmp-nip46` wrapper (or vice versa), and an exception for one component
+cannot mask another component. Roots and explicit platform omissions come
+from the same governed `component.toml` records that own snapshot generation.
 
 Backtested against real history: at the commit before the #493 Kotlin
 Following port (`920033e^`), the check fails with exactly the five real

@@ -1,0 +1,5 @@
+schema = 1
+
+# Intentional platform differences use one [[exception]] per exact
+# (component, concept, platform) tuple with a source-verifiable justification.
+# There are no current exceptions.

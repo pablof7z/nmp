@@ -18,6 +18,8 @@
 - [ ] **Diagnostics impact:** evidence/coverage/receipt consequences are described, including “none.”
 - [ ] **Updated falsifiers:** concrete tests are linked or listed.
 - [ ] **Superseded path removed:** the obsolete API/semantic path is deleted; no compatibility alias remains.
-- [ ] **Surface snapshots:** `scripts/regenerate-surface-snapshots.sh` was run and any diff is committed.
+- [ ] **Component catalog:** every active UniFFI namespace has one closed-schema `docs/surface/components/<key>/component.toml`; owner/co-location, platform roots or omission reasons, and optional Android identities are exact.
+- [ ] **Surface snapshots:** `scripts/regenerate-surface-snapshots.sh` was run and every active component's `uniffi.txt` plus `nmp-facade.txt` diff is committed.
+- [ ] **Retirements:** an active component is replaced only by the checker's exact derived tombstone; removed paths are gone, reserved identities are not reused, and an artifact owner has no live child.
 - [ ] **Append-only trail:** if a snapshot changed, a complete entry was appended to `docs/surface-change-log.md`; old entries were not edited.
 - [ ] **Approval trail:** independent exact-head review and required CI cover the snapshot delta and log entry.

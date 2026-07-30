@@ -25,13 +25,18 @@ jobs:
         run: |
           mkdir -p \
             "$TRUSTED_DIR/scripts" \
+            "$TRUSTED_DIR/scripts/lib" \
             "$TRUSTED_DIR/tools/component-interface-snapshot/src" \
             "$TRUSTED_DIR/tools/rust-facade-snapshot/src" \
+            "$TRUSTED_DIR/tools/surface-component-catalog/src" \
             "$TRUSTED_DIR/tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/facade/src" \
             "$TRUSTED_DIR/tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/renamed-package/src" \
             "$TRUSTED_DIR/tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/nested-package/src"
           paths=(
             scripts/check-surface-governance.sh
+            scripts/check-sdk-parity.sh
+            scripts/check-sdk-parity-allowlist.toml
+            scripts/lib/require-commands.sh
             scripts/install-surface-tools.sh
             scripts/regenerate-surface-snapshots.sh
             scripts/test-install-surface-tools.sh
@@ -40,6 +45,9 @@ jobs:
             tools/component-interface-snapshot/Cargo.toml
             tools/component-interface-snapshot/Cargo.lock
             tools/component-interface-snapshot/src/main.rs
+            tools/surface-component-catalog/Cargo.toml
+            tools/surface-component-catalog/Cargo.lock
+            tools/surface-component-catalog/src/main.rs
             tools/rust-facade-snapshot/Cargo.toml
             tools/rust-facade-snapshot/Cargo.lock
             tools/rust-facade-snapshot/src/main.rs
@@ -52,7 +60,11 @@ jobs:
             tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/nested-package/Cargo.toml
             tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/nested-package/src/lib.rs
           )
-          if git cat-file -e "$BASE_SHA:scripts/check-surface-governance.sh" 2>/dev/null; then
+          # The #954 bootstrap is phase one: the base has the old checker but
+          # no component catalog program, so ordinary credential-free CI runs
+          # the complete proposed program. After that exact bootstrap lands,
+          # every later PR is judged by the base-trusted copy (phase two).
+          if git cat-file -e "$BASE_SHA:tools/surface-component-catalog/Cargo.toml" 2>/dev/null; then
             for path in "${paths[@]}"; do
               git show "$BASE_SHA:$path" > "$TRUSTED_DIR/$path"
             done
@@ -71,10 +83,17 @@ jobs:
         run: ${{ runner.temp }}/nmp-surface-regeneration/scripts/install-surface-tools.sh
 
       - name: Falsify governance and installer
+        env:
+          SURFACE_CATALOG_TOOL_DIR: ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-component-catalog
+          SURFACE_CATALOG_TARGET_DIR: ${{ runner.temp }}/nmp-surface-regeneration-target/catalog
+          SURFACE_BUILD_TARGET_DIR: ${{ runner.temp }}/nmp-surface-regeneration-target/build
         run: |
           ${{ runner.temp }}/nmp-surface-regeneration/scripts/test-surface-governance.sh
           ${{ runner.temp }}/nmp-surface-regeneration/scripts/test-install-surface-tools.sh
           source ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-toolchain.env
+          RUSTUP_TOOLCHAIN="$SURFACE_RUST_TOOLCHAIN" cargo "+$SURFACE_RUST_TOOLCHAIN" test --locked \
+            --manifest-path ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-component-catalog/Cargo.toml \
+            --target-dir ${{ runner.temp }}/nmp-surface-regeneration-target/catalog
           RUSTUP_TOOLCHAIN="$SURFACE_RUST_TOOLCHAIN" cargo "+$SURFACE_RUST_TOOLCHAIN" test --locked \
             --manifest-path ${{ runner.temp }}/nmp-surface-regeneration/tools/rust-facade-snapshot/Cargo.toml
 
@@ -83,6 +102,8 @@ jobs:
         env:
           SURFACE_BASE_REF: ${{ github.event.pull_request.base.sha }}
           SURFACE_HEAD_REF: ${{ github.event.pull_request.head.sha }}
+          SURFACE_CATALOG_TOOL_DIR: ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-component-catalog
+          SURFACE_CATALOG_TARGET_DIR: ${{ runner.temp }}/nmp-surface-regeneration-target/catalog
         run: |
           value=$(${{ runner.temp }}/nmp-surface-regeneration/scripts/check-surface-governance.sh --print-projections)
           echo "value=$value" >> "$GITHUB_OUTPUT"
@@ -97,9 +118,12 @@ jobs:
           SURFACE_REGEN_CMD: ${{ runner.temp }}/nmp-surface-regeneration/scripts/regenerate-surface-snapshots.sh
           SURFACE_TOOLCHAIN_ENV: ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-toolchain.env
           SURFACE_COMPONENT_TOOL_DIR: ${{ runner.temp }}/nmp-surface-regeneration/tools/component-interface-snapshot
+          SURFACE_CATALOG_TOOL_DIR: ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-component-catalog
+          SURFACE_CATALOG_TARGET_DIR: ${{ runner.temp }}/nmp-surface-regeneration-target/catalog
+          SURFACE_BUILD_TARGET_DIR: ${{ runner.temp }}/nmp-surface-regeneration-target/build
           SURFACE_RUST_FACADE_TOOL_DIR: ${{ runner.temp }}/nmp-surface-regeneration/tools/rust-facade-snapshot
-          # Only effective while the base genuinely lacks the trusted program.
-          SURFACE_BOOTSTRAP: 1
+          # Only effective for the exact legacy -> nmp-core+nmp-nip46 transition.
+          SURFACE_OWNER_BOOTSTRAP: 1
         run: ${{ runner.temp }}/nmp-surface-regeneration/scripts/check-surface-governance.sh
 
   test:
