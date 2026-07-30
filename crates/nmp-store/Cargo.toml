@@ -51,5 +51,6 @@ blake3 = "1"
 
 [dev-dependencies]
 libc = "0.2"
+syn = { version = "2", features = ["full", "visit"] }
 tempfile = "3"
 wait-timeout = "0.2"

@@ -1,4 +1,5 @@
 use super::canonical::try_decode_stored_event;
+use super::commit::commit_prepared;
 use super::outbox::{
     alloc_receipt_id_in_txn, attempt_key, deadline_intent_key, deadline_key, deadline_upper,
     decode_attempt, decode_attempt_details, decode_deadline, decode_deadline_by_intent,
@@ -19,8 +20,8 @@ use super::store::RedbStore;
 use super::Ordering;
 use super::{
     AttemptHandoffDetail, AttemptOutcome, AttemptTransientDetail, BTreeMap, BTreeSet,
-    CloseIntentOutcome, Event, EventId, EventStore, InFlightPhase, IntentId, IntentSigState,
-    LaneDeadline, LaneKey, LaneState, PersistenceError, PostHandoffState, PublicKey, ReceiptState,
+    CloseIntentOutcome, Event, EventId, InFlightPhase, IntentId, IntentSigState, LaneDeadline,
+    LaneKey, LaneState, PersistenceError, PostHandoffState, PublicKey, ReceiptState,
     RecoveredAttempt, RecoveredAttemptDetails, RecoveredIntent, RecoveredLane, RecoveredReceipt,
     RecoveredRouteRevision, RelayUrl, Timestamp, TransientCause,
 };
@@ -204,8 +205,7 @@ pub(super) fn record_route_revision(
     };
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::RouteRevisionBeforeCommit);
-    write_txn.commit().map_err(persist_err)?;
-    Ok(revision)
+    commit_prepared(write_txn, revision)
 }
 
 pub(super) fn recover_route_revisions(
@@ -287,7 +287,7 @@ pub(super) fn bootstrap_outbox_lanes(
     intent_id: IntentId,
 ) -> Result<Vec<RecoveredLane>, PersistenceError> {
     let write_txn = store.db.begin_write().map_err(persist_err)?;
-    {
+    let prepared = {
         let intents = write_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?;
         if intents
             .get(intent_key(intent_id).as_str())
@@ -380,8 +380,11 @@ pub(super) fn bootstrap_outbox_lanes(
                 "attempt detail row has no base attempt row",
             ));
         }
-        for relay in relays {
-            let key = LaneKey { intent_id, relay };
+        for relay in &relays {
+            let key = LaneKey {
+                intent_id,
+                relay: relay.clone(),
+            };
             let storage_key = lane_key(&key);
             let lane_attempts: Vec<_> = attempts
                 .iter()
@@ -459,11 +462,37 @@ pub(super) fn bootstrap_outbox_lanes(
                 .insert(storage_key.as_str(), encoded.as_str())
                 .map_err(persist_err)?;
         }
-    }
+
+        // Construct the complete value this mutating door will return while
+        // the transaction is still uncommitted. This deliberately ranges the
+        // whole intent prefix rather than returning only the rows staged
+        // above: an orphan, malformed, or intent-mismatched row must refuse
+        // before any newly prepared lane becomes durable.
+        let mut recovered = Vec::new();
+        for row in lanes
+            .range(lower.as_str()..upper.as_str())
+            .map_err(persist_err)?
+        {
+            let (key, value) = row.map_err(persist_err)?;
+            let lane = decode_lane(key.value(), value.value())?;
+            if lane.key.intent_id != intent_id {
+                return Err(PersistenceError::invariant(
+                    "lane range escaped intent prefix",
+                ));
+            }
+            if !relays.contains(&lane.key.relay) {
+                return Err(PersistenceError::invariant(
+                    "lane relay is absent from every route revision",
+                ));
+            }
+            recovered.push(lane);
+        }
+        recovered.sort_by(|left, right| left.key.relay.cmp(&right.key.relay));
+        recovered
+    };
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::LaneBootstrapBeforeCommit);
-    write_txn.commit().map_err(persist_err)?;
-    store.recover_outbox_lanes(intent_id)
+    commit_prepared(write_txn, prepared)
 }
 
 pub(super) fn recover_outbox_lanes(
@@ -689,8 +718,7 @@ pub(super) fn set_lane_transient(
     };
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::LaneTransitionBeforeCommit);
-    write_txn.commit().map_err(persist_err)?;
-    Ok(lane)
+    commit_prepared(write_txn, lane)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -768,8 +796,7 @@ pub(super) fn suspend_lane_attempt(
     };
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::LaneTransitionBeforeCommit);
-    write_txn.commit().map_err(persist_err)?;
-    Ok(lane)
+    commit_prepared(write_txn, lane)
 }
 
 pub(super) fn start_lane_attempt(
@@ -892,8 +919,7 @@ pub(super) fn start_lane_attempt(
     };
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::LaneStartBeforeCommit);
-    write_txn.commit().map_err(persist_err)?;
-    Ok((attempt, lane))
+    commit_prepared(write_txn, (attempt, lane))
 }
 
 pub(super) fn record_lane_handoff(
@@ -1011,8 +1037,7 @@ pub(super) fn record_lane_handoff(
     };
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::LaneHandoffBeforeCommit);
-    write_txn.commit().map_err(persist_err)?;
-    Ok(lane)
+    commit_prepared(write_txn, lane)
 }
 
 pub(super) fn finish_lane_attempt(
@@ -1093,8 +1118,7 @@ pub(super) fn finish_lane_attempt(
     };
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::FinishAttemptBeforeCommit);
-    write_txn.commit().map_err(persist_err)?;
-    Ok(lane)
+    commit_prepared(write_txn, lane)
 }
 
 pub(super) fn recover_attempt_details(
@@ -1212,8 +1236,7 @@ pub(super) fn close_terminal_intent(
     };
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::LaneCloseBeforeCommit);
-    write_txn.commit().map_err(persist_err)?;
-    Ok(result)
+    commit_prepared(write_txn, result)
 }
 
 pub(super) fn accept_ephemeral(
@@ -1242,6 +1265,5 @@ pub(super) fn accept_ephemeral(
         increment_pending_ephemeral_in_txn(&mut outbox_meta)?;
         receipt_id
     };
-    write_txn.commit().map_err(persist_err)?;
-    Ok(receipt_id)
+    commit_prepared(write_txn, receipt_id)
 }
